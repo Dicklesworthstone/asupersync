@@ -11,7 +11,7 @@ use asupersync::trace::{
     TraceWriter,
 };
 use asupersync::types::Budget;
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use std::path::Path;
 use tempfile::NamedTempFile;
 
@@ -42,7 +42,7 @@ fn bench_region_creation(c: &mut Criterion) {
         b.iter(|| {
             let mut state = RuntimeState::new();
             // This triggers RegionRecord::new which has the span creation
-            black_box(state.create_root_region(Budget::INFINITE))
+            std::hint::black_box(state.create_root_region(Budget::INFINITE))
         });
     });
 
@@ -59,7 +59,7 @@ fn bench_task_creation(c: &mut Criterion) {
             // This triggers Scope::spawn which has tracing
             // But we can't easily use Scope here without Cx.
             // RuntimeState::create_task also has tracing (debug!).
-            black_box(state.create_task(region, Budget::INFINITE, async { 42 }))
+            std::hint::black_box(state.create_task(region, Budget::INFINITE, async { 42 }))
         });
     });
 
@@ -90,7 +90,7 @@ fn bench_trace_read_uncompressed(c: &mut Criterion) {
         b.iter(|| {
             let reader = TraceReader::open(&path).expect("open trace reader");
             let loaded = reader.load_all().expect("load trace");
-            black_box(loaded.len());
+            std::hint::black_box(loaded.len());
         });
     });
 }
@@ -122,7 +122,7 @@ fn bench_trace_read_lz4(c: &mut Criterion) {
         b.iter(|| {
             let reader = TraceReader::open(&path).expect("open trace reader");
             let loaded = reader.load_all().expect("load trace");
-            black_box(loaded.len());
+            std::hint::black_box(loaded.len());
         });
     });
 }

@@ -9,7 +9,7 @@
 
 #![allow(missing_docs)]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::{
@@ -219,7 +219,7 @@ fn bench_gf256_primitives(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("add_slice", &label), &scenario, |b, _| {
             let mut dst = deterministic_bytes(scenario.len, scenario.seed ^ 0xAA55_AA55);
             b.iter(|| {
-                gf256_add_slice(black_box(&mut dst), black_box(&src));
+                gf256_add_slice(std::hint::black_box(&mut dst), std::hint::black_box(&src));
             });
         });
 
@@ -227,7 +227,7 @@ fn bench_gf256_primitives(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("mul_slice", &label), &scenario, |b, _| {
             let mut dst: Vec<u8> = src.clone();
             b.iter(|| {
-                gf256_mul_slice(black_box(&mut dst), black_box(c_val));
+                gf256_mul_slice(std::hint::black_box(&mut dst), std::hint::black_box(c_val));
             });
         });
 
@@ -238,7 +238,11 @@ fn bench_gf256_primitives(c: &mut Criterion) {
             |b, _| {
                 let mut dst = deterministic_bytes(scenario.len, scenario.seed ^ 0x55AA_55AA);
                 b.iter(|| {
-                    gf256_addmul_slice(black_box(&mut dst), black_box(&src), black_box(c_val));
+                    gf256_addmul_slice(
+                        std::hint::black_box(&mut dst),
+                        std::hint::black_box(&src),
+                        std::hint::black_box(c_val),
+                    );
                 });
             },
         );
@@ -252,9 +256,9 @@ fn bench_gf256_primitives(c: &mut Criterion) {
                 let mut dst_b = deterministic_bytes(scenario.len, scenario.seed ^ 0x3333_4444);
                 b.iter(|| {
                     gf256_mul_slices2(
-                        black_box(&mut dst_a),
-                        black_box(&mut dst_b),
-                        black_box(c_val),
+                        std::hint::black_box(&mut dst_a),
+                        std::hint::black_box(&mut dst_b),
+                        std::hint::black_box(c_val),
                     );
                 });
             },
@@ -266,8 +270,14 @@ fn bench_gf256_primitives(c: &mut Criterion) {
                 let mut dst_a = deterministic_bytes(scenario.len, scenario.seed ^ 0x1111_2222);
                 let mut dst_b = deterministic_bytes(scenario.len, scenario.seed ^ 0x3333_4444);
                 b.iter(|| {
-                    gf256_mul_slice(black_box(&mut dst_a), black_box(c_val));
-                    gf256_mul_slice(black_box(&mut dst_b), black_box(c_val));
+                    gf256_mul_slice(
+                        std::hint::black_box(&mut dst_a),
+                        std::hint::black_box(c_val),
+                    );
+                    gf256_mul_slice(
+                        std::hint::black_box(&mut dst_b),
+                        std::hint::black_box(c_val),
+                    );
                 });
             },
         );
@@ -282,11 +292,11 @@ fn bench_gf256_primitives(c: &mut Criterion) {
                 let mut dst_b = deterministic_bytes(scenario.len, scenario.seed ^ 0xBBBB_0202);
                 b.iter(|| {
                     gf256_addmul_slices2(
-                        black_box(&mut dst_a),
-                        black_box(&src),
-                        black_box(&mut dst_b),
-                        black_box(&src_b),
-                        black_box(c_val),
+                        std::hint::black_box(&mut dst_a),
+                        std::hint::black_box(&src),
+                        std::hint::black_box(&mut dst_b),
+                        std::hint::black_box(&src_b),
+                        std::hint::black_box(c_val),
                     );
                 });
             },
@@ -299,8 +309,16 @@ fn bench_gf256_primitives(c: &mut Criterion) {
                 let mut dst_a = deterministic_bytes(scenario.len, scenario.seed ^ 0xAAAA_0101);
                 let mut dst_b = deterministic_bytes(scenario.len, scenario.seed ^ 0xBBBB_0202);
                 b.iter(|| {
-                    gf256_addmul_slice(black_box(&mut dst_a), black_box(&src), black_box(c_val));
-                    gf256_addmul_slice(black_box(&mut dst_b), black_box(&src_b), black_box(c_val));
+                    gf256_addmul_slice(
+                        std::hint::black_box(&mut dst_a),
+                        std::hint::black_box(&src),
+                        std::hint::black_box(c_val),
+                    );
+                    gf256_addmul_slice(
+                        std::hint::black_box(&mut dst_b),
+                        std::hint::black_box(&src_b),
+                        std::hint::black_box(c_val),
+                    );
                 });
             },
         );
@@ -329,7 +347,7 @@ fn bench_linalg_operations(c: &mut Criterion) {
             |b, _| {
                 let mut dst = vec![0u8; symbol_size];
                 b.iter(|| {
-                    row_xor(black_box(&mut dst), black_box(&src));
+                    row_xor(std::hint::black_box(&mut dst), std::hint::black_box(&src));
                 });
             },
         );
@@ -341,7 +359,11 @@ fn bench_linalg_operations(c: &mut Criterion) {
             |b, _| {
                 let mut dst = vec![0u8; symbol_size];
                 b.iter(|| {
-                    row_scale_add(black_box(&mut dst), black_box(&src), black_box(c_val));
+                    row_scale_add(
+                        std::hint::black_box(&mut dst),
+                        std::hint::black_box(&src),
+                        std::hint::black_box(c_val),
+                    );
                 });
             },
         );
@@ -383,7 +405,7 @@ fn bench_gaussian_elimination(c: &mut Criterion) {
                 }
 
                 let result = solver.solve();
-                black_box(result)
+                std::hint::black_box(result)
             });
         });
 
@@ -406,7 +428,7 @@ fn bench_gaussian_elimination(c: &mut Criterion) {
                 }
 
                 let result = solver.solve_markowitz();
-                black_box(result)
+                std::hint::black_box(result)
             });
         });
     }
@@ -448,10 +470,11 @@ fn bench_encode_decode(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("encode", &label), |b| {
             b.iter(|| {
                 let encoder =
-                    SystematicEncoder::new(black_box(&source), symbol_size, seed).unwrap();
+                    SystematicEncoder::new(std::hint::black_box(&source), symbol_size, seed)
+                        .unwrap();
                 // Generate some repair symbols
                 for esi in (k as u32)..((k + 4) as u32) {
-                    let _ = black_box(encoder.repair_symbol(esi));
+                    let _ = std::hint::black_box(encoder.repair_symbol(esi));
                 }
             });
         });
@@ -475,8 +498,8 @@ fn bench_encode_decode(c: &mut Criterion) {
                 .collect();
 
             b.iter(|| {
-                let result = decoder.decode(black_box(&received));
-                black_box(result)
+                let result = decoder.decode(std::hint::black_box(&received));
+                std::hint::black_box(result)
             });
         });
 
@@ -496,8 +519,8 @@ fn bench_encode_decode(c: &mut Criterion) {
                 .collect();
 
             b.iter(|| {
-                let result = decoder.decode(black_box(&received));
-                black_box(result)
+                let result = decoder.decode(std::hint::black_box(&received));
+                std::hint::black_box(result)
             });
         });
     }

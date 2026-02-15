@@ -78,7 +78,7 @@
 #![allow(missing_docs)]
 #![allow(clippy::semicolon_if_nothing_returned)]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::collections::{BTreeMap, BinaryHeap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -132,7 +132,7 @@ fn bench_timer_insert(c: &mut Criterion) {
         let mut wheel = TimerWheel::new();
         b.iter(|| {
             let handle = wheel.register(Time::from_millis(100), noop_waker());
-            black_box(handle);
+            std::hint::black_box(handle);
         });
     });
 
@@ -141,7 +141,7 @@ fn bench_timer_insert(c: &mut Criterion) {
         let mut wheel = TimerWheel::new();
         b.iter(|| {
             let handle = wheel.register(Time::from_millis(1), noop_waker());
-            black_box(handle);
+            std::hint::black_box(handle);
         });
     });
 
@@ -149,7 +149,7 @@ fn bench_timer_insert(c: &mut Criterion) {
         let mut wheel = TimerWheel::new();
         b.iter(|| {
             let handle = wheel.register(Time::from_secs(1), noop_waker());
-            black_box(handle);
+            std::hint::black_box(handle);
         });
     });
 
@@ -157,7 +157,7 @@ fn bench_timer_insert(c: &mut Criterion) {
         let mut wheel = TimerWheel::new();
         b.iter(|| {
             let handle = wheel.register(Time::from_secs(60), noop_waker());
-            black_box(handle);
+            std::hint::black_box(handle);
         });
     });
 
@@ -165,7 +165,7 @@ fn bench_timer_insert(c: &mut Criterion) {
         let mut wheel = TimerWheel::new();
         b.iter(|| {
             let handle = wheel.register(Time::from_secs(3600), noop_waker());
-            black_box(handle);
+            std::hint::black_box(handle);
         });
     });
 
@@ -173,7 +173,7 @@ fn bench_timer_insert(c: &mut Criterion) {
         let mut wheel = TimerWheel::new();
         b.iter(|| {
             let handle = wheel.register(Time::from_secs(48 * 3600), noop_waker());
-            black_box(handle);
+            std::hint::black_box(handle);
         });
     });
 
@@ -200,7 +200,7 @@ fn bench_timer_cancel(c: &mut Criterion) {
 
             let start = std::time::Instant::now();
             for handle in handles {
-                black_box(wheel.cancel(&handle));
+                std::hint::black_box(wheel.cancel(&handle));
             }
             total += start.elapsed();
             total
@@ -214,7 +214,7 @@ fn bench_timer_cancel(c: &mut Criterion) {
         wheel.cancel(&handle);
 
         b.iter(|| {
-            black_box(wheel.cancel(&handle));
+            std::hint::black_box(wheel.cancel(&handle));
         });
     });
 
@@ -235,7 +235,7 @@ fn bench_timer_tick(c: &mut Criterion) {
         b.iter(|| {
             time = time.saturating_add_nanos(1_000_000); // 1ms
             let wakers = wheel.collect_expired(time);
-            black_box(wakers);
+            std::hint::black_box(wakers);
         });
     });
 
@@ -251,7 +251,7 @@ fn bench_timer_tick(c: &mut Criterion) {
         b.iter(|| {
             time = time.saturating_add_nanos(1_000_000); // 1ms
             let wakers = wheel.collect_expired(time);
-            black_box(wakers);
+            std::hint::black_box(wakers);
         });
     });
 
@@ -267,7 +267,7 @@ fn bench_timer_tick(c: &mut Criterion) {
                 let start = std::time::Instant::now();
                 let wakers = wheel.collect_expired(Time::from_millis(1 + i));
                 total += start.elapsed();
-                black_box(wakers);
+                std::hint::black_box(wakers);
             }
             total
         });
@@ -285,7 +285,7 @@ fn bench_timer_tick(c: &mut Criterion) {
                 let start = std::time::Instant::now();
                 let wakers = wheel.collect_expired(Time::from_secs(3600));
                 total += start.elapsed();
-                black_box(wakers);
+                std::hint::black_box(wakers);
             }
             total
         });
@@ -312,7 +312,7 @@ fn bench_throughput_10k(c: &mut Criterion) {
                 for i in 0..size_u64 {
                     wheel.register(Time::from_millis(i + 1), noop_waker());
                 }
-                black_box(wheel.len());
+                std::hint::black_box(wheel.len());
             });
         });
 
@@ -391,7 +391,7 @@ fn bench_coalescing(c: &mut Criterion) {
                 let start = std::time::Instant::now();
                 let wakers = wheel.collect_expired(Time::from_millis(1));
                 total += start.elapsed();
-                black_box(wakers);
+                std::hint::black_box(wakers);
             }
             total
         });
@@ -414,7 +414,7 @@ fn bench_coalescing(c: &mut Criterion) {
                 let start = std::time::Instant::now();
                 let wakers = wheel.collect_expired(Time::from_millis(1));
                 total += start.elapsed();
-                black_box(wakers);
+                std::hint::black_box(wakers);
             }
             total
         });
@@ -434,7 +434,7 @@ fn bench_coalescing(c: &mut Criterion) {
         wheel.collect_expired(Time::ZERO);
 
         b.iter(|| {
-            black_box(wheel.coalescing_group_size(Time::from_nanos(500_000)));
+            std::hint::black_box(wheel.coalescing_group_size(Time::from_nanos(500_000)));
         });
     });
 
@@ -454,7 +454,7 @@ fn bench_overflow(c: &mut Criterion) {
         b.iter(|| {
             // 48 hours, definitely in overflow
             let handle = wheel.register(Time::from_secs(48 * 3600), noop_waker());
-            black_box(handle);
+            std::hint::black_box(handle);
         });
     });
 
@@ -496,7 +496,7 @@ fn bench_config(c: &mut Criterion) {
     // Default construction
     group.bench_function("new_default", |b| {
         b.iter(|| {
-            black_box(TimerWheel::new());
+            std::hint::black_box(TimerWheel::new());
         });
     });
 
@@ -508,7 +508,7 @@ fn bench_config(c: &mut Criterion) {
         let coalescing = CoalescingConfig::enabled_with_window(Duration::from_millis(1));
 
         b.iter(|| {
-            black_box(TimerWheel::with_config(
+            std::hint::black_box(TimerWheel::with_config(
                 Time::ZERO,
                 config.clone(),
                 coalescing.clone(),
@@ -524,7 +524,7 @@ fn bench_config(c: &mut Criterion) {
         b.iter(|| {
             // Just under max
             let result = wheel.try_register(Time::from_secs(3599), noop_waker());
-            let _ = black_box(result);
+            let _ = std::hint::black_box(result);
         });
     });
 
@@ -711,7 +711,7 @@ fn bench_comparison_insert(c: &mut Criterion) {
                 for i in 0..size_u64 {
                     wheel.register(Time::from_millis(i + 1), noop_waker());
                 }
-                black_box(wheel.len());
+                std::hint::black_box(wheel.len());
             });
         });
 
@@ -721,7 +721,7 @@ fn bench_comparison_insert(c: &mut Criterion) {
                 for i in 0..size_u64 {
                     timers.insert((i + 1) * 1_000_000, noop_waker()); // millis → nanos
                 }
-                black_box(timers.len());
+                std::hint::black_box(timers.len());
             });
         });
 
@@ -731,7 +731,7 @@ fn bench_comparison_insert(c: &mut Criterion) {
                 for i in 0..size_u64 {
                     timers.insert((i + 1) * 1_000_000, noop_waker());
                 }
-                black_box(timers.len());
+                std::hint::black_box(timers.len());
             });
         });
 
@@ -741,7 +741,7 @@ fn bench_comparison_insert(c: &mut Criterion) {
                 for i in 0..size_u64 {
                     timers.insert((i + 1) * 1_000_000, noop_waker());
                 }
-                black_box(timers.len());
+                std::hint::black_box(timers.len());
             });
         });
     }
@@ -969,7 +969,7 @@ fn bench_comparison_mixed(c: &mut Criterion) {
                         collected += wakers.len();
                     }
                     total += start.elapsed();
-                    black_box(collected);
+                    std::hint::black_box(collected);
                 }
                 total
             });
@@ -998,7 +998,7 @@ fn bench_comparison_mixed(c: &mut Criterion) {
                         collected += wakers.len();
                     }
                     total += start.elapsed();
-                    black_box(collected);
+                    std::hint::black_box(collected);
                 }
                 total
             });
@@ -1027,7 +1027,7 @@ fn bench_comparison_mixed(c: &mut Criterion) {
                         collected += wakers.len();
                     }
                     total += start.elapsed();
-                    black_box(collected);
+                    std::hint::black_box(collected);
                 }
                 total
             });
@@ -1056,7 +1056,7 @@ fn bench_comparison_mixed(c: &mut Criterion) {
                         collected += wakers.len();
                     }
                     total += start.elapsed();
-                    black_box(collected);
+                    std::hint::black_box(collected);
                 }
                 total
             });
@@ -1090,7 +1090,7 @@ fn bench_comparison_memory(c: &mut Criterion) {
                         wheel.register(Time::from_millis(i + 1), noop_waker());
                     }
                     let wakers = wheel.collect_expired(Time::from_millis(size_u64 + 1));
-                    black_box(wakers.len());
+                    std::hint::black_box(wakers.len());
                 });
             },
         );
@@ -1105,7 +1105,7 @@ fn bench_comparison_memory(c: &mut Criterion) {
                         timers.insert((i + 1) * 1_000_000, noop_waker());
                     }
                     let wakers = timers.collect_expired((size_u64 + 1) * 1_000_000);
-                    black_box(wakers.len());
+                    std::hint::black_box(wakers.len());
                 });
             },
         );
@@ -1117,7 +1117,7 @@ fn bench_comparison_memory(c: &mut Criterion) {
                     timers.insert((i + 1) * 1_000_000, noop_waker());
                 }
                 let wakers = timers.collect_expired((size_u64 + 1) * 1_000_000);
-                black_box(wakers.len());
+                std::hint::black_box(wakers.len());
             });
         });
 
@@ -1128,7 +1128,7 @@ fn bench_comparison_memory(c: &mut Criterion) {
                     timers.insert((i + 1) * 1_000_000, noop_waker());
                 }
                 let wakers = timers.collect_expired((size_u64 + 1) * 1_000_000);
-                black_box(wakers.len());
+                std::hint::black_box(wakers.len());
             });
         });
     }

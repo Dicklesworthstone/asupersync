@@ -35,7 +35,10 @@
 //!   - dispatch decision is memoized in `OnceLock`, so kernel selection is stable
 //!     for process lifetime.
 
-#![cfg_attr(feature = "simd-intrinsics", allow(unsafe_code))]
+#![cfg_attr(
+    feature = "simd-intrinsics",
+    allow(unsafe_code, clippy::cast_ptr_alignment, clippy::ptr_as_ptr)
+)]
 
 #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
 use core::arch::aarch64::{

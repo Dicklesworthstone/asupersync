@@ -19,7 +19,7 @@
 #![allow(clippy::semicolon_if_nothing_returned)]
 #![allow(unused_imports)]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -87,7 +87,7 @@ fn bench_reactor_registration(c: &mut Criterion) {
             reactor
                 .register(&listener, token, Interest::READABLE)
                 .expect("register");
-            black_box(token);
+            std::hint::black_box(token);
         });
     });
 
@@ -132,7 +132,7 @@ fn bench_reactor_registration(c: &mut Criterion) {
                         })
                         .collect();
 
-                    black_box(tokens)
+                    std::hint::black_box(tokens)
                 });
             },
         );
@@ -161,7 +161,7 @@ fn bench_reactor_wake(c: &mut Criterion) {
             let count = reactor
                 .poll(&mut events, Some(Duration::from_millis(0)))
                 .expect("poll");
-            black_box(count);
+            std::hint::black_box(count);
         });
     });
 
@@ -184,7 +184,7 @@ fn bench_reactor_wake(c: &mut Criterion) {
             let count = reactor
                 .poll(&mut events, Some(Duration::from_millis(0)))
                 .expect("poll");
-            black_box(count);
+            std::hint::black_box(count);
         });
     });
 
@@ -202,7 +202,7 @@ fn bench_waker_throughput(c: &mut Criterion) {
     group.bench_function("create_noop_waker", |b| {
         b.iter(|| {
             let waker = noop_waker();
-            black_box(waker);
+            std::hint::black_box(waker);
         });
     });
 
@@ -211,7 +211,7 @@ fn bench_waker_throughput(c: &mut Criterion) {
         let waker = noop_waker();
         b.iter(|| {
             let cloned = waker.clone();
-            black_box(cloned);
+            std::hint::black_box(cloned);
         });
     });
 
@@ -221,7 +221,7 @@ fn bench_waker_throughput(c: &mut Criterion) {
         b.iter(|| {
             waker.wake_by_ref();
         });
-        black_box(count.load(Ordering::Relaxed));
+        std::hint::black_box(count.load(Ordering::Relaxed));
     });
 
     // Benchmark wake (consumes waker)
@@ -243,26 +243,26 @@ fn bench_interest_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("reactor/interest");
 
     group.bench_function("create_readable", |b| {
-        b.iter(|| black_box(Interest::READABLE));
+        b.iter(|| std::hint::black_box(Interest::READABLE));
     });
 
     group.bench_function("create_writable", |b| {
-        b.iter(|| black_box(Interest::WRITABLE));
+        b.iter(|| std::hint::black_box(Interest::WRITABLE));
     });
 
     group.bench_function("combine_interests", |b| {
-        b.iter(|| black_box(Interest::READABLE | Interest::WRITABLE));
+        b.iter(|| std::hint::black_box(Interest::READABLE | Interest::WRITABLE));
     });
 
     group.bench_function("check_contains", |b| {
         let interest = Interest::READABLE | Interest::WRITABLE;
-        b.iter(|| black_box(interest.contains(Interest::READABLE)));
+        b.iter(|| std::hint::black_box(interest.contains(Interest::READABLE)));
     });
 
     group.bench_function("intersect_interests", |b| {
         let a = Interest::READABLE | Interest::WRITABLE;
         let b_int = Interest::READABLE;
-        b.iter(|| black_box(a & b_int));
+        b.iter(|| std::hint::black_box(a & b_int));
     });
 
     group.finish();
@@ -375,7 +375,7 @@ fn bench_echo_latency(c: &mut Criterion) {
                 b.iter(|| {
                     client.write_all(&data).expect("write");
                     client.read_exact(&mut buf).expect("read");
-                    black_box(&buf);
+                    std::hint::black_box(&buf);
                 });
 
                 drop(client);
@@ -451,15 +451,15 @@ fn bench_token_operations(c: &mut Criterion) {
 
     group.bench_function("create_token", |b| {
         b.iter(|| {
-            let token = Token(black_box(42));
-            black_box(token);
+            let token = Token(std::hint::black_box(42));
+            std::hint::black_box(token);
         });
     });
 
     group.bench_function("compare_tokens", |b| {
         let t1 = Token(1);
         let t2 = Token(2);
-        b.iter(|| black_box(t1 == t2));
+        b.iter(|| std::hint::black_box(t1 == t2));
     });
 
     group.bench_function("hash_token", |b| {
@@ -470,7 +470,7 @@ fn bench_token_operations(c: &mut Criterion) {
         b.iter(|| {
             let mut hasher = DefaultHasher::new();
             token.hash(&mut hasher);
-            black_box(hasher.finish());
+            std::hint::black_box(hasher.finish());
         });
     });
 
@@ -488,7 +488,7 @@ fn bench_lab_reactor(c: &mut Criterion) {
     group.bench_function("create", |b| {
         b.iter(|| {
             let reactor = LabReactor::new();
-            black_box(reactor);
+            std::hint::black_box(reactor);
         });
     });
 
@@ -518,7 +518,7 @@ fn bench_lab_reactor(c: &mut Criterion) {
             let count = reactor
                 .poll(&mut events, Some(Duration::from_millis(0)))
                 .expect("poll");
-            black_box(count);
+            std::hint::black_box(count);
         });
     });
 

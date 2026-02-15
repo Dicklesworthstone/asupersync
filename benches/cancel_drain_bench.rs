@@ -15,9 +15,8 @@
 #![allow(missing_docs)]
 #![allow(clippy::semicolon_if_nothing_returned)]
 
-use criterion::{
-    black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
 
 use asupersync::obligation::lyapunov::{LyapunovGovernor, PotentialWeights, StateSnapshot};
 use asupersync::record::task::TaskRecord;

@@ -407,8 +407,6 @@ mod tests {
     use futures_lite::future;
     #[cfg(unix)]
     use nix::fcntl::{fcntl, FcntlArg, OFlag};
-    #[cfg(unix)]
-    use std::os::fd::AsRawFd;
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
@@ -549,8 +547,7 @@ mod tests {
     fn udp_from_std_forces_nonblocking_mode() {
         let std_socket = StdUdpSocket::bind("127.0.0.1:0").expect("bind socket");
         let socket = UdpSocket::from(std_socket);
-        let flags =
-            fcntl(socket.inner.as_ref().as_raw_fd(), FcntlArg::F_GETFL).expect("read socket flags");
+        let flags = fcntl(socket.inner.as_ref(), FcntlArg::F_GETFL).expect("read socket flags");
         let is_nonblocking = OFlag::from_bits_truncate(flags).contains(OFlag::O_NONBLOCK);
         assert!(
             is_nonblocking,
