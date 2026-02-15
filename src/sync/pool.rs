@@ -205,7 +205,8 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::mpsc;
-use std::task::{Context, Poll};
+use std::sync::Arc;
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use crate::cx::Cx;
@@ -393,6 +394,12 @@ pub struct PooledResource<R> {
     return_tx: PoolReturnSender<R>,
     acquired_at: Instant,
     created_at: Instant,
+    /// Shared waker list for notifying pool waiters when a resource is
+    /// returned.  [`GenericPool`] populates this; custom [`Pool`]
+    /// implementations that use only the public `new()` constructor get
+    /// `None`, which is harmless — it just means notification relies on
+    /// the next `process_returns` call instead of being immediate.
+    return_wakers: Option<Arc<std::sync::Mutex<Vec<Waker>>>>,
 }
 
 impl<R> PooledResource<R> {
@@ -405,6 +412,7 @@ impl<R> PooledResource<R> {
             return_tx,
             acquired_at: now,
             created_at: now,
+            return_wakers: None,
         }
     }
 
@@ -420,7 +428,17 @@ impl<R> PooledResource<R> {
             return_tx,
             acquired_at: Instant::now(),
             created_at,
+            return_wakers: None,
         }
+    }
+
+    /// Attach the shared return-notification wakers from a
+    /// [`GenericPool`].  Called internally after construction so that
+    /// returning/discarding the resource immediately wakes waiting
+    /// acquirers.
+    fn with_return_notify(mut self, wakers: Arc<std::sync::Mutex<Vec<Waker>>>) -> Self {
+        self.return_wakers = Some(wakers);
+        self
     }
 
     /// Access the resource.
@@ -471,6 +489,9 @@ impl<R> PooledResource<R> {
         }
 
         self.return_obligation.discharge();
+        // Wake pool waiters so they re-poll and call process_returns
+        // to move the returned resource from the mpsc channel into idle.
+        self.notify_return_wakers();
     }
 
     fn discard_inner(&mut self) {
@@ -482,6 +503,19 @@ impl<R> PooledResource<R> {
         self.resource.take();
         let _ = self.return_tx.send(PoolReturn::Discard { hold_duration });
         self.return_obligation.discharge();
+        // Wake pool waiters — a discard frees a creation slot.
+        self.notify_return_wakers();
+    }
+
+    /// Wake all registered pool waiters so they can re-poll and
+    /// discover the newly available resource/slot.
+    fn notify_return_wakers(&self) {
+        if let Some(ref wakers) = self.return_wakers {
+            let mut wakers = wakers.lock().expect("return_wakers lock");
+            for waker in wakers.drain(..) {
+                waker.wake();
+            }
+        }
     }
 }
 
@@ -754,6 +788,12 @@ where
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // Drain the mpsc return channel first so idle/active counts
+        // reflect resources that were returned since the last poll.
+        // Without this, a resource sitting in the channel is invisible
+        // and the waiter would remain Pending even though a slot freed.
+        self.pool.process_returns();
+
         let mut state = self.pool.state.lock().expect("pool state lock poisoned");
 
         if state.closed {
@@ -793,6 +833,19 @@ where
                 waker: cx.waker().clone(),
             });
             self.waiter_id = Some(id);
+        }
+
+        // Also register in the return_wakers list so that
+        // PooledResource::return_inner / discard_inner can wake us
+        // directly.  Without this, a return that arrives while no other
+        // code calls process_returns would leave us stuck until timeout.
+        {
+            let mut wakers = self
+                .pool
+                .return_wakers
+                .lock()
+                .expect("return_wakers lock");
+            wakers.push(cx.waker().clone());
         }
 
         drop(state);
@@ -846,6 +899,13 @@ where
 
     fn commit(mut self) {
         self.pool.commit_create_slot();
+        self.committed = true;
+    }
+
+    /// Mark the reservation as committed without calling
+    /// `commit_create_slot`.  The caller is responsible for adjusting
+    /// pool accounting (e.g., via `commit_create_slot_as_idle`).
+    fn committed_manually(mut self) {
         self.committed = true;
     }
 }
@@ -909,6 +969,11 @@ where
     /// are checked before being returned from `acquire()`.
     #[allow(clippy::type_complexity)]
     health_check_fn: Option<Box<dyn Fn(&R) -> bool + Send + Sync>>,
+    /// Shared waker list: [`PooledResource`] drains and wakes these on
+    /// return/discard so that [`WaitForNotification`] futures are
+    /// re-polled immediately instead of waiting for the next
+    /// `process_returns` call.
+    return_wakers: Arc<std::sync::Mutex<Vec<Waker>>>,
     /// Optional metrics handle for observability.
     #[cfg(feature = "metrics")]
     metrics: Option<PoolMetricsHandle>,
@@ -939,6 +1004,7 @@ where
             return_tx,
             return_rx: std::sync::Mutex::new(return_rx),
             health_check_fn: None,
+            return_wakers: Arc::new(std::sync::Mutex::new(Vec::new())),
             #[cfg(feature = "metrics")]
             metrics: None,
         }
@@ -1011,36 +1077,36 @@ where
     ///   [`PoolConfig::min_size`] resources were created.
     /// - [`WarmupStrategy::BestEffort`]: Never returns an error from warmup.
     pub async fn warmup(&self) -> Result<usize, PoolError> {
-        let existing = self.total_count();
-        let capacity = self.config.max_size.saturating_sub(existing);
-        let target = self.config.warmup_connections.min(capacity);
-        if target == 0 {
-            return Ok(0);
-        }
-
         let mut created = 0;
         let mut last_error = None;
 
+        let target = self.config.warmup_connections;
         for _ in 0..target {
+            // Reserve a creation slot so concurrent acquire() calls see
+            // an accurate capacity picture.  Without this, concurrent
+            // acquires could exceed max_size during warmup.
+            let Some(slot) = CreateSlotReservation::try_reserve(self) else {
+                break; // max_size reached (possibly by concurrent activity)
+            };
+
             match self.create_resource().await {
                 Ok(resource) => {
-                    {
-                        let mut state = self.state.lock().expect("pool state lock poisoned");
-                        state.idle.push_back(IdleResource {
-                            resource,
-                            idle_since: Instant::now(),
-                            created_at: Instant::now(),
-                        });
-                        state.total_created += 1;
-                    }
+                    // Commit the slot as idle — not active.
+                    // CreateSlotReservation::drop is disarmed because we
+                    // set committed before drop.
+                    slot.committed_manually();
+                    self.commit_create_slot_as_idle(resource);
                     created += 1;
                 }
-                Err(e) => match self.config.warmup_failure_strategy {
-                    WarmupStrategy::FailFast => return Err(e),
-                    WarmupStrategy::BestEffort | WarmupStrategy::RequireMinimum => {
-                        last_error = Some(e);
+                Err(e) => {
+                    // slot is dropped here → releases the creating count
+                    match self.config.warmup_failure_strategy {
+                        WarmupStrategy::FailFast => return Err(e),
+                        WarmupStrategy::BestEffort | WarmupStrategy::RequireMinimum => {
+                            last_error = Some(e);
+                        }
                     }
-                },
+                }
             }
         }
 
@@ -1221,6 +1287,20 @@ where
         state.total_created += 1;
     }
 
+    /// Commit a completed creation slot as an idle resource (for warmup).
+    /// Unlike `commit_create_slot`, this does NOT increment `active` or
+    /// `total_acquisitions` — the resource goes straight to the idle queue.
+    fn commit_create_slot_as_idle(&self, resource: R) {
+        let mut state = self.state.lock().expect("pool state lock poisoned");
+        state.creating = state.creating.saturating_sub(1);
+        state.idle.push_back(IdleResource {
+            resource,
+            idle_since: Instant::now(),
+            created_at: Instant::now(),
+        });
+        state.total_created += 1;
+    }
+
     /// Create a new resource using the factory.
     async fn create_resource(&self) -> Result<R, PoolError> {
         let fut = self.factory.create();
@@ -1331,7 +1411,8 @@ where
                         resource,
                         self.return_tx.clone(),
                         created_at,
-                    ));
+                    )
+                    .with_return_notify(Arc::clone(&self.return_wakers)));
                 }
 
                 // Try to create a new resource if under capacity
@@ -1348,7 +1429,8 @@ where
                         self.update_metrics_gauges();
                     }
 
-                    return Ok(PooledResource::new(resource, self.return_tx.clone()));
+                    return Ok(PooledResource::new(resource, self.return_tx.clone())
+                        .with_return_notify(Arc::clone(&self.return_wakers)));
                 }
 
                 // Check for timeout
@@ -1404,11 +1486,14 @@ where
                 self.update_metrics_gauges();
             }
 
-            return Some(PooledResource::new_with_created_at(
-                resource,
-                self.return_tx.clone(),
-                created_at,
-            ));
+            return Some(
+                PooledResource::new_with_created_at(
+                    resource,
+                    self.return_tx.clone(),
+                    created_at,
+                )
+                .with_return_notify(Arc::clone(&self.return_wakers)),
+            );
         }
 
         None
@@ -2092,7 +2177,9 @@ mod tests {
             // _pooled dropped here
         }
 
-        let msg = rx.recv().expect("should receive exactly one return message");
+        let msg = rx
+            .recv()
+            .expect("should receive exactly one return message");
         match msg {
             PoolReturn::Return {
                 resource: value, ..
