@@ -116,6 +116,214 @@
       "1-4": "background/parallelizable"
     }
   },
+  "coverage_gate_policy": {
+    "policy_version": "1.0.0",
+    "policy_id": "lean.coverage.gates.thresholds.v1",
+    "owner_bead": "bd-2ruh1",
+    "governance_parent_bead": "bd-1hkjl",
+    "governance_reference_time_utc": "2026-02-15T00:00:00Z",
+    "category_thresholds": [
+      {
+        "category": "theorem",
+        "metric": "theorem_surface_inventory.proven_ratio",
+        "comparator": ">=",
+        "threshold": 0.95,
+        "owner_role": "Track-3 theorem owner",
+        "owner_bead": "bd-1egsf"
+      },
+      {
+        "category": "constructor",
+        "metric": "step_constructor_coverage.covered_ratio",
+        "comparator": ">=",
+        "threshold": 1.0,
+        "owner_role": "Track-3 constructor owner",
+        "owner_bead": "bd-1egsf"
+      },
+      {
+        "category": "invariant",
+        "metric": "invariant_status_inventory.witness_coverage_ratio",
+        "comparator": ">=",
+        "threshold": 1.0,
+        "owner_role": "Track-3 invariant owner",
+        "owner_bead": "bd-1egsf"
+      },
+      {
+        "category": "conformance",
+        "metric": "runtime_state_refinement_map.mapped_operations_ratio",
+        "comparator": ">=",
+        "threshold": 0.95,
+        "owner_role": "Track-4 refinement owner",
+        "owner_bead": "bd-1odhw"
+      },
+      {
+        "category": "frontier",
+        "metric": "lean_frontier_buckets_v1.errors_total",
+        "comparator": "<=",
+        "threshold": 32,
+        "owner_role": "Track-2 frontier owner",
+        "owner_bead": "bd-k6fj1"
+      }
+    ],
+    "escalation_policy": {
+      "owner_assignment_rules": [
+        {
+          "category": "theorem",
+          "primary_owner_role": "Track-3 theorem owner",
+          "primary_owner_bead": "bd-1egsf",
+          "escalation_owner_role": "Track-5 governance owner",
+          "escalation_bead": "bd-2ruh1"
+        },
+        {
+          "category": "constructor",
+          "primary_owner_role": "Track-3 constructor owner",
+          "primary_owner_bead": "bd-1egsf",
+          "escalation_owner_role": "Track-5 governance owner",
+          "escalation_bead": "bd-2ruh1"
+        },
+        {
+          "category": "invariant",
+          "primary_owner_role": "Track-3 invariant owner",
+          "primary_owner_bead": "bd-1egsf",
+          "escalation_owner_role": "Track-5 governance owner",
+          "escalation_bead": "bd-2ruh1"
+        },
+        {
+          "category": "conformance",
+          "primary_owner_role": "Track-4 refinement owner",
+          "primary_owner_bead": "bd-1odhw",
+          "escalation_owner_role": "Track-5 governance owner",
+          "escalation_bead": "bd-1hkjl"
+        },
+        {
+          "category": "frontier",
+          "primary_owner_role": "Track-2 frontier owner",
+          "primary_owner_bead": "bd-k6fj1",
+          "escalation_owner_role": "Track-5 governance owner",
+          "escalation_bead": "bd-1hkjl"
+        }
+      ],
+      "sla_targets": [
+        {
+          "severity": "warning",
+          "trigger": "threshold_breach_without_regression",
+          "ttfr_minutes": 240,
+          "ttr_hours": 72,
+          "escalation_bead": "bd-2ruh1"
+        },
+        {
+          "severity": "high",
+          "trigger": "threshold_regression_vs_baseline",
+          "ttfr_minutes": 120,
+          "ttr_hours": 48,
+          "escalation_bead": "bd-1hkjl"
+        },
+        {
+          "severity": "critical",
+          "trigger": "frontier_or_conformance_hard_gate_failure",
+          "ttfr_minutes": 60,
+          "ttr_hours": 24,
+          "escalation_bead": "bd-1hkjl"
+        }
+      ],
+      "allowed_temporary_regressions": [
+        {
+          "category": "theorem",
+          "max_regression_points": 0.02,
+          "max_expiry_days": 14,
+          "approval_bead": "bd-2ruh1"
+        },
+        {
+          "category": "constructor",
+          "max_regression_points": 0.0,
+          "max_expiry_days": 7,
+          "approval_bead": "bd-2ruh1"
+        },
+        {
+          "category": "invariant",
+          "max_regression_points": 0.0,
+          "max_expiry_days": 7,
+          "approval_bead": "bd-2ruh1"
+        },
+        {
+          "category": "conformance",
+          "max_regression_points": 0.01,
+          "max_expiry_days": 14,
+          "approval_bead": "bd-2ruh1"
+        },
+        {
+          "category": "frontier",
+          "max_regression_points": 0.0,
+          "max_expiry_days": 14,
+          "approval_bead": "bd-2ruh1"
+        }
+      ]
+    },
+    "exception_lifecycle": {
+      "policy_id": "lean.coverage.exception_lifecycle.v1",
+      "required_fields": [
+        "waiver_id",
+        "category",
+        "owner",
+        "reason",
+        "risk_class",
+        "status",
+        "opened_at_utc",
+        "expires_at_utc",
+        "approval_bead",
+        "closure_dependency_path"
+      ],
+      "statuses": [
+        "draft",
+        "active",
+        "closed",
+        "expired"
+      ],
+      "governance_checks": [
+        {
+          "check_id": "waiver.expiry.enforced",
+          "rule": "Any waiver with status=active must have expires_at_utc > governance_reference_time_utc."
+        },
+        {
+          "check_id": "waiver.closed.requires_closure_bead",
+          "rule": "Closed waivers must include closure_bead and closed_at_utc."
+        }
+      ]
+    },
+    "exceptions": [
+      {
+        "waiver_id": "waiver.track5.threshold-policy.bootstrap.2026-02-15",
+        "category": "frontier",
+        "owner": "Track-5 governance owner",
+        "reason": "Initial threshold rollout uses baseline frontier cap before post-stabilization recalibration.",
+        "risk_class": "medium",
+        "status": "active",
+        "opened_at_utc": "2026-02-15T00:00:00Z",
+        "expires_at_utc": "2026-03-01T00:00:00Z",
+        "approval_bead": "bd-2ruh1",
+        "closure_dependency_path": "bd-k6fj1 -> bd-2ruh1",
+        "closure_bead": null,
+        "closed_at_utc": null
+      }
+    ],
+    "governance_checks": [
+      {
+        "check_id": "coverage.threshold.categories.complete",
+        "rule": "Category thresholds must cover theorem, constructor, invariant, conformance, and frontier."
+      },
+      {
+        "check_id": "coverage.escalation.owner_assignment.complete",
+        "rule": "Escalation owner assignment must exist for each category threshold."
+      },
+      {
+        "check_id": "coverage.sla.targets.ordered",
+        "rule": "SLA targets must include warning/high/critical severities with strictly tighter TTFR/TTR at higher severity."
+      },
+      {
+        "check_id": "coverage.waiver.lifecycle.enforced",
+        "rule": "Waiver lifecycle fields/statuses must satisfy exception_lifecycle policy."
+      }
+    ]
+  },
   "gaps": [
     {
       "id": "gap.declaration_order.helper_frontier",

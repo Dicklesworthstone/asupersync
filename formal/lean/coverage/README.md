@@ -81,8 +81,23 @@ The Rust model in `conformance/src/lean_coverage_matrix.rs` enforces:
 - canonical gap categories across declaration-order, missing-lemma, proof-shape, model-code-mismatch, tactic-instability
 - canonical `error_code_catalog` mapping each deterministic frontier `error_code` to one primary `failure_mode`
 - deterministic scoring (`priority_score = 2*product_risk + unblock_potential - implementation_effort`)
+- machine-readable `coverage_gate_policy` thresholds for theorem/constructor/invariant/conformance/frontier categories
 - first-class blockers and critical path for Tracks 2-6
 - explicit dependency edges and phase exits for execution planning
+
+## Coverage Gate Policy (Track-5)
+
+`gap_risk_sequencing_plan.json` now includes a `coverage_gate_policy` section used as the
+canonical threshold/escalation contract for proof-health governance:
+- per-category thresholds (`theorem`, `constructor`, `invariant`, `conformance`, `frontier`)
+- explicit owner assignment and escalation beads
+- severity-ordered SLA targets (TTFR/TTR)
+- temporary-regression bounds with required expiry windows
+- exception lifecycle policy (`draft/active/closed/expired`) with required waiver fields
+
+Governance enforcement is machine-checked in `tests/lean_gap_risk_sequencing_plan.rs` so CI
+fails on malformed thresholds, missing owner routes, invalid SLA ordering, or invalid waiver
+lifecycle records.
 
 ## Divergence Repair Routing (Track-4)
 
