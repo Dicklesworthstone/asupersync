@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 const PROFILES_JSON: &str = include_str!("../formal/lean/coverage/ci_verification_profiles.json");
+const CI_WORKFLOW_YML: &str = include_str!("../.github/workflows/ci.yml");
 
 fn load_beads_jsonl() -> Option<String> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -186,6 +187,7 @@ fn ci_profile_runtime_order_and_bead_links_are_valid() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn ci_profile_waiver_policy_enforces_expiry_and_closure_paths() {
     let profiles: Value = serde_json::from_str(PROFILES_JSON).expect("profiles json must parse");
     let waiver_policy = profiles
@@ -364,5 +366,41 @@ fn ci_profile_waiver_policy_enforces_expiry_and_closure_paths() {
                 "closed_at_utc must be UTC RFC3339 (Z suffix)"
             );
         }
+    }
+}
+
+#[test]
+fn lean_smoke_failure_payload_routes_to_owners_deterministically() {
+    for required_snippet in [
+        ".beads/issues.jsonl",
+        "routing_policy: \"bead-owner-v1\"",
+        "ttfr_target_minutes",
+        "owner_candidates",
+        "routed_owners",
+        "primary_owner",
+        "first_action_checklist",
+    ] {
+        assert!(
+            CI_WORKFLOW_YML.contains(required_snippet),
+            "ci workflow must include `{required_snippet}` in lean-smoke failure payload contract"
+        );
+    }
+}
+
+#[test]
+fn lean_full_gate_emits_repro_bundle_and_routing_contract() {
+    for required_snippet in [
+        "Lean Full Gate (Main/Release)",
+        "select(.name == \"full\")",
+        "lean-full/repro_bundle_manifest.json",
+        "lean-full/repro_commands.sh",
+        "lean-full/failure_payload.json",
+        "Upload Lean full artifacts",
+        "lean-full-artifacts",
+    ] {
+        assert!(
+            CI_WORKFLOW_YML.contains(required_snippet),
+            "ci workflow must include `{required_snippet}` in lean-full gate contract"
+        );
     }
 }

@@ -71,6 +71,153 @@
       "largest_bucket": "proof-shape.type-mismatch"
     }
   },
+  "track2_frontier_burndown_dashboard": {
+    "schema_version": "1.0.0",
+    "dashboard_id": "lean.track2.frontier_burndown.v1",
+    "bucket_ordering": "lexicographic(failure_mode,error_code)",
+    "generated_from_artifacts": [
+      "formal/lean/coverage/lean_frontier_buckets_v1.json"
+    ],
+    "generation_commands": [
+      "cargo test --test lean_baseline_report baseline_report_track2_burndown_and_closure_gate_are_well_formed -- --nocapture"
+    ],
+    "runs": [
+      {
+        "run_index": 1,
+        "run_id": "track2.frontier.baseline.2026-02-15",
+        "source_log": "target/lean-e2e/bd-cspxm_lake_build.log",
+        "toolchain_key": "lean4+rust-nightly-2026-02-05",
+        "frontier_artifact": "formal/lean/coverage/lean_frontier_buckets_v1.json",
+        "diagnostics_total": 86,
+        "errors_total": 32,
+        "warnings_total": 54,
+        "bucket_count": 7,
+        "delta_vs_previous": {
+          "diagnostics_total": 0,
+          "errors_total": 0,
+          "warnings_total": 0,
+          "bucket_count": 0
+        }
+      }
+    ],
+    "bucket_trends": [
+      {
+        "bucket_id": "proof-shape.application-type-mismatch",
+        "failure_mode": "proof-shape",
+        "error_code": "application-type-mismatch",
+        "current_count": 1,
+        "delta_from_previous": 0,
+        "trend": "baseline"
+      },
+      {
+        "bucket_id": "proof-shape.omega-goal-not-proved",
+        "failure_mode": "proof-shape",
+        "error_code": "omega-goal-not-proved",
+        "current_count": 1,
+        "delta_from_previous": 0,
+        "trend": "baseline"
+      },
+      {
+        "bucket_id": "proof-shape.other",
+        "failure_mode": "proof-shape",
+        "error_code": "other",
+        "current_count": 1,
+        "delta_from_previous": 0,
+        "trend": "baseline"
+      },
+      {
+        "bucket_id": "proof-shape.rewrite-failed",
+        "failure_mode": "proof-shape",
+        "error_code": "rewrite-failed",
+        "current_count": 3,
+        "delta_from_previous": 0,
+        "trend": "baseline"
+      },
+      {
+        "bucket_id": "proof-shape.subst-failed",
+        "failure_mode": "proof-shape",
+        "error_code": "subst-failed",
+        "current_count": 9,
+        "delta_from_previous": 0,
+        "trend": "baseline"
+      },
+      {
+        "bucket_id": "proof-shape.type-mismatch",
+        "failure_mode": "proof-shape",
+        "error_code": "type-mismatch",
+        "current_count": 14,
+        "delta_from_previous": 0,
+        "trend": "baseline"
+      },
+      {
+        "bucket_id": "proof-shape.unsolved-goals",
+        "failure_mode": "proof-shape",
+        "error_code": "unsolved-goals",
+        "current_count": 3,
+        "delta_from_previous": 0,
+        "trend": "baseline"
+      }
+    ]
+  },
+  "track2_closure_gate": {
+    "policy_version": "1.0.0",
+    "policy_id": "lean.track2.closure_gate.v1",
+    "decision_owner_bead": "bd-5wwbm",
+    "track2_parent_bead": "bd-k6fj1",
+    "status": "not-satisfied",
+    "blocking_classes_must_be_zero": [
+      "declaration-order.unknown-identifier",
+      "declaration-order.helper-availability",
+      "tactic-instability.recursion-depth"
+    ],
+    "acceptable_residual_buckets": [
+      {
+        "bucket_id": "proof-shape.application-type-mismatch",
+        "max_count": 1
+      },
+      {
+        "bucket_id": "proof-shape.omega-goal-not-proved",
+        "max_count": 1
+      },
+      {
+        "bucket_id": "proof-shape.other",
+        "max_count": 1
+      },
+      {
+        "bucket_id": "proof-shape.rewrite-failed",
+        "max_count": 3
+      },
+      {
+        "bucket_id": "proof-shape.subst-failed",
+        "max_count": 9
+      },
+      {
+        "bucket_id": "proof-shape.type-mismatch",
+        "max_count": 14
+      },
+      {
+        "bucket_id": "proof-shape.unsolved-goals",
+        "max_count": 3
+      }
+    ],
+    "stability_requirement": {
+      "consecutive_runs_required": 2,
+      "no_regression_required": true,
+      "comparison_keys": [
+        "diagnostics_total",
+        "errors_total",
+        "warnings_total",
+        "bucket_count",
+        "bucket_trends[].current_count"
+      ]
+    },
+    "references": {
+      "track_close_decision_bead": "bd-k6fj1",
+      "track3_dependency_bead": "bd-1egsf",
+      "track5_ci_policy_bead": "bd-1hkjl",
+      "track5_threshold_policy_bead": "bd-2ruh1"
+    }
+  },
   "ownership_map": [
     {
       "area": "Track-1 baseline/scope execution",

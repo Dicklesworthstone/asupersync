@@ -1,7 +1,7 @@
 //! Baseline report consistency checks (bd-5w2lq).
 
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 const BASELINE_JSON: &str = include_str!("../formal/lean/coverage/baseline_report_v1.json");
 const THEOREM_JSON: &str = include_str!("../formal/lean/coverage/theorem_surface_inventory.json");
@@ -233,4 +233,236 @@ fn baseline_report_references_existing_beads_and_has_cadence() {
     assert!(gates.contains("cargo check --all-targets"));
     assert!(gates.contains("cargo clippy --all-targets -- -D warnings"));
     assert!(gates.contains("cargo test"));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn baseline_report_track2_burndown_and_closure_gate_are_well_formed() {
+    let baseline: Value = serde_json::from_str(BASELINE_JSON).expect("baseline report must parse");
+    let frontier: Value = serde_json::from_str(FRONTIER_JSON).expect("frontier report must parse");
+
+    let dashboard = baseline
+        .get("track2_frontier_burndown_dashboard")
+        .and_then(Value::as_object)
+        .expect("track2_frontier_burndown_dashboard must be object");
+    assert_eq!(
+        dashboard
+            .get("schema_version")
+            .and_then(Value::as_str)
+            .expect("dashboard schema_version must be string"),
+        "1.0.0"
+    );
+
+    let runs = dashboard
+        .get("runs")
+        .and_then(Value::as_array)
+        .expect("dashboard runs must be array");
+    assert!(!runs.is_empty(), "dashboard runs must not be empty");
+
+    let mut previous_run_index = 0_u64;
+    for run in runs {
+        let run_index = run
+            .get("run_index")
+            .and_then(Value::as_u64)
+            .expect("run_index must be numeric");
+        assert!(
+            run_index > previous_run_index,
+            "run_index values must be strictly increasing"
+        );
+        previous_run_index = run_index;
+    }
+
+    let latest = runs.last().expect("runs is non-empty");
+    let latest_errors = latest
+        .get("errors_total")
+        .and_then(Value::as_u64)
+        .expect("latest errors_total must be numeric");
+    let latest_warnings = latest
+        .get("warnings_total")
+        .and_then(Value::as_u64)
+        .expect("latest warnings_total must be numeric");
+    let latest_diagnostics = latest
+        .get("diagnostics_total")
+        .and_then(Value::as_u64)
+        .expect("latest diagnostics_total must be numeric");
+    let latest_bucket_count = latest
+        .get("bucket_count")
+        .and_then(Value::as_u64)
+        .expect("latest bucket_count must be numeric");
+
+    assert_eq!(
+        latest_diagnostics,
+        baseline
+            .pointer("/snapshot/frontier_buckets/diagnostics_total")
+            .and_then(Value::as_u64)
+            .expect("snapshot diagnostics_total must be numeric")
+    );
+    assert_eq!(
+        latest_errors,
+        baseline
+            .pointer("/snapshot/frontier_buckets/errors_total")
+            .and_then(Value::as_u64)
+            .expect("snapshot errors_total must be numeric")
+    );
+    assert_eq!(
+        latest_warnings,
+        baseline
+            .pointer("/snapshot/frontier_buckets/warnings_total")
+            .and_then(Value::as_u64)
+            .expect("snapshot warnings_total must be numeric")
+    );
+    assert_eq!(
+        latest_bucket_count,
+        baseline
+            .pointer("/snapshot/frontier_buckets/bucket_count")
+            .and_then(Value::as_u64)
+            .expect("snapshot bucket_count must be numeric")
+    );
+
+    let frontier_buckets = frontier
+        .get("buckets")
+        .and_then(Value::as_array)
+        .expect("frontier buckets must be array");
+    let frontier_map = frontier_buckets
+        .iter()
+        .map(|bucket| {
+            let bucket_id = bucket
+                .get("bucket_id")
+                .and_then(Value::as_str)
+                .expect("frontier bucket_id must be string");
+            let count = bucket
+                .get("count")
+                .and_then(Value::as_u64)
+                .expect("frontier count must be numeric");
+            (bucket_id.to_string(), count)
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let bucket_trends = dashboard
+        .get("bucket_trends")
+        .and_then(Value::as_array)
+        .expect("dashboard bucket_trends must be array");
+    assert_eq!(
+        bucket_trends.len(),
+        frontier_buckets.len(),
+        "bucket_trends size must match frontier bucket count"
+    );
+
+    let mut trend_ids = BTreeSet::new();
+    for trend in bucket_trends {
+        let bucket_id = trend
+            .get("bucket_id")
+            .and_then(Value::as_str)
+            .expect("bucket trend bucket_id must be string");
+        let current_count = trend
+            .get("current_count")
+            .and_then(Value::as_u64)
+            .expect("bucket trend current_count must be numeric");
+        let delta = trend
+            .get("delta_from_previous")
+            .and_then(Value::as_i64)
+            .expect("bucket trend delta_from_previous must be numeric");
+        let trend_label = trend
+            .get("trend")
+            .and_then(Value::as_str)
+            .expect("bucket trend label must be string");
+
+        let expected_count = frontier_map
+            .get(bucket_id)
+            .copied()
+            .expect("bucket trend bucket_id must exist in frontier");
+        assert_eq!(current_count, expected_count);
+        assert_eq!(delta, 0, "baseline run must use zero deltas");
+        assert_eq!(trend_label, "baseline");
+        trend_ids.insert(bucket_id.to_string());
+    }
+
+    let frontier_ids = frontier_map.keys().cloned().collect::<BTreeSet<_>>();
+    assert_eq!(
+        trend_ids, frontier_ids,
+        "bucket trend IDs must match frontier"
+    );
+
+    let closure_gate = baseline
+        .get("track2_closure_gate")
+        .and_then(Value::as_object)
+        .expect("track2_closure_gate must be object");
+    assert_eq!(
+        closure_gate
+            .get("policy_version")
+            .and_then(Value::as_str)
+            .expect("closure gate policy_version must be string"),
+        "1.0.0"
+    );
+
+    let status = closure_gate
+        .get("status")
+        .and_then(Value::as_str)
+        .expect("closure gate status must be string");
+    assert!(
+        matches!(status, "not-satisfied" | "satisfied"),
+        "closure gate status must be not-satisfied|satisfied"
+    );
+
+    let blocking_classes = closure_gate
+        .get("blocking_classes_must_be_zero")
+        .and_then(Value::as_array)
+        .expect("blocking_classes_must_be_zero must be array");
+    assert!(
+        blocking_classes.len() >= 3,
+        "closure gate must include at least 3 zero-class constraints"
+    );
+
+    let stability_requirement = closure_gate
+        .get("stability_requirement")
+        .and_then(Value::as_object)
+        .expect("stability_requirement must be object");
+    assert!(
+        stability_requirement
+            .get("consecutive_runs_required")
+            .and_then(Value::as_u64)
+            .expect("consecutive_runs_required must be numeric")
+            >= 2,
+        "stability requirement must require at least two runs"
+    );
+    assert!(
+        stability_requirement
+            .get("no_regression_required")
+            .and_then(Value::as_bool)
+            .expect("no_regression_required must be boolean"),
+        "stability requirement must require no regression"
+    );
+
+    let bead_ids = BEADS_JSONL
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .fold(BTreeSet::new(), |mut ids, entry| {
+            if let Some(id) = entry.get("id").and_then(Value::as_str) {
+                ids.insert(id.to_string());
+            }
+            if let Some(external_ref) = entry.get("external_ref").and_then(Value::as_str) {
+                ids.insert(external_ref.to_string());
+            }
+            ids
+        });
+
+    let references = closure_gate
+        .get("references")
+        .and_then(Value::as_object)
+        .expect("closure gate references must be object");
+    for field in [
+        "track_close_decision_bead",
+        "track3_dependency_bead",
+        "track5_ci_policy_bead",
+        "track5_threshold_policy_bead",
+    ] {
+        let bead_id = references
+            .get(field)
+            .and_then(Value::as_str)
+            .expect("closure gate reference must be string");
+        assert!(
+            bead_ids.contains(bead_id),
+            "closure gate reference {field} points to unknown bead {bead_id}"
+        );
+    }
 }

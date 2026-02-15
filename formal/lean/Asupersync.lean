@@ -2377,7 +2377,7 @@ private theorem setTask_same_region_preserves_wellformed_aux {Value Error Panic 
       by_cases hEq : t' = t
       · subst t'
         simp [getTask, setTask] at h
-        have hTaskEq : task' = newTask := by simpa using h
+        have hTaskEq : task' = newTask := by simpa using h.symm
         subst task'
         obtain ⟨region, hReg⟩ := hWF.task_region_exists t task hTask
         exact ⟨region, by simpa [getRegion, setTask, hSameRegion] using hReg⟩
@@ -2518,7 +2518,7 @@ theorem committed_obligation_stable {Value Error Panic : Type}
     · subst hEq
       have hEqOb : obStep = ob := by
         have : some obStep = some ob := by
-          simpa using (hOb'.trans hOb.symm)
+          simpa using (hOb'.symm.trans hOb)
         exact Option.some.inj this
       rw [hEqOb] at hState
       rw [hCommitted] at hState
@@ -2531,7 +2531,7 @@ theorem committed_obligation_stable {Value Error Panic : Type}
     · subst hEq
       have hEqOb : obStep = ob := by
         have : some obStep = some ob := by
-          simpa using (hOb'.trans hOb.symm)
+          simpa using (hOb'.symm.trans hOb)
         exact Option.some.inj this
       rw [hEqOb] at hState
       rw [hCommitted] at hState
@@ -2544,7 +2544,7 @@ theorem committed_obligation_stable {Value Error Panic : Type}
     · subst hEq
       have hEqOb : obStep = ob := by
         have : some obStep = some ob := by
-          simpa using (hOb'.trans hOb.symm)
+          simpa using (hOb'.symm.trans hOb)
         exact Option.some.inj this
       rw [hEqOb] at hState
       rw [hCommitted] at hState
@@ -2912,7 +2912,7 @@ theorem aborted_obligation_stable {Value Error Panic : Type}
     · subst hEq
       have hEqOb : obStep = ob := by
         have : some obStep = some ob := by
-          simpa using (hOb'.trans hOb.symm)
+          simpa using (hOb'.symm.trans hOb)
         exact Option.some.inj this
       rw [hEqOb] at hState
       rw [hAborted] at hState
@@ -2925,7 +2925,7 @@ theorem aborted_obligation_stable {Value Error Panic : Type}
     · subst hEq
       have hEqOb : obStep = ob := by
         have : some obStep = some ob := by
-          simpa using (hOb'.trans hOb.symm)
+          simpa using (hOb'.symm.trans hOb)
         exact Option.some.inj this
       rw [hEqOb] at hState
       rw [hAborted] at hState
@@ -2938,7 +2938,7 @@ theorem aborted_obligation_stable {Value Error Panic : Type}
     · subst hEq
       have hEqOb : obStep = ob := by
         have : some obStep = some ob := by
-          simpa using (hOb'.trans hOb.symm)
+          simpa using (hOb'.symm.trans hOb)
         exact Option.some.inj this
       rw [hEqOb] at hState
       rw [hAborted] at hState
@@ -3012,7 +3012,7 @@ theorem leaked_obligation_stable {Value Error Panic : Type}
     · subst hEq
       have hEqOb : obStep = ob := by
         have : some obStep = some ob := by
-          simpa using (hOb'.trans hOb.symm)
+          simpa using (hOb'.symm.trans hOb)
         exact Option.some.inj this
       rw [hEqOb] at hState
       rw [hLeaked] at hState
@@ -3026,7 +3026,7 @@ theorem leaked_obligation_stable {Value Error Panic : Type}
     · subst hEq
       have hEqOb : obStep = ob := by
         have : some obStep = some ob := by
-          simpa using (hOb'.trans hOb.symm)
+          simpa using (hOb'.symm.trans hOb)
         exact Option.some.inj this
       rw [hEqOb] at hState
       rw [hLeaked] at hState
@@ -3040,7 +3040,7 @@ theorem leaked_obligation_stable {Value Error Panic : Type}
     · subst hEq
       have hEqOb : obStep = ob := by
         have : some obStep = some ob := by
-          simpa using (hOb'.trans hOb.symm)
+          simpa using (hOb'.symm.trans hOb)
         exact Option.some.inj this
       rw [hEqOb] at hState
       rw [hLeaked] at hState

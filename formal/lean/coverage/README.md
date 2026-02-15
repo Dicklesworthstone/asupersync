@@ -144,6 +144,8 @@ Validation for this artifact is enforced in `tests/lean_gap_risk_sequencing_plan
 
 `baseline_report_v1.json` and `baseline_report_v1.md` define:
 - reproducible baseline snapshot for theorem/constructor/invariant/gap status
+- deterministic Track-2 frontier burn-down dashboard (run totals + per-bucket trends + deltas)
+- objective Track-2 closure gate policy (zero-class requirements + stability criteria)
 - ownership map for active blocker beads
 - refresh triggers and required verification gates
 - change-control protocol for taxonomy/definition updates
