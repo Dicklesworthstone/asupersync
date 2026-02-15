@@ -235,7 +235,10 @@ impl<T> Sender<T> {
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         let waker = {
-            let mut inner = self.inner.lock().expect("oneshot lock poisoned");
+            let Ok(mut inner) = self.inner.lock() else {
+                // Mutex poisoned — bail to avoid double-panic abort.
+                return;
+            };
             if inner.sender_consumed {
                 None
             } else {
@@ -340,7 +343,10 @@ impl<T> Drop for SendPermit<T> {
         if !self.sent {
             // Permit dropped without sending - abort
             let waker = {
-                let mut inner = self.inner.lock().expect("oneshot lock poisoned");
+                let Ok(mut inner) = self.inner.lock() else {
+                    // Mutex poisoned — bail to avoid double-panic abort.
+                    return;
+                };
                 inner.permit_outstanding = false;
                 inner.waker.take()
             };
@@ -399,6 +405,20 @@ impl<T> Future for RecvFuture<'_, T> {
             _ => inner.waker = Some(ctx.waker().clone()),
         }
         Poll::Pending
+    }
+}
+
+impl<T> Drop for RecvFuture<'_, T> {
+    fn drop(&mut self) {
+        // If dropped while Pending (e.g., select/race loser), clear
+        // the registered waker to avoid retaining stale executor state.
+        let Ok(mut inner) = self.receiver.inner.lock() else {
+            return;
+        };
+        // Only clear if this future's waker is the one registered.
+        // We don't have direct equality, so unconditionally clear —
+        // oneshot has at most one receiver, so this is always correct.
+        inner.waker = None;
     }
 }
 
@@ -474,7 +494,10 @@ impl<T> Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        let mut inner = self.inner.lock().expect("oneshot lock poisoned");
+        let Ok(mut inner) = self.inner.lock() else {
+            // Mutex poisoned — bail to avoid double-panic abort.
+            return;
+        };
         inner.receiver_dropped = true;
     }
 }
@@ -948,15 +971,16 @@ mod tests {
         crate::test_complete!("recv_closed_clears_stale_waker");
     }
 
-    /// Verify that SendPermit::send clears the stale waker when the
-    /// receiver has already been dropped.
+    /// Verify that SendPermit::send handles receiver-already-dropped
+    /// path correctly (returns Disconnected, doesn't panic or deadlock).
     #[test]
     fn permit_send_receiver_dropped_clears_waker() {
         init_test("permit_send_receiver_dropped_clears_waker");
         let cx = test_cx();
         let (tx, rx) = channel::<i32>();
 
-        // Poll recv to register a waker
+        // Poll recv to register a waker, then drop the future.
+        // RecvFuture::Drop now clears the stale waker (correct behavior).
         let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
         let mut task_cx = Context::from_waker(&waker);
         let mut fut = Box::pin(rx.recv(&cx));
@@ -964,8 +988,11 @@ mod tests {
         assert!(matches!(poll, Poll::Pending));
         drop(fut);
 
-        // Verify waker is registered
-        assert!(tx.inner.lock().unwrap().waker.is_some());
+        // Waker was cleared by RecvFuture::Drop
+        assert!(
+            tx.inner.lock().unwrap().waker.is_none(),
+            "RecvFuture::Drop should clear stale waker"
+        );
 
         // Drop receiver
         drop(rx);
@@ -975,9 +1002,92 @@ mod tests {
         let result = permit.send(42);
         assert!(matches!(result, Err(SendError::Disconnected(42))));
 
-        // Waker should have been cleared in the error path
-        // (We can't access inner easily here because tx is consumed,
-        // but the important thing is it doesn't panic or deadlock)
         crate::test_complete!("permit_send_receiver_dropped_clears_waker");
+    }
+
+    #[test]
+    fn sender_drop_on_poisoned_mutex_does_not_panic() {
+        init_test("sender_drop_on_poisoned_mutex_does_not_panic");
+        let (tx, _rx) = channel::<i32>();
+
+        // Poison the mutex.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = tx.inner.lock().expect("lock");
+            panic!("intentional poison");
+        }));
+
+        // Dropping tx should NOT panic.
+        drop(tx);
+        crate::test_complete!("sender_drop_on_poisoned_mutex_does_not_panic");
+    }
+
+    #[test]
+    fn permit_drop_on_poisoned_mutex_does_not_panic() {
+        init_test("permit_drop_on_poisoned_mutex_does_not_panic");
+        let cx = test_cx();
+        let (tx, _rx) = channel::<i32>();
+
+        let permit = tx.reserve(&cx);
+
+        // Poison the mutex.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = permit.inner.lock().expect("lock");
+            panic!("intentional poison");
+        }));
+
+        // Dropping permit should NOT panic.
+        drop(permit);
+        crate::test_complete!("permit_drop_on_poisoned_mutex_does_not_panic");
+    }
+
+    #[test]
+    fn receiver_drop_on_poisoned_mutex_does_not_panic() {
+        init_test("receiver_drop_on_poisoned_mutex_does_not_panic");
+        let (tx, rx) = channel::<i32>();
+
+        // Poison the mutex.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = tx.inner.lock().expect("lock");
+            panic!("intentional poison");
+        }));
+
+        // Dropping rx should NOT panic.
+        drop(rx);
+        drop(tx);
+        crate::test_complete!("receiver_drop_on_poisoned_mutex_does_not_panic");
+    }
+
+    #[test]
+    fn recv_future_drop_clears_stale_waker() {
+        init_test("recv_future_drop_clears_stale_waker");
+        let cx = test_cx();
+        let (tx, rx) = channel::<i32>();
+
+        let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
+        let mut task_cx = Context::from_waker(&waker);
+
+        {
+            let mut fut = Box::pin(rx.recv(&cx));
+            let poll = fut.as_mut().poll(&mut task_cx);
+            assert!(matches!(poll, Poll::Pending));
+            assert!(
+                rx.inner.lock().unwrap().waker.is_some(),
+                "waker registered after Pending"
+            );
+            // fut dropped here
+        }
+
+        // Waker should be cleared by RecvFuture::Drop
+        assert!(
+            rx.inner.lock().unwrap().waker.is_none(),
+            "waker cleared after RecvFuture drop"
+        );
+
+        // Channel should still work
+        tx.send(&cx, 99).unwrap();
+        let value = rx.try_recv().unwrap();
+        crate::assert_with_log!(value == 99, "recv after drop", 99, value);
+
+        crate::test_complete!("recv_future_drop_clears_stale_waker");
     }
 }

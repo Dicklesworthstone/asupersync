@@ -213,7 +213,13 @@ impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         let mut wakers_to_wake = Vec::new();
         {
-            let mut inner = self.channel.inner.lock().expect("broadcast lock poisoned");
+            let Ok(mut inner) = self.channel.inner.lock() else {
+                // Mutex poisoned — another thread panicked while holding the
+                // lock.  We cannot safely update sender_count, but waking
+                // through a poisoned lock would be unsound anyway.  Bail out
+                // to avoid a double-panic abort during unwinding.
+                return;
+            };
             inner.sender_count -= 1;
             if inner.sender_count == 0 {
                 inner.wakers.retain(|waker| {
@@ -436,7 +442,10 @@ impl<T> Clone for Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        let mut inner = self.channel.inner.lock().expect("broadcast lock poisoned");
+        let Ok(mut inner) = self.channel.inner.lock() else {
+            // Mutex poisoned — bail out to avoid a double-panic abort.
+            return;
+        };
         inner.receiver_count -= 1;
     }
 }
@@ -1018,5 +1027,39 @@ mod tests {
         );
 
         crate::test_complete!("permit_send_after_last_receiver_drop_is_noop");
+    }
+
+    #[test]
+    fn sender_drop_on_poisoned_mutex_does_not_panic() {
+        init_test("sender_drop_on_poisoned_mutex_does_not_panic");
+        let (tx, _rx) = channel::<i32>(4);
+
+        // Poison the mutex by panicking inside a lock scope.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = tx.channel.inner.lock().expect("lock");
+            panic!("intentional poison");
+        }));
+
+        // Dropping tx should NOT panic (it should bail gracefully).
+        drop(tx);
+        crate::test_complete!("sender_drop_on_poisoned_mutex_does_not_panic");
+    }
+
+    #[test]
+    fn receiver_drop_on_poisoned_mutex_does_not_panic() {
+        init_test("receiver_drop_on_poisoned_mutex_does_not_panic");
+        let (tx, rx) = channel::<i32>(4);
+
+        // Poison the mutex.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = tx.channel.inner.lock().expect("lock");
+            panic!("intentional poison");
+        }));
+
+        // Dropping rx should NOT panic.
+        drop(rx);
+        // tx drop also should not panic.
+        drop(tx);
+        crate::test_complete!("receiver_drop_on_poisoned_mutex_does_not_panic");
     }
 }
