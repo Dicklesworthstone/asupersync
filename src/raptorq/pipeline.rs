@@ -8,7 +8,7 @@ use std::task::{Context, Poll};
 
 use crate::config::RaptorQConfig;
 use crate::cx::Cx;
-use crate::decoding::{DecodingConfig, DecodingPipeline};
+use crate::decoding::{DecodingConfig, DecodingPipeline, SymbolAcceptResult};
 use crate::encoding::EncodingPipeline;
 use crate::error::{Error, ErrorKind};
 use crate::observability::Metrics;
@@ -251,11 +251,18 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
                     continue;
                 }
 
-                let _ = decoder.feed(auth_symbol);
-                symbols_received += 1;
-
-                if let Some(ref mut m) = self.metrics {
-                    m.counter("raptorq.symbols_received").increment();
+                match decoder.feed(auth_symbol).map_err(Error::from)? {
+                    SymbolAcceptResult::Accepted { .. }
+                    | SymbolAcceptResult::DecodingStarted { .. }
+                    | SymbolAcceptResult::BlockComplete { .. } => {
+                        symbols_received += 1;
+                        if let Some(ref mut m) = self.metrics {
+                            m.counter("raptorq.symbols_received").increment();
+                        }
+                    }
+                    SymbolAcceptResult::Duplicate | SymbolAcceptResult::Rejected(_) => {
+                        // Not used for decoding; keep waiting for usable symbols.
+                    }
                 }
             } else {
                 let progress = decoder.progress();
@@ -662,5 +669,39 @@ mod tests {
 
         let recv = receiver.receive_object(&cx, &params).unwrap();
         assert!(recv.authenticated);
+    }
+
+    #[test]
+    fn test_receive_object_duplicate_symbols_do_not_inflate_used_count() {
+        let cx: Cx = Cx::for_testing();
+        let sink = VecSink::new();
+        let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, None, None);
+
+        let data = vec![0x5Au8; 512];
+        let object_id = ObjectId::new_for_test(11);
+        let outcome = sender.send_object(&cx, object_id, &data).unwrap();
+        let params = params_for(
+            object_id,
+            data.len(),
+            sender.config().encoding.symbol_size,
+            outcome.source_symbols,
+        );
+
+        let mut symbols: Vec<AuthenticatedSymbol> = sender.transport_mut().symbols.drain(..).collect();
+        symbols.truncate(outcome.source_symbols);
+        let duplicate = symbols[0].clone();
+        let mut stream_symbols = vec![duplicate.clone(), duplicate];
+        stream_symbols.extend(symbols);
+
+        let stream = VecStream::new(stream_symbols);
+        let mut receiver = RaptorQReceiver::new(RaptorQConfig::default(), stream, None, None);
+        let recv = receiver.receive_object(&cx, &params).unwrap();
+
+        assert_eq!(&recv.data[..data.len()], &data);
+        assert_eq!(
+            recv.symbols_received,
+            outcome.source_symbols,
+            "duplicate symbols must not count as used-for-decoding"
+        );
     }
 }
