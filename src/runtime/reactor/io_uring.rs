@@ -165,6 +165,12 @@ mod imp {
                 })?;
                 (info.raw_fd, info.interest)
             };
+            if unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } == -1 {
+                let err = io::Error::last_os_error();
+                let mut regs = self.registrations.lock();
+                regs.remove(&token);
+                return Err(err);
+            }
 
             // Best-effort remove existing poll, then re-add with new interest.
             let _ = self.submit_poll_remove(token);
