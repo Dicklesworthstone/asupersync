@@ -283,6 +283,22 @@ impl UdpSocket {
         }
     }
 
+    /// Creates an async `UdpSocket` from a standard library socket.
+    ///
+    /// The socket will be set to non-blocking mode to preserve async
+    /// readiness semantics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if setting non-blocking mode fails.
+    pub fn from_std(socket: StdUdpSocket) -> io::Result<Self> {
+        socket.set_nonblocking(true)?;
+        Ok(Self {
+            inner: Arc::new(socket),
+            registration: None,
+        })
+    }
+
     /// Register interest with the reactor.
     fn register_interest(&mut self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
         if let Some(registration) = &mut self.registration {
@@ -323,18 +339,6 @@ impl UdpSocket {
                 Ok(())
             }
             Err(err) => Err(err),
-        }
-    }
-}
-
-impl From<StdUdpSocket> for UdpSocket {
-    fn from(socket: StdUdpSocket) -> Self {
-        // Ensure async poll paths never block even when callers pass a
-        // freshly-created std socket in its default blocking mode.
-        let _ = socket.set_nonblocking(true);
-        Self {
-            inner: Arc::new(socket),
-            registration: None,
         }
     }
 }
@@ -517,7 +521,7 @@ mod tests {
         );
         let _guard = Cx::set_current(Some(cx));
 
-        let mut socket = UdpSocket::from(std_server);
+        let mut socket = UdpSocket::from_std(std_server).expect("wrap socket");
         let waker = noop_waker();
         let cx = Context::from_waker(&waker);
         let mut buf = [0u8; 8];
@@ -546,12 +550,12 @@ mod tests {
     #[test]
     fn udp_from_std_forces_nonblocking_mode() {
         let std_socket = StdUdpSocket::bind("127.0.0.1:0").expect("bind socket");
-        let socket = UdpSocket::from(std_socket);
+        let socket = UdpSocket::from_std(std_socket).expect("wrap socket");
         let flags = fcntl(socket.inner.as_ref(), FcntlArg::F_GETFL).expect("read socket flags");
         let is_nonblocking = OFlag::from_bits_truncate(flags).contains(OFlag::O_NONBLOCK);
         assert!(
             is_nonblocking,
-            "UdpSocket::from should force nonblocking mode"
+            "UdpSocket::from_std should force nonblocking mode"
         );
     }
 

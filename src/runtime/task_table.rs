@@ -52,14 +52,20 @@ impl TaskTable {
     }
 
     /// Inserts a task record into the arena (arena-index based).
-    pub fn insert(&mut self, record: TaskRecord) -> ArenaIndex {
-        self.tasks.insert(record)
+    pub fn insert(&mut self, mut record: TaskRecord) -> ArenaIndex {
+        self.tasks.insert_with(|idx| {
+            // Canonicalize record.id to its arena slot to keep table invariants intact.
+            record.id = TaskId::from_arena(idx);
+            record
+        })
     }
 
     /// Removes a task record by arena index.
     pub fn remove(&mut self, index: ArenaIndex) -> Option<TaskRecord> {
         let record = self.tasks.remove(index)?;
-        self.stored_futures.remove(&record.id);
+        // Use slot-derived TaskId so cleanup stays correct even if record.id
+        // was stale/placeholder at insertion time.
+        self.stored_futures.remove(&TaskId::from_arena(index));
         Some(record)
     }
 
@@ -97,7 +103,7 @@ impl TaskTable {
     ///
     /// Returns the assigned arena index.
     pub fn insert_task(&mut self, record: TaskRecord) -> ArenaIndex {
-        self.tasks.insert(record)
+        self.insert(record)
     }
 
     /// Inserts a new task record produced by `f` into the arena.
@@ -268,5 +274,31 @@ mod tests {
         assert!(removed.is_some());
         assert_eq!(table.stored_future_count(), 0);
         assert!(table.get_stored_future(task_id).is_none());
+    }
+
+    #[test]
+    fn remove_by_index_cleans_stored_future_even_with_stale_record_id() {
+        use crate::runtime::stored_task::StoredTask;
+        use crate::types::Outcome;
+
+        let mut table = TaskTable::new();
+        let owner = RegionId::from_arena(ArenaIndex::new(1, 0));
+
+        // Model a caller inserting a placeholder/stale id.
+        let stale = TaskRecord::new(
+            TaskId::from_arena(ArenaIndex::new(0, 0)),
+            owner,
+            Budget::INFINITE,
+        );
+        let idx = table.insert_task(stale);
+        let canonical_id = TaskId::from_arena(idx);
+
+        table.store_spawned_task(canonical_id, StoredTask::new(async { Outcome::Ok(()) }));
+        assert_eq!(table.stored_future_count(), 1);
+
+        let removed = table.remove(idx);
+        assert!(removed.is_some());
+        assert_eq!(table.stored_future_count(), 0);
+        assert!(table.get_stored_future(canonical_id).is_none());
     }
 }

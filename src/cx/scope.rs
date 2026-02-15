@@ -1051,6 +1051,12 @@ impl<P: Policy> Scope<'_, P> {
     ) -> Result<(T, usize), JoinError> {
         use crate::combinator::select::SelectAll;
 
+        if handles.is_empty() {
+            return Err(JoinError::Cancelled(CancelReason::user(
+                "race_all requires at least one handle",
+            )));
+        }
+
         let futures: Vec<_> = handles
             .iter()
             .map(|h| Box::pin(h.join_with_drop_reason(cx, CancelReason::race_loser())))
@@ -1649,21 +1655,24 @@ mod tests {
             .expect("primary task should remain tracked");
 
         let task = state.task(task_id).expect("primary task record missing");
-        let inner = task
-            .cx_inner
-            .as_ref()
-            .expect("primary task must have shared Cx inner")
-            .read()
-            .expect("lock poisoned");
+        let (cancel_requested, cancel_reason_kind) = {
+            let inner = task
+                .cx_inner
+                .as_ref()
+                .expect("primary task must have shared Cx inner")
+                .read()
+                .expect("lock poisoned");
+            (
+                inner.cancel_requested,
+                inner.cancel_reason.as_ref().map(|r| r.kind),
+            )
+        };
 
         assert!(
-            inner.cancel_requested,
+            cancel_requested,
             "primary task must be cancellation-requested when backup spawn fails"
         );
-        assert_eq!(
-            inner.cancel_reason.as_ref().map(|r| r.kind),
-            Some(CancelKind::ResourceUnavailable)
-        );
+        assert_eq!(cancel_reason_kind, Some(CancelKind::ResourceUnavailable));
     }
 
     #[test]
@@ -1978,5 +1987,19 @@ mod tests {
             }
             res => unreachable!("Expected Ready(Ok((1, 0))), got {res:?}"),
         }
+    }
+
+    #[test]
+    fn race_all_empty_fails_fast() {
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        let result = block_on(scope.race_all::<i32>(&cx, vec![]));
+        assert!(matches!(
+            result,
+            Err(JoinError::Cancelled(reason)) if reason.kind == CancelKind::User
+        ));
     }
 }
