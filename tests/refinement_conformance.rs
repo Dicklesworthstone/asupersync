@@ -53,6 +53,8 @@ use asupersync::runtime::yield_now;
 use asupersync::trace::{trace_fingerprint, TraceEvent};
 use asupersync::types::{Budget, CancelReason, ObligationId, Outcome, RegionId, TaskId, Time};
 use common::*;
+use serde_json::Value;
+use std::path::Path;
 
 fn region(n: u32) -> RegionId {
     RegionId::new_for_test(n, 0)
@@ -76,6 +78,8 @@ fn init_test(test_name: &str) {
 }
 
 const SEMANTICS_TRACE_FINGERPRINT: u64 = 7_089_537_941_211_056_616;
+const INVARIANT_LINK_MAP_JSON: &str =
+    include_str!("../formal/lean/coverage/invariant_theorem_test_link_map.json");
 
 // ============================================================================
 // Spawn Simulation Tests
@@ -721,4 +725,119 @@ fn refinement_trace_equivalence_detects_semantic_mismatch() {
     );
 
     test_complete!("refinement_trace_equivalence_detects_semantic_mismatch");
+}
+
+fn invariant_row<'a>(rows: &'a [Value], invariant_id: &str) -> &'a Value {
+    rows.iter()
+        .find(|row| row.get("invariant_id").and_then(Value::as_str) == Some(invariant_id))
+        .unwrap_or_else(|| panic!("missing invariant row {invariant_id}"))
+}
+
+fn string_array_set(parent: &Value, key: &str) -> std::collections::BTreeSet<String> {
+    parent
+        .get(key)
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("{key} must be an array"))
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .unwrap_or_else(|| panic!("{key} entries must be strings"))
+                .to_string()
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+}
+
+#[test]
+fn refinement_liveness_link_map_contract_feeds_conformance_harnesses() {
+    init_test("refinement_liveness_link_map_contract_feeds_conformance_harnesses");
+
+    let link_map: Value = serde_json::from_str(INVARIANT_LINK_MAP_JSON)
+        .expect("invariant theorem/test link map must parse");
+    let rows = link_map
+        .get("invariant_links")
+        .and_then(Value::as_array)
+        .expect("invariant_links must be an array");
+
+    let cancel_row = invariant_row(rows, "inv.cancel.protocol");
+    let loser_row = invariant_row(rows, "inv.race.losers_drained");
+    let quiescence_row = invariant_row(rows, "inv.region_close.quiescence");
+
+    for row in [cancel_row, loser_row, quiescence_row] {
+        let assumption_envelope = row
+            .get("assumption_envelope")
+            .expect("liveness row must include assumption_envelope");
+        let assumptions = string_array_set(assumption_envelope, "assumptions");
+        let guardrails = string_array_set(assumption_envelope, "runtime_guardrails");
+        assert!(
+            !assumptions.is_empty(),
+            "liveness assumption_envelope must define assumptions"
+        );
+        assert!(
+            !guardrails.is_empty(),
+            "liveness assumption_envelope must define runtime_guardrails"
+        );
+
+        let composition_contract = row
+            .get("composition_contract")
+            .expect("liveness row must include composition_contract");
+        let consumed_by = string_array_set(composition_contract, "consumed_by");
+        assert!(
+            consumed_by.contains("tests/refinement_conformance.rs"),
+            "liveness composition_contract must feed tests/refinement_conformance.rs"
+        );
+        for path in consumed_by {
+            assert!(
+                Path::new(&path).exists(),
+                "composition consumer path does not exist: {path}"
+            );
+        }
+    }
+
+    let cancel_checks = string_array_set(cancel_row, "executable_checks");
+    assert!(
+        cancel_checks.contains("tests/cancel_obligation_invariants.rs"),
+        "cancel protocol row must include cancellation/obligation conformance coverage"
+    );
+    assert!(
+        cancel_checks.contains("tests/cancellation_conformance.rs"),
+        "cancel protocol row must include cancellation conformance coverage"
+    );
+
+    let loser_checks = string_array_set(loser_row, "executable_checks");
+    assert!(
+        loser_checks.contains("tests/e2e/combinator/cancel_correctness/loser_drain.rs"),
+        "loser-drain row must include loser_drain harness"
+    );
+    assert!(
+        loser_checks.contains("tests/e2e/combinator/cancel_correctness/async_loser_drain.rs"),
+        "loser-drain row must include async loser_drain harness"
+    );
+
+    assert_eq!(
+        loser_row
+            .get("composition_contract")
+            .and_then(|contract| contract.get("status"))
+            .and_then(Value::as_str)
+            .expect("loser-drain composition status must be present"),
+        "partial"
+    );
+    assert_eq!(
+        cancel_row
+            .get("composition_contract")
+            .and_then(|contract| contract.get("status"))
+            .and_then(Value::as_str)
+            .expect("cancel composition status must be present"),
+        "ready"
+    );
+    assert_eq!(
+        quiescence_row
+            .get("composition_contract")
+            .and_then(|contract| contract.get("status"))
+            .and_then(Value::as_str)
+            .expect("quiescence composition status must be present"),
+        "ready"
+    );
+
+    test_complete!("refinement_liveness_link_map_contract_feeds_conformance_harnesses");
 }
