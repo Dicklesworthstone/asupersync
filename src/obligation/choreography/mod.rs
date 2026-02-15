@@ -479,8 +479,12 @@ impl Interaction {
             Self::Loop { body, .. } => body.first_active_participant(),
             Self::Continue { .. } | Self::End => None,
             Self::Compensate { forward, .. } => forward.first_active_participant(),
-            Self::Seq { first, .. } => first.first_active_participant(),
-            Self::Par { left, .. } => left.first_active_participant(),
+            Self::Seq { first, second } => first
+                .first_active_participant()
+                .or_else(|| second.first_active_participant()),
+            Self::Par { left, right } => left
+                .first_active_participant()
+                .or_else(|| right.first_active_participant()),
         }
     }
 }
@@ -776,9 +780,7 @@ impl GlobalProtocol {
     /// A protocol is deadlock-free if it passes all validation checks,
     /// in particular the knowledge-of-choice condition on every branch.
     pub fn is_deadlock_free(&self) -> bool {
-        self.validate()
-            .iter()
-            .all(|e| !matches!(e, ValidationError::KnowledgeOfChoice { .. }))
+        self.validate().is_empty()
     }
 }
 
@@ -1655,6 +1657,7 @@ mod tests {
         assert!(errors
             .iter()
             .any(|e| matches!(e, ValidationError::SelfCommunication { .. })));
+        assert!(!protocol.is_deadlock_free());
     }
 
     #[test]
@@ -1668,6 +1671,7 @@ mod tests {
         assert!(errors.iter().any(
             |e| matches!(e, ValidationError::UndeclaredParticipant { name, .. } if name == "bob")
         ));
+        assert!(!protocol.is_deadlock_free());
     }
 
     #[test]
@@ -1730,6 +1734,7 @@ mod tests {
         assert!(errors
             .iter()
             .any(|e| matches!(e, ValidationError::EmptyProtocol)));
+        assert!(!protocol.is_deadlock_free());
     }
 
     #[test]
@@ -1742,6 +1747,7 @@ mod tests {
         assert!(errors
             .iter()
             .any(|e| matches!(e, ValidationError::NoParticipants)));
+        assert!(!protocol.is_deadlock_free());
     }
 
     // ------------------------------------------------------------------
@@ -2307,6 +2313,66 @@ mod tests {
             .build();
         assert!(protocol.validate().is_empty());
         assert!(protocol.is_deadlock_free());
+    }
+
+    #[test]
+    fn knowledge_of_choice_violation_detected_when_seq_prefix_is_inert() {
+        let protocol = GlobalProtocol::builder("choice_seq_inert_prefix")
+            .participant("a", "role")
+            .participant("b", "role")
+            .participant("c", "role")
+            .interaction(Interaction::choice(
+                "a",
+                "pred",
+                Interaction::seq(
+                    Interaction::end(),
+                    Interaction::comm("b", "late_then_send", "Msg", "c"),
+                ),
+                Interaction::comm("a", "ok_else_send", "Msg", "b"),
+            ))
+            .build();
+
+        let errors = protocol.validate();
+        assert!(errors.iter().any(|e| {
+            matches!(
+                e,
+                ValidationError::KnowledgeOfChoice {
+                    branch: "then",
+                    first_sender: Some(first_sender),
+                    ..
+                } if first_sender == "b"
+            )
+        }));
+    }
+
+    #[test]
+    fn knowledge_of_choice_violation_detected_when_par_left_is_inert() {
+        let protocol = GlobalProtocol::builder("choice_par_inert_left")
+            .participant("a", "role")
+            .participant("b", "role")
+            .participant("c", "role")
+            .interaction(Interaction::choice(
+                "a",
+                "pred",
+                Interaction::par(
+                    Interaction::end(),
+                    Interaction::comm("b", "late_parallel_send", "Msg", "c"),
+                ),
+                Interaction::comm("a", "ok_else_send", "Msg", "b"),
+            ))
+            .build();
+
+        let errors = protocol.validate();
+        assert!(errors.iter().any(|e| {
+            matches!(
+                e,
+                ValidationError::KnowledgeOfChoice {
+                    branch: "then",
+                    first_sender: Some(first_sender),
+                    ..
+                } if first_sender == "b"
+            )
+        }));
     }
 
     // ------------------------------------------------------------------
