@@ -230,14 +230,16 @@ impl TcpStreamInner {
             }
         }
 
-        // Build combined waker before dropping the lock.
+        // Build combined waker while still holding the lock. We keep the lock
+        // held across `driver.register()` to prevent a race where both halves
+        // concurrently attempt to create a fresh registration for the same fd,
+        // causing one to fail with EEXIST from epoll_ctl(ADD).
         let waker = combined_waker(guard.read_waker.as_ref(), guard.write_waker.as_ref());
         let register_interest = registration_interest(
             guard.read_waker.is_some(),
             guard.write_waker.is_some(),
             interest,
         );
-        drop(guard);
 
         let Some(current) = Cx::current() else {
             cx.waker().wake_by_ref();
@@ -248,9 +250,9 @@ impl TcpStreamInner {
             return Ok(());
         };
 
-        match driver.register(&*self.stream, register_interest, waker) {
+        let result = match driver.register(&*self.stream, register_interest, waker) {
             Ok(registration) => {
-                self.state.lock().unwrap().registration = Some(registration);
+                guard.registration = Some(registration);
                 Ok(())
             }
             Err(err) if err.kind() == io::ErrorKind::Unsupported => {
@@ -258,7 +260,9 @@ impl TcpStreamInner {
                 Ok(())
             }
             Err(err) => Err(err),
-        }
+        };
+        drop(guard);
+        result
     }
 }
 
@@ -479,14 +483,148 @@ impl std::error::Error for ReuniteError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cx::Cx;
     use crate::net::tcp::stream::TcpStream;
+    use crate::runtime::io_driver::IoDriverHandle;
+    use crate::runtime::reactor::{Events, Reactor, Source, Token};
     use crate::test_utils::init_test_logging;
+    use crate::types::{Budget, RegionId, TaskId};
+    use std::collections::HashMap;
     use std::io::Write;
     use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier, Mutex};
+    use std::task::{Context, Wake, Waker};
+    use std::thread;
+    use std::time::Duration;
 
     fn init_test(name: &str) {
         init_test_logging();
         crate::test_phase!(name);
+    }
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(NoopWaker))
+    }
+
+    #[cfg(unix)]
+    #[derive(Default)]
+    struct SourceExclusiveState {
+        source_to_token: HashMap<i32, Token>,
+        token_to_source: HashMap<Token, i32>,
+    }
+
+    #[cfg(unix)]
+    #[derive(Default)]
+    struct SourceExclusiveReactor {
+        state: Mutex<SourceExclusiveState>,
+        register_calls: AtomicUsize,
+        modify_calls: AtomicUsize,
+        slow_first_register: AtomicBool,
+    }
+
+    #[cfg(unix)]
+    impl SourceExclusiveReactor {
+        fn new() -> Self {
+            Self {
+                state: Mutex::new(SourceExclusiveState::default()),
+                register_calls: AtomicUsize::new(0),
+                modify_calls: AtomicUsize::new(0),
+                slow_first_register: AtomicBool::new(true),
+            }
+        }
+
+        fn register_calls(&self) -> usize {
+            self.register_calls.load(Ordering::SeqCst)
+        }
+
+        fn modify_calls(&self) -> usize {
+            self.modify_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Reactor for SourceExclusiveReactor {
+        fn register(
+            &self,
+            source: &dyn Source,
+            token: Token,
+            _interest: Interest,
+        ) -> io::Result<()> {
+            let fd = source.raw_fd();
+            let mut state = self.state.lock().expect("lock poisoned");
+
+            if state.source_to_token.contains_key(&fd) {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "source already registered",
+                ));
+            }
+            if state.token_to_source.contains_key(&token) {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "token already registered",
+                ));
+            }
+
+            state.source_to_token.insert(fd, token);
+            state.token_to_source.insert(token, fd);
+            drop(state);
+
+            self.register_calls.fetch_add(1, Ordering::SeqCst);
+            if self.slow_first_register.swap(false, Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(25));
+            }
+            Ok(())
+        }
+
+        fn modify(&self, token: Token, _interest: Interest) -> io::Result<()> {
+            let state = self.state.lock().expect("lock poisoned");
+            if !state.token_to_source.contains_key(&token) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "token not registered",
+                ));
+            }
+            drop(state);
+            self.modify_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn deregister(&self, token: Token) -> io::Result<()> {
+            let mut state = self.state.lock().expect("lock poisoned");
+            let Some(fd) = state.token_to_source.remove(&token) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "token not registered",
+                ));
+            };
+            state.source_to_token.remove(&fd);
+            Ok(())
+        }
+
+        fn poll(&self, events: &mut Events, _timeout: Option<Duration>) -> io::Result<usize> {
+            events.clear();
+            Ok(0)
+        }
+
+        fn wake(&self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn registration_count(&self) -> usize {
+            self.state
+                .lock()
+                .expect("lock poisoned")
+                .token_to_source
+                .len()
+        }
     }
 
     #[test]
@@ -642,6 +780,75 @@ mod tests {
         );
 
         crate::test_complete!("owned_half_addresses");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn split_register_interest_serializes_fresh_registration() {
+        init_test("split_register_interest_serializes_fresh_registration");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let client = std::net::TcpStream::connect(addr).expect("connect");
+        let (_server, _) = listener.accept().expect("accept");
+        client.set_nonblocking(true).expect("nonblocking");
+
+        let (read_half, write_half) = OwnedReadHalf::new_pair(Arc::new(client), None);
+        let reactor = Arc::new(SourceExclusiveReactor::new());
+        let driver = IoDriverHandle::new(reactor.clone());
+        let cx = Cx::new_with_observability(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver),
+            None,
+        );
+
+        let barrier = Arc::new(Barrier::new(3));
+        let read_inner = read_half.inner.clone();
+        let read_cx = cx.clone();
+        let read_barrier = barrier.clone();
+        let read_thread = thread::spawn(move || {
+            let _guard = Cx::set_current(Some(read_cx));
+            let waker = noop_waker();
+            let task_cx = Context::from_waker(&waker);
+            read_barrier.wait();
+            read_inner.register_interest(&task_cx, Interest::READABLE)
+        });
+
+        let write_inner = write_half.inner.clone();
+        let write_cx = cx.clone();
+        let write_barrier = barrier.clone();
+        let write_thread = thread::spawn(move || {
+            let _guard = Cx::set_current(Some(write_cx));
+            let waker = noop_waker();
+            let task_cx = Context::from_waker(&waker);
+            write_barrier.wait();
+            write_inner.register_interest(&task_cx, Interest::WRITABLE)
+        });
+
+        barrier.wait();
+        let read_result = read_thread.join().expect("read thread panic");
+        let write_result = write_thread.join().expect("write thread panic");
+        assert!(
+            read_result.is_ok(),
+            "read half registration should not fail: {read_result:?}"
+        );
+        assert!(
+            write_result.is_ok(),
+            "write half registration should not fail: {write_result:?}"
+        );
+        assert_eq!(
+            reactor.register_calls(),
+            1,
+            "fresh split registration should be issued once"
+        );
+        assert_eq!(
+            reactor.modify_calls(),
+            1,
+            "second waiter should re-arm existing registration"
+        );
     }
 
     #[test]
