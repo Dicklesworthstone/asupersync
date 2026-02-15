@@ -325,12 +325,11 @@ pub struct Recv<'a, T> {
 impl<T> Recv<'_, T> {
     fn clear_waiter_registration(&mut self) {
         if let Some(token) = self.waiter.take() {
-            let mut inner = self
-                .receiver
-                .channel
-                .inner
-                .lock()
-                .expect("broadcast lock poisoned");
+            let Ok(mut inner) = self.receiver.channel.inner.lock() else {
+                // Poisoned mutex during unwinding: avoid a second panic from
+                // Recv drop paths and fail open.
+                return;
+            };
             inner.wakers.remove(token);
         }
     }
@@ -1061,6 +1060,38 @@ mod tests {
         // tx drop also should not panic.
         drop(tx);
         crate::test_complete!("receiver_drop_on_poisoned_mutex_does_not_panic");
+    }
+
+    #[test]
+    fn recv_drop_on_poisoned_mutex_does_not_panic() {
+        init_test("recv_drop_on_poisoned_mutex_does_not_panic");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(4);
+
+        let wake_state = CountingWaker::new();
+        let waker = Waker::from(Arc::clone(&wake_state));
+        let mut poll_cx = Context::from_waker(&waker);
+
+        // Register a waiter so Recv::drop attempts waiter cleanup.
+        let mut fut = Box::pin(rx.recv(&cx));
+        crate::assert_with_log!(
+            matches!(fut.as_mut().poll(&mut poll_cx), Poll::Pending),
+            "poll pending",
+            true,
+            true
+        );
+
+        // Poison the mutex while the waiter is still registered.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = tx.channel.inner.lock().expect("lock");
+            panic!("intentional poison");
+        }));
+
+        // Dropping the pending recv future should not panic.
+        drop(fut);
+        drop(rx);
+        drop(tx);
+        crate::test_complete!("recv_drop_on_poisoned_mutex_does_not_panic");
     }
 
     // --- Audit tests (SapphireHill, 2026-02-15) ---

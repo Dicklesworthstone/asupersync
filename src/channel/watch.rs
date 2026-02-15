@@ -151,7 +151,10 @@ impl<T> WatchInner<T> {
 
     fn wake_all_waiters(&self) {
         let waiters: SmallVec<[WatchWaiter; 4]> = {
-            let mut w = self.waiters.lock().expect("watch lock poisoned");
+            let Ok(mut w) = self.waiters.lock() else {
+                // Poisoned during unwinding — bail out instead of panicking.
+                return;
+            };
             std::mem::take(&mut *w)
         };
         for w in waiters {
@@ -1398,5 +1401,71 @@ mod tests {
         drop(rx);
         drop(tx);
         crate::test_complete!("receiver_drop_on_poisoned_mutex_does_not_panic");
+    }
+
+    #[test]
+    fn send_and_modify_on_poisoned_waiters_mutex_do_not_panic() {
+        init_test("send_and_modify_on_poisoned_waiters_mutex_do_not_panic");
+        let (tx, mut rx) = channel::<i32>(0);
+
+        // Ensure at least one waiter exists so wake_all_waiters takes the lock.
+        let cx = test_cx();
+        let waker = Waker::noop();
+        let mut task_cx = Context::from_waker(waker);
+        {
+            let mut future = rx.changed(&cx);
+            let result = Pin::new(&mut future).poll(&mut task_cx);
+            assert!(result.is_pending());
+        }
+
+        // Poison the waiters mutex.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = tx.inner.waiters.lock().expect("lock");
+            panic!("intentional poison");
+        }));
+
+        // send() should not panic even if waiters lock is poisoned.
+        let send_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tx.send(1)));
+        crate::assert_with_log!(
+            send_result.is_ok(),
+            "send does not panic on poisoned waiters",
+            true,
+            send_result.is_ok()
+        );
+        let send_outcome = send_result.expect("send should not panic");
+        crate::assert_with_log!(
+            send_outcome.is_ok(),
+            "send still returns Ok",
+            true,
+            send_outcome.is_ok()
+        );
+        let after_send = *tx.borrow();
+        crate::assert_with_log!(after_send == 1, "send updates value", 1, after_send);
+
+        // send_modify() should also not panic.
+        let modify_result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tx.send_modify(|v| *v = 2)));
+        crate::assert_with_log!(
+            modify_result.is_ok(),
+            "send_modify does not panic on poisoned waiters",
+            true,
+            modify_result.is_ok()
+        );
+        let modify_outcome = modify_result.expect("send_modify should not panic");
+        crate::assert_with_log!(
+            modify_outcome.is_ok(),
+            "send_modify still returns Ok",
+            true,
+            modify_outcome.is_ok()
+        );
+        let after_modify = *tx.borrow();
+        crate::assert_with_log!(
+            after_modify == 2,
+            "send_modify updates value",
+            2,
+            after_modify
+        );
+
+        crate::test_complete!("send_and_modify_on_poisoned_waiters_mutex_do_not_panic");
     }
 }
