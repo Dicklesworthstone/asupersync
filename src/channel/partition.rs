@@ -179,14 +179,24 @@ impl PartitionController {
     /// Heal all active partitions.
     #[allow(clippy::cast_possible_truncation)]
     pub fn heal_all(&self) {
-        let count = {
+        let healed_edges = {
             let mut partitions = self.partitions.lock().expect("partition lock poisoned");
-            let count = partitions.len() as u64;
-            partitions.clear();
-            count
+            let mut healed_edges: Vec<(u64, u64)> = partitions.drain().collect();
+            healed_edges.sort_unstable();
+            drop(partitions);
+            healed_edges
         };
+        let count = healed_edges.len() as u64;
         if let Ok(mut stats) = self.stats.lock() {
             stats.partitions_healed += count;
+        }
+        for (src, dst) in healed_edges {
+            emit_partition_evidence(
+                &self.evidence_sink,
+                "heal",
+                ActorId::new(src),
+                ActorId::new(dst),
+            );
         }
     }
 
@@ -276,16 +286,26 @@ impl<T> PartitionSender<T> {
     /// - `Error`: returns `Err(SendError::Disconnected(value))`
     pub async fn send(&self, cx: &Cx, value: T) -> Result<(), SendError<T>> {
         if self.controller.is_partitioned(self.src, self.dst) {
-            self.controller.record_drop();
-            emit_partition_evidence(
-                &self.controller.evidence_sink,
-                "message_dropped",
-                self.src,
-                self.dst,
-            );
             return match self.controller.behavior() {
-                PartitionBehavior::Drop => Ok(()),
-                PartitionBehavior::Error => Err(SendError::Disconnected(value)),
+                PartitionBehavior::Drop => {
+                    self.controller.record_drop();
+                    emit_partition_evidence(
+                        &self.controller.evidence_sink,
+                        "message_dropped",
+                        self.src,
+                        self.dst,
+                    );
+                    Ok(())
+                }
+                PartitionBehavior::Error => {
+                    emit_partition_evidence(
+                        &self.controller.evidence_sink,
+                        "message_rejected",
+                        self.src,
+                        self.dst,
+                    );
+                    Err(SendError::Disconnected(value))
+                }
             };
         }
         self.inner.send(cx, value).await
@@ -464,7 +484,7 @@ mod tests {
 
     #[test]
     fn partition_error_mode() {
-        let (ctrl, _) = make_controller(PartitionBehavior::Error);
+        let (ctrl, collector) = make_controller(PartitionBehavior::Error);
         let a = ActorId::new(1);
         let b = ActorId::new(2);
         let (ptx, _rx) = partition_channel::<u32>(16, ctrl.clone(), a, b);
@@ -476,6 +496,17 @@ mod tests {
             matches!(result, Err(SendError::Disconnected(42))),
             "expected Disconnected, got: {result:?}"
         );
+
+        // Error mode rejects sends but does not count them as dropped.
+        let stats = ctrl.stats();
+        assert_eq!(stats.messages_dropped, 0);
+
+        // Evidence should indicate rejection, not drop.
+        let entries = collector.entries();
+        assert!(entries
+            .iter()
+            .any(|e| e.action.contains("message_rejected")));
+        assert!(!entries.iter().any(|e| e.action.contains("message_dropped")));
     }
 
     #[test]
@@ -574,7 +605,7 @@ mod tests {
 
     #[test]
     fn heal_all_clears_all_partitions() {
-        let (ctrl, _) = make_controller(PartitionBehavior::Drop);
+        let (ctrl, collector) = make_controller(PartitionBehavior::Drop);
         let a = ActorId::new(1);
         let b = ActorId::new(2);
         let c = ActorId::new(3);
@@ -585,6 +616,15 @@ mod tests {
 
         ctrl.heal_all();
         assert_eq!(ctrl.active_partition_count(), 0);
+        assert_eq!(ctrl.stats().partitions_healed, 4);
+
+        // heal_all should emit heal evidence for every cleared directed edge.
+        let entries = collector.entries();
+        let heal_entries = entries
+            .iter()
+            .filter(|e| e.action.contains("partition_heal"))
+            .count();
+        assert_eq!(heal_entries, 4);
     }
 
     #[test]

@@ -373,6 +373,14 @@ impl<T> Future for RecvFuture<'_, T> {
 
         // 3. Check cancellation
         if self.cx.checkpoint().is_err() {
+            // Clear stale waiter if this future registered it.
+            if inner
+                .waker
+                .as_ref()
+                .is_some_and(|waker| waker.will_wake(ctx.waker()))
+            {
+                inner.waker = None;
+            }
             self.cx.trace("oneshot::recv cancelled while waiting");
             return Poll::Ready(Err(RecvError::Cancelled));
         }
@@ -486,11 +494,7 @@ mod tests {
     }
 
     fn block_on<F: Future>(f: F) -> F::Output {
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: std::sync::Arc<Self>) {}
-        }
-        let waker = Waker::from(std::sync::Arc::new(NoopWaker));
+        let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
         let mut cx = Context::from_waker(&waker);
         let mut pinned = Box::pin(f);
         loop {
@@ -503,6 +507,13 @@ mod tests {
 
     #[derive(Debug)]
     struct NonClone(i32);
+
+    #[derive(Debug)]
+    struct TestNoopWaker;
+
+    impl std::task::Wake for TestNoopWaker {
+        fn wake(self: std::sync::Arc<Self>) {}
+    }
 
     #[test]
     fn basic_send_recv() {
@@ -800,5 +811,57 @@ mod tests {
         // Sender should still be usable
         drop(tx);
         crate::test_complete!("recv_cancel_during_wait");
+    }
+
+    #[test]
+    fn recv_cancel_after_pending_clears_registered_waker() {
+        init_test("recv_cancel_after_pending_clears_registered_waker");
+        let cx = test_cx();
+        let (_tx, rx) = channel::<i32>();
+
+        let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut fut = Box::pin(rx.recv(&cx));
+
+        let first_poll = fut.as_mut().poll(&mut task_cx);
+        crate::assert_with_log!(
+            matches!(first_poll, Poll::Pending),
+            "first poll pending",
+            true,
+            matches!(first_poll, Poll::Pending)
+        );
+
+        let registered_before_cancel = {
+            let inner = rx.inner.lock().expect("oneshot lock poisoned");
+            inner.waker.is_some()
+        };
+        crate::assert_with_log!(
+            registered_before_cancel,
+            "waker registered before cancel",
+            true,
+            registered_before_cancel
+        );
+
+        cx.set_cancel_requested(true);
+        let cancelled = fut.as_mut().poll(&mut task_cx);
+        crate::assert_with_log!(
+            matches!(cancelled, Poll::Ready(Err(RecvError::Cancelled))),
+            "recv cancelled",
+            "Ready(Err(Cancelled))",
+            format!("{cancelled:?}")
+        );
+
+        let registered_after_cancel = {
+            let inner = rx.inner.lock().expect("oneshot lock poisoned");
+            inner.waker.is_some()
+        };
+        crate::assert_with_log!(
+            !registered_after_cancel,
+            "waker cleared on cancel",
+            false,
+            registered_after_cancel
+        );
+
+        crate::test_complete!("recv_cancel_after_pending_clears_registered_waker");
     }
 }
