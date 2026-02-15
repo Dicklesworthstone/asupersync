@@ -1299,4 +1299,156 @@ mod tests {
         let parsed = decoder.decode(&mut buf).unwrap().unwrap();
         assert_eq!(parsed.payload.len(), 126);
     }
+
+    // =========================================================================
+    // Audit regression tests (asupersync-10x0x.47)
+    // =========================================================================
+
+    #[test]
+    fn decode_close_frame_1byte_payload_rejected() {
+        // RFC 6455 §5.5.1: Close frame body must be empty or start with a
+        // 2-byte status code. A 1-byte body is a protocol violation.
+        let mut codec = FrameCodec::client();
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Close → 0x88; MASK=0, len=1 → 0x01
+        buf.put_u8(0x88);
+        buf.put_u8(0x01);
+        buf.put_u8(0xFF); // single invalid byte
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::InvalidClosePayload)));
+    }
+
+    #[test]
+    fn decode_close_frame_empty_payload_accepted() {
+        // Close frame with no body is valid per RFC 6455 §5.5.1.
+        let mut codec = FrameCodec::client();
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Close → 0x88; MASK=0, len=0 → 0x00
+        buf.put_u8(0x88);
+        buf.put_u8(0x00);
+
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(frame.opcode, Opcode::Close);
+        assert!(frame.payload.is_empty());
+    }
+
+    #[test]
+    fn decode_close_frame_2byte_payload_accepted() {
+        // Close frame with exactly 2 bytes (status code only) is valid.
+        let mut codec = FrameCodec::client();
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Close → 0x88; MASK=0, len=2 → 0x02
+        buf.put_u8(0x88);
+        buf.put_u8(0x02);
+        buf.put_u16(1000); // Normal close
+
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(frame.opcode, Opcode::Close);
+        assert_eq!(frame.payload.len(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "must not be sent")]
+    fn close_frame_code_1005_panics() {
+        // RFC 6455 §7.4.1: 1005 (No Status Received) MUST NOT be set as a
+        // status code in a Close control frame by an endpoint.
+        Frame::close(Some(1005), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "must not be sent")]
+    fn close_frame_code_1006_panics() {
+        // RFC 6455 §7.4.1: 1006 (Abnormal Closure) MUST NOT be set as a
+        // status code in a Close control frame by an endpoint.
+        Frame::close(Some(1006), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "must not be sent")]
+    fn close_frame_code_1015_panics() {
+        // RFC 6455 §7.4.1: 1015 (TLS Handshake) MUST NOT be set as a
+        // status code in a Close control frame by an endpoint.
+        Frame::close(Some(1015), None);
+    }
+
+    #[test]
+    fn close_frame_valid_codes_accepted() {
+        // Verify that commonly used close codes don't panic.
+        let _ = Frame::close(Some(1000), Some("normal"));
+        let _ = Frame::close(Some(1001), None);
+        let _ = Frame::close(Some(1002), None);
+        let _ = Frame::close(Some(1003), None);
+        let _ = Frame::close(Some(1007), None);
+        let _ = Frame::close(Some(1008), None);
+        let _ = Frame::close(Some(1009), None);
+        let _ = Frame::close(Some(1010), None);
+        let _ = Frame::close(Some(1011), None);
+        // Application-defined codes
+        let _ = Frame::close(Some(4000), Some("app error"));
+    }
+
+    #[test]
+    fn payload_too_large_rejected_in_7bit_path() {
+        // Verify DoS protection: payload size exceeding max is rejected
+        // even in the 7-bit length path.
+        let mut codec = FrameCodec::client().max_payload_size(50);
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Binary → 0x82; MASK=0, len=100 → 0x64
+        buf.put_u8(0x82);
+        buf.put_u8(100);
+        buf.put_slice(&vec![0u8; 100]);
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(
+            result,
+            Err(WsError::PayloadTooLarge { size: 100, max: 50 })
+        ));
+    }
+
+    #[test]
+    fn mask_involution_empty_payload() {
+        // Masking an empty payload should be a no-op.
+        let mut payload = Vec::new();
+        apply_mask(&mut payload, [0xAA, 0xBB, 0xCC, 0xDD]);
+        assert!(payload.is_empty());
+    }
+
+    #[test]
+    fn mask_involution_all_key_bytes_exercised() {
+        // Verify all 4 bytes of the mask key are used for payloads >= 4 bytes.
+        let mask_key = [0x11, 0x22, 0x33, 0x44];
+        let mut payload = vec![0x00; 5]; // 5 bytes exercises all 4 key positions + wrap
+        apply_mask(&mut payload, mask_key);
+        assert_eq!(payload, vec![0x11, 0x22, 0x33, 0x44, 0x11]);
+
+        // Applying again should restore zeros.
+        apply_mask(&mut payload, mask_key);
+        assert_eq!(payload, vec![0x00; 5]);
+    }
+
+    #[test]
+    fn codec_state_resets_after_decode_error() {
+        // After a decode error, the codec should accept valid frames
+        // (state machine must not get stuck).
+        let mut codec = FrameCodec::client();
+
+        // First: trigger a reserved-bits error.
+        let mut bad_buf = BytesMut::new();
+        bad_buf.put_u8(0xC1); // RSV1 set
+        bad_buf.put_u8(0x05);
+        bad_buf.put_slice(b"Hello");
+        let err = codec.decode(&mut bad_buf);
+        assert!(matches!(err, Err(WsError::ReservedBitsSet)));
+
+        // Second: feed a valid frame — codec should decode it successfully.
+        let mut good_buf = BytesMut::new();
+        // FIN=1, opcode=Text → 0x81; MASK=0, len=2 → 0x02
+        good_buf.put_u8(0x81);
+        good_buf.put_u8(0x02);
+        good_buf.put_slice(b"OK");
+        let frame = codec.decode(&mut good_buf).unwrap().unwrap();
+        assert_eq!(frame.opcode, Opcode::Text);
+        assert_eq!(frame.payload.as_ref(), b"OK");
+    }
 }
