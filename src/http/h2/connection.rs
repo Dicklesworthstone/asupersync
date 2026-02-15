@@ -865,10 +865,18 @@ impl Connection {
     ) -> Result<Option<ReceivedFrame>, H2Error> {
         let increment = i32::try_from(frame.increment)
             .map_err(|_| H2Error::flow_control("window increment too large"))?;
-        // RFC 9113 §6.9.1: increment of 0 MUST be treated as a connection
-        // error (stream 0) or stream error of type PROTOCOL_ERROR.
+        // RFC 9113 §6.9.1: increment of 0 on the connection flow-control
+        // window (stream 0) MUST be treated as a connection error of type
+        // PROTOCOL_ERROR.  On any other stream it MUST be a stream error.
         if increment == 0 {
-            return Err(H2Error::protocol("WINDOW_UPDATE with zero increment"));
+            if frame.stream_id == 0 {
+                return Err(H2Error::protocol("WINDOW_UPDATE with zero increment"));
+            }
+            return Err(H2Error::stream(
+                frame.stream_id,
+                ErrorCode::ProtocolError,
+                "WINDOW_UPDATE with zero increment",
+            ));
         }
         if frame.stream_id == 0 {
             // Connection-level window update
@@ -2536,6 +2544,43 @@ mod tests {
         let window_update = Frame::WindowUpdate(WindowUpdateFrame::new(0, 1024));
         let result = conn.process_frame(window_update);
         assert!(result.is_ok());
+    }
+
+    /// Regression: zero-increment WINDOW_UPDATE on a stream must be a stream
+    /// error (RST_STREAM), not a connection error (RFC 9113 §6.9.1).
+    #[test]
+    fn zero_increment_window_update_on_stream_is_stream_error() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        // Open a stream.
+        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        conn.process_frame(headers).unwrap();
+
+        // Zero increment on stream 1: must be a *stream* error, not connection.
+        let wu = Frame::WindowUpdate(WindowUpdateFrame::new(1, 0));
+        let err = conn.process_frame(wu).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert_eq!(
+            err.stream_id,
+            Some(1),
+            "zero increment on a stream must be a stream error, not connection"
+        );
+    }
+
+    /// Zero-increment WINDOW_UPDATE on stream 0 must be a connection error.
+    #[test]
+    fn zero_increment_window_update_on_connection_is_connection_error() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        let wu = Frame::WindowUpdate(WindowUpdateFrame::new(0, 0));
+        let err = conn.process_frame(wu).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert!(
+            err.stream_id.is_none(),
+            "zero increment on connection must be a connection error"
+        );
     }
 
     #[test]
