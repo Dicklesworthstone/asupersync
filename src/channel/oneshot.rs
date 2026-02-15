@@ -234,14 +234,19 @@ impl<T> Sender<T> {
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
-        let mut inner = self.inner.lock().expect("oneshot lock poisoned");
-        // Only mark consumed if we haven't been consumed by reserve()
-        if !inner.sender_consumed {
-            inner.sender_consumed = true;
-            // Notify receiver that we are gone
-            if let Some(waker) = inner.waker.take() {
-                waker.wake();
+        let waker = {
+            let mut inner = self.inner.lock().expect("oneshot lock poisoned");
+            if inner.sender_consumed {
+                None
+            } else {
+                inner.sender_consumed = true;
+                // Take waker under lock, wake outside to avoid deadlock
+                // with inline-polling executors.
+                inner.waker.take()
             }
+        };
+        if let Some(waker) = waker {
+            waker.wake();
         }
     }
 }
@@ -273,25 +278,27 @@ impl<T> SendPermit<T> {
     ///
     /// Returns `Err(SendError::Disconnected(value))` if the receiver was dropped.
     pub fn send(mut self, value: T) -> Result<(), SendError<T>> {
-        let result = {
+        let (result, waker) = {
             let mut inner = self.inner.lock().expect("oneshot lock poisoned");
 
-            let result = if inner.receiver_dropped {
+            if inner.receiver_dropped {
                 // Receiver gone, return the value
                 inner.permit_outstanding = false;
-                Err(value)
+                (Err(value), None)
             } else {
                 inner.value = Some(value);
                 inner.permit_outstanding = false;
-                // Wake the receiver
-                if let Some(waker) = inner.waker.take() {
-                    waker.wake();
-                }
-                Ok(())
-            };
-            drop(inner);
-            result
+                // Take waker under lock, wake outside to avoid deadlock
+                // with inline-polling executors.
+                let waker = inner.waker.take();
+                drop(inner);
+                (Ok(()), waker)
+            }
         };
+
+        if let Some(waker) = waker {
+            waker.wake();
+        }
 
         self.sent = true;
         result.map_err(SendError::Disconnected)
@@ -302,13 +309,14 @@ impl<T> SendPermit<T> {
     /// This consumes the permit without sending a value. The receiver
     /// will see a `Closed` error when attempting to receive.
     pub fn abort(mut self) {
-        {
+        let waker = {
             let mut inner = self.inner.lock().expect("oneshot lock poisoned");
             inner.permit_outstanding = false;
-            // Wake the receiver to notify of close
-            if let Some(waker) = inner.waker.take() {
-                waker.wake();
-            }
+            // Take waker under lock, wake outside.
+            inner.waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
         }
         self.sent = true; // Prevent drop from double-aborting
     }
@@ -327,10 +335,12 @@ impl<T> Drop for SendPermit<T> {
     fn drop(&mut self) {
         if !self.sent {
             // Permit dropped without sending - abort
-            let mut inner = self.inner.lock().expect("oneshot lock poisoned");
-            inner.permit_outstanding = false;
-            // Wake the receiver
-            if let Some(waker) = inner.waker.take() {
+            let waker = {
+                let mut inner = self.inner.lock().expect("oneshot lock poisoned");
+                inner.permit_outstanding = false;
+                inner.waker.take()
+            };
+            if let Some(waker) = waker {
                 waker.wake();
             }
         }

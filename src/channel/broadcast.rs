@@ -208,13 +208,19 @@ impl<T> Clone for Sender<T> {
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
-        let mut inner = self.channel.inner.lock().expect("broadcast lock poisoned");
-        inner.sender_count -= 1;
-        if inner.sender_count == 0 {
-            inner.wakers.retain(|waker| {
-                waker.wake_by_ref();
-                false
-            });
+        let mut wakers_to_wake = Vec::new();
+        {
+            let mut inner = self.channel.inner.lock().expect("broadcast lock poisoned");
+            inner.sender_count -= 1;
+            if inner.sender_count == 0 {
+                inner.wakers.retain(|waker| {
+                    wakers_to_wake.push(waker.clone());
+                    false
+                });
+            }
+        }
+        for waker in wakers_to_wake {
+            waker.wake();
         }
     }
 }
@@ -249,13 +255,20 @@ impl<T: Clone> SendPermit<'_, T> {
 
         let receiver_count = inner.receiver_count;
 
-        // Wake everyone waiting for messages
+        // Collect wakers under lock, wake outside to avoid deadlock
+        // with inline-polling executors.
+        let mut wakers_to_wake = Vec::new();
         inner.wakers.retain(|waker| {
-            waker.wake_by_ref();
+            wakers_to_wake.push(waker.clone());
             false
         });
 
         drop(inner);
+
+        for waker in wakers_to_wake {
+            waker.wake();
+        }
+
         receiver_count
     }
 }
