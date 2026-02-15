@@ -1137,6 +1137,19 @@ mod tests {
         );
     }
 
+    fn failure_context(
+        scenario_id: &str,
+        seed: u64,
+        k: usize,
+        symbol_size: usize,
+        parameter_set: &str,
+        replay_ref: &str,
+    ) -> String {
+        format!(
+            "scenario_id={scenario_id} seed={seed} parameter_set={parameter_set},k={k},symbol_size={symbol_size} replay_ref={replay_ref}"
+        )
+    }
+
     #[test]
     fn params_small() {
         let p = SystematicParams::for_source_block(4, 64);
@@ -1399,8 +1412,18 @@ mod tests {
     fn repair_symbol_matches_rfc_equation_terms() {
         let k = 12;
         let symbol_size = 32;
+        let seed = 42u64;
+        let replay_ref = "replay:rq-u-systematic-rfc-equation-v1";
+        let context = failure_context(
+            "RQ-U-SYSTEMATIC-RFC-EQUATION",
+            seed,
+            k,
+            symbol_size,
+            "rfc_repair_equation",
+            replay_ref,
+        );
         let source = make_source_symbols(k, symbol_size);
-        let enc = SystematicEncoder::new(&source, symbol_size, 42).unwrap();
+        let enc = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
 
         for esi in (k as u32)..(k as u32 + 8) {
             let repair = enc.repair_symbol(esi);
@@ -1413,7 +1436,7 @@ mod tests {
 
             assert_eq!(
                 repair, expected,
-                "repair symbol must equal RFC tuple-derived equation expansion for esi={esi}"
+                "repair symbol must equal RFC tuple-derived equation expansion for esi={esi}; {context}"
             );
         }
     }
@@ -1422,8 +1445,18 @@ mod tests {
     fn emitted_repair_degree_matches_rfc_equation_width() {
         let k = 10;
         let symbol_size = 24;
+        let seed = 7u64;
+        let replay_ref = "replay:rq-u-systematic-degree-metadata-v1";
+        let context = failure_context(
+            "RQ-U-SYSTEMATIC-DEGREE-METADATA",
+            seed,
+            k,
+            symbol_size,
+            "emit_repair_degree",
+            replay_ref,
+        );
         let source = make_source_symbols(k, symbol_size);
-        let mut enc = SystematicEncoder::new(&source, symbol_size, 7).unwrap();
+        let mut enc = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
         let emitted = enc.emit_repair(6);
 
         for symbol in emitted {
@@ -1431,8 +1464,8 @@ mod tests {
             assert_eq!(
                 symbol.degree,
                 columns.len(),
-                "degree metadata must match RFC tuple term count for esi={}",
-                symbol.esi
+                "degree metadata must match RFC tuple term count for esi={}; {context}",
+                symbol.esi,
             );
         }
     }
@@ -1441,9 +1474,19 @@ mod tests {
     fn same_source_same_repair_across_seeds() {
         let k = 4;
         let symbol_size = 32;
+        let seed = 1u64;
+        let replay_ref = "replay:rq-u-systematic-seed-determinism-v1";
+        let context = failure_context(
+            "RQ-U-DETERMINISM-SEED",
+            seed,
+            k,
+            symbol_size,
+            "seed_independent_repair",
+            replay_ref,
+        );
         let source = make_source_symbols(k, symbol_size);
 
-        let enc1 = SystematicEncoder::new(&source, symbol_size, 1).unwrap();
+        let enc1 = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
         let enc2 = SystematicEncoder::new(&source, symbol_size, 2).unwrap();
 
         // The constraint matrix and repair equations are fully determined
@@ -1454,7 +1497,7 @@ mod tests {
         assert_eq!(
             enc1.repair_symbol(esi),
             enc2.repair_symbol(esi),
-            "same source data should produce identical repair symbols"
+            "same source data should produce identical repair symbols; {context}"
         );
     }
 
@@ -1630,14 +1673,24 @@ mod tests {
     fn stats_overhead_ratio() {
         let k = 20;
         let symbol_size = 32;
+        let seed = 42u64;
+        let replay_ref = "replay:rq-u-systematic-overhead-ratio-v1";
+        let context = failure_context(
+            "RQ-U-SYSTEMATIC-OVERHEAD-RATIO",
+            seed,
+            k,
+            symbol_size,
+            "stats_overhead_ratio",
+            replay_ref,
+        );
         let source = make_source_symbols(k, symbol_size);
-        let enc = SystematicEncoder::new(&source, symbol_size, 42).unwrap();
+        let enc = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
 
         let ratio = enc.stats().overhead_ratio();
         // L = K' + S + H, so ratio > 1.0. For small K (e.g., 20), S and H
         // dominate, pushing ratio above 2.0 (e.g., L=41, K=20 → 2.05).
-        assert!(ratio > 1.0, "overhead ratio should be > 1");
-        assert!(ratio < 3.0, "overhead ratio should be reasonable");
+        assert!(ratio > 1.0, "overhead ratio should be > 1; {context}");
+        assert!(ratio < 3.0, "overhead ratio should be reasonable; {context}");
     }
 
     #[test]

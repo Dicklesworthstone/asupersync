@@ -1285,6 +1285,17 @@ unsafe fn gf256_addmul_slice_aarch64_neon_impl_tables(
 mod tests {
     use super::*;
 
+    fn failure_context(
+        scenario_id: &str,
+        seed: u64,
+        parameter_set: &str,
+        replay_ref: &str,
+    ) -> String {
+        format!(
+            "scenario_id={scenario_id} seed={seed} parameter_set={parameter_set} replay_ref={replay_ref}"
+        )
+    }
+
     // -- Table sanity --
 
     #[test]
@@ -1492,12 +1503,20 @@ mod tests {
     fn mul_slice_large_inputs() {
         // Exercise the `mul_with_table_wide` path (>= MUL_TABLE_THRESHOLD bytes).
         const LEN: usize = 64 + 7; // 71 bytes: crosses the 64-byte threshold
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
+        let context = failure_context(
+            "RQ-U-GF256-ALGEBRA",
+            seed,
+            "mul_slice_large_inputs",
+            replay_ref,
+        );
         let original: Vec<u8> = (0..LEN).map(|i| (i.wrapping_mul(37)) as u8).collect();
         let c = Gf256(13);
         let expected: Vec<u8> = original.iter().map(|&s| (Gf256(s) * c).0).collect();
         let mut data = original;
         gf256_mul_slice(&mut data, c);
-        assert_eq!(data, expected);
+        assert_eq!(data, expected, "{context}");
     }
 
     #[test]
@@ -1529,12 +1548,20 @@ mod tests {
     #[test]
     fn addmul_slice_large_inputs() {
         const LEN: usize = 64 + 7;
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
+        let context = failure_context(
+            "RQ-U-GF256-ALGEBRA",
+            seed,
+            "addmul_slice_large_inputs",
+            replay_ref,
+        );
         let src: Vec<u8> = (0..LEN).map(|i| (i.wrapping_mul(37)) as u8).collect();
         let c = Gf256(13);
         let mut dst = vec![0u8; LEN];
         let expected: Vec<u8> = src.iter().map(|&s| (Gf256(s) * c).0).collect();
         gf256_addmul_slice(&mut dst, &src, c);
-        assert_eq!(dst, expected);
+        assert_eq!(dst, expected, "{context}");
     }
 
     #[test]
@@ -1590,17 +1617,24 @@ mod tests {
     #[test]
     fn nibble_tables_exhaustive() {
         // Verify nibble decomposition for all 256×256 (c, x) pairs.
+        let replay_ref = "replay:rq-u-gf256-nibble-table-v1";
         for c in 0u16..=255 {
             let gc = Gf256(c as u8);
             let nib = NibbleTables::for_scalar(gc);
             for x in 0u16..=255 {
+                let context = failure_context(
+                    "RQ-U-GF256-ALGEBRA",
+                    c as u64,
+                    &format!("nibble_table,c={c},x={x}"),
+                    replay_ref,
+                );
                 let expected = (gc * Gf256(x as u8)).0;
                 let v = Simd::<u8, 16>::splat(x as u8);
                 let result = nib.mul16(v);
                 assert_eq!(
                     result[0], expected,
-                    "nibble decomp mismatch: c={c}, x={x}, got={}, expected={expected}",
-                    result[0]
+                    "nibble decomp mismatch: c={c}, x={x}, got={}, expected={expected}; {context}",
+                    result[0],
                 );
             }
         }
@@ -1609,8 +1643,16 @@ mod tests {
     #[test]
     fn simd_vs_scalar_mul_equivalence() {
         // Compare SIMD and scalar mul paths at various sizes.
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
         for &len in &[16usize, 17, 31, 64, 71, 128, 1024] {
             for &c_val in &[2u8, 13, 127, 255] {
+                let context = failure_context(
+                    "RQ-U-GF256-ALGEBRA",
+                    seed,
+                    &format!("simd_vs_scalar_mul,len={len},c={c_val}"),
+                    replay_ref,
+                );
                 let c = Gf256(c_val);
                 let original: Vec<u8> = (0..len)
                     .map(|i: usize| (i.wrapping_mul(37)) as u8)
@@ -1624,7 +1666,7 @@ mod tests {
                 let mut scalar_dst = original;
                 mul_with_table_scalar(&mut scalar_dst, table);
 
-                assert_eq!(simd_dst, scalar_dst, "mul mismatch: len={len}, c={c_val}");
+                assert_eq!(simd_dst, scalar_dst, "mul mismatch: len={len}, c={c_val}; {context}");
             }
         }
     }
@@ -1632,8 +1674,16 @@ mod tests {
     #[test]
     fn simd_vs_scalar_addmul_equivalence() {
         // Compare SIMD and scalar addmul paths at various sizes.
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
         for &len in &[16usize, 17, 31, 64, 71, 128, 1024] {
             for &c_val in &[2u8, 13, 127, 255] {
+                let context = failure_context(
+                    "RQ-U-GF256-ALGEBRA",
+                    seed,
+                    &format!("simd_vs_scalar_addmul,len={len},c={c_val}"),
+                    replay_ref,
+                );
                 let c = Gf256(c_val);
                 let src: Vec<u8> = (0..len)
                     .map(|i: usize| (i.wrapping_mul(37)) as u8)
@@ -1652,7 +1702,7 @@ mod tests {
 
                 assert_eq!(
                     simd_dst, scalar_dst,
-                    "addmul mismatch: len={len}, c={c_val}"
+                    "addmul mismatch: len={len}, c={c_val}; {context}"
                 );
             }
         }
