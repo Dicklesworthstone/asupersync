@@ -179,7 +179,16 @@ impl Frame {
                 buf.put_u16(c);
                 buf.freeze()
             }
-            _ => Bytes::new(),
+            (None, Some(r)) => {
+                // RFC 6455 §5.5.1: if there is a body, it MUST begin with a
+                // 2-byte status code. Use Normal (1000) when caller supplies a
+                // reason without an explicit code.
+                let mut buf = BytesMut::with_capacity(2 + r.len());
+                buf.put_u16(1000);
+                buf.put_slice(r.as_bytes());
+                buf.freeze()
+            }
+            (None, None) => Bytes::new(),
         };
 
         Self {
@@ -494,13 +503,36 @@ impl Decoder for FrameCodec {
 
                     let payload_len = if *bytes_needed == 2 {
                         let bytes = src.split_to(2);
-                        u64::from(u16::from_be_bytes([bytes[0], bytes[1]]))
+                        let len = u64::from(u16::from_be_bytes([bytes[0], bytes[1]]));
+                        // RFC 6455 §5.2: minimal encoding — 2-byte form for 126..65535
+                        if len < 126 {
+                            self.state = DecodeState::Header;
+                            return Err(WsError::ProtocolViolation(
+                                "non-minimal payload length encoding",
+                            ));
+                        }
+                        len
                     } else {
                         let bytes = src.split_to(8);
-                        u64::from_be_bytes([
+                        let raw = u64::from_be_bytes([
                             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
                             bytes[7],
-                        ])
+                        ]);
+                        // RFC 6455 §5.2: most significant bit MUST be 0
+                        if raw & (1u64 << 63) != 0 {
+                            self.state = DecodeState::Header;
+                            return Err(WsError::ProtocolViolation(
+                                "most significant bit of 64-bit payload length must be 0",
+                            ));
+                        }
+                        // RFC 6455 §5.2: minimal encoding — 8-byte form for 65536+
+                        if raw < 65536 {
+                            self.state = DecodeState::Header;
+                            return Err(WsError::ProtocolViolation(
+                                "non-minimal payload length encoding",
+                            ));
+                        }
+                        raw
                     };
 
                     if payload_len > self.max_payload_size as u64 {
@@ -1090,5 +1122,163 @@ mod tests {
         assert_eq!(parsed.opcode, Opcode::Text);
         assert!(!parsed.masked);
         assert_eq!(parsed.payload.as_ref(), b"server says hi");
+    }
+
+    #[test]
+    fn test_decode_reserved_bits_rejected() {
+        // Craft raw wire bytes with RSV1 set — must be rejected per RFC 6455 §5.2.
+        let mut codec = FrameCodec::client();
+        let mut buf = BytesMut::new();
+        // FIN=1, RSV1=1, opcode=Text → 0xC1; MASK=0, len=5 → 0x05
+        buf.put_u8(0xC1);
+        buf.put_u8(0x05);
+        buf.put_slice(b"Hello");
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::ReservedBitsSet)));
+    }
+
+    #[test]
+    fn test_decode_unmasked_client_frame_rejected() {
+        // Server codec must reject unmasked frames from client (RFC 6455 §5.1).
+        let mut codec = FrameCodec::server();
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Text → 0x81; MASK=0, len=5 → 0x05 (missing mask!)
+        buf.put_u8(0x81);
+        buf.put_u8(0x05);
+        buf.put_slice(b"Hello");
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::UnmaskedClientFrame)));
+    }
+
+    #[test]
+    fn test_decode_fragmented_control_rejected() {
+        // Control frames must not be fragmented (FIN must be set, RFC 6455 §5.5).
+        let mut codec = FrameCodec::client();
+        let mut buf = BytesMut::new();
+        // FIN=0, opcode=Ping → 0x09; MASK=0, len=4 → 0x04
+        buf.put_u8(0x09);
+        buf.put_u8(0x04);
+        buf.put_slice(b"ping");
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::FragmentedControlFrame)));
+    }
+
+    #[test]
+    fn test_decode_control_frame_extended_length_rejected() {
+        // Control frames cannot use extended length encoding (payload > 125, RFC 6455 §5.5).
+        let mut codec = FrameCodec::client();
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Ping → 0x89; MASK=0, len=126 (2-byte extended) → 0x7E
+        buf.put_u8(0x89);
+        buf.put_u8(0x7E);
+        // Extended length bytes (would indicate 200 bytes)
+        buf.put_u16(200);
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::ControlFrameTooLarge(_))));
+    }
+
+    #[test]
+    fn test_decode_multiple_frames_single_buffer() {
+        // Verify the state machine correctly resets between frames in a streaming buffer.
+        let mut encoder = FrameCodec::server();
+        let mut decoder = FrameCodec::client();
+
+        let mut buf = BytesMut::new();
+        encoder.encode(Frame::text("first"), &mut buf).unwrap();
+        encoder
+            .encode(Frame::binary(Bytes::from("second")), &mut buf)
+            .unwrap();
+
+        let frame1 = decoder.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(frame1.opcode, Opcode::Text);
+        assert_eq!(frame1.payload.as_ref(), b"first");
+
+        let frame2 = decoder.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(frame2.opcode, Opcode::Binary);
+        assert_eq!(frame2.payload.as_ref(), b"second");
+
+        // Buffer exhausted
+        assert!(decoder.decode(&mut buf).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_close_frame_reason_without_code_uses_normal() {
+        // Previously, Frame::close(None, Some("reason")) silently dropped the
+        // reason. Now it defaults to Normal (1000) per RFC 6455 §5.5.1.
+        let frame = Frame::close(None, Some("going away"));
+        assert_eq!(frame.opcode, Opcode::Close);
+        assert!(frame.payload.len() >= 2);
+        let code = u16::from_be_bytes([frame.payload[0], frame.payload[1]]);
+        assert_eq!(code, 1000);
+        let reason = std::str::from_utf8(&frame.payload[2..]).unwrap();
+        assert_eq!(reason, "going away");
+    }
+
+    #[test]
+    fn test_decode_non_minimal_2byte_length_rejected() {
+        // RFC 6455 §5.2: 2-byte extended length must encode values >= 126.
+        // A value < 126 in the 2-byte form is a protocol violation.
+        let mut codec = FrameCodec::client();
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Binary → 0x82; MASK=0, len_indicator=126 → 0x7E
+        buf.put_u8(0x82);
+        buf.put_u8(0x7E);
+        // Extended length = 100 (non-minimal: should use 7-bit form)
+        buf.put_u16(100);
+        buf.put_slice(&vec![0u8; 100]);
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::ProtocolViolation(_))));
+    }
+
+    #[test]
+    fn test_decode_non_minimal_8byte_length_rejected() {
+        // RFC 6455 §5.2: 8-byte extended length must encode values >= 65536.
+        let mut codec = FrameCodec::client();
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Binary → 0x82; MASK=0, len_indicator=127 → 0x7F
+        buf.put_u8(0x82);
+        buf.put_u8(0x7F);
+        // Extended length = 200 (non-minimal: should use 2-byte form)
+        buf.put_u64(200);
+        buf.put_slice(&vec![0u8; 200]);
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::ProtocolViolation(_))));
+    }
+
+    #[test]
+    fn test_decode_8byte_length_msb_set_rejected() {
+        // RFC 6455 §5.2: most significant bit of 64-bit length MUST be 0.
+        let mut codec = FrameCodec::client()
+            .max_payload_size(usize::MAX); // disable size limit for this test
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Binary → 0x82; MASK=0, len_indicator=127 → 0x7F
+        buf.put_u8(0x82);
+        buf.put_u8(0x7F);
+        // 64-bit length with MSB set
+        buf.put_u64(0x8000_0000_0000_0100);
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::ProtocolViolation(_))));
+    }
+
+    #[test]
+    fn test_decode_valid_2byte_length_accepted() {
+        // Ensure valid 2-byte lengths (>= 126) still decode correctly.
+        let mut encoder = FrameCodec::server();
+        let mut decoder = FrameCodec::client();
+        let payload = Bytes::from(vec![0xABu8; 126]); // exactly 126 — uses 2-byte form
+        let frame = Frame::binary(payload);
+
+        let mut buf = BytesMut::new();
+        encoder.encode(frame, &mut buf).unwrap();
+
+        let parsed = decoder.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(parsed.payload.len(), 126);
     }
 }
