@@ -675,6 +675,7 @@ mod tests {
                 ));
             };
             state.source_to_token.remove(&fd);
+            drop(state);
             Ok(())
         }
 
@@ -887,7 +888,7 @@ mod tests {
         });
 
         let write_inner = write_half.inner.clone();
-        let write_cx = cx.clone();
+        let write_cx = cx;
         let write_barrier = barrier.clone();
         let write_thread = thread::spawn(move || {
             let _guard = Cx::set_current(Some(write_cx));
@@ -1018,6 +1019,7 @@ mod tests {
             state.registration.is_none(),
             "registration should be released when no waiters remain"
         );
+        drop(state);
     }
 
     #[cfg(unix)]
@@ -1075,13 +1077,12 @@ mod tests {
             Interest::READABLE,
             "interest should drop writable bit when write half is dropped"
         );
+        drop(state);
     }
 
     #[cfg(unix)]
     #[test]
     fn dropping_write_half_wakes_survivor_when_reregistration_fails() {
-        init_test("dropping_write_half_wakes_survivor_when_reregistration_fails");
-
         struct CountingWaker {
             hits: Arc<AtomicUsize>,
         }
@@ -1094,6 +1095,8 @@ mod tests {
                 self.hits.fetch_add(1, Ordering::SeqCst);
             }
         }
+
+        init_test("dropping_write_half_wakes_survivor_when_reregistration_fails");
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("local addr");

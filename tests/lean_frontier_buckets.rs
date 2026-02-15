@@ -76,6 +76,10 @@ fn frontier_report_has_valid_schema_and_sorted_buckets() {
         "declaration-order bucket should be eliminated after bd-cspxm helper-ordering pass"
     );
     assert!(
+        !bucket_ids.contains(&"declaration-order.helper-availability"),
+        "declaration-order helper-availability bucket should remain eliminated after bd-53a0d ordering stabilization"
+    );
+    assert!(
         !bucket_ids.contains(&"tactic-instability.tactic-simp-nested-error"),
         "tactic-instability bucket should be eliminated after bd-kf0mv stabilization pass"
     );
