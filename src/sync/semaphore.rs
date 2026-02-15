@@ -204,14 +204,13 @@ impl Semaphore {
     ///
     /// Saturates at `usize::MAX` if adding would overflow.
     pub fn add_permits(&self, count: usize) {
-        let waiter_to_wake = {
-            let mut state = self.state.lock();
-            state.permits = state.permits.saturating_add(count);
-            // Only wake the first waiter since FIFO ordering means only it can acquire.
-            // Waking all waiters wastes CPU when only the front can make progress.
-            // If the first waiter acquires and releases, it will wake the next.
-            front_waiter_waker(&state)
-        };
+        let mut state = self.state.lock();
+        state.permits = state.permits.saturating_add(count);
+        // Only wake the first waiter since FIFO ordering means only it can acquire.
+        // Waking all waiters wastes CPU when only the front can make progress.
+        // If the first waiter acquires and releases, it will wake the next.
+        let waiter_to_wake = front_waiter_waker(&state);
+        drop(state);
         if let Some(waiter) = waiter_to_wake {
             waiter.wake();
         }
@@ -1082,5 +1081,192 @@ mod tests {
             sem.available_permits()
         );
         crate::test_complete!("drop_permit_restores_count");
+    }
+
+    // =========================================================================
+    // Audit regression tests (asupersync-10x0x.50)
+    // =========================================================================
+
+    #[test]
+    fn add_permits_saturates_at_usize_max() {
+        init_test("add_permits_saturates_at_usize_max");
+        let sem = Semaphore::new(1);
+        sem.add_permits(usize::MAX);
+        let avail = sem.available_permits();
+        crate::assert_with_log!(avail == usize::MAX, "saturated at MAX", usize::MAX, avail);
+
+        // Adding more should still stay at MAX (saturating).
+        sem.add_permits(100);
+        let avail2 = sem.available_permits();
+        crate::assert_with_log!(
+            avail2 == usize::MAX,
+            "still MAX after add",
+            usize::MAX,
+            avail2
+        );
+        crate::test_complete!("add_permits_saturates_at_usize_max");
+    }
+
+    #[test]
+    fn close_during_owned_acquire_returns_error() {
+        init_test("close_during_owned_acquire_returns_error");
+        let cx1 = test_cx();
+        let sem = Arc::new(Semaphore::new(1));
+        let _held = sem.try_acquire(1).expect("initial acquire");
+
+        let mut fut = Box::pin(OwnedSemaphorePermit::acquire(Arc::clone(&sem), &cx1, 1));
+        let pending = poll_once(&mut fut).is_none();
+        crate::assert_with_log!(pending, "owned acquire pending", true, pending);
+
+        sem.close();
+
+        let result = poll_once(&mut fut);
+        let closed = matches!(result, Some(Err(AcquireError::Closed)));
+        crate::assert_with_log!(closed, "owned acquire closed", true, closed);
+        crate::test_complete!("close_during_owned_acquire_returns_error");
+    }
+
+    #[test]
+    fn try_acquire_respects_fifo_with_available_permits() {
+        init_test("try_acquire_respects_fifo_with_available_permits");
+        let cx1 = test_cx();
+        let sem = Semaphore::new(3);
+
+        // Waiter queues for 3 permits, only 2 available after held.
+        let held = sem.try_acquire(1).expect("initial acquire");
+
+        let mut fut = sem.acquire(&cx1, 3);
+        let pending = poll_once(&mut fut).is_none();
+        crate::assert_with_log!(pending, "waiter pending for 3", true, pending);
+
+        // Even though 2 permits are available, try_acquire must fail because
+        // there is a waiter in the queue (FIFO enforcement).
+        let try_result = sem.try_acquire(1);
+        crate::assert_with_log!(
+            try_result.is_err(),
+            "try_acquire blocked by FIFO",
+            true,
+            try_result.is_err()
+        );
+
+        drop(held);
+        crate::test_complete!("try_acquire_respects_fifo_with_available_permits");
+    }
+
+    #[test]
+    fn owned_permit_try_acquire_and_drop() {
+        init_test("owned_permit_try_acquire_and_drop");
+        let sem = Arc::new(Semaphore::new(3));
+
+        let permit = OwnedSemaphorePermit::try_acquire(Arc::clone(&sem), 2).expect("try_acquire");
+        let count = permit.count();
+        crate::assert_with_log!(count == 2, "owned permit count", 2usize, count);
+
+        let avail = sem.available_permits();
+        crate::assert_with_log!(avail == 1, "after owned acquire", 1usize, avail);
+
+        drop(permit);
+        let avail_after = sem.available_permits();
+        crate::assert_with_log!(
+            avail_after == 3,
+            "after owned drop",
+            3usize,
+            avail_after
+        );
+        crate::test_complete!("owned_permit_try_acquire_and_drop");
+    }
+
+    #[test]
+    fn cancel_front_waiter_wakes_next() {
+        init_test("cancel_front_waiter_wakes_next");
+        let cx1 = test_cx();
+        let cx2 = test_cx();
+        let sem = Semaphore::new(1);
+        let _held = sem.try_acquire(1).expect("initial acquire");
+
+        // Two waiters queue up.
+        let w1 = CountingWaker::new();
+        let w2 = CountingWaker::new();
+        let waker1 = Waker::from(Arc::clone(&w1));
+        let waker2 = Waker::from(Arc::clone(&w2));
+
+        let mut fut1 = sem.acquire(&cx1, 1);
+        let mut fut2 = sem.acquire(&cx2, 1);
+        let pending1 = poll_once_with_waker(&mut fut1, &waker1).is_none();
+        let pending2 = poll_once_with_waker(&mut fut2, &waker2).is_none();
+        crate::assert_with_log!(pending1, "fut1 pending", true, pending1);
+        crate::assert_with_log!(pending2, "fut2 pending", true, pending2);
+
+        // Cancel the front waiter. It must wake the next waiter so it doesn't
+        // sleep forever.
+        cx1.set_cancel_requested(true);
+        let result1 = poll_once_with_waker(&mut fut1, &waker1);
+        let cancelled = matches!(result1, Some(Err(AcquireError::Cancelled)));
+        crate::assert_with_log!(cancelled, "front waiter cancelled", true, cancelled);
+
+        // The second waiter should have been woken.
+        let w2_woken = w2.count() > 0;
+        crate::assert_with_log!(w2_woken, "second waiter woken", true, w2_woken);
+        crate::test_complete!("cancel_front_waiter_wakes_next");
+    }
+
+    #[test]
+    fn drop_front_waiter_wakes_next() {
+        init_test("drop_front_waiter_wakes_next");
+        let cx1 = test_cx();
+        let cx2 = test_cx();
+        let sem = Semaphore::new(1);
+        let _held = sem.try_acquire(1).expect("initial acquire");
+
+        let w2 = CountingWaker::new();
+        let waker2 = Waker::from(Arc::clone(&w2));
+
+        let mut fut1 = sem.acquire(&cx1, 1);
+        let mut fut2 = sem.acquire(&cx2, 1);
+        let pending1 = poll_once(&mut fut1).is_none();
+        let pending2 = poll_once_with_waker(&mut fut2, &waker2).is_none();
+        crate::assert_with_log!(pending1, "fut1 pending", true, pending1);
+        crate::assert_with_log!(pending2, "fut2 pending", true, pending2);
+
+        // Drop the front waiter without cancelling. It must wake the next waiter.
+        drop(fut1);
+        let w2_woken = w2.count() > 0;
+        crate::assert_with_log!(w2_woken, "second waiter woken on drop", true, w2_woken);
+        crate::test_complete!("drop_front_waiter_wakes_next");
+    }
+
+    #[test]
+    fn waker_update_on_repoll() {
+        init_test("waker_update_on_repoll");
+        let cx1 = test_cx();
+        let sem = Semaphore::new(1);
+        let _held = sem.try_acquire(1).expect("initial acquire");
+
+        let w1 = CountingWaker::new();
+        let w2 = CountingWaker::new();
+        let waker1 = Waker::from(Arc::clone(&w1));
+        let waker2 = Waker::from(Arc::clone(&w2));
+
+        let mut fut = sem.acquire(&cx1, 1);
+
+        // First poll registers waker1.
+        let pending = poll_once_with_waker(&mut fut, &waker1).is_none();
+        crate::assert_with_log!(pending, "pending with waker1", true, pending);
+
+        // Second poll with a different waker should update the stored waker.
+        let still_pending = poll_once_with_waker(&mut fut, &waker2).is_none();
+        crate::assert_with_log!(still_pending, "pending with waker2", true, still_pending);
+
+        // Release permit - should wake waker2 (the updated one), not waker1.
+        drop(_held);
+        // The semaphore wakes the front waiter's stored waker.
+        let w2_woken = w2.count() > 0;
+        crate::assert_with_log!(
+            w2_woken,
+            "updated waker woken",
+            true,
+            w2_woken
+        );
+        crate::test_complete!("waker_update_on_repoll");
     }
 }
