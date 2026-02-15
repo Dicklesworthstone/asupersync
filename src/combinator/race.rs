@@ -146,6 +146,14 @@ impl<A, B> Race<A, B> {
     }
 }
 
+impl<A, B> Clone for Race<A, B> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<A, B> Copy for Race<A, B> {}
+
 impl<A, B> Default for Race<A, B> {
     fn default() -> Self {
         Self::new()
@@ -211,7 +219,7 @@ impl<T> Clone for RaceAll<T> {
 impl<T> Copy for RaceAll<T> {}
 
 /// The result of a race, indicating which branch won.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RaceResult<A, B> {
     /// The first branch won.
     First(A),
@@ -1134,6 +1142,55 @@ mod tests {
     fn race_all_outcomes_panics_on_invalid_index() {
         let outcomes: Vec<Outcome<i32, &str>> = vec![Outcome::Ok(1), Outcome::Ok(2)];
         let _ = race_all_outcomes(5, outcomes);
+    }
+
+    #[test]
+    fn race_result_eq() {
+        let a: RaceResult<i32, &str> = RaceResult::First(42);
+        let b: RaceResult<i32, &str> = RaceResult::First(42);
+        let c: RaceResult<i32, &str> = RaceResult::Second("x");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn race_marker_clone_copy() {
+        let r1: Race<i32, &str> = Race::new();
+        let r2 = r1; // Copy
+        let r3 = r1; // still valid after Copy
+        assert_eq!(
+            std::mem::size_of_val(&r1),
+            std::mem::size_of_val(&r2)
+        );
+        assert_eq!(
+            std::mem::size_of_val(&r1),
+            std::mem::size_of_val(&r3)
+        );
+    }
+
+    #[test]
+    fn race_result_map_first_passthrough() {
+        // map_first on Second variant should pass through unchanged
+        let result: RaceResult<i32, &str> = RaceResult::Second("hello");
+        let mapped = result.map_first(|x| x * 2);
+        assert!(matches!(mapped, RaceResult::Second("hello")));
+    }
+
+    #[test]
+    fn race_result_map_second_passthrough() {
+        // map_second on First variant should pass through unchanged
+        let result: RaceResult<i32, &str> = RaceResult::First(42);
+        let mapped = result.map_second(str::len);
+        assert!(matches!(mapped, RaceResult::First(42)));
+    }
+
+    #[test]
+    fn race2_to_result_second_wins_err() {
+        let o1: Outcome<i32, &str> = Outcome::Cancelled(CancelReason::race_loser());
+        let o2: Outcome<i32, &str> = Outcome::Err("second failed");
+
+        let result = race2_to_result(RaceWinner::Second, o1, o2);
+        assert!(matches!(result, Err(RaceError::Second("second failed"))));
     }
 
     #[test]
