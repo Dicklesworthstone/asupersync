@@ -15,7 +15,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 
 use asupersync::cx::{Cx, NameRegistry, Scope};
 use asupersync::gen_server::{CallError, GenServer, Reply, SystemMsg};
@@ -118,7 +118,7 @@ fn bench_genserver_call(c: &mut Criterion) {
             runtime.run_until_idle();
 
             let guard = result.lock().unwrap();
-            black_box(guard.is_some())
+            std::hint::black_box(guard.is_some())
         })
     });
 
@@ -150,7 +150,7 @@ fn bench_genserver_call(c: &mut Criterion) {
                 .schedule(server_task_id, 0);
             runtime.run_until_idle();
 
-            black_box(())
+            std::hint::black_box(())
         })
     });
 
@@ -168,7 +168,7 @@ fn bench_genserver_call(c: &mut Criterion) {
             let server_task_id = handle.task_id();
             runtime.state.store_spawned_task(server_task_id, stored);
 
-            black_box(server_task_id)
+            std::hint::black_box(server_task_id)
         })
     });
 
@@ -192,7 +192,7 @@ fn bench_registry_operations(c: &mut Criterion) {
                 .register("bench_name", task_id, region, now)
                 .unwrap();
             let _ = lease.abort();
-            black_box(())
+            std::hint::black_box(())
         })
     });
 
@@ -210,7 +210,7 @@ fn bench_registry_operations(c: &mut Criterion) {
             for lease in &mut leases {
                 let _ = lease.abort();
             }
-            black_box(())
+            std::hint::black_box(())
         })
     });
 
@@ -222,14 +222,14 @@ fn bench_registry_operations(c: &mut Criterion) {
         // Keep the lease alive for the duration of the benchmark.
         let mut lease = registry.register("target", task_id, region, now).unwrap();
 
-        b.iter(|| black_box(registry.whereis("target")));
+        b.iter(|| std::hint::black_box(registry.whereis("target")));
 
         let _ = lease.abort();
     });
 
     group.bench_function("whereis_miss", |b| {
         let registry = NameRegistry::new();
-        b.iter(|| black_box(registry.whereis("nonexistent")))
+        b.iter(|| std::hint::black_box(registry.whereis("nonexistent")))
     });
 
     group.bench_function("register_unregister_cycle", |b| {
@@ -243,7 +243,7 @@ fn bench_registry_operations(c: &mut Criterion) {
                 .unwrap();
             let _ = lease.abort();
             let _ = registry.unregister("cycle_name");
-            black_box(())
+            std::hint::black_box(())
         })
     });
 
@@ -275,7 +275,7 @@ fn bench_supervisor_restart_decision(c: &mut Criterion) {
             .compile()
             .unwrap();
 
-        b.iter(|| black_box(compiled.restart_plan_for("child_b")))
+        b.iter(|| std::hint::black_box(compiled.restart_plan_for("child_b")))
     });
 
     group.bench_function("restart_plan_one_for_all_5_children", |b| {
@@ -289,7 +289,7 @@ fn bench_supervisor_restart_decision(c: &mut Criterion) {
             .compile()
             .unwrap();
 
-        b.iter(|| black_box(compiled.restart_plan_for("c3")))
+        b.iter(|| std::hint::black_box(compiled.restart_plan_for("c3")))
     });
 
     group.bench_function("restart_plan_rest_for_one_5_children", |b| {
@@ -303,7 +303,7 @@ fn bench_supervisor_restart_decision(c: &mut Criterion) {
             .compile()
             .unwrap();
 
-        b.iter(|| black_box(compiled.restart_plan_for("c2")))
+        b.iter(|| std::hint::black_box(compiled.restart_plan_for("c2")))
     });
 
     group.bench_function("compile_supervisor_10_children", |b| {
@@ -312,7 +312,7 @@ fn bench_supervisor_restart_decision(c: &mut Criterion) {
             for i in 0..10 {
                 builder = builder.child(ChildSpec::new(format!("child_{i}"), noop_child_start));
             }
-            black_box(builder.compile().unwrap())
+            std::hint::black_box(builder.compile().unwrap())
         })
     });
 
@@ -331,14 +331,14 @@ fn bench_harness_lifecycle(c: &mut Criterion) {
             let app = asupersync::app::AppSpec::new("bench_app");
             let harness = asupersync::lab::SporkAppHarness::with_seed(42, app).unwrap();
             let report = harness.run_to_report().unwrap();
-            black_box(report.run.trace_fingerprint)
+            std::hint::black_box(report.run.trace_fingerprint)
         })
     });
 
     group.bench_function("lab_runtime_create", |b| {
         b.iter(|| {
             let runtime = LabRuntime::new(LabConfig::new(42));
-            black_box(runtime.now())
+            std::hint::black_box(runtime.now())
         })
     });
 

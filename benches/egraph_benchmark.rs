@@ -6,7 +6,7 @@
 #![allow(missing_docs)]
 
 use asupersync::plan::{EGraph, Extractor};
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use std::time::Duration;
 
 // ---------------------------------------------------------------------------
@@ -74,7 +74,7 @@ fn bench_add_leaf(c: &mut Criterion) {
                 for i in 0..n {
                     eg.add_leaf(format!("leaf_{i}"));
                 }
-                black_box(&eg);
+                std::hint::black_box(&eg);
             });
         });
     }
@@ -87,7 +87,7 @@ fn bench_add_join(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
             b.iter(|| {
                 let eg = build_flat_join(n);
-                black_box(&eg);
+                std::hint::black_box(&eg);
             });
         });
     }
@@ -100,7 +100,7 @@ fn bench_build_balanced_tree(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(depth), &depth, |b, &depth| {
             b.iter(|| {
                 let eg = build_balanced_tree(depth);
-                black_box(&eg);
+                std::hint::black_box(&eg);
             });
         });
     }
@@ -123,7 +123,7 @@ fn bench_hashcons_dedup(c: &mut Criterion) {
                 for _ in 0..n {
                     eg.add_join(vec![a, b_node]);
                 }
-                black_box(&eg);
+                std::hint::black_box(&eg);
             });
         });
     }
@@ -149,7 +149,7 @@ fn bench_merge_chain(c: &mut Criterion) {
                     for window in leaves.windows(2) {
                         eg.merge(window[0], window[1]);
                     }
-                    black_box(&eg);
+                    std::hint::black_box(&eg);
                 },
                 BatchSize::SmallInput,
             );
@@ -179,7 +179,7 @@ fn bench_merge_with_congruence(c: &mut Criterion) {
                     for window in leaves.windows(2) {
                         eg.merge(window[0], window[1]);
                     }
-                    black_box(&eg);
+                    std::hint::black_box(&eg);
                 },
                 BatchSize::SmallInput,
             );
@@ -206,7 +206,7 @@ fn bench_extract_flat(c: &mut Criterion) {
                 |(mut eg, root)| {
                     let mut extractor = Extractor::new(&mut eg);
                     let (dag, cert) = extractor.extract(root);
-                    black_box((&dag, &cert));
+                    std::hint::black_box((&dag, &cert));
                 },
                 BatchSize::SmallInput,
             );
@@ -229,7 +229,7 @@ fn bench_extract_balanced_tree(c: &mut Criterion) {
                 |(mut eg, root)| {
                     let mut extractor = Extractor::new(&mut eg);
                     let (dag, cert) = extractor.extract(root);
-                    black_box((&dag, &cert));
+                    std::hint::black_box((&dag, &cert));
                 },
                 BatchSize::SmallInput,
             );
@@ -259,7 +259,7 @@ fn bench_extract_after_merge(c: &mut Criterion) {
             |(mut eg, root)| {
                 let mut extractor = Extractor::new(&mut eg);
                 let (dag, cert) = extractor.extract(root);
-                black_box((&dag, &cert));
+                std::hint::black_box((&dag, &cert));
             },
             BatchSize::SmallInput,
         );
@@ -295,7 +295,7 @@ fn bench_full_workflow(c: &mut Criterion) {
                 let mut extractor = Extractor::new(&mut eg);
                 let (dag, cert) = extractor.extract(timed);
 
-                black_box((&dag, &cert));
+                std::hint::black_box((&dag, &cert));
             });
         });
     }
@@ -344,7 +344,7 @@ fn bench_rewrite_assoc(c: &mut Criterion) {
                 |mut dag| {
                     let report =
                         dag.apply_rewrites(RewritePolicy::assume_all(), &[RewriteRule::JoinAssoc]);
-                    black_box(report);
+                    std::hint::black_box(report);
                 },
                 BatchSize::SmallInput,
             );
@@ -362,7 +362,7 @@ fn bench_rewrite_commute(c: &mut Criterion) {
                 |mut dag| {
                     let report = dag
                         .apply_rewrites(RewritePolicy::assume_all(), &[RewriteRule::JoinCommute]);
-                    black_box(report);
+                    std::hint::black_box(report);
                 },
                 BatchSize::SmallInput,
             );
@@ -385,7 +385,7 @@ fn bench_rewrite_dedup(c: &mut Criterion) {
                             RewritePolicy::conservative(),
                             &[RewriteRule::DedupRaceJoin],
                         );
-                        black_box(report);
+                        std::hint::black_box(report);
                     },
                     BatchSize::SmallInput,
                 );
@@ -411,7 +411,7 @@ fn bench_rewrite_all_rules(c: &mut Criterion) {
                 || build_nested_join_plan(depth),
                 |mut dag| {
                     let report = dag.apply_rewrites(RewritePolicy::assume_all(), all_rules);
-                    black_box(report);
+                    std::hint::black_box(report);
                 },
                 BatchSize::SmallInput,
             );
@@ -434,7 +434,7 @@ fn bench_certified_rewrite(c: &mut Criterion) {
                             RewritePolicy::conservative(),
                             &[RewriteRule::DedupRaceJoin],
                         );
-                        black_box((report, cert));
+                        std::hint::black_box((report, cert));
                     },
                     BatchSize::SmallInput,
                 );

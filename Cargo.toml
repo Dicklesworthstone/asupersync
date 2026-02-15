@@ -147,7 +147,7 @@ base64 = "0.22.1"
 # SHA-1 hashing for WebSocket Sec-WebSocket-Accept calculation (RFC 6455)
 sha1 = "0.10"
 # X.509 certificate parsing for SPKI extraction
-x509-parser = { version = "0.17", optional = true }
+x509-parser = { version = "0.18", optional = true }
 # Optional TOML config file support for RuntimeBuilder
 toml = { version = "1.0", optional = true }
 clap = { version = "4.5", features = ["derive"], optional = true }
@@ -284,3 +284,5 @@ module_inception = "allow"
 doc_markdown = "allow"
 # Phase 0: Allow casts (arena is bounded at 2^32)
 cast_possible_truncation = "allow"
+# Many Duration::from_millis(1000) patterns are intentionally explicit about units
+duration_suboptimal_units = "allow"

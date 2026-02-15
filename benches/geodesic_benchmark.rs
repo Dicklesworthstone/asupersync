@@ -9,7 +9,7 @@
 
 #![allow(missing_docs)]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use asupersync::trace::event_structure::{OwnerKey, TracePoset};
 use asupersync::trace::{GeodesicConfig, TraceEvent};
@@ -89,8 +89,8 @@ fn bench_poset_construction(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("from_trace", n), &trace, |b, trace| {
             b.iter(|| {
-                let poset = TracePoset::from_trace(black_box(trace));
-                black_box(poset)
+                let poset = TracePoset::from_trace(std::hint::black_box(trace));
+                std::hint::black_box(poset)
             });
         });
     }
@@ -122,8 +122,9 @@ fn bench_exact_search(c: &mut Criterion) {
             &poset,
             |b, poset| {
                 b.iter(|| {
-                    let result = asupersync::trace::geodesic_normalize(black_box(poset), &config);
-                    black_box(result)
+                    let result =
+                        asupersync::trace::geodesic_normalize(std::hint::black_box(poset), &config);
+                    std::hint::black_box(result)
                 });
             },
         );
@@ -139,8 +140,9 @@ fn bench_exact_search(c: &mut Criterion) {
             &poset,
             |b, poset| {
                 b.iter(|| {
-                    let result = asupersync::trace::geodesic_normalize(black_box(poset), &config);
-                    black_box(result)
+                    let result =
+                        asupersync::trace::geodesic_normalize(std::hint::black_box(poset), &config);
+                    std::hint::black_box(result)
                 });
             },
         );
@@ -173,9 +175,11 @@ fn bench_beam_search(c: &mut Criterion) {
                 &poset,
                 |b, poset| {
                     b.iter(|| {
-                        let result =
-                            asupersync::trace::geodesic_normalize(black_box(poset), &config);
-                        black_box(result)
+                        let result = asupersync::trace::geodesic_normalize(
+                            std::hint::black_box(poset),
+                            &config,
+                        );
+                        std::hint::black_box(result)
                     });
                 },
             );
@@ -210,8 +214,9 @@ fn bench_greedy(c: &mut Criterion) {
             &poset,
             |b, poset| {
                 b.iter(|| {
-                    let result = asupersync::trace::geodesic_normalize(black_box(poset), &config);
-                    black_box(result)
+                    let result =
+                        asupersync::trace::geodesic_normalize(std::hint::black_box(poset), &config);
+                    std::hint::black_box(result)
                 });
             },
         );
@@ -228,8 +233,9 @@ fn bench_greedy(c: &mut Criterion) {
             &poset,
             |b, poset| {
                 b.iter(|| {
-                    let result = asupersync::trace::geodesic_normalize(black_box(poset), &config);
-                    black_box(result)
+                    let result =
+                        asupersync::trace::geodesic_normalize(std::hint::black_box(poset), &config);
+                    std::hint::black_box(result)
                 });
             },
         );
@@ -268,23 +274,31 @@ fn bench_algorithm_crossover(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("exact", n), &poset, |b, poset| {
             b.iter(|| {
-                let result = asupersync::trace::geodesic_normalize(black_box(poset), &exact_config);
-                black_box(result)
+                let result = asupersync::trace::geodesic_normalize(
+                    std::hint::black_box(poset),
+                    &exact_config,
+                );
+                std::hint::black_box(result)
             });
         });
 
         group.bench_with_input(BenchmarkId::new("beam_w8", n), &poset, |b, poset| {
             b.iter(|| {
-                let result = asupersync::trace::geodesic_normalize(black_box(poset), &beam_config);
-                black_box(result)
+                let result = asupersync::trace::geodesic_normalize(
+                    std::hint::black_box(poset),
+                    &beam_config,
+                );
+                std::hint::black_box(result)
             });
         });
 
         group.bench_with_input(BenchmarkId::new("greedy", n), &poset, |b, poset| {
             b.iter(|| {
-                let result =
-                    asupersync::trace::geodesic_normalize(black_box(poset), &greedy_config);
-                black_box(result)
+                let result = asupersync::trace::geodesic_normalize(
+                    std::hint::black_box(poset),
+                    &greedy_config,
+                );
+                std::hint::black_box(result)
             });
         });
     }
@@ -331,10 +345,12 @@ fn bench_switch_cost_improvement(c: &mut Criterion) {
 
         group.bench_function(BenchmarkId::new("e2e", label), |b| {
             b.iter(|| {
-                let poset = TracePoset::from_trace(black_box(&trace));
-                let result =
-                    asupersync::trace::geodesic_normalize(black_box(&poset), &default_config);
-                black_box(result)
+                let poset = TracePoset::from_trace(std::hint::black_box(&trace));
+                let result = asupersync::trace::geodesic_normalize(
+                    std::hint::black_box(&poset),
+                    &default_config,
+                );
+                std::hint::black_box(result)
             });
         });
     }

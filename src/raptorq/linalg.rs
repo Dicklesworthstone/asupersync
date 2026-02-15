@@ -283,8 +283,7 @@ impl SparseRow {
     pub fn get(&self, index: usize) -> Gf256 {
         self.entries
             .binary_search_by_key(&index, |(i, _)| *i)
-            .map(|pos| self.entries[pos].1)
-            .unwrap_or(Gf256::ZERO)
+            .map_or(Gf256::ZERO, |pos| self.entries[pos].1)
     }
 
     /// Returns an iterator over nonzero entries as (index, value) pairs.

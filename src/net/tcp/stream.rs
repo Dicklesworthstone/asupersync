@@ -567,8 +567,6 @@ mod tests {
     use std::future::Future;
     use std::io;
     use std::net::{SocketAddr, TcpListener};
-    #[cfg(unix)]
-    use std::os::fd::AsRawFd;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
@@ -751,8 +749,7 @@ mod tests {
         let (_server, _) = listener.accept().expect("accept");
 
         let stream = TcpStream::from_std(client).expect("wrap stream");
-        let flags =
-            fcntl(stream.inner.as_ref().as_raw_fd(), FcntlArg::F_GETFL).expect("read stream flags");
+        let flags = fcntl(stream.inner.as_ref(), FcntlArg::F_GETFL).expect("read stream flags");
         let is_nonblocking = OFlag::from_bits_truncate(flags).contains(OFlag::O_NONBLOCK);
         assert!(
             is_nonblocking,

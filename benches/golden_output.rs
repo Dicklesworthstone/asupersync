@@ -24,7 +24,7 @@
 #![allow(clippy::semicolon_if_nothing_returned)]
 #![allow(clippy::cast_sign_loss)]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -622,7 +622,7 @@ fn bench_golden_scheduler(c: &mut Criterion) {
     group.bench_function("priority_lane_ordering_100", |b| {
         b.iter(|| {
             let output = scenario_priority_lane_ordering(100);
-            black_box(&output);
+            std::hint::black_box(&output);
         })
     });
 
@@ -640,7 +640,7 @@ fn bench_golden_scheduler(c: &mut Criterion) {
     group.bench_function("mixed_cancel_ready_timed_200", |b| {
         b.iter(|| {
             let output = scenario_mixed_cancel_ready_timed(200);
-            black_box(&output);
+            std::hint::black_box(&output);
         })
     });
 
@@ -657,7 +657,7 @@ fn bench_golden_scheduler(c: &mut Criterion) {
     group.bench_function("global_inject_pop_50", |b| {
         b.iter(|| {
             let output = scenario_global_inject_pop(50);
-            black_box(&output);
+            std::hint::black_box(&output);
         })
     });
 
@@ -679,7 +679,7 @@ fn bench_golden_scheduler(c: &mut Criterion) {
             |b, &count| {
                 b.iter(|| {
                     let output = scenario_priority_lane_ordering(count as u32);
-                    black_box(&output);
+                    std::hint::black_box(&output);
                 })
             },
         );
@@ -695,7 +695,7 @@ fn bench_golden_channels(c: &mut Criterion) {
     group.bench_function("mpsc_try_send_recv_1000", |b| {
         b.iter(|| {
             let output = scenario_mpsc_try_send_recv(1000);
-            black_box(&output);
+            std::hint::black_box(&output);
         })
     });
 
@@ -712,7 +712,7 @@ fn bench_golden_channels(c: &mut Criterion) {
     group.bench_function("mpsc_multi_producer_interleave", |b| {
         b.iter(|| {
             let output = scenario_mpsc_multi_producer_interleave();
-            black_box(&output);
+            std::hint::black_box(&output);
         })
     });
 
@@ -729,7 +729,7 @@ fn bench_golden_channels(c: &mut Criterion) {
     group.bench_function("oneshot_send_recv_sequence", |b| {
         b.iter(|| {
             let output = scenario_oneshot_send_recv();
-            black_box(&output);
+            std::hint::black_box(&output);
         })
     });
 
@@ -751,7 +751,7 @@ fn bench_golden_channels(c: &mut Criterion) {
             |b, &count| {
                 b.iter(|| {
                     let output = scenario_mpsc_try_send_recv(count as usize);
-                    black_box(&output);
+                    std::hint::black_box(&output);
                 })
             },
         );
@@ -767,7 +767,7 @@ fn bench_golden_cancel(c: &mut Criterion) {
     group.bench_function("tree_propagation_depth_5", |b| {
         b.iter(|| {
             let output = scenario_cancel_tree_propagation(5);
-            black_box(&output);
+            std::hint::black_box(&output);
         })
     });
 
@@ -784,7 +784,7 @@ fn bench_golden_cancel(c: &mut Criterion) {
     group.bench_function("cancel_budgets", |b| {
         b.iter(|| {
             let output = scenario_cancel_budgets();
-            black_box(&output);
+            std::hint::black_box(&output);
         })
     });
 
@@ -807,7 +807,7 @@ fn bench_golden_cancel(c: &mut Criterion) {
             |b, &depth| {
                 b.iter(|| {
                     let output = scenario_cancel_tree_propagation(depth);
-                    black_box(&output);
+                    std::hint::black_box(&output);
                 })
             },
         );
@@ -824,7 +824,7 @@ fn bench_golden_lab(c: &mut Criterion) {
     group.bench_function("deterministic_schedule_seed_42", |b| {
         b.iter(|| {
             let output = scenario_lab_deterministic(42);
-            black_box(&output);
+            std::hint::black_box(&output);
         })
     });
 
@@ -841,7 +841,7 @@ fn bench_golden_lab(c: &mut Criterion) {
     group.bench_function("deterministic_schedule_seed_1337", |b| {
         b.iter(|| {
             let output = scenario_lab_deterministic(1337);
-            black_box(&output);
+            std::hint::black_box(&output);
         })
     });
 
@@ -859,7 +859,7 @@ fn bench_golden_lab(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("seed_sweep", seed), &seed, |b, &seed| {
             b.iter(|| {
                 let output = scenario_lab_deterministic(seed);
-                black_box(&output);
+                std::hint::black_box(&output);
             })
         });
     }
@@ -874,7 +874,7 @@ fn bench_golden_budget(c: &mut Criterion) {
     group.bench_function("combine_chain", |b| {
         b.iter(|| {
             let output = scenario_budget_combine_chain();
-            black_box(&output);
+            std::hint::black_box(&output);
         })
     });
 
@@ -891,7 +891,7 @@ fn bench_golden_budget(c: &mut Criterion) {
     group.bench_function("deadline_check_matrix", |b| {
         b.iter(|| {
             let output = scenario_budget_deadline_check();
-            black_box(&output);
+            std::hint::black_box(&output);
         })
     });
 
@@ -914,7 +914,7 @@ fn bench_golden_obligation(c: &mut Criterion) {
     group.bench_function("send_permit_lifecycle", |b| {
         b.iter(|| {
             let output = scenario_obligation_send_permit();
-            black_box(&output);
+            std::hint::black_box(&output);
         })
     });
 
@@ -931,7 +931,7 @@ fn bench_golden_obligation(c: &mut Criterion) {
     group.bench_function("region_cancel_propagation", |b| {
         b.iter(|| {
             let output = scenario_region_cancel_propagation();
-            black_box(&output);
+            std::hint::black_box(&output);
         })
     });
 
@@ -953,7 +953,7 @@ fn bench_flush_golden_updates(c: &mut Criterion) {
         flush_updates();
     }
     // No-op benchmark to ensure this function runs last
-    c.bench_function("golden/_flush", |b| b.iter(|| black_box(0)));
+    c.bench_function("golden/_flush", |b| b.iter(|| std::hint::black_box(0)));
 }
 
 criterion_group!(

@@ -205,8 +205,6 @@ mod tests {
     #[cfg(unix)]
     use nix::fcntl::{fcntl, FcntlArg, OFlag};
     use std::net::SocketAddr;
-    #[cfg(unix)]
-    use std::os::fd::AsRawFd;
     use std::sync::Arc;
     use std::task::{Context, Wake, Waker};
 
@@ -268,8 +266,7 @@ mod tests {
     fn listener_from_std_forces_nonblocking_mode() {
         let raw = net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let listener = TcpListener::from_std(raw).expect("wrap listener");
-        let flags =
-            fcntl(listener.inner.as_raw_fd(), FcntlArg::F_GETFL).expect("read listener flags");
+        let flags = fcntl(&listener.inner, FcntlArg::F_GETFL).expect("read listener flags");
         let is_nonblocking = OFlag::from_bits_truncate(flags).contains(OFlag::O_NONBLOCK);
         assert!(
             is_nonblocking,
