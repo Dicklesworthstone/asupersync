@@ -94,11 +94,13 @@ impl SocketAncillary {
         self.send_fds.clear();
     }
 
-    pub(crate) fn prepare_for_recv(&mut self) -> &mut Vec<u8> {
+    pub(crate) fn prepare_for_recv(&mut self) -> &mut [u8] {
         self.recv_fds.clear();
         self.truncated = false;
-        self.recv_buf.clear();
-        &mut self.recv_buf
+        // nix::recvmsg reads from the slice length (not Vec capacity), so we expose
+        // a full-length initialized buffer each receive.
+        self.recv_buf.resize(self.recv_buf.capacity(), 0);
+        self.recv_buf.as_mut_slice()
     }
 
     pub(crate) fn push_received_fds(&mut self, fds: &[RawFd]) {
@@ -288,5 +290,14 @@ mod tests {
         crate::assert_with_log!(space3 > space1, "space for 3 > 1", true, space3 > space1);
 
         crate::test_complete!("test_ancillary_space_for_fds");
+    }
+
+    #[test]
+    fn test_prepare_for_recv_exposes_full_buffer_len() {
+        init_test("test_prepare_for_recv_exposes_full_buffer_len");
+        let mut ancillary = SocketAncillary::new(128);
+        let recv_buf = ancillary.prepare_for_recv();
+        crate::assert_with_log!(recv_buf.len() == 128, "recv buf len", 128, recv_buf.len());
+        crate::test_complete!("test_prepare_for_recv_exposes_full_buffer_len");
     }
 }
