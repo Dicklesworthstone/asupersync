@@ -731,7 +731,12 @@ fn seed_sweep_structured_logging() {
                     gauss_ops: result.stats.gauss_ops,
                     pivots: result.stats.pivots_selected,
                 });
-                eprintln!("{}", log_entry.to_json().unwrap_or_else(|_| log_entry.to_context_string()));
+                eprintln!(
+                    "{}",
+                    log_entry
+                        .to_json()
+                        .unwrap_or_else(|_| log_entry.to_context_string())
+                );
 
                 for (i, original) in source.iter().enumerate() {
                     assert_eq!(
@@ -768,7 +773,12 @@ fn seed_sweep_structured_logging() {
                     gauss_ops: 0,
                     pivots: 0,
                 });
-                eprintln!("{} FAIL: {e:?}", log_entry.to_json().unwrap_or_else(|_| log_entry.to_context_string()));
+                eprintln!(
+                    "{} FAIL: {e:?}",
+                    log_entry
+                        .to_json()
+                        .unwrap_or_else(|_| log_entry.to_context_string())
+                );
             }
         }
     }

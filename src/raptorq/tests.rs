@@ -92,9 +92,7 @@ fn builder_failure_context(
     replay_ref: &str,
 ) -> String {
     UnitLogEntry::new(scenario_id, seed, parameter_set, replay_ref, "pending")
-        .with_repro_command(&format!(
-            "rch exec -- cargo test --lib raptorq::tests -- --nocapture"
-        ))
+        .with_repro_command("rch exec -- cargo test --lib raptorq::tests -- --nocapture")
         .to_context_string()
 }
 
