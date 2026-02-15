@@ -1461,6 +1461,31 @@ mod tests {
         }
     }
 
+    fn make_pivot_tie_break_state(
+        params: &SystematicParams,
+        symbol_size: usize,
+        left_col: usize,
+        right_col: usize,
+    ) -> DecoderState {
+        let eq_left = Equation::new(vec![left_col], vec![Gf256::ONE]);
+        let eq_mix = Equation::new(vec![left_col, right_col], vec![Gf256::ONE, Gf256::ONE]);
+        let eq_right = Equation::new(vec![right_col], vec![Gf256::ONE]);
+        let active_cols = [left_col, right_col].into_iter().collect();
+        DecoderState {
+            params: params.clone(),
+            equations: vec![eq_left, eq_mix, eq_right],
+            rhs: vec![
+                vec![0x10; symbol_size],
+                vec![0x30; symbol_size],
+                vec![0x20; symbol_size],
+            ],
+            solved: vec![None; params.l],
+            active_cols,
+            inactive_cols: BTreeSet::new(),
+            stats: DecodeStats::default(),
+        }
+    }
+
     #[test]
     fn singular_matrix_reports_original_column_id() {
         let decoder = InactivationDecoder::new(8, 16, 123);
@@ -1511,6 +1536,41 @@ mod tests {
                 row: 11,
                 attempted_cols: vec![3, 9],
             }
+        );
+    }
+
+    #[test]
+    fn pivot_tie_break_prefers_lowest_available_row_deterministically() {
+        let decoder = InactivationDecoder::new(8, 1, 999);
+        let params = decoder.params().clone();
+
+        let mut state_one = make_pivot_tie_break_state(&params, 1, 3, 7);
+        let mut trace_one = EliminationTrace::default();
+        decoder
+            .inactivate_and_solve_with_proof(&mut state_one, &mut trace_one)
+            .expect("tie-break test state should be solvable");
+
+        assert_eq!(
+            trace_one
+                .pivot_events
+                .iter()
+                .map(|ev| (ev.col, ev.row))
+                .collect::<Vec<_>>(),
+            vec![(3, 0), (7, 1)],
+            "pivot order should be deterministic and prefer lowest available row"
+        );
+        assert_eq!(state_one.solved[3], Some(vec![0x10]));
+        assert_eq!(state_one.solved[7], Some(vec![0x20]));
+
+        let mut state_two = make_pivot_tie_break_state(&params, 1, 3, 7);
+        let mut trace_two = EliminationTrace::default();
+        decoder
+            .inactivate_and_solve_with_proof(&mut state_two, &mut trace_two)
+            .expect("second solve should match first solve");
+
+        assert_eq!(
+            trace_one.pivot_events, trace_two.pivot_events,
+            "pivot trace should be stable across repeated runs"
         );
     }
 }

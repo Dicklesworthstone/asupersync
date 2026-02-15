@@ -2,7 +2,7 @@
   "schema_version": "raptorq-replay-catalog-v1",
   "owner_bead": "bd-26pqk",
   "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
-  "generated_at_utc": "2026-02-15T17:50:00Z",
+  "generated_at_utc": "2026-02-15T18:12:00Z",
   "catalog_notes": [
     "Stable replay identifiers must never be rotated or reused without migration notes.",
     "Each replay entry links at least one unit test and one deterministic E2E script.",
@@ -360,6 +360,49 @@
       ],
       "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
       "repro_cmd": "rch exec -- cargo test --lib stats_overhead_ratio -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-gf256-core-laws-v1",
+      "scenario_id": "RQ-U-GF256-ALGEBRA",
+      "seed": 0,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "gf256_core_laws_hold_under_deterministic_vectors",
+      "profile_tags": [
+        "fast",
+        "full"
+      ],
+      "unit_tests": [
+        "src/raptorq/gf256.rs::exp_table_generates_all_nonzero",
+        "src/raptorq/gf256.rs::log_exp_roundtrip",
+        "src/raptorq/gf256.rs::multiplication_associative",
+        "src/raptorq/gf256.rs::distributive_law",
+        "src/raptorq/gf256.rs::division_is_mul_inverse",
+        "src/raptorq/gf256.rs::addmul_accumulates"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib multiplication_associative -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:rq-u-gf256-dual-policy-v1",
+      "scenario_id": "RQ-U-GF256-DUAL-POLICY",
+      "seed": 0,
+      "fixture_ref": "RQ-D9-REPLAY-CATALOG-V1",
+      "expected_outcome": "dual_policy_ratio_and_window_gates_remain_deterministic",
+      "profile_tags": [
+        "fast"
+      ],
+      "unit_tests": [
+        "src/raptorq/gf256.rs::dual_policy_ratio_gate_behaves_as_expected",
+        "src/raptorq/gf256.rs::dual_policy_window_gate_behaves_as_expected"
+      ],
+      "e2e_scripts": [
+        "tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
+      ],
+      "artifact_path": "target/phase6-e2e/report_<timestamp>.txt",
+      "repro_cmd": "rch exec -- cargo test --lib dual_policy_ratio_gate_behaves_as_expected -- --nocapture"
     },
     {
       "replay_ref": "replay:rq-u-gf256-simd-scalar-equivalence-v1",

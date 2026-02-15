@@ -1046,6 +1046,19 @@ mod tests {
     }
 
     #[test]
+    fn select_pivot_markowitz_tie_breaks_by_lowest_row_index() {
+        let rows: Vec<Vec<u8>> = vec![
+            vec![1, 0, 1, 0], // 2 nonzeros
+            vec![1, 1, 0, 0], // 2 nonzeros
+            vec![1, 0, 1, 0], // 2 nonzeros
+        ];
+        let matrix: Vec<&[u8]> = rows.iter().map(Vec::as_slice).collect();
+
+        assert_eq!(select_pivot_markowitz(&matrix, 0, 3, 0), Some((0, 2)));
+        assert_eq!(select_pivot_markowitz(&matrix, 1, 3, 0), Some((1, 2)));
+    }
+
+    #[test]
     fn row_nonzero_count_works() {
         assert_eq!(row_nonzero_count(&[0, 0, 0]), 0);
         assert_eq!(row_nonzero_count(&[1, 0, 2]), 2);
@@ -1180,6 +1193,37 @@ mod tests {
         let stats = solver.stats();
         assert!(stats.pivot_selections > 0, "pivot selections tracked");
         assert!(stats.swaps > 0, "swaps tracked (row 0 needs swap)");
+    }
+
+    #[test]
+    fn gaussian_singular_failure_is_deterministic_across_solvers() {
+        let mut basic = GaussianSolver::new(4, 4);
+        basic.set_row(0, &[1, 0, 0, 0], DenseRow::new(vec![1]));
+        basic.set_row(1, &[0, 1, 0, 0], DenseRow::new(vec![2]));
+        basic.set_row(2, &[1, 1, 0, 0], DenseRow::new(vec![3]));
+        basic.set_row(3, &[1, 1, 0, 0], DenseRow::new(vec![4]));
+
+        let mut markowitz = GaussianSolver::new(4, 4);
+        markowitz.set_row(0, &[1, 0, 0, 0], DenseRow::new(vec![1]));
+        markowitz.set_row(1, &[0, 1, 0, 0], DenseRow::new(vec![2]));
+        markowitz.set_row(2, &[1, 1, 0, 0], DenseRow::new(vec![3]));
+        markowitz.set_row(3, &[1, 1, 0, 0], DenseRow::new(vec![4]));
+
+        let basic_result = basic.solve();
+        let markowitz_result = markowitz.solve_markowitz();
+
+        assert_eq!(
+            basic_result,
+            GaussianResult::Singular { row: 2 },
+            "basic solver should fail at first unpivotable column"
+        );
+        assert_eq!(
+            markowitz_result,
+            GaussianResult::Singular { row: 2 },
+            "markowitz solver should fail at the same column"
+        );
+        assert_eq!(basic.stats().pivot_selections, 3);
+        assert_eq!(markowitz.stats().pivot_selections, 3);
     }
 
     #[test]
