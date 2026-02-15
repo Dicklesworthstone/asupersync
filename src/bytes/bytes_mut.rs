@@ -270,13 +270,15 @@ impl BytesMut {
         self.data.spare_capacity_mut()
     }
 
-    /// Set the length of the buffer.
+    /// Resize the buffer to `len`, zero-filling any new bytes.
     ///
-    /// # Safety
+    /// When growing, new bytes are filled with `0`. When shrinking, excess
+    /// bytes are dropped. This is equivalent to [`resize(len, 0)`](Self::resize).
     ///
-    /// This is safe because we only allow setting length to values within
-    /// capacity, and we use safe Vec operations. However, the caller must
-    /// ensure that all bytes up to `len` have been initialized.
+    /// **Note:** Because new bytes are zeroed, data previously written via
+    /// [`spare_capacity_mut()`](Self::spare_capacity_mut) will be overwritten.
+    /// If you need the `write-then-set-len` pattern, use [`resize`](Self::resize)
+    /// or write through [`put_slice`](Self::put_slice) instead.
     ///
     /// # Panics
     ///
@@ -287,8 +289,6 @@ impl BytesMut {
             "set_len out of bounds: len={len}, capacity={}",
             self.capacity()
         );
-        // This is safe because we're within capacity bounds
-        // and Vec tracks initialization
         self.data.resize(len, 0);
     }
 }
@@ -622,5 +622,74 @@ mod tests {
         let mut b = BytesMut::new();
         b.put_slice(b"hello");
         let _bad = b.split_to(100);
+    }
+
+    // --- Audit tests (SapphireHill, 2026-02-15) ---
+
+    #[test]
+    fn set_len_zeros_new_bytes() {
+        init_test("set_len_zeros_new_bytes");
+        let mut b = BytesMut::with_capacity(16);
+        b.put_slice(b"abc");
+        b.set_len(8);
+        // Bytes beyond the original "abc" must be zero-filled.
+        let ok = &b[..] == b"abc\0\0\0\0\0";
+        crate::assert_with_log!(ok, "zero-filled", b"abc\0\0\0\0\0", &b[..]);
+        crate::test_complete!("set_len_zeros_new_bytes");
+    }
+
+    #[test]
+    fn set_len_overwrites_spare_capacity_writes() {
+        init_test("set_len_overwrites_spare_capacity_writes");
+        let mut b = BytesMut::with_capacity(16);
+        b.put_slice(b"abc");
+        // Write 0xFF into spare capacity via the raw spare slice.
+        let spare = b.spare_capacity_mut();
+        spare[0].write(0xFF);
+        spare[1].write(0xFF);
+        // set_len uses resize(len, 0) which zeroes new positions.
+        b.set_len(5);
+        let ok = b[3] == 0 && b[4] == 0;
+        crate::assert_with_log!(ok, "zeroed, not 0xFF", true, ok);
+        crate::test_complete!("set_len_overwrites_spare_capacity_writes");
+    }
+
+    #[test]
+    fn set_len_shrink_preserves_data() {
+        init_test("set_len_shrink_preserves_data");
+        let mut b = BytesMut::with_capacity(16);
+        b.put_slice(b"hello world");
+        b.set_len(5);
+        let ok = &b[..] == b"hello";
+        crate::assert_with_log!(ok, "shrunk", b"hello", &b[..]);
+        crate::test_complete!("set_len_shrink_preserves_data");
+    }
+
+    #[test]
+    #[should_panic(expected = "out of bounds")]
+    fn set_len_panics_beyond_capacity() {
+        init_test("set_len_panics_beyond_capacity");
+        let mut b = BytesMut::with_capacity(4);
+        b.set_len(5);
+    }
+
+    #[test]
+    fn chunk_mut_returns_empty_and_advance_mut_zero_is_ok() {
+        init_test("chunk_mut_returns_empty_and_advance_mut_zero_is_ok");
+        let mut b = BytesMut::with_capacity(16);
+        let chunk = b.chunk_mut();
+        let ok = chunk.is_empty();
+        crate::assert_with_log!(ok, "chunk_mut empty", true, ok);
+        // advance_mut(0) must not panic.
+        b.advance_mut(0);
+        crate::test_complete!("chunk_mut_returns_empty_and_advance_mut_zero_is_ok");
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported")]
+    fn advance_mut_nonzero_panics() {
+        init_test("advance_mut_nonzero_panics");
+        let mut b = BytesMut::with_capacity(16);
+        b.advance_mut(1);
     }
 }
