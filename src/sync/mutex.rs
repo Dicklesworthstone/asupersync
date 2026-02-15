@@ -906,4 +906,57 @@ mod tests {
 
         crate::test_complete!("try_lock_steal_does_not_lose_waiter");
     }
+
+    #[test]
+    fn test_owned_mutex_guard_try_lock() {
+        init_test("test_owned_mutex_guard_try_lock");
+        let mutex = Arc::new(Mutex::new(42_u32));
+
+        // try_lock should succeed on an unlocked mutex.
+        let mut guard =
+            OwnedMutexGuard::try_lock(Arc::clone(&mutex)).expect("try_lock should succeed");
+        crate::assert_with_log!(*guard == 42, "owned guard reads value", 42u32, *guard);
+
+        *guard = 100;
+        crate::assert_with_log!(*guard == 100, "owned guard writes value", 100u32, *guard);
+
+        // try_lock should fail while held.
+        let locked = OwnedMutexGuard::try_lock(Arc::clone(&mutex)).is_err();
+        crate::assert_with_log!(locked, "try_lock fails while held", true, locked);
+
+        // After drop, another lock should succeed and see the mutation.
+        drop(guard);
+        let guard2 =
+            OwnedMutexGuard::try_lock(Arc::clone(&mutex)).expect("try_lock after drop");
+        crate::assert_with_log!(*guard2 == 100, "mutation persisted", 100u32, *guard2);
+        crate::test_complete!("test_owned_mutex_guard_try_lock");
+    }
+
+    #[test]
+    fn test_owned_mutex_guard_async_lock() {
+        init_test("test_owned_mutex_guard_async_lock");
+        let cx = test_cx();
+        let mutex = Arc::new(Mutex::new(0_u32));
+
+        // Lock via the owned async path.
+        let mut fut = OwnedMutexGuard::lock(Arc::clone(&mutex), &cx);
+        let mut guard = poll_until_ready(&mut fut).expect("async lock should succeed");
+        *guard = 99;
+        drop(guard);
+
+        // Verify the mutation persisted.
+        let guard2 =
+            OwnedMutexGuard::try_lock(Arc::clone(&mutex)).expect("try_lock after async");
+        crate::assert_with_log!(*guard2 == 99, "async mutation persisted", 99u32, *guard2);
+        crate::test_complete!("test_owned_mutex_guard_async_lock");
+    }
+
+    #[test]
+    fn test_mutex_default() {
+        init_test("test_mutex_default");
+        let mutex: Mutex<u32> = Mutex::default();
+        let guard = mutex.try_lock().expect("default mutex should be unlocked");
+        crate::assert_with_log!(*guard == 0, "default value", 0u32, *guard);
+        crate::test_complete!("test_mutex_default");
+    }
 }

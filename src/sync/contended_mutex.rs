@@ -113,7 +113,10 @@ mod inner {
         /// Acquires the mutex, tracking contention metrics.
         pub fn lock(&self) -> LockResult<ContendedMutexGuard<'_, T>> {
             let start = Instant::now();
-            let contended = self.inner.try_lock().is_err();
+            let contended = matches!(
+                self.inner.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            );
 
             let result = self.inner.lock();
             let wait_ns = start.elapsed().as_nanos() as u64;
@@ -537,5 +540,31 @@ mod tests {
             after.hold_ns
         );
         crate::test_complete!("reset_clears_all_metrics");
+    }
+
+    #[cfg(feature = "lock-metrics")]
+    #[test]
+    fn poisoned_lock_does_not_count_as_contention() {
+        init_test("poisoned_lock_does_not_count_as_contention");
+        let m = Arc::new(ContendedMutex::new("test", 0u8));
+        let m2 = Arc::clone(&m);
+
+        let poisoner = thread::spawn(move || {
+            let _guard = m2.lock().expect("initial lock should succeed");
+            panic!("intentional poison");
+        });
+        let _ = poisoner.join();
+
+        let poisoned = m.lock().expect_err("lock should be poisoned");
+        drop(poisoned.into_inner());
+
+        let snap = m.snapshot();
+        crate::assert_with_log!(
+            snap.contentions == 0,
+            "poison is not contention",
+            0u64,
+            snap.contentions
+        );
+        crate::test_complete!("poisoned_lock_does_not_count_as_contention");
     }
 }

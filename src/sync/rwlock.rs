@@ -1413,7 +1413,12 @@ mod tests {
         // The reader should now acquire.
         let read_result = poll_once(&mut read_fut);
         let acquired = matches!(read_result, Some(Ok(_)));
-        crate::assert_with_log!(acquired, "reader acquired after writer drop", true, acquired);
+        crate::assert_with_log!(
+            acquired,
+            "reader acquired after writer drop",
+            true,
+            acquired
+        );
 
         let state = lock.debug_state();
         crate::assert_with_log!(
@@ -1475,8 +1480,8 @@ mod tests {
         let cx = test_cx();
         let lock = StdArc::new(RwLock::new(42_u32));
 
-        let guard = OwnedRwLockReadGuard::try_read(StdArc::clone(&lock))
-            .expect("try_read should succeed");
+        let guard =
+            OwnedRwLockReadGuard::try_read(StdArc::clone(&lock)).expect("try_read should succeed");
         let value = guard.with_read(|v| *v);
         crate::assert_with_log!(value == 42, "owned read guard value", 42u32, value);
         drop(guard);
@@ -1499,7 +1504,12 @@ mod tests {
         drop(guard);
 
         let read_guard = lock.try_read().expect("read after write drop");
-        crate::assert_with_log!(*read_guard == 100, "owned write persisted", 100u32, *read_guard);
+        crate::assert_with_log!(
+            *read_guard == 100,
+            "owned write persisted",
+            100u32,
+            *read_guard
+        );
         crate::test_complete!("test_owned_write_guard_basic");
     }
 
@@ -1538,7 +1548,12 @@ mod tests {
 
         // Writer 3 should still be pending.
         let w3_still_pending = poll_once(&mut write3_fut).is_none();
-        crate::assert_with_log!(w3_still_pending, "writer 3 still pending", true, w3_still_pending);
+        crate::assert_with_log!(
+            w3_still_pending,
+            "writer 3 still pending",
+            true,
+            w3_still_pending
+        );
 
         // Release writer 2 — writer 3 should acquire.
         if let Some(Ok(guard)) = w2_result {
