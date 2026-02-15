@@ -281,15 +281,6 @@ impl TcpStreamInner {
             Interest::empty(),
         );
 
-        let wake_remaining = || {
-            if let Some(w) = guard.read_waker.as_ref() {
-                w.wake_by_ref();
-            }
-            if let Some(w) = guard.write_waker.as_ref() {
-                w.wake_by_ref();
-            }
-        };
-
         let mut clear_registration = desired_interest.is_empty();
         if !clear_registration {
             let combined = combined_waker(guard.read_waker.as_ref(), guard.write_waker.as_ref());
@@ -299,12 +290,22 @@ impl TcpStreamInner {
                 // stranded after sibling drop.
                 if reg.set_interest(desired_interest).is_err() || !reg.update_waker(combined) {
                     clear_registration = true;
-                    wake_remaining();
+                    if let Some(w) = guard.read_waker.as_ref() {
+                        w.wake_by_ref();
+                    }
+                    if let Some(w) = guard.write_waker.as_ref() {
+                        w.wake_by_ref();
+                    }
                 }
             } else {
                 // Surviving waiter but no registration: wake it so poll paths
                 // can attempt fresh registration or surface terminal errors.
-                wake_remaining();
+                if let Some(w) = guard.read_waker.as_ref() {
+                    w.wake_by_ref();
+                }
+                if let Some(w) = guard.write_waker.as_ref() {
+                    w.wake_by_ref();
+                }
             }
         }
 
