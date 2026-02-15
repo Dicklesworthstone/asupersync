@@ -448,8 +448,25 @@ impl Bulkhead {
     }
 
     /// Release permit (internal use - prefer RAII via permit).
+    ///
+    /// Uses a CAS loop to cap `available_permits` at `max_concurrent`,
+    /// preventing overflow if permits are released after a `reset()`.
     fn release_permit(&self, weight: u32) {
-        self.available_permits.fetch_add(weight, Ordering::SeqCst);
+        let max = self.policy.max_concurrent;
+        loop {
+            let current = self.available_permits.load(Ordering::SeqCst);
+            let new = current.saturating_add(weight).min(max);
+            if new == current {
+                break;
+            }
+            if self
+                .available_permits
+                .compare_exchange(current, new, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                break;
+            }
+        }
     }
 
     /// Execute an operation with bulkhead protection (synchronous, immediate).
@@ -1331,5 +1348,51 @@ mod tests {
         bh.reset();
 
         assert_eq!(bh.available(), 10);
+    }
+
+    #[test]
+    fn release_after_reset_does_not_exceed_max_concurrent() {
+        let bh = Bulkhead::new(BulkheadPolicy {
+            max_concurrent: 10,
+            ..Default::default()
+        });
+
+        // Acquire permits
+        let p1 = bh.try_acquire(5).unwrap();
+        let p2 = bh.try_acquire(3).unwrap();
+        assert_eq!(bh.available(), 2);
+
+        // Reset while permits outstanding
+        bh.reset();
+        assert_eq!(bh.available(), 10);
+
+        // Release pre-reset permits — must NOT exceed max_concurrent
+        p1.release_to(&bh);
+        assert_eq!(
+            bh.available(),
+            10,
+            "available_permits must be capped at max_concurrent after reset + release"
+        );
+
+        p2.release_to(&bh);
+        assert_eq!(
+            bh.available(),
+            10,
+            "available_permits must still be capped after second release"
+        );
+
+        // Core invariant: must not grant more than max_concurrent permits
+        let mut permits: Vec<BulkheadPermit> = Vec::new();
+        for _ in 0..10 {
+            permits.push(bh.try_acquire(1).unwrap());
+        }
+        assert!(
+            bh.try_acquire(1).is_none(),
+            "must reject 11th permit even after reset + release"
+        );
+
+        for p in permits {
+            p.release_to(&bh);
+        }
     }
 }
