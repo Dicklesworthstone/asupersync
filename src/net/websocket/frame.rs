@@ -165,8 +165,19 @@ impl Frame {
     }
 
     /// Create a close frame with optional status code and reason.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `code` is a value that MUST NOT appear in a Close frame
+    /// per RFC 6455 §7.4.1 (1005, 1006, 1015).
     #[must_use]
     pub fn close(code: Option<u16>, reason: Option<&str>) -> Self {
+        if let Some(c) = code {
+            assert!(
+                c != 1005 && c != 1006 && c != 1015,
+                "close code {c} must not be sent in a Close frame (RFC 6455 §7.4.1)"
+            );
+        }
         let payload = match (code, reason) {
             (Some(c), Some(r)) => {
                 let mut buf = BytesMut::with_capacity(2 + r.len());
@@ -626,6 +637,13 @@ impl Decoder for FrameCodec {
                     // Apply masking if present
                     if let Some(key) = mask_key {
                         apply_mask(&mut payload, *key);
+                    }
+
+                    // RFC 6455 §5.5.1: Close frame body must be 0 bytes or
+                    // start with a 2-byte status code. Exactly 1 byte is invalid.
+                    if *opcode == Opcode::Close && payload.len() == 1 {
+                        self.state = DecodeState::Header;
+                        return Err(WsError::InvalidClosePayload);
                     }
 
                     let frame = Frame {
