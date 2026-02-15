@@ -173,7 +173,7 @@ impl Notify {
     /// start waiting after this call will not be affected.
     pub fn notify_waiters(&self) {
         // Increment generation to signal all waiters.
-        self.generation.fetch_add(1, Ordering::Release);
+        let new_generation = self.generation.fetch_add(1, Ordering::Release) + 1;
 
         // Collect all wakers (SmallVec avoids heap allocation for ≤8 waiters).
         let wakers: SmallVec<[Waker; 8]> = {
@@ -187,6 +187,9 @@ impl Notify {
                     // (`waker == None`) can pin tail entries and prevent shrinking.
                     if let Some(waker) = entry.waker.take() {
                         entry.notified = true;
+                        // Mark this waiter as broadcast-notified to avoid turning
+                        // a cancelled broadcast waiter into a stored notify_one token.
+                        entry.generation = new_generation;
                         Some(waker)
                     } else {
                         None
@@ -379,11 +382,24 @@ impl Drop for Notified<'_> {
                 let mut waiters = self.notify.waiters.lock();
 
                 // Check if notify_one() selected us before we remove the entry.
-                let was_notified = index < waiters.entries.len() && waiters.entries[index].notified;
+                let (was_notified, notified_generation) = if index < waiters.entries.len() {
+                    let entry = &waiters.entries[index];
+                    (entry.notified, entry.generation)
+                } else {
+                    (false, self.initial_generation)
+                };
 
                 waiters.remove(index);
 
                 if was_notified {
+                    let was_broadcast_notify = notified_generation != self.initial_generation;
+                    if was_broadcast_notify {
+                        // notify_waiters is edge-triggered for currently waiting tasks only.
+                        // If a broadcast-notified waiter is cancelled, do not convert that
+                        // event into a stored token for future waiters.
+                        return;
+                    }
+
                     // We were marked notified by notify_one() but the future was
                     // dropped before consuming it (e.g. cancelled by select!).
                     // Pass the notification to the next waiter to prevent a lost
@@ -778,5 +794,48 @@ mod tests {
         );
 
         crate::test_complete!("notify_waiters_preserves_slab_shrinking_with_middle_hole");
+    }
+
+    #[test]
+    fn dropped_broadcast_waiter_does_not_leak_stored_notification() {
+        init_test("dropped_broadcast_waiter_does_not_leak_stored_notification");
+        let notify = Notify::new();
+
+        // Register two waiters.
+        let mut fut1 = notify.notified();
+        let mut fut2 = notify.notified();
+        assert!(poll_once(&mut fut1).is_pending());
+        assert!(poll_once(&mut fut2).is_pending());
+
+        // Broadcast wake current waiters.
+        notify.notify_waiters();
+
+        // Cancel one waiter before it consumes readiness.
+        drop(fut1);
+
+        // The other waiter should still complete.
+        assert!(poll_once(&mut fut2).is_ready());
+        drop(fut2);
+
+        let stored = notify.stored_notifications.load(Ordering::Acquire);
+        crate::assert_with_log!(
+            stored == 0,
+            "broadcast drop should not create stored token",
+            0usize,
+            stored
+        );
+
+        // A new waiter after broadcast should wait (not consume a ghost token).
+        let mut fut3 = notify.notified();
+        let pending = poll_once(&mut fut3).is_pending();
+        crate::assert_with_log!(
+            pending,
+            "post-broadcast waiter should remain pending",
+            true,
+            pending
+        );
+        drop(fut3);
+
+        crate::test_complete!("dropped_broadcast_waiter_does_not_leak_stored_notification");
     }
 }

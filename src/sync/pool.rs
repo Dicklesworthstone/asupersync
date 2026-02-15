@@ -2045,6 +2045,89 @@ mod tests {
     }
 
     #[test]
+    fn pool_stats_total_includes_creating_slots() {
+        init_test("pool_stats_total_includes_creating_slots");
+
+        // Verify that PoolStats::total includes in-flight creates (the `creating`
+        // counter), not just active + idle. This ensures monitoring accurately
+        // reflects actual capacity usage.
+        let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(3));
+
+        // Reserve a create slot (simulates async resource creation in progress)
+        let slot = CreateSlotReservation::try_reserve(&pool);
+        assert!(slot.is_some(), "should reserve a create slot");
+
+        let stats = pool.stats();
+        // total should be 1 (0 active + 0 idle + 1 creating)
+        crate::assert_with_log!(
+            stats.total == 1,
+            "total includes creating slot",
+            1usize,
+            stats.total
+        );
+
+        // Drop the reservation without committing (simulates cancelled create)
+        drop(slot);
+
+        let stats = pool.stats();
+        crate::assert_with_log!(
+            stats.total == 0,
+            "total after released creating slot",
+            0usize,
+            stats.total
+        );
+
+        crate::test_complete!("pool_stats_total_includes_creating_slots");
+    }
+
+    #[test]
+    fn drop_delegates_to_return_inner_no_double_send() {
+        init_test("drop_delegates_to_return_inner_no_double_send");
+
+        // Verify that Drop delegates to return_inner and does not
+        // produce double sends on the return channel.
+        let (tx, rx) = mpsc::channel();
+        {
+            let _pooled = PooledResource::new(55u8, tx);
+            // _pooled dropped here
+        }
+
+        let msg = rx.recv().expect("should receive exactly one return message");
+        match msg {
+            PoolReturn::Return {
+                resource: value, ..
+            } => {
+                crate::assert_with_log!(value == 55, "returned value", 55u8, value);
+            }
+            PoolReturn::Discard { .. } => unreachable!("expected Return, got Discard"),
+        }
+
+        // Verify no second message (no double-send from duplicated drop logic)
+        crate::assert_with_log!(
+            rx.try_recv().is_err(),
+            "no double send from Drop",
+            true,
+            rx.try_recv().is_err()
+        );
+
+        crate::test_complete!("drop_delegates_to_return_inner_no_double_send");
+    }
+
+    #[test]
+    fn pooled_resource_is_send_when_resource_is_send() {
+        init_test("pooled_resource_is_send_when_resource_is_send");
+
+        // Verify that PooledResource<R> auto-derives Send when R: Send
+        // (no manual unsafe impl needed).
+        fn assert_send<T: Send>() {}
+        assert_send::<PooledResource<u8>>();
+        assert_send::<PooledResource<String>>();
+        assert_send::<PooledResource<Vec<u8>>>();
+
+        crate::test_complete!("pooled_resource_is_send_when_resource_is_send");
+    }
+
+    #[test]
     fn generic_pool_try_acquire_creates_resource() {
         init_test("generic_pool_try_acquire_creates_resource");
 
