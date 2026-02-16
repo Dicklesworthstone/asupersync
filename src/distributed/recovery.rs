@@ -663,7 +663,14 @@ impl RecoveryOrchestrator {
             // Reconstruct AuthenticatedSymbol from CollectedSymbol parts
             // This assumes the tag was valid when collected (if verified=true).
             // StateDecoder will re-verify if verify_auth is true.
-            let auth = if cs.verified {
+            //
+            // SECURITY: If we are required to verify integrity (verify_integrity=true),
+            // we MUST NOT trust the `cs.verified` flag from the collector, as it may
+            // come from an untrusted source or a previous context. We force the symbol
+            // to be unverified so the pipeline performs the check.
+            let trust_verified_flag = !self.decoder.config.verify_integrity;
+
+            let auth = if cs.verified && trust_verified_flag {
                 AuthenticatedSymbol::new_verified(cs.symbol.clone(), cs.tag)
             } else {
                 AuthenticatedSymbol::from_parts(cs.symbol.clone(), cs.tag)
