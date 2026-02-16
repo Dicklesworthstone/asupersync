@@ -26,6 +26,9 @@ mod tests {
         println!("Final e-value: {}", monitor.e_value());
 
         // Assert that evidence grew
-        assert!(monitor.e_value() > 1.0, "Evidence should grow for 20% overload with 10% tolerance");
+        assert!(
+            monitor.e_value() > 1.0,
+            "Evidence should grow for 20% overload with 10% tolerance"
+        );
     }
 }

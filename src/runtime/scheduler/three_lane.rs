@@ -1590,7 +1590,11 @@ impl ThreeLaneWorker {
     /// Wakes a list of dependent tasks (waiters) while holding the RuntimeState lock.
     ///
     /// This handles local/global routing and centralized deduplication via `wake_state`.
-    fn wake_dependents_locked(&self, state: &RuntimeState, waiters: impl IntoIterator<Item = TaskId>) {
+    fn wake_dependents_locked(
+        &self,
+        state: &RuntimeState,
+        waiters: impl IntoIterator<Item = TaskId>,
+    ) {
         for waiter in waiters {
             if let Some(record) = state.task(waiter) {
                 let waiter_priority = record
@@ -1665,15 +1669,19 @@ impl ThreeLaneWorker {
                             }
                         }
                     });
-                    
+
                     // 2. Wake waiters and process finalizers (requires full RuntimeState lock)
                     // We expect success here; poisoning aborts the thread, which is acceptable during panic unwind.
-                    let mut state = self.worker.state.lock().expect("runtime state lock poisoned");
+                    let mut state = self
+                        .worker
+                        .state
+                        .lock()
+                        .expect("runtime state lock poisoned");
                     let waiters = state.task_completed(self.task_id);
                     let finalizers = state.drain_ready_async_finalizers();
-                    
+
                     self.worker.wake_dependents_locked(&state, waiters);
-                    
+
                     for (finalizer_task, priority) in finalizers {
                         self.worker.global.inject_ready(finalizer_task, priority);
                         self.worker.coordinator.wake_one();
@@ -1878,9 +1886,9 @@ impl ThreeLaneWorker {
 
                 let waiters = state.task_completed(task_id);
                 let finalizers = state.drain_ready_async_finalizers();
-                
+
                 self.wake_dependents_locked(&state, waiters);
-                
+
                 for (finalizer_task, priority) in finalizers {
                     self.global.inject_ready(finalizer_task, priority);
                     self.coordinator.wake_one();
@@ -4577,7 +4585,7 @@ mod tests {
 
         // 5. Verify where it went
         let worker_1_has_it = worker_1_ready.lock().unwrap().contains(&task_id);
-        
+
         // Check Worker 0's queue
         let worker_0_ready = scheduler.local_ready[0].clone();
         let worker_0_has_it = worker_0_ready.lock().unwrap().contains(&task_id);

@@ -778,7 +778,9 @@ mod tests {
         let mut b = TestDuplex::new(b"from B");
         let mut fut = copy_bidirectional(&mut a, &mut b);
         let mut fut = Pin::new(&mut fut);
-        let _ = poll_ready(&mut fut).expect("future did not resolve").unwrap();
+        let _ = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .unwrap();
 
         crate::assert_with_log!(a.shutdown_called, "a shutdown", true, a.shutdown_called);
         crate::assert_with_log!(b.shutdown_called, "b shutdown", true, b.shutdown_called);

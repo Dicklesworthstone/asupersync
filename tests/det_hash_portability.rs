@@ -4,7 +4,7 @@ use std::hash::Hasher;
 #[test]
 fn test_det_hasher_endianness() {
     let val: u32 = 0x12345678;
-    
+
     let mut h1 = DetHasher::default();
     h1.write_u32(val);
     let hash1 = h1.finish();
@@ -17,13 +17,16 @@ fn test_det_hasher_endianness() {
     // On Big Endian machines, it would fail.
     // However, if we fix the implementation to use to_le_bytes(), this assertion will hold true everywhere.
     // The goal of the fix is to make this strictly true by design, not just by coincidence of host arch.
-    assert_eq!(hash1, hash2, "Hasher should use Little Endian encoding for u32");
+    assert_eq!(
+        hash1, hash2,
+        "Hasher should use Little Endian encoding for u32"
+    );
 }
 
 #[test]
 fn test_det_hasher_usize_width_portability() {
     let val: usize = 0x12345678;
-    
+
     let mut h1 = DetHasher::default();
     h1.write_usize(val);
     let hash1 = h1.finish();

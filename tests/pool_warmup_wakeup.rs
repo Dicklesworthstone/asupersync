@@ -1,10 +1,10 @@
-use asupersync::sync::{GenericPool, Pool, PoolConfig, AsyncResourceFactory};
 use asupersync::cx::Cx;
+use asupersync::sync::{AsyncResourceFactory, GenericPool, Pool, PoolConfig};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 
 struct ManualWakerFactory {
     waker: Arc<Mutex<Option<Waker>>>,
@@ -15,7 +15,9 @@ impl AsyncResourceFactory for ManualWakerFactory {
     type Resource = u32;
     type Error = std::io::Error;
 
-    fn create(&self) -> Pin<Box<dyn Future<Output = Result<Self::Resource, Self::Error>> + Send + '_>> {
+    fn create(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Self::Resource, Self::Error>> + Send + '_>> {
         let waker = self.waker.clone();
         let val = self.created_val;
         Box::pin(async move {
@@ -33,7 +35,10 @@ struct WaitOnce {
 
 impl WaitOnce {
     fn new(waker: Arc<Mutex<Option<Waker>>>) -> Self {
-        Self { waker, polled: false }
+        Self {
+            waker,
+            polled: false,
+        }
     }
 }
 
@@ -55,7 +60,7 @@ impl Future for WaitOnce {
 fn test_warmup_wakes_waiters() {
     // This test uses a manual future implementation to verify wakeup behavior
     // It's a bit complex because we need to control the execution order precisely.
-    
+
     let factory_waker = Arc::new(Mutex::new(None));
     let factory = ManualWakerFactory {
         waker: factory_waker.clone(),
@@ -72,9 +77,8 @@ fn test_warmup_wakes_waiters() {
 
     // Spawn warmup in background
     let pool_clone = pool.clone();
-    let warmup_handle = std::thread::spawn(move || {
-        futures_lite::future::block_on(pool_clone.warmup())
-    });
+    let warmup_handle =
+        std::thread::spawn(move || futures_lite::future::block_on(pool_clone.warmup()));
 
     // Wait for factory to be called (meaning warmup has reserved the slot)
     // We poll the factory_waker until it's set
@@ -89,7 +93,10 @@ fn test_warmup_wakes_waiters() {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert!(factory_task_waker.is_some(), "Warmup should have started creating resource");
+    assert!(
+        factory_task_waker.is_some(),
+        "Warmup should have started creating resource"
+    );
 
     // Now acquire. The pool is "full" (1 creating, max 1).
     // This acquire should block waiting for a slot.
@@ -109,16 +116,19 @@ fn test_warmup_wakes_waiters() {
     }
 
     // Wait for warmup to complete
-    warmup_handle.join().unwrap().expect("Warmup should succeed");
+    warmup_handle
+        .join()
+        .unwrap()
+        .expect("Warmup should succeed");
 
     // Now acquire should complete immediately because warmup finished and put resource in idle.
     // If there is a bug, acquire will hang (or timeout if configured, but we didn't set short timeout)
     // We'll join with a timeout to detect the hang.
-    
+
     // Since std::thread::join doesn't timeout, we can't easily timeout here without extra crates.
     // But if we just wait, the test will hang if bug is present.
     // Let's assume the test runner has a timeout.
-    
+
     let resource = acquire_handle.join().unwrap();
     assert_eq!(*resource, 42);
 }

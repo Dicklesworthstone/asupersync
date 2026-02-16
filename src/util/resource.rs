@@ -620,7 +620,7 @@ fn prepare_limit_exceeded(
     if projected.symbols_in_flight > limits.max_symbols_in_flight {
         batch.exceeded.push(ResourceKind::SymbolsInFlight);
     }
-    
+
     batch
 }
 
