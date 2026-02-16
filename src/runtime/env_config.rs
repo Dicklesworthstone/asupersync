@@ -315,6 +315,9 @@ mod tests {
             ENV_BLOCKING_MAX_THREADS,
             ENV_ENABLE_PARKING,
             ENV_POLL_BUDGET,
+            ENV_CANCEL_LANE_MAX_STREAK,
+            ENV_ENABLE_GOVERNOR,
+            ENV_GOVERNOR_INTERVAL,
         ] {
             std::env::remove_var(var);
         }
@@ -456,6 +459,28 @@ mod tests {
     }
 
     #[test]
+    fn env_overrides_cancel_lane_max_streak() {
+        with_env(ENV_CANCEL_LANE_MAX_STREAK, "7", || {
+            let mut config = RuntimeConfig::default();
+            apply_env_overrides(&mut config).unwrap();
+            assert_eq!(config.cancel_lane_max_streak, 7);
+        });
+    }
+
+    #[test]
+    fn env_overrides_governor_settings() {
+        with_envs(
+            &[(ENV_ENABLE_GOVERNOR, "true"), (ENV_GOVERNOR_INTERVAL, "41")],
+            || {
+                let mut config = RuntimeConfig::default();
+                apply_env_overrides(&mut config).unwrap();
+                assert!(config.enable_governor);
+                assert_eq!(config.governor_interval, 41);
+            },
+        );
+    }
+
+    #[test]
     fn env_overrides_multiple() {
         with_envs(
             &[
@@ -502,6 +527,20 @@ mod tests {
                 "error should mention bad value: {msg}"
             );
         });
+    }
+
+    #[test]
+    fn clean_env_locked_removes_governor_related_vars() {
+        let _guard = crate::test_utils::env_lock();
+        std::env::set_var(ENV_CANCEL_LANE_MAX_STREAK, "99");
+        std::env::set_var(ENV_ENABLE_GOVERNOR, "true");
+        std::env::set_var(ENV_GOVERNOR_INTERVAL, "123");
+
+        clean_env_locked();
+
+        assert!(std::env::var(ENV_CANCEL_LANE_MAX_STREAK).is_err());
+        assert!(std::env::var(ENV_ENABLE_GOVERNOR).is_err());
+        assert!(std::env::var(ENV_GOVERNOR_INTERVAL).is_err());
     }
 
     #[test]
