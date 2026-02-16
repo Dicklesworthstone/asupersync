@@ -14,18 +14,18 @@ use crate::sync::OwnedMutexGuard;
 use crate::transport::sink::{SymbolSink, SymbolSinkExt};
 use crate::types::symbol::{ObjectId, Symbol};
 use crate::types::{RegionId, Time};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
-type EndpointSinkMap = HashMap<EndpointId, Arc<Mutex<Box<dyn SymbolSink>>>>;
+type EndpointSinkMap = BTreeMap<EndpointId, Arc<Mutex<Box<dyn SymbolSink>>>>;
 
 // ============================================================================
 // Endpoint Types
 // ============================================================================
 
 /// Unique identifier for an endpoint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EndpointId(pub u64);
 
 impl EndpointId {
@@ -109,7 +109,7 @@ pub struct Endpoint {
     pub last_failure: RwLock<Option<Time>>,
 
     /// Custom metadata.
-    pub metadata: HashMap<String, String>,
+    pub metadata: BTreeMap<String, String>,
 }
 
 impl Endpoint {
@@ -126,7 +126,7 @@ impl Endpoint {
             failures: AtomicU64::new(0),
             last_success: RwLock::new(None),
             last_failure: RwLock::new(None),
-            metadata: HashMap::new(),
+            metadata: BTreeMap::new(),
         }
     }
 
@@ -184,6 +184,25 @@ impl Endpoint {
         } else {
             failures as f64 / total as f64
         }
+    }
+
+    /// Acquires a connection slot and returns a RAII guard.
+    ///
+    /// The connection slot is automatically released when the guard is dropped.
+    pub fn acquire_connection_guard(&self) -> ConnectionGuard<'_> {
+        self.acquire_connection();
+        ConnectionGuard { endpoint: self }
+    }
+}
+
+/// RAII guard for an active connection slot.
+pub struct ConnectionGuard<'a> {
+    endpoint: &'a Endpoint,
+}
+
+impl Drop for ConnectionGuard<'_> {
+    fn drop(&mut self) {
+        self.endpoint.release_connection();
     }
 }
 
@@ -395,7 +414,7 @@ impl RoutingEntry {
 }
 
 /// Key for routing table lookups.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RouteKey {
     /// Route by ObjectId.
     Object(ObjectId),
@@ -428,13 +447,13 @@ impl RouteKey {
 #[derive(Debug)]
 pub struct RoutingTable {
     /// Routes by key.
-    routes: RwLock<HashMap<RouteKey, RoutingEntry>>,
+    routes: RwLock<BTreeMap<RouteKey, RoutingEntry>>,
 
     /// Default route (if no specific route matches).
     default_route: RwLock<Option<RoutingEntry>>,
 
     /// All known endpoints.
-    endpoints: RwLock<HashMap<EndpointId, Arc<Endpoint>>>,
+    endpoints: RwLock<BTreeMap<EndpointId, Arc<Endpoint>>>,
 }
 
 impl RoutingTable {
@@ -442,9 +461,9 @@ impl RoutingTable {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            routes: RwLock::new(HashMap::new()),
+            routes: RwLock::new(BTreeMap::new()),
             default_route: RwLock::new(None),
-            endpoints: RwLock::new(HashMap::new()),
+            endpoints: RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -862,6 +881,19 @@ impl std::fmt::Debug for SymbolDispatcher {
     }
 }
 
+/// RAII guard for an active dispatch.
+struct DispatchGuard<'a> {
+    dispatcher: &'a SymbolDispatcher,
+}
+
+impl Drop for DispatchGuard<'_> {
+    fn drop(&mut self) {
+        self.dispatcher
+            .active_dispatches
+            .fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 impl SymbolDispatcher {
     /// Creates a new dispatcher.
     #[must_use]
@@ -872,7 +904,7 @@ impl SymbolDispatcher {
             active_dispatches: AtomicU32::new(0),
             total_dispatched: AtomicU64::new(0),
             total_failures: AtomicU64::new(0),
-            sinks: RwLock::new(HashMap::new()),
+            sinks: RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -908,6 +940,9 @@ impl SymbolDispatcher {
             return Err(DispatchError::Overloaded);
         }
 
+        // RAII guard to ensure active_dispatches is decremented even on cancellation/panic
+        let _guard = DispatchGuard { dispatcher: self };
+
         let result = match strategy {
             DispatchStrategy::Unicast => self.dispatch_unicast(cx, &symbol).await,
             DispatchStrategy::Multicast { count } => {
@@ -919,7 +954,8 @@ impl SymbolDispatcher {
             }
         };
 
-        self.active_dispatches.fetch_sub(1, Ordering::SeqCst);
+        // Explicitly drop guard is handled by RAII, but we need to update stats before returning.
+        // We can do stats update here. The guard handles the decrement.
 
         match &result {
             Ok(r) => {
@@ -951,7 +987,7 @@ impl SymbolDispatcher {
             sinks.get(&route.endpoint.id).cloned()
         };
 
-        route.endpoint.acquire_connection();
+        let _guard = route.endpoint.acquire_connection_guard();
 
         let result =
             if let Some(sink) = sink {
@@ -994,7 +1030,7 @@ impl SymbolDispatcher {
                 })
             };
 
-        route.endpoint.release_connection();
+        // Guard drop releases connection
         result
     }
 
@@ -1044,7 +1080,7 @@ impl SymbolDispatcher {
         let mut failed = Vec::new();
 
         for endpoint in selected {
-            endpoint.acquire_connection();
+            let _guard = endpoint.acquire_connection_guard();
 
             // Attempt send
             let success = if let Some(sink) = {
@@ -1063,7 +1099,7 @@ impl SymbolDispatcher {
                 true
             };
 
-            endpoint.release_connection();
+            // Release is implicit on loop continue/exit
 
             if success {
                 endpoint.record_success(Time::ZERO);
@@ -1110,7 +1146,7 @@ impl SymbolDispatcher {
         let mut failed = Vec::new();
 
         for route in endpoints {
-            route.acquire_connection();
+            let _guard = route.acquire_connection_guard();
 
             // Attempt send
             let success = if let Some(sink) = {
@@ -1128,8 +1164,6 @@ impl SymbolDispatcher {
                 // Simulation
                 true
             };
-
-            route.release_connection();
 
             if success {
                 route.record_success(Time::ZERO);
@@ -1184,7 +1218,7 @@ impl SymbolDispatcher {
                 break;
             }
 
-            route.acquire_connection();
+            let _guard = route.acquire_connection_guard();
 
             let success = if let Some(sink) = {
                 let sinks = self.sinks.read().expect("sinks lock poisoned");
@@ -1200,8 +1234,6 @@ impl SymbolDispatcher {
             } else {
                 true
             };
-
-            route.release_connection();
 
             if success {
                 route.record_success(Time::ZERO);
