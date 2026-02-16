@@ -75,7 +75,7 @@ pub struct VirtualTcpStream {
     write_half: Arc<Mutex<ChannelHalf>>,
     nodelay: AtomicBool,
     ttl: AtomicU32,
-    write_shutdown: bool,
+    write_shutdown: AtomicBool,
 }
 
 impl std::fmt::Debug for VirtualTcpStream {
@@ -105,7 +105,7 @@ impl VirtualTcpStream {
             write_half: Arc::clone(&a_to_b),
             nodelay: AtomicBool::new(false),
             ttl: AtomicU32::new(64),
-            write_shutdown: false,
+            write_shutdown: AtomicBool::new(false),
         };
 
         let stream_b = Self {
@@ -115,7 +115,7 @@ impl VirtualTcpStream {
             write_half: b_to_a,
             nodelay: AtomicBool::new(false),
             ttl: AtomicU32::new(64),
-            write_shutdown: false,
+            write_shutdown: AtomicBool::new(false),
         };
 
         (stream_a, stream_b)
@@ -161,7 +161,7 @@ impl AsyncWrite for VirtualTcpStream {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        if this.write_shutdown {
+        if this.write_shutdown.load(Ordering::Relaxed) {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "write half shutdown",
@@ -196,7 +196,7 @@ impl AsyncWrite for VirtualTcpStream {
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        this.write_shutdown = true;
+        this.write_shutdown.store(true, Ordering::Relaxed);
 
         // Signal EOF to the reader
         let mut half = this.write_half.lock().expect("channel lock poisoned");
@@ -214,7 +214,7 @@ impl Unpin for VirtualTcpStream {}
 
 impl Drop for VirtualTcpStream {
     fn drop(&mut self) {
-        self.write_shutdown = true;
+        *self.write_shutdown.get_mut() = true;
 
         let read_wake = self.read_half.lock().map_or_else(
             |_| None,
@@ -278,6 +278,7 @@ impl TcpStreamApi for VirtualTcpStream {
         }
         match how {
             Shutdown::Write | Shutdown::Both => {
+                self.write_shutdown.store(true, Ordering::Relaxed);
                 let mut half = self.write_half.lock().expect("lock poisoned");
                 half.closed = true;
                 let wake = half.waker.take();

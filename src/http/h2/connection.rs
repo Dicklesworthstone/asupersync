@@ -522,13 +522,10 @@ impl Connection {
     /// Process DATA frame.
     fn process_data(&mut self, frame: DataFrame) -> Result<Option<ReceivedFrame>, H2Error> {
         // RFC 7540 §5.1: receiving DATA on an idle stream MUST be treated as a
-        // connection error of type PROTOCOL_ERROR. Check this before
-        // get_or_create to avoid polluting last_stream_id on rejection.
-        {
-            let stream = self.streams.get_or_create(frame.stream_id)?;
-            if stream.state() == StreamState::Idle {
-                return Err(H2Error::protocol("DATA received on idle stream"));
-            }
+        // connection error of type PROTOCOL_ERROR. Check before get_or_create
+        // to avoid polluting last_stream_id and leaking idle Stream entries.
+        if self.streams.is_idle_stream_id(frame.stream_id) {
+            return Err(H2Error::protocol("DATA received on idle stream"));
         }
 
         // Track stream ID only after the idle check passes.
@@ -551,11 +548,14 @@ impl Connection {
         // desynchronizes the connection flow-control windows.
         self.recv_window -= window_delta;
 
-        // Re-borrow the stream for the stream-level operations.
+        // Look up the stream. If the stream was closed and pruned, treat
+        // it as a stream error (RFC 7540 §5.1). The connection-level window
+        // was already decremented above so the peer's accounting stays in sync.
         let stream = self.streams.get_mut(frame.stream_id).ok_or_else(|| {
-            H2Error::connection(
-                ErrorCode::InternalError,
-                "stream disappeared after get_or_create",
+            H2Error::stream(
+                frame.stream_id,
+                ErrorCode::StreamClosed,
+                "DATA received on closed stream",
             )
         })?;
         stream.recv_data(payload_len, frame.end_stream)?;
