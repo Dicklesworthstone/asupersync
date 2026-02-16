@@ -209,10 +209,14 @@ fn parse_request_line(line: &str) -> Result<(Method, String, Version), HttpError
 
 /// Validates an HTTP field-name (RFC 7230 token / tchar set).
 fn is_valid_header_name(name: &str) -> bool {
+    is_valid_header_name_bytes(name.as_bytes())
+}
+
+fn is_valid_header_name_bytes(name: &[u8]) -> bool {
     if name.is_empty() {
         return false;
     }
-    name.as_bytes().iter().all(|&b| {
+    name.iter().all(|&b| {
         matches!(
             b,
             b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^'
@@ -221,9 +225,7 @@ fn is_valid_header_name(name: &str) -> bool {
     })
 }
 
-/// Parse a single `Name: Value` header line.
-pub(super) fn parse_header_line(line: &str) -> Result<(String, String), HttpError> {
-    let line_bytes = line.as_bytes();
+fn parse_header_line_bytes(line_bytes: &[u8]) -> Result<(String, String), HttpError> {
     let colon = line_bytes
         .iter()
         .position(|&b| b == b':')
@@ -231,18 +233,13 @@ pub(super) fn parse_header_line(line: &str) -> Result<(String, String), HttpErro
     let raw_name = &line_bytes[..colon];
 
     // Header field names cannot be surrounded by whitespace.
-    if raw_name
-        .first()
-        .is_some_and(|b| b.is_ascii_whitespace())
-        || raw_name
-            .last()
-            .is_some_and(|b| b.is_ascii_whitespace())
+    if raw_name.first().is_some_and(u8::is_ascii_whitespace)
+        || raw_name.last().is_some_and(u8::is_ascii_whitespace)
     {
         return Err(HttpError::InvalidHeaderName);
     }
 
-    let name = std::str::from_utf8(raw_name).map_err(|_| HttpError::InvalidHeaderName)?;
-    if !is_valid_header_name(name) {
+    if !is_valid_header_name_bytes(raw_name) {
         return Err(HttpError::InvalidHeaderName);
     }
 
@@ -260,8 +257,14 @@ pub(super) fn parse_header_line(line: &str) -> Result<(String, String), HttpErro
         return Err(HttpError::InvalidHeaderValue);
     }
 
-    let value = std::str::from_utf8(value_bytes).map_err(|_| HttpError::InvalidHeaderValue)?;
+    let name = std::str::from_utf8(raw_name).map_err(|_| HttpError::BadHeader)?;
+    let value = std::str::from_utf8(value_bytes).map_err(|_| HttpError::BadHeader)?;
     Ok((name.to_owned(), value.to_owned()))
+}
+
+/// Parse a single `Name: Value` header line.
+pub(super) fn parse_header_line(line: &str) -> Result<(String, String), HttpError> {
+    parse_header_line_bytes(line.as_bytes())
 }
 
 pub(super) fn validate_header_field(name: &str, value: &str) -> Result<(), HttpError> {
@@ -319,6 +322,45 @@ pub(super) fn require_transfer_encoding_chunked(value: &str) -> Result<(), HttpE
         return Ok(());
     }
     Err(HttpError::BadTransferEncoding)
+}
+
+#[must_use]
+/// Thin `fmt::Write` adapter for [`BytesMut`] so `write!` macros can
+/// append directly without an intermediate `String` allocation.
+struct BytesMutWriter<'a>(&'a mut BytesMut);
+
+impl fmt::Write for BytesMutWriter<'_> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.0.extend_from_slice(s.as_bytes());
+        Ok(())
+    }
+}
+
+fn upper_hex_len(mut n: usize) -> usize {
+    let mut len = 1;
+    while n >= 16 {
+        n /= 16;
+        len += 1;
+    }
+    len
+}
+
+fn append_chunk_size_line(dst: &mut BytesMut, mut size: usize) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut digits = [0u8; usize::BITS as usize / 4];
+    let mut written = 0usize;
+    loop {
+        let idx = size & 0xF;
+        digits[digits.len() - 1 - written] = HEX[idx];
+        written += 1;
+        size >>= 4;
+        if size == 0 {
+            break;
+        }
+    }
+    let start = digits.len() - written;
+    dst.extend_from_slice(&digits[start..]);
+    dst.extend_from_slice(b"\r\n");
 }
 
 /// Determine body length from headers.
@@ -456,9 +498,7 @@ impl ChunkedBodyDecoder {
                         return Err(HttpError::HeadersTooLarge);
                     }
 
-                    let line =
-                        std::str::from_utf8(line.as_ref()).map_err(|_| HttpError::BadHeader)?;
-                    self.trailers.push(parse_header_line(line)?);
+                    self.trailers.push(parse_header_line_bytes(line.as_ref())?);
                     if self.trailers.len() > MAX_HEADERS {
                         return Err(HttpError::TooManyHeaders);
                     }
@@ -539,8 +579,7 @@ fn decode_head(
         if line_end == 0 {
             break;
         }
-        let line = std::str::from_utf8(&cursor[..line_end]).map_err(|_| HttpError::BadHeader)?;
-        headers.push(parse_header_line(line)?);
+        headers.push(parse_header_line_bytes(&cursor[..line_end])?);
         if headers.len() > MAX_HEADERS {
             return Err(HttpError::TooManyHeaders);
         }
@@ -674,7 +713,6 @@ impl Encoder<Response> for Http1Codec {
     type Error = HttpError;
 
     fn encode(&mut self, resp: Response, dst: &mut BytesMut) -> Result<(), HttpError> {
-        use std::fmt::Write;
 
         let reason = if resp.reason.is_empty() {
             types::default_reason(resp.status)
@@ -714,55 +752,85 @@ impl Encoder<Response> for Http1Codec {
             }
         }
 
-        // Status line
-        let mut head = String::with_capacity(256);
-        let _ = write!(head, "{} {} {}\r\n", resp.version, resp.status, reason);
-
-        // Headers
+        // Pre-validate all headers (and trailers for chunked) so the write
+        // path below is infallible and we can write directly to `dst`.
         let mut has_content_length = false;
         for (name, value) in &resp.headers {
             validate_header_field(name, value)?;
             if name.eq_ignore_ascii_case("content-length") {
                 has_content_length = true;
             }
-            let _ = write!(head, "{name}: {value}\r\n");
         }
-
         if chunked {
-            head.push_str("\r\n");
-            dst.extend_from_slice(head.as_bytes());
+            for (name, value) in &resp.trailers {
+                validate_header_field(name, value)?;
+            }
+        }
 
-            if !resp.body.is_empty() {
-                let mut chunk_line = String::with_capacity(16);
-                let _ = write!(chunk_line, "{:X}\r\n", resp.body.len());
-                dst.extend_from_slice(chunk_line.as_bytes());
-                dst.extend_from_slice(&resp.body);
-                dst.extend_from_slice(b"\r\n");
+        // Pre-reserve capacity for the entire response.
+        let headers_bytes: usize = resp
+            .headers
+            .iter()
+            .map(|(name, value)| name.len() + value.len() + 4)
+            .sum();
+        let trailers_bytes: usize = resp
+            .trailers
+            .iter()
+            .map(|(name, value)| name.len() + value.len() + 4)
+            .sum();
+        let chunk_line_bytes = if chunked && !resp.body.is_empty() {
+            upper_hex_len(resp.body.len()) + 2
+        } else {
+            0
+        };
+        let encoded_body_bytes = if chunked {
+            chunk_line_bytes + resp.body.len() + 2 + 3 + trailers_bytes + 2
+        } else {
+            resp.body.len()
+        };
+        dst.reserve(64 + reason.len() + headers_bytes + encoded_body_bytes);
+
+        // Write directly to dst via BytesMutWriter — no intermediate String.
+        {
+            let mut w = BytesMutWriter(dst);
+            let _ = fmt::Write::write_fmt(
+                &mut w,
+                format_args!("{} {} {}\r\n", resp.version, resp.status, reason),
+            );
+
+            for (name, value) in &resp.headers {
+                let _ = fmt::Write::write_fmt(&mut w, format_args!("{name}: {value}\r\n"));
             }
 
-            dst.extend_from_slice(b"0\r\n");
-            if !resp.trailers.is_empty() {
-                let mut trailer_block = String::with_capacity(256);
-                for (name, value) in &resp.trailers {
-                    validate_header_field(name, value)?;
-                    let _ = write!(trailer_block, "{name}: {value}\r\n");
+            if chunked {
+                w.0.extend_from_slice(b"\r\n");
+                if !resp.body.is_empty() {
+                    append_chunk_size_line(w.0, resp.body.len());
+                    w.0.extend_from_slice(&resp.body);
+                    w.0.extend_from_slice(b"\r\n");
                 }
-                dst.extend_from_slice(trailer_block.as_bytes());
+                w.0.extend_from_slice(b"0\r\n");
+                for (name, value) in &resp.trailers {
+                    w.0.extend_from_slice(name.as_bytes());
+                    w.0.extend_from_slice(b": ");
+                    w.0.extend_from_slice(value.as_bytes());
+                    w.0.extend_from_slice(b"\r\n");
+                }
+                w.0.extend_from_slice(b"\r\n");
+                return Ok(());
             }
-            dst.extend_from_slice(b"\r\n");
-            return Ok(());
-        }
 
-        // Auto-add Content-Length if not present
-        if !has_content_length {
-            let _ = write!(head, "Content-Length: {}\r\n", resp.body.len());
-        }
+            if !has_content_length {
+                let _ = fmt::Write::write_fmt(
+                    &mut w,
+                    format_args!("Content-Length: {}\r\n", resp.body.len()),
+                );
+            }
 
-        head.push_str("\r\n");
-
-        dst.extend_from_slice(head.as_bytes());
-        if !resp.body.is_empty() {
-            dst.extend_from_slice(&resp.body);
+            w.0.extend_from_slice(b"\r\n");
+            if !resp.body.is_empty() {
+                w.0.extend_from_slice(&resp.body);
+            }
         }
 
         Ok(())
