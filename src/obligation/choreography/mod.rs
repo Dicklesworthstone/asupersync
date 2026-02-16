@@ -103,6 +103,12 @@ pub struct GlobalProtocol {
     pub participants: BTreeMap<String, Participant>,
     /// The interaction tree describing the global protocol.
     pub interaction: Interaction,
+    /// Duplicate participant names encountered during builder construction.
+    ///
+    /// Stored for validation so duplicate declarations are surfaced as
+    /// deterministic `ValidationError::DuplicateParticipant` entries instead
+    /// of being silently overwritten by the map.
+    duplicate_participants: BTreeSet<String>,
 }
 
 /// A named participant in a choreography with a typed role.
@@ -227,6 +233,7 @@ pub struct ProtocolBuilder {
     name: String,
     participants: BTreeMap<String, Participant>,
     interaction: Option<Interaction>,
+    duplicate_participants: BTreeSet<String>,
 }
 
 impl GlobalProtocol {
@@ -236,6 +243,7 @@ impl GlobalProtocol {
             name: name.to_string(),
             participants: BTreeMap::new(),
             interaction: None,
+            duplicate_participants: BTreeSet::new(),
         }
     }
 }
@@ -244,6 +252,10 @@ impl ProtocolBuilder {
     /// Add a participant with the given name and role.
     #[must_use]
     pub fn participant(mut self, name: &str, role: &str) -> Self {
+        if self.participants.contains_key(name) {
+            self.duplicate_participants.insert(name.to_string());
+            return self;
+        }
         self.participants.insert(
             name.to_string(),
             Participant {
@@ -271,6 +283,7 @@ impl ProtocolBuilder {
             name: self.name,
             participants: self.participants,
             interaction: self.interaction.expect("interaction must be set"),
+            duplicate_participants: self.duplicate_participants,
         }
     }
 }
@@ -647,6 +660,12 @@ impl GlobalProtocol {
     /// 7. Protocol is non-empty
     pub fn validate(&self) -> Vec<ValidationError> {
         let mut errors = Vec::new();
+
+        // Duplicate participant declarations are tracked at build time.
+        // Validate deterministically in lexical order.
+        for name in &self.duplicate_participants {
+            errors.push(ValidationError::DuplicateParticipant { name: name.clone() });
+        }
 
         // Check: at least one participant
         if self.participants.is_empty() {
@@ -1742,6 +1761,21 @@ mod tests {
             |e| matches!(e, ValidationError::UndeclaredParticipant { name, .. } if name == "bob")
         ));
         assert!(!protocol.is_deadlock_free());
+    }
+
+    #[test]
+    fn detects_duplicate_participant_declaration() {
+        let protocol = GlobalProtocol::builder("dupe_participant")
+            .participant("alice", "role-v1")
+            .participant("alice", "role-v2")
+            .participant("bob", "role")
+            .interaction(Interaction::comm("alice", "ping", "Ping", "bob").then(Interaction::end()))
+            .build();
+
+        let errors = protocol.validate();
+        assert!(errors.iter().any(
+            |e| matches!(e, ValidationError::DuplicateParticipant { name } if name == "alice")
+        ));
     }
 
     #[test]

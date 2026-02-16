@@ -647,6 +647,7 @@ fn render_handler_body(local: &LocalType, code: &mut String, indent: usize) {
             writeln!(code, "{pad}// Loop: {label}").ok();
             writeln!(code, "{pad}loop {{").ok();
             render_handler_body(body, code, indent + 1);
+            writeln!(code, "{pad}    break;").ok();
             writeln!(code, "{pad}}}").ok();
         }
         LocalType::RecVar { label } => {
@@ -883,6 +884,7 @@ mod tests {
 
         assert!(code.contains("loop {"));
         assert!(code.contains("continue;"));
+        assert!(code.contains("break;"));
     }
 
     #[test]
