@@ -219,7 +219,10 @@ impl SymbolPool {
 
     /// Returns a buffer to the pool.
     pub fn deallocate(&mut self, mut buffer: SymbolBuffer) {
-        debug_assert!(buffer.in_use, "deallocating a buffer that is not marked in-use");
+        debug_assert!(
+            buffer.in_use,
+            "deallocating a buffer that is not marked in-use"
+        );
         debug_assert_eq!(
             buffer.len(),
             self.config.symbol_size as usize,
@@ -448,6 +451,7 @@ impl ResourceTracker {
     }
 
     /// Attempts to acquire a resource request.
+    #[allow(clippy::significant_drop_tightening)] // false positive: inner still borrowed by prepare_pressure_notifications
     pub fn try_acquire(&self, usage: ResourceUsage) -> Result<ResourceGuard, ResourceExhausted> {
         let batch = {
             let mut inner = self.inner.lock().expect("lock poisoned");
@@ -481,6 +485,7 @@ pub struct ResourceGuard {
 }
 
 impl Drop for ResourceGuard {
+    #[allow(clippy::significant_drop_tightening)] // false positive: inner still borrowed by prepare_pressure_notifications
     fn drop(&mut self) {
         let batch = {
             let mut inner = self.inner.lock().expect("lock poisoned");
@@ -560,7 +565,7 @@ fn ratio(value: usize, limit: usize) -> f64 {
 fn prepare_pressure_notifications(inner: &mut ResourceTrackerInner) -> NotificationBatch {
     let pressure = compute_pressure(&inner.current, &inner.limits);
     let mut batch = NotificationBatch::empty();
-    batch.observers = inner.observers.clone();
+    batch.observers.clone_from(&inner.observers);
 
     if (pressure - inner.last_pressure).abs() > f64::EPSILON {
         inner.last_pressure = pressure;
@@ -605,7 +610,7 @@ fn prepare_limit_exceeded(
     projected: &ResourceUsage,
 ) -> NotificationBatch {
     let mut batch = NotificationBatch::empty();
-    batch.observers = inner.observers.clone();
+    batch.observers.clone_from(&inner.observers);
     let limits = &inner.limits;
 
     if projected.symbol_memory > limits.max_symbol_memory {
