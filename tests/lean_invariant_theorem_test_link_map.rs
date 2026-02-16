@@ -1237,15 +1237,7 @@ fn reliability_hardening_contract_covers_assumption_classes_and_governance_flow(
     assert_incident_triage_flow(contract);
 }
 
-#[test]
-fn cross_entity_liveness_contract_composes_theorem_chain_into_harness_consumers() {
-    let link_map = parse_json(LINK_MAP_JSON, "link map");
-    let theorem_inventory = parse_json(THEOREM_JSON, "theorem inventory");
-    let runtime_map = parse_json(RUNTIME_MAP_JSON, "runtime_state_refinement_map");
-
-    let contract = link_map
-        .get("cross_entity_liveness_composition")
-        .expect("cross_entity_liveness_composition must exist");
+fn assert_cross_entity_contract_identity(contract: &Value) {
     assert_eq!(
         contract
             .get("contract_id")
@@ -1260,7 +1252,9 @@ fn cross_entity_liveness_contract_composes_theorem_chain_into_harness_consumers(
             .expect("source_bead must be a string"),
         "asupersync-24rak"
     );
+}
 
+fn assert_cross_entity_invariant_links(contract: &Value, link_map: &Value) {
     let linked_invariants = contract
         .get("invariant_ids")
         .and_then(Value::as_array)
@@ -1280,7 +1274,8 @@ fn cross_entity_liveness_contract_composes_theorem_chain_into_harness_consumers(
             "inv.region_close.quiescence",
         ])
     );
-    let known_invariants = link_rows(&link_map)
+
+    let known_invariants = link_rows(link_map)
         .iter()
         .map(|row| {
             row.get("invariant_id")
@@ -1294,8 +1289,9 @@ fn cross_entity_liveness_contract_composes_theorem_chain_into_harness_consumers(
             "cross-entity contract references unknown invariant_id {invariant_id}"
         );
     }
+}
 
-    let theorem_index = theorem_lines(&theorem_inventory);
+fn assert_cross_entity_theorem_chain(contract: &Value, theorem_index: &BTreeMap<String, u64>) {
     let theorem_chain = contract
         .get("theorem_chain")
         .and_then(Value::as_array)
@@ -1340,13 +1336,14 @@ fn cross_entity_liveness_contract_composes_theorem_chain_into_harness_consumers(
         BTreeSet::from(["cancel_ladder", "race_loser_drain", "close_quiescence"]),
         "theorem_chain must include canonical cross-entity liveness segments"
     );
+}
 
-    let runtime_harnesses = runtime_map
+fn cross_entity_harness_field_map(runtime_map: &Value) -> BTreeMap<String, BTreeSet<String>> {
+    runtime_map
         .get("conformance_harness_contract")
         .and_then(|contract| contract.get("harnesses"))
         .and_then(Value::as_array)
-        .expect("runtime map harnesses must be an array");
-    let harness_field_map = runtime_harnesses
+        .expect("runtime map harnesses must be an array")
         .iter()
         .map(|harness| {
             let harness_id = harness
@@ -1361,8 +1358,13 @@ fn cross_entity_liveness_contract_composes_theorem_chain_into_harness_consumers(
             ]);
             (harness_id, fields)
         })
-        .collect::<BTreeMap<_, _>>();
+        .collect::<BTreeMap<_, _>>()
+}
 
+fn assert_cross_entity_harness_links(
+    contract: &Value,
+    harness_field_map: &BTreeMap<String, BTreeSet<String>>,
+) -> BTreeSet<String> {
     let harness_links = contract
         .get("conformance_harness_links")
         .and_then(Value::as_array)
@@ -1395,7 +1397,14 @@ fn cross_entity_liveness_contract_composes_theorem_chain_into_harness_consumers(
             );
         }
     }
+    contract_harness_ids
+}
 
+fn assert_cross_entity_end_to_end_guarantees(
+    contract: &Value,
+    theorem_index: &BTreeMap<String, u64>,
+    contract_harness_ids: &BTreeSet<String>,
+) {
     let guarantees = contract
         .get("end_to_end_guarantees")
         .and_then(Value::as_array)
@@ -1469,4 +1478,24 @@ fn cross_entity_liveness_contract_composes_theorem_chain_into_harness_consumers(
             );
         }
     }
+}
+
+#[test]
+fn cross_entity_liveness_contract_composes_theorem_chain_into_harness_consumers() {
+    let link_map = parse_json(LINK_MAP_JSON, "link map");
+    let theorem_inventory = parse_json(THEOREM_JSON, "theorem inventory");
+    let runtime_map = parse_json(RUNTIME_MAP_JSON, "runtime_state_refinement_map");
+    let contract = link_map
+        .get("cross_entity_liveness_composition")
+        .expect("cross_entity_liveness_composition must exist");
+
+    assert_cross_entity_contract_identity(contract);
+    assert_cross_entity_invariant_links(contract, &link_map);
+
+    let theorem_index = theorem_lines(&theorem_inventory);
+    assert_cross_entity_theorem_chain(contract, &theorem_index);
+
+    let harness_field_map = cross_entity_harness_field_map(&runtime_map);
+    let contract_harness_ids = assert_cross_entity_harness_links(contract, &harness_field_map);
+    assert_cross_entity_end_to_end_guarantees(contract, &theorem_index, &contract_harness_ids);
 }
