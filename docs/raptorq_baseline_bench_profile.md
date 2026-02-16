@@ -59,7 +59,7 @@ rch exec -- valgrind --tool=callgrind --callgrind-out-file=target/perf-results/p
 
 ## Draft Budget Sheet (G1)
 
-Budget source: `baseline_current.json` and phase0 throughput logs listed above. Values below are draft guardrails for CI profile wiring and should be recalibrated after D7 evidence is fully green.
+Budget source: `baseline_current.json` and phase0 throughput logs listed above. Values below are draft guardrails for CI profile wiring and should be recalibrated with a refreshed post-D7 corpus.
 
 | Workload ID | Baseline | Warning Budget | Fail Budget |
 |---|---:|---:|---:|
@@ -150,13 +150,13 @@ Before closing `bd-3v1cs`, run this checklist and record evidence paths in bead 
 | `bd-1rxlv` | D1 golden-vector conformance | `closed` | prerequisite satisfied |
 | `bd-61s90` | D5 comprehensive unit matrix | `closed` | prerequisite satisfied |
 | `bd-3bvdj` / `asupersync-wdk6c` | D6 deterministic E2E suite | `closed` | deterministic profile suite is established and linked |
-| `bd-oeql8` | D7 structured logging/artifact schema | `open` | forensics schema contract still pending closure |
+| `bd-oeql8` | D7 structured logging/artifact schema | `closed` | forensics schema contract is enforced in deterministic unit and E2E paths |
 | `bd-26pqk` | D9 replay catalog linkage | `closed` | prerequisite satisfied |
 
 Closure gate interpretation for `bd-3v1cs`:
 
 - This bead may publish and iterate draft budgets early.
-- Final closure requires a post-D7 calibration pass with refreshed corpus artifacts and updated budget numbers committed in this document.
+- Final closure requires a calibration refresh with updated corpus artifacts and budget numbers committed in this document.
 
 ## Phase Note
 

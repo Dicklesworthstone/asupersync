@@ -101,6 +101,42 @@ declare -A SCENARIO_UNIT_SENTINEL=(
     ["RQ-E2E-REPORT-DETERMINISM"]="tests/raptorq_conformance.rs::e2e_pipeline_reports_are_deterministic"
 )
 
+declare -A SCENARIO_ASSERTION_ID=(
+    ["RQ-E2E-HAPPY-NO-LOSS"]="E2E-ROUNDTRIP-NO-LOSS"
+    ["RQ-E2E-HAPPY-RANDOM-LOSS"]="E2E-ROUNDTRIP-RANDOM-LOSS"
+    ["RQ-E2E-HAPPY-REPAIR-ONLY"]="E2E-ROUNDTRIP-REPAIR-ONLY"
+    ["RQ-E2E-BOUNDARY-K1"]="E2E-BOUNDARY-K1"
+    ["RQ-E2E-BOUNDARY-TINY-SYMBOL"]="E2E-BOUNDARY-TINY-SYMBOL"
+    ["RQ-E2E-BOUNDARY-LARGE-SYMBOL"]="E2E-BOUNDARY-LARGE-SYMBOL"
+    ["RQ-E2E-FAILURE-INSUFFICIENT"]="E2E-ERROR-INSUFFICIENT"
+    ["RQ-E2E-FAILURE-SIZE-MISMATCH"]="E2E-ERROR-SIZE-MISMATCH"
+    ["RQ-E2E-REPORT-DETERMINISM"]="E2E-REPORT-DETERMINISM"
+)
+
+declare -A SCENARIO_SEED=(
+    ["RQ-E2E-HAPPY-NO-LOSS"]="42"
+    ["RQ-E2E-HAPPY-RANDOM-LOSS"]="123"
+    ["RQ-E2E-HAPPY-REPAIR-ONLY"]="456"
+    ["RQ-E2E-BOUNDARY-K1"]="42"
+    ["RQ-E2E-BOUNDARY-TINY-SYMBOL"]="200"
+    ["RQ-E2E-BOUNDARY-LARGE-SYMBOL"]="300"
+    ["RQ-E2E-FAILURE-INSUFFICIENT"]="500"
+    ["RQ-E2E-FAILURE-SIZE-MISMATCH"]="600"
+    ["RQ-E2E-REPORT-DETERMINISM"]="42"
+)
+
+declare -A SCENARIO_PARAMETER_SET=(
+    ["RQ-E2E-HAPPY-NO-LOSS"]="k=8,symbol_size=64,loss=none"
+    ["RQ-E2E-HAPPY-RANDOM-LOSS"]="k=10,symbol_size=32,loss=random"
+    ["RQ-E2E-HAPPY-REPAIR-ONLY"]="k=6,symbol_size=24,loss=repair_only"
+    ["RQ-E2E-BOUNDARY-K1"]="k=1,symbol_size=16,loss=none"
+    ["RQ-E2E-BOUNDARY-TINY-SYMBOL"]="k=4,symbol_size=1,loss=none"
+    ["RQ-E2E-BOUNDARY-LARGE-SYMBOL"]="k=4,symbol_size=4096,loss=none"
+    ["RQ-E2E-FAILURE-INSUFFICIENT"]="k=8,symbol_size=32,loss=insufficient"
+    ["RQ-E2E-FAILURE-SIZE-MISMATCH"]="k=4,symbol_size=32,loss=symbol_size_mismatch"
+    ["RQ-E2E-REPORT-DETERMINISM"]="k=16,symbol_size=64,loss=deterministic_matrix"
+)
+
 declare -A SCENARIO_PROFILES=(
     ["RQ-E2E-HAPPY-NO-LOSS"]="fast,full"
     ["RQ-E2E-HAPPY-RANDOM-LOSS"]="full,forensics"
@@ -157,6 +193,47 @@ selected_for_run() {
         return
     fi
     matches_profile "$scenario_id" "$PROFILE"
+}
+
+validate_scenario_contract() {
+    local scenario_json="$1"
+    local -a required_string_fields=(
+        "scenario_id"
+        "profile"
+        "category"
+        "replay_ref"
+        "unit_sentinel"
+        "assertion_id"
+        "run_id"
+        "parameter_set"
+        "artifact_path"
+        "repro_command"
+    )
+    local field
+
+    if [[ "$scenario_json" != *'"schema_version":"raptorq-e2e-scenario-log-v2"'* ]]; then
+        return 1
+    fi
+
+    for field in "${required_string_fields[@]}"; do
+        if ! grep -Eq "\"${field}\":\"[^\"]+\"" <<<"$scenario_json"; then
+            return 1
+        fi
+    done
+
+    if ! grep -Eq '"seed":[0-9]+' <<<"$scenario_json"; then
+        return 1
+    fi
+
+    if [[ "$scenario_json" != *'"phase_markers":["encode","loss","decode","proof","report"]'* ]]; then
+        return 1
+    fi
+
+    if [[ "$scenario_json" != *'"repro_command":"rch exec -- '* ]]; then
+        return 1
+    fi
+
+    return 0
 }
 
 while [[ $# -gt 0 ]]; do
@@ -244,7 +321,7 @@ if [[ "${NO_PREFLIGHT:-0}" != "1" ]]; then
   "status": "preflight_failed",
   "artifact_dir": "$(json_escape "$RUN_DIR")",
   "preflight_log": "$(json_escape "$PREFLIGHT_LOG")",
-  "repro_cmd": "rch exec -- cargo test --test raptorq_conformance --no-run"
+  "repro_command": "rch exec -- cargo test --test raptorq_conformance --no-run"
 }
 EOF
         exit 1
@@ -267,8 +344,12 @@ for scenario_id in "${SCENARIO_IDS[@]}"; do
     replay_ref="${SCENARIO_REPLAY_REF[$scenario_id]}"
     replay_extra="${SCENARIO_REPLAY_EXTRA[$scenario_id]}"
     unit_sentinel="${SCENARIO_UNIT_SENTINEL[$scenario_id]}"
+    assertion_id="${SCENARIO_ASSERTION_ID[$scenario_id]}"
+    scenario_seed="${SCENARIO_SEED[$scenario_id]}"
+    parameter_set="${SCENARIO_PARAMETER_SET[$scenario_id]}"
     scenario_profiles="${SCENARIO_PROFILES[$scenario_id]}"
     scenario_log_file="${RUN_DIR}/${scenario_id}.log"
+    run_id="${scenario_id}-${PROFILE}"
     repro_cmd="rch exec -- cargo test --test raptorq_conformance ${test_filter} -- --nocapture --test-threads=${TEST_THREADS}"
 
     echo ">>> [${selected_count}] ${scenario_id} (${category})"
@@ -285,6 +366,7 @@ for scenario_id in "${SCENARIO_IDS[@]}"; do
     tests_failed="$(grep -c "^test .* FAILED$" "$scenario_log_file" 2>/dev/null || true)"
 
     status="pass"
+    contract_failure=0
     if [[ "$rc" -ne 0 ]]; then
         status="fail"
         failed_count=$((failed_count + 1))
@@ -299,7 +381,7 @@ for scenario_id in "${SCENARIO_IDS[@]}"; do
         echo "    PASS (${tests_passed} tests)"
     fi
 
-    printf '{"schema_version":"raptorq-e2e-scenario-log-v1","scenario_id":"%s","category":"%s","profile":"%s","profile_set":"%s","test_filter":"%s","replay_ref":"%s","replay_ref_extra":"%s","unit_sentinel":"%s","status":"%s","exit_code":%d,"duration_ms":%d,"tests_passed":%d,"tests_failed":%d,"log_path":"%s","repro_cmd":"%s"}\n' \
+    printf -v scenario_json '{"schema_version":"raptorq-e2e-scenario-log-v2","scenario_id":"%s","category":"%s","profile":"%s","profile_set":"%s","test_filter":"%s","replay_ref":"%s","replay_ref_extra":"%s","unit_sentinel":"%s","assertion_id":"%s","run_id":"%s","seed":%s,"parameter_set":"%s","phase_markers":["encode","loss","decode","proof","report"],"status":"%s","exit_code":%d,"duration_ms":%d,"tests_passed":%d,"tests_failed":%d,"artifact_path":"%s","log_path":"%s","repro_command":"%s"}' \
         "$(json_escape "$scenario_id")" \
         "$(json_escape "$category")" \
         "$(json_escape "$PROFILE")" \
@@ -308,14 +390,57 @@ for scenario_id in "${SCENARIO_IDS[@]}"; do
         "$(json_escape "$replay_ref")" \
         "$(json_escape "$replay_extra")" \
         "$(json_escape "$unit_sentinel")" \
+        "$(json_escape "$assertion_id")" \
+        "$(json_escape "$run_id")" \
+        "$scenario_seed" \
+        "$(json_escape "$parameter_set")" \
         "$(json_escape "$status")" \
         "$rc" \
         "$duration_ms" \
         "$tests_passed" \
         "$tests_failed" \
         "$(json_escape "$scenario_log_file")" \
-        "$(json_escape "$repro_cmd")" \
-        >> "$SCENARIO_LOG"
+        "$(json_escape "$scenario_log_file")" \
+        "$(json_escape "$repro_cmd")"
+
+    if ! validate_scenario_contract "$scenario_json"; then
+        contract_failure=1
+        if [[ "$status" == "pass" ]]; then
+            passed_count=$((passed_count - 1))
+            failed_count=$((failed_count + 1))
+        fi
+        status="fail"
+        rc=70
+        printf -v scenario_json '{"schema_version":"raptorq-e2e-scenario-log-v2","scenario_id":"%s","category":"%s","profile":"%s","profile_set":"%s","test_filter":"%s","replay_ref":"%s","replay_ref_extra":"%s","unit_sentinel":"%s","assertion_id":"%s","run_id":"%s","seed":%s,"parameter_set":"%s","phase_markers":["encode","loss","decode","proof","report"],"status":"%s","exit_code":%d,"duration_ms":%d,"tests_passed":%d,"tests_failed":%d,"artifact_path":"%s","log_path":"%s","repro_command":"%s"}' \
+            "$(json_escape "$scenario_id")" \
+            "$(json_escape "$category")" \
+            "$(json_escape "$PROFILE")" \
+            "$(json_escape "$scenario_profiles")" \
+            "$(json_escape "$test_filter")" \
+            "$(json_escape "$replay_ref")" \
+            "$(json_escape "$replay_extra")" \
+            "$(json_escape "$unit_sentinel")" \
+            "$(json_escape "$assertion_id")" \
+            "$(json_escape "$run_id")" \
+            "$scenario_seed" \
+            "$(json_escape "$parameter_set")" \
+            "fail" \
+            "$rc" \
+            "$duration_ms" \
+            "$tests_passed" \
+            "$tests_failed" \
+            "$(json_escape "$scenario_log_file")" \
+            "$(json_escape "$scenario_log_file")" \
+            "$(json_escape "$repro_cmd")"
+        echo "    FAIL (D7 schema contract) -> ${scenario_log_file}"
+        echo "    repro: ${repro_cmd}"
+    fi
+
+    printf '%s\n' "$scenario_json" >> "$SCENARIO_LOG"
+
+    if [[ "$contract_failure" -eq 1 ]]; then
+        continue
+    fi
 done
 
 if [[ "$selected_count" -eq 0 ]]; then
@@ -358,4 +483,3 @@ echo "==================================================================="
 if [[ "$failed_count" -gt 0 ]]; then
     exit 1
 fi
-

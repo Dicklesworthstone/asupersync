@@ -82,7 +82,7 @@ Required unit failure fields (for matrix governance):
 Status:
 
 - structured fields are fully present in deterministic E2E report flow
-- unit-level structured context is present for edge-case paths, builder-path send/receive tests, systematic conformance/property/drop/fuzz vectors, and GF256 unit families included in this matrix; broader suite-wide replay-id propagation remains a D7/D9 follow-up
+- unit-level structured context is present for edge-case paths, builder-path send/receive tests, systematic conformance/property/drop/fuzz vectors, and GF256 unit families included in this matrix; broader suite-wide replay-id propagation remains a D9 follow-up
 
 ## Replay Catalog (D9)
 
@@ -116,7 +116,13 @@ Deterministic scenario runner for D6:
   - `category` (`happy`|`boundary`|`failure`|`composite`)
   - `replay_ref`
   - `unit_sentinel`
-  - `repro_cmd`
+  - `assertion_id`
+  - `run_id`
+  - `seed`
+  - `parameter_set`
+  - `phase_markers`
+  - `artifact_path`
+  - `repro_command`
 
 Profile coverage in the script suite:
 
@@ -128,8 +134,8 @@ Profile coverage in the script suite:
 
 Open gaps identified during matrix pass:
 
-1. D5 matrix rows are now `strong`; remaining replay/logging standardization work continues in D7/D9 for non-D5 suites.
-2. End-to-end structured-forensics evolution (beyond this unit matrix scope) remains tracked in D7 and D6.
+1. D5 matrix rows are now `strong`; replay-log hygiene maintenance continues for D9-linked surfaces as suites evolve.
+2. End-to-end structured-forensics evolution (beyond this unit matrix scope) remains tracked through D6 artifact maintenance.
 
 Mapped follow-up beads:
 
@@ -157,7 +163,7 @@ The D5 bead can close only when all of the following are true:
 |---|---|---|---|
 | `bd-61s90` | D5 comprehensive unit matrix | `closed` | matrix contract is accepted; continue maintenance as coverage evolves |
 | `bd-26pqk` | D9 replay catalog | `closed` | replay catalog linkage is closed and remains a required reference |
-| `bd-oeql8` | D7 structured logging schema | `open` | schema contract enforcement still needed across all required suites |
+| `bd-oeql8` | D7 structured logging schema | `closed` | schema contract enforcement is in place for deterministic unit + E2E paths |
 | `bd-3bvdj` / `asupersync-wdk6c` | D6 deterministic E2E suite | `closed` | deterministic profile/scenario runner is in place and linked to unit families |
 
 ## Repro Commands

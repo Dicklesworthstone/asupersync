@@ -1556,3 +1556,39 @@ fn unit_log_schema_contract_failure_entry() {
         "D7 schema contract violation in failure entry: {violations:?}"
     );
 }
+
+/// D7 guardrail: deterministic E2E runner must emit the v2 scenario schema
+/// with all forensic contract fields and an explicit contract-fail gate.
+#[test]
+fn d7_e2e_runner_script_schema_contract_surface() {
+    let script = include_str!("../scripts/run_raptorq_e2e.sh");
+
+    for required in [
+        "\"schema_version\":\"raptorq-e2e-scenario-log-v2\"",
+        "\"assertion_id\":\"%s\"",
+        "\"run_id\":\"%s\"",
+        "\"seed\":%s",
+        "\"parameter_set\":\"%s\"",
+        "\"phase_markers\":[\"encode\",\"loss\",\"decode\",\"proof\",\"report\"]",
+        "\"artifact_path\":\"%s\"",
+        "\"repro_command\":\"%s\"",
+    ] {
+        assert!(
+            script.contains(required),
+            "missing D7 scenario-log contract token in run_raptorq_e2e.sh: {required}"
+        );
+    }
+
+    assert!(
+        script.contains("validate_scenario_contract"),
+        "run_raptorq_e2e.sh must include explicit schema contract validation"
+    );
+    assert!(
+        script.contains("FAIL (D7 schema contract)"),
+        "runner must fail loudly when scenario schema contract is violated"
+    );
+    assert!(
+        !script.contains("\"repro_cmd\":"),
+        "legacy scenario field repro_cmd should not be emitted by D7 v2 schema"
+    );
+}
