@@ -830,6 +830,43 @@ impl Scheduler {
         Some(entry.task)
     }
 
+    /// Checks all local lanes in priority order (cancel > timed > ready)
+    /// in a single call, avoiding repeated lock acquisitions when the
+    /// caller would check each lane sequentially.
+    ///
+    /// Returns `(lane_tag, task_id)` where lane_tag is 0=cancel, 1=timed, 2=ready.
+    #[must_use]
+    pub fn pop_any_lane_with_hint(&mut self, rng_hint: u64, now: Time) -> Option<(u8, TaskId)> {
+        // Cancel lane first (highest priority).
+        if let Some(entry) =
+            Self::pop_entry_with_rng(&mut self.cancel_lane, rng_hint, &mut self.scratch_entries)
+        {
+            self.scheduled.remove(entry.task);
+            return Some((0, entry.task));
+        }
+        // Timed lane (EDF, only if deadline is due).
+        if let Some(earliest) = self.timed_lane.peek() {
+            if earliest.deadline <= now {
+                if let Some(entry) = Self::pop_timed_with_rng(
+                    &mut self.timed_lane,
+                    rng_hint,
+                    &mut self.scratch_timed,
+                ) {
+                    self.scheduled.remove(entry.task);
+                    return Some((1, entry.task));
+                }
+            }
+        }
+        // Ready lane.
+        if let Some(entry) =
+            Self::pop_entry_with_rng(&mut self.ready_lane, rng_hint, &mut self.scratch_entries)
+        {
+            self.scheduled.remove(entry.task);
+            return Some((2, entry.task));
+        }
+        None
+    }
+
     /// Steals a batch of ready tasks for another worker.
     ///
     /// Only steals from the ready lane to preserve cancel/timed priority semantics.
