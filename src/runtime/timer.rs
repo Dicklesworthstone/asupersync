@@ -178,4 +178,47 @@ mod tests {
         );
         crate::test_complete!("pop_expired_returns_all_due_tasks");
     }
+
+    #[test]
+    fn same_deadline_pops_in_insertion_order() {
+        init_test("same_deadline_pops_in_insertion_order");
+        let mut heap = TimerHeap::new();
+        let deadline = Time::from_millis(100);
+
+        heap.insert(task(1), deadline);
+        heap.insert(task(2), deadline);
+        heap.insert(task(3), deadline);
+
+        let expired = heap.pop_expired(deadline);
+        crate::assert_with_log!(
+            expired == vec![task(1), task(2), task(3)],
+            "same-deadline timers pop deterministically by insertion order",
+            vec![task(1), task(2), task(3)],
+            expired
+        );
+        crate::test_complete!("same_deadline_pops_in_insertion_order");
+    }
+
+    #[test]
+    fn pop_expired_includes_exact_deadline() {
+        init_test("pop_expired_includes_exact_deadline");
+        let mut heap = TimerHeap::new();
+        let deadline = Time::from_millis(250);
+        heap.insert(task(7), deadline);
+
+        let expired = heap.pop_expired(deadline);
+        crate::assert_with_log!(
+            expired == vec![task(7)],
+            "task at exact deadline must be treated as expired",
+            vec![task(7)],
+            expired
+        );
+        crate::assert_with_log!(
+            heap.is_empty(),
+            "heap drained after pop",
+            true,
+            heap.is_empty()
+        );
+        crate::test_complete!("pop_expired_includes_exact_deadline");
+    }
 }
