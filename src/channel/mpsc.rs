@@ -18,6 +18,7 @@
 //! - `permit.abort()`: Aborts the obligation
 //! - `drop(permit)`: Equivalent to abort (RAII cleanup)
 
+use smallvec::SmallVec;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
@@ -72,16 +73,16 @@ impl std::fmt::Display for RecvError {
 
 impl std::error::Error for RecvError {}
 
-/// Shared state between the future and the wait queue.
-#[derive(Debug)]
-struct SharedWaiter {
-    waker: Mutex<Waker>,
-}
-
 /// A queued waiter for channel capacity.
+///
+/// Waker is stored inline (no inner `Mutex`) because all access occurs while
+/// the outer `ChannelInner` lock is held, making a per-waiter mutex pure overhead.
+/// Identity is a monotonic `u64` instead of `Arc::ptr_eq`, eliminating one `Arc`
+/// allocation per waiter.
 #[derive(Debug)]
 struct SendWaiter {
-    shared: Arc<SharedWaiter>,
+    id: u64,
+    waker: Waker,
 }
 
 /// Internal channel state shared between senders and receivers.
@@ -101,6 +102,8 @@ struct ChannelInner<T> {
     send_wakers: VecDeque<SendWaiter>,
     /// Waker for the receiver waiting for messages.
     recv_waker: Option<Waker>,
+    /// Monotonic counter for waiter identity (replaces Arc::ptr_eq).
+    next_waiter_id: u64,
 }
 
 /// Shared state wrapper.
@@ -127,6 +130,7 @@ impl<T> ChannelInner<T> {
             sender_count: 1,
             send_wakers: VecDeque::new(),
             recv_waker: None,
+            next_waiter_id: 0,
         }
     }
 
@@ -152,14 +156,7 @@ impl<T> ChannelInner<T> {
     /// This does NOT remove the waiter from the queue. The waiter is responsible
     /// for removing itself upon successfully acquiring a permit.
     fn take_next_sender_waker(&self) -> Option<Waker> {
-        self.send_wakers.front().map(|waiter| {
-            waiter
-                .shared
-                .waker
-                .lock()
-                .expect("waiter lock poisoned")
-                .clone()
-        })
+        self.send_wakers.front().map(|waiter| waiter.waker.clone())
     }
 }
 
@@ -196,7 +193,7 @@ impl<T> Sender<T> {
         Reserve {
             sender: self,
             cx,
-            waiter: None,
+            waiter_id: None,
         }
     }
 
@@ -338,7 +335,7 @@ impl<T> Sender<T> {
 pub struct Reserve<'a, T> {
     sender: &'a Sender<T>,
     cx: &'a Cx,
-    waiter: Option<Arc<SharedWaiter>>,
+    waiter_id: Option<u64>,
 }
 
 impl<'a, T> Future for Reserve<'a, T> {
@@ -365,18 +362,16 @@ impl<'a, T> Future for Reserve<'a, T> {
         if inner.has_capacity() {
             inner.reserved += 1;
             // Remove self from queue
-            if let Some(waiter) = self.waiter.as_ref() {
+            if let Some(id) = self.waiter_id {
                 let is_head = inner
                     .send_wakers
                     .front()
-                    .is_some_and(|w| Arc::ptr_eq(&w.shared, waiter));
+                    .is_some_and(|w| w.id == id);
 
                 if is_head {
                     inner.send_wakers.pop_front();
                 } else {
-                    inner
-                        .send_wakers
-                        .retain(|w| !Arc::ptr_eq(&w.shared, waiter));
+                    inner.send_wakers.retain(|w| w.id != id);
                 }
 
                 // CASCADE: If there is still capacity, wake the *next* waiter.
@@ -400,22 +395,23 @@ impl<'a, T> Future for Reserve<'a, T> {
             }));
         }
 
-        // Register/update waiter
-        if let Some(waiter) = self.waiter.as_ref() {
-            // Already queued. Update waker.
-            let mut waker_guard = waiter.waker.lock().expect("waiter lock poisoned");
-            if !waker_guard.will_wake(ctx.waker()) {
-                waker_guard.clone_from(ctx.waker());
+        // Register/update waiter (all access under outer lock — no inner Mutex needed)
+        if let Some(id) = self.waiter_id {
+            // Already queued. Update waker inline.
+            if let Some(entry) = inner.send_wakers.iter_mut().find(|w| w.id == id) {
+                if !entry.waker.will_wake(ctx.waker()) {
+                    entry.waker.clone_from(ctx.waker());
+                }
             }
         } else {
-            // New waiter
-            let waiter = Arc::new(SharedWaiter {
-                waker: Mutex::new(ctx.waker().clone()),
-            });
+            // New waiter — assign monotonic id, store waker inline.
+            let id = inner.next_waiter_id;
+            inner.next_waiter_id += 1;
             inner.send_wakers.push_back(SendWaiter {
-                shared: Arc::clone(&waiter),
+                id,
+                waker: ctx.waker().clone(),
             });
-            self.waiter = Some(waiter);
+            self.waiter_id = Some(id);
         }
 
         drop(inner);
@@ -426,33 +422,27 @@ impl<'a, T> Future for Reserve<'a, T> {
 impl<T> Drop for Reserve<'_, T> {
     fn drop(&mut self) {
         // If we have a waiter, we need to remove it from the sender's queue.
-        if let Some(waiter) = self.waiter.as_ref() {
+        if let Some(id) = self.waiter_id {
             let next_waker = {
                 let Ok(mut inner) = self.sender.shared.inner.lock() else {
                     return;
                 };
 
-                // We need to remove ourselves.
+                // Remove ourselves by id.
                 let is_head = inner
                     .send_wakers
                     .front()
-                    .is_some_and(|w| Arc::ptr_eq(&w.shared, waiter));
+                    .is_some_and(|w| w.id == id);
 
                 if is_head {
                     inner.send_wakers.pop_front();
                 } else {
-                    inner
-                        .send_wakers
-                        .retain(|w| !Arc::ptr_eq(&w.shared, waiter));
+                    inner.send_wakers.retain(|w| w.id != id);
                 }
 
                 // Propagate wake if we were blocking capacity.
-                // Use defensive locking on waiter mutex for poison safety.
                 if inner.has_capacity() {
-                    inner
-                        .send_wakers
-                        .front()
-                        .and_then(|w| w.shared.waker.lock().ok().map(|g| g.clone()))
+                    inner.take_next_sender_waker()
                 } else {
                     None
                 }
@@ -563,17 +553,14 @@ impl<T> SendPermit<'_, T> {
         if inner.receiver_dropped {
             // Receiver is gone; drop the value and release capacity.
             // Collect wakers before dropping the lock to avoid wake-under-lock.
-            let wakers: Vec<_> = inner
+            if inner.send_wakers.is_empty() {
+                drop(inner);
+                return;
+            }
+            let wakers: SmallVec<[Waker; 4]> = inner
                 .send_wakers
                 .drain(..)
-                .map(|waiter| {
-                    waiter
-                        .shared
-                        .waker
-                        .lock()
-                        .expect("waiter lock poisoned")
-                        .clone()
-                })
+                .map(|waiter| waiter.waker)
                 .collect();
             drop(inner);
             for waker in wakers {
@@ -628,11 +615,7 @@ impl<T> Drop for SendPermit<'_, T> {
                 } else {
                     inner.reserved -= 1;
                 }
-                // Use defensive locking on waiter mutex for poison safety.
-                inner
-                    .send_wakers
-                    .front()
-                    .and_then(|w| w.shared.waker.lock().ok().map(|g| g.clone()))
+                inner.take_next_sender_waker()
             };
             // Wake outside the lock.
             if let Some(w) = next_waker {
@@ -786,7 +769,7 @@ impl<T> Future for Recv<'_, T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        let wakers: Vec<Waker> = {
+        let wakers: SmallVec<[Waker; 4]> = {
             let Ok(mut inner) = self.shared.inner.lock() else {
                 return;
             };
@@ -797,7 +780,7 @@ impl<T> Drop for Receiver<T> {
             inner
                 .send_wakers
                 .drain(..)
-                .filter_map(|waiter| waiter.shared.waker.lock().ok().map(|g| g.clone()))
+                .map(|waiter| waiter.waker)
                 .collect()
         };
         // Wake senders outside the lock to avoid wake-under-lock deadlocks.
