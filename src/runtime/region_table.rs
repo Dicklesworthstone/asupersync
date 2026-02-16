@@ -357,7 +357,9 @@ mod tests {
         let expected = parent_budget.meet(child_budget);
 
         let parent = table.create_root(parent_budget, Time::ZERO);
-        let child = table.create_child(parent, child_budget, Time::ZERO).unwrap();
+        let child = table
+            .create_child(parent, child_budget, Time::ZERO)
+            .unwrap();
 
         let actual = table.budget(child).unwrap();
         assert_eq!(actual, expected);
