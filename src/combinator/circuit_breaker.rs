@@ -1808,8 +1808,15 @@ mod tests {
             "Panic should record failure and reopen circuit"
         );
 
-        // Subsequent call should be rejected as Open, not HalfOpenFull
+        // Subsequent call should not be blocked by a leaked probe permit.
+        // With zero open_duration, Open may transition immediately to HalfOpen.
         let result = cb.should_allow(now);
-        assert!(matches!(result, Err(CircuitBreakerError::Open { .. })));
+        assert!(
+            matches!(
+                result,
+                Ok(Permit::Probe) | Err(CircuitBreakerError::Open { .. })
+            ),
+            "Expected reopened circuit to permit probe or briefly report Open"
+        );
     }
 }

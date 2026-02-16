@@ -254,6 +254,7 @@ pub struct RateLimiter {
 impl RateLimiter {
     /// Create a new rate limiter with the given policy.
     #[must_use]
+    #[allow(clippy::cast_precision_loss)]
     pub fn new(policy: RateLimitPolicy) -> Self {
         let initial_tokens = u64::from(policy.burst) * FIXED_POINT_SCALE;
         let period_ms = duration_to_millis_saturating(policy.period) as f64;
@@ -295,10 +296,15 @@ impl RateLimiter {
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn metrics(&self) -> RateLimitMetrics {
+        // Avoid lock-order inversion with process_queue() by not holding
+        // metrics and state locks at the same time.
+        let available_tokens = {
+            let state = self.state.lock().expect("lock poisoned");
+            state.tokens_fixed as f64 / FIXED_POINT_SCALE as f64
+        };
+
         let mut m = self.metrics.read().expect("lock poisoned").clone();
-        let state = self.state.lock().expect("lock poisoned");
-        m.available_tokens = state.tokens_fixed as f64 / FIXED_POINT_SCALE as f64;
-        drop(state);
+        m.available_tokens = available_tokens;
 
         // Use atomic values
         m.total_allowed = self.total_allowed.load(Ordering::Relaxed);
@@ -1753,5 +1759,41 @@ mod tests {
     #[test]
     fn duration_to_millis_saturates_for_large_durations() {
         assert_eq!(duration_to_millis_saturating(Duration::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn metrics_does_not_hold_metrics_lock_while_waiting_on_state_lock() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let rl = Arc::new(RateLimiter::new(RateLimitPolicy {
+            rate: 10,
+            burst: 10,
+            ..Default::default()
+        }));
+
+        let state_guard = rl.state.lock().expect("lock poisoned");
+        let rendezvous = Arc::new(Barrier::new(2));
+        let rl_clone = Arc::clone(&rl);
+        let rendezvous_clone = Arc::clone(&rendezvous);
+
+        let handle = thread::spawn(move || {
+            rendezvous_clone.wait();
+            let _ = rl_clone.metrics();
+        });
+
+        rendezvous.wait();
+        // Let spawned thread attempt metrics() while state lock is held.
+        thread::sleep(Duration::from_millis(10));
+
+        let metrics_write_guard = rl.metrics.try_write();
+        assert!(
+            metrics_write_guard.is_ok(),
+            "metrics() must not hold metrics read-lock while blocked on state lock"
+        );
+        drop(metrics_write_guard);
+
+        drop(state_guard);
+        handle.join().expect("metrics thread should complete");
     }
 }

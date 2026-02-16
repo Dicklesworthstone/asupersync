@@ -1135,8 +1135,8 @@ mod tests {
         let bh1 = registry.get_or_create("db");
         let bh2 = registry.get_or_create("api");
 
-        let _ = bh1.try_acquire(1);
-        let _ = bh2.try_acquire(3);
+        let _p1 = bh1.try_acquire(1);
+        let _p2 = bh2.try_acquire(3);
 
         let all = registry.all_metrics();
         assert_eq!(all.len(), 2);
