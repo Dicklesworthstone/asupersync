@@ -847,11 +847,15 @@ impl CancellationInjector {
     /// Creates an injector with a specific strategy.
     #[must_use]
     pub fn with_strategy(strategy: InjectionStrategy) -> Arc<Self> {
+        let task_id = match &strategy {
+            InjectionStrategy::AtPoint(point) => point.task_id,
+            _ => None,
+        };
         Arc::new(Self {
             strategy,
             recorded: parking_lot::Mutex::new(Vec::new()),
             injection_count: AtomicU64::new(0),
-            task_id: None,
+            task_id,
         })
     }
 
@@ -1171,6 +1175,16 @@ mod tests {
         }
 
         assert_eq!(injector.recorded_points(), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn with_strategy_at_point_preserves_task_id_for_injection() {
+        let task_id = TaskId::from_arena(crate::util::ArenaIndex::new(11, 0));
+        let point = AwaitPoint::new(Some(task_id), 3);
+        let injector = CancellationInjector::with_strategy(InjectionStrategy::AtPoint(point));
+
+        assert!(injector.should_inject_at(3));
+        assert_eq!(injector.injection_count(), 1);
     }
 
     #[test]
