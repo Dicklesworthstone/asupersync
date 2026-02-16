@@ -356,6 +356,11 @@ impl RegionRecord {
         self.inner.read().expect("lock poisoned").budget
     }
 
+    /// Sets the region budget.
+    pub fn set_budget(&self, budget: Budget) {
+        self.inner.write().expect("lock poisoned").budget = budget;
+    }
+
     /// Returns the current admission limits for this region.
     #[must_use]
     pub fn limits(&self) -> RegionLimits {
@@ -914,6 +919,34 @@ impl RegionRecord {
         inner.children.is_empty()
             && inner.tasks.iter().all(|task| completed(*task))
             && inner.pending_obligations == 0
+    }
+
+    /// Applies a distributed snapshot to this region record.
+    ///
+    /// This method is used by the distributed bridge to update the local region state
+    /// to match the state recovered from a remote replica.
+    ///
+    /// # Safety
+    ///
+    /// This method blindly overwrites the internal state of the region. It should
+    /// only be used by the distributed bridge when applying a validated snapshot.
+    pub fn apply_distributed_snapshot(
+        &self,
+        state: RegionState,
+        budget: Budget,
+        children: Vec<RegionId>,
+        tasks: Vec<TaskId>,
+        cancel_reason: Option<CancelReason>,
+    ) {
+        // Update atomic state
+        self.state.store(state);
+
+        // Update inner protected state
+        let mut inner = self.inner.write().expect("lock poisoned");
+        inner.budget = budget;
+        inner.children = children;
+        inner.tasks = tasks;
+        inner.cancel_reason = cancel_reason;
     }
 }
 
