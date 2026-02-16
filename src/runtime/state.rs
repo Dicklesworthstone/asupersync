@@ -1586,8 +1586,7 @@ impl RuntimeState {
 
         // Build a map of region -> cancel reason for cause chain construction.
         // Each child region's reason chains to its parent's reason.
-        let mut region_reasons: BTreeMap<RegionId, CancelReason> =
-            BTreeMap::new();
+        let mut region_reasons: BTreeMap<RegionId, CancelReason> = BTreeMap::new();
 
         // First pass: mark regions with cancellation reason and transition to Closing
         for node in &regions_to_cancel {

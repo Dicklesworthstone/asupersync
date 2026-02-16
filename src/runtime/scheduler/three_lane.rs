@@ -2972,6 +2972,7 @@ mod tests {
                 .expect("create task");
             let record = guard.task_mut(task_id).expect("task record missing");
             record.mark_local();
+            drop(guard);
             task_id
         };
 
@@ -3012,6 +3013,7 @@ mod tests {
                 .expect("create task");
             let record = guard.task_mut(task_id).expect("task record missing");
             record.mark_local();
+            drop(guard);
             task_id
         };
 

@@ -105,28 +105,26 @@ impl Default for GlobalInjector {
 impl GlobalInjector {
     /// Decrements the pending counter, saturating at zero.
     ///
-    /// Uses a single `fetch_sub` instead of a `fetch_update` CAS loop.
-    /// The counter is approximate (Relaxed ordering), so transient underflow
-    /// from concurrent inc/dec racing is harmless — the `wrapping_sub` result
-    /// will be corrected on the next increment.  However, we avoid wrapping
-    /// past zero in the common sequential case by only subtracting when the
-    /// counter is positive.  The load + sub is not atomic as a pair, but
-    /// since this counter is advisory (used for heuristics/metrics, not for
-    /// correctness), a brief inconsistency is acceptable and far cheaper
-    /// than a CAS retry loop under contention.
+    /// Counter values are advisory (Relaxed ordering), but they must never
+    /// wrap to huge values under concurrent decrements because queue-depth
+    /// heuristics consume this signal.
     #[inline]
     fn decrement_pending_count(&self) {
-        if self.pending_count.load(Ordering::Relaxed) > 0 {
-            self.pending_count.fetch_sub(1, Ordering::Relaxed);
-        }
+        let _ = self
+            .pending_count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                count.checked_sub(1)
+            });
     }
 
     /// Decrements the ready counter, saturating at zero (same rationale).
     #[inline]
     fn decrement_ready_count(&self) {
-        if self.ready_count.load(Ordering::Relaxed) > 0 {
-            self.ready_count.fetch_sub(1, Ordering::Relaxed);
-        }
+        let _ = self
+            .ready_count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                count.checked_sub(1)
+            });
     }
 
     /// Creates a new empty global injector.
@@ -293,6 +291,8 @@ impl GlobalInjector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     fn task(id: u32) -> TaskId {
         TaskId::new_for_test(1, id)
@@ -469,5 +469,46 @@ mod tests {
         assert_eq!(popped_ready.task, task(11));
         assert_eq!(injector.ready_count.load(Ordering::Relaxed), 0);
         assert_eq!(injector.pending_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn concurrent_decrements_saturate_counters_at_zero() {
+        for _ in 0..2_000 {
+            let injector = Arc::new(GlobalInjector::new());
+            injector.pending_count.store(1, Ordering::Relaxed);
+            injector.ready_count.store(1, Ordering::Relaxed);
+            let barrier = Arc::new(Barrier::new(3));
+
+            let i1 = Arc::clone(&injector);
+            let b1 = Arc::clone(&barrier);
+            let h1 = thread::spawn(move || {
+                b1.wait();
+                i1.decrement_pending_count();
+                i1.decrement_ready_count();
+            });
+
+            let i2 = Arc::clone(&injector);
+            let b2 = Arc::clone(&barrier);
+            let h2 = thread::spawn(move || {
+                b2.wait();
+                i2.decrement_pending_count();
+                i2.decrement_ready_count();
+            });
+
+            barrier.wait();
+            h1.join().expect("first decrement thread should complete");
+            h2.join().expect("second decrement thread should complete");
+
+            assert_eq!(
+                injector.pending_count.load(Ordering::Relaxed),
+                0,
+                "pending counter must saturate at zero"
+            );
+            assert_eq!(
+                injector.ready_count.load(Ordering::Relaxed),
+                0,
+                "ready counter must saturate at zero"
+            );
+        }
     }
 }

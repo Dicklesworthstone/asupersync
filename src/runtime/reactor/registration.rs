@@ -668,8 +668,7 @@ mod tests {
         let kind = result
             .as_ref()
             .err()
-            .map(io::Error::kind)
-            .unwrap_or(io::ErrorKind::Other);
+            .map_or(io::ErrorKind::Other, io::Error::kind);
         crate::assert_with_log!(
             kind == io::ErrorKind::Other,
             "panic maps to io::ErrorKind::Other",

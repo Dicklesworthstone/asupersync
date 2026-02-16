@@ -427,13 +427,20 @@ impl Worker {
                     if let Some(record) = state.task(waiter) {
                         if record.wake_state.notify() {
                             if record.is_local() {
-                                if let Some(worker_id) = record.pinned_worker() {
-                                    assert!(
-                                        worker_id == self.id,
-                                        "Pinned local waiter {waiter:?} has invalid worker id {worker_id}"
-                                    );
+                                match record.pinned_worker() {
+                                    Some(worker_id) if worker_id == self.id => {
+                                        local_waiters.push(waiter);
+                                    }
+                                    Some(_worker_id) => {
+                                        error!(
+                                            ?waiter,
+                                            worker_id = _worker_id,
+                                            current_worker = self.id,
+                                            "ready path: pinned local waiter has foreign worker id, wake skipped"
+                                        );
+                                    }
+                                    None => local_waiters.push(waiter),
                                 }
-                                local_waiters.push(waiter);
                             } else {
                                 global_waiters.push(waiter);
                             }
@@ -1100,11 +1107,90 @@ mod tests {
                 guard.task(panicking_task).is_none(),
                 "panicking task should be completed and removed from runtime state"
             );
+            drop(guard);
         }
         assert_eq!(
             global.pop(),
             Some(waiter_task),
             "panic path should wake and enqueue waiters"
+        );
+    }
+
+    #[test]
+    fn test_execute_ready_with_foreign_local_waiter_does_not_panic() {
+        use crate::record::task::TaskRecord;
+        use crate::runtime::stored_task::StoredTask;
+        use crate::runtime::RuntimeState;
+        use crate::sync::ContendedMutex;
+        use crate::types::{Budget, Outcome, RegionId};
+
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let global = Arc::new(GlobalQueue::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let completing_task = TaskId::new_for_test(0, 0);
+        let waiter_task = TaskId::new_for_test(1, 0);
+
+        {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let completing_record = TaskRecord::new(
+                completing_task,
+                RegionId::new_for_test(0, 0),
+                Budget::INFINITE,
+            );
+            let mut waiter_record =
+                TaskRecord::new(waiter_task, RegionId::new_for_test(0, 0), Budget::INFINITE);
+            waiter_record.pin_to_worker(1);
+            let _completing_idx = guard.insert_task(completing_record);
+            let _waiter_idx = guard.insert_task(waiter_record);
+
+            guard
+                .task_mut(completing_task)
+                .expect("completing task should exist")
+                .add_waiter(waiter_task);
+
+            guard.store_spawned_task(
+                completing_task,
+                StoredTask::new_with_id(async move { Outcome::Ok(()) }, completing_task),
+            );
+        }
+
+        let worker = Worker::new(
+            0,
+            Vec::new(),
+            Arc::clone(&global),
+            Arc::clone(&state),
+            Arc::clone(&shutdown),
+        );
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            worker.execute(completing_task);
+        }));
+        assert!(
+            result.is_ok(),
+            "foreign-worker local waiter must not panic scheduler worker"
+        );
+
+        {
+            let guard = state.lock().expect("runtime state lock poisoned");
+            assert!(
+                guard.task(completing_task).is_none(),
+                "completed task should be removed from runtime state"
+            );
+            assert!(
+                guard.task(waiter_task).is_some(),
+                "foreign local waiter should remain in state"
+            );
+            drop(guard);
+        }
+
+        assert!(
+            global.pop().is_none(),
+            "foreign local waiter must not be routed to global queue"
+        );
+        assert!(
+            worker.local.pop().is_none(),
+            "foreign local waiter must not be routed to current worker local queue"
         );
     }
 
