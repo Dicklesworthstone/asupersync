@@ -34,6 +34,7 @@ use super::{Interest, Token};
 use std::cell::Cell;
 use std::io;
 use std::marker::PhantomData;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::Weak;
 
 /// Internal trait for reactor operations needed by Registration.
@@ -158,22 +159,6 @@ impl Registration {
         self.reactor.strong_count() > 0
     }
 
-    /// Updates the waker to be notified when I/O is ready.
-    ///
-    /// This method stores the waker so that when the reactor detects
-    /// that the registered source is ready for the requested operations,
-    /// the associated task can be woken.
-    ///
-    /// # Note
-    ///
-    /// This is a stub implementation - full reactor integration is pending.
-    /// Currently this is a no-op that allows compilation.
-    pub fn update_waker(&self, _waker: std::task::Waker) {
-        // TODO: Implement proper waker storage and notification
-        // once reactor integration is complete.
-        // For now, this is a no-op stub to unblock compilation.
-    }
-
     /// Explicitly deregisters without waiting for drop.
     ///
     /// This is useful when you want to handle deregistration errors
@@ -204,7 +189,8 @@ impl Registration {
                 Ok(())
             },
             |reactor| {
-                let first = reactor.deregister_by_token(this.token);
+                let first = deregister_no_panic(&*reactor, this.token)
+                    .unwrap_or_else(panicked_deregister_result);
                 match first {
                     Ok(()) => {
                         this.disarmed.set(true);
@@ -216,7 +202,8 @@ impl Registration {
                     }
                     Err(first_err) => {
                         // Best-effort retry, then disarm Drop so we don't loop.
-                        let second = reactor.deregister_by_token(this.token);
+                        let second = deregister_no_panic(&*reactor, this.token)
+                            .unwrap_or_else(panicked_deregister_result);
                         this.disarmed.set(true);
                         match second {
                             Ok(()) => Ok(()),
@@ -240,13 +227,21 @@ impl Drop for Registration {
         if let Some(reactor) = self.reactor.upgrade() {
             // Best-effort cleanup: retry once on non-NotFound errors to reduce
             // stale-registration risk if the first deregister attempt fails transiently.
-            if let Err(err) = reactor.deregister_by_token(self.token) {
+            if let Some(Err(err)) = deregister_no_panic(&*reactor, self.token) {
                 if err.kind() != io::ErrorKind::NotFound {
-                    let _ = reactor.deregister_by_token(self.token);
+                    let _ = deregister_no_panic(&*reactor, self.token);
                 }
             }
         }
     }
+}
+
+fn deregister_no_panic(reactor: &dyn ReactorHandle, token: Token) -> Option<io::Result<()>> {
+    panic::catch_unwind(AssertUnwindSafe(|| reactor.deregister_by_token(token))).ok()
+}
+
+fn panicked_deregister_result() -> io::Result<()> {
+    Err(io::Error::other("reactor deregister panicked"))
 }
 
 impl std::fmt::Debug for Registration {
@@ -359,6 +354,33 @@ mod tests {
         fn deregister_by_token(&self, _token: Token) -> io::Result<()> {
             self.deregister_count.fetch_add(1, Ordering::SeqCst);
             Err(io::Error::other("persistent failure"))
+        }
+
+        fn modify_interest(&self, _token: Token, _interest: Interest) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct PanickingReactor {
+        deregister_count: AtomicUsize,
+    }
+
+    impl PanickingReactor {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                deregister_count: AtomicUsize::new(0),
+            })
+        }
+
+        fn deregister_count(&self) -> usize {
+            self.deregister_count.load(Ordering::SeqCst)
+        }
+    }
+
+    impl ReactorHandle for PanickingReactor {
+        fn deregister_by_token(&self, _token: Token) -> io::Result<()> {
+            self.deregister_count.fetch_add(1, Ordering::SeqCst);
+            panic!("injected deregister panic")
         }
 
         fn modify_interest(&self, _token: Token, _interest: Interest) -> io::Result<()> {
@@ -598,6 +620,65 @@ mod tests {
             count
         );
         crate::test_complete!("drop_retries_after_transient_deregister_error");
+    }
+
+    #[test]
+    fn drop_swallows_panicking_reactor_deregister() {
+        init_test("drop_swallows_panicking_reactor_deregister");
+        let reactor = PanickingReactor::new();
+        let token = Token::new(12);
+
+        let reg = Registration::new(
+            token,
+            Arc::downgrade(&reactor) as Weak<dyn ReactorHandle>,
+            Interest::READABLE,
+        );
+
+        let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(reg)));
+        crate::assert_with_log!(
+            dropped.is_ok(),
+            "drop must not panic even if deregister panics",
+            true,
+            dropped.is_ok()
+        );
+        let count = reactor.deregister_count();
+        crate::assert_with_log!(count == 1, "single deregister attempt", 1usize, count);
+        crate::test_complete!("drop_swallows_panicking_reactor_deregister");
+    }
+
+    #[test]
+    fn explicit_deregister_panicking_reactor_returns_error() {
+        init_test("explicit_deregister_panicking_reactor_returns_error");
+        let reactor = PanickingReactor::new();
+        let token = Token::new(13);
+
+        let reg = Registration::new(
+            token,
+            Arc::downgrade(&reactor) as Weak<dyn ReactorHandle>,
+            Interest::READABLE,
+        );
+
+        let result = reg.deregister();
+        crate::assert_with_log!(
+            result.is_err(),
+            "explicit deregister surfaces panic as error",
+            true,
+            result.is_err()
+        );
+        let kind = result
+            .as_ref()
+            .err()
+            .map(io::Error::kind)
+            .unwrap_or(io::ErrorKind::Other);
+        crate::assert_with_log!(
+            kind == io::ErrorKind::Other,
+            "panic maps to io::ErrorKind::Other",
+            io::ErrorKind::Other,
+            kind
+        );
+        let count = reactor.deregister_count();
+        crate::assert_with_log!(count == 1, "single deregister attempt", 1usize, count);
+        crate::test_complete!("explicit_deregister_panicking_reactor_returns_error");
     }
 
     #[test]
