@@ -381,6 +381,10 @@ impl VirtualTcpListener {
     /// `remote_addr` is the address reported as the peer address.
     pub fn inject_connection(&self, stream: VirtualTcpStream, remote_addr: SocketAddr) {
         let mut state = self.state.lock().expect("lock poisoned");
+        if state.closed {
+            // Listener is closed: do not enqueue new virtual connections.
+            return;
+        }
         state.connections.push_back((stream, remote_addr));
         if let Some(waker) = state.waker.take() {
             waker.wake();
@@ -397,6 +401,7 @@ impl VirtualTcpListener {
     pub fn close(&self) {
         let mut state = self.state.lock().expect("lock poisoned");
         state.closed = true;
+        state.connections.clear();
         if let Some(waker) = state.waker.take() {
             waker.wake();
         }
@@ -424,6 +429,10 @@ impl VirtualConnectionInjector {
     /// Inject a connection into the listener's accept queue.
     pub fn inject(&self, stream: VirtualTcpStream, remote_addr: SocketAddr) {
         let mut state = self.state.lock().expect("lock poisoned");
+        if state.closed {
+            // Listener is closed: do not enqueue new virtual connections.
+            return;
+        }
         state.connections.push_back((stream, remote_addr));
         if let Some(waker) = state.waker.take() {
             waker.wake();
@@ -453,14 +462,14 @@ impl TcpListenerApi for VirtualTcpListener {
         async move {
             std::future::poll_fn(|cx| {
                 let mut guard = state.lock().expect("lock poisoned");
-                if let Some(conn) = guard.connections.pop_front() {
-                    return Poll::Ready(Ok(conn));
-                }
                 if guard.closed {
                     return Poll::Ready(Err(io::Error::new(
                         io::ErrorKind::NotConnected,
                         "virtual listener closed",
                     )));
+                }
+                if let Some(conn) = guard.connections.pop_front() {
+                    return Poll::Ready(Ok(conn));
                 }
                 guard.waker = Some(cx.waker().clone());
                 Poll::Pending
@@ -471,14 +480,14 @@ impl TcpListenerApi for VirtualTcpListener {
 
     fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<(Self::Stream, SocketAddr)>> {
         let mut state = self.state.lock().expect("lock poisoned");
-        if let Some(conn) = state.connections.pop_front() {
-            return Poll::Ready(Ok(conn));
-        }
         if state.closed {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::NotConnected,
                 "virtual listener closed",
             )));
+        }
+        if let Some(conn) = state.connections.pop_front() {
+            return Poll::Ready(Ok(conn));
         }
         state.waker = Some(cx.waker().clone());
         Poll::Pending
@@ -665,6 +674,40 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
         let result = listener.poll_accept(&mut cx);
         assert!(matches!(result, Poll::Ready(Err(_))));
+    }
+
+    #[test]
+    fn virtual_listener_close_drops_pending_connections() {
+        let listener = VirtualTcpListener::new(addr("127.0.0.1:8080"));
+        let (_client, server) =
+            VirtualTcpStream::pair(addr("127.0.0.1:9000"), addr("127.0.0.1:8080"));
+        listener.inject_connection(server, addr("127.0.0.1:9000"));
+        assert_eq!(listener.pending_count(), 1);
+
+        listener.close();
+        assert_eq!(listener.pending_count(), 0);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let result = listener.poll_accept(&mut cx);
+        assert!(matches!(result, Poll::Ready(Err(_))));
+    }
+
+    #[test]
+    fn virtual_listener_inject_after_close_is_ignored() {
+        let listener = VirtualTcpListener::new(addr("127.0.0.1:8080"));
+        listener.close();
+
+        let (_client, server) =
+            VirtualTcpStream::pair(addr("127.0.0.1:9001"), addr("127.0.0.1:8080"));
+        listener.inject_connection(server, addr("127.0.0.1:9001"));
+        assert_eq!(listener.pending_count(), 0);
+
+        let injector = listener.injector();
+        let (_client2, server2) =
+            VirtualTcpStream::pair(addr("127.0.0.1:9002"), addr("127.0.0.1:8080"));
+        injector.inject(server2, addr("127.0.0.1:9002"));
+        assert_eq!(listener.pending_count(), 0);
     }
 
     #[test]
