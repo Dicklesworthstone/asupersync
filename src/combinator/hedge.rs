@@ -691,12 +691,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "winner must be None")]
     fn hedge_outcomes_panics_on_winner_when_not_spawned() {
-        let _ = hedge_outcomes::<i32, &str>(
-            Outcome::Ok(42),
-            false,
-            None,
-            Some(HedgeWinner::Primary),
-        );
+        let _ =
+            hedge_outcomes::<i32, &str>(Outcome::Ok(42), false, None, Some(HedgeWinner::Primary));
     }
 
     // =========================================================================
