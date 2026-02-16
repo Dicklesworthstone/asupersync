@@ -317,8 +317,10 @@ impl RecoveryCollector {
     /// object parameters are known.
     pub fn add_collected_with_verify(&mut self, cs: CollectedSymbol) -> Result<bool, Error> {
         if let Some(params) = &self.object_params {
-            let max_expected = params.total_source_symbols() + self.config.min_symbols;
-            if cs.symbol.esi() > max_expected + 100 {
+            let max_expected = params
+                .total_source_symbols()
+                .saturating_add(self.config.min_symbols);
+            if cs.symbol.esi() > max_expected.saturating_add(100) {
                 self.metrics.symbols_corrupt += 1;
                 return Err(Error::new(ErrorKind::CorruptedSymbol).with_message(format!(
                     "ESI {} exceeds expected range for object",

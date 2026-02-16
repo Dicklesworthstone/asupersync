@@ -1137,10 +1137,17 @@ where
     /// pops an idle entry. If health-check rejects that entry we must undo
     /// those counters, and (when metrics are enabled) record a destroy event.
     fn reject_unhealthy_idle_resource(&self) {
-        let mut state = self.state.lock().expect("pool state lock poisoned");
-        state.active = state.active.saturating_sub(1);
-        state.total_acquisitions = state.total_acquisitions.saturating_sub(1);
-        drop(state);
+        let waiter = {
+            let mut state = self.state.lock().expect("pool state lock poisoned");
+            state.active = state.active.saturating_sub(1);
+            state.total_acquisitions = state.total_acquisitions.saturating_sub(1);
+            // A slot just freed up — wake one blocked acquirer so it can
+            // try to create or grab another idle resource.
+            state.waiters.pop_front()
+        };
+        if let Some(waiter) = waiter {
+            waiter.waker.wake();
+        }
 
         #[cfg(feature = "metrics")]
         if let Some(ref metrics) = self.metrics {
