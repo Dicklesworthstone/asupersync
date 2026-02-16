@@ -517,7 +517,7 @@ impl<R> PooledResource<R> {
                     // abort (this method is called from Drop).
                     return;
                 };
-                wakers.drain(..).collect::<Vec<_>>()
+                std::mem::take(&mut *wakers)
             };
             for waker in drained {
                 waker.wake();
@@ -848,7 +848,9 @@ where
         // code calls process_returns would leave us stuck until timeout.
         {
             let mut wakers = self.pool.return_wakers.lock().expect("return_wakers lock");
-            wakers.push(cx.waker().clone());
+            if !wakers.iter().any(|w| w.will_wake(cx.waker())) {
+                wakers.push(cx.waker().clone());
+            }
         }
 
         drop(state);
