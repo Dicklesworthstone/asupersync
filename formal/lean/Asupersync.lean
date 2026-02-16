@@ -554,11 +554,14 @@ inductive Step {Value Error Panic : Type} :
               cancel := some (strengthenOpt region.cancel reason) }) :
       Step s (Label.cancel r reason) s'
 
-  /-- CLOSE-CHILDREN-DONE: all children/subregions complete; enter finalizing. -/
+  /-- CLOSE-CHILDREN-DONE: all children/subregions complete; enter finalizing.
+      This transition is admissible from either `closing` or `draining`. -/
   | closeChildrenDone {s s' : State Value Error Panic} {r : RegionId}
       {region : Region Value Error Panic}
       (hRegion : getRegion s r = some region)
-      (hState : region.state = RegionState.draining)
+      (hState :
+        region.state = RegionState.closing ∨
+        region.state = RegionState.draining)
       (hChildren : allTasksCompleted s region.children)
       (hSubs : allRegionsClosed s region.subregions)
       (hUpdate :
@@ -1782,7 +1785,9 @@ theorem close_cancel_children_step {Value Error Panic : Type}
 theorem close_children_done_step {Value Error Panic : Type}
     {s : State Value Error Panic} {r : RegionId} {region : Region Value Error Panic}
     (hRegion : getRegion s r = some region)
-    (hState : region.state = RegionState.draining)
+    (hState :
+      region.state = RegionState.closing ∨
+      region.state = RegionState.draining)
     (hChildren : allTasksCompleted s region.children)
     (hSubs : allRegionsClosed s region.subregions)
     : ∃ s', Step s (Label.tau) s' ∧
@@ -1790,6 +1795,16 @@ theorem close_children_done_step {Value Error Panic : Type}
   refine ⟨setRegion s r { region with state := RegionState.finalizing }, ?_, ?_⟩
   · exact Step.closeChildrenDone hRegion hState hChildren hSubs rfl
   · simp [getRegion, setRegion]
+
+theorem close_children_done_from_closing_step {Value Error Panic : Type}
+    {s : State Value Error Panic} {r : RegionId} {region : Region Value Error Panic}
+    (hRegion : getRegion s r = some region)
+    (hState : region.state = RegionState.closing)
+    (hChildren : allTasksCompleted s region.children)
+    (hSubs : allRegionsClosed s region.subregions)
+    : ∃ s', Step s (Label.tau) s' ∧
+        getRegion s' r = some { region with state := RegionState.finalizing } := by
+  exact close_children_done_step hRegion (Or.inl hState) hChildren hSubs
 
 theorem close_run_finalizer_step {Value Error Panic : Type}
     {s : State Value Error Panic} {r : RegionId}
@@ -1816,6 +1831,105 @@ theorem close_complete_step {Value Error Panic : Type}
   refine ⟨setRegion s r { region with state := RegionState.closed outcome }, ?_, ?_⟩
   · exact Step.close outcome hRegion hState hFinalizers hQuiescent rfl
   · simp [getRegion, setRegion]
+
+/-- Totality envelope for task-level cancel ladder states:
+    from `cancelRequested`, `cancelling`, or `finalizing`, one τ-step exists. -/
+theorem cancel_protocol_totality_tau {Value Error Panic : Type}
+    {s : State Value Error Panic} {t : TaskId} {task : Task Value Error Panic}
+    {reason : CancelReason} {cleanup : Budget}
+    (hTask : getTask s t = some task)
+    (hState :
+      task.state = TaskState.cancelRequested reason cleanup ∨
+      task.state = TaskState.cancelling reason cleanup ∨
+      task.state = TaskState.finalizing reason cleanup)
+    : ∃ s', Step s (Label.tau) s' := by
+  rcases hState with hRequested | hTail
+  · have hMaskSplit : task.mask = 0 ∨ task.mask > 0 := Nat.eq_zero_or_pos task.mask
+    rcases hMaskSplit with hMaskZero | hMaskPos
+    · rcases cancel_ack_step (hTask := hTask) (hState := hRequested) (hMask := hMaskZero) with
+        ⟨s', hStep, _⟩
+      exact ⟨s', hStep⟩
+    · rcases cancel_masked_step (hTask := hTask) (hState := hRequested) (hMask := hMaskPos) with
+        ⟨s', hStep, _⟩
+      exact ⟨s', hStep⟩
+  · rcases hTail with hCancelling | hFinalizing
+    · rcases cancel_finalize_step (hTask := hTask) (hState := hCancelling) with
+        ⟨s', hStep, _⟩
+      exact ⟨s', hStep⟩
+    · rcases cancel_complete_step (hTask := hTask) (hState := hFinalizing) with
+        ⟨s', hStep, _⟩
+      exact ⟨s', hStep⟩
+
+/-- Totality branch for `closing` regions under explicit reachability assumptions:
+    either there is live child work (cancel path) or all descendants are done
+    (direct finalizing path). -/
+theorem close_closing_totality_step {Value Error Panic : Type}
+    {s : State Value Error Panic} {r : RegionId} {region : Region Value Error Panic}
+    (reason : CancelReason)
+    (hRegion : getRegion s r = some region)
+    (hState : region.state = RegionState.closing)
+    (hBranch :
+      (∃ t ∈ region.children,
+          match getTask s t with
+          | some task => ¬ taskCompleted task
+          | none => False) ∨
+      (allTasksCompleted s region.children ∧ allRegionsClosed s region.subregions))
+    : ∃ lbl s', Step s lbl s' := by
+  rcases hBranch with hLive | hDone
+  · rcases close_cancel_children_step reason hRegion hState hLive with ⟨s', hStep, _⟩
+    exact ⟨Label.cancel r reason, s', hStep⟩
+  · rcases hDone with ⟨hChildren, hSubs⟩
+    rcases close_children_done_step (hRegion := hRegion) (hState := Or.inl hState)
+        (hChildren := hChildren) (hSubs := hSubs) with ⟨s', hStep, _⟩
+    exact ⟨Label.tau, s', hStep⟩
+
+/-- Totality envelope for close-protocol ladder states under declared assumptions.
+    Every listed branch yields one enabled `Step`. -/
+theorem close_protocol_totality_step {Value Error Panic : Type}
+    {s : State Value Error Panic} {r : RegionId} {region : Region Value Error Panic}
+    (hRegion : getRegion s r = some region)
+    (hCases :
+      (region.state = RegionState.open) ∨
+      (∃ reason : CancelReason,
+          region.state = RegionState.closing ∧
+          ((∃ t ∈ region.children,
+              match getTask s t with
+              | some task => ¬ taskCompleted task
+              | none => False) ∨
+            (allTasksCompleted s region.children ∧
+              allRegionsClosed s region.subregions))) ∨
+      (region.state = RegionState.draining ∧
+        allTasksCompleted s region.children ∧
+        allRegionsClosed s region.subregions) ∨
+      (∃ f : TaskId, ∃ rest : List TaskId,
+          region.state = RegionState.finalizing ∧
+          region.finalizers = f :: rest) ∨
+      (∃ outcome : Outcome Value Error CancelReason Panic,
+          region.state = RegionState.finalizing ∧
+          region.finalizers = [] ∧
+          Quiescent s region))
+    : ∃ lbl s', Step s lbl s' := by
+  rcases hCases with hOpen | hTail
+  · rcases close_begin_step hRegion hOpen with ⟨s', hStep, _⟩
+    exact ⟨Label.tau, s', hStep⟩
+  · rcases hTail with hClosing | hTail
+    · rcases hClosing with ⟨reason, hState, hBranch⟩
+      exact close_closing_totality_step reason hRegion hState hBranch
+    · rcases hTail with hDraining | hTail
+      · rcases hDraining with ⟨hState, hChildren, hSubs⟩
+        rcases close_children_done_step (hRegion := hRegion) (hState := Or.inr hState)
+            (hChildren := hChildren) (hSubs := hSubs) with ⟨s', hStep, _⟩
+        exact ⟨Label.tau, s', hStep⟩
+      · rcases hTail with hFinalizer | hClose
+        · rcases hFinalizer with ⟨f, rest, hState, hFinalizers⟩
+          rcases close_run_finalizer_step (hRegion := hRegion) (hState := hState)
+              (hFinalizers := hFinalizers) with ⟨s', hStep, _⟩
+          exact ⟨Label.finalize r f, s', hStep⟩
+        · rcases hClose with ⟨outcome, hState, hFinalizers, hQuiescent⟩
+          rcases close_complete_step (outcome := outcome) (hRegion := hRegion)
+              (hState := hState) (hFinalizers := hFinalizers)
+              (hQuiescent := hQuiescent) with ⟨s', hStep, _⟩
+          exact ⟨Label.close r outcome, s', hStep⟩
 
 -- ==========================================================================
 -- Safety: completed tasks cannot be cancelled (bd-330st)

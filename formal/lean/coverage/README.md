@@ -15,6 +15,7 @@ This directory contains the canonical machine-readable artifacts for Lean proof 
 - `baseline_report_v1.json` - reproducible Track-1 baseline snapshot (counts, blockers, ownership, cadence)
 - `baseline_report_v1.md` - human-readable baseline report synchronized with JSON snapshot
 - `ci_verification_profiles.json` - deterministic smoke/frontier/full CI profile definitions and comparability keys
+- `lean_full_repro_bundle_manifest.schema.json` - JSON Schema for `lean-full/repro_bundle_manifest.json` emitted by the full CI profile
 - `lean_frontier_buckets_v1.json` - deterministic frontier error buckets with failure-mode + bead linkage
 - `proof_guided_performance_opportunity_map.json` - deterministic Track-6 optimization envelope map with theorem-linked constraints and required conformance checks
 
@@ -44,6 +45,35 @@ and Rust conformance tests:
 - `inv.race.losers_drained`: Losers are drained after races
 - `inv.obligation.no_leaks`: No obligation leaks
 - `inv.authority.no_ambient`: No ambient authority
+
+## Lemma Canonicalization and Layering Rules (Track-3 / asupersync-3qo95)
+
+Theorem-family canonicalization is recorded in
+`theorem_surface_inventory.json` under `lemma_canonicalization`.
+
+Usage contract:
+- Use `canonical_theorem` as the first import target when a family offers
+  multiple theorem variants.
+- Treat listed `variants` as purpose-specific projections (simulation witness,
+  ledger projection, constructor projection), not as alternate canonical names.
+- Keep liveness decomposition families (`cancel_*`, `close_*`) anchored to their
+  canonical termination/quiescence theorem before introducing state-specific
+  projections.
+- Keep frame/update lemmas (`set*`/`get*` families) dependency-free from
+  preservation or refinement master theorems.
+- Keep constructor-specific theorem helpers depending on canonical lifecycle
+  lemmas, never the reverse.
+
+Safe rewrite/simp patterns for active Track-3 work:
+- Prefer `[simp]` frame lemmas (`setTask_getTask_same`,
+  `setTask_getTask_other`, `setRegion_getRegion_same`,
+  `setObligation_getObligation_same`) for local state updates.
+- Rewrite state transitions with `get*`/`set*` lemmas before attempting
+  constructor discharges.
+- For obligation lifecycle branches, normalize through canonical lemmas:
+  `commit_resolves`, `abort_resolves`, `leak_marks_leaked`.
+- Use simulation-only variants (`*_resolves_obligation`) after canonical state
+  normalization, when proving Rust-to-Lean projection details.
 
 ## Blocker Taxonomy (deterministic codes)
 
@@ -187,6 +217,17 @@ Validation for this artifact is enforced in `tests/lean_invariant_theorem_test_l
 
 Validation for profile structure, runtime ordering, and bead-link integrity is enforced in
 `tests/lean_ci_verification_profiles.rs`.
+
+The full profile manifest contract is explicit and versioned:
+- schema version: `lean.full.repro.bundle.v1`
+- schema path: `formal/lean/coverage/lean_full_repro_bundle_manifest.schema.json`
+- required contract fields include deterministic repro metadata (`toolchain`, `inputs`,
+  `commands`, `artifacts`) and routing ownership context.
+
+Retention policy is also enforced from `ci_verification_profiles.json`:
+- default retention: 30 days
+- bounded range: 30 to 90 days
+- expiry reference: `ci_run_created_at_utc`
 
 ## Governance Cadence and Decision Records (Track-5)
 

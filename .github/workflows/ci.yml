@@ -407,6 +407,7 @@ jobs:
           fi
 
           manifest_schema_version="$(jq -r '.artifact_contract.manifest_schema_version // empty' "$profile_file")"
+          manifest_schema_path="$(jq -r '.artifact_contract.manifest_schema_path // empty' "$profile_file")"
           artifact_name="$(jq -r '.artifact_bundle.name // empty' <<<"$profile_json")"
           artifact_dir="$(jq -r '.artifact_bundle.directory // empty' <<<"$profile_json")"
           retention_days="$(jq -r '.artifact_bundle.retention_days // empty' <<<"$profile_json")"
@@ -427,8 +428,12 @@ jobs:
             failure_payload_path="$failure_payload_default"
           fi
 
-          if [[ -z "$manifest_schema_version" || -z "$artifact_name" || -z "$artifact_dir" ]]; then
-            echo "::error::Full artifact contract is missing manifest schema/name/directory"
+          if [[ -z "$manifest_schema_version" || -z "$manifest_schema_path" || -z "$artifact_name" || -z "$artifact_dir" ]]; then
+            echo "::error::Full artifact contract is missing manifest schema version/path/name/directory"
+            exit 1
+          fi
+          if [[ ! -f "$manifest_schema_path" ]]; then
+            echo "::error::manifest schema path does not exist: $manifest_schema_path"
             exit 1
           fi
           if [[ -z "$repro_bundle_manifest" || -z "$repro_script" || -z "$failure_payload_path" ]]; then
@@ -472,6 +477,7 @@ jobs:
           {
             printf 'profile_file=%s\n' "$profile_file"
             printf 'manifest_schema_version=%s\n' "$manifest_schema_version"
+            printf 'manifest_schema_path=%s\n' "$manifest_schema_path"
             printf 'artifact_name=%s\n' "$artifact_name"
             printf 'artifact_dir=%s\n' "$artifact_dir"
             printf 'retention_days=%s\n' "$retention_days"
@@ -530,6 +536,7 @@ jobs:
           artifact_dir="${{ steps.lean_full_contract.outputs.artifact_dir }}"
           profile_file="${{ steps.lean_full_contract.outputs.profile_file }}"
           manifest_schema_version="${{ steps.lean_full_contract.outputs.manifest_schema_version }}"
+          manifest_schema_path="${{ steps.lean_full_contract.outputs.manifest_schema_path }}"
           repro_bundle_manifest="${{ steps.lean_full_contract.outputs.repro_bundle_manifest }}"
           repro_script="${{ steps.lean_full_contract.outputs.repro_script }}"
           mkdir -p "$artifact_dir"
@@ -580,6 +587,7 @@ jobs:
             --arg status "$run_status" \
             --arg failed_command "$failed_cmd" \
             --arg profile_source "$profile_file" \
+            --arg manifest_schema_path "$manifest_schema_path" \
             --arg repro_script "$repro_script" \
             --arg commands_file "$artifact_dir/commands.txt" \
             --arg workflow_name "${GITHUB_WORKFLOW}" \
@@ -605,6 +613,7 @@ jobs:
               status: $status,
               failed_command: (if $failed_command == "unknown" then null else $failed_command end),
               profile_source: $profile_source,
+              manifest_schema_path: $manifest_schema_path,
               repro_script: $repro_script,
               ci_context: {
                 workflow: $workflow_name,
@@ -631,6 +640,19 @@ jobs:
               commands: $commands,
               artifacts: $artifacts
             }' > "$repro_bundle_manifest"
+
+          mapfile -t missing_required_fields < <(jq -r '(.manifest_required_fields - (keys_unsorted))[]?' "$repro_bundle_manifest")
+          if [[ "${#missing_required_fields[@]}" -ne 0 ]]; then
+            echo "::error::Repro manifest missing required fields from artifact_contract.manifest_required_fields"
+            printf 'Missing fields:\n'
+            printf '  - %s\n' "${missing_required_fields[@]}"
+            exit 1
+          fi
+          emitted_schema_path="$(jq -r '.manifest_schema_path // empty' "$repro_bundle_manifest")"
+          if [[ "$emitted_schema_path" != "$manifest_schema_path" ]]; then
+            echo "::error::Repro manifest emitted manifest_schema_path=$emitted_schema_path but contract requires $manifest_schema_path"
+            exit 1
+          fi
 
       - name: Emit full failure payload
         if: failure()

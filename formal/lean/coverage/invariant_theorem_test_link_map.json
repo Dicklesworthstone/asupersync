@@ -18,12 +18,38 @@
     {
       "invariant_id": "inv.authority.no_ambient",
       "invariant_name": "No ambient authority",
+      "proof_status": "unproven",
       "theorem_witnesses": [],
       "executable_checks": [
         "tests/property_cap_obligation.rs",
         "tests/cap_obligation_compile_fail.rs",
         "tests/integration_e2e.rs"
       ],
+      "assumption_envelope": {
+        "assumption_id": "safety.authority.no_ambient.v1",
+        "assumptions": [
+          "Capability-bearing APIs remain the sole gateway for side effects in runtime and combinator surfaces.",
+          "Compile-fail and property suites capture ambient-authority regressions that are not yet Lean-proven.",
+          "No ambient effect path bypasses Cx capability flow without failing conformance checks."
+        ],
+        "runtime_guardrails": [
+          "New effectful APIs must thread explicit capabilities instead of introducing ambient global state.",
+          "Capability compile-fail suites must stay in deterministic CI for every coverage artifact refresh.",
+          "Authority-sensitive paths must keep explicit audit traces for regression triage."
+        ]
+      },
+      "composition_contract": {
+        "status": "planned",
+        "consumed_by": [
+          "tests/property_cap_obligation.rs",
+          "tests/cap_obligation_compile_fail.rs",
+          "tests/integration_e2e.rs"
+        ],
+        "feeds_invariants": [
+          "inv.structured_concurrency.single_owner",
+          "inv.obligation.no_leaks"
+        ]
+      },
       "explicit_gaps": [
         {
           "gap_id": "inv.authority.no_ambient.gap.lean-proof-family-missing",
@@ -39,6 +65,7 @@
     {
       "invariant_id": "inv.cancel.protocol",
       "invariant_name": "Cancellation is a protocol: request -> drain -> finalize (idempotent)",
+      "proof_status": "partially_proven",
       "theorem_witnesses": [
         {
           "theorem": "cancel_masked_step",
@@ -170,6 +197,7 @@
     {
       "invariant_id": "inv.obligation.no_leaks",
       "invariant_name": "No obligation leaks",
+      "proof_status": "partially_proven",
       "theorem_witnesses": [
         {
           "theorem": "commit_resolves",
@@ -268,14 +296,40 @@
         "tests/leak_regression_e2e.rs",
         "tests/lease_semantics.rs"
       ],
+      "assumption_envelope": {
+        "assumption_id": "safety.obligation.no_leaks.v1",
+        "assumptions": [
+          "Every reserve pathway eventually resolves via commit/abort/leak transitions recorded in the ledger model.",
+          "Close/quiescence checks continue to treat unresolved obligations as blockers to completion.",
+          "Existing theorem witnesses over commit/abort/leak stability compose with runtime conformance traces."
+        ],
+        "runtime_guardrails": [
+          "Obligation lifecycle tests must remain deterministic and replayable across artifact refreshes.",
+          "Ledger transition code paths must preserve explicit terminal-state transitions without silent drops.",
+          "Leak-related regressions must block merge via obligation conformance gates."
+        ]
+      },
+      "composition_contract": {
+        "status": "partial",
+        "consumed_by": [
+          "tests/obligation_lifecycle_e2e.rs",
+          "tests/cancel_obligation_invariants.rs",
+          "tests/leak_regression_e2e.rs",
+          "tests/lease_semantics.rs"
+        ],
+        "feeds_invariants": [
+          "inv.region_close.quiescence",
+          "inv.race.losers_drained"
+        ]
+      },
       "explicit_gaps": [
         {
           "gap_id": "inv.obligation.no_leaks.gap.global-zero-leak-theorem-missing",
           "description": "A single global theorem stating zero leaked obligations across all reachable executions is not yet present.",
-          "owner": "unassigned",
+          "owner": "MagentaBridge",
           "dependency_blockers": [
             "bd-3k6l5",
-            "bd-244p5"
+            "asupersync-1pdet"
           ]
         }
       ]
@@ -283,6 +337,7 @@
     {
       "invariant_id": "inv.race.losers_drained",
       "invariant_name": "Losers are drained after races",
+      "proof_status": "unproven",
       "theorem_witnesses": [
         {
           "theorem": "cancel_propagation_bounded",
@@ -349,6 +404,7 @@
     {
       "invariant_id": "inv.region_close.quiescence",
       "invariant_name": "Region close = quiescence",
+      "proof_status": "fully_proven",
       "theorem_witnesses": [
         {
           "theorem": "close_implies_quiescent",
@@ -440,6 +496,7 @@
     {
       "invariant_id": "inv.structured_concurrency.single_owner",
       "invariant_name": "Structured concurrency: every task is owned by exactly one region",
+      "proof_status": "partially_proven",
       "theorem_witnesses": [
         {
           "theorem": "spawn_preserves_existing_task",
@@ -495,6 +552,31 @@
         "tests/region_lifecycle_conformance.rs",
         "tests/integration_e2e.rs"
       ],
+      "assumption_envelope": {
+        "assumption_id": "safety.structured_concurrency.single_owner.v1",
+        "assumptions": [
+          "Spawn and schedule transitions preserve single-owner task membership in the modeled region tree.",
+          "Wellformedness invariants continue to imply non-duplicated ownership across task IDs.",
+          "Executable region ownership tests provide deterministic regression evidence where Lean remains partial."
+        ],
+        "runtime_guardrails": [
+          "Task migration and scheduling paths must preserve owner region IDs without aliasing.",
+          "Region lifecycle tests must continue to assert ownership/quiescence coupling in CI.",
+          "Any ownership model change requires traceability updates in theorem/test linkage artifacts."
+        ]
+      },
+      "composition_contract": {
+        "status": "partial",
+        "consumed_by": [
+          "tests/property_region_ops.rs",
+          "tests/region_lifecycle_conformance.rs",
+          "tests/integration_e2e.rs"
+        ],
+        "feeds_invariants": [
+          "inv.region_close.quiescence",
+          "inv.cancel.protocol"
+        ]
+      },
       "explicit_gaps": [
         {
           "gap_id": "inv.structured_concurrency.single_owner.gap.global-uniqueness-theorem-missing",

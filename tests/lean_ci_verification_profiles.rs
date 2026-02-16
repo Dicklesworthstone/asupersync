@@ -5,6 +5,8 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 const PROFILES_JSON: &str = include_str!("../formal/lean/coverage/ci_verification_profiles.json");
+const MANIFEST_SCHEMA_JSON: &str =
+    include_str!("../formal/lean/coverage/lean_full_repro_bundle_manifest.schema.json");
 const CI_WORKFLOW_YML: &str = include_str!("../.github/workflows/ci.yml");
 
 fn load_beads_jsonl() -> Option<String> {
@@ -135,6 +137,29 @@ fn ci_artifact_contract_schema_and_retention_policy_are_explicit() {
             .expect("artifact_contract.manifest_schema_version must be string"),
         "lean.full.repro.bundle.v1"
     );
+    let manifest_schema_path = artifact_contract
+        .get("manifest_schema_path")
+        .and_then(Value::as_str)
+        .expect("artifact_contract.manifest_schema_path must be string");
+    assert_eq!(
+        manifest_schema_path,
+        "formal/lean/coverage/lean_full_repro_bundle_manifest.schema.json"
+    );
+    assert!(
+        std::path::Path::new(manifest_schema_path).is_file(),
+        "artifact_contract.manifest_schema_path must point to an existing file"
+    );
+
+    let manifest_schema: Value =
+        serde_json::from_str(MANIFEST_SCHEMA_JSON).expect("manifest schema json must parse");
+    let schema_contract_version = manifest_schema
+        .pointer("/properties/schema_version/const")
+        .and_then(Value::as_str)
+        .expect("manifest schema must define properties.schema_version.const");
+    assert_eq!(
+        schema_contract_version, "lean.full.repro.bundle.v1",
+        "manifest schema version constant must match artifact_contract.manifest_schema_version"
+    );
 
     let required_manifest_fields = artifact_contract
         .get("manifest_required_fields")
@@ -153,17 +178,61 @@ fn ci_artifact_contract_schema_and_retention_policy_are_explicit() {
         "profile",
         "status",
         "profile_source",
+        "manifest_schema_path",
         "repro_script",
         "ci_context",
         "ownership",
         "comparison_keys",
         "expected_runtime_seconds",
+        "toolchain",
+        "inputs",
         "commands",
         "artifacts",
     ] {
         assert!(
             required_manifest_fields.contains(required),
             "artifact_contract.manifest_required_fields must include {required}"
+        );
+    }
+    let schema_required_fields = manifest_schema
+        .get("required")
+        .and_then(Value::as_array)
+        .expect("manifest schema required must be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("manifest schema required values must be strings")
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        required_manifest_fields, schema_required_fields,
+        "artifact_contract.manifest_required_fields must match manifest schema required fields"
+    );
+
+    let comparability_keys = artifact_contract
+        .get("comparability_keys")
+        .and_then(Value::as_array)
+        .expect("artifact_contract.comparability_keys must be array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("artifact_contract.comparability_keys entries must be strings")
+        })
+        .collect::<BTreeSet<_>>();
+    for required in [
+        "profile",
+        "ci_context.git_commit",
+        "toolchain.rustc",
+        "inputs.cargo_lock_sha256",
+        "commands",
+        "artifacts[].path",
+        "artifacts[].sha256",
+    ] {
+        assert!(
+            comparability_keys.contains(required),
+            "artifact_contract.comparability_keys must include {required}"
         );
     }
 
@@ -841,6 +910,7 @@ fn lean_full_gate_emits_repro_bundle_and_routing_contract() {
         "Lean Full Gate (Main/Release)",
         "Resolve Lean full artifact contract",
         ".artifact_contract.manifest_schema_version // empty",
+        ".artifact_contract.manifest_schema_path // empty",
         ".artifact_contract.misroute_tracking.policy_id // empty",
         ".governance_policy.policy_id // empty",
         ".governance_policy.decision_log_path // empty",
@@ -855,9 +925,11 @@ fn lean_full_gate_emits_repro_bundle_and_routing_contract() {
         "governance_phase_exit_review_json",
         "governance_decision_required_fields_json",
         "decision_record_required_fields",
+        "steps.lean_full_contract.outputs.manifest_schema_path",
         "steps.lean_full_contract.outputs.repro_bundle_manifest",
         "steps.lean_full_contract.outputs.repro_script",
         "steps.lean_full_contract.outputs.failure_payload",
+        "missing required fields from artifact_contract.manifest_required_fields",
         "Append governance decision record",
         "Upload Lean full artifacts",
         "steps.lean_full_contract.outputs.artifact_name",

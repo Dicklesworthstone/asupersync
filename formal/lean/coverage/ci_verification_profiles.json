@@ -10,23 +10,29 @@
   "artifact_contract": {
     "policy_id": "lean.ci.artifact_contract.v1",
     "manifest_schema_version": "lean.full.repro.bundle.v1",
+    "manifest_schema_path": "formal/lean/coverage/lean_full_repro_bundle_manifest.schema.json",
     "manifest_required_fields": [
       "schema_version",
       "generated_at_utc",
       "profile",
       "status",
       "profile_source",
+      "manifest_schema_path",
       "repro_script",
       "ci_context",
       "ownership",
       "comparison_keys",
       "expected_runtime_seconds",
+      "toolchain",
+      "inputs",
       "commands",
       "artifacts"
     ],
     "comparability_keys": [
       "profile",
       "ci_context.git_commit",
+      "toolchain.rustc",
+      "inputs.cargo_lock_sha256",
       "commands",
       "artifacts[].path",
       "artifacts[].sha256"

@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://asupersync.dev/schemas/lean-full-repro-bundle-manifest-v1.json",
+  "title": "Lean Full Repro Bundle Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "generated_at_utc",
+    "profile",
+    "status",
+    "profile_source",
+    "manifest_schema_path",
+    "repro_script",
+    "ci_context",
+    "ownership",
+    "comparison_keys",
+    "expected_runtime_seconds",
+    "toolchain",
+    "inputs",
+    "commands",
+    "artifacts"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "lean.full.repro.bundle.v1"
+    },
+    "generated_at_utc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "profile": {
+      "type": "string",
+      "const": "full"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["success", "failure", "unknown"]
+    },
+    "failed_command": {
+      "type": ["string", "null"]
+    },
+    "profile_source": {
+      "type": "string",
+      "minLength": 1
+    },
+    "manifest_schema_path": {
+      "type": "string",
+      "const": "formal/lean/coverage/lean_full_repro_bundle_manifest.schema.json"
+    },
+    "repro_script": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ci_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workflow",
+        "run_id",
+        "run_attempt",
+        "event_name",
+        "git_ref",
+        "git_commit"
+      ],
+      "properties": {
+        "workflow": { "type": "string", "minLength": 1 },
+        "run_id": { "type": "string", "minLength": 1 },
+        "run_attempt": { "type": "string", "minLength": 1 },
+        "event_name": { "type": "string", "minLength": 1 },
+        "git_ref": { "type": "string", "minLength": 1 },
+        "git_commit": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ownership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primary_bead", "failure_triage_bead", "escalation_bead"],
+      "properties": {
+        "primary_bead": { "type": "string", "minLength": 1 },
+        "failure_triage_bead": { "type": "string", "minLength": 1 },
+        "escalation_bead": { "type": "string", "minLength": 1 }
+      }
+    },
+    "comparison_keys": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "expected_runtime_seconds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "p95", "max"],
+      "properties": {
+        "target": { "type": "integer", "minimum": 1 },
+        "p95": { "type": "integer", "minimum": 1 },
+        "max": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "toolchain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rustc", "cargo", "rustup_toolchain"],
+      "properties": {
+        "rustc": { "type": "string", "minLength": 1 },
+        "cargo": { "type": "string", "minLength": 1 },
+        "rustup_toolchain": { "type": "string", "minLength": 1 }
+      }
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_file", "commands_file", "cargo_lock_sha256"],
+      "properties": {
+        "profile_file": { "type": "string", "minLength": 1 },
+        "commands_file": { "type": "string", "minLength": 1 },
+        "cargo_lock_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "manifest_required_fields": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "commands": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "exists", "sha256", "size_bytes"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "exists": { "type": "boolean" },
+          "sha256": {
+            "anyOf": [
+              { "type": "null" },
+              { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+            ]
+          },
+          "size_bytes": {
+            "anyOf": [
+              { "type": "null" },
+              { "type": "integer", "minimum": 0 }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

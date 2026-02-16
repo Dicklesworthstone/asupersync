@@ -589,5 +589,150 @@
       "line": 3983,
       "theorem": "obligation_leaked_canonical_form"
     }
-  ]
+  ],
+  "lemma_canonicalization": {
+    "version": "2026-02-16",
+    "families": [
+      {
+        "family_id": "obligation_resolution_commit",
+        "canonical_theorem": "commit_resolves",
+        "variants": [
+          {
+            "theorem": "commit_resolves_obligation",
+            "role": "simulation_projection"
+          },
+          {
+            "theorem": "commit_removes_from_ledger",
+            "role": "ledger_projection"
+          },
+          {
+            "theorem": "committed_obligation_stable",
+            "role": "constructor_stability"
+          }
+        ]
+      },
+      {
+        "family_id": "obligation_resolution_abort",
+        "canonical_theorem": "abort_resolves",
+        "variants": [
+          {
+            "theorem": "abort_resolves_obligation",
+            "role": "simulation_projection"
+          },
+          {
+            "theorem": "abort_removes_from_ledger",
+            "role": "ledger_projection"
+          },
+          {
+            "theorem": "aborted_obligation_stable",
+            "role": "constructor_stability"
+          }
+        ]
+      },
+      {
+        "family_id": "obligation_resolution_leak",
+        "canonical_theorem": "leak_marks_leaked",
+        "variants": [
+          {
+            "theorem": "leak_removes_from_ledger",
+            "role": "ledger_projection"
+          },
+          {
+            "theorem": "leaked_obligation_stable",
+            "role": "constructor_stability"
+          },
+          {
+            "theorem": "resolved_obligation_stable",
+            "role": "post_resolution_aggregation"
+          }
+        ]
+      },
+      {
+        "family_id": "cancel_termination_chain",
+        "canonical_theorem": "cancel_protocol_terminates",
+        "variants": [
+          {
+            "theorem": "cancel_terminates_from_cancelling",
+            "role": "state_specific_progression"
+          },
+          {
+            "theorem": "cancel_terminates_from_finalizing",
+            "role": "state_specific_progression"
+          },
+          {
+            "theorem": "cancel_steps_testable_bound",
+            "role": "bounded_execution_projection"
+          },
+          {
+            "theorem": "cancel_propagation_bounded",
+            "role": "propagation_bound_projection"
+          }
+        ]
+      },
+      {
+        "family_id": "close_quiescence_chain",
+        "canonical_theorem": "close_implies_quiescent",
+        "variants": [
+          {
+            "theorem": "close_quiescence_decomposition",
+            "role": "decomposition_projection"
+          },
+          {
+            "theorem": "close_complete_step",
+            "role": "protocol_step_projection"
+          }
+        ]
+      }
+    ],
+    "layering_rules": [
+      {
+        "rule_id": "frame_before_preservation",
+        "description": "Frame/update lemmas are foundational and must not depend on preservation/refinement master theorems.",
+        "anchor_theorems": [
+          "setTask_getTask_same",
+          "setTask_getTask_other",
+          "setRegion_getRegion_same",
+          "setRegion_getRegion_other",
+          "setObligation_getObligation_same",
+          "setObligation_getObligation_other"
+        ],
+        "must_not_depend_on": [
+          "step_preserves_wellformed",
+          "refinement_preserves_wellformed"
+        ]
+      },
+      {
+        "rule_id": "constructor_helpers_depend_on_canonical",
+        "description": "Constructor/simulation helpers should derive from canonical lifecycle lemmas, not duplicate the canonical role.",
+        "anchor_theorems": [
+          "commit_resolves_obligation",
+          "abort_resolves_obligation",
+          "committed_obligation_stable",
+          "aborted_obligation_stable",
+          "leaked_obligation_stable"
+        ],
+        "must_depend_on_any": [
+          "commit_resolves",
+          "abort_resolves",
+          "leak_marks_leaked"
+        ]
+      },
+      {
+        "rule_id": "liveness_variants_follow_canonical",
+        "description": "State-specific liveness helpers should appear after canonical termination/quiescence statements to avoid declaration-order brittleness.",
+        "anchor_theorems": [
+          "cancel_terminates_from_cancelling",
+          "cancel_terminates_from_finalizing",
+          "cancel_steps_testable_bound",
+          "cancel_propagation_bounded",
+          "close_quiescence_decomposition",
+          "close_complete_step"
+        ],
+        "must_depend_on_any": [
+          "cancel_protocol_terminates",
+          "close_implies_quiescent"
+        ]
+      }
+    ]
+  }
 }

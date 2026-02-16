@@ -16,6 +16,7 @@ const BEADS_JSONL: &str = include_str!("../.beads/issues.jsonl");
 #[derive(Debug)]
 struct InvariantExpectations {
     name: String,
+    lean_status: String,
     theorem_names: BTreeSet<String>,
     test_refs: BTreeSet<String>,
     gap_count: usize,
@@ -115,6 +116,11 @@ fn invariant_expectations(invariant_inventory: &Value) -> BTreeMap<String, Invar
                 .and_then(Value::as_str)
                 .expect("invariant name must be string")
                 .to_string();
+            let lean_status = entry
+                .get("lean_status")
+                .and_then(Value::as_str)
+                .expect("lean_status must be string")
+                .to_string();
             let theorem_names = entry
                 .get("lean_theorems")
                 .and_then(Value::as_array)
@@ -147,6 +153,7 @@ fn invariant_expectations(invariant_inventory: &Value) -> BTreeMap<String, Invar
                 id,
                 InvariantExpectations {
                     name,
+                    lean_status,
                     theorem_names,
                     test_refs,
                     gap_count,
@@ -351,6 +358,85 @@ fn assert_gaps(
     }
 }
 
+fn assert_status_and_assumption_metadata(
+    invariant_id: &str,
+    row: &Value,
+    expectations: &InvariantExpectations,
+) {
+    let proof_status = row
+        .get("proof_status")
+        .and_then(Value::as_str)
+        .expect("proof_status must be a string");
+    assert_eq!(
+        proof_status, expectations.lean_status,
+        "proof_status drift for {invariant_id}"
+    );
+
+    let assumption_envelope = row
+        .get("assumption_envelope")
+        .expect("assumption_envelope must be present");
+    assert!(
+        assumption_envelope
+            .get("assumption_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty()),
+        "{invariant_id} assumption_envelope.assumption_id must be non-empty"
+    );
+    let assumptions = assumption_envelope
+        .get("assumptions")
+        .and_then(Value::as_array)
+        .expect("assumption_envelope.assumptions must be an array");
+    assert!(
+        !assumptions.is_empty(),
+        "{invariant_id} must define at least one assumption"
+    );
+    let runtime_guardrails = assumption_envelope
+        .get("runtime_guardrails")
+        .and_then(Value::as_array)
+        .expect("assumption_envelope.runtime_guardrails must be an array");
+    assert!(
+        !runtime_guardrails.is_empty(),
+        "{invariant_id} must define runtime_guardrails"
+    );
+
+    let composition_contract = row
+        .get("composition_contract")
+        .expect("composition_contract must be present");
+    let status = composition_contract
+        .get("status")
+        .and_then(Value::as_str)
+        .expect("composition_contract.status must be a string");
+    assert!(
+        ["ready", "partial", "planned"].contains(&status),
+        "{invariant_id} composition_contract.status must be one of ready|partial|planned"
+    );
+    let consumed_by = composition_contract
+        .get("consumed_by")
+        .and_then(Value::as_array)
+        .expect("composition_contract.consumed_by must be an array");
+    assert!(
+        !consumed_by.is_empty(),
+        "{invariant_id} composition_contract.consumed_by must be non-empty"
+    );
+    for consumer in consumed_by {
+        let consumer = consumer
+            .as_str()
+            .expect("composition_contract.consumed_by entries must be strings");
+        assert!(
+            Path::new(consumer).exists(),
+            "{invariant_id} composition consumer path missing: {consumer}"
+        );
+    }
+    let feeds = composition_contract
+        .get("feeds_invariants")
+        .and_then(Value::as_array)
+        .expect("composition_contract.feeds_invariants must be an array");
+    assert!(
+        !feeds.is_empty(),
+        "{invariant_id} composition_contract.feeds_invariants must be non-empty"
+    );
+}
+
 fn summary_counts(rows: &[Value]) -> SummaryCounts {
     let invariants_total = rows.len();
     let invariants_with_theorem_witnesses = rows
@@ -508,6 +594,7 @@ fn link_map_rows_cover_all_invariants_and_resolve_sources() {
             expectations.name,
             "invariant_name drift for {invariant_id}"
         );
+        assert_status_and_assumption_metadata(invariant_id, row, expectations);
 
         let has_theorem_witnesses = assert_witnesses(
             invariant_id,
@@ -758,6 +845,80 @@ fn assert_loser_drain_liveness_row(losers_row: &Value) {
     );
 }
 
+fn assert_obligation_terminal_outcomes_row(obligation_row: &Value) {
+    let obligation_theorems = theorem_witness_names(obligation_row);
+    for theorem in [
+        "commit_resolves",
+        "abort_resolves",
+        "leak_marks_leaked",
+        "commit_removes_from_ledger",
+        "abort_removes_from_ledger",
+        "leak_removes_from_ledger",
+        "committed_obligation_stable",
+        "aborted_obligation_stable",
+        "leaked_obligation_stable",
+        "close_implies_ledger_empty",
+    ] {
+        assert!(
+            obligation_theorems.contains(theorem),
+            "obligation witness missing terminal-outcome theorem {theorem}"
+        );
+    }
+
+    assert_liveness_contract(
+        obligation_row,
+        "inv.obligation.no_leaks",
+        "partial",
+        &[
+            "tests/obligation_lifecycle_e2e.rs",
+            "tests/cancel_obligation_invariants.rs",
+            "tests/leak_regression_e2e.rs",
+            "tests/lease_semantics.rs",
+        ],
+    );
+
+    let obligation_gaps = obligation_row
+        .get("explicit_gaps")
+        .and_then(Value::as_array)
+        .expect("obligation explicit_gaps must be an array");
+    let global_zero_gap = obligation_gaps
+        .iter()
+        .find(|gap| {
+            gap.get("gap_id").and_then(Value::as_str)
+                == Some("inv.obligation.no_leaks.gap.global-zero-leak-theorem-missing")
+        })
+        .expect("obligation global-zero-leak gap must be tracked explicitly");
+
+    let dependency_blockers = global_zero_gap
+        .get("dependency_blockers")
+        .and_then(Value::as_array)
+        .expect("obligation gap dependency_blockers must be an array")
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .expect("dependency_blockers entries must be strings")
+        })
+        .collect::<BTreeSet<_>>();
+    assert!(
+        dependency_blockers.contains("asupersync-1pdet"),
+        "obligation gap must include asupersync-1pdet as closure path"
+    );
+    assert!(
+        dependency_blockers.contains("bd-3k6l5"),
+        "obligation gap must retain bd-3k6l5 dependency"
+    );
+
+    let owner = global_zero_gap
+        .get("owner")
+        .and_then(Value::as_str)
+        .expect("obligation gap owner must be present");
+    assert!(
+        owner != "unassigned",
+        "obligation gap owner must be explicitly assigned"
+    );
+}
+
 #[test]
 fn liveness_invariants_have_termination_quiescence_and_gap_contracts() {
     let link_map = parse_json(LINK_MAP_JSON, "link map");
@@ -765,4 +926,11 @@ fn liveness_invariants_have_termination_quiescence_and_gap_contracts() {
     assert_cancel_liveness_row(invariant_row(rows, "inv.cancel.protocol"));
     assert_quiescence_liveness_row(invariant_row(rows, "inv.region_close.quiescence"));
     assert_loser_drain_liveness_row(invariant_row(rows, "inv.race.losers_drained"));
+}
+
+#[test]
+fn obligation_invariant_tracks_terminal_outcomes_and_gap_contracts() {
+    let link_map = parse_json(LINK_MAP_JSON, "link map");
+    let rows = link_rows(&link_map);
+    assert_obligation_terminal_outcomes_row(invariant_row(rows, "inv.obligation.no_leaks"));
 }

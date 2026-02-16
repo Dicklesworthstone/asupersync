@@ -1,7 +1,7 @@
 //! Lean theorem inventory and constructor coverage consistency tests (bd-3n3b2).
 
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 const THEOREM_INVENTORY_JSON: &str =
     include_str!("../formal/lean/coverage/theorem_surface_inventory.json");
@@ -58,6 +58,207 @@ fn theorem_inventory_lines_are_positive_and_unique() {
             seen_lines.insert(line),
             "theorem inventory has duplicate line {line}; expected stable 1:1 theorem-to-line mapping (latest theorem: {theorem})"
         );
+    }
+}
+
+#[test]
+fn theorem_inventory_canonicalization_metadata_is_consistent() {
+    let inventory: Value =
+        serde_json::from_str(THEOREM_INVENTORY_JSON).expect("theorem inventory must parse");
+    let theorem_entries = inventory
+        .get("theorems")
+        .and_then(Value::as_array)
+        .expect("theorems must be an array");
+    let mut theorem_lines = BTreeMap::new();
+    for entry in theorem_entries {
+        let theorem = entry
+            .get("theorem")
+            .and_then(Value::as_str)
+            .expect("theorem name must be present");
+        let line = entry
+            .get("line")
+            .and_then(Value::as_u64)
+            .expect("theorem line must be present");
+        assert!(
+            theorem_lines.insert(theorem, line).is_none(),
+            "duplicate theorem entry in inventory: {theorem}"
+        );
+    }
+    let theorem_names = theorem_lines.keys().copied().collect::<BTreeSet<_>>();
+
+    let canonicalization = inventory
+        .get("lemma_canonicalization")
+        .expect("lemma_canonicalization metadata must be present");
+    let families = canonicalization
+        .get("families")
+        .and_then(Value::as_array)
+        .expect("lemma_canonicalization.families must be an array");
+    assert!(
+        !families.is_empty(),
+        "canonicalization metadata must define at least one family"
+    );
+
+    let mut family_ids = BTreeSet::new();
+    let mut canonical_theorems = BTreeSet::new();
+    let mut variant_theorems = BTreeSet::new();
+    for family in families {
+        let family_id = family
+            .get("family_id")
+            .and_then(Value::as_str)
+            .expect("family_id must be present");
+        assert!(
+            family_ids.insert(family_id),
+            "family_id appears more than once: {family_id}"
+        );
+        let canonical = family
+            .get("canonical_theorem")
+            .and_then(Value::as_str)
+            .expect("canonical_theorem must be present");
+        assert!(
+            theorem_names.contains(canonical),
+            "family {family_id} points to unknown canonical theorem: {canonical}"
+        );
+        assert!(
+            canonical_theorems.insert(canonical),
+            "canonical theorem appears in multiple families: {canonical}"
+        );
+        let canonical_line = *theorem_lines
+            .get(canonical)
+            .expect("canonical theorem line must exist");
+
+        let variants = family
+            .get("variants")
+            .and_then(Value::as_array)
+            .expect("family variants must be an array");
+        assert!(
+            !variants.is_empty(),
+            "family {family_id} must define at least one variant"
+        );
+        for variant in variants {
+            let theorem = variant
+                .get("theorem")
+                .and_then(Value::as_str)
+                .expect("variant theorem must be present");
+            let role = variant
+                .get("role")
+                .and_then(Value::as_str)
+                .expect("variant role must be present");
+            assert!(
+                !role.trim().is_empty(),
+                "family {family_id} has variant theorem {theorem} with empty role"
+            );
+            assert!(
+                theorem_names.contains(theorem),
+                "family {family_id} variant points to unknown theorem: {theorem}"
+            );
+            assert_ne!(
+                theorem, canonical,
+                "family {family_id} variant theorem equals canonical theorem {canonical}"
+            );
+            assert!(
+                variant_theorems.insert(theorem),
+                "variant theorem appears in multiple families: {theorem}"
+            );
+            let variant_line = *theorem_lines
+                .get(theorem)
+                .expect("variant theorem line must exist");
+            assert!(
+                canonical_line < variant_line,
+                "family {family_id} canonical theorem {canonical} must appear before variant {theorem}"
+            );
+        }
+    }
+
+    let layering_rules = canonicalization
+        .get("layering_rules")
+        .and_then(Value::as_array)
+        .expect("lemma_canonicalization.layering_rules must be an array");
+    assert!(
+        !layering_rules.is_empty(),
+        "layering_rules must include at least one rule"
+    );
+    for rule in layering_rules {
+        let rule_id = rule
+            .get("rule_id")
+            .and_then(Value::as_str)
+            .expect("layering rule_id must be present");
+        let mut anchor_names = Vec::new();
+        let anchors = rule
+            .get("anchor_theorems")
+            .and_then(Value::as_array)
+            .expect("layering anchor_theorems must be an array");
+        assert!(
+            !anchors.is_empty(),
+            "layering rule {rule_id} must include anchor_theorems"
+        );
+        for anchor in anchors {
+            let theorem = anchor
+                .as_str()
+                .expect("layering anchor theorem names must be strings");
+            assert!(
+                theorem_names.contains(theorem),
+                "layering rule {rule_id} references unknown anchor theorem: {theorem}"
+            );
+            anchor_names.push(theorem);
+        }
+
+        if let Some(disallowed) = rule.get("must_not_depend_on").and_then(Value::as_array) {
+            for entry in disallowed {
+                let theorem = entry
+                    .as_str()
+                    .expect("must_not_depend_on theorem names must be strings");
+                assert!(
+                    theorem_names.contains(theorem),
+                    "layering rule {rule_id} references unknown must_not_depend_on theorem: {theorem}"
+                );
+                let disallowed_line = *theorem_lines
+                    .get(theorem)
+                    .expect("must_not_depend_on theorem line must exist");
+                for anchor in &anchor_names {
+                    let anchor_line = *theorem_lines
+                        .get(anchor)
+                        .expect("anchor theorem line must exist");
+                    assert!(
+                        anchor_line < disallowed_line,
+                        "layering rule {rule_id} requires anchor theorem {anchor} to appear before forbidden dependency target {theorem}"
+                    );
+                }
+            }
+        }
+
+        if let Some(required) = rule.get("must_depend_on_any").and_then(Value::as_array) {
+            assert!(
+                !required.is_empty(),
+                "layering rule {rule_id} must_depend_on_any cannot be empty when present"
+            );
+            for entry in required {
+                let theorem = entry
+                    .as_str()
+                    .expect("must_depend_on_any theorem names must be strings");
+                assert!(
+                    theorem_names.contains(theorem),
+                    "layering rule {rule_id} references unknown must_depend_on_any theorem: {theorem}"
+                );
+            }
+            for anchor in &anchor_names {
+                let anchor_line = *theorem_lines
+                    .get(anchor)
+                    .expect("anchor theorem line must exist");
+                let has_prior_requirement = required.iter().any(|entry| {
+                    let theorem = entry
+                        .as_str()
+                        .expect("must_depend_on_any theorem names must be strings");
+                    let required_line = *theorem_lines
+                        .get(theorem)
+                        .expect("must_depend_on_any theorem line must exist");
+                    required_line < anchor_line
+                });
+                assert!(
+                    has_prior_requirement,
+                    "layering rule {rule_id} requires each anchor theorem to appear after at least one required dependency theorem"
+                );
+            }
+        }
     }
 }
 
