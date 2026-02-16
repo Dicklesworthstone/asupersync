@@ -7,7 +7,7 @@ mod common;
 
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::{Decoder, Encoder};
-use asupersync::net::websocket::{CloseCode, Frame, FrameCodec, Opcode, WsError, apply_mask};
+use asupersync::net::websocket::{apply_mask, CloseCode, Frame, FrameCodec, Opcode, WsError};
 use common::{init_test_logging, test_proptest_config};
 use proptest::prelude::*;
 

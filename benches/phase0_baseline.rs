@@ -17,19 +17,19 @@
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::explicit_iter_loop)]
 
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
 
-use asupersync::Cx;
-use asupersync::combinator::race::{RaceWinner, race2_outcomes};
-use asupersync::combinator::{TimeoutConfig, effective_deadline, join2_outcomes};
+use asupersync::combinator::race::{race2_outcomes, RaceWinner};
+use asupersync::combinator::{effective_deadline, join2_outcomes, TimeoutConfig};
 use asupersync::config::RaptorQConfig;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::raptorq::{RaptorQReceiverBuilder, RaptorQSenderBuilder};
 use asupersync::runtime::RuntimeState;
-use asupersync::transport::mock::{SimTransportConfig, sim_channel};
+use asupersync::transport::mock::{sim_channel, SimTransportConfig};
 use asupersync::types::{Budget, CancelKind, CancelReason, ObjectId, ObjectParams, Outcome, Time};
 use asupersync::util::Arena;
+use asupersync::Cx;
 
 // =============================================================================
 // CORE TYPE BENCHMARKS

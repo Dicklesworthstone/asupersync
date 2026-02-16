@@ -4,8 +4,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 /// A flag that tracks whether a cleanup action was executed.

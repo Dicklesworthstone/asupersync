@@ -2,7 +2,7 @@ use crate::websocket_e2e::util::{init_ws_test, read_http_headers, ws_handshake_r
 use asupersync::cx::Cx;
 use asupersync::net::tcp::VirtualTcpStream;
 use asupersync::net::websocket::{
-    HttpResponse, WebSocketAcceptor, WsAcceptError, compute_accept_key,
+    compute_accept_key, HttpResponse, WebSocketAcceptor, WsAcceptError,
 };
 use std::net::SocketAddr;
 

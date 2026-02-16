@@ -16,7 +16,7 @@
 
 use asupersync::channel::mpsc;
 use asupersync::channel::partition::{
-    ActorId, PartitionBehavior, PartitionController, partition_channel,
+    partition_channel, ActorId, PartitionBehavior, PartitionController,
 };
 use asupersync::evidence_sink::{CollectorSink, EvidenceSink};
 use asupersync::types::Budget;

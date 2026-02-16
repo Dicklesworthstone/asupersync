@@ -4,8 +4,8 @@
 //! This is THE critical invariant for cancel-correct structured concurrency.
 
 use crate::e2e::combinator::util::{Counter, DrainFlag, DrainTracker, NeverComplete};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
 
 struct CleanupOnDrop {
     flag: Arc<AtomicBool>,

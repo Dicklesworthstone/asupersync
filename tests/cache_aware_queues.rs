@@ -102,12 +102,12 @@ fn measure_allocs<F: FnOnce()>(f: F) -> (u64, u64) {
 
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::record::task::TaskRecord;
-use asupersync::runtime::RuntimeState;
 use asupersync::runtime::scheduler::{
     GlobalQueue, IntrusivePriorityHeap, LocalQueue, PriorityScheduler,
 };
+use asupersync::runtime::RuntimeState;
 use asupersync::types::{Budget, RegionId, TaskId};
-use asupersync::util::{Arena, ArenaIndex, CACHE_LINE_SIZE, CachePadded};
+use asupersync::util::{Arena, ArenaIndex, CachePadded, CACHE_LINE_SIZE};
 
 fn init_test(test_name: &str) {
     common::init_test_logging();

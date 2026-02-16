@@ -458,71 +458,57 @@ mod tests {
                 .posterior(vec![0.5, 0.2, 0.1]) // sums to 0.8
                 .build(),
         );
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ValidationError::PosteriorNotNormalized { .. }))
-        );
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::PosteriorNotNormalized { .. })));
     }
 
     #[test]
     fn validation_posterior_empty() {
         let errors = expect_validation(valid_builder().posterior(vec![]).build());
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ValidationError::PosteriorEmpty))
-        );
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::PosteriorEmpty)));
     }
 
     #[test]
     fn validation_calibration_out_of_range() {
         let errors = expect_validation(valid_builder().calibration_score(1.5).build());
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ValidationError::CalibrationOutOfRange { .. }))
-        );
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::CalibrationOutOfRange { .. })));
     }
 
     #[test]
     fn validation_negative_expected_loss() {
         let errors = expect_validation(valid_builder().expected_loss("bad_action", -0.1).build());
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ValidationError::NegativeExpectedLoss { .. }))
-        );
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::NegativeExpectedLoss { .. })));
     }
 
     #[test]
     fn validation_negative_chosen_expected_loss() {
         let errors = expect_validation(valid_builder().chosen_expected_loss(-0.01).build());
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ValidationError::NegativeChosenExpectedLoss { .. }))
-        );
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::NegativeChosenExpectedLoss { .. })));
     }
 
     #[test]
     fn validation_empty_component() {
         let errors = expect_validation(valid_builder().component("").build());
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ValidationError::EmptyComponent))
-        );
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::EmptyComponent)));
     }
 
     #[test]
     fn validation_empty_action() {
         let errors = expect_validation(valid_builder().action("").build());
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ValidationError::EmptyAction))
-        );
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::EmptyAction)));
     }
 
     #[test]

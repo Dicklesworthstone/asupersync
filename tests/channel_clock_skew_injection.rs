@@ -17,8 +17,8 @@ use asupersync::channel::clock_skew::{ClockSkewConfig, SkewClock};
 use asupersync::evidence_sink::{CollectorSink, EvidenceSink};
 use asupersync::time::{TimeSource, TimerDriver, VirtualClock};
 use asupersync::types::Time;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::task::Wake;
 
 struct FlagWaker(AtomicBool);

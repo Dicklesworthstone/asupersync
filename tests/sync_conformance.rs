@@ -15,10 +15,10 @@
 // Allow significant_drop_tightening in tests - the scoped blocks are for clarity
 #![allow(clippy::significant_drop_tightening)]
 
-use asupersync::Cx;
 use asupersync::sync::{Barrier, LockError, Mutex, Notify, OnceCell, RwLock, Semaphore};
-use std::sync::Arc;
+use asupersync::Cx;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread;
 #[macro_use]
 mod common;

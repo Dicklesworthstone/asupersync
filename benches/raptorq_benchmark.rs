@@ -9,14 +9,14 @@
 
 #![allow(missing_docs)]
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::{
-    Gf256, gf256_add_slice, gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slice,
-    gf256_mul_slices2,
+    gf256_add_slice, gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slice, gf256_mul_slices2,
+    Gf256,
 };
-use asupersync::raptorq::linalg::{DenseRow, GaussianSolver, row_scale_add, row_xor};
+use asupersync::raptorq::linalg::{row_scale_add, row_xor, DenseRow, GaussianSolver};
 use asupersync::raptorq::systematic::SystematicEncoder;
 
 const TRACK_E_ARTIFACT_PATH: &str = "artifacts/raptorq_track_e_gf256_bench_v1.json";

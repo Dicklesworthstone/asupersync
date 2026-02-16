@@ -17,9 +17,9 @@
 mod common;
 
 use asupersync::combinator::{
-    HedgeWinner, RaceWinner, first_ok_outcomes, first_ok_to_result, hedge_outcomes,
-    hedge_to_result, join_all_to_result, join2_outcomes, make_join_all_result,
-    make_race_all_result, pipeline_to_result, pipeline2_outcomes, quorum_outcomes, race2_to_result,
+    first_ok_outcomes, first_ok_to_result, hedge_outcomes, hedge_to_result, join2_outcomes,
+    join_all_to_result, make_join_all_result, make_race_all_result, pipeline2_outcomes,
+    pipeline_to_result, quorum_outcomes, race2_to_result, HedgeWinner, RaceWinner,
 };
 use asupersync::lab::oracle::{CancellationProtocolOracle, OracleSuite};
 use asupersync::lab::{LabConfig, LabRuntime};
@@ -30,8 +30,8 @@ use asupersync::types::{
     Budget, CancelKind, CancelReason, ObligationId, Outcome, PanicPayload, RegionId, TaskId, Time,
 };
 use common::*;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 fn region(n: u32) -> RegionId {
     RegionId::new_for_test(n, 0)

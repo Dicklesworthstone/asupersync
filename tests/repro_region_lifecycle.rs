@@ -1,7 +1,7 @@
 #![allow(missing_docs)]
 
-use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
+use asupersync::Cx;
 
 #[test]
 fn test_scope_inherits_region_id_in_phase0() {

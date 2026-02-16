@@ -1074,15 +1074,13 @@ mod tests {
         let scan = scan_conformance_attributes(std::slice::from_ref(&file)).unwrap();
         assert!(scan.warnings.is_empty());
         assert_eq!(scan.entries.len(), 2);
-        assert!(
-            scan.entries
-                .iter()
-                .any(|entry| entry.spec_section == "3.2.1")
-        );
-        assert!(
-            scan.entries
-                .iter()
-                .any(|entry| entry.spec_section == "3.2.2")
-        );
+        assert!(scan
+            .entries
+            .iter()
+            .any(|entry| entry.spec_section == "3.2.1"));
+        assert!(scan
+            .entries
+            .iter()
+            .any(|entry| entry.spec_section == "3.2.2"));
     }
 }

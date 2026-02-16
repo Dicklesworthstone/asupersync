@@ -17,15 +17,15 @@
 mod common;
 
 use asupersync::time::{
-    Elapsed, Interval, MissedTickBehavior, Sleep, TimerWheel, interval, interval_at, timeout,
-    timeout_at,
+    interval, interval_at, timeout, timeout_at, Elapsed, Interval, MissedTickBehavior, Sleep,
+    TimerWheel,
 };
 use asupersync::types::{Budget, Time};
 use common::*;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 

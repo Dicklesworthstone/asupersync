@@ -7,12 +7,12 @@
 mod common;
 use common::*;
 
-use asupersync::lab::LabRuntime;
 use asupersync::lab::explorer::{DporExplorer, ExplorerConfig, ScheduleExplorer};
+use asupersync::lab::LabRuntime;
 use asupersync::trace::canonicalize::trace_fingerprint;
 use asupersync::trace::dpor::{
-    BacktrackPoint, Race, SleepSet, detect_hb_races, detect_races, estimated_classes,
-    racing_events, trace_coverage_analysis,
+    detect_hb_races, detect_races, estimated_classes, racing_events, trace_coverage_analysis,
+    BacktrackPoint, Race, SleepSet,
 };
 use asupersync::trace::event::TraceEvent;
 use asupersync::types::{Budget, CancelReason, RegionId, TaskId, Time};

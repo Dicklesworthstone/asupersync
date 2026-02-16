@@ -50,7 +50,7 @@ use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::record::task::TaskState;
 use asupersync::record::{ObligationKind, ObligationState};
 use asupersync::runtime::yield_now;
-use asupersync::trace::{TraceEvent, trace_fingerprint};
+use asupersync::trace::{trace_fingerprint, TraceEvent};
 use asupersync::types::{Budget, CancelReason, ObligationId, Outcome, RegionId, TaskId, Time};
 use common::*;
 use serde_json::Value;

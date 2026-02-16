@@ -7,8 +7,8 @@ mod common;
 mod websocket_e2e;
 
 use asupersync::net::websocket::{
-    ClientHandshake, HandshakeError, HttpRequest, HttpResponse, ServerHandshake, WsUrl,
-    compute_accept_key,
+    compute_accept_key, ClientHandshake, HandshakeError, HttpRequest, HttpResponse,
+    ServerHandshake, WsUrl,
 };
 use asupersync::util::DetEntropy;
 use futures_lite::future::block_on;

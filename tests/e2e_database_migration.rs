@@ -11,7 +11,7 @@ mod common;
 
 use asupersync::database::{SqliteConnection, SqliteError, SqliteValue};
 use asupersync::migration::{
-    DualValue, DualValueError, MigrationFeature, MigrationMode, configure_migration,
+    configure_migration, DualValue, DualValueError, MigrationFeature, MigrationMode,
 };
 use asupersync::types::Outcome;
 use common::*;

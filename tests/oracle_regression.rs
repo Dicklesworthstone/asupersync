@@ -15,11 +15,11 @@ mod common;
 
 use common::*;
 
-use asupersync::lab::OracleReport;
-use asupersync::lab::meta::{ALL_ORACLE_INVARIANTS, MetaRunner, builtin_mutations};
-use asupersync::lab::oracle::OracleSuite;
+use asupersync::lab::meta::{builtin_mutations, MetaRunner, ALL_ORACLE_INVARIANTS};
 use asupersync::lab::oracle::eprocess::{EProcessConfig, EProcessMonitor};
 use asupersync::lab::oracle::evidence::{DetectionModel, EvidenceLedger, EvidenceStrength};
+use asupersync::lab::oracle::OracleSuite;
+use asupersync::lab::OracleReport;
 use asupersync::types::Time;
 
 // ==================== Constants ====================

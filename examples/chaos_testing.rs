@@ -35,8 +35,8 @@ use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::types::Budget;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 

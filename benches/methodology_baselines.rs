@@ -19,17 +19,17 @@
 #![allow(missing_docs)]
 #![allow(clippy::semicolon_if_nothing_returned)]
 
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
 
-use asupersync::Cx;
 use asupersync::channel::mpsc;
 use asupersync::record::task::TaskRecord;
-use asupersync::runtime::RuntimeState;
 use asupersync::runtime::scheduler::{GlobalQueue, LocalQueue};
+use asupersync::runtime::RuntimeState;
 use asupersync::sync::ContendedMutex;
 use asupersync::types::{Budget, CancelKind, CancelReason, RegionId, TaskId, Time};
 use asupersync::util::ArenaIndex;
+use asupersync::Cx;
 use std::sync::Arc;
 
 // =============================================================================

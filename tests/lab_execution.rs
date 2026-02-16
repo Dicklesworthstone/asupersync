@@ -4,9 +4,9 @@
 mod common;
 
 use asupersync::cx::Cx;
+use asupersync::lab::assert_deterministic;
 use asupersync::lab::LabConfig;
 use asupersync::lab::LabRuntime;
-use asupersync::lab::assert_deterministic;
 use asupersync::runtime::{AdaptiveDeadlineConfig, DeadlineWarning, MonitorConfig, WarningReason};
 use asupersync::types::{Budget, Time};
 use common::*;

@@ -18,7 +18,7 @@
 mod common;
 
 use asupersync::combinator::join2_outcomes;
-use asupersync::combinator::race::{RaceWinner, race2_outcomes};
+use asupersync::combinator::race::{race2_outcomes, RaceWinner};
 use asupersync::cx::Cx;
 use asupersync::lab::oracle::{LoserDrainOracle, OracleViolation};
 use asupersync::lab::{LabConfig, LabRuntime};
@@ -26,9 +26,9 @@ use asupersync::plan::certificate::{verify, verify_steps};
 use asupersync::plan::fixtures::all_fixtures;
 use asupersync::plan::{PlanDag, PlanId, PlanNode, RewritePolicy};
 use asupersync::runtime::RuntimeState;
-use asupersync::runtime::{JoinError, TaskHandle, yield_now};
-use asupersync::trace::TraceEvent;
+use asupersync::runtime::{yield_now, JoinError, TaskHandle};
 use asupersync::trace::format::{GoldenTraceConfig, GoldenTraceFixture};
+use asupersync::trace::TraceEvent;
 use asupersync::types::{
     Budget, CancelKind, CancelReason, Outcome, RegionId, Severity, TaskId, Time,
 };

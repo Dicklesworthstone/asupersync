@@ -7,10 +7,11 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
-    Ident, Token, Type, braced,
+    braced,
     parse::{Parse, ParseStream},
     parse_macro_input,
     punctuated::Punctuated,
+    Ident, Token, Type,
 };
 
 // ============================================================================

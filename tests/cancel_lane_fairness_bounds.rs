@@ -13,14 +13,14 @@
 //!   Priority queue: src/runtime/scheduler/priority.rs
 //!   Existing tests: tests/scheduler_lane_fairness.rs
 
-use asupersync::runtime::RuntimeState;
 use asupersync::runtime::scheduler::three_lane::ThreeLaneScheduler;
+use asupersync::runtime::RuntimeState;
 use asupersync::sync::ContendedMutex;
 use asupersync::test_utils::init_test_logging;
 use asupersync::time::{TimerDriverHandle, VirtualClock};
 use asupersync::types::{Budget, TaskId, Time};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 // ---------------------------------------------------------------------------

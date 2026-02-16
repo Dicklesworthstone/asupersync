@@ -66,8 +66,8 @@ use asupersync::service::{
 use asupersync::types::Time;
 use std::future::{self, Future};
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
@@ -963,8 +963,8 @@ mod tower_adapter_tests {
     use std::future;
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::task::{Context, Poll};
     use tower::{Layer, Service, ServiceBuilder};
 

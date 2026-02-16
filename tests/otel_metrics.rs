@@ -10,14 +10,14 @@
 //! - `InMemoryExporter` round-trip
 //! - Snapshot building and custom exporters
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use asupersync::observability::{Metrics, MetricsProvider, NoOpMetrics, OutcomeKind};
 use asupersync::record::ObligationKind;
-use asupersync::runtime::RuntimeState;
 use asupersync::runtime::config::ObligationLeakResponse;
+use asupersync::runtime::RuntimeState;
 use asupersync::trace::TraceEventKind;
 use asupersync::types::cancel::CancelKind;
 use asupersync::types::id::{RegionId, TaskId};
@@ -553,8 +553,8 @@ mod otel_integration {
     };
     use opentelemetry::metrics::MeterProvider;
     use opentelemetry_sdk::metrics::{
-        InMemoryMetricExporter as OtelInMemoryExporter, PeriodicReader, SdkMeterProvider,
-        data::ResourceMetrics,
+        data::ResourceMetrics, InMemoryMetricExporter as OtelInMemoryExporter, PeriodicReader,
+        SdkMeterProvider,
     };
     use std::collections::HashSet;
 

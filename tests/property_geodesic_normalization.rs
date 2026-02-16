@@ -20,8 +20,8 @@ mod common;
 use asupersync::trace::event_structure::{OwnerKey, TracePoset};
 use asupersync::trace::independence::independent;
 use asupersync::trace::{
-    GeodesicAlgorithm, GeodesicConfig, TraceEvent, count_switches, geodesic_normalize,
-    is_valid_linear_extension,
+    count_switches, geodesic_normalize, is_valid_linear_extension, GeodesicAlgorithm,
+    GeodesicConfig, TraceEvent,
 };
 use asupersync::types::{RegionId, TaskId, Time};
 use common::{init_test_logging, test_proptest_config};

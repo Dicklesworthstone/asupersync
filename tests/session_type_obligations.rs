@@ -8,14 +8,14 @@ mod common;
 
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::obligation::session_types::{
-    Branch, End, Initiator, Select, Selected, Send, SessionProof, delegation, lease, send_permit,
-    two_phase,
+    delegation, lease, send_permit, two_phase, Branch, End, Initiator, Select, Selected, Send,
+    SessionProof,
 };
 use asupersync::record::ObligationKind;
 use common::{init_test_logging, test_proptest_config};
 use proptest::prelude::*;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 // ============================================================================
 // Helpers

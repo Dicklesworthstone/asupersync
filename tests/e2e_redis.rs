@@ -7,8 +7,8 @@ mod common;
 mod redis_e2e;
 
 use asupersync::cx::Cx;
-use asupersync::messaging::RedisClient;
 use asupersync::messaging::redis::RespValue;
+use asupersync::messaging::RedisClient;
 use std::time::Duration;
 
 fn init_redis_test(name: &str) {

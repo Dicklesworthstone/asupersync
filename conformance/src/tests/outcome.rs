@@ -32,11 +32,11 @@
 //! - OB-008: Obligation description can be set
 
 use crate::{
-    ConformanceTest, MpscReceiver, MpscSender, OneshotSender, RuntimeInterface, TestCategory,
-    TestMeta, TestResult, checkpoint,
+    checkpoint, ConformanceTest, MpscReceiver, MpscSender, OneshotSender, RuntimeInterface,
+    TestCategory, TestMeta, TestResult,
 };
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Get all outcome conformance tests.

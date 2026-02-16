@@ -807,7 +807,7 @@ mod tests {
         // When mostly good, continue is optimal.
         let mostly_good = Posterior::new(vec![0.9, 0.1]).unwrap();
         assert_eq!(m.bayes_action(&mostly_good), 0); // continue
-        // When mostly bad, stop is optimal.
+                                                     // When mostly bad, stop is optimal.
         let mostly_bad = Posterior::new(vec![0.2, 0.8]).unwrap();
         assert_eq!(m.bayes_action(&mostly_bad), 1); // stop
     }
@@ -1116,7 +1116,7 @@ mod tests {
         let contract = TestContract::new();
         let mut posterior = Posterior::uniform(2);
         contract.update_posterior(&mut posterior, 0); // observe "good"
-        // After update: state 0 should be more probable.
+                                                      // After update: state 0 should be more probable.
         assert!(posterior.probs()[0] > posterior.probs()[1]);
     }
 

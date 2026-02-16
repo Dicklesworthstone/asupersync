@@ -50,8 +50,8 @@ use std::net::SocketAddr;
 #[allow(unused_imports)]
 use std::os::unix::io::AsRawFd;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 use std::time::Duration;

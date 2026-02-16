@@ -17,11 +17,11 @@
 //! - RT-010: High concurrency stress test
 
 use crate::{
-    ConformanceTest, MpscReceiver, MpscSender, OneshotSender, RuntimeInterface, TestCategory,
-    TestMeta, TestResult, checkpoint,
+    checkpoint, ConformanceTest, MpscReceiver, MpscSender, OneshotSender, RuntimeInterface,
+    TestCategory, TestMeta, TestResult,
 };
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Get all runtime conformance tests.

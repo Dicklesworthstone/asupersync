@@ -71,7 +71,7 @@ use asupersync::bytes::Bytes;
 use asupersync::lab::{NetworkConditions, NetworkConfig, NetworkFault, SimulatedNetwork};
 use asupersync::net::dns::{CacheConfig, DnsCache};
 use asupersync::net::tcp::TcpListenerBuilder;
-use asupersync::net::{TcpListener, TcpSocket, TcpStream, UdpSocket, lookup_all, lookup_one};
+use asupersync::net::{lookup_all, lookup_one, TcpListener, TcpSocket, TcpStream, UdpSocket};
 use asupersync::stream::Stream;
 use common::*;
 use futures_lite::future::block_on;

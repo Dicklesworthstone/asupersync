@@ -14,9 +14,9 @@ mod e2e {
 }
 
 use asupersync::combinator::Either;
-use asupersync::epoch::{EpochContext, EpochId, EpochPolicy, epoch_join2, epoch_race2};
+use asupersync::epoch::{epoch_join2, epoch_race2, EpochContext, EpochId, EpochPolicy};
 use asupersync::time::WallClock;
-use asupersync::types::{CancelReason, Outcome, Time, join_outcomes};
+use asupersync::types::{join_outcomes, CancelReason, Outcome, Time};
 use e2e::combinator::util::{
     CompleteAfterPolls, ControllableFuture, ControllableFutureHandle, Counter, DrainFlag,
     DrainTracker, NeverComplete,

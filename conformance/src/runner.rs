@@ -4,7 +4,7 @@
 //! implementations and collects results. When running in comparison mode,
 //! it runs each test against both runtimes and compares the outcomes.
 
-use crate::logging::{ConformanceTestLogger, TestEvent, with_test_logger};
+use crate::logging::{with_test_logger, ConformanceTestLogger, TestEvent};
 use crate::{ConformanceTest, RuntimeInterface, TestCategory, TestResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -725,25 +725,19 @@ mod tests {
     #[test]
     fn comparison_status_is_success() {
         assert!(ComparisonStatus::BothPassedEquivalent.is_success());
-        assert!(
-            ComparisonStatus::BothPassedDifferent {
-                difference: "test".to_string()
-            }
-            .is_success()
-        );
+        assert!(ComparisonStatus::BothPassedDifferent {
+            difference: "test".to_string()
+        }
+        .is_success());
         assert!(!ComparisonStatus::BothFailedSame.is_success());
-        assert!(
-            !ComparisonStatus::OnlyAPassed {
-                error_b: "err".to_string()
-            }
-            .is_success()
-        );
-        assert!(
-            !ComparisonStatus::OnlyBPassed {
-                error_a: "err".to_string()
-            }
-            .is_success()
-        );
+        assert!(!ComparisonStatus::OnlyAPassed {
+            error_b: "err".to_string()
+        }
+        .is_success());
+        assert!(!ComparisonStatus::OnlyBPassed {
+            error_a: "err".to_string()
+        }
+        .is_success());
     }
 
     #[test]

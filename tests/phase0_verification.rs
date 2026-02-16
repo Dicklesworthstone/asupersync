@@ -9,8 +9,8 @@ mod common;
 use asupersync::channel::mpsc;
 use asupersync::cx::Cx;
 use asupersync::lab::oracle::{
-    CancellationProtocolOracle, DeadlineMonotoneOracle, LoserDrainOracle, OracleSuite,
-    assert_deterministic,
+    assert_deterministic, CancellationProtocolOracle, DeadlineMonotoneOracle, LoserDrainOracle,
+    OracleSuite,
 };
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::plan::certificate::{verify, verify_steps};
@@ -18,8 +18,8 @@ use asupersync::plan::fixtures::all_fixtures;
 use asupersync::plan::{PlanDag, PlanId, PlanNode, RewritePolicy};
 use asupersync::record::task::{TaskPhase, TaskState};
 use asupersync::record::{Finalizer, ObligationKind, ObligationState};
-use asupersync::runtime::{JoinError, RuntimeState, TaskHandle, yield_now};
-use asupersync::trace::{TraceData, TraceEvent, TraceEventKind, trace_fingerprint};
+use asupersync::runtime::{yield_now, JoinError, RuntimeState, TaskHandle};
+use asupersync::trace::{trace_fingerprint, TraceData, TraceEvent, TraceEventKind};
 use asupersync::types::{Budget, CancelReason, Outcome, RegionId, TaskId, Time};
 use common::*;
 use futures_lite::future;

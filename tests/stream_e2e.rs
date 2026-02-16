@@ -18,7 +18,7 @@ mod common;
 use asupersync::channel::{broadcast, mpsc, watch};
 use asupersync::cx::Cx;
 use asupersync::stream::{
-    BroadcastStream, ReceiverStream, Stream, StreamExt, WatchStream, iter, merge,
+    iter, merge, BroadcastStream, ReceiverStream, Stream, StreamExt, WatchStream,
 };
 use common::*;
 use std::cell::RefCell;
@@ -576,7 +576,11 @@ fn test_try_for_each_error() {
     let stream = iter(vec![1, 2, 3, 4, 5]);
     let mut result = stream.try_for_each(move |x| {
         processed_clone.borrow_mut().push(x);
-        if x == 3 { Err("stopped at 3") } else { Ok(()) }
+        if x == 3 {
+            Err("stopped at 3")
+        } else {
+            Ok(())
+        }
     });
 
     let waker = noop_waker();

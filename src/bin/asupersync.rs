@@ -1,19 +1,19 @@
 //! Asupersync CLI tools (feature-gated).
 #![allow(clippy::result_large_err)]
 
-use asupersync::Time;
 use asupersync::cli::{
-    CliError, ColorChoice, CommonArgs, ExitCode, Output, OutputFormat, Outputtable,
-    parse_color_choice, parse_output_format,
+    parse_color_choice, parse_output_format, CliError, ColorChoice, CommonArgs, ExitCode, Output,
+    OutputFormat, Outputtable,
 };
 use asupersync::trace::{
-    CompressionMode, IssueSeverity, ReplayEvent, TRACE_FILE_VERSION, TRACE_MAGIC, TraceFileError,
-    TraceReader, VerificationOptions, verify_trace,
+    verify_trace, CompressionMode, IssueSeverity, ReplayEvent, TraceFileError, TraceReader,
+    VerificationOptions, TRACE_FILE_VERSION, TRACE_MAGIC,
 };
+use asupersync::Time;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use conformance::{
-    ScanWarning, SpecRequirement, TraceabilityMatrix, TraceabilityScanError,
-    requirements_from_entries, scan_conformance_attributes,
+    requirements_from_entries, scan_conformance_attributes, ScanWarning, SpecRequirement,
+    TraceabilityMatrix, TraceabilityScanError,
 };
 use std::fmt::Write as _;
 use std::fs::{self, File};

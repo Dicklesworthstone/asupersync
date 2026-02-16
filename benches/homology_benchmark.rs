@@ -20,16 +20,16 @@
 #![allow(missing_docs)]
 #![allow(clippy::semicolon_if_nothing_returned)]
 
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
 
-use asupersync::trace::TraceEvent;
 use asupersync::trace::boundary::SquareComplex;
 use asupersync::trace::event_structure::TracePoset;
 use asupersync::trace::gf2::{BoundaryMatrix, PersistencePairs};
 use asupersync::trace::scoring::{
-    ClassId, score_boundary_matrix, score_persistence, seed_fingerprint,
+    score_boundary_matrix, score_persistence, seed_fingerprint, ClassId,
 };
+use asupersync::trace::TraceEvent;
 use asupersync::types::{RegionId, TaskId, Time};
 use std::collections::HashSet;
 

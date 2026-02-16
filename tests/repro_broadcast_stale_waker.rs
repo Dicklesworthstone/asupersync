@@ -3,8 +3,8 @@
 use asupersync::channel::broadcast;
 use asupersync::cx::Cx;
 use std::future::Future;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll, Wake};
 
 struct FlagWaker(AtomicBool);

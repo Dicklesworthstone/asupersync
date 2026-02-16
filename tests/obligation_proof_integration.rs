@@ -273,12 +273,10 @@ fn dynamic_no_aliasing_rejects_duplicate_allocation() {
     let mut aliasing = NoAliasingProver::all_kinds();
     let result = aliasing.check(&events);
     assert!(!result.is_verified());
-    assert!(
-        result
-            .counterexamples
-            .iter()
-            .any(|c| c.violation == AliasingViolation::DuplicateAllocation),
-    );
+    assert!(result
+        .counterexamples
+        .iter()
+        .any(|c| c.violation == AliasingViolation::DuplicateAllocation),);
 }
 
 // ============================================================================
@@ -501,12 +499,10 @@ fn mutation_double_resolve_rejected() {
     let mut aliasing = NoAliasingProver::all_kinds();
     let result = aliasing.check(&events);
     assert!(!result.is_verified(), "double resolve rejected by aliasing");
-    assert!(
-        result
-            .counterexamples
-            .iter()
-            .any(|c| c.violation == AliasingViolation::UseAfterRelease),
-    );
+    assert!(result
+        .counterexamples
+        .iter()
+        .any(|c| c.violation == AliasingViolation::UseAfterRelease),);
 
     let mut sl = SeparationLogicVerifier::new();
     let sl_result = sl.verify(&events);
@@ -665,12 +661,10 @@ fn transfer_use_after_release_rejected() {
     let mut aliasing = NoAliasingProver::new();
     let result = aliasing.check(&events);
     assert!(!result.is_verified(), "use-after-release rejected");
-    assert!(
-        result
-            .counterexamples
-            .iter()
-            .any(|c| c.violation == AliasingViolation::UseAfterRelease),
-    );
+    assert!(result
+        .counterexamples
+        .iter()
+        .any(|c| c.violation == AliasingViolation::UseAfterRelease),);
 }
 
 // ============================================================================

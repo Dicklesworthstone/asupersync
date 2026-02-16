@@ -11,22 +11,23 @@
 pub mod coverage;
 
 pub use coverage::{
-    CoverageEntry, CoverageInfo, CoverageReport, InvariantTracker, assert_coverage,
-    assert_coverage_threshold,
+    assert_coverage, assert_coverage_threshold, CoverageEntry, CoverageInfo, CoverageReport,
+    InvariantTracker,
 };
 
 pub use asupersync::test_logging::{
-    ARTIFACT_SCHEMA_VERSION, AggregatedReport, AllocatedPort, DockerFixtureService,
-    EnvironmentMetadata, FixtureService, InProcessService, NoOpFixtureService, PortAllocator,
-    ReproManifest, TempDirFixture, TestContext, TestEnvironment, TestHarness, TestReportAggregator,
-    TestSummary, derive_component_seed, derive_entropy_seed, derive_scenario_seed,
-    wait_until_healthy,
+    derive_component_seed, derive_entropy_seed, derive_scenario_seed, wait_until_healthy,
+    AggregatedReport, AllocatedPort, DockerFixtureService, EnvironmentMetadata, FixtureService,
+    InProcessService, NoOpFixtureService, PortAllocator, ReproManifest, TempDirFixture,
+    TestContext, TestEnvironment, TestHarness, TestReportAggregator, TestSummary,
+    ARTIFACT_SCHEMA_VERSION,
 };
 
 pub use asupersync::raptorq::test_log_schema::{
-    self as raptorq_log, E2E_LOG_SCHEMA_VERSION, E2eLogEntry, LogConfigReport, LogLossReport,
-    LogOutcomeReport, LogProofReport, LogSymbolCounts, LogSymbolReport, UNIT_LOG_SCHEMA_VERSION,
-    UnitDecodeStats, UnitLogEntry, validate_e2e_log_json, validate_unit_log_json,
+    self as raptorq_log, validate_e2e_log_json, validate_unit_log_json, E2eLogEntry,
+    LogConfigReport, LogLossReport, LogOutcomeReport, LogProofReport, LogSymbolCounts,
+    LogSymbolReport, UnitDecodeStats, UnitLogEntry, E2E_LOG_SCHEMA_VERSION,
+    UNIT_LOG_SCHEMA_VERSION,
 };
 
 use asupersync::cx::Cx;

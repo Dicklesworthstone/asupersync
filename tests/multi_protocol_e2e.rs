@@ -18,13 +18,13 @@ use common::*;
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::{Decoder, Encoder};
 use asupersync::grpc::{
-    Channel, Code, GrpcClient, GrpcCodec, GrpcMessage, HealthCheckRequest, HealthService,
-    Interceptor, InterceptorLayer, Metadata, MetadataValue, Request as GrpcRequest,
-    Response as GrpcResponse, Server, ServingStatus, Status, auth_bearer_interceptor,
-    fn_interceptor, trace_interceptor,
+    auth_bearer_interceptor, fn_interceptor, trace_interceptor, Channel, Code, GrpcClient,
+    GrpcCodec, GrpcMessage, HealthCheckRequest, HealthService, Interceptor, InterceptorLayer,
+    Metadata, MetadataValue, Request as GrpcRequest, Response as GrpcResponse, Server,
+    ServingStatus, Status,
 };
 use asupersync::http::body::{Body, Empty, Full, HeaderMap, HeaderName, HeaderValue};
-use asupersync::http::compress::{ContentEncoding, negotiate_encoding};
+use asupersync::http::compress::{negotiate_encoding, ContentEncoding};
 use asupersync::http::h1::codec::Http1Codec;
 use asupersync::http::h1::server::Http1Config;
 use asupersync::http::pool::{Pool, PoolConfig, PoolKey};
@@ -34,10 +34,10 @@ use asupersync::types::{Budget, CancelReason, Time};
 use asupersync::web::extract::{FromRequest, FromRequestParts, Path, Query, Request};
 use asupersync::web::handler::{FnHandler, FnHandler1};
 use asupersync::web::response::{Json, StatusCode};
-use asupersync::web::router::{Router, get, post};
+use asupersync::web::router::{get, post, Router};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 fn init_test(name: &str) {
     init_test_logging();

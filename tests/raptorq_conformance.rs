@@ -701,8 +701,8 @@ mod pipeline_e2e {
     use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
     use asupersync::raptorq::proof::{FailureReason, ProofOutcome};
     use asupersync::raptorq::systematic::ConstraintMatrix;
-    use asupersync::security::AuthenticatedSymbol;
     use asupersync::security::tag::AuthenticationTag;
+    use asupersync::security::AuthenticatedSymbol;
     use asupersync::types::resource::{PoolConfig, SymbolPool};
     use asupersync::types::{ObjectId, ObjectParams, Symbol, SymbolKind};
     use asupersync::util::DetRng;
@@ -838,7 +838,11 @@ mod pipeline_e2e {
         let lo = obj as u64;
         let mut seed = hi ^ lo.rotate_left(13);
         seed ^= u64::from(sbn) << 56;
-        if seed == 0 { 1 } else { seed }
+        if seed == 0 {
+            1
+        } else {
+            seed
+        }
     }
 
     fn pool_for(symbol_size: u16) -> SymbolPool {
@@ -2017,7 +2021,7 @@ mod metamorphic_property {
 
 mod golden_vectors {
     use super::*;
-    use asupersync::raptorq::rfc6330::{LtTuple, deg, next_prime_ge, rand, tuple, tuple_indices};
+    use asupersync::raptorq::rfc6330::{deg, next_prime_ge, rand, tuple, tuple_indices, LtTuple};
 
     // ----------------------------------------------------------------
     // G1: Systematic Parameter Lookup (RFC 6330 Table 2)

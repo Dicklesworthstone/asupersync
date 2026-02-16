@@ -7,11 +7,11 @@
 mod common;
 
 use asupersync::io::{
-    AsyncRead, AsyncReadExt, AsyncWrite, BufReader, ReadBuf, SplitStream, copy, copy_bidirectional,
+    copy, copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, BufReader, ReadBuf, SplitStream,
 };
 use asupersync::lab::{LabConfig, LabRuntime};
-use asupersync::runtime::IoOp;
 use asupersync::runtime::reactor::{Event, Interest};
+use asupersync::runtime::IoOp;
 use asupersync::trace::ReplayTrace;
 use asupersync::types::{Budget, CancelReason, Outcome, RegionId, TaskId};
 use common::*;

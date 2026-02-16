@@ -1,10 +1,10 @@
 //! Benchmark runner for conformance performance comparisons.
 
-use crate::RuntimeInterface;
 use crate::bench::report::{render_console_summary, write_html_report, write_json_report};
 use crate::bench::stats::{Comparison, Stats};
 use crate::bench::{BenchCategory, Benchmark};
 use crate::logging::{LogCollector, LogEntry, LogLevel};
+use crate::RuntimeInterface;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::collections::HashMap;
@@ -543,7 +543,11 @@ fn regression_metric_count(
     threshold: f64,
 ) -> RegressionMetric {
     let ratio = if baseline == 0 {
-        if current == 0 { 1.0 } else { f64::INFINITY }
+        if current == 0 {
+            1.0
+        } else {
+            f64::INFINITY
+        }
     } else {
         current as f64 / baseline as f64
     };

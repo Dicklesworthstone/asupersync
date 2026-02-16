@@ -13,7 +13,7 @@
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{Error, Result, parse::ParseStream};
+use syn::{parse::ParseStream, Error, Result};
 
 /// Creates a compile error from a message and span.
 pub fn compile_error(message: &str) -> TokenStream {

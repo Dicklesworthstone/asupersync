@@ -1,7 +1,7 @@
 //! Lean coverage matrix schema validation tests (bd-13aa6).
 
 use conformance::{
-    CoverageRowType, CoverageStatus, LEAN_COVERAGE_SCHEMA_VERSION, LeanCoverageMatrix,
+    CoverageRowType, CoverageStatus, LeanCoverageMatrix, LEAN_COVERAGE_SCHEMA_VERSION,
 };
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -21,59 +21,43 @@ fn sample_matrix_parses_and_validates() {
 #[test]
 fn sample_matrix_contains_all_required_row_types() {
     let matrix = LeanCoverageMatrix::from_json_str(SAMPLE_JSON).expect("sample must parse");
-    assert!(
-        matrix
-            .rows
-            .iter()
-            .any(|row| row.row_type == CoverageRowType::SemanticRule)
-    );
-    assert!(
-        matrix
-            .rows
-            .iter()
-            .any(|row| row.row_type == CoverageRowType::Invariant)
-    );
-    assert!(
-        matrix
-            .rows
-            .iter()
-            .any(|row| row.row_type == CoverageRowType::RefinementObligation)
-    );
-    assert!(
-        matrix
-            .rows
-            .iter()
-            .any(|row| row.row_type == CoverageRowType::OperationalGate)
-    );
+    assert!(matrix
+        .rows
+        .iter()
+        .any(|row| row.row_type == CoverageRowType::SemanticRule));
+    assert!(matrix
+        .rows
+        .iter()
+        .any(|row| row.row_type == CoverageRowType::Invariant));
+    assert!(matrix
+        .rows
+        .iter()
+        .any(|row| row.row_type == CoverageRowType::RefinementObligation));
+    assert!(matrix
+        .rows
+        .iter()
+        .any(|row| row.row_type == CoverageRowType::OperationalGate));
 }
 
 #[test]
 fn sample_matrix_contains_status_model_examples() {
     let matrix = LeanCoverageMatrix::from_json_str(SAMPLE_JSON).expect("sample must parse");
-    assert!(
-        matrix
-            .rows
-            .iter()
-            .any(|row| row.status == CoverageStatus::InProgress)
-    );
-    assert!(
-        matrix
-            .rows
-            .iter()
-            .any(|row| row.status == CoverageStatus::Blocked)
-    );
-    assert!(
-        matrix
-            .rows
-            .iter()
-            .any(|row| row.status == CoverageStatus::Proven)
-    );
-    assert!(
-        matrix
-            .rows
-            .iter()
-            .any(|row| row.status == CoverageStatus::ValidatedInCi)
-    );
+    assert!(matrix
+        .rows
+        .iter()
+        .any(|row| row.status == CoverageStatus::InProgress));
+    assert!(matrix
+        .rows
+        .iter()
+        .any(|row| row.status == CoverageStatus::Blocked));
+    assert!(matrix
+        .rows
+        .iter()
+        .any(|row| row.status == CoverageStatus::Proven));
+    assert!(matrix
+        .rows
+        .iter()
+        .any(|row| row.status == CoverageStatus::ValidatedInCi));
 }
 
 #[test]

@@ -10,11 +10,11 @@
 mod common;
 use common::*;
 
-use asupersync::lab::meta::{MetaRunner, builtin_mutations};
-use asupersync::lab::oracle::OracleSuite;
+use asupersync::lab::meta::{builtin_mutations, MetaRunner};
 use asupersync::lab::oracle::eprocess::{EProcessConfig, EProcessMonitor};
 use asupersync::lab::oracle::evidence::{DetectionModel, EvidenceLedger, EvidenceStrength};
-use asupersync::lab::{ALL_ORACLE_INVARIANTS, OracleReport};
+use asupersync::lab::oracle::OracleSuite;
+use asupersync::lab::{OracleReport, ALL_ORACLE_INVARIANTS};
 use asupersync::types::Time;
 
 // ==================== Unified Report Tests ====================

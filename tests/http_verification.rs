@@ -15,7 +15,7 @@ use asupersync::types::Time;
 use asupersync::web::extract::{FromRequest, FromRequestParts, Path, Query, Request};
 use asupersync::web::handler::{FnHandler, FnHandler1};
 use asupersync::web::response::{Html, IntoResponse, Json, Redirect, StatusCode};
-use asupersync::web::router::{Router, get, post, put};
+use asupersync::web::router::{get, post, put, Router};
 use std::collections::HashMap;
 
 // ===========================================================================
@@ -182,12 +182,11 @@ fn response_html_content_type() {
 
     let resp = Html("<html><body>Hello</body></html>").into_response();
     assert_eq!(resp.status, StatusCode::OK);
-    assert!(
-        resp.headers
-            .get("content-type")
-            .unwrap()
-            .contains("text/html")
-    );
+    assert!(resp
+        .headers
+        .get("content-type")
+        .unwrap()
+        .contains("text/html"));
 
     test_complete!("response_html_content_type");
 }

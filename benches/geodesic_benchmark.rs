@@ -9,7 +9,7 @@
 
 #![allow(missing_docs)]
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use asupersync::trace::event_structure::{OwnerKey, TracePoset};
 use asupersync::trace::{GeodesicConfig, TraceEvent};

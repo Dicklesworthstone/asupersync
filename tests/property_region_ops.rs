@@ -1317,7 +1317,7 @@ fn check_no_orphan_tasks(harness: &TestHarness) -> Vec<InvariantViolation> {
     for task_id in &harness.tasks {
         if let Some(task_record) = harness.runtime.state.task(*task_id) {
             let region_id = task_record.owner; // Note: field is `owner` not `region`
-            // Check region exists
+                                               // Check region exists
             if harness.runtime.state.region(region_id).is_none() {
                 violations.push(InvariantViolation {
                     invariant: "no_orphan_tasks",

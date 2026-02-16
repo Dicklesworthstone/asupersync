@@ -15,7 +15,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, Criterion};
 
 use asupersync::cx::{Cx, NameRegistry, Scope};
 use asupersync::gen_server::{CallError, GenServer, Reply, SystemMsg};

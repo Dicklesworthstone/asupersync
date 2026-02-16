@@ -24,21 +24,21 @@
 #![allow(clippy::semicolon_if_nothing_returned)]
 #![allow(clippy::cast_sign_loss)]
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write as FmtWrite;
 use std::sync::OnceLock;
 
-use asupersync::Cx;
 use asupersync::cancel::SymbolCancelToken;
 use asupersync::channel::{mpsc, oneshot};
 use asupersync::lab::{LabConfig, LabRuntime};
-use asupersync::runtime::RuntimeState;
 use asupersync::runtime::scheduler::{GlobalQueue, Scheduler};
+use asupersync::runtime::RuntimeState;
 use asupersync::types::{Budget, CancelKind, CancelReason, ObjectId, TaskId, Time};
 use asupersync::util::DetRng;
+use asupersync::Cx;
 
 // =============================================================================
 // GOLDEN OUTPUT INFRASTRUCTURE

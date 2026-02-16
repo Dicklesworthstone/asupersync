@@ -14,9 +14,9 @@ pub use report::{
     render_console_summary, write_html_comparison_report, write_html_report, write_json_report,
 };
 pub use runner::{
-    BenchAllocSnapshot, BenchAllocStats, BenchComparisonResult, BenchComparisonSummary,
-    BenchConfig, BenchOutput, BenchRunResult, BenchRunSummary, BenchRunner, BenchThresholds,
-    RegressionCheck, RegressionConfig, RegressionMetric, run_benchmark_comparison,
+    run_benchmark_comparison, BenchAllocSnapshot, BenchAllocStats, BenchComparisonResult,
+    BenchComparisonSummary, BenchConfig, BenchOutput, BenchRunResult, BenchRunSummary, BenchRunner,
+    BenchThresholds, RegressionCheck, RegressionConfig, RegressionMetric,
 };
 pub use stats::{Comparison, ComparisonConfidence, Stats, StatsError};
 
