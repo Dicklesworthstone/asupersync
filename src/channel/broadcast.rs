@@ -367,17 +367,22 @@ impl<T: Clone> Future for Recv<'_, T> {
             return Poll::Ready(Err(RecvError::Lagged(missed)));
         }
 
-        // 2. Try to get message
-        let offset = this.receiver.next_index.saturating_sub(earliest) as usize;
-
-        if let Some(slot) = inner.buffer.get(offset) {
-            let msg = slot.msg.clone();
-            this.receiver.next_index += 1;
-            // Clear waiter
-            if let Some(token) = this.waiter.take() {
-                inner.wakers.remove(token);
+        // 2. Try to get message.
+        //
+        // Use checked conversion to avoid `u64 -> usize` truncation on 32-bit
+        // targets. A large `next_index - earliest` delta must not wrap and
+        // incorrectly index into the front of the ring buffer.
+        let delta = this.receiver.next_index.saturating_sub(earliest);
+        if let Ok(offset) = usize::try_from(delta) {
+            if let Some(slot) = inner.buffer.get(offset) {
+                let msg = slot.msg.clone();
+                this.receiver.next_index += 1;
+                // Clear waiter
+                if let Some(token) = this.waiter.take() {
+                    inner.wakers.remove(token);
+                }
+                return Poll::Ready(Ok(msg));
             }
-            return Poll::Ready(Ok(msg));
         }
 
         // 3. Check if closed
@@ -1214,5 +1219,29 @@ mod tests {
         let got = block_on(rx.recv(&cx)).unwrap();
         crate::assert_with_log!(got == 3, "last message", 3, got);
         crate::test_complete!("capacity_one_overwrites_correctly");
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "32")]
+    fn recv_large_delta_does_not_truncate_offset() {
+        // Regression: on 32-bit, casting `u64` delta to `usize` truncated and
+        // could incorrectly return a buffered message at offset 0.
+        init_test("recv_large_delta_does_not_truncate_offset");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(2);
+        tx.send(&cx, 7).unwrap();
+
+        // Simulate a receiver cursor far beyond the current window.
+        rx.next_index = u64::from(u32::MAX) + 1;
+
+        let wake_state = CountingWaker::new();
+        let waker = Waker::from(Arc::clone(&wake_state));
+        let mut ctx = Context::from_waker(&waker);
+
+        let mut fut = Box::pin(rx.recv(&cx));
+        let pending = matches!(fut.as_mut().poll(&mut ctx), Poll::Pending);
+        crate::assert_with_log!(pending, "poll pending", true, pending);
+
+        crate::test_complete!("recv_large_delta_does_not_truncate_offset");
     }
 }
