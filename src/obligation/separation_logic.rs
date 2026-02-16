@@ -182,7 +182,7 @@ impl AuthNat {
                     None // Fragment exceeds authoritative count.
                 }
             }
-            (Self::Frag(a), Self::Frag(b)) => Some(Self::Frag(a + b)),
+            (Self::Frag(a), Self::Frag(b)) => a.checked_add(*b).map(Self::Frag),
             (Self::Auth(_), Self::Auth(_)) => None, // Two authorities: ⊥
         }
     }
@@ -1682,6 +1682,21 @@ mod tests {
             result
         );
         crate::test_complete!("auth_nat_fragments_additive");
+    }
+
+    #[test]
+    fn auth_nat_fragment_overflow_returns_none() {
+        init_test("auth_nat_fragment_overflow_returns_none");
+        let a = AuthNat::Frag(u64::MAX);
+        let b = AuthNat::Frag(1);
+        let result = a.compose(&b);
+        crate::assert_with_log!(
+            result.is_none(),
+            "fragment overflow yields invalid composition",
+            true,
+            true
+        );
+        crate::test_complete!("auth_nat_fragment_overflow_returns_none");
     }
 
     // ---- Resource Predicate tests ----------------------------------------------
