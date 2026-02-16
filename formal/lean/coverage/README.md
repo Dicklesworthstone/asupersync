@@ -207,6 +207,11 @@ invariant:
 - executable Rust conformance checks
 - explicit gaps with owner and dependency-bead blockers
 
+It also carries the cross-entity liveness composition contract
+`lean.track3.cross_entity_liveness.v1` (source bead `asupersync-24rak`), which
+binds cancel-ladder, race-loser-drain, and close-quiescence theorem segments to
+end-to-end conformance consumers and required harness artifacts.
+
 Validation for this artifact is enforced in `tests/lean_invariant_theorem_test_link_map.rs`.
 
 ## CI Verification Profiles

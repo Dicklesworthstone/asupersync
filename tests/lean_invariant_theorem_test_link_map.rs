@@ -1236,3 +1236,237 @@ fn reliability_hardening_contract_covers_assumption_classes_and_governance_flow(
     assert_assumption_class_matrix(contract, &required_classes, &invariant_ids, &cadence_ids);
     assert_incident_triage_flow(contract);
 }
+
+#[test]
+fn cross_entity_liveness_contract_composes_theorem_chain_into_harness_consumers() {
+    let link_map = parse_json(LINK_MAP_JSON, "link map");
+    let theorem_inventory = parse_json(THEOREM_JSON, "theorem inventory");
+    let runtime_map = parse_json(RUNTIME_MAP_JSON, "runtime_state_refinement_map");
+
+    let contract = link_map
+        .get("cross_entity_liveness_composition")
+        .expect("cross_entity_liveness_composition must exist");
+    assert_eq!(
+        contract
+            .get("contract_id")
+            .and_then(Value::as_str)
+            .expect("contract_id must be a string"),
+        "lean.track3.cross_entity_liveness.v1"
+    );
+    assert_eq!(
+        contract
+            .get("source_bead")
+            .and_then(Value::as_str)
+            .expect("source_bead must be a string"),
+        "asupersync-24rak"
+    );
+
+    let linked_invariants = contract
+        .get("invariant_ids")
+        .and_then(Value::as_array)
+        .expect("invariant_ids must be an array")
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .expect("invariant_ids entries must be strings")
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        linked_invariants,
+        BTreeSet::from([
+            "inv.cancel.protocol",
+            "inv.race.losers_drained",
+            "inv.region_close.quiescence",
+        ])
+    );
+    let known_invariants = link_rows(&link_map)
+        .iter()
+        .map(|row| {
+            row.get("invariant_id")
+                .and_then(Value::as_str)
+                .expect("invariant_id must be string")
+        })
+        .collect::<BTreeSet<_>>();
+    for invariant_id in &linked_invariants {
+        assert!(
+            known_invariants.contains(invariant_id),
+            "cross-entity contract references unknown invariant_id {invariant_id}"
+        );
+    }
+
+    let theorem_index = theorem_lines(&theorem_inventory);
+    let theorem_chain = contract
+        .get("theorem_chain")
+        .and_then(Value::as_array)
+        .expect("theorem_chain must be an array");
+    let mut seen_segments = BTreeSet::new();
+    for segment in theorem_chain {
+        let segment_id = segment
+            .get("segment_id")
+            .and_then(Value::as_str)
+            .expect("segment_id must be a string");
+        assert!(
+            seen_segments.insert(segment_id),
+            "theorem_chain must not repeat segment_id {segment_id}"
+        );
+        assert!(
+            segment
+                .get("guarantee")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty()),
+            "theorem_chain.{segment_id}.guarantee must be non-empty"
+        );
+        let theorems = segment
+            .get("theorems")
+            .and_then(Value::as_array)
+            .expect("segment theorems must be an array");
+        assert!(
+            !theorems.is_empty(),
+            "theorem_chain.{segment_id} must list at least one theorem"
+        );
+        for theorem in theorems {
+            let theorem = theorem
+                .as_str()
+                .expect("segment theorem entries must be strings");
+            assert!(
+                theorem_index.contains_key(theorem),
+                "theorem_chain.{segment_id} references unknown theorem {theorem}"
+            );
+        }
+    }
+    assert_eq!(
+        seen_segments,
+        BTreeSet::from(["cancel_ladder", "race_loser_drain", "close_quiescence"]),
+        "theorem_chain must include canonical cross-entity liveness segments"
+    );
+
+    let runtime_harnesses = runtime_map
+        .get("conformance_harness_contract")
+        .and_then(|contract| contract.get("harnesses"))
+        .and_then(Value::as_array)
+        .expect("runtime map harnesses must be an array");
+    let harness_field_map = runtime_harnesses
+        .iter()
+        .map(|harness| {
+            let harness_id = harness
+                .get("harness_id")
+                .and_then(Value::as_str)
+                .expect("runtime harness_id must be a string")
+                .to_string();
+            let fields = BTreeSet::from([
+                "normalized_trace_artifact".to_string(),
+                "mismatch_payload_artifact".to_string(),
+                "repro_manifest_artifact".to_string(),
+            ]);
+            (harness_id, fields)
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let harness_links = contract
+        .get("conformance_harness_links")
+        .and_then(Value::as_array)
+        .expect("conformance_harness_links must be an array");
+    let mut contract_harness_ids = BTreeSet::new();
+    for link in harness_links {
+        let harness_id = link
+            .get("harness_id")
+            .and_then(Value::as_str)
+            .expect("harness_id must be a string");
+        contract_harness_ids.insert(harness_id.to_string());
+        let available_fields = harness_field_map
+            .get(harness_id)
+            .unwrap_or_else(|| panic!("unknown harness_id in cross-entity contract: {harness_id}"));
+        let required_artifacts = link
+            .get("required_artifacts")
+            .and_then(Value::as_array)
+            .expect("required_artifacts must be an array");
+        assert!(
+            !required_artifacts.is_empty(),
+            "cross-entity harness link {harness_id} must require at least one artifact"
+        );
+        for field in required_artifacts {
+            let field = field
+                .as_str()
+                .expect("required_artifacts entries must be strings");
+            assert!(
+                available_fields.contains(field),
+                "cross-entity harness link {harness_id} references unknown artifact field {field}"
+            );
+        }
+    }
+
+    let guarantees = contract
+        .get("end_to_end_guarantees")
+        .and_then(Value::as_array)
+        .expect("end_to_end_guarantees must be an array");
+    let mut seen_guarantees = BTreeSet::new();
+    for guarantee in guarantees {
+        let guarantee_id = guarantee
+            .get("guarantee_id")
+            .and_then(Value::as_str)
+            .expect("guarantee_id must be a string");
+        assert!(
+            seen_guarantees.insert(guarantee_id),
+            "end_to_end_guarantees must not repeat guarantee_id {guarantee_id}"
+        );
+        assert!(
+            guarantee
+                .get("statement")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty()),
+            "end_to_end_guarantees.{guarantee_id}.statement must be non-empty"
+        );
+        let theorem_deps = guarantee
+            .get("depends_on_theorems")
+            .and_then(Value::as_array)
+            .expect("depends_on_theorems must be an array");
+        assert!(
+            !theorem_deps.is_empty(),
+            "end_to_end_guarantees.{guarantee_id} must define depends_on_theorems"
+        );
+        for theorem in theorem_deps {
+            let theorem = theorem
+                .as_str()
+                .expect("depends_on_theorems entries must be strings");
+            assert!(
+                theorem_index.contains_key(theorem),
+                "end_to_end_guarantees.{guarantee_id} references unknown theorem {theorem}"
+            );
+        }
+        let harness_ids = guarantee
+            .get("harness_ids")
+            .and_then(Value::as_array)
+            .expect("harness_ids must be an array");
+        assert!(
+            !harness_ids.is_empty(),
+            "end_to_end_guarantees.{guarantee_id} must define harness_ids"
+        );
+        for harness_id in harness_ids {
+            let harness_id = harness_id
+                .as_str()
+                .expect("harness_ids entries must be strings");
+            assert!(
+                contract_harness_ids.contains(harness_id),
+                "end_to_end_guarantees.{guarantee_id} references unknown harness_id {harness_id}"
+            );
+        }
+        let consumers = guarantee
+            .get("consumed_by")
+            .and_then(Value::as_array)
+            .expect("consumed_by must be an array");
+        assert!(
+            !consumers.is_empty(),
+            "end_to_end_guarantees.{guarantee_id} must define consumed_by"
+        );
+        for consumer in consumers {
+            let consumer = consumer
+                .as_str()
+                .expect("consumed_by entries must be strings");
+            assert!(
+                Path::new(consumer).exists(),
+                "end_to_end_guarantees.{guarantee_id} consumer path missing: {consumer}"
+            );
+        }
+    }
+}
