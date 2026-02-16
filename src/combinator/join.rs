@@ -478,15 +478,21 @@ pub fn join_all_to_result<T, E: Clone>(
 ) -> Result<Vec<T>, JoinAllError<E>> {
     match result.decision {
         AggregateDecision::AllOk => {
-            // All succeeded - extract values in order
-            let mut values: Vec<Option<T>> = (0..result.total_count).map(|_| None).collect();
-            for (i, v) in result.successes {
-                if i < values.len() {
-                    values[i] = Some(v);
-                }
-            }
-            // Safety: if decision is AllOk, all values must be present
-            Ok(values.into_iter().flatten().collect())
+            // Fast path: for AllOk, successes are emitted in source index order.
+            debug_assert_eq!(
+                result.successes.len(),
+                result.total_count,
+                "AllOk must include every branch result"
+            );
+            debug_assert!(
+                result
+                    .successes
+                    .iter()
+                    .enumerate()
+                    .all(|(expected, (idx, _))| *idx == expected),
+                "AllOk successes must be contiguous and index-ordered"
+            );
+            Ok(result.successes.into_iter().map(|(_, v)| v).collect())
         }
         AggregateDecision::FirstError(e) => {
             // Find the first error index (the first index gap in successes).

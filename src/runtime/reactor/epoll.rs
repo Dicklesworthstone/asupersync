@@ -173,12 +173,15 @@ impl EpollReactor {
 
     /// Converts our interest mode flags to polling crate poll mode.
     fn interest_to_poll_mode(interest: Interest) -> PollMode {
-        match (interest.is_edge_triggered(), interest.is_oneshot()) {
-            (true, true) => PollMode::EdgeOneshot,
-            (true, false) => PollMode::Edge,
-            (false, true) => PollMode::Oneshot,
+        if interest.is_edge_triggered() {
+            if interest.is_oneshot() {
+                PollMode::EdgeOneshot
+            } else {
+                PollMode::Edge
+            }
+        } else {
             // Preserve current behavior for non-edge registrations.
-            (false, false) => PollMode::Oneshot,
+            PollMode::Oneshot
         }
     }
 
