@@ -3996,9 +3996,24 @@ theorem task_cancel_requested_canonical_form {Value Error Panic : Type}
       | TaskState.cancelRequested _ _ => True
       | _ => False) :
     ∃ reason cleanup, task.state = TaskState.cancelRequested reason cleanup := by
-  cases hState : task.state <;> try simp at hMatch
-  case cancelRequested reason cleanup =>
-    exact ⟨reason, cleanup, hState⟩
+  cases hState : task.state with
+  | created =>
+      exfalso
+      simpa [hState] using hMatch
+  | running =>
+      exfalso
+      simpa [hState] using hMatch
+  | cancelRequested reason cleanup =>
+      exact ⟨reason, cleanup, by simpa [hState]⟩
+  | cancelling _ _ =>
+      exfalso
+      simpa [hState] using hMatch
+  | finalizing _ _ =>
+      exfalso
+      simpa [hState] using hMatch
+  | completed _ =>
+      exfalso
+      simpa [hState] using hMatch
 
 /-- Canonical-form decomposition for the `cancelling` task ladder state. -/
 theorem task_cancelling_canonical_form {Value Error Panic : Type}
@@ -4008,9 +4023,24 @@ theorem task_cancelling_canonical_form {Value Error Panic : Type}
       | TaskState.cancelling _ _ => True
       | _ => False) :
     ∃ reason cleanup, task.state = TaskState.cancelling reason cleanup := by
-  cases hState : task.state <;> try simp at hMatch
-  case cancelling reason cleanup =>
-    exact ⟨reason, cleanup, hState⟩
+  cases hState : task.state with
+  | created =>
+      exfalso
+      simpa [hState] using hMatch
+  | running =>
+      exfalso
+      simpa [hState] using hMatch
+  | cancelRequested _ _ =>
+      exfalso
+      simpa [hState] using hMatch
+  | cancelling reason cleanup =>
+      exact ⟨reason, cleanup, by simpa [hState]⟩
+  | finalizing _ _ =>
+      exfalso
+      simpa [hState] using hMatch
+  | completed _ =>
+      exfalso
+      simpa [hState] using hMatch
 
 /-- Canonical-form decomposition for the `finalizing` task ladder state. -/
 theorem task_finalizing_canonical_form {Value Error Panic : Type}
@@ -4020,9 +4050,24 @@ theorem task_finalizing_canonical_form {Value Error Panic : Type}
       | TaskState.finalizing _ _ => True
       | _ => False) :
     ∃ reason cleanup, task.state = TaskState.finalizing reason cleanup := by
-  cases hState : task.state <;> try simp at hMatch
-  case finalizing reason cleanup =>
-    exact ⟨reason, cleanup, hState⟩
+  cases hState : task.state with
+  | created =>
+      exfalso
+      simpa [hState] using hMatch
+  | running =>
+      exfalso
+      simpa [hState] using hMatch
+  | cancelRequested _ _ =>
+      exfalso
+      simpa [hState] using hMatch
+  | cancelling _ _ =>
+      exfalso
+      simpa [hState] using hMatch
+  | finalizing reason cleanup =>
+      exact ⟨reason, cleanup, by simpa [hState]⟩
+  | completed _ =>
+      exfalso
+      simpa [hState] using hMatch
 
 /-- Canonical-form decomposition for `RegionState.closing`. -/
 theorem region_closing_canonical_form {Value Error Panic : Type}
@@ -4032,9 +4077,21 @@ theorem region_closing_canonical_form {Value Error Panic : Type}
       | RegionState.closing => True
       | _ => False) :
     region.state = RegionState.closing := by
-  cases hState : region.state <;> try simp at hMatch
+  cases hState : region.state
+  case open =>
+      exfalso
+      simpa [hState] using hMatch
   case closing =>
-    simpa [hState]
+      simpa [hState]
+  case draining =>
+      exfalso
+      simpa [hState] using hMatch
+  case finalizing =>
+      exfalso
+      simpa [hState] using hMatch
+  case closed _ =>
+      exfalso
+      simpa [hState] using hMatch
 
 /-- Canonical-form decomposition for `RegionState.draining`. -/
 theorem region_draining_canonical_form {Value Error Panic : Type}
@@ -4044,9 +4101,21 @@ theorem region_draining_canonical_form {Value Error Panic : Type}
       | RegionState.draining => True
       | _ => False) :
     region.state = RegionState.draining := by
-  cases hState : region.state <;> try simp at hMatch
+  cases hState : region.state
+  case open =>
+      exfalso
+      simpa [hState] using hMatch
+  case closing =>
+      exfalso
+      simpa [hState] using hMatch
   case draining =>
-    simpa [hState]
+      simpa [hState]
+  case finalizing =>
+      exfalso
+      simpa [hState] using hMatch
+  case closed _ =>
+      exfalso
+      simpa [hState] using hMatch
 
 /-- Canonical-form decomposition for `RegionState.finalizing`. -/
 theorem region_finalizing_canonical_form {Value Error Panic : Type}
@@ -4056,9 +4125,21 @@ theorem region_finalizing_canonical_form {Value Error Panic : Type}
       | RegionState.finalizing => True
       | _ => False) :
     region.state = RegionState.finalizing := by
-  cases hState : region.state <;> try simp at hMatch
+  cases hState : region.state
+  case open =>
+      exfalso
+      simpa [hState] using hMatch
+  case closing =>
+      exfalso
+      simpa [hState] using hMatch
+  case draining =>
+      exfalso
+      simpa [hState] using hMatch
   case finalizing =>
-    simpa [hState]
+      simpa [hState]
+  case closed _ =>
+      exfalso
+      simpa [hState] using hMatch
 
 /-- Canonical-form decomposition for `ObligationState.reserved`. -/
 theorem obligation_reserved_canonical_form {ob : ObligationRecord}
@@ -4067,9 +4148,17 @@ theorem obligation_reserved_canonical_form {ob : ObligationRecord}
       | ObligationState.reserved => True
       | _ => False) :
     ob.state = ObligationState.reserved := by
-  cases hState : ob.state <;> try simp at hMatch
-  case reserved =>
-    simpa [hState]
+  cases hState : ob.state with
+  | reserved => simpa [hState]
+  | committed =>
+      exfalso
+      simpa [hState] using hMatch
+  | aborted =>
+      exfalso
+      simpa [hState] using hMatch
+  | leaked =>
+      exfalso
+      simpa [hState] using hMatch
 
 /-- Canonical-form decomposition for `ObligationState.committed`. -/
 theorem obligation_committed_canonical_form {ob : ObligationRecord}
@@ -4078,9 +4167,17 @@ theorem obligation_committed_canonical_form {ob : ObligationRecord}
       | ObligationState.committed => True
       | _ => False) :
     ob.state = ObligationState.committed := by
-  cases hState : ob.state <;> try simp at hMatch
-  case committed =>
-    simpa [hState]
+  cases hState : ob.state with
+  | reserved =>
+      exfalso
+      simpa [hState] using hMatch
+  | committed => simpa [hState]
+  | aborted =>
+      exfalso
+      simpa [hState] using hMatch
+  | leaked =>
+      exfalso
+      simpa [hState] using hMatch
 
 /-- Canonical-form decomposition for `ObligationState.aborted`. -/
 theorem obligation_aborted_canonical_form {ob : ObligationRecord}
@@ -4089,9 +4186,17 @@ theorem obligation_aborted_canonical_form {ob : ObligationRecord}
       | ObligationState.aborted => True
       | _ => False) :
     ob.state = ObligationState.aborted := by
-  cases hState : ob.state <;> try simp at hMatch
-  case aborted =>
-    simpa [hState]
+  cases hState : ob.state with
+  | reserved =>
+      exfalso
+      simpa [hState] using hMatch
+  | committed =>
+      exfalso
+      simpa [hState] using hMatch
+  | aborted => simpa [hState]
+  | leaked =>
+      exfalso
+      simpa [hState] using hMatch
 
 /-- Canonical-form decomposition for `ObligationState.leaked`. -/
 theorem obligation_leaked_canonical_form {ob : ObligationRecord}
@@ -4100,9 +4205,17 @@ theorem obligation_leaked_canonical_form {ob : ObligationRecord}
       | ObligationState.leaked => True
       | _ => False) :
     ob.state = ObligationState.leaked := by
-  cases hState : ob.state <;> try simp at hMatch
-  case leaked =>
-    simpa [hState]
+  cases hState : ob.state with
+  | reserved =>
+      exfalso
+      simpa [hState] using hMatch
+  | committed =>
+      exfalso
+      simpa [hState] using hMatch
+  | aborted =>
+      exfalso
+      simpa [hState] using hMatch
+  | leaked => simpa [hState]
 
 end CanonicalForms
 
