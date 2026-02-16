@@ -6,11 +6,11 @@
 use crate::runtime::stored_task::LocalStoredTask;
 use crate::types::TaskId;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 thread_local! {
     /// Local tasks stored on the current thread.
-    static LOCAL_TASKS: RefCell<HashMap<TaskId, LocalStoredTask>> = RefCell::new(HashMap::new());
+    static LOCAL_TASKS: RefCell<BTreeMap<TaskId, LocalStoredTask>> = RefCell::new(BTreeMap::new());
 }
 
 /// Stores a local task in the current thread's storage.

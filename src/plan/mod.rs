@@ -4,12 +4,12 @@
 //! structures. It is intentionally lightweight and uses safe Rust only.
 
 use crate::util::{DetHashMap, DetHashSet};
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::mem;
 use std::time::Duration;
 
 /// Node identifier for a plan DAG.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PlanId(usize);
 
 impl PlanId {
@@ -158,8 +158,8 @@ impl PlanDag {
             return Ok(());
         };
 
-        let mut visiting = HashSet::new();
-        let mut visited = HashSet::new();
+        let mut visiting = BTreeSet::new();
+        let mut visited = BTreeSet::new();
         self.validate_from(root, &mut visiting, &mut visited)?;
         Ok(())
     }
@@ -167,8 +167,8 @@ impl PlanDag {
     fn validate_from(
         &self,
         id: PlanId,
-        visiting: &mut HashSet<PlanId>,
-        visited: &mut HashSet<PlanId>,
+        visiting: &mut BTreeSet<PlanId>,
+        visited: &mut BTreeSet<PlanId>,
     ) -> Result<(), PlanError> {
         if visited.contains(&id) {
             return Ok(());

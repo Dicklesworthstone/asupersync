@@ -28,7 +28,7 @@
 //! ```
 
 use crate::types::{RegionId, TaskId};
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 type FilterPredicate = dyn Fn(&dyn FilterableEvent) -> bool + Send + Sync;
@@ -40,7 +40,7 @@ type FilterPredicate = dyn Fn(&dyn FilterableEvent) -> bool + Send + Sync;
 /// Categories of trace events for filtering.
 ///
 /// These categories group related events for easier filtering configuration.
-#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, PartialOrd, Ord)]
 pub enum EventCategory {
     /// Task scheduling events (scheduled, yielded, completed, spawned).
     Scheduling,
@@ -136,16 +136,16 @@ pub trait FilterableEvent {
 #[derive(Clone)]
 pub struct TraceFilter {
     /// Event kinds to include (empty = all kinds).
-    include_kinds: HashSet<EventCategory>,
+    include_kinds: BTreeSet<EventCategory>,
 
     /// Event kinds to exclude (takes precedence over include).
-    exclude_kinds: HashSet<EventCategory>,
+    exclude_kinds: BTreeSet<EventCategory>,
 
     /// Only record events for these regions (None = all regions).
-    region_filter: Option<HashSet<RegionId>>,
+    region_filter: Option<BTreeSet<RegionId>>,
 
     /// Only record events for these tasks (None = all tasks).
-    task_filter: Option<HashSet<TaskId>>,
+    task_filter: Option<BTreeSet<TaskId>>,
 
     /// Sample rate for high-frequency events (0.0-1.0).
     /// 1.0 = record all, 0.5 = record 50%, 0.0 = record none.
@@ -162,8 +162,8 @@ pub struct TraceFilter {
 impl Default for TraceFilter {
     fn default() -> Self {
         Self {
-            include_kinds: HashSet::new(),
-            exclude_kinds: HashSet::new(),
+            include_kinds: BTreeSet::new(),
+            exclude_kinds: BTreeSet::new(),
             region_filter: None,
             task_filter: None,
             sample_rate: 1.0,
@@ -231,7 +231,7 @@ impl TraceFilter {
     #[must_use]
     pub fn region_subtree(root: RegionId) -> Self {
         let mut filter = Self::new();
-        let mut regions = HashSet::new();
+        let mut regions = BTreeSet::new();
         regions.insert(root);
         filter.region_filter = Some(regions);
         filter
@@ -319,7 +319,7 @@ impl TraceFilter {
     #[must_use]
     pub fn include_region(mut self, region: RegionId) -> Self {
         self.region_filter
-            .get_or_insert_with(HashSet::new)
+            .get_or_insert_with(BTreeSet::new)
             .insert(region);
         self
     }
@@ -354,7 +354,7 @@ impl TraceFilter {
     #[must_use]
     pub fn include_task(mut self, task: TaskId) -> Self {
         self.task_filter
-            .get_or_insert_with(HashSet::new)
+            .get_or_insert_with(BTreeSet::new)
             .insert(task);
         self
     }
@@ -496,13 +496,13 @@ impl TraceFilter {
 
     /// Returns the included kinds (empty = all).
     #[must_use]
-    pub fn included_kinds(&self) -> &HashSet<EventCategory> {
+    pub fn included_kinds(&self) -> &BTreeSet<EventCategory> {
         &self.include_kinds
     }
 
     /// Returns the excluded kinds.
     #[must_use]
-    pub fn excluded_kinds(&self) -> &HashSet<EventCategory> {
+    pub fn excluded_kinds(&self) -> &BTreeSet<EventCategory> {
         &self.exclude_kinds
     }
 }

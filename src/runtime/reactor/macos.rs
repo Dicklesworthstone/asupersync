@@ -25,7 +25,7 @@
 //! │                       KqueueReactor                              │
 //! │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
 //! │  │  kqueue fd  │  │  wake pipe  │  │    registration map     │  │
-//! │  │             │  │ (read,write)│  │   HashMap<Token, info>  │  │
+//! │  │             │  │ (read,write)│  │  BTreeMap<Token, info>  │  │
 //! │  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
@@ -68,7 +68,7 @@
 mod kqueue_impl {
     use super::super::{Event, Events, Interest, Reactor, Source, Token};
     use parking_lot::Mutex;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
     use std::io;
     use std::os::fd::RawFd;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -112,7 +112,7 @@ mod kqueue_impl {
         /// Flag to coalesce multiple wake() calls.
         wake_pending: AtomicBool,
         /// Maps tokens to registration info for bookkeeping.
-        registrations: Mutex<HashMap<Token, RegistrationInfo>>,
+        registrations: Mutex<BTreeMap<Token, RegistrationInfo>>,
     }
 
     impl KqueueReactor {
@@ -177,7 +177,7 @@ mod kqueue_impl {
                 kq_fd,
                 wake_pipe,
                 wake_pending: AtomicBool::new(false),
-                registrations: Mutex::new(HashMap::new()),
+                registrations: Mutex::new(BTreeMap::new()),
             };
 
             // Register the wake pipe read end with kqueue

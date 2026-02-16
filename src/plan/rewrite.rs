@@ -1,6 +1,6 @@
 //! Plan DAG rewrites and rewrite policies.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::fmt::Write;
 
 use super::analysis::SideConditionChecker;
@@ -685,7 +685,7 @@ impl PlanDag {
 
         if policy.requires_binary_joins() {
             for (_, join_nodes) in &join_children {
-                let mut unique = HashSet::new();
+                let mut unique = BTreeSet::new();
                 for child in join_nodes {
                     if !unique.insert(*child) {
                         return None;
@@ -694,9 +694,9 @@ impl PlanDag {
             }
         }
 
-        let mut intersection: HashSet<PlanId> = join_children[0].1.iter().copied().collect();
+        let mut intersection: BTreeSet<PlanId> = join_children[0].1.iter().copied().collect();
         for (_, join_nodes) in join_children.iter().skip(1) {
-            let set: HashSet<PlanId> = join_nodes.iter().copied().collect();
+            let set: BTreeSet<PlanId> = join_nodes.iter().copied().collect();
             intersection.retain(|id| set.contains(id));
         }
 
@@ -981,9 +981,9 @@ pub(crate) fn check_side_conditions(
                 join_children.push(children.clone());
             }
 
-            let mut intersection: HashSet<PlanId> = join_children[0].iter().copied().collect();
+            let mut intersection: BTreeSet<PlanId> = join_children[0].iter().copied().collect();
             for nodes in join_children.iter().skip(1) {
-                let set: HashSet<PlanId> = nodes.iter().copied().collect();
+                let set: BTreeSet<PlanId> = nodes.iter().copied().collect();
                 intersection.retain(|id| set.contains(id));
             }
             if intersection.len() != 1 {

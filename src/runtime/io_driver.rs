@@ -41,7 +41,7 @@
 use crate::runtime::reactor::{
     Event, Events, Interest, Reactor, SlabToken, Source, Token, TokenSlab,
 };
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::io;
 use std::sync::{Arc, Mutex, Weak};
 use std::task::Waker;
@@ -84,7 +84,7 @@ pub struct IoDriver {
     /// Slab mapping tokens to wakers.
     wakers: TokenSlab,
     /// Interest sets for registered tokens.
-    interests: HashMap<Token, Interest>,
+    interests: BTreeMap<Token, Interest>,
     /// Pre-allocated events buffer to avoid allocation per turn.
     events: Events,
     /// Statistics for diagnostics.
@@ -102,7 +102,7 @@ impl IoDriver {
         Self {
             reactor,
             wakers: TokenSlab::new(),
-            interests: HashMap::new(),
+            interests: BTreeMap::new(),
             events: Events::with_capacity(DEFAULT_EVENTS_CAPACITY),
             stats: IoStats::default(),
         }
@@ -116,7 +116,7 @@ impl IoDriver {
         Self {
             reactor,
             wakers: TokenSlab::new(),
-            interests: HashMap::new(),
+            interests: BTreeMap::new(),
             events: Events::with_capacity(events_capacity),
             stats: IoStats::default(),
         }

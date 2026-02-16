@@ -121,7 +121,7 @@ pub struct VirtualTimerWheel {
     /// Next timer ID to assign.
     next_timer_id: u64,
     /// Cancelled timer IDs (for lazy cancellation).
-    cancelled: std::collections::HashSet<u64>,
+    cancelled: std::collections::BTreeSet<u64>,
 }
 
 impl Default for VirtualTimerWheel {
@@ -138,7 +138,7 @@ impl VirtualTimerWheel {
             heap: BinaryHeap::new(),
             current_tick: 0,
             next_timer_id: 0,
-            cancelled: std::collections::HashSet::new(),
+            cancelled: std::collections::BTreeSet::new(),
         }
     }
 
@@ -149,7 +149,7 @@ impl VirtualTimerWheel {
             heap: BinaryHeap::new(),
             current_tick: tick,
             next_timer_id: 0,
-            cancelled: std::collections::HashSet::new(),
+            cancelled: std::collections::BTreeSet::new(),
         }
     }
 
@@ -293,7 +293,7 @@ impl VirtualTimerWheel {
     fn cleanup_cancelled(&mut self) {
         if self.cancelled.len() > self.heap.len() {
             // More cancelled IDs than heap entries - rebuild the set
-            let heap_ids: std::collections::HashSet<_> =
+            let heap_ids: std::collections::BTreeSet<_> =
                 self.heap.iter().map(|t| t.timer_id).collect();
             self.cancelled.retain(|id| heap_ids.contains(id));
         }

@@ -10,7 +10,7 @@
 use crate::error::{Error, ErrorKind};
 use crate::types::symbol::{ObjectId, Symbol, SymbolId};
 use crate::types::Time;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -19,7 +19,7 @@ use std::sync::{Arc, RwLock};
 // ============================================================================
 
 /// Unique identifier for a transport path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PathId(pub u64);
 
 impl PathId {
@@ -295,7 +295,7 @@ pub enum PathSelectionPolicy {
 #[derive(Debug)]
 pub struct PathSet {
     /// All registered paths.
-    paths: RwLock<HashMap<PathId, Arc<TransportPath>>>,
+    paths: RwLock<BTreeMap<PathId, Arc<TransportPath>>>,
 
     /// Selection policy.
     policy: PathSelectionPolicy,
@@ -312,7 +312,7 @@ impl PathSet {
     #[must_use]
     pub fn new(policy: PathSelectionPolicy) -> Self {
         Self {
-            paths: RwLock::new(HashMap::new()),
+            paths: RwLock::new(BTreeMap::new()),
             policy,
             rr_counter: AtomicU64::new(0),
             next_id: AtomicU64::new(0),
@@ -508,13 +508,13 @@ impl Default for DeduplicatorConfig {
 #[derive(Debug)]
 struct ObjectDeduplicationState {
     /// Symbols seen for this object.
-    seen: HashSet<SymbolId>,
+    seen: BTreeSet<SymbolId>,
 
     /// When each symbol was first seen.
-    first_seen: HashMap<SymbolId, Time>,
+    first_seen: BTreeMap<SymbolId, Time>,
 
     /// Which path each symbol arrived on first.
-    first_path: HashMap<SymbolId, PathId>,
+    first_path: BTreeMap<SymbolId, PathId>,
 
     /// When this state was created.
     #[allow(dead_code)]
@@ -527,9 +527,9 @@ struct ObjectDeduplicationState {
 impl ObjectDeduplicationState {
     fn new(created_at: Time) -> Self {
         Self {
-            seen: HashSet::new(),
-            first_seen: HashMap::new(),
-            first_path: HashMap::new(),
+            seen: BTreeSet::new(),
+            first_seen: BTreeMap::new(),
+            first_path: BTreeMap::new(),
             created_at,
             last_activity: created_at,
         }
@@ -540,7 +540,7 @@ impl ObjectDeduplicationState {
 #[derive(Debug)]
 pub struct SymbolDeduplicator {
     /// Per-object deduplication state.
-    objects: RwLock<HashMap<ObjectId, ObjectDeduplicationState>>,
+    objects: RwLock<BTreeMap<ObjectId, ObjectDeduplicationState>>,
 
     /// Configuration.
     config: DeduplicatorConfig,
@@ -557,7 +557,7 @@ impl SymbolDeduplicator {
     #[must_use]
     pub fn new(config: DeduplicatorConfig) -> Self {
         Self {
-            objects: RwLock::new(HashMap::new()),
+            objects: RwLock::new(BTreeMap::new()),
             config,
             duplicates_detected: AtomicU64::new(0),
             unique_symbols: AtomicU64::new(0),
@@ -747,7 +747,7 @@ impl ObjectReorderState {
 #[derive(Debug)]
 pub struct SymbolReorderer {
     /// Per-object reordering state.
-    objects: RwLock<HashMap<ObjectId, ObjectReorderState>>,
+    objects: RwLock<BTreeMap<ObjectId, ObjectReorderState>>,
 
     /// Configuration.
     config: ReordererConfig,
@@ -767,7 +767,7 @@ impl SymbolReorderer {
     #[must_use]
     pub fn new(config: ReordererConfig) -> Self {
         Self {
-            objects: RwLock::new(HashMap::new()),
+            objects: RwLock::new(BTreeMap::new()),
             config,
             in_order_deliveries: AtomicU64::new(0),
             reordered_deliveries: AtomicU64::new(0),
@@ -1930,7 +1930,7 @@ mod tests {
         }
 
         // Should see both paths represented (2 paths, 4 calls)
-        let unique_ids: HashSet<PathId> = ids.iter().copied().collect();
+        let unique_ids: BTreeSet<PathId> = ids.iter().copied().collect();
         crate::assert_with_log!(
             unique_ids.len() == 2,
             "round robin covers both paths",

@@ -8,7 +8,7 @@
 use crate::observability::metrics::MetricsProvider;
 use crate::record::TaskRecord;
 use crate::types::{RegionId, TaskId, Time};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -154,8 +154,8 @@ struct MonitoredTask {
 pub struct DeadlineMonitor {
     config: MonitorConfig,
     on_warning: Option<Box<dyn Fn(DeadlineWarning) + Send + Sync>>,
-    monitored: HashMap<TaskId, MonitoredTask>,
-    history: HashMap<String, DurationHistory>,
+    monitored: BTreeMap<TaskId, MonitoredTask>,
+    history: BTreeMap<String, DurationHistory>,
     metrics_provider: Option<Arc<dyn MetricsProvider>>,
     last_scan_time: Option<Time>,
     last_scan_instant: Option<Instant>,
@@ -179,8 +179,8 @@ impl DeadlineMonitor {
         Self {
             config,
             on_warning: None,
-            monitored: HashMap::new(),
-            history: HashMap::new(),
+            monitored: BTreeMap::new(),
+            history: BTreeMap::new(),
             metrics_provider: None,
             last_scan_time: None,
             last_scan_instant: None,
@@ -317,7 +317,7 @@ impl DeadlineMonitor {
         self.last_scan_time = Some(now);
         self.last_scan_instant = Some(now_instant);
 
-        let mut seen: HashSet<TaskId> = HashSet::new();
+        let mut seen: BTreeSet<TaskId> = BTreeSet::new();
 
         for task in tasks {
             if task.state.is_terminal() {
