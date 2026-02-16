@@ -294,6 +294,10 @@ impl<T> PartitionSender<T> {
     /// - `Drop`: returns `Ok(())` but the message is silently discarded
     /// - `Error`: returns `Err(SendError::Disconnected(value))`
     pub async fn send(&self, cx: &Cx, value: T) -> Result<(), SendError<T>> {
+        if cx.checkpoint().is_err() {
+            return Err(SendError::Cancelled(value));
+        }
+
         if self.controller.is_partitioned(self.src, self.dst) {
             return match self.controller.behavior() {
                 PartitionBehavior::Drop => {
@@ -521,6 +525,36 @@ mod tests {
         assert!(!entries
             .iter()
             .any(|e| e.action == "partition_message_dropped"));
+    }
+
+    #[test]
+    fn partition_drop_mode_respects_cancellation() {
+        let (ctrl, _collector) = make_controller(PartitionBehavior::Drop);
+        let a = ActorId::new(1);
+        let b = ActorId::new(2);
+        let (ptx, rx) = partition_channel::<u32>(16, ctrl.clone(), a, b);
+        let cx = test_cx();
+        cx.set_cancel_requested(true);
+
+        ctrl.partition(a, b);
+        let result = block_on(ptx.send(&cx, 7));
+        assert!(matches!(result, Err(SendError::Cancelled(7))));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(ctrl.stats().messages_dropped, 0);
+    }
+
+    #[test]
+    fn partition_error_mode_respects_cancellation_precedence() {
+        let (ctrl, _collector) = make_controller(PartitionBehavior::Error);
+        let a = ActorId::new(1);
+        let b = ActorId::new(2);
+        let (ptx, _rx) = partition_channel::<u32>(16, ctrl.clone(), a, b);
+        let cx = test_cx();
+        cx.set_cancel_requested(true);
+
+        ctrl.partition(a, b);
+        let result = block_on(ptx.send(&cx, 11));
+        assert!(matches!(result, Err(SendError::Cancelled(11))));
     }
 
     #[test]

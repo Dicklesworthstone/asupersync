@@ -216,22 +216,18 @@ impl<T: Clone> FaultSender<T> {
 
         if should_reorder {
             self.record_reorder();
-            // Keep a copy of the caller's message so we can surface an
-            // error if an auto-flush fails while this value is part of it.
-            let value_for_error = value.clone();
             let needs_flush = {
                 let mut buffer = self.reorder_buffer.lock().expect("reorder buffer poisoned");
                 buffer.push(value);
                 buffer.len() >= self.config.reorder_buffer_size
             };
             if needs_flush {
-                if let Err(err) = self.flush(cx).await {
-                    return Err(match err {
-                        SendError::Disconnected(()) => SendError::Disconnected(value_for_error),
-                        SendError::Cancelled(()) => SendError::Cancelled(value_for_error),
-                        SendError::Full(()) => SendError::Full(value_for_error),
-                    });
-                }
+                // Auto-flush is best-effort. If flush fails, `flush()` has
+                // already re-queued undelivered messages, including this one.
+                // Returning `Err(value)` here would hand ownership back while
+                // the same value is still buffered, which can duplicate on
+                // caller retry.
+                let _ = self.flush(cx).await;
             }
             return Ok(());
         }
@@ -431,10 +427,14 @@ mod tests {
     use std::task::{Context, Poll, Waker};
 
     fn test_cx() -> Cx {
+        test_cx_with_budget(Budget::INFINITE)
+    }
+
+    fn test_cx_with_budget(budget: Budget) -> Cx {
         Cx::new(
             RegionId::from_arena(ArenaIndex::new(0, 0)),
             TaskId::from_arena(ArenaIndex::new(0, 0)),
-            Budget::INFINITE,
+            budget,
         )
     }
 
@@ -759,6 +759,26 @@ mod tests {
         let flush_result = block_on(fault_tx.flush(&cx));
         assert!(matches!(flush_result, Err(SendError::Disconnected(()))));
         assert_eq!(fault_tx.buffered_count(), 2);
+    }
+
+    #[test]
+    fn auto_flush_cancelled_keeps_message_buffered_without_erroring_send() {
+        let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
+        let config = FaultChannelConfig::new(42).with_reorder(1.0, 1);
+        let (fault_tx, rx) = fault_channel::<u32>(8, config, sink);
+        let cancelled_cx = test_cx();
+        cancelled_cx.set_cancel_requested(true);
+        let healthy_cx = test_cx();
+
+        // Auto-flush fails due cancellation and re-queues the message.
+        // send() should still report acceptance into the fault buffer.
+        block_on(fault_tx.send(&cancelled_cx, 2))
+            .expect("send accepted into fault buffer despite cancelled auto-flush");
+        assert_eq!(fault_tx.buffered_count(), 1);
+
+        block_on(fault_tx.flush(&healthy_cx)).expect("flush buffered message");
+        assert_eq!(fault_tx.buffered_count(), 0);
+        assert_eq!(rx.try_recv().expect("received buffered value"), 2);
     }
 
     #[test]
