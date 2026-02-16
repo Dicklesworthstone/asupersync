@@ -229,6 +229,12 @@ pub fn make_timed_result<T, E>(
     completed_in_time: bool,
 ) -> TimedResult<T, E> {
     if completed_in_time {
+        return TimedResult::Completed(outcome);
+    }
+
+    // If the timed-out operation panicked while being drained, surface that panic
+    // instead of masking it as a plain timeout.
+    if matches!(outcome, Outcome::Panicked(_)) {
         TimedResult::Completed(outcome)
     } else {
         TimedResult::TimedOut(TimeoutError::new(deadline))
@@ -578,6 +584,19 @@ mod tests {
         assert!(!result.is_completed());
         let err = result.into_result().unwrap_err();
         assert!(matches!(err, TimedError::TimedOut(_)));
+    }
+
+    #[test]
+    fn test_timeout_race_deadline_fires_first_preserves_panics() {
+        // If the timed-out branch panics during drain, do not mask it as TimedOut.
+        let outcome: Outcome<i32, &str> =
+            Outcome::Panicked(crate::types::outcome::PanicPayload::new("boom"));
+        let deadline = Time::from_nanos(1000);
+        let result = make_timed_result(outcome, deadline, false);
+
+        assert!(result.is_completed());
+        let err = result.into_result().unwrap_err();
+        assert!(matches!(err, TimedError::Panicked(_)));
     }
 
     #[test]

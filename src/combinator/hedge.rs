@@ -370,6 +370,14 @@ pub fn hedge_outcomes<T, E>(
             HedgeWinner::Backup => HedgeResult::backup_won(backup_outcome, primary_outcome),
         }
     } else {
+        assert!(
+            backup_outcome.is_none(),
+            "backup_outcome must be None when backup_spawned is false"
+        );
+        assert!(
+            winner.is_none(),
+            "winner must be None when backup_spawned is false"
+        );
         // Primary completed before hedge deadline
         HedgeResult::primary_fast(primary_outcome)
     }
@@ -666,6 +674,28 @@ mod tests {
             true,
             Some(Outcome::Cancelled(CancelReason::race_loser())),
             None,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "backup_outcome must be None")]
+    fn hedge_outcomes_panics_on_backup_outcome_when_not_spawned() {
+        let _ = hedge_outcomes::<i32, &str>(
+            Outcome::Ok(42),
+            false,
+            Some(Outcome::Cancelled(CancelReason::race_loser())),
+            None,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "winner must be None")]
+    fn hedge_outcomes_panics_on_winner_when_not_spawned() {
+        let _ = hedge_outcomes::<i32, &str>(
+            Outcome::Ok(42),
+            false,
+            None,
+            Some(HedgeWinner::Primary),
         );
     }
 
