@@ -326,8 +326,8 @@ impl<T> Recv<'_, T> {
     fn clear_waiter_registration(&mut self) {
         if let Some(token) = self.waiter.take() {
             let Ok(mut inner) = self.receiver.channel.inner.lock() else {
-                // Poisoned mutex during unwinding: avoid a second panic from
-                // Recv drop paths and fail open.
+                // Mutex poisoned — bail out to avoid a double-panic abort
+                // during unwinding (this method is called from Drop).
                 return;
             };
             inner.wakers.remove(token);
@@ -1064,31 +1064,31 @@ mod tests {
 
     #[test]
     fn recv_drop_on_poisoned_mutex_does_not_panic() {
+        // Regression: clear_waiter_registration used expect() which would
+        // panic-in-Drop if the mutex was poisoned, causing an abort.
         init_test("recv_drop_on_poisoned_mutex_does_not_panic");
         let cx = test_cx();
         let (tx, mut rx) = channel::<i32>(4);
 
         let wake_state = CountingWaker::new();
         let waker = Waker::from(Arc::clone(&wake_state));
-        let mut poll_cx = Context::from_waker(&waker);
+        let mut ctx = Context::from_waker(&waker);
 
-        // Register a waiter so Recv::drop attempts waiter cleanup.
+        // Create a Recv future and poll it to register a waiter.
         let mut fut = Box::pin(rx.recv(&cx));
-        crate::assert_with_log!(
-            matches!(fut.as_mut().poll(&mut poll_cx), Poll::Pending),
-            "poll pending",
-            true,
-            true
-        );
+        assert!(matches!(fut.as_mut().poll(&mut ctx), Poll::Pending));
 
-        // Poison the mutex while the waiter is still registered.
+        // Poison the mutex.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = tx.channel.inner.lock().expect("lock");
             panic!("intentional poison");
         }));
 
-        // Dropping the pending recv future should not panic.
+        // Dropping the Recv future (which has a registered waiter) must NOT
+        // panic even though the mutex is poisoned.
         drop(fut);
+
+        // Clean up — these drops should also be graceful.
         drop(rx);
         drop(tx);
         crate::test_complete!("recv_drop_on_poisoned_mutex_does_not_panic");
@@ -1107,21 +1107,17 @@ mod tests {
             tx.send(&cx, i).unwrap();
         }
 
-        let inner = tx.channel.inner.lock().expect("lock");
-        crate::assert_with_log!(
-            inner.total_sent == 10,
-            "total_sent",
-            10u64,
-            inner.total_sent
-        );
-        crate::assert_with_log!(
-            inner.buffer.len() == 2,
-            "buffer len",
-            2usize,
-            inner.buffer.len()
-        );
+        let (total_sent, buffer_len, first_idx) = {
+            let inner = tx.channel.inner.lock().expect("lock");
+            (
+                inner.total_sent,
+                inner.buffer.len(),
+                inner.buffer.front().unwrap().index,
+            )
+        };
+        crate::assert_with_log!(total_sent == 10, "total_sent", 10u64, total_sent);
+        crate::assert_with_log!(buffer_len == 2, "buffer len", 2usize, buffer_len);
         // Buffer should hold the last 2 messages (indices 8, 9).
-        let first_idx = inner.buffer.front().unwrap().index;
         crate::assert_with_log!(first_idx == 8, "first buffer index", 8u64, first_idx);
         crate::test_complete!("total_sent_advances_even_when_buffer_evicts");
     }
@@ -1189,14 +1185,12 @@ mod tests {
         crate::assert_with_log!(count == 0, "no receivers", 0usize, count);
 
         // total_sent and buffer should be untouched.
-        let inner = tx.channel.inner.lock().expect("lock");
-        crate::assert_with_log!(inner.total_sent == 0, "total_sent", 0u64, inner.total_sent);
-        crate::assert_with_log!(
-            inner.buffer.is_empty(),
-            "buffer empty",
-            true,
-            inner.buffer.is_empty()
-        );
+        let (total_sent, buffer_empty) = {
+            let inner = tx.channel.inner.lock().expect("lock");
+            (inner.total_sent, inner.buffer.is_empty())
+        };
+        crate::assert_with_log!(total_sent == 0, "total_sent", 0u64, total_sent);
+        crate::assert_with_log!(buffer_empty, "buffer empty", true, buffer_empty);
         crate::test_complete!("permit_send_returns_zero_after_all_receivers_drop");
     }
 

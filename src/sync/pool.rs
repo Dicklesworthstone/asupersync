@@ -512,7 +512,11 @@ impl<R> PooledResource<R> {
     fn notify_return_wakers(&self) {
         if let Some(ref wakers) = self.return_wakers {
             let drained = {
-                let mut wakers = wakers.lock().expect("return_wakers lock");
+                let Ok(mut wakers) = wakers.lock() else {
+                    // Mutex poisoned — bail out to avoid a double-panic
+                    // abort (this method is called from Drop).
+                    return;
+                };
                 wakers.drain(..).collect::<Vec<_>>()
             };
             for waker in drained {
@@ -2260,11 +2264,12 @@ mod tests {
 
     #[test]
     fn pooled_resource_is_send_when_resource_is_send() {
+        fn assert_send<T: Send>() {}
+
         init_test("pooled_resource_is_send_when_resource_is_send");
 
         // Verify that PooledResource<R> auto-derives Send when R: Send
         // (no manual unsafe impl needed).
-        fn assert_send<T: Send>() {}
         assert_send::<PooledResource<u8>>();
         assert_send::<PooledResource<String>>();
         assert_send::<PooledResource<Vec<u8>>>();
