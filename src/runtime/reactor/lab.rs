@@ -35,7 +35,7 @@ use super::{Event, Interest, Reactor, Source, Token};
 use crate::lab::chaos::{ChaosConfig, ChaosRng, ChaosStats};
 use crate::tracing_compat::debug;
 use crate::types::Time;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -782,6 +782,7 @@ impl Reactor for LabReactor {
                     next_sequence,
                     chaos,
                 } = &mut *inner;
+                let mut closed_tokens_emitted = HashSet::new();
 
                 for timed in ready_events {
                     let event = timed.event;
@@ -805,6 +806,15 @@ impl Reactor for LabReactor {
                                 injection = "partition_drop",
                                 "event dropped due to partition"
                             );
+                            continue;
+                        }
+
+                        // Closed sockets always report hangup instead of readiness.
+                        // This keeps close state sticky until fault config is cleared.
+                        if fault.config.closed {
+                            if closed_tokens_emitted.insert(token) {
+                                delivered_events.push(Event::hangup(token));
+                            }
                             continue;
                         }
 
@@ -2009,6 +2019,46 @@ mod tests {
             crate::assert_with_log!(dropped == 0, "dropped count", 0u64, dropped);
 
             crate::test_complete!("inject_close_delivers_hup");
+        }
+
+        #[test]
+        fn closed_fault_state_forces_hup_until_cleared() {
+            super::init_test("closed_fault_state_forces_hup_until_cleared");
+
+            let reactor = LabReactor::new();
+            let token = Token::new(1);
+            let source = TestFdSource;
+
+            reactor
+                .register(&source, token, Interest::READABLE | Interest::WRITABLE)
+                .unwrap();
+            reactor
+                .set_fault_config(token, FaultConfig::new().with_closed(true))
+                .unwrap();
+
+            // Even with normal readiness, closed fault should emit HUP.
+            reactor.set_ready(token, Event::readable(token));
+            let mut events = crate::runtime::reactor::Events::with_capacity(10);
+            reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+            crate::assert_with_log!(events.len() == 1, "single HUP", 1usize, events.len());
+            let first = events.iter().next().expect("event");
+            crate::assert_with_log!(first.is_hangup(), "first event is HUP", true, first.is_hangup());
+
+            // Closed is sticky; multiple queued readiness events still collapse to HUP.
+            reactor.set_ready(token, Event::readable(token));
+            reactor.set_ready(token, Event::writable(token));
+            events.clear();
+            reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+            crate::assert_with_log!(events.len() == 1, "collapsed HUP", 1usize, events.len());
+            let second = events.iter().next().expect("event");
+            crate::assert_with_log!(
+                second.is_hangup(),
+                "second event remains HUP",
+                true,
+                second.is_hangup()
+            );
+
+            crate::test_complete!("closed_fault_state_forces_hup_until_cleared");
         }
 
         #[test]
