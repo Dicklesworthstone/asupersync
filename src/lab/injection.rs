@@ -539,7 +539,17 @@ impl LabInjectionRunner {
 
             // Run the test
             let instrumented = test_fn(injector.clone(), &mut runtime, &mut oracles);
-            let (outcome, _poll_result) = Self::run_with_panic_catch(instrumented);
+            let (mut outcome, poll_result) = Self::run_with_panic_catch(instrumented);
+
+            // A successful run must actually inject cancellation at the target point.
+            // If the future completed normally, the target point was not reached.
+            if matches!(outcome, InjectionOutcome::Success)
+                && matches!(poll_result, Some(InstrumentedPollResult::Inner(_)))
+            {
+                outcome = InjectionOutcome::AssertionFailed(format!(
+                    "Injection target {point} was not reached; future completed without cancellation injection"
+                ));
+            }
 
             let await_points_before = injector.recorded_points().len().saturating_sub(1);
 
@@ -887,6 +897,36 @@ mod tests {
         for (r1, r2) in run1.results.iter().zip(run2.results.iter()) {
             assert_eq!(r1.injection.injection_point, r2.injection.injection_point);
         }
+    }
+
+    #[test]
+    fn lab_injection_marks_unreached_target_as_failure() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let invocation_count = Arc::new(AtomicUsize::new(0));
+        let config = LabInjectionConfig::new(42).with_strategy(InjectionStrategy::FirstN(2));
+        let mut runner = LabInjectionRunner::new(config);
+
+        let report = runner.run_simple({
+            let invocation_count = Arc::clone(&invocation_count);
+            move |injector| {
+                // Recording run discovers several points; subsequent injection runs
+                // intentionally complete quickly, so higher targets may be unreachable.
+                let call_index = invocation_count.fetch_add(1, Ordering::SeqCst);
+                let yields = if call_index == 0 { 2 } else { 0 };
+                let future = YieldingFuture::new(yields, 42);
+                InstrumentedFuture::new(future, injector)
+            }
+        });
+
+        assert_eq!(report.tests_run, 2);
+        assert_eq!(report.successes, 1);
+        assert_eq!(report.failures, 1);
+        assert!(matches!(
+            report.results[1].injection.outcome,
+            InjectionOutcome::AssertionFailed(_)
+        ));
+        assert_eq!(report.results[1].injection.injection_point, 2);
     }
 
     #[test]

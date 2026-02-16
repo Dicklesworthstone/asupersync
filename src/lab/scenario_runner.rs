@@ -129,7 +129,9 @@ impl ScenarioRunResult {
     /// Returns true if all checked oracles passed and no invariant violations were found.
     #[must_use]
     pub fn passed(&self) -> bool {
-        self.oracle_report.all_passed && self.lab_report.invariant_violations.is_empty()
+        self.lab_report.quiescent
+            && self.oracle_report.all_passed
+            && self.lab_report.invariant_violations.is_empty()
     }
 
     /// Convert to JSON for artifact storage.
@@ -517,6 +519,9 @@ impl ScenarioRunner {
                     })
                     .collect();
                 f.extend(result.lab_report.invariant_violations.clone());
+                if !result.lab_report.quiescent {
+                    f.push("runtime not quiescent at report boundary".to_string());
+                }
                 f
             };
 
@@ -613,6 +618,19 @@ mod tests {
         assert_eq!(result.seed, 42);
         assert_eq!(result.faults_injected, 0);
         crate::test_complete!("run_minimal_scenario");
+    }
+
+    #[test]
+    fn passed_requires_quiescence() {
+        init_test("passed_requires_quiescence");
+        let scenario = minimal_scenario();
+        let result = ScenarioRunner::run(&scenario).unwrap();
+        assert!(result.passed());
+
+        let mut forced_non_quiescent = result.clone();
+        forced_non_quiescent.lab_report.quiescent = false;
+        assert!(!forced_non_quiescent.passed());
+        crate::test_complete!("passed_requires_quiescence");
     }
 
     #[test]

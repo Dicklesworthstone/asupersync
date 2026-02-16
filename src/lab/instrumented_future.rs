@@ -688,6 +688,9 @@ impl InjectionRunner {
             });
         }
 
+        // Reset to baseline mode so subsequent runs start from a consistent state.
+        self.current_mode = InjectionMode::Recording;
+
         // Phase 4: Generate report
         let strategy_name = format!("{strategy:?}");
         InjectionReport::from_results_with_seed(
@@ -1392,6 +1395,25 @@ mod tests {
         assert_eq!(report.total_await_points, 4); // 3 yields + 1 completion
         assert_eq!(report.tests_run, 0);
         assert!(report.all_passed());
+    }
+
+    #[test]
+    fn injection_runner_resets_mode_after_run() {
+        let mut runner = InjectionRunner::new(42);
+
+        let _ = runner.run_with_injection(
+            InjectionStrategy::FirstN(1),
+            |injector| {
+                let future = YieldingFuture::new(2, 7);
+                InstrumentedFuture::new(future, injector)
+            },
+            |instrumented| {
+                let _ = poll_to_completion(instrumented);
+                InjectionOutcome::Success
+            },
+        );
+
+        assert_eq!(runner.current_mode(), InjectionMode::Recording);
     }
 
     #[test]

@@ -935,6 +935,13 @@ impl CleanupCoordinator {
         let mut handlers_run = Vec::new();
         let mut polls_used: u32 = 0;
         let mut within_budget = true;
+        // Remove the handler up front so callback execution never happens
+        // while holding the handlers lock (avoids re-entrant deadlocks).
+        let handler = self
+            .handlers
+            .write()
+            .expect("lock poisoned")
+            .remove(&object_id);
 
         // Get pending symbols
         let pending_set = self
@@ -948,7 +955,7 @@ impl CleanupCoordinator {
             bytes_freed = set.total_bytes;
 
             // Run registered handler
-            if let Some(handler) = self.handlers.read().expect("lock poisoned").get(&object_id) {
+            if let Some(handler) = handler {
                 if polls_used < budget.poll_quota {
                     polls_used += 1;
                     handlers_run.push(handler.name().to_string());
@@ -958,12 +965,6 @@ impl CleanupCoordinator {
                 }
             }
         }
-
-        // Remove handler
-        self.handlers
-            .write()
-            .expect("lock poisoned")
-            .remove(&object_id);
 
         CleanupResult {
             object_id,
@@ -1384,6 +1385,54 @@ mod tests {
         let result = coordinator.cleanup(object_id, None);
         assert!(called.load(Ordering::SeqCst));
         assert_eq!(result.handlers_run, vec!["test"]);
+    }
+
+    #[test]
+    fn test_cleanup_handler_invoked_without_holding_handler_lock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct LockCheckHandler {
+            coordinator: Arc<CleanupCoordinator>,
+            write_lock_available: Arc<AtomicBool>,
+        }
+
+        impl CleanupHandler for LockCheckHandler {
+            fn cleanup(
+                &self,
+                _object_id: ObjectId,
+                _symbols: Vec<Symbol>,
+            ) -> crate::error::Result<usize> {
+                let can_acquire_write = self.coordinator.handlers.try_write().is_ok();
+                self.write_lock_available
+                    .store(can_acquire_write, Ordering::SeqCst);
+                Ok(0)
+            }
+
+            fn name(&self) -> &'static str {
+                "lock-check"
+            }
+        }
+
+        let coordinator = Arc::new(CleanupCoordinator::new());
+        let object_id = ObjectId::new_for_test(99);
+        let now = Time::from_millis(100);
+        let write_lock_available = Arc::new(AtomicBool::new(false));
+
+        coordinator.register_handler(
+            object_id,
+            LockCheckHandler {
+                coordinator: Arc::clone(&coordinator),
+                write_lock_available: Arc::clone(&write_lock_available),
+            },
+        );
+
+        coordinator.register_pending(object_id, Symbol::new_for_test(99, 0, 0, &[1]), now);
+        let _ = coordinator.cleanup(object_id, None);
+
+        assert!(
+            write_lock_available.load(Ordering::SeqCst),
+            "cleanup handler callback should execute without handlers lock held"
+        );
     }
 
     #[test]

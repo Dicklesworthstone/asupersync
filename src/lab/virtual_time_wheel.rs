@@ -159,12 +159,10 @@ impl VirtualTimerWheel {
         self.current_tick
     }
 
-    /// Returns the number of pending (non-cancelled) timers.
-    ///
-    /// Note: This may include cancelled timers that haven't been cleaned up yet.
+    /// Returns the exact number of pending (non-cancelled) timers.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.heap.len().saturating_sub(self.cancelled.len())
+        self.pending_count()
     }
 
     /// Returns true if there are no pending timers.
@@ -202,7 +200,16 @@ impl VirtualTimerWheel {
     /// Uses lazy cancellation - the timer is marked as cancelled and will
     /// be skipped when its deadline is reached.
     pub fn cancel(&mut self, handle: VirtualTimerHandle) {
-        self.cancelled.insert(handle.timer_id);
+        // Guard against stale handles so live timers are never hidden from len()/is_empty().
+        let still_pending = self
+            .heap
+            .iter()
+            .any(|timer| timer.timer_id == handle.timer_id && timer.deadline == handle.deadline);
+        if still_pending {
+            self.cancelled.insert(handle.timer_id);
+        } else {
+            self.cancelled.remove(&handle.timer_id);
+        }
     }
 
     /// Returns the deadline of the next non-cancelled timer, if any.
@@ -461,6 +468,29 @@ mod tests {
         let expired = wheel.advance_to(100);
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0].timer_id, h2.timer_id());
+    }
+
+    #[test]
+    fn stale_cancel_handle_does_not_hide_pending_timers() {
+        let mut wheel = VirtualTimerWheel::new();
+
+        let (_, stale_waker) = counting_waker();
+        let stale_handle = wheel.insert(10, stale_waker);
+        let expired = wheel.advance_to(10);
+        assert_eq!(expired.len(), 1);
+
+        let (_, live_waker) = counting_waker();
+        let live_handle = wheel.insert(20, live_waker);
+
+        // Cancelling an already-expired handle should not affect live timers.
+        wheel.cancel(stale_handle);
+        assert_eq!(wheel.len(), 1);
+        assert!(!wheel.is_empty());
+        assert_eq!(wheel.next_deadline(), Some(20));
+
+        let expired = wheel.advance_to(20);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].timer_id, live_handle.timer_id());
     }
 
     #[test]
