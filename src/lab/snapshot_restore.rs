@@ -252,25 +252,20 @@ impl RestorableSnapshot {
         const FNV_PRIME: u64 = 0x0100_0000_01b3;
 
         let mut hash = FNV_OFFSET;
-
-        // Hash timestamp
-        for byte in snapshot.timestamp.to_le_bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(FNV_PRIME);
-        }
-
-        // Hash entity counts
-        for byte in (snapshot.regions.len() as u64).to_le_bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(FNV_PRIME);
-        }
-        for byte in (snapshot.tasks.len() as u64).to_le_bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(FNV_PRIME);
-        }
-        for byte in (snapshot.obligations.len() as u64).to_le_bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(FNV_PRIME);
+        // Hash full snapshot content (not just counts) so semantic tampering is detected.
+        // JSON encoding is deterministic here because RuntimeSnapshot and nested fields are
+        // structs/vectors with stable field order.
+        if let Ok(encoded) = serde_json::to_vec(snapshot) {
+            for byte in encoded {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(FNV_PRIME);
+            }
+        } else {
+            // Keep behavior deterministic even if serialization unexpectedly fails.
+            for byte in b"snapshot-hash-serialization-error" {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(FNV_PRIME);
+            }
         }
 
         hash
@@ -849,6 +844,26 @@ mod tests {
         crate::assert_with_log!(invalid, "tampered invalid", true, invalid);
 
         crate::test_complete!("integrity_verification_works");
+    }
+
+    #[test]
+    fn integrity_verification_detects_semantic_tampering() {
+        init_test("integrity_verification_detects_semantic_tampering");
+        let snapshot = make_snapshot(
+            vec![make_region(0, None, RegionStateSnapshot::Open)],
+            vec![make_task(0, 0, TaskStateSnapshot::Running)],
+            vec![make_obligation(0, 0, ObligationStateSnapshot::Reserved)],
+        );
+
+        let mut tampered = snapshot.clone();
+        tampered.snapshot.tasks[0].state = TaskStateSnapshot::Completed {
+            outcome: crate::runtime::state::OutcomeSnapshot::Ok,
+        };
+
+        let invalid = !tampered.verify_integrity();
+        crate::assert_with_log!(invalid, "semantic tamper invalid", true, invalid);
+
+        crate::test_complete!("integrity_verification_detects_semantic_tampering");
     }
 
     #[test]
