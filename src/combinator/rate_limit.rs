@@ -240,6 +240,11 @@ pub struct RateLimiter {
 
     /// Metrics.
     metrics: RwLock<RateLimitMetrics>,
+
+    // Atomic counters for hot path
+    total_allowed: AtomicU64,
+    total_rejected: AtomicU64,
+    total_waited: AtomicU64,
 }
 
 impl RateLimiter {
@@ -257,6 +262,9 @@ impl RateLimiter {
             wait_queue: RwLock::new(VecDeque::new()),
             next_id: AtomicU64::new(0),
             metrics: RwLock::new(RateLimitMetrics::default()),
+            total_allowed: AtomicU64::new(0),
+            total_rejected: AtomicU64::new(0),
+            total_waited: AtomicU64::new(0),
         }
     }
 
@@ -279,6 +287,12 @@ impl RateLimiter {
         let mut m = self.metrics.read().expect("lock poisoned").clone();
         let state = self.state.lock().expect("lock poisoned");
         m.available_tokens = state.tokens_fixed as f64 / FIXED_POINT_SCALE as f64;
+        
+        // Use atomic values
+        m.total_allowed = self.total_allowed.load(Ordering::Relaxed);
+        m.total_rejected = self.total_rejected.load(Ordering::Relaxed);
+        m.total_waited = self.total_waited.load(Ordering::Relaxed);
+        
         m
     }
 
@@ -326,9 +340,9 @@ impl RateLimiter {
 
         if state.tokens_fixed >= cost_fixed {
             state.tokens_fixed -= cost_fixed;
-            drop(state); // Release lock before updating metrics
+            drop(state); // Release bucket lock immediately
 
-            self.metrics.write().expect("lock poisoned").total_allowed += 1;
+            self.total_allowed.fetch_add(1, Ordering::Relaxed);
             true
         } else {
             false
@@ -363,7 +377,7 @@ impl RateLimiter {
         F: FnOnce() -> Result<T, E>,
     {
         if !self.try_acquire(cost, now) {
-            self.metrics.write().expect("lock poisoned").total_rejected += 1;
+            self.total_rejected.fetch_add(1, Ordering::Relaxed);
             return Err(RateLimitError::RateLimitExceeded);
         }
 
@@ -444,7 +458,7 @@ impl RateLimiter {
         // Check wait strategy
         match &self.policy.wait_strategy {
             WaitStrategy::Reject => {
-                self.metrics.write().expect("lock poisoned").total_rejected += 1;
+                self.total_rejected.fetch_add(1, Ordering::Relaxed);
                 return Err(RateLimitError::RateLimitExceeded);
             }
             WaitStrategy::Block | WaitStrategy::BlockWithTimeout(_) => {
@@ -473,7 +487,7 @@ impl RateLimiter {
             result: None,
         });
 
-        self.metrics.write().expect("lock poisoned").total_waited += 1;
+        self.total_waited.fetch_add(1, Ordering::Relaxed);
 
         Ok(entry_id)
     }
@@ -518,19 +532,10 @@ impl RateLimiter {
 
                 // Update metrics
                 let wait_ms = now_millis.saturating_sub(entry.enqueued_at_millis);
-                // Release state lock temporarily? No, metrics lock is fine inside state lock if order is consistent.
-                // But wait_queue lock is held. Hierarchy: wait_queue -> state -> metrics?
-                // Current: wait_queue held. state held.
-                // try_acquire: state held. metrics held.
-                // So metrics should be acquired inside state.
-                // Wait, enqueue: wait_queue held. metrics held.
-                // So wait_queue -> metrics.
-                // try_acquire: state -> metrics.
-                // process_queue: wait_queue -> state -> metrics.
-                // This seems consistent.
+                self.total_allowed.fetch_add(1, Ordering::Relaxed);
 
                 let mut metrics = self.metrics.write().expect("lock poisoned");
-                metrics.total_allowed += 1;
+                
                 let wait_duration = Duration::from_millis(wait_ms);
                 metrics.total_wait_time += wait_duration;
 
@@ -538,9 +543,13 @@ impl RateLimiter {
                     metrics.max_wait_time = wait_duration;
                 }
 
+                let total_waited = self.total_waited.load(Ordering::Relaxed);
                 let total_ms = duration_to_millis_saturating(metrics.total_wait_time);
-                if let Some(avg_ms) = total_ms.checked_div(metrics.total_waited) {
-                    metrics.avg_wait_time = Duration::from_millis(avg_ms);
+                
+                if total_waited > 0 {
+                    if let Some(avg_ms) = total_ms.checked_div(total_waited) {
+                        metrics.avg_wait_time = Duration::from_millis(avg_ms);
+                    }
                 }
             } else {
                 // Stop at first ungrantable entry to preserve FIFO order?
@@ -657,6 +666,10 @@ pub struct SlidingWindowRateLimiter {
 
     /// Metrics.
     metrics: RwLock<RateLimitMetrics>,
+
+    // Atomic counters
+    total_allowed: AtomicU64,
+    total_rejected: AtomicU64,
 }
 
 impl SlidingWindowRateLimiter {
@@ -667,6 +680,8 @@ impl SlidingWindowRateLimiter {
             policy,
             window: RwLock::new(VecDeque::new()),
             metrics: RwLock::new(RateLimitMetrics::default()),
+            total_allowed: AtomicU64::new(0),
+            total_rejected: AtomicU64::new(0),
         }
     }
 
@@ -730,11 +745,11 @@ impl SlidingWindowRateLimiter {
         if usage + cost <= self.policy.rate {
             window.push_back((now_millis, cost));
             drop(window);
-            self.metrics.write().expect("lock poisoned").total_allowed += 1;
+            self.total_allowed.fetch_add(1, Ordering::Relaxed);
             true
         } else {
             drop(window);
-            self.metrics.write().expect("lock poisoned").total_rejected += 1;
+            self.total_rejected.fetch_add(1, Ordering::Relaxed);
             false
         }
     }
@@ -785,7 +800,10 @@ impl SlidingWindowRateLimiter {
     /// Get metrics.
     #[must_use]
     pub fn metrics(&self) -> RateLimitMetrics {
-        self.metrics.read().expect("lock poisoned").clone()
+        let mut m = self.metrics.read().expect("lock poisoned").clone();
+        m.total_allowed = self.total_allowed.load(Ordering::Relaxed);
+        m.total_rejected = self.total_rejected.load(Ordering::Relaxed);
+        m
     }
 
     /// Reset the sliding window.

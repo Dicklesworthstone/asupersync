@@ -44,7 +44,7 @@
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -355,11 +355,19 @@ pub struct CircuitBreaker {
     // Atomic state representation
     state_bits: AtomicU64,
 
-    // Metrics (needs lock for complex updates)
+    // Metrics (needs lock for complex updates like state changes)
+    // Hot counters are shadowed in atomics below.
     metrics: RwLock<CircuitBreakerMetrics>,
 
     // Sliding window (if enabled)
     sliding_window: Option<RwLock<SlidingWindow>>,
+
+    // Hot atomic counters to avoid RwLock on every call
+    total_success: AtomicU64,
+    total_failure: AtomicU64,
+    total_rejected: AtomicU64,
+    total_ignored_errors: AtomicU64,
+    current_failure_streak: AtomicU32,
 }
 
 impl CircuitBreaker {
@@ -381,6 +389,11 @@ impl CircuitBreaker {
             state_bits: AtomicU64::new(State::default().to_bits()),
             metrics: RwLock::new(CircuitBreakerMetrics::default()),
             sliding_window,
+            total_success: AtomicU64::new(0),
+            total_failure: AtomicU64::new(0),
+            total_rejected: AtomicU64::new(0),
+            total_ignored_errors: AtomicU64::new(0),
+            current_failure_streak: AtomicU32::new(0),
         }
     }
 
@@ -391,9 +404,19 @@ impl CircuitBreaker {
     }
 
     /// Get current metrics.
+    ///
+    /// This combines the atomic counters with the rare event counters
+    /// guarded by the RwLock.
     #[must_use]
     pub fn metrics(&self) -> CircuitBreakerMetrics {
-        self.metrics.read().expect("lock poisoned").clone()
+        let mut m = self.metrics.read().expect("lock poisoned").clone();
+        m.total_success = self.total_success.load(Ordering::Relaxed);
+        m.total_failure = self.total_failure.load(Ordering::Relaxed);
+        m.total_rejected = self.total_rejected.load(Ordering::Relaxed);
+        m.total_ignored_errors = self.total_ignored_errors.load(Ordering::Relaxed);
+        m.current_failure_streak = self.current_failure_streak.load(Ordering::Relaxed);
+        m.current_state = self.state(); // Prefer latest atomic state
+        m
     }
 
     /// Get the policy name.
@@ -435,20 +458,10 @@ impl CircuitBreaker {
                             )
                             .is_ok()
                         {
-                            let callback_metrics = {
-                                let mut metrics = self.metrics.write().expect("lock poisoned");
-                                metrics.current_state = new_state;
-                                if self.policy.on_state_change.is_some() {
-                                    Some(metrics.clone())
-                                } else {
-                                    None
-                                }
-                            };
-
-                            if let Some(metrics) = callback_metrics {
-                                if let Some(ref cb) = self.policy.on_state_change {
-                                    cb(state, new_state, &metrics);
-                                }
+                            // State changed, update locked metrics and callback
+                            let callback_metrics = self.update_state_metrics(state, new_state);
+                            if let Some(ref cb) = self.policy.on_state_change {
+                                cb(state, new_state, &callback_metrics);
                             }
                             return Ok(Permit::Probe);
                         }
@@ -456,7 +469,7 @@ impl CircuitBreaker {
                         continue;
                     }
                     // Track rejection
-                    self.metrics.write().expect("lock poisoned").total_rejected += 1;
+                    self.total_rejected.fetch_add(1, Ordering::Relaxed);
                     let remaining = self
                         .policy
                         .open_duration
@@ -491,7 +504,7 @@ impl CircuitBreaker {
                         continue;
                     }
                     // Max probes active, reject
-                    self.metrics.write().expect("lock poisoned").total_rejected += 1;
+                    self.total_rejected.fetch_add(1, Ordering::Relaxed);
                     return Err(CircuitBreakerError::HalfOpenFull);
                 }
             }
@@ -502,21 +515,87 @@ impl CircuitBreaker {
     #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
     pub fn record_success(&self, permit: Permit, now: Time) {
         let now_millis = now.as_millis();
+        self.total_success.fetch_add(1, Ordering::Relaxed);
 
-        let callback_event = {
-            let mut metrics = self.metrics.write().expect("lock poisoned");
-            metrics.total_success += 1;
-            let mut event = None;
+        // Optimistic check for Happy Path (Closed + No Failures) to avoid CAS loop overhead
+        if permit == Permit::Normal {
+            let current_bits = self.state_bits.load(Ordering::SeqCst);
+            if let State::Closed { failures: 0 } = State::from_bits(current_bits) {
+                // Already clean, just check sliding window
+                self.check_sliding_window_success(now_millis);
+                return;
+            }
+        }
 
-            match permit {
-                Permit::Normal => {
-                    // Reset failure count in Closed state if needed
-                    loop {
-                        let current_bits = self.state_bits.load(Ordering::SeqCst);
-                        let state = State::from_bits(current_bits);
-                        match state {
-                            State::Closed { failures } if failures > 0 => {
+        let callback_event = match permit {
+            Permit::Normal => {
+                // Reset failure count in Closed state if needed
+                loop {
+                    let current_bits = self.state_bits.load(Ordering::SeqCst);
+                    let state = State::from_bits(current_bits);
+                    match state {
+                        State::Closed { failures } if failures > 0 => {
+                            let new_state = State::Closed { failures: 0 };
+                            if self
+                                .state_bits
+                                .compare_exchange(
+                                    current_bits,
+                                    new_state.to_bits(),
+                                    Ordering::SeqCst,
+                                    Ordering::SeqCst,
+                                )
+                                .is_ok()
+                            {
+                                self.current_failure_streak.store(0, Ordering::Relaxed);
+                                break;
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+                None
+            }
+            Permit::Probe => {
+                let mut event = None;
+                loop {
+                    let current_bits = self.state_bits.load(Ordering::SeqCst);
+                    let state = State::from_bits(current_bits);
+                    match state {
+                        State::HalfOpen {
+                            probes_active,
+                            successes,
+                        } => {
+                            let new_successes = successes + 1;
+                            if new_successes >= self.policy.success_threshold {
+                                // Transition to Closed
                                 let new_state = State::Closed { failures: 0 };
+                                if self
+                                    .state_bits
+                                    .compare_exchange(
+                                        current_bits,
+                                        new_state.to_bits(),
+                                        Ordering::SeqCst,
+                                        Ordering::SeqCst,
+                                    )
+                                    .is_ok()
+                                {
+                                    self.current_failure_streak.store(0, Ordering::Relaxed);
+                                    let mut m = self.metrics.write().expect("lock poisoned");
+                                    m.times_closed += 1;
+                                    m.current_state = new_state;
+                                    if self.policy.on_state_change.is_some() {
+                                        // Populate atomic snapshots
+                                        self.populate_metrics_snapshot(&mut m);
+                                        event = Some((state, new_state, m.clone()));
+                                    }
+                                    break;
+                                }
+                            } else {
+                                // Increment successes, decrement probes
+                                let new_state = State::HalfOpen {
+                                    probes_active: probes_active.saturating_sub(1),
+                                    successes: new_successes,
+                                };
                                 if self
                                     .state_bits
                                     .compare_exchange(
@@ -530,68 +609,12 @@ impl CircuitBreaker {
                                     break;
                                 }
                             }
-                            _ => break,
                         }
-                    }
-                    metrics.current_failure_streak = 0;
-                }
-                Permit::Probe => {
-                    loop {
-                        let current_bits = self.state_bits.load(Ordering::SeqCst);
-                        let state = State::from_bits(current_bits);
-                        match state {
-                            State::HalfOpen {
-                                probes_active,
-                                successes,
-                            } => {
-                                let new_successes = successes + 1;
-                                if new_successes >= self.policy.success_threshold {
-                                    // Transition to Closed
-                                    let new_state = State::Closed { failures: 0 };
-                                    if self
-                                        .state_bits
-                                        .compare_exchange(
-                                            current_bits,
-                                            new_state.to_bits(),
-                                            Ordering::SeqCst,
-                                            Ordering::SeqCst,
-                                        )
-                                        .is_ok()
-                                    {
-                                        metrics.times_closed += 1;
-                                        metrics.current_state = new_state;
-                                        metrics.current_failure_streak = 0;
-                                        if self.policy.on_state_change.is_some() {
-                                            event = Some((state, new_state, metrics.clone()));
-                                        }
-                                        break;
-                                    }
-                                } else {
-                                    // Increment successes, decrement probes
-                                    let new_state = State::HalfOpen {
-                                        probes_active: probes_active.saturating_sub(1),
-                                        successes: new_successes,
-                                    };
-                                    if self
-                                        .state_bits
-                                        .compare_exchange(
-                                            current_bits,
-                                            new_state.to_bits(),
-                                            Ordering::SeqCst,
-                                            Ordering::SeqCst,
-                                        )
-                                        .is_ok()
-                                    {
-                                        break;
-                                    }
-                                }
-                            }
-                            _ => break,
-                        }
+                        _ => break,
                     }
                 }
+                event
             }
-            event
         };
 
         if let Some((from, to, m)) = callback_event {
@@ -600,8 +623,27 @@ impl CircuitBreaker {
             }
         }
 
-        // Check sliding window after recording success - may trigger open
-        // if failure rate threshold is exceeded once minimum_calls is reached
+        self.check_sliding_window_success(now_millis);
+    }
+
+    /// Helper to update metrics on state change.
+    fn update_state_metrics(&self, _old: State, new: State) -> CircuitBreakerMetrics {
+        let mut m = self.metrics.write().expect("lock poisoned");
+        m.current_state = new;
+        self.populate_metrics_snapshot(&mut m);
+        m.clone()
+    }
+
+    /// Helper to populate a metrics struct with current atomic values.
+    fn populate_metrics_snapshot(&self, m: &mut CircuitBreakerMetrics) {
+        m.total_success = self.total_success.load(Ordering::Relaxed);
+        m.total_failure = self.total_failure.load(Ordering::Relaxed);
+        m.total_rejected = self.total_rejected.load(Ordering::Relaxed);
+        m.total_ignored_errors = self.total_ignored_errors.load(Ordering::Relaxed);
+        m.current_failure_streak = self.current_failure_streak.load(Ordering::Relaxed);
+    }
+
+    fn check_sliding_window_success(&self, now_millis: u64) {
         let window_triggered = self.sliding_window.as_ref().is_some_and(|window| {
             let mut w = window.write().expect("lock poisoned");
             w.record_success(now_millis);
@@ -609,52 +651,51 @@ impl CircuitBreaker {
         });
 
         if window_triggered {
-            let callback_event = {
-                let mut metrics = self.metrics.write().expect("lock poisoned");
-                // Transition to Open due to window (use CAS to avoid clobbering concurrent transitions)
-                let mut event = None;
-                loop {
-                    let current_bits = self.state_bits.load(Ordering::SeqCst);
-                    let state = State::from_bits(current_bits);
+            self.trigger_open_from_window(now_millis);
+        }
+    }
 
-                    // Only transition if not already Open
-                    if matches!(state, State::Open { .. }) {
-                        break;
-                    }
+    fn trigger_open_from_window(&self, now_millis: u64) {
+        let mut event = None;
+        loop {
+            let current_bits = self.state_bits.load(Ordering::SeqCst);
+            let state = State::from_bits(current_bits);
 
-                    let new_state = State::Open {
-                        since_millis: now_millis,
-                    };
-                    if self
-                        .state_bits
-                        .compare_exchange(
-                            current_bits,
-                            new_state.to_bits(),
-                            Ordering::SeqCst,
-                            Ordering::SeqCst,
-                        )
-                        .is_ok()
-                    {
-                        metrics.times_opened += 1;
-                        metrics.current_state = new_state;
+            // Only transition if not already Open
+            if matches!(state, State::Open { .. }) {
+                break;
+            }
 
-                        if let Some(ref w) = self.sliding_window {
-                            w.write().expect("lock poisoned").reset();
-                        }
-
-                        if self.policy.on_state_change.is_some() {
-                            event = Some((state, new_state, metrics.clone()));
-                        }
-                        break;
-                    }
-                }
-                event
+            let new_state = State::Open {
+                since_millis: now_millis,
             };
-
-            if let Some((from, to, m)) = callback_event {
-                if let Some(ref cb) = self.policy.on_state_change {
-                    cb(from, to, &m);
+            if self
+                .state_bits
+                .compare_exchange(
+                    current_bits,
+                    new_state.to_bits(),
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_ok()
+            {
+                let mut m = self.metrics.write().expect("lock poisoned");
+                m.times_opened += 1;
+                m.current_state = new_state;
+                if let Some(ref w) = self.sliding_window {
+                    w.write().expect("lock poisoned").reset();
                 }
+                if self.policy.on_state_change.is_some() {
+                    self.populate_metrics_snapshot(&mut m);
+                    event = Some((state, new_state, m.clone()));
+                }
+                break;
+            }
+        }
+
+        if let Some((from, to, m)) = event {
+            if let Some(ref cb) = self.policy.on_state_change {
+                cb(from, to, &m);
             }
         }
     }
@@ -668,10 +709,7 @@ impl CircuitBreaker {
         let counts_as_failure = self.policy.failure_predicate.is_failure(error);
 
         if !counts_as_failure {
-            self.metrics
-                .write()
-                .expect("lock poisoned")
-                .total_ignored_errors += 1;
+            self.total_ignored_errors.fetch_add(1, Ordering::Relaxed);
 
             // Still need to release probe if applicable
             if matches!(permit, Permit::Probe) {
@@ -707,6 +745,8 @@ impl CircuitBreaker {
             return;
         }
 
+        self.total_failure.fetch_add(1, Ordering::Relaxed);
+
         // Check sliding window if enabled (before acquiring metrics lock)
         let (window_triggered, failure_rate) =
             self.sliding_window
@@ -717,111 +757,109 @@ impl CircuitBreaker {
                     (w.should_open(), Some(w.failure_rate()))
                 });
 
-        let callback_event = {
-            let mut metrics = self.metrics.write().expect("lock poisoned");
-            metrics.total_failure += 1;
-            if let Some(rate) = failure_rate {
-                metrics.sliding_window_failure_rate = Some(rate);
-            }
-            let mut event = None;
+        if let Some(rate) = failure_rate {
+             let mut m = self.metrics.write().expect("lock poisoned");
+             m.sliding_window_failure_rate = Some(rate);
+        }
 
-            match permit {
-                Permit::Normal => loop {
+        let mut event = None;
+
+        match permit {
+            Permit::Normal => loop {
+                let current_bits = self.state_bits.load(Ordering::SeqCst);
+                let state = State::from_bits(current_bits);
+                match state {
+                    State::Closed { failures } => {
+                        let new_failures = failures + 1;
+                        self.current_failure_streak.store(new_failures, Ordering::Relaxed);
+
+                        if new_failures >= self.policy.failure_threshold || window_triggered {
+                            let new_state = State::Open {
+                                since_millis: now_millis,
+                            };
+                            if self
+                                .state_bits
+                                .compare_exchange(
+                                    current_bits,
+                                    new_state.to_bits(),
+                                    Ordering::SeqCst,
+                                    Ordering::SeqCst,
+                                )
+                                .is_ok()
+                            {
+                                let mut m = self.metrics.write().expect("lock poisoned");
+                                m.times_opened += 1;
+                                m.current_state = new_state;
+                                if let Some(ref w) = self.sliding_window {
+                                    w.write().expect("lock poisoned").reset();
+                                }
+                                if self.policy.on_state_change.is_some() {
+                                    self.populate_metrics_snapshot(&mut m);
+                                    event = Some((state, new_state, m.clone()));
+                                }
+                                break;
+                            }
+                        } else {
+                            let new_state = State::Closed {
+                                failures: new_failures,
+                            };
+                            if self
+                                .state_bits
+                                .compare_exchange(
+                                    current_bits,
+                                    new_state.to_bits(),
+                                    Ordering::SeqCst,
+                                    Ordering::SeqCst,
+                                )
+                                .is_ok()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                    _ => break,
+                }
+            },
+            Permit::Probe => {
+                loop {
                     let current_bits = self.state_bits.load(Ordering::SeqCst);
                     let state = State::from_bits(current_bits);
                     match state {
-                        State::Closed { failures } => {
-                            let new_failures = failures + 1;
-                            metrics.current_failure_streak = new_failures;
-
-                            if new_failures >= self.policy.failure_threshold || window_triggered {
-                                let new_state = State::Open {
-                                    since_millis: now_millis,
-                                };
-                                if self
-                                    .state_bits
-                                    .compare_exchange(
-                                        current_bits,
-                                        new_state.to_bits(),
-                                        Ordering::SeqCst,
-                                        Ordering::SeqCst,
-                                    )
-                                    .is_ok()
-                                {
-                                    metrics.times_opened += 1;
-                                    metrics.current_state = new_state;
-                                    if self.policy.on_state_change.is_some() {
-                                        event = Some((state, new_state, metrics.clone()));
-                                    }
-                                    if let Some(ref w) = self.sliding_window {
-                                        w.write().expect("lock poisoned").reset();
-                                    }
-                                    break;
+                        State::HalfOpen { .. } => {
+                            // Probe failed -> Reopen
+                            let new_state = State::Open {
+                                since_millis: now_millis,
+                            };
+                            if self
+                                .state_bits
+                                .compare_exchange(
+                                    current_bits,
+                                    new_state.to_bits(),
+                                    Ordering::SeqCst,
+                                    Ordering::SeqCst,
+                                )
+                                .is_ok()
+                            {
+                                let mut m = self.metrics.write().expect("lock poisoned");
+                                m.times_opened += 1;
+                                m.current_state = new_state;
+                                if let Some(ref w) = self.sliding_window {
+                                    w.write().expect("lock poisoned").reset();
                                 }
-                            } else {
-                                let new_state = State::Closed {
-                                    failures: new_failures,
-                                };
-                                if self
-                                    .state_bits
-                                    .compare_exchange(
-                                        current_bits,
-                                        new_state.to_bits(),
-                                        Ordering::SeqCst,
-                                        Ordering::SeqCst,
-                                    )
-                                    .is_ok()
-                                {
-                                    break;
+                                if self.policy.on_state_change.is_some() {
+                                    self.populate_metrics_snapshot(&mut m);
+                                    event = Some((state, new_state, m.clone()));
                                 }
+                                break;
                             }
                         }
                         _ => break,
                     }
-                },
-                Permit::Probe => {
-                    loop {
-                        let current_bits = self.state_bits.load(Ordering::SeqCst);
-                        let state = State::from_bits(current_bits);
-                        match state {
-                            State::HalfOpen {
-                                probes_active: _,
-                                successes: _,
-                            } => {
-                                // Probe failed -> Reopen
-                                let new_state = State::Open {
-                                    since_millis: now_millis,
-                                };
-                                if self
-                                    .state_bits
-                                    .compare_exchange(
-                                        current_bits,
-                                        new_state.to_bits(),
-                                        Ordering::SeqCst,
-                                        Ordering::SeqCst,
-                                    )
-                                    .is_ok()
-                                {
-                                    metrics.times_opened += 1;
-                                    metrics.current_state = new_state;
-                                    if self.policy.on_state_change.is_some() {
-                                        event = Some((state, new_state, metrics.clone()));
-                                    }
-                                    if let Some(ref w) = self.sliding_window {
-                                        w.write().expect("lock poisoned").reset();
-                                    }
-                                    break;
-                                }
-                            }
-                            _ => break,
-                        }
-                    }
                 }
             }
-            event
-        };
+        }
 
-        if let Some((from, to, m)) = callback_event {
+        if let Some((from, to, m)) = event {
             if let Some(ref cb) = self.policy.on_state_change {
                 cb(from, to, &m);
             }
@@ -890,7 +928,7 @@ impl CircuitBreaker {
             let new_state = State::Closed { failures: 0 };
             self.state_bits.store(new_state.to_bits(), Ordering::SeqCst);
             metrics.current_state = new_state;
-            metrics.current_failure_streak = 0;
+            self.current_failure_streak.store(0, Ordering::Relaxed);
         }
 
         if let Some(ref window) = self.sliding_window {
