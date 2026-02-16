@@ -279,7 +279,7 @@ impl<H: Handler> Handler for BulkheadMiddleware<H> {
             },
             |p| {
                 let resp = self.inner.call(req);
-                p.release_to(&self.bulkhead);
+                p.release();
                 resp
             },
         )
