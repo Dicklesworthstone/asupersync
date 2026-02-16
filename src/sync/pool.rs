@@ -1303,14 +1303,21 @@ where
     /// Unlike `commit_create_slot`, this does NOT increment `active` or
     /// `total_acquisitions` — the resource goes straight to the idle queue.
     fn commit_create_slot_as_idle(&self, resource: R) {
-        let mut state = self.state.lock().expect("pool state lock poisoned");
-        state.creating = state.creating.saturating_sub(1);
-        state.idle.push_back(IdleResource {
-            resource,
-            idle_since: Instant::now(),
-            created_at: Instant::now(),
-        });
-        state.total_created += 1;
+        let waiter = {
+            let mut state = self.state.lock().expect("pool state lock poisoned");
+            state.creating = state.creating.saturating_sub(1);
+            state.idle.push_back(IdleResource {
+                resource,
+                idle_since: Instant::now(),
+                created_at: Instant::now(),
+            });
+            state.total_created += 1;
+            state.waiters.pop_front()
+        };
+
+        if let Some(waiter) = waiter {
+            waiter.waker.wake();
+        }
     }
 
     /// Create a new resource using the factory.
