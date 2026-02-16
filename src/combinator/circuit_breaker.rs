@@ -406,7 +406,7 @@ impl CircuitBreaker {
     /// Get current state.
     #[must_use]
     pub fn state(&self) -> State {
-        State::from_bits(self.state_bits.load(Ordering::SeqCst))
+        State::from_bits(self.state_bits.load(Ordering::Acquire))
     }
 
     /// Get current metrics.
@@ -438,7 +438,7 @@ impl CircuitBreaker {
         let now_millis = now.as_millis();
 
         loop {
-            let current_bits = self.state_bits.load(Ordering::SeqCst);
+            let current_bits = self.state_bits.load(Ordering::Acquire);
             let state = State::from_bits(current_bits);
 
             match state {
@@ -525,7 +525,7 @@ impl CircuitBreaker {
 
         // Optimistic check for Happy Path (Closed + No Failures) to avoid CAS loop overhead
         if permit == Permit::Normal {
-            let current_bits = self.state_bits.load(Ordering::SeqCst);
+            let current_bits = self.state_bits.load(Ordering::Acquire);
             if State::from_bits(current_bits) == (State::Closed { failures: 0 }) {
                 // Already clean, just check sliding window
                 self.check_sliding_window_success(now_millis);
