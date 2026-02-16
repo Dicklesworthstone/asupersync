@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 #[cfg(test)]
 mod tests {
     use asupersync::supervision::{RestartStormMonitor, StormMonitorConfig};

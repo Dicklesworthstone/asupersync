@@ -1,6 +1,6 @@
+#![allow(missing_docs, unused_imports)]
+
 use asupersync::combinator::circuit_breaker::*;
-use asupersync::types::Time;
-use std::time::Duration;
 
 #[test]
 fn test_half_open_probes_overflow() {

@@ -1,3 +1,6 @@
+#![allow(missing_docs)]
+
+
 use asupersync::cx::Cx;
 use asupersync::sync::{AsyncResourceFactory, GenericPool, Pool, PoolConfig};
 use std::future::Future;
@@ -88,6 +91,7 @@ fn test_warmup_wakes_waiters() {
             let mut lock = factory_waker.lock().unwrap();
             if lock.is_some() {
                 factory_task_waker = lock.take();
+                drop(lock);
                 break;
             }
         }
@@ -100,10 +104,9 @@ fn test_warmup_wakes_waiters() {
 
     // Now acquire. The pool is "full" (1 creating, max 1).
     // This acquire should block waiting for a slot.
-    let pool_clone2 = pool.clone();
     // We run acquire in another thread to detect if it hangs
     let acquire_handle = std::thread::spawn(move || {
-        let result = futures_lite::future::block_on(pool_clone2.acquire(&cx));
+        let result = futures_lite::future::block_on(pool.acquire(&cx));
         result.expect("Acquire should succeed")
     });
 

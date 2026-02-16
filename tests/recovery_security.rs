@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 use asupersync::distributed::recovery::{
     CollectedSymbol, RecoveryConfig, RecoveryDecodingConfig, RecoveryOrchestrator, RecoveryTrigger,
 };
@@ -25,7 +27,7 @@ fn orchestrator_trusts_fake_verified_symbol() {
 
     // Create a CollectedSymbol that CLAIMS to be verified
     let fake_verified_symbol = CollectedSymbol {
-        symbol: symbol.clone(),
+        symbol,
         tag: invalid_tag,
         source_replica: "malicious".to_string(),
         collected_at: Time::ZERO,
