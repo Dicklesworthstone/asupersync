@@ -1875,6 +1875,14 @@ pub struct StormMonitorConfig {
     pub expected_rate: f64,
     /// Minimum observations before the monitor can trigger an alert.
     pub min_observations: u32,
+    /// Tolerance factor for intensity fluctuations (normalizer).
+    ///
+    /// Intensities below `tolerance * expected_rate` will cause the evidence to decay.
+    /// Must be >= 1.0.
+    ///
+    /// The default is 1.2 (20% tolerance). A higher value reduces sensitivity to
+    /// mild overloads but increases robustness against variance (false alarms).
+    pub tolerance: f64,
 }
 
 impl Default for StormMonitorConfig {
@@ -1883,6 +1891,7 @@ impl Default for StormMonitorConfig {
             alpha: 0.01,
             expected_rate: 0.05, // 1 restart per 20 seconds
             min_observations: 3,
+            tolerance: 1.2,
         }
     }
 }
@@ -1901,10 +1910,10 @@ impl Default for StormMonitorConfig {
 /// ratio comparing H1 (intensity above expected) against H0 (normal rate):
 ///
 /// ```text
-/// LR = max(1, intensity / expected_rate) / normalizer
+/// LR = max(1, intensity / expected_rate) / tolerance
 /// ```
 ///
-/// The normalizer ensures the e-process is a non-negative supermartingale
+/// The tolerance (normalizer) ensures the e-process is a non-negative supermartingale
 /// under H0, preserving Ville's inequality.
 ///
 /// # Usage
@@ -1916,6 +1925,7 @@ impl Default for StormMonitorConfig {
 ///     alpha: 0.01,          // 1% false-positive bound
 ///     expected_rate: 0.05,  // ~1 restart per 20 seconds
 ///     min_observations: 3,
+///     tolerance: 1.2,       // Alert if intensity > 1.2 * expected
 /// };
 /// let mut monitor = RestartStormMonitor::new(config);
 ///
@@ -1950,7 +1960,8 @@ impl RestartStormMonitor {
     ///
     /// # Panics
     ///
-    /// Panics if `alpha` is not in (0, 1) or `expected_rate` is not positive.
+    /// Panics if `alpha` is not in (0, 1), `expected_rate` is not positive,
+    /// or `tolerance` is less than 1.0.
     #[must_use]
     pub fn new(config: StormMonitorConfig) -> Self {
         assert!(
@@ -1962,6 +1973,11 @@ impl RestartStormMonitor {
             config.expected_rate > 0.0,
             "expected_rate must be > 0, got {}",
             config.expected_rate
+        );
+        assert!(
+            config.tolerance >= 1.0,
+            "tolerance must be >= 1.0, got {}",
+            config.tolerance
         );
 
         let threshold = 1.0 / config.alpha;
@@ -1985,19 +2001,19 @@ impl RestartStormMonitor {
     ///
     /// The likelihood ratio at each step is:
     /// ```text
-    /// LR = max(1, intensity / expected_rate) / normalizer
+    /// LR = max(1, intensity / expected_rate) / tolerance
     /// ```
     ///
-    /// The normalizer (1 + 1/e ≈ 1.37) ensures E[LR] ≤ 1 under H0,
-    /// making the e-process a non-negative supermartingale.
+    /// The tolerance ensures E[LR] ≤ 1 under H0, making the e-process a
+    /// non-negative supermartingale.
     pub fn observe_intensity(&mut self, intensity: f64) -> crate::obligation::eprocess::AlertState {
         self.observations += 1;
 
         let ratio = intensity / self.config.expected_rate;
 
         // Likelihood ratio: evidence grows when intensity exceeds expected.
-        // Normalizer ensures supermartingale property under H0.
-        let normalizer = 1.0 + (-1.0_f64).exp(); // 1 + 1/e ≈ 1.3679
+        // Normalizer (tolerance) ensures supermartingale property under H0.
+        let normalizer = self.config.tolerance;
         let lr = ratio.max(1.0) / normalizer;
 
         self.log_e_value += lr.ln();
