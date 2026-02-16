@@ -699,6 +699,49 @@ fn bridge_upgrade_preserves_state() {
 }
 
 #[test]
+fn bridge_apply_snapshot_updates_state() {
+    let mut bridge = RegionBridge::new_local(
+        RegionId::new_for_test(1, 0),
+        None,
+        Budget::default(),
+    );
+
+    // Create a snapshot with different state
+    let mut snapshot = RegionSnapshot::empty(RegionId::new_for_test(1, 0));
+    snapshot.state = RegionState::Closing;
+    snapshot.budget = BudgetSnapshot {
+        deadline_nanos: Some(12345),
+        polls_remaining: Some(99),
+        cost_remaining: Some(100),
+    };
+    snapshot.tasks = vec![
+        TaskSnapshot {
+            task_id: TaskId::new_for_test(10, 0),
+            state: TaskState::Running,
+            priority: 10,
+        }
+    ];
+    snapshot.cancel_reason = Some("Timeout".to_string());
+
+    // Apply snapshot
+    bridge.apply_snapshot(&snapshot).unwrap();
+
+    // Verify local state updated
+    assert_eq!(bridge.local.state(), RegionState::Closing);
+    let budget = bridge.local.budget();
+    assert_eq!(budget.deadline.map(|t| t.as_nanos()), Some(12345));
+    assert_eq!(budget.poll_quota, 99);
+    assert_eq!(budget.cost_quota, Some(100));
+
+    let tasks = bridge.local.task_ids();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0], TaskId::new_for_test(10, 0));
+
+    let reason = bridge.local.cancel_reason().unwrap();
+    assert_eq!(reason.kind, crate::types::cancel::CancelKind::Timeout);
+}
+
+#[test]
 fn bridge_config_variants() {
     let mut bridge = RegionBridge::new_local(RegionId::new_for_test(1, 0), None, Budget::default());
 

@@ -23,6 +23,7 @@ use crate::record::region::{RegionRecord, RegionState};
 use crate::types::budget::Budget;
 use crate::types::cancel::CancelReason;
 use crate::types::{RegionId, TaskId, Time};
+use std::collections::HashSet;
 
 use super::snapshot::{BudgetSnapshot, RegionSnapshot, TaskSnapshot, TaskState};
 
@@ -336,6 +337,28 @@ impl LocalToDistributed for Budget {
             },
             cost_remaining: self.cost_quota,
         }
+    }
+}
+
+impl DistributedToLocal for BudgetSnapshot {
+    type Local = Budget;
+
+    fn to_local(&self) -> Budget {
+        let mut budget = Budget::default();
+        if let Some(d) = self.deadline_nanos {
+            budget.deadline = Some(Time::from_nanos(d));
+        }
+        if let Some(p) = self.polls_remaining {
+            budget.poll_quota = p;
+        }
+        if let Some(c) = self.cost_remaining {
+            budget.cost_quota = Some(c);
+        }
+        budget
+    }
+
+    fn is_lossless(&self) -> bool {
+        false // Priority is lost
     }
 }
 
@@ -705,12 +728,51 @@ impl RegionBridge {
                 .with_message("snapshot region ID does not match bridge"));
         }
 
-        // Apply state from snapshot.
-        // Note: we can only set the local state if the snapshot state maps
-        // to a valid transition. For simplicity, we just update sync state.
-        // TODO(Phase 4): Implement full state application. Currently this only acknowledges
-        // the snapshot sequence, effectively making the bridge write-only (pushing to replicas).
-        // For recovery or follower replicas, we need to update self.local state here.
+        // Reconstruct Budget
+        let budget = Budget {
+            deadline: snapshot.budget.deadline_nanos.map(Time::from_nanos),
+            poll_quota: snapshot.budget.polls_remaining.unwrap_or(0),
+            cost_quota: snapshot.budget.cost_remaining,
+            priority: 128, // Default priority (not preserved in snapshot)
+        };
+
+        // Reconstruct CancelReason
+        let cancel_reason = snapshot.cancel_reason.as_ref().map(|reason_str| {
+            // Attempt to parse known kinds from the string
+            let kind = match reason_str.as_str() {
+                "User" => crate::types::cancel::CancelKind::User,
+                "Timeout" => crate::types::cancel::CancelKind::Timeout,
+                "Deadline" => crate::types::cancel::CancelKind::Deadline,
+                "PollQuota" => crate::types::cancel::CancelKind::PollQuota,
+                "CostBudget" => crate::types::cancel::CancelKind::CostBudget,
+                "FailFast" => crate::types::cancel::CancelKind::FailFast,
+                "RaceLost" => crate::types::cancel::CancelKind::RaceLost,
+                "ParentCancelled" => crate::types::cancel::CancelKind::ParentCancelled,
+                "ResourceUnavailable" => crate::types::cancel::CancelKind::ResourceUnavailable,
+                "Shutdown" => crate::types::cancel::CancelKind::Shutdown,
+                "LinkedExit" => crate::types::cancel::CancelKind::LinkedExit,
+                _ => crate::types::cancel::CancelKind::User, // Fallback
+            };
+
+            crate::types::cancel::CancelReason::with_origin(
+                kind,
+                snapshot.region_id,
+                snapshot.timestamp,
+            )
+        });
+
+        // Extract tasks IDs
+        let tasks: Vec<TaskId> = snapshot.tasks.iter().map(|t| t.task_id).collect();
+
+        // Apply state from snapshot to local record
+        self.local.apply_distributed_snapshot(
+            snapshot.state,
+            budget,
+            snapshot.children.clone(),
+            tasks,
+            cancel_reason,
+        );
+
         self.sync_state.last_synced_sequence = snapshot.sequence;
         self.sync_state.sync_pending = false;
 
