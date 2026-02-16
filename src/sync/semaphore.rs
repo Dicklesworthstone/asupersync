@@ -254,20 +254,19 @@ impl<'a> Future for AcquireFuture<'a, '_> {
             return Poll::Ready(Err(AcquireError::Cancelled));
         }
 
+        // Single lock acquisition: allocate waiter_id inside the same
+        // critical section if this is our first wait, avoiding the previous
+        // double-lock (lock to get id, drop, re-lock to check state).
+        let mut state = self.semaphore.state.lock();
+
         let waiter_id = if let Some(id) = self.waiter_id {
             id
         } else {
-            let id = {
-                let mut state = self.semaphore.state.lock();
-                let id = state.next_waiter_id;
-                state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-                id
-            };
+            let id = state.next_waiter_id;
+            state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
             self.waiter_id = Some(id);
             id
         };
-
-        let mut state = self.semaphore.state.lock();
 
         if state.closed {
             state.waiters.retain(|waiter| waiter.id != waiter_id);
@@ -466,20 +465,17 @@ impl Future for OwnedAcquireFuture {
             return Poll::Ready(Err(AcquireError::Cancelled));
         }
 
+        // Single lock acquisition (same optimization as AcquireFuture).
+        let mut state = self.semaphore.state.lock();
+
         let waiter_id = if let Some(id) = self.waiter_id {
             id
         } else {
-            let id = {
-                let mut state = self.semaphore.state.lock();
-                let id = state.next_waiter_id;
-                state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-                id
-            };
+            let id = state.next_waiter_id;
+            state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
             self.waiter_id = Some(id);
             id
         };
-
-        let mut state = self.semaphore.state.lock();
 
         if state.closed {
             state.waiters.retain(|waiter| waiter.id != waiter_id);
