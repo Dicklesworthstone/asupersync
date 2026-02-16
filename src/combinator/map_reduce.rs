@@ -717,12 +717,8 @@ mod tests {
         // even though the decision is vacuously AllOk.
         // This prevents callers from doing result.reduced.unwrap() after
         // checking all_succeeded(), which would panic on empty input.
-        let result: MapReduceResult<i32, &str> = MapReduceResult::new(
-            AggregateDecision::AllOk,
-            None,
-            vec![],
-            0,
-        );
+        let result: MapReduceResult<i32, &str> =
+            MapReduceResult::new(AggregateDecision::AllOk, None, vec![], 0);
         assert!(!result.all_succeeded());
         assert!(!result.has_reduced());
     }
