@@ -742,15 +742,38 @@ fn render_lab_test(protocol: &str, participants: &BTreeMap<String, SagaParticipa
     for (i, name_a) in participant_names.iter().enumerate() {
         for name_b in &participant_names[i + 1..] {
             writeln!(code, "        // Channel: {name_a} <-> {name_b}").ok();
-            writeln!(code, "        let (chan_{name_a}, chan_{name_b}) = (").ok();
+            writeln!(
+                code,
+                "        let (chan_{name_a}_to_{name_b}, chan_{name_b}_to_{name_a}) = ("
+            )
+            .ok();
             writeln!(code, "            /* create session channel pair */").ok();
             writeln!(
                 code,
-                "            todo!(\"wire up session channels for {name_a} <-> {name_b}\"),"
+                "            todo!(\"wire up session endpoint for {name_a} -> {name_b}\"),"
+            )
+            .ok();
+            writeln!(
+                code,
+                "            todo!(\"wire up session endpoint for {name_b} -> {name_a}\"),"
             )
             .ok();
             writeln!(code, "        );").ok();
         }
+    }
+
+    writeln!(code).ok();
+    writeln!(
+        code,
+        "        // Compose participant entry channels from pair endpoints"
+    )
+    .ok();
+    for name in &participant_names {
+        writeln!(
+            code,
+            "        let chan_{name} = todo!(\"compose session endpoint for {name} from pair channels\");"
+        )
+        .ok();
     }
 
     writeln!(code).ok();
@@ -1261,6 +1284,34 @@ mod tests {
         assert!(output.lab_test_code.contains("coordinator_handle"));
         assert!(output.lab_test_code.contains("worker_handle"));
         assert!(output.lab_test_code.contains("tokio::spawn"));
+    }
+
+    #[test]
+    fn lab_test_channel_scaffold_is_unique_per_participant() {
+        let protocol = example_scatter_gather_disjoint();
+        let output = pipeline()
+            .generate_with_locals(&protocol)
+            .expect("pipeline failed");
+
+        // Pairwise directional placeholders must exist.
+        assert!(output
+            .lab_test_code
+            .contains("let (chan_proxy_a_to_proxy_b, chan_proxy_b_to_proxy_a) = ("));
+        assert!(output
+            .lab_test_code
+            .contains("let (chan_proxy_a_to_worker_a, chan_worker_a_to_proxy_a) = ("));
+
+        // Each participant should have exactly one entry-channel placeholder.
+        for name in ["proxy_a", "proxy_b", "worker_a", "worker_b"] {
+            let decl = format!(
+                "let chan_{name} = todo!(\"compose session endpoint for {name} from pair channels\");"
+            );
+            assert_eq!(
+                output.lab_test_code.matches(&decl).count(),
+                1,
+                "{name} should have exactly one channel entry placeholder"
+            );
+        }
     }
 
     // ------------------------------------------------------------------

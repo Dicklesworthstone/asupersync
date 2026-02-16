@@ -995,7 +995,39 @@ fn project_choice(
                 })
             }
         }
-        (Some(local), None) | (None, Some(local)) => Some(local),
+        // Keep branch structure when only one side has local actions.
+        // Collapsing to the single non-empty branch loses control-flow
+        // semantics and can force actions that should be conditional.
+        (Some(then_l), None) => {
+            if decider == participant {
+                Some(LocalType::InternalChoice {
+                    predicate: predicate.to_string(),
+                    then_branch: Box::new(then_l),
+                    else_branch: Box::new(LocalType::End),
+                })
+            } else {
+                Some(LocalType::ExternalChoice {
+                    from: decider.to_string(),
+                    then_branch: Box::new(then_l),
+                    else_branch: Box::new(LocalType::End),
+                })
+            }
+        }
+        (None, Some(else_l)) => {
+            if decider == participant {
+                Some(LocalType::InternalChoice {
+                    predicate: predicate.to_string(),
+                    then_branch: Box::new(LocalType::End),
+                    else_branch: Box::new(else_l),
+                })
+            } else {
+                Some(LocalType::ExternalChoice {
+                    from: decider.to_string(),
+                    then_branch: Box::new(LocalType::End),
+                    else_branch: Box::new(else_l),
+                })
+            }
+        }
         (None, None) => None,
     }
 }
@@ -2627,6 +2659,100 @@ mod tests {
         match &local_c {
             LocalType::Recv { action, .. } => assert_eq!(action, "notify"),
             other => panic!("Expected Recv notify, got {other}"),
+        }
+    }
+
+    #[test]
+    fn project_choice_single_branch_participant_keeps_choice_structure() {
+        let protocol = GlobalProtocol::builder("choice_single_branch")
+            .participant("a", "role")
+            .participant("b", "role")
+            .interaction(Interaction::choice(
+                "a",
+                "pred",
+                Interaction::comm("a", "maybe_send", "Msg", "b"),
+                Interaction::end(),
+            ))
+            .build();
+
+        assert!(protocol.validate().is_empty());
+
+        let local_a = protocol.project("a").expect("a should project");
+        match &local_a {
+            LocalType::InternalChoice {
+                predicate,
+                then_branch,
+                else_branch,
+            } => {
+                assert_eq!(predicate, "pred");
+                assert!(matches!(else_branch.as_ref(), LocalType::End));
+                match then_branch.as_ref() {
+                    LocalType::Send { action, .. } => assert_eq!(action, "maybe_send"),
+                    other => panic!("Expected Send in then branch, got {other}"),
+                }
+            }
+            other => panic!("Expected InternalChoice, got {other}"),
+        }
+
+        let local_b = protocol.project("b").expect("b should project");
+        match &local_b {
+            LocalType::ExternalChoice {
+                from,
+                then_branch,
+                else_branch,
+            } => {
+                assert_eq!(from, "a");
+                assert!(matches!(else_branch.as_ref(), LocalType::End));
+                match then_branch.as_ref() {
+                    LocalType::Recv { action, .. } => assert_eq!(action, "maybe_send"),
+                    other => panic!("Expected Recv in then branch, got {other}"),
+                }
+            }
+            other => panic!("Expected ExternalChoice, got {other}"),
+        }
+    }
+
+    #[test]
+    fn seq_after_choice_threads_into_both_projected_branches() {
+        let protocol = GlobalProtocol::builder("choice_then_seq")
+            .participant("a", "role")
+            .participant("b", "role")
+            .interaction(Interaction::seq(
+                Interaction::choice(
+                    "a",
+                    "pred",
+                    Interaction::comm("a", "maybe_send", "Msg", "b"),
+                    Interaction::end(),
+                ),
+                Interaction::comm("a", "always_send", "Msg2", "b"),
+            ))
+            .build();
+
+        assert!(protocol.validate().is_empty());
+
+        let local_b = protocol.project("b").expect("b should project");
+        match &local_b {
+            LocalType::ExternalChoice {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                match then_branch.as_ref() {
+                    LocalType::Recv { action, then, .. } => {
+                        assert_eq!(action, "maybe_send");
+                        match then.as_ref() {
+                            LocalType::Recv { action, .. } => assert_eq!(action, "always_send"),
+                            other => panic!("Expected Recv(always_send), got {other}"),
+                        }
+                    }
+                    other => panic!("Expected Recv(maybe_send) in then branch, got {other}"),
+                }
+                match else_branch.as_ref() {
+                    LocalType::Recv { action, .. } => assert_eq!(action, "always_send"),
+                    other => panic!("Expected Recv(always_send) in else branch, got {other}"),
+                }
+            }
+            other => panic!("Expected ExternalChoice, got {other}"),
         }
     }
 
