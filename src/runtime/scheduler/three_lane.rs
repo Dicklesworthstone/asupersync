@@ -625,6 +625,21 @@ impl ThreeLaneScheduler {
         }
     }
 
+    /// Injects a task into the ready lane with queue limit checks.
+    fn inject_global_ready_checked(&self, task: TaskId, priority: u8) {
+        if self.global_queue_limit > 0 && self.global.ready_count() >= self.global_queue_limit {
+            crate::tracing_compat::warn!(
+                ?task,
+                priority,
+                limit = self.global_queue_limit,
+                current = self.global.ready_count(),
+                "inject_ready: global ready queue at capacity, scheduling anyway"
+            );
+        }
+        self.global.inject_ready(task, priority);
+        self.wake_one();
+    }
+
     /// Injects a task into the ready lane for cross-thread wakeup.
     ///
     /// Uses `wake_state.notify()` for centralized deduplication.
@@ -659,17 +674,7 @@ impl ThreeLaneScheduler {
         }
 
         if should_schedule {
-            if self.global_queue_limit > 0 && self.global.ready_count() >= self.global_queue_limit {
-                crate::tracing_compat::warn!(
-                    ?task,
-                    priority,
-                    limit = self.global_queue_limit,
-                    current = self.global.ready_count(),
-                    "inject_ready: global ready queue at capacity, scheduling anyway"
-                );
-            }
-            self.global.inject_ready(task, priority);
-            self.wake_one();
+            self.inject_global_ready_checked(task, priority);
             trace!(
                 ?task,
                 priority,
@@ -712,9 +717,19 @@ impl ThreeLaneScheduler {
         }
 
         if is_local {
+            let current_worker = current_worker_id();
+            let is_pinned_here = match (pinned_worker, current_worker) {
+                (Some(pw), Some(cw)) => pw == cw,
+                (None, Some(_)) => true,
+                _ => false,
+            };
+
             // 1. Try scheduling on current thread (fastest, no locks if TLS setup)
-            if schedule_local_task(task) {
-                return;
+            // ONLY if this thread is the owner.
+            if is_pinned_here {
+                if schedule_local_task(task) {
+                    return;
+                }
             }
 
             // 2. Try routing to pinned worker (cross-thread spawn)
@@ -738,29 +753,13 @@ impl ThreeLaneScheduler {
             return;
         }
 
-        // Fast path 1: O(1) push to worker's LocalQueue via TLS.
-        if LocalQueue::schedule_local(task) {
-            return;
-        }
-
-        // Fast path 2: O(log n) push to PriorityScheduler via TLS.
-        let scheduled = CURRENT_LOCAL.with(|cell| {
-            if let Some(local) = cell.borrow().as_ref() {
-                local
-                    .lock()
-                    .expect("local scheduler lock poisoned")
-                    .schedule(task, priority);
-                return true;
-            }
-            false
-        });
-        if scheduled {
+        // Fast path 1 & 2: Try local queue (O(1)) then local scheduler (O(log n)) via TLS.
+        if schedule_on_current_local(task, priority) {
             return;
         }
 
         // Slow path: global injector (off worker thread).
-        self.global.inject_ready(task, priority);
-        self.wake_one();
+        self.inject_global_ready_checked(task, priority);
     }
 
     /// Wakes a task by injecting it into the ready lane.
@@ -791,9 +790,19 @@ impl ThreeLaneScheduler {
         }
 
         if is_local {
+            let current_worker = current_worker_id();
+            let is_pinned_here = match (pinned_worker, current_worker) {
+                (Some(pw), Some(cw)) => pw == cw,
+                (None, Some(_)) => true,
+                _ => false,
+            };
+
             // 1. Try scheduling on current thread (fastest, no locks if TLS setup)
-            if schedule_local_task(task) {
-                return;
+            // ONLY if this thread is the owner.
+            if is_pinned_here {
+                if schedule_local_task(task) {
+                    return;
+                }
             }
 
             // 2. Try routing to pinned worker (cross-thread wake)
@@ -817,29 +826,13 @@ impl ThreeLaneScheduler {
             return;
         }
 
-        // Fast path 1: O(1) push to worker's LocalQueue via TLS.
-        if LocalQueue::schedule_local(task) {
-            return;
-        }
-
-        // Fast path 2: O(log n) push to PriorityScheduler via TLS.
-        let scheduled = CURRENT_LOCAL.with(|cell| {
-            if let Some(local) = cell.borrow().as_ref() {
-                local
-                    .lock()
-                    .expect("local scheduler lock poisoned")
-                    .schedule(task, priority);
-                return true;
-            }
-            false
-        });
-        if scheduled {
+        // Fast path 1 & 2: Try local queue (O(1)) then local scheduler (O(log n)) via TLS.
+        if schedule_on_current_local(task, priority) {
             return;
         }
 
         // Slow path: global injector (off worker thread).
-        self.global.inject_ready(task, priority);
-        self.wake_one();
+        self.inject_global_ready_checked(task, priority);
     }
 
     /// Wakes one idle worker.
@@ -1594,6 +1587,59 @@ impl ThreeLaneWorker {
         }
     }
 
+    /// Wakes a list of dependent tasks (waiters) while holding the RuntimeState lock.
+    ///
+    /// This handles local/global routing and centralized deduplication via `wake_state`.
+    fn wake_dependents_locked(&self, state: &RuntimeState, waiters: impl IntoIterator<Item = TaskId>) {
+        for waiter in waiters {
+            if let Some(record) = state.task(waiter) {
+                let waiter_priority = record
+                    .cx_inner
+                    .as_ref()
+                    .and_then(|inner| inner.read().ok().map(|cx| cx.budget.priority))
+                    .unwrap_or_default();
+                if record.wake_state.notify() {
+                    if record.is_local() {
+                        if let Some(worker_id) = record.pinned_worker() {
+                            if let Some(queue) = self.all_local_ready.get(worker_id) {
+                                queue
+                                    .lock()
+                                    .expect("local_ready lock poisoned")
+                                    .push(waiter);
+                                self.coordinator.wake_worker(worker_id);
+                            } else {
+                                // SAFETY: Invalid worker id for a local waiter means
+                                // we can't route to the correct queue. Skipping the
+                                // wake may hang the waiter, but avoids potential UB.
+                                debug_assert!(
+                                    false,
+                                    "Pinned local waiter {waiter:?} has invalid worker id {worker_id}"
+                                );
+                                error!(
+                                    ?waiter,
+                                    worker_id,
+                                    "execute: pinned local waiter has invalid worker id, wake skipped"
+                                );
+                            }
+                        } else {
+                            // Local task without a pinned worker yet.
+                            // Schedule on the current worker's local queue.
+                            self.local_ready
+                                .lock()
+                                .expect("local_ready lock poisoned")
+                                .push(waiter);
+                            self.parker.unpark();
+                        }
+                    } else {
+                        // Global waiters are ready tasks.
+                        self.global.inject_ready(waiter, waiter_priority);
+                        self.coordinator.wake_one();
+                    }
+                }
+            }
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(crate) fn execute(&self, task_id: TaskId) {
         // Guard to handle task panics during polling.
@@ -1607,6 +1653,7 @@ impl ThreeLaneWorker {
         impl Drop for TaskExecutionGuard<'_> {
             fn drop(&mut self) {
                 if !self.completed && std::thread::panicking() {
+                    // 1. Mark task as Panicked (using hot-path task table if available)
                     self.worker.with_task_table(|tt| {
                         if let Some(record) = tt.task_mut(self.task_id) {
                             if !record.state.is_terminal() {
@@ -1618,8 +1665,19 @@ impl ThreeLaneWorker {
                             }
                         }
                     });
-                    // complete() marks the task terminal, so it won't be scheduled again.
-                    // The future itself is lost (owned by the stack frame unwinding).
+                    
+                    // 2. Wake waiters and process finalizers (requires full RuntimeState lock)
+                    // We expect success here; poisoning aborts the thread, which is acceptable during panic unwind.
+                    let mut state = self.worker.state.lock().expect("runtime state lock poisoned");
+                    let waiters = state.task_completed(self.task_id);
+                    let finalizers = state.drain_ready_async_finalizers();
+                    
+                    self.worker.wake_dependents_locked(&state, waiters);
+                    
+                    for (finalizer_task, priority) in finalizers {
+                        self.worker.global.inject_ready(finalizer_task, priority);
+                        self.worker.coordinator.wake_one();
+                    }
                 }
             }
         }
@@ -1820,53 +1878,9 @@ impl ThreeLaneWorker {
 
                 let waiters = state.task_completed(task_id);
                 let finalizers = state.drain_ready_async_finalizers();
-                for waiter in waiters {
-                    if let Some(record) = state.task(waiter) {
-                        let waiter_priority = record
-                            .cx_inner
-                            .as_ref()
-                            .and_then(|inner| inner.read().ok().map(|cx| cx.budget.priority))
-                            .unwrap_or_default();
-                        if record.wake_state.notify() {
-                            if record.is_local() {
-                                if let Some(worker_id) = record.pinned_worker() {
-                                    if let Some(queue) = self.all_local_ready.get(worker_id) {
-                                        queue
-                                            .lock()
-                                            .expect("local_ready lock poisoned")
-                                            .push(waiter);
-                                        self.coordinator.wake_worker(worker_id);
-                                    } else {
-                                        // SAFETY: Invalid worker id for a local waiter means
-                                        // we can't route to the correct queue. Skipping the
-                                        // wake may hang the waiter, but avoids potential UB.
-                                        debug_assert!(
-                                            false,
-                                            "Pinned local waiter {waiter:?} has invalid worker id {worker_id}"
-                                        );
-                                        error!(
-                                            ?waiter,
-                                            worker_id,
-                                            "execute: pinned local waiter has invalid worker id, wake skipped"
-                                        );
-                                    }
-                                } else {
-                                    // Local task without a pinned worker yet.
-                                    // Schedule on the current worker's local queue.
-                                    self.local_ready
-                                        .lock()
-                                        .expect("local_ready lock poisoned")
-                                        .push(waiter);
-                                    self.parker.unpark();
-                                }
-                            } else {
-                                // Global waiters are ready tasks.
-                                self.global.inject_ready(waiter, waiter_priority);
-                                self.coordinator.wake_one();
-                            }
-                        }
-                    }
-                }
+                
+                self.wake_dependents_locked(&state, waiters);
+                
                 for (finalizer_task, priority) in finalizers {
                     self.global.inject_ready(finalizer_task, priority);
                     self.coordinator.wake_one();
@@ -4520,6 +4534,56 @@ mod tests {
             worker.local_ready.lock().unwrap().is_empty(),
             "global waiter should NOT be in local_ready"
         );
+    }
+
+    #[test]
+    fn test_local_task_cross_thread_wake_routes_correctly() {
+        // Verify that `wake` schedules a pinned local task on the
+        // owner worker instead of the current thread.
+        use crate::runtime::RuntimeState;
+        use crate::sync::ContendedMutex;
+        use crate::types::{Budget, RegionId};
+
+        // 1. Setup runtime state and scheduler with 2 workers
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let scheduler = ThreeLaneScheduler::new(2, &state);
+
+        // 2. Create a task pinned to Worker 0
+        let task_id = {
+            let mut guard = state.lock().expect("lock");
+            let region = guard.create_root_region(Budget::INFINITE);
+            let (tid, _) = guard
+                .create_task(region, Budget::INFINITE, async { 1 })
+                .unwrap();
+
+            // Mark as local and pin to Worker 0
+            let record = guard.task_mut(tid).unwrap();
+            record.mark_local();
+            record.pin_to_worker(0);
+
+            // Simulate task in waiting state
+            record.wake_state.begin_poll();
+            tid
+        };
+
+        // 3. Simulate being Worker 1
+        let worker_1_ready = Arc::new(Mutex::new(Vec::new()));
+        let _tls_guard = ScopedLocalReady::new(worker_1_ready.clone());
+        let _worker_guard = ScopedWorkerId::new(1);
+
+        // 4. Wake the task (which is pinned to Worker 0)
+        // We are on "Worker 1".
+        scheduler.wake(task_id, 100);
+
+        // 5. Verify where it went
+        let worker_1_has_it = worker_1_ready.lock().unwrap().contains(&task_id);
+        
+        // Check Worker 0's queue
+        let worker_0_ready = scheduler.local_ready[0].clone();
+        let worker_0_has_it = worker_0_ready.lock().unwrap().contains(&task_id);
+
+        assert!(!worker_1_has_it, "Task incorrectly scheduled on Worker 1");
+        assert!(worker_0_has_it, "Task correctly routed to Worker 0");
     }
 
     // =========================================================================
