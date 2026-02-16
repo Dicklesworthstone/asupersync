@@ -137,9 +137,13 @@ impl IntrusivePriorityHeap {
     /// O(1) via the stored `heap_index` field.
     #[must_use]
     pub fn contains(&self, task: TaskId, arena: &Arena<TaskRecord>) -> bool {
-        arena
-            .get(task.arena_index())
-            .is_some_and(|record| record.heap_index.is_some())
+        arena.get(task.arena_index()).is_some_and(|record| {
+            let Some(pos) = record.heap_index else {
+                return false;
+            };
+            let pos = pos as usize;
+            pos < self.heap.len() && self.heap[pos] == task
+        })
     }
 
     /// Pushes a task into the heap with the given priority.
@@ -206,7 +210,19 @@ impl IntrusivePriorityHeap {
             return false;
         };
 
-        self.remove_at(pos as usize, arena);
+        let pos = pos as usize;
+        // Defensively validate slot ownership before removing. A stale or
+        // corrupted heap_index must not remove arbitrary tasks or panic.
+        if pos >= self.heap.len() || self.heap[pos] != task {
+            if let Some(record) = arena.get_mut(task.arena_index()) {
+                record.heap_index = None;
+                record.sched_priority = 0;
+                record.sched_generation = 0;
+            }
+            return false;
+        }
+
+        self.remove_at(pos, arena);
         true
     }
 
@@ -604,5 +620,54 @@ mod tests {
 
         assert_eq!(heap.pop(&mut arena), Some(task(0)));
         assert_eq!(heap.pop(&mut arena), Some(task(1)));
+    }
+
+    #[test]
+    fn contains_rejects_stale_heap_index() {
+        let mut arena = setup_arena(2);
+        let mut heap = IntrusivePriorityHeap::new();
+
+        heap.push(task(0), 9, &mut arena);
+
+        // Corrupt task(1) metadata to point at task(0)'s slot.
+        if let Some(record) = arena.get_mut(task(1).arena_index()) {
+            record.heap_index = Some(0);
+            record.sched_priority = 9;
+            record.sched_generation = 0;
+        }
+
+        assert!(heap.contains(task(0), &arena));
+        assert!(
+            !heap.contains(task(1), &arena),
+            "stale index must not be treated as membership"
+        );
+    }
+
+    #[test]
+    fn remove_with_stale_heap_index_is_safe_and_non_destructive() {
+        let mut arena = setup_arena(2);
+        let mut heap = IntrusivePriorityHeap::new();
+
+        heap.push(task(0), 9, &mut arena);
+
+        // Corrupt task(1) metadata to point at task(0)'s slot.
+        if let Some(record) = arena.get_mut(task(1).arena_index()) {
+            record.heap_index = Some(0);
+            record.sched_priority = 9;
+            record.sched_generation = 0;
+        }
+
+        assert!(
+            !heap.remove(task(1), &mut arena),
+            "stale index must not remove arbitrary task"
+        );
+        assert_eq!(heap.len(), 1, "heap content must be preserved");
+        assert_eq!(heap.peek(), Some(task(0)));
+
+        // The stale metadata is healed.
+        let record = arena.get(task(1).arena_index()).unwrap();
+        assert!(record.heap_index.is_none());
+        assert_eq!(record.sched_priority, 0);
+        assert_eq!(record.sched_generation, 0);
     }
 }
