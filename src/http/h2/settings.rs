@@ -159,26 +159,46 @@ impl Settings {
     /// Convert settings to a list of Setting values for encoding.
     #[must_use]
     pub fn to_settings(&self) -> Vec<Setting> {
-        vec![
-            Setting::HeaderTableSize(self.header_table_size),
-            Setting::EnablePush(self.enable_push),
-            Setting::MaxConcurrentStreams(self.max_concurrent_streams),
-            Setting::InitialWindowSize(self.initial_window_size),
-            Setting::MaxFrameSize(self.max_frame_size),
-            Setting::MaxHeaderListSize(self.max_header_list_size),
-        ]
+        self.to_settings_for_role(true)
+    }
+
+    /// Convert settings to a list of Setting values for encoding, with role rules.
+    ///
+    /// Per RFC 7540 §6.5.2, servers MUST NOT send `SETTINGS_ENABLE_PUSH`.
+    /// Set `is_client` to `false` when serializing server settings.
+    #[must_use]
+    pub fn to_settings_for_role(&self, is_client: bool) -> Vec<Setting> {
+        let mut settings = Vec::with_capacity(if is_client { 6 } else { 5 });
+        settings.push(Setting::HeaderTableSize(self.header_table_size));
+        if is_client {
+            settings.push(Setting::EnablePush(self.enable_push));
+        }
+        settings.push(Setting::MaxConcurrentStreams(self.max_concurrent_streams));
+        settings.push(Setting::InitialWindowSize(self.initial_window_size));
+        settings.push(Setting::MaxFrameSize(self.max_frame_size));
+        settings.push(Setting::MaxHeaderListSize(self.max_header_list_size));
+        settings
     }
 
     /// Convert settings to a minimal list (only non-default values).
     #[must_use]
     pub fn to_settings_minimal(&self) -> Vec<Setting> {
+        self.to_settings_minimal_for_role(true)
+    }
+
+    /// Convert settings to a minimal list (only non-default values), with role rules.
+    ///
+    /// Per RFC 7540 §6.5.2, servers MUST NOT send `SETTINGS_ENABLE_PUSH`.
+    /// Set `is_client` to `false` when serializing server settings.
+    #[must_use]
+    pub fn to_settings_minimal_for_role(&self, is_client: bool) -> Vec<Setting> {
         let default = Self::default();
         let mut settings = Vec::new();
 
         if self.header_table_size != default.header_table_size {
             settings.push(Setting::HeaderTableSize(self.header_table_size));
         }
-        if self.enable_push != default.enable_push {
+        if is_client && self.enable_push != default.enable_push {
             settings.push(Setting::EnablePush(self.enable_push));
         }
         if self.max_concurrent_streams != default.max_concurrent_streams {
@@ -387,5 +407,23 @@ mod tests {
 
         let minimal = settings.to_settings_minimal();
         assert_eq!(minimal.len(), 2);
+    }
+
+    #[test]
+    fn test_to_settings_for_server_omits_enable_push() {
+        let settings = SettingsBuilder::server().enable_push(false).build();
+        let serialized = settings.to_settings_for_role(false);
+        assert!(!serialized
+            .iter()
+            .any(|setting| matches!(setting, Setting::EnablePush(_))));
+    }
+
+    #[test]
+    fn test_to_settings_minimal_for_server_omits_enable_push() {
+        let settings = SettingsBuilder::server().enable_push(false).build();
+        let minimal = settings.to_settings_minimal_for_role(false);
+        assert!(!minimal
+            .iter()
+            .any(|setting| matches!(setting, Setting::EnablePush(_))));
     }
 }
