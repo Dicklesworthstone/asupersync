@@ -13,6 +13,7 @@ use crate::types::TaskId;
 use crate::types::{Budget, RegionId};
 use crate::util::Arena;
 use parking_lot::Mutex;
+use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -239,17 +240,58 @@ pub struct Stealer {
 }
 
 impl Stealer {
+    const SKIPPED_LOCALS_INLINE_CAP: usize = 8;
+
     #[inline]
     fn restore_skipped_locals(
         stack: &mut IntrusiveStack,
         arena: &mut Arena<TaskRecord>,
-        skipped_locals: &mut Vec<TaskId>,
+        skipped_locals: &mut SmallVec<[TaskId; Self::SKIPPED_LOCALS_INLINE_CAP]>,
     ) {
-        // Skipped locals were popped from oldest -> newest. Reinsert newer -> older
-        // so the final queue order matches the pre-steal owner-visible order.
-        for task_id in skipped_locals.drain(..).rev() {
+        // Skipped locals were popped from oldest -> newest. Restore in reverse
+        // (newest -> oldest) so owner-visible LIFO order remains unchanged.
+        while let Some(task_id) = skipped_locals.pop() {
             stack.push_bottom(task_id, arena);
         }
+    }
+
+    #[inline]
+    fn steal_batch_locked(
+        src: &mut IntrusiveStack,
+        dest: &mut IntrusiveStack,
+        arena: &mut Arena<TaskRecord>,
+    ) -> bool {
+        let mut stolen = 0usize;
+        // Keep the common "few local tasks skipped" path allocation-free.
+        let mut skipped_locals = SmallVec::<[TaskId; Self::SKIPPED_LOCALS_INLINE_CAP]>::new();
+
+        let initial_len = src.len();
+        if initial_len == 0 {
+            return false;
+        }
+        let steal_limit = (initial_len / 2).max(1);
+        let mut remaining_attempts = initial_len;
+
+        while stolen < steal_limit && remaining_attempts > 0 {
+            remaining_attempts -= 1;
+            let Some(task_id) = src.steal_one(arena) else {
+                break;
+            };
+            let is_local = arena
+                .get(task_id.arena_index())
+                .is_some_and(crate::record::task::TaskRecord::is_local);
+            if is_local {
+                // Local (!Send) tasks must not be transferred across workers.
+                // Preserve original owner-visible ordering when restoring.
+                skipped_locals.push(task_id);
+                continue;
+            }
+            dest.push(task_id, arena);
+            stolen += 1;
+        }
+        Self::restore_skipped_locals(src, arena, &mut skipped_locals);
+
+        stolen > 0
     }
 
     /// Steals a task from the queue.
@@ -258,7 +300,8 @@ impl Stealer {
         self.tasks.with_tasks_arena_mut(|arena| {
             let mut stack = self.inner.lock();
             let mut remaining_attempts = stack.len();
-            let mut skipped_locals = Vec::new();
+            // Keep the common "few local tasks skipped" path allocation-free.
+            let mut skipped_locals = SmallVec::<[TaskId; Self::SKIPPED_LOCALS_INLINE_CAP]>::new();
             while remaining_attempts > 0 {
                 remaining_attempts -= 1;
                 let Some(task_id) = stack.steal_one(arena) else {
@@ -299,38 +342,20 @@ impl Stealer {
         debug_assert!(self.tasks.same_underlying_tasks(&dest.tasks));
 
         self.tasks.with_tasks_arena_mut(|arena| {
-            let mut stolen = 0usize;
-            let mut src = self.inner.lock();
-            let mut skipped_locals = Vec::new();
+            // Avoid lock inversion when two workers concurrently steal from each
+            // other by acquiring queue locks in a deterministic pointer order.
+            let src_addr = Arc::as_ptr(&self.inner) as usize;
+            let dest_addr = Arc::as_ptr(&dest.inner) as usize;
 
-            let initial_len = src.len();
-            if initial_len == 0 {
-                return false;
+            if src_addr < dest_addr {
+                let mut src = self.inner.lock();
+                let mut dest_stack = dest.inner.lock();
+                Self::steal_batch_locked(&mut src, &mut dest_stack, arena)
+            } else {
+                let mut dest_stack = dest.inner.lock();
+                let mut src = self.inner.lock();
+                Self::steal_batch_locked(&mut src, &mut dest_stack, arena)
             }
-            let steal_limit = (initial_len / 2).max(1);
-            let mut remaining_attempts = initial_len;
-
-            let mut dest_stack = dest.inner.lock();
-            while stolen < steal_limit && remaining_attempts > 0 {
-                remaining_attempts -= 1;
-                let Some(task_id) = src.steal_one(arena) else {
-                    break;
-                };
-                let is_local = arena
-                    .get(task_id.arena_index())
-                    .is_some_and(crate::record::task::TaskRecord::is_local);
-                if is_local {
-                    // Local (!Send) tasks must not be transferred across workers.
-                    // Preserve original owner-visible ordering when restoring.
-                    skipped_locals.push(task_id);
-                    continue;
-                }
-                dest_stack.push(task_id, arena);
-                stolen += 1;
-            }
-            Self::restore_skipped_locals(&mut src, arena, &mut skipped_locals);
-
-            stolen > 0
         })
     }
 }
@@ -763,6 +788,40 @@ mod tests {
     }
 
     #[test]
+    fn steal_batch_many_skipped_locals_preserves_owner_order() {
+        let state = LocalQueue::test_state(16);
+        let src = LocalQueue::new(Arc::clone(&state));
+        let dest = LocalQueue::new(Arc::clone(&state));
+
+        {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            for id in 0..=15 {
+                let record = guard.task_mut(task(id)).expect("task record missing");
+                record.mark_local();
+            }
+            drop(guard);
+        }
+
+        // Queue shape (oldest..newest): local x16, then one remote.
+        for id in 0..=16 {
+            src.push(task(id));
+        }
+
+        assert!(
+            src.stealer().steal_batch(&dest),
+            "remote task should be stolen"
+        );
+        assert_eq!(dest.pop(), Some(task(16)));
+        assert_eq!(dest.pop(), None);
+
+        // Local tasks must remain in original owner-visible LIFO order.
+        for expected in (0..=15).rev() {
+            assert_eq!(src.pop(), Some(task(expected)));
+        }
+        assert_eq!(src.pop(), None);
+    }
+
+    #[test]
     fn test_local_queue_stealer_clone() {
         let queue = queue(2);
         queue.push(task(1));
@@ -778,6 +837,60 @@ mod tests {
         assert!(t1.is_some());
         assert!(t2.is_some());
         assert_ne!(t1, t2, "stealers should get different tasks");
+    }
+
+    #[test]
+    fn concurrent_bidirectional_steal_batch_does_not_deadlock_or_lose_tasks() {
+        let state = LocalQueue::test_state(63);
+        let left = Arc::new(LocalQueue::new(Arc::clone(&state)));
+        let right = Arc::new(LocalQueue::new(Arc::clone(&state)));
+
+        for id in 0..32 {
+            left.push(task(id));
+        }
+        for id in 32..64 {
+            right.push(task(id));
+        }
+
+        let barrier = Arc::new(Barrier::new(3));
+
+        let left_for_t1 = Arc::clone(&left);
+        let right_for_t1 = Arc::clone(&right);
+        let barrier_t1 = Arc::clone(&barrier);
+        let t1 = thread::spawn(move || {
+            let stealer = right_for_t1.stealer();
+            barrier_t1.wait();
+            for _ in 0..64 {
+                let _ = stealer.steal_batch(&left_for_t1);
+                thread::yield_now();
+            }
+        });
+
+        let left_for_t2 = Arc::clone(&left);
+        let right_for_t2 = Arc::clone(&right);
+        let barrier_t2 = Arc::clone(&barrier);
+        let t2 = thread::spawn(move || {
+            let stealer = left_for_t2.stealer();
+            barrier_t2.wait();
+            for _ in 0..64 {
+                let _ = stealer.steal_batch(&right_for_t2);
+                thread::yield_now();
+            }
+        });
+
+        barrier.wait();
+        t1.join().expect("first steal-batch thread should complete");
+        t2.join()
+            .expect("second steal-batch thread should complete");
+
+        let mut seen = HashSet::new();
+        while let Some(task_id) = left.pop() {
+            assert!(seen.insert(task_id), "duplicate task found: {task_id:?}");
+        }
+        while let Some(task_id) = right.pop() {
+            assert!(seen.insert(task_id), "duplicate task found: {task_id:?}");
+        }
+        assert_eq!(seen.len(), 64, "all tasks should remain accounted for");
     }
 
     #[test]

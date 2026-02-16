@@ -1142,104 +1142,193 @@ impl ThreeLaneWorker {
     /// Select the next task to dispatch, respecting lane priorities and fairness.
     ///
     /// Returns `None` when no work is available across any lane or steal target.
+    ///
+    /// # Lock reduction optimisation
+    ///
+    /// The previous implementation called `try_cancel_work`, `try_timed_work`,
+    /// and `try_ready_work` sequentially.  Each method checks its global queue
+    /// (lock-free or separate mutex) then falls through to the local
+    /// `PriorityScheduler` lock, acquiring it up to **3 times per call** when
+    /// global queues are empty.
+    ///
+    /// This version splits the work into phases:
+    ///
+    /// 1. **Global queues** (lock-free / own mutex) — suggestion-ordered.
+    /// 2. **Fast ready paths** (`local_ready`, `fast_queue`, global ready) —
+    ///    no `PriorityScheduler` lock.
+    /// 3. **Single local lock** — cancel, timed, ready checked in suggestion
+    ///    order under one acquisition.
+    /// 4. **Steal** from other workers.
+    /// 5. **Fallback cancel** (streak-limit path).
+    ///
+    /// Phases 1–2 cover the hot path (most dispatches come from global or fast
+    /// queues).  Phase 3 replaces 3 lock acquisitions with 1 for the local
+    /// PriorityScheduler fallback.
     pub fn next_task(&mut self) -> Option<TaskId> {
-        // PHASE 0: Process expired timers (fires wakers, which may inject tasks)
+        // PHASE 0: Process expired timers (fires wakers, which may inject tasks).
         if let Some(timer) = &self.timer_driver {
             let _ = timer.process_timers();
         }
 
-        // Consult the governor for scheduling suggestion (amortized).
+        // Consult the governor for scheduling suggestion (amortised).
         let suggestion = self.governor_suggest();
 
-        match suggestion {
-            SchedulingSuggestion::MeetDeadlines => {
-                // Deadline pressure dominates: check timed lane first.
-                if let Some(task) = self.try_timed_work() {
-                    self.cancel_streak = 0;
-                    self.preemption_metrics.timed_dispatches += 1;
-                    return Some(task);
-                }
-                // Then cancel work with standard fairness.
-                if self.cancel_streak < self.cancel_streak_limit {
-                    if let Some(task) = self.try_cancel_work() {
-                        self.cancel_streak += 1;
-                        self.record_cancel_dispatch();
-                        return Some(task);
-                    }
-                    self.cancel_streak = 0;
-                } else {
-                    self.preemption_metrics.fairness_yields += 1;
-                }
-            }
-            SchedulingSuggestion::DrainObligations | SchedulingSuggestion::DrainRegions => {
-                // Obligation/region drain dominates: allow longer cancel streaks
-                // to accelerate cleanup convergence.
-                let boosted_limit = self.cancel_streak_limit.saturating_mul(2);
-                if self.cancel_streak < boosted_limit {
-                    if let Some(task) = self.try_cancel_work() {
-                        self.cancel_streak += 1;
-                        self.record_cancel_dispatch();
-                        return Some(task);
-                    }
-                    self.cancel_streak = 0;
-                } else {
-                    self.preemption_metrics.fairness_yields += 1;
-                }
-                // Timed work (still respect EDF).
-                if let Some(task) = self.try_timed_work() {
-                    self.cancel_streak = 0;
-                    self.preemption_metrics.timed_dispatches += 1;
-                    return Some(task);
-                }
-            }
-            SchedulingSuggestion::NoPreference => {
-                // Default lane ordering: cancel > timed > ready.
-                if self.cancel_streak < self.cancel_streak_limit {
-                    if let Some(task) = self.try_cancel_work() {
-                        self.cancel_streak += 1;
-                        self.record_cancel_dispatch();
-                        return Some(task);
-                    }
-                    self.cancel_streak = 0;
-                } else {
-                    self.preemption_metrics.fairness_yields += 1;
-                }
-                if let Some(task) = self.try_timed_work() {
-                    self.cancel_streak = 0;
-                    self.preemption_metrics.timed_dispatches += 1;
-                    return Some(task);
-                }
-            }
-        }
-
-        // Ready work (always checked regardless of suggestion).
-        if let Some(task) = self.try_ready_work() {
-            self.cancel_streak = 0;
-            self.preemption_metrics.ready_dispatches += 1;
-            return Some(task);
-        }
-
-        // Steal from other workers.
-        if let Some(task) = self.try_steal() {
-            self.cancel_streak = 0;
-            self.preemption_metrics.ready_dispatches += 1;
-            return Some(task);
-        }
-
-        // If we hit the fairness limit but no other lanes had work, allow cancel.
+        // Cancel eligibility: effective limit depends on suggestion.
         let effective_limit = match suggestion {
             SchedulingSuggestion::DrainObligations | SchedulingSuggestion::DrainRegions => {
                 self.cancel_streak_limit.saturating_mul(2)
             }
             _ => self.cancel_streak_limit,
         };
-        if self.cancel_streak >= effective_limit {
+        let check_cancel = self.cancel_streak < effective_limit;
+        if !check_cancel {
+            self.preemption_metrics.fairness_yields += 1;
+        }
+
+        // Current time for EDF (computed once, reused for global + local).
+        let now = self
+            .timer_driver
+            .as_ref()
+            .map_or(Time::ZERO, TimerDriverHandle::now);
+
+        // ── PHASE 1: Global queues (lock-free) ───────────────────────
+        match suggestion {
+            SchedulingSuggestion::MeetDeadlines => {
+                // Deadline pressure: global timed first.
+                if let Some(tt) = self.global.pop_timed_if_due(now) {
+                    self.cancel_streak = 0;
+                    self.preemption_metrics.timed_dispatches += 1;
+                    return Some(tt.task);
+                }
+                if check_cancel {
+                    if let Some(pt) = self.global.pop_cancel() {
+                        self.cancel_streak += 1;
+                        self.record_cancel_dispatch();
+                        return Some(pt.task);
+                    }
+                }
+            }
+            _ => {
+                // Default / drain: cancel > timed.
+                if check_cancel {
+                    if let Some(pt) = self.global.pop_cancel() {
+                        self.cancel_streak += 1;
+                        self.record_cancel_dispatch();
+                        return Some(pt.task);
+                    }
+                }
+                if let Some(tt) = self.global.pop_timed_if_due(now) {
+                    self.cancel_streak = 0;
+                    self.preemption_metrics.timed_dispatches += 1;
+                    return Some(tt.task);
+                }
+            }
+        }
+
+        // ── PHASE 2: Fast ready paths (no PriorityScheduler lock) ────
+        if let Ok(mut queue) = self.local_ready.try_lock() {
+            if let Some(task) = queue.pop() {
+                self.cancel_streak = 0;
+                self.preemption_metrics.ready_dispatches += 1;
+                return Some(task);
+            }
+        }
+        if let Some(task) = self.fast_queue.pop() {
+            self.cancel_streak = 0;
+            self.preemption_metrics.ready_dispatches += 1;
+            return Some(task);
+        }
+        if let Some(pt) = self.global.pop_ready() {
+            self.cancel_streak = 0;
+            self.preemption_metrics.ready_dispatches += 1;
+            return Some(pt.task);
+        }
+
+        // ── PHASE 3: Single local PriorityScheduler lock ─────────────
+        // All global/fast paths returned nothing.  Check local cancel,
+        // timed, and ready lanes under one lock acquisition (replaces 3
+        // separate lock round-trips).
+        //
+        // If cancel was eligible but the global queue was empty, reset
+        // the streak (matches original try_cancel_work returning None).
+        if check_cancel {
+            self.cancel_streak = 0;
+        }
+        {
+            let mut local = self.local.lock().expect("local scheduler lock poisoned");
+            let rng_hint = self.rng.next_u64();
+
+            let local_result = match suggestion {
+                SchedulingSuggestion::MeetDeadlines => {
+                    // timed > cancel > ready (deadline pressure).
+                    if let Some(task) = local.pop_timed_only_with_hint(rng_hint, now) {
+                        Some((1u8, task))
+                    } else if check_cancel {
+                        local
+                            .pop_cancel_only_with_hint(rng_hint)
+                            .map(|t| (0u8, t))
+                    } else {
+                        None
+                    }
+                }
+                _ => {
+                    // cancel > timed > ready (default / drain).
+                    if check_cancel {
+                        if let Some(task) = local.pop_cancel_only_with_hint(rng_hint) {
+                            Some((0u8, task))
+                        } else {
+                            local
+                                .pop_timed_only_with_hint(rng_hint, now)
+                                .map(|t| (1u8, t))
+                        }
+                    } else {
+                        local
+                            .pop_timed_only_with_hint(rng_hint, now)
+                            .map(|t| (1u8, t))
+                    }
+                }
+            };
+
+            // Ready lane is always last within the local scheduler.
+            let local_result = local_result
+                .or_else(|| local.pop_ready_only_with_hint(rng_hint).map(|t| (2u8, t)));
+
+            // Release the lock before updating metrics / calling methods
+            // on `self` (avoids borrow conflict with the MutexGuard).
+            drop(local);
+
+            if let Some((lane, task)) = local_result {
+                match lane {
+                    0 => {
+                        // Local cancel found: start a fresh streak at 1.
+                        self.cancel_streak = 1;
+                        self.record_cancel_dispatch();
+                    }
+                    1 => {
+                        self.preemption_metrics.timed_dispatches += 1;
+                    }
+                    _ => {
+                        self.preemption_metrics.ready_dispatches += 1;
+                    }
+                }
+                return Some(task);
+            }
+        }
+
+        // ── PHASE 4: Steal from other workers ────────────────────────
+        if let Some(task) = self.try_steal() {
+            self.cancel_streak = 0;
+            self.preemption_metrics.ready_dispatches += 1;
+            return Some(task);
+        }
+
+        // ── PHASE 5: Fallback cancel ─────────────────────────────────
+        // The streak limit was hit but no other lanes had work.  Allow
+        // one more cancel dispatch (global + local).  Sets streak to 1
+        // so the next call re-checks ready/timed after at most
+        // cancel_streak_limit − 1 more cancel dispatches.
+        if !check_cancel {
             if let Some(task) = self.try_cancel_work() {
-                // Fallback: no ready/timed/steal work available, so dispatch one
-                // more cancel task. Count this dispatch toward the streak (reset
-                // to 1, not 0) so the next call re-checks for ready/timed work
-                // after at most cancel_streak_limit − 1 more cancel dispatches,
-                // matching the documented fairness bound.
                 self.preemption_metrics.cancel_dispatches += 1;
                 self.preemption_metrics.fallback_cancel_dispatches += 1;
                 self.cancel_streak = 1;

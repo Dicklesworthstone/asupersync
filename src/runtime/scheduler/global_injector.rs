@@ -79,6 +79,9 @@ pub struct GlobalInjector {
     pending_count: AtomicUsize,
     /// Approximate count of ready-lane tasks only.
     ready_count: AtomicUsize,
+    /// Approximate count of timed-lane tasks, allowing callers to skip
+    /// acquiring the timed_queue mutex when the lane is empty.
+    timed_count: AtomicUsize,
 }
 
 /// Thread-safe EDF queue for timed tasks.
@@ -98,33 +101,43 @@ impl Default for GlobalInjector {
             ready_queue: SegQueue::new(),
             pending_count: AtomicUsize::new(0),
             ready_count: AtomicUsize::new(0),
+            timed_count: AtomicUsize::new(0),
         }
     }
 }
 
 impl GlobalInjector {
-    /// Decrements the pending counter, saturating at zero.
+    /// Decrements an advisory counter, saturating at zero.
     ///
-    /// Counter values are advisory (Relaxed ordering), but they must never
-    /// wrap to huge values under concurrent decrements because queue-depth
-    /// heuristics consume this signal.
+    /// Uses a single `fetch_sub` instead of a CAS loop. The brief underflow
+    /// window (between `fetch_sub` and `fetch_max(0)`) is acceptable because
+    /// these counters are only used for heuristic queue-depth decisions with
+    /// Relaxed ordering, and the value is immediately clamped back to zero.
+    /// Callers already tolerate stale/approximate counts.
     #[inline]
-    fn decrement_pending_count(&self) {
-        let _ = self
-            .pending_count
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                count.checked_sub(1)
-            });
+    fn saturating_decrement(counter: &AtomicUsize) {
+        if counter.fetch_sub(1, Ordering::Relaxed) == 0 {
+            // We underflowed (was already 0). Restore to 0.
+            counter.store(0, Ordering::Relaxed);
+        }
     }
 
-    /// Decrements the ready counter, saturating at zero (same rationale).
+    /// Decrements the pending counter, saturating at zero.
+    #[inline]
+    fn decrement_pending_count(&self) {
+        Self::saturating_decrement(&self.pending_count);
+    }
+
+    /// Decrements the ready counter, saturating at zero.
     #[inline]
     fn decrement_ready_count(&self) {
-        let _ = self
-            .ready_count
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                count.checked_sub(1)
-            });
+        Self::saturating_decrement(&self.ready_count);
+    }
+
+    /// Decrements the timed counter, saturating at zero.
+    #[inline]
+    fn decrement_timed_count(&self) {
+        Self::saturating_decrement(&self.timed_count);
     }
 
     /// Creates a new empty global injector.
@@ -148,11 +161,15 @@ impl GlobalInjector {
     /// Timed tasks are scheduled by their deadline (earliest deadline first)
     /// and have priority over ready tasks but not cancel tasks.
     pub fn inject_timed(&self, task: TaskId, deadline: Time) {
+        // Increment counters *before* the push so that `timed_count` is always
+        // >= the true heap length.  A brief over-count is harmless (pop just
+        // finds an empty heap and saturates back to 0).
+        self.timed_count.fetch_add(1, Ordering::Relaxed);
+        self.pending_count.fetch_add(1, Ordering::Relaxed);
         let mut queue = self.timed_queue.lock();
         let generation = queue.next_generation;
         queue.next_generation += 1;
         queue.heap.push(TimedTask::new(task, deadline, generation));
-        self.pending_count.fetch_add(1, Ordering::Relaxed);
         drop(queue);
     }
 
@@ -187,10 +204,14 @@ impl GlobalInjector {
     /// The caller should check if the deadline is due before executing.
     #[must_use]
     pub fn pop_timed(&self) -> Option<TimedTask> {
+        if self.timed_count.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
         let mut queue = self.timed_queue.lock();
         let result = queue.heap.pop();
         drop(queue);
         if result.is_some() {
+            self.decrement_timed_count();
             self.decrement_pending_count();
         }
         result
@@ -201,6 +222,9 @@ impl GlobalInjector {
     /// Returns `None` if the timed lane is empty.
     #[must_use]
     pub fn peek_earliest_deadline(&self) -> Option<Time> {
+        if self.timed_count.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
         let queue = self.timed_queue.lock();
         queue.heap.peek().map(|t| t.deadline)
     }
@@ -211,12 +235,16 @@ impl GlobalInjector {
     /// deadline is still in the future.
     #[must_use]
     pub fn pop_timed_if_due(&self, now: Time) -> Option<TimedTask> {
+        if self.timed_count.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
         let mut queue = self.timed_queue.lock();
         if let Some(entry) = queue.heap.peek() {
             if entry.deadline <= now {
                 let result = queue.heap.pop();
                 drop(queue);
                 if result.is_some() {
+                    self.decrement_timed_count();
                     self.decrement_pending_count();
                 }
                 return result;
@@ -243,7 +271,7 @@ impl GlobalInjector {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.cancel_queue.is_empty()
-            && self.timed_queue.lock().heap.is_empty()
+            && self.timed_count.load(Ordering::Relaxed) == 0
             && self.ready_queue.is_empty()
     }
 
@@ -252,6 +280,9 @@ impl GlobalInjector {
     pub fn has_runnable_work(&self, now: Time) -> bool {
         if !self.cancel_queue.is_empty() || !self.ready_queue.is_empty() {
             return true;
+        }
+        if self.timed_count.load(Ordering::Relaxed) == 0 {
+            return false;
         }
         let queue = self.timed_queue.lock();
         queue.heap.peek().is_some_and(|t| t.deadline <= now)
@@ -272,7 +303,7 @@ impl GlobalInjector {
     /// Returns true if the timed lane has pending work.
     #[must_use]
     pub fn has_timed_work(&self) -> bool {
-        !self.timed_queue.lock().heap.is_empty()
+        self.timed_count.load(Ordering::Relaxed) > 0
     }
 
     /// Returns true if the ready lane has pending work.
@@ -476,12 +507,15 @@ mod tests {
         let injector = GlobalInjector::new();
 
         // Simulate heap visibility preceding counter update due to interleaving.
+        // Set timed_count to reflect the heap item (inject_timed now increments
+        // counters before pushing, so timed_count >= heap.len() always holds).
         {
             let mut timed = injector.timed_queue.lock();
             timed
                 .heap
                 .push(TimedTask::new(task(12), Time::from_secs(10), 0));
         }
+        injector.timed_count.fetch_add(1, Ordering::Relaxed);
         assert_eq!(injector.pending_count.load(Ordering::Relaxed), 0);
 
         let popped_timed = injector.pop_timed().expect("timed task should pop");
@@ -494,12 +528,15 @@ mod tests {
         let injector = GlobalInjector::new();
 
         // Simulate heap visibility preceding counter update due to interleaving.
+        // Set timed_count to reflect the heap item (inject_timed now increments
+        // counters before pushing, so timed_count >= heap.len() always holds).
         {
             let mut timed = injector.timed_queue.lock();
             timed
                 .heap
                 .push(TimedTask::new(task(13), Time::from_secs(10), 0));
         }
+        injector.timed_count.fetch_add(1, Ordering::Relaxed);
         assert_eq!(injector.pending_count.load(Ordering::Relaxed), 0);
 
         // Not due yet: no pop and counter remains saturated.
