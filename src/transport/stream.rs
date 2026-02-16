@@ -569,6 +569,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
     use std::task::{Wake, Waker};
+    use std::thread;
+    use std::time::Instant;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -1141,8 +1143,6 @@ mod tests {
     #[test]
     fn test_channel_stream_no_lost_wakeup_concurrent() {
         init_test("test_channel_stream_no_lost_wakeup_concurrent");
-        use std::thread;
-        use std::time::{Duration, Instant};
 
         // Run many iterations to maximise the chance of hitting the race window.
         for iteration in 0..200 {
@@ -1163,7 +1163,7 @@ mod tests {
                 loop {
                     match Pin::new(&mut stream).poll_next(&mut cx) {
                         Poll::Ready(Some(Ok(_))) => return true,
-                        Poll::Ready(Some(Err(_))) | Poll::Ready(None) => return false,
+                        Poll::Ready(Some(Err(_)) | None) => return false,
                         Poll::Pending => {
                             if start.elapsed() > Duration::from_millis(500) {
                                 return false; // Timeout — lost wakeup
@@ -1260,25 +1260,25 @@ mod tests {
         crate::test_complete!("channel_stream_closed_after_waiter_registration");
     }
 
+    /// Stream that produces 1 good item then an error.
+    struct GoodThenError(bool);
+    impl SymbolStream for GoodThenError {
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
+            if self.0 {
+                Poll::Ready(None)
+            } else {
+                self.0 = true;
+                Poll::Ready(Some(Err(StreamError::Reset)))
+            }
+        }
+    }
+
     #[test]
     fn collect_to_set_propagates_error_stops_early() {
         init_test("collect_to_set_propagates_error_stops_early");
-        // Stream that produces 1 good item then an error.
-        struct GoodThenError(bool);
-        impl SymbolStream for GoodThenError {
-            fn poll_next(
-                mut self: Pin<&mut Self>,
-                _cx: &mut Context<'_>,
-            ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
-                if self.0 {
-                    Poll::Ready(None)
-                } else {
-                    self.0 = true;
-                    Poll::Ready(Some(Err(StreamError::Reset)))
-                }
-            }
-        }
-
         let mut stream = GoodThenError(false);
         let mut set = SymbolSet::new();
         let result = future::block_on(async { stream.collect_to_set(&mut set).await });
