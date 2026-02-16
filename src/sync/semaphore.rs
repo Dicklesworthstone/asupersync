@@ -465,19 +465,20 @@ impl Future for OwnedAcquireFuture {
             return Poll::Ready(Err(AcquireError::Cancelled));
         }
 
-        // Clone the Arc to split borrows: `state` borrows through `sem`,
-        // leaving `self.waiter_id` free for mutable access.
-        let sem = Arc::clone(&self.semaphore);
+        // Extract waiter_id first to avoid borrow conflicts with self.semaphore.
+        // Arc<Semaphore> (unlike &Semaphore in AcquireFuture) creates a borrow
+        // chain through Pin<&mut Self>, so we must defer self.waiter_id assignment
+        // until after the MutexGuard (state) is dropped.
         let existing_waiter_id = self.waiter_id;
-        let mut state = sem.state.lock();
+        // Single lock acquisition (same optimization as AcquireFuture).
+        let mut state = self.semaphore.state.lock();
 
-        let waiter_id = if let Some(id) = existing_waiter_id {
-            id
+        let (waiter_id, is_new_waiter) = if let Some(id) = existing_waiter_id {
+            (id, false)
         } else {
             let id = state.next_waiter_id;
             state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-            self.waiter_id = Some(id);
-            id
+            (id, true)
         };
 
         if state.closed {
@@ -531,6 +532,12 @@ impl Future for OwnedAcquireFuture {
                 id: waiter_id,
                 waker: context.waker().clone(),
             });
+        }
+        // Deferred assignment: set waiter_id after state (MutexGuard) is dropped
+        // to avoid borrow conflict with self.semaphore through Pin<&mut Self>.
+        drop(state);
+        if is_new_waiter {
+            self.waiter_id = Some(waiter_id);
         }
         Poll::Pending
     }
