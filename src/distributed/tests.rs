@@ -721,17 +721,17 @@ fn bridge_apply_snapshot_updates_state() {
     bridge.apply_snapshot(&snapshot).unwrap();
 
     // Verify local state updated
-    assert_eq!(bridge.local.state(), RegionState::Closing);
-    let budget = bridge.local.budget();
-    assert_eq!(budget.deadline.map(|t| t.as_nanos()), Some(12345));
+    assert_eq!(bridge.local().state(), RegionState::Closing);
+    let budget = bridge.local().budget();
+    assert_eq!(budget.deadline, Some(crate::types::Time::from_nanos(12345)));
     assert_eq!(budget.poll_quota, 99);
     assert_eq!(budget.cost_quota, Some(100));
 
-    let tasks = bridge.local.task_ids();
+    let tasks = bridge.local().task_ids();
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0], TaskId::new_for_test(10, 0));
 
-    let reason = bridge.local.cancel_reason().unwrap();
+    let reason = bridge.local().cancel_reason().unwrap();
     assert_eq!(reason.kind, crate::types::cancel::CancelKind::Timeout);
 }
 

@@ -1,3 +1,5 @@
+//! Regression test for high-ESI symbol acceptance during recovery.
+
 use asupersync::distributed::{
     CollectedSymbol, RecoveryConfig, RecoveryDecodingConfig, RecoveryOrchestrator, RecoveryTrigger,
 };
@@ -68,8 +70,7 @@ fn repro_recovery_high_esi_accepted() {
             assert_ne!(
                 e.kind(),
                 asupersync::error::ErrorKind::CorruptedSymbol,
-                "High ESI symbol was rejected as corrupt: {}",
-                e
+                "High ESI symbol was rejected as corrupt: {e}",
             );
             // It might fail decoding, which is fine for this test.
         }

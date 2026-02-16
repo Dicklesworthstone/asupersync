@@ -14,6 +14,7 @@
 
 use std::time::Duration;
 
+use super::snapshot::{BudgetSnapshot, RegionSnapshot, TaskSnapshot, TaskState};
 use crate::error::{Error, ErrorKind};
 use crate::record::distributed_region::{
     ConsistencyLevel, DistributedRegionConfig, DistributedRegionRecord, DistributedRegionState,
@@ -23,7 +24,6 @@ use crate::record::region::{RegionRecord, RegionState};
 use crate::types::budget::Budget;
 use crate::types::cancel::CancelReason;
 use crate::types::{RegionId, TaskId, Time};
-use super::snapshot::{BudgetSnapshot, RegionSnapshot, TaskSnapshot, TaskState};
 
 // ---------------------------------------------------------------------------
 // RegionMode
@@ -738,7 +738,6 @@ impl RegionBridge {
         let cancel_reason = snapshot.cancel_reason.as_ref().map(|reason_str| {
             // Attempt to parse known kinds from the string
             let kind = match reason_str.as_str() {
-                "User" => crate::types::cancel::CancelKind::User,
                 "Timeout" => crate::types::cancel::CancelKind::Timeout,
                 "Deadline" => crate::types::cancel::CancelKind::Deadline,
                 "PollQuota" => crate::types::cancel::CancelKind::PollQuota,
@@ -749,7 +748,7 @@ impl RegionBridge {
                 "ResourceUnavailable" => crate::types::cancel::CancelKind::ResourceUnavailable,
                 "Shutdown" => crate::types::cancel::CancelKind::Shutdown,
                 "LinkedExit" => crate::types::cancel::CancelKind::LinkedExit,
-                _ => crate::types::cancel::CancelKind::User, // Fallback
+                _ => crate::types::cancel::CancelKind::User, // Fallback (includes "User")
             };
 
             crate::types::cancel::CancelReason::with_origin(

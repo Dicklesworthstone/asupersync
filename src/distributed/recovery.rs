@@ -531,7 +531,7 @@ impl StateDecoder {
                     // Additional symbols after decode are fine; ignore them.
                 }
                 SymbolAcceptResult::Rejected(reason) => {
-                    let message = format!("symbol rejected: {reason:?}");
+                    let _message = format!("symbol rejected: {reason:?}");
                     // Do not fail the entire batch just because one symbol was bad.
                     // We might have enough valid symbols in the rest of the batch.
                     // Just log it (conceptually) and continue.

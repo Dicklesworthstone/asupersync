@@ -21,7 +21,7 @@ use super::encoding::EncodedState;
 // ---------------------------------------------------------------------------
 
 /// Transport interface for distributing symbols.
-pub trait DistributorTransport {
+pub trait DistributorTransport: Sync {
     /// Sends a batch of symbols to a replica.
     fn send_symbols(
         &self,

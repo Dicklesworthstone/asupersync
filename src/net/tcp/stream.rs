@@ -144,7 +144,7 @@ impl TcpStream {
             Domain::IPV6
         };
         let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
-        
+
         Self::connect_from_socket(socket, addr).await
     }
 
@@ -160,8 +160,8 @@ impl TcpStream {
             Err(err) => return Err(err),
         };
 
+        // socket.into() preserves the nonblocking flag set above; no need to set again.
         let stream: net::TcpStream = socket.into();
-        stream.set_nonblocking(true)?;
         Ok(Self::from_parts(Arc::new(stream), registration))
     }
 

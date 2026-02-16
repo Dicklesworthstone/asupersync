@@ -1,4 +1,6 @@
-use asupersync::distributed::bridge::{RegionBridge, RegionMode};
+//! Distributed snapshot application integration tests.
+
+use asupersync::distributed::bridge::RegionBridge;
 use asupersync::distributed::snapshot::{BudgetSnapshot, RegionSnapshot, TaskSnapshot, TaskState};
 use asupersync::record::region::RegionState;
 use asupersync::types::{Budget, RegionId, TaskId, Time};
@@ -34,7 +36,7 @@ fn test_apply_snapshot_updates_local_state() {
         children: vec![RegionId::new_for_test(3, 0)],
         finalizer_count: 0,
         budget: BudgetSnapshot {
-            deadline_nanos: Some(999999),
+            deadline_nanos: Some(999_999),
             polls_remaining: Some(50),
             cost_remaining: None,
         },
