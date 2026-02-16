@@ -135,8 +135,19 @@ mod iocp_impl {
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "token not registered"))?;
 
             let event = Self::interest_to_poll_event(token, interest);
-            self.poller.modify(info.raw_socket, event)?;
-            info.interest = interest;
+            if let Err(err) = self.poller.modify(info.raw_socket, event) {
+                if Self::is_already_gone_error(&err) {
+                    regs.remove(&token);
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "token not registered",
+                    ));
+                }
+                return Err(err);
+            }
+            if let Some(info) = regs.get_mut(&token) {
+                info.interest = interest;
+            }
 
             Ok(())
         }
@@ -239,6 +250,30 @@ mod iocp_impl {
             reactor
                 .deregister(Token::new(1))
                 .expect("deregister should succeed");
+        }
+
+        #[test]
+        fn modify_closed_socket_prunes_stale_registration() {
+            use std::net::TcpListener;
+
+            let reactor = IocpReactor::new().expect("failed to create iocp reactor");
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+            let key = Token::new(44);
+            reactor
+                .register(&listener, key, Interest::READABLE)
+                .expect("register should succeed");
+            assert_eq!(reactor.registration_count(), 1);
+
+            drop(listener);
+            let err = reactor
+                .modify(key, Interest::WRITABLE)
+                .expect_err("modify should fail for closed socket");
+            assert_eq!(err.kind(), io::ErrorKind::NotFound);
+            assert_eq!(
+                reactor.registration_count(),
+                0,
+                "closed socket modify should prune stale registration"
+            );
         }
     }
 }

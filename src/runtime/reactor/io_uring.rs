@@ -234,7 +234,13 @@ mod imp {
                         .sec(t.as_secs())
                         .nsec(t.subsec_nanos());
                     let args = types::SubmitArgs::new().timespec(&ts);
-                    ring.submitter().submit_with_args(1, &args)?;
+                    if let Err(err) = ring.submitter().submit_with_args(1, &args) {
+                        // io_uring reports timeout expiry as ETIME; that is not an
+                        // operational failure for reactor poll semantics.
+                        if err.raw_os_error() != Some(libc::ETIME) {
+                            return Err(err);
+                        }
+                    }
                 }
             }
 
@@ -593,6 +599,28 @@ mod imp {
             reactor
                 .deregister(live)
                 .expect("deregister live token should succeed");
+        }
+
+        #[test]
+        fn test_poll_timeout_returns_zero_events() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+
+            let (left, _right) = UnixStream::pair().expect("unix stream pair");
+            let key = Token::new(303);
+            reactor
+                .register(&left, key, Interest::READABLE)
+                .expect("register should succeed");
+
+            let mut events = Events::with_capacity(8);
+            let count = reactor
+                .poll(&mut events, Some(Duration::from_millis(10)))
+                .expect("poll timeout should not error");
+            assert_eq!(count, 0, "timeout poll should return zero events");
+            assert!(events.is_empty(), "timeout poll should not emit events");
+
+            reactor.deregister(key).expect("deregister should succeed");
         }
     }
 }
