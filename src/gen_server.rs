@@ -158,9 +158,11 @@ impl AsyncMaskGuard {
         let inner = Arc::clone(&cx.inner);
         {
             let mut guard = inner.write().expect("lock poisoned");
-            debug_assert!(
+            assert!(
                 guard.mask_depth < crate::types::task_context::MAX_MASK_DEPTH,
-                "mask depth exceeded MAX_MASK_DEPTH ({}) in AsyncMaskGuard::enter",
+                "mask depth exceeded MAX_MASK_DEPTH ({}) in AsyncMaskGuard::enter: \
+                 this violates INV-MASK-BOUNDED and prevents cancellation from ever \
+                 being observed. Reduce nesting of masked sections.",
                 crate::types::task_context::MAX_MASK_DEPTH
             );
             guard.mask_depth += 1;
@@ -993,6 +995,7 @@ impl<S: GenServer> GenServerHandle<S> {
             self.state.load(),
             ActorState::Stopping | ActorState::Stopped
         ) {
+            cx.trace("gen_server::info_rejected_stopped");
             return Err(InfoError::ServerStopped);
         }
 
@@ -1252,6 +1255,7 @@ impl<S: GenServer> GenServerRef<S> {
             self.state.load(),
             ActorState::Stopping | ActorState::Stopped
         ) {
+            cx.trace("gen_server::info_rejected_stopped");
             return Err(InfoError::ServerStopped);
         }
 
@@ -1779,7 +1783,7 @@ where
         state: &mut crate::runtime::RuntimeState,
         cx: &crate::cx::Cx,
     ) -> Result<TaskId, SpawnError> {
-        let now = crate::types::Time::ZERO;
+        let now = state.now;
         let server = (self.make_server)();
         let (mut named_handle, stored) = scope
             .spawn_named_gen_server(
