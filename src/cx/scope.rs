@@ -918,22 +918,27 @@ impl<P: Policy> Scope<'_, P> {
         h1: TaskHandle<T>,
         h2: TaskHandle<T>,
     ) -> Result<T, JoinError> {
-        let f1 = Box::pin(h1.join_with_drop_reason(cx, CancelReason::race_loser()));
-        let f2 = Box::pin(h2.join_with_drop_reason(cx, CancelReason::race_loser()));
+        use std::pin::pin;
 
-        match Select::new(f1, f2).await {
+        let f1 = h1.join_with_drop_reason(cx, CancelReason::race_loser());
+        let mut f1_pinned = pin!(f1);
+
+        let f2 = h2.join_with_drop_reason(cx, CancelReason::race_loser());
+        let mut f2_pinned = pin!(f2);
+
+        match Select::new(f1_pinned.as_mut(), f2_pinned.as_mut()).await {
             Either::Left(res) => {
                 // h1 finished first
                 // h2 was dropped and aborted by JoinFuture::drop
                 // We manually ensure it's cancelled (idempotent) and drain it
                 h2.abort_with_reason(CancelReason::race_loser());
-                let _ = h2.join(cx).await; // Drain h2
+                let _ = f2_pinned.await; // Drain h2
                 res
             }
             Either::Right(res) => {
                 // h2 finished first
                 h1.abort_with_reason(CancelReason::race_loser());
-                let _ = h1.join(cx).await; // Drain h1
+                let _ = f1_pinned.await; // Drain h1
                 res
             }
         }
@@ -974,6 +979,7 @@ impl<P: Policy> Scope<'_, P> {
     {
         use crate::combinator::select::Select;
         use crate::combinator::Either;
+        use std::pin::pin;
 
         // 1. Spawn primary
         let h1 = self
@@ -984,16 +990,16 @@ impl<P: Policy> Scope<'_, P> {
         // We reuse the join future if it doesn't complete, so we must pin it.
         // We use plain join() because we don't want to cancel h1 if the delay fires.
         let f1_join = h1.join(cx);
-        let mut f1_pinned = Box::pin(f1_join);
+        let mut f1_pinned = pin!(f1_join);
 
         // Compute deadline
         let now = cx
             .timer_driver()
             .map_or_else(crate::time::wall_now, |d| d.now());
         let sleep_fut = crate::time::sleep(now, delay);
-        let mut sleep_pinned = Box::pin(sleep_fut);
+        let mut sleep_pinned = pin!(sleep_fut);
 
-        match Select::new(&mut f1_pinned, &mut sleep_pinned).await {
+        match Select::new(f1_pinned.as_mut(), sleep_pinned.as_mut()).await {
             Either::Left(res) => {
                 // Primary finished first
                 res
@@ -1011,9 +1017,9 @@ impl<P: Policy> Scope<'_, P> {
                 // We reuse f1_pinned which is still pending.
                 // We create h2 join future.
                 let f2_join = h2.join(cx);
-                let mut f2_pinned = Box::pin(f2_join);
+                let mut f2_pinned = pin!(f2_join);
 
-                match Select::new(&mut f1_pinned, &mut f2_pinned).await {
+                match Select::new(f1_pinned.as_mut(), f2_pinned.as_mut()).await {
                     Either::Left(res) => {
                         // Primary won race
                         // Cancel h2
