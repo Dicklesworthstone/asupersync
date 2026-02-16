@@ -590,6 +590,14 @@ pub struct Parker {
 }
 
 impl Parker {
+    #[inline]
+    fn lock_unpoisoned(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.inner
+            .mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Creates a new parker.
     #[must_use]
     pub fn new() -> Self {
@@ -608,9 +616,13 @@ impl Parker {
             return;
         }
 
-        let mut guard = self.inner.mutex.lock().unwrap();
+        let mut guard = self.lock_unpoisoned();
         while !self.inner.notified.swap(false, Ordering::Acquire) {
-            guard = self.inner.cvar.wait(guard).unwrap();
+            guard = self
+                .inner
+                .cvar
+                .wait(guard)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         drop(guard);
     }
@@ -624,10 +636,10 @@ impl Parker {
         let (guard, _timeout) = self
             .inner
             .cvar
-            .wait_timeout_while(self.inner.mutex.lock().unwrap(), duration, |()| {
+            .wait_timeout_while(self.lock_unpoisoned(), duration, |()| {
                 !self.inner.notified.swap(false, Ordering::Acquire)
             })
-            .unwrap();
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         drop(guard);
     }
 
@@ -647,7 +659,7 @@ impl Parker {
         // Was not notified: the thread may be parked. We must acquire the
         // mutex before notify_one to prevent lost wakeups (standard condvar
         // protocol).
-        let _guard = self.inner.mutex.lock().unwrap();
+        let _guard = self.lock_unpoisoned();
         self.inner.cvar.notify_one();
     }
 }
@@ -894,6 +906,38 @@ mod tests {
             !parker.inner.notified.load(Ordering::Acquire),
             "permit should be consumed after park"
         );
+    }
+
+    #[test]
+    fn test_parker_park_timeout_survives_poisoned_mutex() {
+        let parker = Parker::new();
+        let poison_parker = parker.clone();
+        let _ = thread::spawn(move || {
+            let _guard = poison_parker.inner.mutex.lock().unwrap();
+            panic!("intentionally poison parker mutex");
+        })
+        .join();
+
+        let result = std::panic::catch_unwind(|| {
+            parker.park_timeout(Duration::from_millis(1));
+        });
+        assert!(result.is_ok(), "park_timeout should recover from poison");
+    }
+
+    #[test]
+    fn test_parker_unpark_survives_poisoned_mutex() {
+        let parker = Parker::new();
+        let poison_parker = parker.clone();
+        let _ = thread::spawn(move || {
+            let _guard = poison_parker.inner.mutex.lock().unwrap();
+            panic!("intentionally poison parker mutex");
+        })
+        .join();
+
+        let result = std::panic::catch_unwind(|| {
+            parker.unpark();
+        });
+        assert!(result.is_ok(), "unpark should recover from poison");
     }
 
     // ========== Work Stealing Tests ==========
