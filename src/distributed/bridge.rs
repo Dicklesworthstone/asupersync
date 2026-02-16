@@ -23,8 +23,6 @@ use crate::record::region::{RegionRecord, RegionState};
 use crate::types::budget::Budget;
 use crate::types::cancel::CancelReason;
 use crate::types::{RegionId, TaskId, Time};
-use std::collections::HashSet;
-
 use super::snapshot::{BudgetSnapshot, RegionSnapshot, TaskSnapshot, TaskState};
 
 // ---------------------------------------------------------------------------

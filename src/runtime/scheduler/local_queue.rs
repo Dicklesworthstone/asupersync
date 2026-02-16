@@ -107,9 +107,9 @@ impl LocalQueue {
     /// missing from the backing arena.
     pub(crate) fn schedule_local(task: TaskId) -> bool {
         CURRENT_QUEUE.with(|slot| {
-            slot.borrow().as_ref().is_some_and(|queue| {
-                queue.schedule_local_push(task)
-            })
+            slot.borrow()
+                .as_ref()
+                .is_some_and(|queue| queue.schedule_local_push(task))
         })
     }
 
@@ -787,6 +787,10 @@ mod tests {
             "duplicate scheduling should still report success (already queued)"
         );
         assert_eq!(queue.pop(), Some(task(1)));
-        assert_eq!(queue.pop(), None, "duplicate schedule must not enqueue twice");
+        assert_eq!(
+            queue.pop(),
+            None,
+            "duplicate schedule must not enqueue twice"
+        );
     }
 }
