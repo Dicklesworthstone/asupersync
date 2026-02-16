@@ -327,24 +327,7 @@ impl<P: Policy> Scope<'_, P> {
             "task spawned"
         );
 
-        // Create the child task's capability context
-        let child_observability = cx.child_observability(self.region, task_id);
-        let child_entropy = cx.child_entropy(task_id);
-        let io_driver = state.io_driver_handle();
-        let child_cx = Cx::<Caps>::new_with_observability(
-            self.region,
-            task_id,
-            self.budget,
-            Some(child_observability),
-            io_driver,
-            Some(child_entropy),
-        )
-        .with_registry_handle(cx.registry_handle())
-        .with_remote_cap_handle(cx.remote_cap_handle())
-        .with_blocking_pool_handle(cx.blocking_pool_handle())
-        .with_evidence_sink(cx.evidence_sink_handle());
-        child_cx.set_trace_buffer(state.trace_handle());
-        let child_cx_full = child_cx.retype::<cap::All>();
+        let (child_cx, child_cx_full) = self.build_child_task_cx(state, cx, task_id);
 
         // Create the TaskHandle
         let handle = TaskHandle::new(task_id, rx, Arc::downgrade(&child_cx.inner));
@@ -731,24 +714,7 @@ impl<P: Policy> Scope<'_, P> {
             "blocking task spawned"
         );
 
-        // Create the child task's capability context
-        let child_observability = cx.child_observability(self.region, task_id);
-        let child_entropy = cx.child_entropy(task_id);
-        let io_driver = state.io_driver_handle();
-        let child_cx = Cx::<Caps>::new_with_observability(
-            self.region,
-            task_id,
-            self.budget,
-            Some(child_observability),
-            io_driver,
-            Some(child_entropy),
-        )
-        .with_registry_handle(cx.registry_handle())
-        .with_remote_cap_handle(cx.remote_cap_handle())
-        .with_blocking_pool_handle(cx.blocking_pool_handle())
-        .with_evidence_sink(cx.evidence_sink_handle());
-        child_cx.set_trace_buffer(state.trace_handle());
-        let child_cx_full = child_cx.retype::<cap::All>();
+        let (child_cx, child_cx_full) = self.build_child_task_cx(state, cx, task_id);
 
         // Create the TaskHandle
         let handle = TaskHandle::new(task_id, rx, Arc::downgrade(&child_cx.inner));
@@ -1103,6 +1069,41 @@ impl<P: Policy> Scope<'_, P> {
         results
     }
 
+    fn build_child_task_cx<Caps>(
+        &self,
+        state: &RuntimeState,
+        parent_cx: &Cx<Caps>,
+        task_id: TaskId,
+    ) -> (Cx<Caps>, Cx<cap::All>) {
+        let child_observability = parent_cx.child_observability(self.region, task_id);
+        let child_entropy = parent_cx.child_entropy(task_id);
+        let io_driver = state.io_driver_handle();
+        let timer_driver = state.timer_driver_handle();
+        let logical_clock = state
+            .logical_clock_mode()
+            .build_handle(timer_driver.clone());
+
+        let child_cx = Cx::<Caps>::new_with_drivers(
+            self.region,
+            task_id,
+            self.budget,
+            Some(child_observability),
+            io_driver,
+            None,
+            timer_driver,
+            Some(child_entropy),
+        )
+        .with_logical_clock(logical_clock)
+        .with_registry_handle(parent_cx.registry_handle())
+        .with_remote_cap_handle(parent_cx.remote_cap_handle())
+        .with_blocking_pool_handle(parent_cx.blocking_pool_handle())
+        .with_evidence_sink(parent_cx.evidence_sink_handle());
+        child_cx.set_trace_buffer(state.trace_handle());
+        let child_cx_full = child_cx.retype::<cap::All>();
+
+        (child_cx, child_cx_full)
+    }
+
     /// Creates a task record in the runtime state.
     ///
     /// This is a helper method used by all spawn variants.
@@ -1316,6 +1317,70 @@ mod tests {
                 );
                 assert_eq!(origin, "origin-test");
             }
+            other => unreachable!("Expected Ready(Ok(_)), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spawn_inherits_runtime_timer_driver() {
+        use std::task::{Context, Waker};
+
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let mut state = RuntimeState::new();
+        let clock = Arc::new(crate::time::VirtualClock::new());
+        state.set_timer_driver(crate::time::TimerDriverHandle::with_virtual_clock(clock));
+
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        let (handle, mut stored) = scope
+            .spawn(&mut state, &cx, |cx| async move { cx.has_timer() })
+            .expect("spawn should succeed");
+
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut poll_cx = Context::from_waker(&waker);
+        assert!(stored.poll(&mut poll_cx).is_ready());
+
+        let mut join_fut = Box::pin(handle.join(&cx));
+        match join_fut.as_mut().poll(&mut poll_cx) {
+            Poll::Ready(Ok(has_timer)) => assert!(has_timer),
+            other => unreachable!("Expected Ready(Ok(_)), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spawn_blocking_inherits_runtime_timer_driver() {
+        use std::task::{Context, Waker};
+
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let mut state = RuntimeState::new();
+        let clock = Arc::new(crate::time::VirtualClock::new());
+        state.set_timer_driver(crate::time::TimerDriverHandle::with_virtual_clock(clock));
+
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        let (handle, mut stored) = scope
+            .spawn_blocking(&mut state, &cx, |cx| cx.has_timer())
+            .expect("spawn_blocking should succeed");
+
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut poll_cx = Context::from_waker(&waker);
+        assert!(stored.poll(&mut poll_cx).is_ready());
+
+        let mut join_fut = Box::pin(handle.join(&cx));
+        match join_fut.as_mut().poll(&mut poll_cx) {
+            Poll::Ready(Ok(has_timer)) => assert!(has_timer),
             other => unreachable!("Expected Ready(Ok(_)), got {other:?}"),
         }
     }

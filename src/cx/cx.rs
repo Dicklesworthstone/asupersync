@@ -651,6 +651,7 @@ impl<Caps> Cx<Caps> {
     /// Returns `None` if no macaroon is attached.
     #[must_use]
     pub fn attenuate_from_budget(&self) -> Option<Self> {
+        let _ = self.handles.macaroon.as_ref()?;
         let budget = self.budget();
         budget.deadline.map_or_else(
             || Some(self.clone()),
@@ -2916,6 +2917,41 @@ mod tests {
     fn cx_attenuate_returns_none_without_macaroon() {
         let cx = test_cx();
         assert!(cx.attenuate(CaveatPredicate::MaxUses(10)).is_none());
+    }
+
+    #[test]
+    fn cx_attenuate_from_budget_returns_none_without_macaroon() {
+        let cx = test_cx();
+        assert!(cx.attenuate_from_budget().is_none());
+    }
+
+    #[test]
+    fn cx_attenuate_from_budget_preserves_token_without_deadline() {
+        let key = test_root_key();
+        let token = MacaroonToken::mint(&key, "spawn:r1", "cx/scheduler");
+        let cx = test_cx().with_macaroon(token);
+
+        let attenuated = cx
+            .attenuate_from_budget()
+            .expect("macaroon should still be present");
+        assert_eq!(attenuated.macaroon().unwrap().caveat_count(), 0);
+        assert_eq!(
+            attenuated.macaroon().unwrap().identifier(),
+            cx.macaroon().unwrap().identifier()
+        );
+    }
+
+    #[test]
+    fn cx_attenuate_from_budget_adds_deadline_caveat() {
+        let key = test_root_key();
+        let token = MacaroonToken::mint(&key, "spawn:r1", "cx/scheduler");
+        let budget = Budget::new().with_deadline(Time::from_millis(5_000));
+        let cx = Cx::for_testing_with_budget(budget).with_macaroon(token);
+
+        let attenuated = cx
+            .attenuate_from_budget()
+            .expect("attenuation with deadline should succeed");
+        assert_eq!(attenuated.macaroon().unwrap().caveat_count(), 1);
     }
 
     #[test]
