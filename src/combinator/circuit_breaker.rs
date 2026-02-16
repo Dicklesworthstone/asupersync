@@ -520,7 +520,7 @@ impl CircuitBreaker {
         // Optimistic check for Happy Path (Closed + No Failures) to avoid CAS loop overhead
         if permit == Permit::Normal {
             let current_bits = self.state_bits.load(Ordering::SeqCst);
-            if let State::Closed { failures: 0 } = State::from_bits(current_bits) {
+            if State::from_bits(current_bits) == (State::Closed { failures: 0 }) {
                 // Already clean, just check sliding window
                 self.check_sliding_window_success(now_millis);
                 return;
@@ -679,15 +679,17 @@ impl CircuitBreaker {
                 )
                 .is_ok()
             {
-                let mut m = self.metrics.write().expect("lock poisoned");
-                m.times_opened += 1;
-                m.current_state = new_state;
-                if let Some(ref w) = self.sliding_window {
-                    w.write().expect("lock poisoned").reset();
-                }
-                if self.policy.on_state_change.is_some() {
-                    self.populate_metrics_snapshot(&mut m);
-                    event = Some((state, new_state, m.clone()));
+                {
+                    let mut m = self.metrics.write().expect("lock poisoned");
+                    m.times_opened += 1;
+                    m.current_state = new_state;
+                    if let Some(ref w) = self.sliding_window {
+                        w.write().expect("lock poisoned").reset();
+                    }
+                    if self.policy.on_state_change.is_some() {
+                        self.populate_metrics_snapshot(&mut m);
+                        event = Some((state, new_state, m.clone()));
+                    }
                 }
                 break;
             }
@@ -758,8 +760,8 @@ impl CircuitBreaker {
                 });
 
         if let Some(rate) = failure_rate {
-             let mut m = self.metrics.write().expect("lock poisoned");
-             m.sliding_window_failure_rate = Some(rate);
+            let mut m = self.metrics.write().expect("lock poisoned");
+            m.sliding_window_failure_rate = Some(rate);
         }
 
         let mut event = None;
@@ -771,7 +773,8 @@ impl CircuitBreaker {
                 match state {
                     State::Closed { failures } => {
                         let new_failures = failures + 1;
-                        self.current_failure_streak.store(new_failures, Ordering::Relaxed);
+                        self.current_failure_streak
+                            .store(new_failures, Ordering::Relaxed);
 
                         if new_failures >= self.policy.failure_threshold || window_triggered {
                             let new_state = State::Open {
@@ -875,20 +878,13 @@ impl CircuitBreaker {
         F: FnOnce() -> Result<T, E>,
         E: fmt::Display,
     {
-        // Check if call is allowed
-        let permit = self.should_allow(now).map_err(|e| match e {
-            CircuitBreakerError::Open { remaining } => CircuitBreakerError::Open { remaining },
-            CircuitBreakerError::HalfOpenFull => CircuitBreakerError::HalfOpenFull,
-            CircuitBreakerError::Inner(()) => unreachable!(),
-        })?;
-
         struct CallGuard<'a> {
             cb: &'a CircuitBreaker,
             permit: Option<Permit>,
             now: Time,
         }
 
-        impl<'a> Drop for CallGuard<'a> {
+        impl Drop for CallGuard<'_> {
             fn drop(&mut self) {
                 if let Some(permit) = self.permit.take() {
                     // Panic occurred or early return without explicit success/failure
@@ -896,6 +892,13 @@ impl CircuitBreaker {
                 }
             }
         }
+
+        // Check if call is allowed
+        let permit = self.should_allow(now).map_err(|e| match e {
+            CircuitBreakerError::Open { remaining } => CircuitBreakerError::Open { remaining },
+            CircuitBreakerError::HalfOpenFull => CircuitBreakerError::HalfOpenFull,
+            CircuitBreakerError::Inner(()) => unreachable!(),
+        })?;
 
         let mut guard = CallGuard {
             cb: self,
@@ -923,12 +926,12 @@ impl CircuitBreaker {
 
     /// Manually reset the circuit breaker to closed state.
     pub fn reset(&self) {
+        let new_state = State::Closed { failures: 0 };
+        self.state_bits.store(new_state.to_bits(), Ordering::SeqCst);
+        self.current_failure_streak.store(0, Ordering::Relaxed);
         {
             let mut metrics = self.metrics.write().expect("lock poisoned");
-            let new_state = State::Closed { failures: 0 };
-            self.state_bits.store(new_state.to_bits(), Ordering::SeqCst);
             metrics.current_state = new_state;
-            self.current_failure_streak.store(0, Ordering::Relaxed);
         }
 
         if let Some(ref window) = self.sliding_window {
@@ -1780,9 +1783,10 @@ mod tests {
 
         // First probe panics
         let cb_clone = cb.clone();
-        let _ = std::panic::catch_unwind(move || {
-            let _ = cb_clone.call::<(), _, _>(now, || panic!("oops"));
-        });
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _: Result<(), CircuitBreakerError<String>> =
+                cb_clone.call::<(), String, _>(now, || panic!("oops"));
+        }));
 
         // State should be Open (probe failed due to panic)
         // With the fix, the CallGuard records a failure on drop.

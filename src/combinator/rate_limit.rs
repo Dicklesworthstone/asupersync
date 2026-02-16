@@ -287,12 +287,13 @@ impl RateLimiter {
         let mut m = self.metrics.read().expect("lock poisoned").clone();
         let state = self.state.lock().expect("lock poisoned");
         m.available_tokens = state.tokens_fixed as f64 / FIXED_POINT_SCALE as f64;
-        
+        drop(state);
+
         // Use atomic values
         m.total_allowed = self.total_allowed.load(Ordering::Relaxed);
         m.total_rejected = self.total_rejected.load(Ordering::Relaxed);
         m.total_waited = self.total_waited.load(Ordering::Relaxed);
-        
+
         m
     }
 
@@ -535,7 +536,7 @@ impl RateLimiter {
                 self.total_allowed.fetch_add(1, Ordering::Relaxed);
 
                 let mut metrics = self.metrics.write().expect("lock poisoned");
-                
+
                 let wait_duration = Duration::from_millis(wait_ms);
                 metrics.total_wait_time += wait_duration;
 
@@ -545,7 +546,7 @@ impl RateLimiter {
 
                 let total_waited = self.total_waited.load(Ordering::Relaxed);
                 let total_ms = duration_to_millis_saturating(metrics.total_wait_time);
-                
+
                 if total_waited > 0 {
                     if let Some(avg_ms) = total_ms.checked_div(total_waited) {
                         metrics.avg_wait_time = Duration::from_millis(avg_ms);

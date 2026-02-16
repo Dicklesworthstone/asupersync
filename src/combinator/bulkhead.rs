@@ -218,7 +218,7 @@ impl Bulkhead {
     /// Get available permits.
     #[must_use]
     pub fn available(&self) -> u32 {
-        self.available_permits.load(Ordering::SeqCst)
+        self.available_permits.load(Ordering::Acquire)
     }
 
     /// Get current metrics.
@@ -228,7 +228,7 @@ impl Bulkhead {
         let queue = self.queue.read().expect("lock poisoned");
         let active = queue.iter().filter(|e| e.result.is_none()).count() as u32;
         let used_permits =
-            self.policy.max_concurrent - self.available_permits.load(Ordering::SeqCst);
+            self.policy.max_concurrent - self.available_permits.load(Ordering::Acquire);
 
         let mut m = self.metrics.read().expect("lock poisoned").clone();
         m.active_permits = used_permits;
@@ -247,15 +247,15 @@ impl Bulkhead {
     #[must_use]
     pub fn try_acquire(&self, weight: u32) -> Option<BulkheadPermit<'_>> {
         loop {
-            let available = self.available_permits.load(Ordering::SeqCst);
+            let available = self.available_permits.load(Ordering::Acquire);
             if available >= weight {
                 if self
                     .available_permits
                     .compare_exchange(
                         available,
                         available - weight,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
                     )
                     .is_ok()
                 {
@@ -294,7 +294,7 @@ impl Bulkhead {
             if entry.result.is_none() {
                 // CAS loop to safely consume permits (prevents TOCTOU race with try_acquire)
                 let granted = loop {
-                    let current = self.available_permits.load(Ordering::SeqCst);
+                    let current = self.available_permits.load(Ordering::Acquire);
                     if current < entry.weight {
                         break false;
                     }
@@ -303,8 +303,8 @@ impl Bulkhead {
                         .compare_exchange(
                             current,
                             current - entry.weight,
-                            Ordering::SeqCst,
-                            Ordering::SeqCst,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
                         )
                         .is_ok()
                     {
@@ -370,7 +370,7 @@ impl Bulkhead {
             return Err(BulkheadError::QueueFull);
         }
 
-        let entry_id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let entry_id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
         queue.push(QueueEntry {
             id: entry_id,
@@ -445,13 +445,15 @@ impl Bulkhead {
 
             if matches!(entry.result, Some(Ok(()))) {
                 // Permit was granted but not claimed. Release it.
-                self.release_permit(entry.weight);
-                // Remove the entry entirely since it's cancelled and permit returned
+                let weight = entry.weight;
                 queue.remove(idx);
+                drop(queue);
+                self.release_permit(weight);
                 self.metrics.write().expect("lock poisoned").total_cancelled += 1;
             } else if entry.result.is_none() {
                 // Still waiting. Mark as cancelled.
                 entry.result = Some(Err(RejectionReason::Cancelled));
+                drop(queue);
                 self.metrics.write().expect("lock poisoned").total_cancelled += 1;
             }
         }
@@ -464,14 +466,14 @@ impl Bulkhead {
     fn release_permit(&self, weight: u32) {
         let max = self.policy.max_concurrent;
         loop {
-            let current = self.available_permits.load(Ordering::SeqCst);
+            let current = self.available_permits.load(Ordering::Acquire);
             let new = current.saturating_add(weight).min(max);
             if new == current {
                 break;
             }
             if self
                 .available_permits
-                .compare_exchange(current, new, Ordering::SeqCst, Ordering::SeqCst)
+                .compare_exchange(current, new, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
                 break;
@@ -520,7 +522,7 @@ impl Bulkhead {
     /// Manually reset the bulkhead to full capacity.
     pub fn reset(&self) {
         self.available_permits
-            .store(self.policy.max_concurrent, Ordering::SeqCst);
+            .store(self.policy.max_concurrent, Ordering::Release);
 
         let mut queue = self.queue.write().expect("lock poisoned");
         for entry in queue.iter_mut() {
@@ -536,7 +538,7 @@ impl fmt::Debug for Bulkhead {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Bulkhead")
             .field("name", &self.policy.name)
-            .field("available", &self.available_permits.load(Ordering::SeqCst))
+            .field("available", &self.available_permits.load(Ordering::Relaxed))
             .field("max_concurrent", &self.policy.max_concurrent)
             .finish_non_exhaustive()
     }
@@ -556,7 +558,7 @@ pub struct BulkheadPermit<'a> {
     weight: u32,
 }
 
-impl<'a> BulkheadPermit<'a> {
+impl BulkheadPermit<'_> {
     /// Get the weight of this permit.
     #[must_use]
     pub fn weight(&self) -> u32 {
@@ -573,7 +575,7 @@ impl<'a> BulkheadPermit<'a> {
     }
 }
 
-impl<'a> Drop for BulkheadPermit<'a> {
+impl Drop for BulkheadPermit<'_> {
     fn drop(&mut self) {
         self.bulkhead.release_permit(self.weight);
     }
@@ -1464,7 +1466,7 @@ mod tests {
 
         // 2. Fill queue
         let id1 = bh.enqueue(1, now).unwrap();
-        let id2 = bh.enqueue(1, now).unwrap();
+        let _id2 = bh.enqueue(1, now).unwrap();
 
         // 3. Release permit - grants id1
         p1.release();
@@ -1476,7 +1478,10 @@ mod tests {
 
         // 5. Try to enqueue - should be rejected because queue is full of zombies/waiting
         let result = bh.enqueue(1, now);
-        assert!(matches!(result, Err(BulkheadError::QueueFull)), "Zombies should count towards queue limit");
+        assert!(
+            matches!(result, Err(BulkheadError::QueueFull)),
+            "Zombies should count towards queue limit"
+        );
 
         // 6. Claim id1 (removes it)
         let permit = bh.check_entry(id1, now).unwrap().unwrap();
