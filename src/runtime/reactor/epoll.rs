@@ -24,7 +24,7 @@
 //! │                       EpollReactor                               │
 //! │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
 //! │  │   Poller    │  │  notify()   │  │    registration map     │  │
-//! │  │  (polling)  │  │  (builtin)  │  │   HashMap<Token, info>  │  │
+//! │  │  (polling)  │  │  (builtin)  │  │   BTreeMap<Token, info>  │  │
 //! │  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
@@ -61,7 +61,7 @@ use super::{Event, Events, Interest, Reactor, Source, Token};
 use libc::{fcntl, F_GETFD};
 use parking_lot::Mutex;
 use polling::{Event as PollEvent, Events as PollEvents, Poller};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::io;
 use std::num::NonZeroUsize;
 use std::os::fd::BorrowedFd;
@@ -78,15 +78,15 @@ struct RegistrationInfo {
 
 #[derive(Debug)]
 struct ReactorState {
-    tokens: HashMap<Token, RegistrationInfo>,
-    fds: HashMap<i32, Token>,
+    tokens: BTreeMap<Token, RegistrationInfo>,
+    fds: BTreeMap<i32, Token>,
 }
 
 impl ReactorState {
     fn new() -> Self {
         Self {
-            tokens: HashMap::new(),
-            fds: HashMap::new(),
+            tokens: BTreeMap::new(),
+            fds: BTreeMap::new(),
         }
     }
 }

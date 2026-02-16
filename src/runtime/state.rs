@@ -39,7 +39,7 @@ use crate::util::{Arena, ArenaIndex, EntropySource, OsEntropy};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::backtrace::Backtrace;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
@@ -712,7 +712,7 @@ impl RuntimeState {
     /// recent trace events. It is designed to be lightweight and serializable.
     #[must_use]
     pub fn snapshot(&self) -> RuntimeSnapshot {
-        let mut obligations_by_task: HashMap<TaskId, Vec<ObligationId>> = HashMap::new();
+        let mut obligations_by_task: BTreeMap<TaskId, Vec<ObligationId>> = BTreeMap::new();
         let obligations: Vec<ObligationSnapshot> = self
             .obligations_iter()
             .map(|(_, record)| {
@@ -1586,8 +1586,8 @@ impl RuntimeState {
 
         // Build a map of region -> cancel reason for cause chain construction.
         // Each child region's reason chains to its parent's reason.
-        let mut region_reasons: HashMap<RegionId, CancelReason> =
-            HashMap::with_capacity(regions_to_cancel.len());
+        let mut region_reasons: BTreeMap<RegionId, CancelReason> =
+            BTreeMap::new();
 
         // First pass: mark regions with cancellation reason and transition to Closing
         for node in &regions_to_cancel {
