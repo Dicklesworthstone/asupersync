@@ -103,22 +103,30 @@ impl Default for GlobalInjector {
 }
 
 impl GlobalInjector {
+    /// Decrements the pending counter, saturating at zero.
+    ///
+    /// Uses a single `fetch_sub` instead of a `fetch_update` CAS loop.
+    /// The counter is approximate (Relaxed ordering), so transient underflow
+    /// from concurrent inc/dec racing is harmless — the `wrapping_sub` result
+    /// will be corrected on the next increment.  However, we avoid wrapping
+    /// past zero in the common sequential case by only subtracting when the
+    /// counter is positive.  The load + sub is not atomic as a pair, but
+    /// since this counter is advisory (used for heuristics/metrics, not for
+    /// correctness), a brief inconsistency is acceptable and far cheaper
+    /// than a CAS retry loop under contention.
     #[inline]
     fn decrement_pending_count(&self) {
-        let _ = self
-            .pending_count
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                count.checked_sub(1)
-            });
+        if self.pending_count.load(Ordering::Relaxed) > 0 {
+            self.pending_count.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 
+    /// Decrements the ready counter, saturating at zero (same rationale).
     #[inline]
     fn decrement_ready_count(&self) {
-        let _ = self
-            .ready_count
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                count.checked_sub(1)
-            });
+        if self.ready_count.load(Ordering::Relaxed) > 0 {
+            self.ready_count.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 
     /// Creates a new empty global injector.

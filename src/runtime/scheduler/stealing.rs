@@ -87,16 +87,21 @@ mod tests {
         let stealers = vec![q1.stealer(), q2.stealer(), q3.stealer()];
 
         // Different RNG seeds to ensure we eventually find the non-empty queue
+        let mut found = false;
         for seed in 0..10 {
             let mut rng = DetRng::new(seed);
             let stolen = steal_task(&stealers, &mut rng);
             if let Some(t) = stolen {
                 assert_eq!(t, task(99));
-                return;
+                found = true;
+                break;
             }
         }
-        // If we get here, something is wrong
-        panic!("should have found task in q3");
+
+        assert!(
+            found,
+            "should have found task in q3 with at least one deterministic seed in [0, 10)"
+        );
     }
 
     #[test]

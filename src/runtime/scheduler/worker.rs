@@ -621,8 +621,21 @@ impl Parker {
     }
 
     /// Unparks a parked thread.
+    ///
+    /// Fast path: if the thread was already notified (common case when a waker
+    /// fires for an already-runnable task), the atomic swap returns `true` and
+    /// we skip the mutex + condvar entirely.  Only when the previous state was
+    /// "not notified" do we acquire the mutex and signal the condvar, which is
+    /// the only case where the thread might actually be parked.
     pub fn unpark(&self) {
-        self.inner.notified.store(true, Ordering::Release);
+        if self.inner.notified.swap(true, Ordering::Release) {
+            // Already notified — the thread will see it on the next
+            // park() fast-path check.  No mutex or condvar needed.
+            return;
+        }
+        // Was not notified: the thread may be parked. We must acquire the
+        // mutex before notify_one to prevent lost wakeups (standard condvar
+        // protocol).
         let _guard = self.inner.mutex.lock().unwrap();
         self.inner.cvar.notify_one();
     }
