@@ -370,6 +370,7 @@ where
 #[derive(Default)]
 struct TransferState {
     read_done: bool,
+    shutdown_done: bool,
     pos: usize,
     cap: usize,
 }
@@ -388,11 +389,11 @@ pub struct CopyBidirectional<'a, A: ?Sized, B: ?Sized> {
 
 /// Result of a single transfer step.
 enum TransferResult {
-    /// Direction is fully complete (read done and buffer flushed).
+    /// Direction is fully complete (read done, buffer flushed, shutdown done).
     Done,
     /// Blocked on I/O.
     Pending,
-    /// Made progress (read or wrote bytes).
+    /// Made progress (read or wrote bytes, or shutdown).
     Progress,
     /// Encountered an error.
     Error(io::Error),
@@ -423,8 +424,18 @@ where
             }
         }
 
-        // 2. If read from A is done and buffer is empty, this direction is finished
+        // 2. If read from A is done and buffer is empty, shutdown B and finish
         if state.read_done {
+            if !state.shutdown_done {
+                match Pin::new(&mut *self.b).poll_shutdown(cx) {
+                    Poll::Pending => return TransferResult::Pending,
+                    Poll::Ready(Err(err)) => return TransferResult::Error(err),
+                    Poll::Ready(Ok(())) => {
+                        state.shutdown_done = true;
+                        return TransferResult::Progress;
+                    }
+                }
+            }
             return TransferResult::Done;
         }
 
@@ -443,8 +454,8 @@ where
                     state.read_done = true;
                 }
                 state.cap = n;
-                // We just learned we are done, but we haven't flushed anything (buffer was empty).
-                // Next call will hit check 2.
+                // We just learned we are done (or read data).
+                // If done, next call will hit check 2 (buffer empty + read_done).
                 TransferResult::Progress
             }
         }
@@ -470,8 +481,18 @@ where
             }
         }
 
-        // 2. If read from B is done and buffer is empty, this direction is finished
+        // 2. If read from B is done and buffer is empty, shutdown A and finish
         if state.read_done {
+            if !state.shutdown_done {
+                match Pin::new(&mut *self.a).poll_shutdown(cx) {
+                    Poll::Pending => return TransferResult::Pending,
+                    Poll::Ready(Err(err)) => return TransferResult::Error(err),
+                    Poll::Ready(Ok(())) => {
+                        state.shutdown_done = true;
+                        return TransferResult::Progress;
+                    }
+                }
+            }
             return TransferResult::Done;
         }
 
@@ -677,6 +698,7 @@ mod tests {
         read_data: Vec<u8>,
         read_pos: usize,
         written: Vec<u8>,
+        shutdown_called: bool,
     }
 
     impl TestDuplex {
@@ -685,6 +707,7 @@ mod tests {
                 read_data: read_data.to_vec(),
                 read_pos: 0,
                 written: Vec::new(),
+                shutdown_called: false,
             }
         }
     }
@@ -722,6 +745,7 @@ mod tests {
         }
 
         fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.get_mut().shutdown_called = true;
             Poll::Ready(Ok(()))
         }
     }
@@ -741,6 +765,20 @@ mod tests {
         crate::assert_with_log!(b.written == b"from A", "b written", b"from A", b.written);
         crate::assert_with_log!(a.written == b"from B", "a written", b"from B", a.written);
         crate::test_complete!("copy_bidirectional_basic");
+    }
+
+    #[test]
+    fn copy_bidirectional_propagates_shutdown() {
+        init_test("copy_bidirectional_propagates_shutdown");
+        let mut a = TestDuplex::new(b"from A");
+        let mut b = TestDuplex::new(b"from B");
+        let mut fut = copy_bidirectional(&mut a, &mut b);
+        let mut fut = Pin::new(&mut fut);
+        let _ = poll_ready(&mut fut).expect("future did not resolve").unwrap();
+
+        crate::assert_with_log!(a.shutdown_called, "a shutdown", true, a.shutdown_called);
+        crate::assert_with_log!(b.shutdown_called, "b shutdown", true, b.shutdown_called);
+        crate::test_complete!("copy_bidirectional_propagates_shutdown");
     }
 
     #[test]

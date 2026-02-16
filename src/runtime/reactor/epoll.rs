@@ -174,6 +174,7 @@ impl Reactor for EpollReactor {
                 "token already registered",
             ));
         }
+
         if regs.values().any(|info| info.raw_fd == raw_fd) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -234,21 +235,38 @@ impl Reactor for EpollReactor {
     fn deregister(&self, token: Token) -> io::Result<()> {
         let mut regs = self.registrations.lock();
         let info = regs
-            .remove(&token)
+            .get(&token)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "token not registered"))?;
-        drop(regs);
 
         // SAFETY: We stored the raw_fd during registration and trust it's still valid.
         // The caller is responsible for ensuring the fd remains valid until deregistered.
         let borrowed_fd = unsafe { BorrowedFd::borrow_raw(info.raw_fd) };
+        let fd_still_valid = unsafe { fcntl(info.raw_fd, F_GETFD) } != -1;
 
         // Remove from epoll. If the fd was already closed or removed by the kernel,
         // treat it as already deregistered from reactor bookkeeping perspective.
         match self.poller.delete(borrowed_fd) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                regs.remove(&token);
+                drop(regs);
+                Ok(())
+            }
             Err(err) => match err.raw_os_error() {
-                Some(libc::EBADF | libc::ENOENT) => Ok(()),
-                _ => Err(err),
+                Some(libc::ENOENT) => {
+                    regs.remove(&token);
+                    drop(regs);
+                    Ok(())
+                }
+                // Treat EBADF as benign only when the target fd itself is closed.
+                Some(libc::EBADF) if !fd_still_valid => {
+                    regs.remove(&token);
+                    drop(regs);
+                    Ok(())
+                }
+                _ => {
+                    drop(regs);
+                    Err(err)
+                }
             },
         }
     }
