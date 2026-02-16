@@ -249,25 +249,13 @@ impl RegionHeap {
     pub fn alloc<T: Send + Sync + 'static>(&mut self, value: T) -> HeapIndex {
         let size_hint = std::mem::size_of::<T>();
         let type_id = TypeId::of::<T>();
-
-        // Update statistics
-        self.stats.allocations += 1;
-        self.stats.live += 1;
-        self.stats.bytes_allocated += size_hint as u64;
-        self.stats.bytes_live += size_hint as u64;
-        GLOBAL_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-
-        let entry = HeapEntry {
-            value: Box::new(value),
-            generation: 0,
-            size_hint,
-        };
-
-        self.len += 1;
+        let entry_value: Box<dyn Any + Send + Sync> = Box::new(value);
 
         // Try to reuse a free slot
-        if let Some(free_index) = self.free_head {
-            let slot = &mut self.slots[free_index as usize];
+        let heap_index = if let Some(free_index) = self.free_head {
+            let Some(slot) = self.slots.get_mut(free_index as usize) else {
+                panic!("free list pointed outside heap slots");
+            };
             match slot {
                 HeapSlot::Vacant {
                     next_free,
@@ -276,9 +264,9 @@ impl RegionHeap {
                     let gen = *generation;
                     self.free_head = *next_free;
                     *slot = HeapSlot::Occupied(HeapEntry {
-                        value: entry.value,
+                        value: entry_value,
                         generation: gen,
-                        size_hint: entry.size_hint,
+                        size_hint,
                     });
                     HeapIndex {
                         index: free_index,
@@ -286,18 +274,32 @@ impl RegionHeap {
                         type_id,
                     }
                 }
-                HeapSlot::Occupied(_) => unreachable!("free list pointed to occupied slot"),
+                HeapSlot::Occupied(_) => panic!("free list pointed to occupied slot"),
             }
         } else {
             // Allocate new slot
             let index = u32::try_from(self.slots.len()).expect("region heap overflow");
-            self.slots.push(HeapSlot::Occupied(entry));
+            self.slots.push(HeapSlot::Occupied(HeapEntry {
+                value: entry_value,
+                generation: 0,
+                size_hint,
+            }));
             HeapIndex {
                 index,
                 generation: 0,
                 type_id,
             }
-        }
+        };
+
+        // Update statistics only after slot insertion succeeds.
+        self.len += 1;
+        self.stats.allocations += 1;
+        self.stats.live += 1;
+        self.stats.bytes_allocated += size_hint as u64;
+        self.stats.bytes_live += size_hint as u64;
+        GLOBAL_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+
+        heap_index
     }
 
     /// Returns a reference to the value at the given index.
@@ -580,6 +582,31 @@ mod tests {
         let first = run_pattern();
         let second = run_pattern();
         assert_eq!(first, second, "allocation pattern should be deterministic");
+    }
+
+    #[test]
+    fn alloc_panic_does_not_mutate_len_or_stats() {
+        let mut heap = RegionHeap::new();
+        heap.free_head = Some(1);
+
+        let before_len = heap.len();
+        let before_stats = heap.stats();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = heap.alloc(123u32);
+        }));
+
+        assert!(
+            result.is_err(),
+            "alloc should panic on corrupted free-list head"
+        );
+        assert_eq!(heap.len(), before_len);
+        let after_stats = heap.stats();
+        assert_eq!(after_stats.allocations, before_stats.allocations);
+        assert_eq!(after_stats.reclaimed, before_stats.reclaimed);
+        assert_eq!(after_stats.live, before_stats.live);
+        assert_eq!(after_stats.bytes_allocated, before_stats.bytes_allocated);
+        assert_eq!(after_stats.bytes_live, before_stats.bytes_live);
     }
 
     #[test]
