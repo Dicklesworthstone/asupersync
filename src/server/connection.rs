@@ -835,12 +835,7 @@ mod tests {
         }
 
         let total = successes.load(std::sync::atomic::Ordering::Relaxed);
-        crate::assert_with_log!(
-            total <= 5,
-            "capacity not exceeded",
-            "<=5",
-            total
-        );
+        crate::assert_with_log!(total <= 5, "capacity not exceeded", "<=5", total);
         crate::test_complete!("concurrent_register_respects_capacity");
     }
 

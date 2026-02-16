@@ -1175,9 +1175,9 @@ mod tests {
 
         let notify_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-        let poll_waker = Waker::from(std::sync::Arc::new(CountWaker(
-            std::sync::Arc::clone(&notify_count),
-        )));
+        let poll_waker = Waker::from(std::sync::Arc::new(CountWaker(std::sync::Arc::clone(
+            &notify_count,
+        ))));
         let mut task_cx = Context::from_waker(&poll_waker);
         let mut fut = Box::pin(rx.recv(&cx));
 
