@@ -245,7 +245,7 @@ impl Bulkhead {
     ///
     /// Returns `Some(permit)` if acquired immediately, `None` if bulkhead is full.
     #[must_use]
-    pub fn try_acquire(&self, weight: u32) -> Option<BulkheadPermit> {
+    pub fn try_acquire(&self, weight: u32) -> Option<BulkheadPermit<'_>> {
         loop {
             let available = self.available_permits.load(Ordering::SeqCst);
             if available >= weight {
@@ -260,8 +260,8 @@ impl Bulkhead {
                     .is_ok()
                 {
                     return Some(BulkheadPermit {
+                        bulkhead: self,
                         weight,
-                        released: false,
                     });
                 }
                 // CAS failed, retry
@@ -357,8 +357,9 @@ impl Bulkhead {
         let mut queue = self.queue.write().expect("lock poisoned");
 
         // Check queue capacity
-        let active_count = queue.iter().filter(|e| e.result.is_none()).count();
-        if active_count >= self.policy.max_queue as usize {
+        // We check total length (including completed-but-unclaimed entries) to
+        // prevent unbounded memory growth if the user abandons request IDs.
+        if queue.len() >= self.policy.max_queue as usize {
             let mut metrics = self.metrics.write().expect("lock poisoned");
             metrics.total_rejected += 1;
 
@@ -396,7 +397,7 @@ impl Bulkhead {
         &self,
         entry_id: u64,
         now: Time,
-    ) -> Result<Option<BulkheadPermit>, BulkheadError<()>> {
+    ) -> Result<Option<BulkheadPermit<'_>>, BulkheadError<()>> {
         // First process the queue to handle timeouts and grants
         let _ = self.process_queue(now);
 
@@ -411,8 +412,8 @@ impl Bulkhead {
                     // Remove the granted entry
                     queue.remove(idx);
                     Ok(Some(BulkheadPermit {
+                        bulkhead: self,
                         weight,
-                        released: false,
                     }))
                 }
                 Some(Err(RejectionReason::Timeout)) => {
@@ -502,7 +503,9 @@ impl Bulkhead {
         // Use catch_unwind to ensure permit is released even if op panics.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(op));
 
-        permit.release_to(self);
+        // Permit is automatically released when dropped here or on unwind.
+        // We explicitly drop it here to be clear that the protected section ends.
+        drop(permit);
 
         match result {
             Ok(Ok(value)) => {
@@ -545,34 +548,34 @@ impl fmt::Debug for Bulkhead {
 
 /// RAII permit guard.
 ///
-/// Note: This struct does not implement `Drop` because release needs a reference
-/// to the bulkhead. Use `release_to()` to explicitly release, or use the
-/// `call()` methods which handle release automatically.
+/// Automatically releases the permit to the bulkhead when dropped.
+/// Use `release()` to explicitly release it early.
 #[derive(Debug)]
-pub struct BulkheadPermit {
+pub struct BulkheadPermit<'a> {
+    bulkhead: &'a Bulkhead,
     weight: u32,
-    released: bool,
 }
 
-impl BulkheadPermit {
+impl<'a> BulkheadPermit<'a> {
     /// Get the weight of this permit.
     #[must_use]
     pub fn weight(&self) -> u32 {
         self.weight
     }
 
-    /// Release the permit back to the bulkhead.
-    pub fn release_to(mut self, bulkhead: &Bulkhead) {
-        if !self.released {
-            bulkhead.release_permit(self.weight);
-            self.released = true;
-        }
+    /// Explicitly release the permit back to the bulkhead.
+    ///
+    /// This consumes the guard, preventing it from running `Drop`.
+    pub fn release(self) {
+        // Drop implementation handles the release.
+        // By consuming self, we ensure it's dropped now.
+        drop(self);
     }
+}
 
-    /// Check if this permit has been released.
-    #[must_use]
-    pub fn is_released(&self) -> bool {
-        self.released
+impl<'a> Drop for BulkheadPermit<'a> {
+    fn drop(&mut self) {
+        self.bulkhead.release_permit(self.weight);
     }
 }
 
@@ -797,7 +800,7 @@ mod tests {
         assert_eq!(bh.available_permits.load(Ordering::SeqCst), 9);
         assert_eq!(bh.metrics().active_permits, 1);
 
-        permit.release_to(&bh);
+        permit.release();
         assert_eq!(bh.available_permits.load(Ordering::SeqCst), 10);
         assert_eq!(bh.metrics().active_permits, 0);
     }
@@ -816,8 +819,8 @@ mod tests {
         assert!(p3.is_none());
         assert_eq!(bh.metrics().active_permits, 2);
 
-        p1.release_to(&bh);
-        p2.release_to(&bh);
+        p1.release();
+        p2.release();
     }
 
     // =========================================================================
@@ -842,8 +845,8 @@ mod tests {
         let p2 = bh.try_acquire(5).unwrap();
         assert_eq!(bh.available_permits.load(Ordering::SeqCst), 0);
 
-        permit.release_to(&bh);
-        p2.release_to(&bh);
+        permit.release();
+        p2.release();
         assert_eq!(bh.available_permits.load(Ordering::SeqCst), 10);
     }
 
@@ -857,7 +860,7 @@ mod tests {
         // Zero weight permits can be useful for "observer" patterns
         let permit = bh.try_acquire(0).unwrap();
         assert_eq!(bh.available_permits.load(Ordering::SeqCst), 10);
-        permit.release_to(&bh);
+        permit.release();
     }
 
     // =========================================================================
@@ -925,7 +928,7 @@ mod tests {
         let entry_id = bh.enqueue(1, now).unwrap();
 
         // Release permit
-        p.release_to(&bh);
+        p.release();
 
         // Process queue - should grant
         let granted = bh.process_queue(now);
@@ -955,7 +958,7 @@ mod tests {
         assert!(matches!(result, Ok(None)));
 
         // Release one permit
-        p1.release_to(&bh);
+        p1.release();
 
         // Now should be granted
         let result = bh.check_entry(entry_id, now);
@@ -1029,10 +1032,10 @@ mod tests {
         let p2 = bh.try_acquire(3).unwrap();
         assert_eq!(bh.metrics().active_permits, 4);
 
-        p1.release_to(&bh);
+        p1.release();
         assert_eq!(bh.metrics().active_permits, 3);
 
-        p2.release_to(&bh);
+        p2.release();
         assert_eq!(bh.metrics().active_permits, 0);
     }
 
@@ -1051,8 +1054,8 @@ mod tests {
         let p2 = bh.try_acquire(5).unwrap();
         assert!((bh.metrics().utilization - 1.0).abs() < f64::EPSILON);
 
-        p1.release_to(&bh);
-        p2.release_to(&bh);
+        p1.release();
+        p2.release();
     }
 
     #[test]
@@ -1171,7 +1174,7 @@ mod tests {
                         if let Some(permit) = bh.try_acquire(1) {
                             // Simulate work
                             std::thread::yield_now();
-                            permit.release_to(&bh);
+                            permit.release();
                         }
                     }
                 })
@@ -1214,7 +1217,7 @@ mod tests {
                             std::thread::yield_now();
 
                             current.fetch_sub(1, Ordering::SeqCst);
-                            permit.release_to(&bh);
+                            permit.release();
                         }
                     }
                 })
@@ -1376,14 +1379,14 @@ mod tests {
         assert_eq!(bh.available(), 10);
 
         // Release pre-reset permits — must NOT exceed max_concurrent
-        p1.release_to(&bh);
+        p1.release();
         assert_eq!(
             bh.available(),
             10,
             "available_permits must be capped at max_concurrent after reset + release"
         );
 
-        p2.release_to(&bh);
+        p2.release();
         assert_eq!(
             bh.available(),
             10,
@@ -1401,7 +1404,7 @@ mod tests {
         );
 
         for p in permits {
-            p.release_to(&bh);
+            p.release();
         }
     }
 
@@ -1422,7 +1425,7 @@ mod tests {
         let entry_id = bh.enqueue(1, now).unwrap();
 
         // 3. Release permit (making it available for the waiter)
-        p1.release_to(&bh);
+        p1.release();
 
         // 4. Process queue (grants the permit to the waiter)
         let granted_id = bh.process_queue(now);
@@ -1442,5 +1445,44 @@ mod tests {
             1,
             "permit should be released upon cancellation of granted entry"
         );
+    }
+
+    #[test]
+    fn zombies_fill_queue() {
+        // Regression test for unbounded queue growth due to abandoned entries.
+        let bh = Bulkhead::new(BulkheadPolicy {
+            max_concurrent: 1,
+            max_queue: 2,
+            queue_timeout: Duration::from_mins(1),
+            ..Default::default()
+        });
+
+        let now = Time::from_millis(0);
+
+        // 1. Exhaust permits
+        let p1 = bh.try_acquire(1).unwrap();
+
+        // 2. Fill queue
+        let id1 = bh.enqueue(1, now).unwrap();
+        let id2 = bh.enqueue(1, now).unwrap();
+
+        // 3. Release permit - grants id1
+        p1.release();
+        let granted = bh.process_queue(now);
+        assert_eq!(granted, Some(id1));
+
+        // 4. Don't claim id1. It sits in queue as "Granted".
+        // Queue len is still 2.
+
+        // 5. Try to enqueue - should be rejected because queue is full of zombies/waiting
+        let result = bh.enqueue(1, now);
+        assert!(matches!(result, Err(BulkheadError::QueueFull)), "Zombies should count towards queue limit");
+
+        // 6. Claim id1 (removes it)
+        let permit = bh.check_entry(id1, now).unwrap().unwrap();
+        permit.release();
+
+        // 7. Queue len now 1. Can enqueue.
+        assert!(bh.enqueue(1, now).is_ok());
     }
 }
