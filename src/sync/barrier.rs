@@ -96,7 +96,10 @@ enum WaitState {
     /// pushed.  On re-poll we try an O(1) indexed lookup first; if the slot
     /// has been invalidated by another waiter's cancellation (which uses
     /// `swap_remove`), we fall back to a linear scan.
-    Waiting { generation: u64, slot: usize },
+    Waiting {
+        generation: u64,
+        slot: usize,
+    },
 }
 
 /// Future returned by `Barrier::wait`.
@@ -107,7 +110,7 @@ pub struct BarrierWaitFuture<'a> {
     state: WaitState,
 }
 
-impl<'a> Future for BarrierWaitFuture<'a> {
+impl Future for BarrierWaitFuture<'_> {
     type Output = Result<BarrierWaitResult, BarrierWaitError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -134,20 +137,20 @@ impl<'a> Future for BarrierWaitFuture<'a> {
                     } else {
                         state.waiters.retain(|w| !w.will_wake(waker));
                     }
+                    drop(state);
 
                     // Mark state as done so Drop doesn't decrement again.
                     self.state = WaitState::Init;
                     return Poll::Ready(Err(BarrierWaitError::Cancelled));
-                } else {
-                    // Generation changed means barrier tripped just before cancel.
-                    // We treat this as success.
-                    self.state = WaitState::Init;
-                    return Poll::Ready(Ok(BarrierWaitResult { is_leader: false }));
                 }
-            } else {
-                // Cancelled before even registering.
-                return Poll::Ready(Err(BarrierWaitError::Cancelled));
+                // Generation changed means barrier tripped just before cancel.
+                // We treat this as success.
+                drop(state);
+                self.state = WaitState::Init;
+                return Poll::Ready(Ok(BarrierWaitResult { is_leader: false }));
             }
+            // Cancelled before even registering.
+            return Poll::Ready(Err(BarrierWaitError::Cancelled));
         }
 
         let mut state = self
@@ -156,73 +159,83 @@ impl<'a> Future for BarrierWaitFuture<'a> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
 
-        loop {
-            match self.state {
-                WaitState::Init => {
-                    if state.arrived + 1 >= self.barrier.parties {
-                        // We are the leader (or the last one to arrive).
-                        // Trip the barrier.
-                        state.arrived = 0;
-                        state.generation = state.generation.wrapping_add(1);
+        match self.state {
+            WaitState::Init => {
+                if state.arrived + 1 >= self.barrier.parties {
+                    // We are the leader (or the last one to arrive).
+                    // Trip the barrier.
+                    state.arrived = 0;
+                    state.generation = state.generation.wrapping_add(1);
 
-                        // Wake all waiters.
-                        for waker in state.waiters.drain(..) {
-                            waker.wake();
-                        }
-
-                        return Poll::Ready(Ok(BarrierWaitResult { is_leader: true }));
-                    } else {
-                        // Not full yet. Arrive and wait.
-                        state.arrived += 1;
-                        let gen = state.generation;
-                        let slot = state.waiters.len();
-                        state.waiters.push(cx.waker().clone());
-                        self.state = WaitState::Waiting { generation: gen, slot };
-                        // Continue loop to re-poll (which will hit Waiting case) or return pending.
-                        return Poll::Pending;
+                    // Wake all waiters.
+                    for waker in state.waiters.drain(..) {
+                        waker.wake();
                     }
+                    drop(state);
+
+                    Poll::Ready(Ok(BarrierWaitResult { is_leader: true }))
+                } else {
+                    // Not full yet. Arrive and wait.
+                    state.arrived += 1;
+                    let gen = state.generation;
+                    let slot = state.waiters.len();
+                    state.waiters.push(cx.waker().clone());
+                    drop(state);
+                    self.state = WaitState::Waiting {
+                        generation: gen,
+                        slot,
+                    };
+                    Poll::Pending
                 }
-                WaitState::Waiting { generation, slot } => {
-                    if state.generation != generation {
-                        // Generation advanced! We are done.
-                        self.state = WaitState::Init;
-                        return Poll::Ready(Ok(BarrierWaitResult { is_leader: false }));
+            }
+            WaitState::Waiting { generation, slot } => {
+                if state.generation == generation {
+                    // Still waiting. Update waker if changed.
+                    // O(1) fast path: use the remembered slot index.
+                    let waker = cx.waker();
+                    if slot < state.waiters.len() && state.waiters[slot].will_wake(waker) {
+                        // Slot still valid — update in place (no-op if same waker).
+                        state.waiters[slot].clone_from(waker);
                     } else {
-                        // Still waiting. Update waker if changed.
-                        // O(1) fast path: use the remembered slot index.
-                        let waker = cx.waker();
-                        if slot < state.waiters.len() && state.waiters[slot].will_wake(waker) {
-                            // Slot still valid — update in place (no-op if same waker).
-                            state.waiters[slot].clone_from(waker);
-                        } else {
-                            // Slot invalidated by a concurrent cancellation's
-                            // swap_remove.  Fall back to linear scan + push.
-                            let mut found = false;
-                            for (i, w) in state.waiters.iter_mut().enumerate() {
-                                if w.will_wake(waker) {
-                                    w.clone_from(waker);
-                                    // Update slot for next re-poll.
-                                    self.state = WaitState::Waiting { generation, slot: i };
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if !found {
-                                let new_slot = state.waiters.len();
-                                state.waiters.push(waker.clone());
-                                self.state = WaitState::Waiting { generation, slot: new_slot };
+                        // Slot invalidated by a concurrent cancellation's
+                        // swap_remove.  Fall back to linear scan + push.
+                        let mut found = false;
+                        for (i, w) in state.waiters.iter_mut().enumerate() {
+                            if w.will_wake(waker) {
+                                w.clone_from(waker);
+                                // Update slot for next re-poll.
+                                self.state = WaitState::Waiting {
+                                    generation,
+                                    slot: i,
+                                };
+                                found = true;
+                                break;
                             }
                         }
-
-                        return Poll::Pending;
+                        if !found {
+                            let new_slot = state.waiters.len();
+                            state.waiters.push(waker.clone());
+                            self.state = WaitState::Waiting {
+                                generation,
+                                slot: new_slot,
+                            };
+                        }
                     }
+                    drop(state);
+
+                    Poll::Pending
+                } else {
+                    // Generation advanced! We are done.
+                    drop(state);
+                    self.state = WaitState::Init;
+                    Poll::Ready(Ok(BarrierWaitResult { is_leader: false }))
                 }
             }
         }
     }
 }
 
-impl<'a> Drop for BarrierWaitFuture<'a> {
+impl Drop for BarrierWaitFuture<'_> {
     fn drop(&mut self) {
         if let WaitState::Waiting { generation, .. } = self.state {
             // We must use a separate block or variable to handle the lock result
@@ -273,7 +286,7 @@ mod tests {
     fn block_on<F: Future>(f: F) -> F::Output {
         let mut f = Box::pin(f);
         let waker = Waker::noop();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(waker);
         loop {
             match f.as_mut().poll(&mut cx) {
                 Poll::Ready(v) => return v,

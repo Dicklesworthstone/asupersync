@@ -201,7 +201,12 @@ where
             .map_err(ConcurrencyLimitError::Inner)
         {
             Poll::Pending => return Poll::Pending,
-            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+            Poll::Ready(Err(err)) => {
+                // If we had already reserved (or were acquiring) a permit,
+                // release that state on inner readiness failure.
+                self.state = State::Idle;
+                return Poll::Ready(Err(err));
+            }
             Poll::Ready(Ok(())) => {}
         }
 
@@ -411,6 +416,36 @@ mod tests {
         }
     }
 
+    struct ReadyThenErrorService {
+        polls: usize,
+    }
+
+    impl ReadyThenErrorService {
+        const fn new() -> Self {
+            Self { polls: 0 }
+        }
+    }
+
+    impl Service<()> for ReadyThenErrorService {
+        type Response = ();
+        type Error = &'static str;
+        type Future = std::future::Ready<Result<(), &'static str>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            let poll_idx = self.polls;
+            self.polls = self.polls.saturating_add(1);
+            if poll_idx == 0 {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Ready(Err("inner error"))
+            }
+        }
+
+        fn call(&mut self, _req: ()) -> Self::Future {
+            ready(Ok(()))
+        }
+    }
+
     #[test]
     fn layer_creates_service() {
         init_test("layer_creates_service");
@@ -562,6 +597,34 @@ mod tests {
         let available = svc.available();
         crate::assert_with_log!(available == 1, "available", 1, available);
         crate::test_complete!("inner_error_does_not_consume_permit");
+    }
+
+    #[test]
+    fn inner_error_after_reserved_permit_releases_state() {
+        init_test("inner_error_after_reserved_permit_releases_state");
+        let layer = ConcurrencyLimitLayer::new(1);
+        let mut svc = layer.layer(ReadyThenErrorService::new());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // First readiness check reserves the only permit.
+        let first = svc.poll_ready(&mut cx);
+        let first_ok = matches!(first, Poll::Ready(Ok(())));
+        crate::assert_with_log!(first_ok, "first ready ok", true, first_ok);
+        let available = svc.available();
+        crate::assert_with_log!(available == 0, "available", 0, available);
+        let has_permit = has_ready_permit(&svc);
+        crate::assert_with_log!(has_permit, "permit present", true, has_permit);
+
+        // Next readiness check errors from inner; limiter must release reserved permit.
+        let second = svc.poll_ready(&mut cx);
+        let second_err = matches!(second, Poll::Ready(Err(ConcurrencyLimitError::Inner(_))));
+        crate::assert_with_log!(second_err, "second inner err", true, second_err);
+        let has_permit = has_ready_permit(&svc);
+        crate::assert_with_log!(!has_permit, "permit released", false, has_permit);
+        let available = svc.available();
+        crate::assert_with_log!(available == 1, "available", 1, available);
+        crate::test_complete!("inner_error_after_reserved_permit_releases_state");
     }
 
     #[test]
