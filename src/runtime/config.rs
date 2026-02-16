@@ -80,6 +80,7 @@ impl LeakEscalation {
     /// Creates a new escalation policy.
     #[must_use]
     pub const fn new(threshold: u64, escalate_to: ObligationLeakResponse) -> Self {
+        let threshold = if threshold == 0 { 1 } else { threshold };
         Self {
             threshold,
             escalate_to,
@@ -173,6 +174,11 @@ impl RuntimeConfig {
         }
         if self.governor_interval == 0 {
             self.governor_interval = 1;
+        }
+        if let Some(escalation) = self.leak_escalation.as_mut() {
+            if escalation.threshold == 0 {
+                escalation.threshold = 1;
+            }
         }
         if self.thread_name_prefix.is_empty() {
             self.thread_name_prefix = "asupersync-worker".to_string();
@@ -378,6 +384,56 @@ mod tests {
             blocking.max_threads
         );
         crate::test_complete!("test_blocking_pool_normalize");
+    }
+
+    #[test]
+    fn test_leak_escalation_new_clamps_zero_threshold() {
+        init_test("test_leak_escalation_new_clamps_zero_threshold");
+        let escalation = LeakEscalation::new(0, ObligationLeakResponse::Panic);
+        crate::assert_with_log!(
+            escalation.threshold == 1,
+            "leak_escalation.threshold",
+            1,
+            escalation.threshold
+        );
+        crate::assert_with_log!(
+            escalation.escalate_to == ObligationLeakResponse::Panic,
+            "leak_escalation.escalate_to",
+            ObligationLeakResponse::Panic,
+            escalation.escalate_to
+        );
+        crate::test_complete!("test_leak_escalation_new_clamps_zero_threshold");
+    }
+
+    #[test]
+    fn test_normalize_clamps_zero_leak_escalation_threshold() {
+        init_test("test_normalize_clamps_zero_leak_escalation_threshold");
+        let mut config = RuntimeConfig {
+            leak_escalation: Some(LeakEscalation {
+                threshold: 0,
+                escalate_to: ObligationLeakResponse::Recover,
+            }),
+            ..RuntimeConfig::default()
+        };
+
+        config.normalize();
+
+        let escalation = config
+            .leak_escalation
+            .expect("leak escalation should remain configured");
+        crate::assert_with_log!(
+            escalation.threshold == 1,
+            "leak_escalation.threshold",
+            1,
+            escalation.threshold
+        );
+        crate::assert_with_log!(
+            escalation.escalate_to == ObligationLeakResponse::Recover,
+            "leak_escalation.escalate_to",
+            ObligationLeakResponse::Recover,
+            escalation.escalate_to
+        );
+        crate::test_complete!("test_normalize_clamps_zero_leak_escalation_threshold");
     }
 
     #[test]
