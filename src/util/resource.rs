@@ -352,7 +352,7 @@ impl std::error::Error for ResourceExhausted {}
 struct ResourceTrackerInner {
     limits: ResourceLimits,
     current: ResourceUsage,
-    observers: Vec<Box<dyn ResourceObserver>>,
+    observers: Vec<Arc<dyn ResourceObserver>>,
     last_pressure: f64,
 }
 
@@ -394,7 +394,7 @@ impl ResourceTracker {
             .lock()
             .expect("lock poisoned")
             .observers
-            .push(observer);
+            .push(Arc::from(observer));
     }
 
     /// Returns the current pressure level (0.0 - 1.0).
@@ -441,21 +441,23 @@ impl ResourceTracker {
 
     /// Attempts to acquire a resource request.
     pub fn try_acquire(&self, usage: ResourceUsage) -> Result<ResourceGuard, ResourceExhausted> {
-        {
+        let batch = {
             let mut inner = self.inner.lock().expect("lock poisoned");
             let mut projected = inner.current;
             projected.add(usage);
 
             if !within_limits(&projected, &inner.limits) {
-                notify_limit_exceeded(&inner, &projected);
+                let batch = prepare_limit_exceeded(&inner, &projected);
                 drop(inner);
+                batch.dispatch();
                 return Err(ResourceExhausted);
             }
 
             inner.current = projected;
-            notify_pressure(&mut inner);
-            drop(inner);
-        }
+            prepare_pressure_notifications(&mut inner)
+        };
+
+        batch.dispatch();
 
         Ok(ResourceGuard {
             inner: Arc::clone(&self.inner),
@@ -472,10 +474,44 @@ pub struct ResourceGuard {
 
 impl Drop for ResourceGuard {
     fn drop(&mut self) {
-        let mut inner = self.inner.lock().expect("lock poisoned");
-        inner.current.sub(self.acquired);
-        notify_pressure(&mut inner);
-        drop(inner);
+        let batch = {
+            let mut inner = self.inner.lock().expect("lock poisoned");
+            inner.current.sub(self.acquired);
+            prepare_pressure_notifications(&mut inner)
+        };
+        batch.dispatch();
+    }
+}
+
+struct NotificationBatch {
+    observers: Vec<Arc<dyn ResourceObserver>>,
+    pressure_change: Option<f64>,
+    approached: Vec<(ResourceKind, f64)>,
+    exceeded: Vec<ResourceKind>,
+}
+
+impl NotificationBatch {
+    fn empty() -> Self {
+        Self {
+            observers: Vec::new(),
+            pressure_change: None,
+            approached: Vec::new(),
+            exceeded: Vec::new(),
+        }
+    }
+
+    fn dispatch(self) {
+        for obs in &self.observers {
+            if let Some(p) = self.pressure_change {
+                obs.on_pressure_change(p);
+            }
+            for (kind, ratio) in &self.approached {
+                obs.on_limit_approached(*kind, *ratio);
+            }
+            for kind in &self.exceeded {
+                obs.on_limit_exceeded(*kind);
+            }
+        }
     }
 }
 
@@ -510,76 +546,71 @@ fn ratio(value: usize, limit: usize) -> f64 {
     }
 }
 
-fn notify_pressure(inner: &mut ResourceTrackerInner) {
+fn prepare_pressure_notifications(inner: &mut ResourceTrackerInner) -> NotificationBatch {
     let pressure = compute_pressure(&inner.current, &inner.limits);
+    let mut batch = NotificationBatch::empty();
+    batch.observers = inner.observers.clone();
+
     if (pressure - inner.last_pressure).abs() > f64::EPSILON {
         inner.last_pressure = pressure;
-        for obs in &inner.observers {
-            obs.on_pressure_change(pressure);
-        }
+        batch.pressure_change = Some(pressure);
     }
 
-    notify_limit_approached(inner, pressure);
-}
-
-fn notify_limit_approached(inner: &ResourceTrackerInner, pressure: f64) {
-    if pressure < 0.8 {
-        return;
-    }
-
-    let ratios = [
-        (
-            ResourceKind::SymbolMemory,
-            ratio(inner.current.symbol_memory, inner.limits.max_symbol_memory),
-        ),
-        (
-            ResourceKind::EncodingOps,
-            ratio(inner.current.encoding_ops, inner.limits.max_encoding_ops),
-        ),
-        (
-            ResourceKind::DecodingOps,
-            ratio(inner.current.decoding_ops, inner.limits.max_decoding_ops),
-        ),
-        (
-            ResourceKind::SymbolsInFlight,
-            ratio(
-                inner.current.symbols_in_flight,
-                inner.limits.max_symbols_in_flight,
+    if pressure >= 0.8 {
+        let ratios = [
+            (
+                ResourceKind::SymbolMemory,
+                ratio(inner.current.symbol_memory, inner.limits.max_symbol_memory),
             ),
-        ),
-    ];
+            (
+                ResourceKind::EncodingOps,
+                ratio(inner.current.encoding_ops, inner.limits.max_encoding_ops),
+            ),
+            (
+                ResourceKind::DecodingOps,
+                ratio(inner.current.decoding_ops, inner.limits.max_decoding_ops),
+            ),
+            (
+                ResourceKind::SymbolsInFlight,
+                ratio(
+                    inner.current.symbols_in_flight,
+                    inner.limits.max_symbols_in_flight,
+                ),
+            ),
+        ];
 
-    for (kind, ratio) in ratios {
-        if ratio >= 0.8 {
-            for obs in &inner.observers {
-                obs.on_limit_approached(kind, ratio);
+        for (kind, ratio) in ratios {
+            if ratio >= 0.8 {
+                batch.approached.push((kind, ratio));
             }
         }
     }
+
+    batch
 }
 
-fn notify_limit_exceeded(inner: &ResourceTrackerInner, projected: &ResourceUsage) {
+fn prepare_limit_exceeded(
+    inner: &ResourceTrackerInner,
+    projected: &ResourceUsage,
+) -> NotificationBatch {
+    let mut batch = NotificationBatch::empty();
+    batch.observers = inner.observers.clone();
     let limits = &inner.limits;
+
     if projected.symbol_memory > limits.max_symbol_memory {
-        for obs in &inner.observers {
-            obs.on_limit_exceeded(ResourceKind::SymbolMemory);
-        }
+        batch.exceeded.push(ResourceKind::SymbolMemory);
     }
     if projected.encoding_ops > limits.max_encoding_ops {
-        for obs in &inner.observers {
-            obs.on_limit_exceeded(ResourceKind::EncodingOps);
-        }
+        batch.exceeded.push(ResourceKind::EncodingOps);
     }
     if projected.decoding_ops > limits.max_decoding_ops {
-        for obs in &inner.observers {
-            obs.on_limit_exceeded(ResourceKind::DecodingOps);
-        }
+        batch.exceeded.push(ResourceKind::DecodingOps);
     }
     if projected.symbols_in_flight > limits.max_symbols_in_flight {
-        for obs in &inner.observers {
-            obs.on_limit_exceeded(ResourceKind::SymbolsInFlight);
-        }
+        batch.exceeded.push(ResourceKind::SymbolsInFlight);
     }
+    
+    batch
 }
 
 #[cfg(test)]
