@@ -187,11 +187,30 @@ fn progress_and_canonical_families_cover_required_ladders() {
         "leaked_obligation_stable",
         "resolved_obligation_stable",
     ]);
+    let required_task_canonical_forms = BTreeSet::from([
+        "task_cancel_requested_canonical_form",
+        "task_cancelling_canonical_form",
+        "task_finalizing_canonical_form",
+    ]);
+    let required_region_canonical_forms = BTreeSet::from([
+        "region_closing_canonical_form",
+        "region_draining_canonical_form",
+        "region_finalizing_canonical_form",
+    ]);
+    let required_obligation_canonical_forms = BTreeSet::from([
+        "obligation_reserved_canonical_form",
+        "obligation_committed_canonical_form",
+        "obligation_aborted_canonical_form",
+        "obligation_leaked_canonical_form",
+    ]);
 
     for theorem in required_cancel_ladder
         .iter()
         .chain(required_close_ladder.iter())
         .chain(required_obligation_lifecycle.iter())
+        .chain(required_task_canonical_forms.iter())
+        .chain(required_region_canonical_forms.iter())
+        .chain(required_obligation_canonical_forms.iter())
     {
         assert!(
             theorem_names.contains(theorem),
