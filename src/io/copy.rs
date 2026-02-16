@@ -545,9 +545,13 @@ where
             }
 
             if !made_progress {
-                // Check if both are done
-                let a_to_b_done = this.a_to_b.read_done && this.a_to_b.pos >= this.a_to_b.cap;
-                let b_to_a_done = this.b_to_a.read_done && this.b_to_a.pos >= this.b_to_a.cap;
+                // Check if both are done (read complete, buffer flushed, AND shutdown complete)
+                let a_to_b_done = this.a_to_b.read_done
+                    && this.a_to_b.pos >= this.a_to_b.cap
+                    && this.a_to_b.shutdown_done;
+                let b_to_a_done = this.b_to_a.read_done
+                    && this.b_to_a.pos >= this.b_to_a.cap
+                    && this.b_to_a.shutdown_done;
 
                 if a_to_b_done && b_to_a_done {
                     return Poll::Ready(Ok((this.a_to_b_total, this.b_to_a_total)));
@@ -816,5 +820,77 @@ mod tests {
         crate::assert_with_log!(a_to_b == 0, "a_to_b", 0, a_to_b);
         crate::assert_with_log!(b_to_a == 0, "b_to_a", 0, b_to_a);
         crate::test_complete!("copy_bidirectional_empty");
+    }
+
+    /// Duplex that defers shutdown by returning Pending on the first call.
+    struct DeferredShutdownDuplex {
+        inner: TestDuplex,
+        shutdown_poll_count: usize,
+    }
+
+    impl DeferredShutdownDuplex {
+        fn new(read_data: &[u8]) -> Self {
+            Self {
+                inner: TestDuplex::new(read_data),
+                shutdown_poll_count: 0,
+            }
+        }
+    }
+
+    impl AsyncRead for DeferredShutdownDuplex {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for DeferredShutdownDuplex {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            this.shutdown_poll_count += 1;
+            if this.shutdown_poll_count <= 1 {
+                // Defer: register waker and return Pending on first call.
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                this.inner.shutdown_called = true;
+                Poll::Ready(Ok(()))
+            }
+        }
+    }
+
+    #[test]
+    fn copy_bidirectional_waits_for_shutdown_completion() {
+        init_test("copy_bidirectional_waits_for_shutdown_completion");
+        let mut a = DeferredShutdownDuplex::new(b"hello");
+        let mut b = DeferredShutdownDuplex::new(b"world");
+        let mut fut = copy_bidirectional(&mut a, &mut b);
+        let mut fut = Pin::new(&mut fut);
+        let (a_to_b, b_to_a) = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .unwrap();
+        crate::assert_with_log!(a_to_b == 5, "a_to_b", 5, a_to_b);
+        crate::assert_with_log!(b_to_a == 5, "b_to_a", 5, b_to_a);
+        // Both sides must have completed shutdown.
+        let a_shut = a.inner.shutdown_called;
+        let b_shut = b.inner.shutdown_called;
+        crate::assert_with_log!(a_shut, "a shutdown done", true, a_shut);
+        crate::assert_with_log!(b_shut, "b shutdown done", true, b_shut);
+        crate::test_complete!("copy_bidirectional_waits_for_shutdown_completion");
     }
 }
