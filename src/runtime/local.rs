@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 thread_local! {
     /// Local tasks stored on the current thread.
-    static LOCAL_TASKS: RefCell<BTreeMap<TaskId, LocalStoredTask>> = RefCell::new(BTreeMap::new());
+    static LOCAL_TASKS: RefCell<BTreeMap<TaskId, LocalStoredTask>> = const { RefCell::new(BTreeMap::new()) };
 }
 
 /// Stores a local task in the current thread's storage.
@@ -21,8 +21,12 @@ thread_local! {
 pub fn store_local_task(task_id: TaskId, task: LocalStoredTask) {
     LOCAL_TASKS.with(|tasks| {
         let mut tasks = tasks.borrow_mut();
-        let prev = tasks.insert(task_id, task);
-        assert!(prev.is_none(), "duplicate local task ID: {task_id:?}");
+        if tasks.insert(task_id, task).is_some() {
+            crate::tracing_compat::warn!(
+                task_id = ?task_id,
+                "duplicate local task ID encountered; replacing existing local task entry"
+            );
+        }
     });
 }
 
@@ -36,4 +40,27 @@ pub fn remove_local_task(task_id: TaskId) -> Option<LocalStoredTask> {
 #[must_use]
 pub fn local_task_count() -> usize {
     LOCAL_TASKS.with(|tasks| tasks.borrow().len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Outcome;
+
+    #[test]
+    fn duplicate_store_replaces_entry_without_panicking() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("duplicate_store_replaces_entry_without_panicking");
+
+        let task_id = TaskId::new_for_test(42_424, 0);
+        let _ = remove_local_task(task_id);
+        let baseline = local_task_count();
+
+        store_local_task(task_id, LocalStoredTask::new(async { Outcome::Ok(()) }));
+        store_local_task(task_id, LocalStoredTask::new(async { Outcome::Ok(()) }));
+
+        assert_eq!(local_task_count(), baseline + 1);
+        assert!(remove_local_task(task_id).is_some());
+        assert_eq!(local_task_count(), baseline);
+    }
 }

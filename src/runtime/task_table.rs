@@ -113,7 +113,12 @@ impl TaskTable {
     where
         F: FnOnce(ArenaIndex) -> TaskRecord,
     {
-        self.tasks.insert_with(f)
+        self.tasks.insert_with(|idx| {
+            let mut record = f(idx);
+            // Preserve TaskTable invariant: record.id must match arena slot.
+            record.id = TaskId::from_arena(idx);
+            record
+        })
     }
 
     /// Removes a task record from the arena.
@@ -300,5 +305,20 @@ mod tests {
         assert!(removed.is_some());
         assert_eq!(table.stored_future_count(), 0);
         assert!(table.get_stored_future(canonical_id).is_none());
+    }
+
+    #[test]
+    fn insert_task_with_canonicalizes_record_id() {
+        let mut table = TaskTable::new();
+        let owner = RegionId::from_arena(ArenaIndex::new(1, 0));
+
+        let idx = table.insert_task_with(|_idx| {
+            // Intentionally stale placeholder to verify table-side canonicalization.
+            TaskRecord::new(TaskId::from_arena(ArenaIndex::new(0, 0)), owner, Budget::INFINITE)
+        });
+
+        let canonical_id = TaskId::from_arena(idx);
+        let record = table.task(canonical_id).expect("task should exist");
+        assert_eq!(record.id, canonical_id);
     }
 }
