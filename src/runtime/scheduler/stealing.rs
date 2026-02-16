@@ -16,13 +16,18 @@ pub fn steal_task(stealers: &[Stealer], rng: &mut DetRng) -> Option<TaskId> {
     let start = rng.next_usize(len);
 
     for i in 0..len {
-        let idx = (start + i) % len;
+        let idx = circular_index(start, i, len);
         if let Some(task) = stealers[idx].steal() {
             return Some(task);
         }
     }
 
     None
+}
+
+fn circular_index(start: usize, offset: usize, len: usize) -> usize {
+    debug_assert!(len > 0);
+    start.wrapping_add(offset) % len
 }
 
 #[cfg(test)]
@@ -187,5 +192,15 @@ mod tests {
         let result2 = steal_task(&stealers_b, &mut rng2);
 
         assert_eq!(result1, result2, "same seed should give same steal target");
+    }
+
+    #[test]
+    fn test_circular_index_wraps_without_overflow() {
+        let len = usize::MAX;
+        let start = usize::MAX - 1;
+        let offset = 3;
+
+        let idx = circular_index(start, offset, len);
+        assert_eq!(idx, 1);
     }
 }

@@ -176,6 +176,10 @@ impl Worker {
             let mut backoff = 0;
 
             loop {
+                if self.shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+
                 // Check queues again (abbreviated check)
                 if !self.local.is_empty() || !self.global.is_empty() {
                     break;
@@ -188,7 +192,9 @@ impl Worker {
                     std::thread::yield_now();
                     backoff += 1;
                 } else {
-                    self.parker.park();
+                    // Use a short timeout so shutdown is observed even if no explicit
+                    // unpark signal is delivered while this worker is parked.
+                    self.parker.park_timeout(Duration::from_millis(1));
                     break;
                 }
             }
@@ -896,6 +902,46 @@ mod tests {
         assert_eq!(
             total, 80,
             "backoff should be 64 spins + 16 yields before park"
+        );
+    }
+
+    #[test]
+    fn test_worker_shutdown_observed_without_explicit_unpark() {
+        use crate::runtime::RuntimeState;
+        use crate::sync::ContendedMutex;
+        use std::sync::mpsc;
+
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let global = Arc::new(GlobalQueue::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let mut worker = Worker::new(
+            0,
+            Vec::new(),
+            Arc::clone(&global),
+            Arc::clone(&state),
+            Arc::clone(&shutdown),
+        );
+
+        let (tx, rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let start = Instant::now();
+            worker.run_loop();
+            tx.send(start.elapsed())
+                .expect("worker shutdown timing send should succeed");
+        });
+
+        thread::sleep(Duration::from_millis(20));
+        shutdown.store(true, Ordering::Relaxed);
+
+        let elapsed = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker should observe shutdown without explicit unpark");
+        handle.join().expect("worker thread should join");
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "worker should exit promptly after shutdown, elapsed={elapsed:?}"
         );
     }
 
