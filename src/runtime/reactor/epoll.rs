@@ -241,6 +241,8 @@ impl Reactor for EpollReactor {
         // SAFETY: We stored the raw_fd during registration and trust it's still valid.
         // The caller is responsible for ensuring the fd remains valid until deregistered.
         let borrowed_fd = unsafe { BorrowedFd::borrow_raw(info.raw_fd) };
+        // Determine whether the target fd itself is valid so EBADF can be
+        // interpreted correctly (target closed vs reactor poller invalid).
         let fd_still_valid = unsafe { fcntl(info.raw_fd, F_GETFD) } != -1;
 
         // Remove from epoll. If the fd was already closed or removed by the kernel,
