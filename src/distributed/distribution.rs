@@ -6,12 +6,29 @@
 use crate::combinator::quorum::{quorum_outcomes, QuorumResult};
 use crate::error::ErrorKind;
 use crate::record::distributed_region::{ConsistencyLevel, ReplicaInfo};
+use crate::security::authenticated::AuthenticatedSymbol;
+use crate::security::SecurityContext;
 use crate::types::symbol::ObjectId;
 use crate::types::{Outcome, Time};
+use std::future::Future;
 use std::time::Duration;
 
 use super::assignment::{AssignmentStrategy, SymbolAssigner};
 use super::encoding::EncodedState;
+
+// ---------------------------------------------------------------------------
+// DistributorTransport
+// ---------------------------------------------------------------------------
+
+/// Transport interface for distributing symbols.
+pub trait DistributorTransport {
+    /// Sends a batch of symbols to a replica.
+    fn send_symbols(
+        &self,
+        replica_id: &str,
+        symbols: Vec<AuthenticatedSymbol>,
+    ) -> impl Future<Output = Result<ReplicaAck, ReplicaFailure>> + Send;
+}
 
 // ---------------------------------------------------------------------------
 // DistributionConfig
@@ -140,6 +157,49 @@ impl SymbolDistributor {
     #[must_use]
     pub fn config(&self) -> &DistributionConfig {
         &self.config
+    }
+
+    /// Distributes symbols to replicas using the provided transport.
+    ///
+    /// This orchestrates the assignment, signing, and transmission of symbols.
+    pub async fn distribute<T: DistributorTransport>(
+        &mut self,
+        encoded: &EncodedState,
+        replicas: &[ReplicaInfo],
+        transport: &T,
+        auth_context: &SecurityContext,
+    ) -> DistributionResult {
+        let start = std::time::Instant::now();
+        let assignments = Self::compute_assignments(encoded, replicas);
+        let mut outcomes = Vec::with_capacity(assignments.len());
+
+        for assignment in assignments {
+            let replica_id = assignment.replica_id.clone();
+            let symbols_for_replica: Vec<AuthenticatedSymbol> = assignment
+                .symbol_indices
+                .iter()
+                .map(|&idx| {
+                    let sym = &encoded.symbols[idx];
+                    auth_context.sign_symbol(sym)
+                })
+                .collect();
+
+            if symbols_for_replica.is_empty() {
+                continue;
+            }
+
+            // TODO: Execute these concurrently (respecting max_concurrent)
+            let result = transport
+                .send_symbols(&replica_id, symbols_for_replica)
+                .await;
+
+            outcomes.push(match result {
+                Ok(ack) => Outcome::Ok(ack),
+                Err(fail) => Outcome::Err(fail),
+            });
+        }
+
+        self.evaluate_outcomes(encoded, replicas, outcomes, start.elapsed())
     }
 
     /// Computes the required acknowledgement count for the given consistency
