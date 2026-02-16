@@ -25,11 +25,11 @@
 //! ```
 
 use crate::types::{RegionId, TaskId, Time};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// A unique identifier for an RRef allocation, combining region and heap index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RRefId {
     /// The region that owns this RRef.
     pub owner_region: RegionId,
@@ -139,11 +139,11 @@ impl std::error::Error for RRefAccessViolation {}
 #[derive(Debug, Default)]
 pub struct RRefAccessOracle {
     /// Active RRefs by owner region.
-    rrefs: HashMap<RRefId, RegionId>,
+    rrefs: BTreeMap<RRefId, RegionId>,
     /// Set of regions that are closed.
-    closed_regions: HashMap<RegionId, Time>,
+    closed_regions: BTreeMap<RegionId, Time>,
     /// Task-to-region mapping.
-    task_regions: HashMap<TaskId, RegionId>,
+    task_regions: BTreeMap<TaskId, RegionId>,
     /// Violations detected so far.
     violations: Vec<RRefAccessViolation>,
 }

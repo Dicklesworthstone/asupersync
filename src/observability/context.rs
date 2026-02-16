@@ -4,7 +4,7 @@
 //! structured fields across asynchronous boundaries.
 
 use crate::types::{RegionId, TaskId};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -52,7 +52,7 @@ pub struct DiagnosticContext {
     region_id: Option<RegionId>,
     span_id: Option<SpanId>,
     parent_span_id: Option<SpanId>,
-    custom: HashMap<String, String>,
+    custom: BTreeMap<String, String>,
     max_completed_spans: usize,
 }
 

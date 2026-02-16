@@ -16,13 +16,13 @@
 //! - Idle connection timeout
 //! - Connection health checks
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crate::types::Time;
 
 /// Connection pool key identifying a specific host.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PoolKey {
     /// Host name or IP address.
     pub host: String,
@@ -240,13 +240,13 @@ pub struct PoolStats {
 #[derive(Debug)]
 struct HostPool {
     /// Connections for this host (by connection ID).
-    connections: HashMap<u64, PooledConnectionMeta>,
+    connections: BTreeMap<u64, PooledConnectionMeta>,
 }
 
 impl HostPool {
     fn new() -> Self {
         Self {
-            connections: HashMap::new(),
+            connections: BTreeMap::new(),
         }
     }
 
@@ -285,11 +285,13 @@ pub struct Pool {
     /// Pool configuration.
     config: PoolConfig,
     /// Connections organized by host.
-    hosts: HashMap<PoolKey, HostPool>,
+    hosts: BTreeMap<PoolKey, HostPool>,
     /// Next connection ID.
     next_id: u64,
     /// Lifetime statistics.
     stats: PoolStats,
+    /// Last time cleanup was run.
+    last_cleanup: Time,
 }
 
 impl Pool {
@@ -304,9 +306,10 @@ impl Pool {
     pub fn with_config(config: PoolConfig) -> Self {
         Self {
             config,
-            hosts: HashMap::new(),
+            hosts: BTreeMap::new(),
             next_id: 1,
             stats: PoolStats::default(),
+            last_cleanup: Time::ZERO,
         }
     }
 
@@ -340,7 +343,7 @@ impl Pool {
     ///
     /// Returns the connection ID if an idle connection is available.
     pub fn try_acquire(&mut self, key: &PoolKey, now: Time) -> Option<u64> {
-        let _ = self.cleanup_expired(now);
+        self.maybe_cleanup(now);
         let host_pool = self.hosts.get_mut(key)?;
 
         // Find an idle connection that's not expired
@@ -369,7 +372,7 @@ impl Pool {
     /// so stale entries do not block new connections.
     #[must_use]
     pub fn can_create_connection(&mut self, key: &PoolKey, now: Time) -> bool {
-        let _ = self.cleanup_expired(now);
+        self.maybe_cleanup(now);
         // Check total connection limit
         let total = self
             .hosts
@@ -388,6 +391,14 @@ impl Pool {
         }
 
         true
+    }
+
+    fn maybe_cleanup(&mut self, now: Time) {
+        let elapsed = now.as_nanos().saturating_sub(self.last_cleanup.as_nanos());
+        if elapsed >= self.config.cleanup_interval.as_nanos() as u64 {
+            self.cleanup_expired(now);
+            self.last_cleanup = now;
+        }
     }
 
     /// Registers a new connection being established.

@@ -344,7 +344,7 @@ fn emit_fault_evidence(sink: &dyn EvidenceSink, fault_type: &str, context: &str)
         component: "channel_fault".to_string(),
         action: format!("inject_{fault_type}"),
         posterior: vec![1.0],
-        expected_loss_by_action: std::collections::HashMap::from([(
+        expected_loss_by_action: std::collections::BTreeMap::from([(
             format!("inject_{fault_type}"),
             0.0,
         )]),

@@ -32,7 +32,7 @@ use crate::time::TimerDriverHandle;
 use crate::tracing_compat::{debug, info, trace, warn};
 use crate::types::Time;
 use crate::types::{ObligationId, RegionId, TaskId};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
@@ -140,7 +140,7 @@ impl From<ObligationState> for ObligationStateInfo {
 #[derive(Debug, Clone, Default)]
 pub struct ObligationSummary {
     /// Obligations grouped by type.
-    pub by_type: HashMap<String, TypeSummary>,
+    pub by_type: BTreeMap<String, TypeSummary>,
     /// Total active obligations.
     pub total_active: usize,
     /// Total potential leaks (above age threshold).
@@ -310,7 +310,7 @@ impl ObligationTracker {
     #[must_use]
     pub fn summary(&self) -> ObligationSummary {
         let obligations = self.list_obligations();
-        let mut by_type: HashMap<String, TypeSummary> = HashMap::new();
+        let mut by_type: BTreeMap<String, TypeSummary> = BTreeMap::new();
         let mut potential_leaks = 0;
         let mut age_warnings = 0;
 

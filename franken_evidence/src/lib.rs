@@ -12,7 +12,7 @@
 //! ├── component           : String    (producing subsystem)
 //! ├── action              : String    (decision taken)
 //! ├── posterior            : Vec<f64>  (probability distribution, sums to ~1.0)
-//! ├── expected_loss_by_action : HashMap<String, f64>  (loss per candidate action)
+//! ├── expected_loss_by_action : BTreeMap<String, f64>  (loss per candidate action)
 //! ├── chosen_expected_loss : f64      (loss of the selected action)
 //! ├── calibration_score   : f64       (calibration quality, [0, 1])
 //! ├── fallback_active     : bool      (true if fallback heuristic fired)
@@ -46,7 +46,7 @@
 pub mod export;
 pub mod render;
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -79,7 +79,7 @@ pub struct EvidenceLedger {
 
     /// Expected loss for each candidate action.
     #[serde(rename = "el")]
-    pub expected_loss_by_action: HashMap<String, f64>,
+    pub expected_loss_by_action: BTreeMap<String, f64>,
 
     /// Expected loss of the *chosen* action.
     #[serde(rename = "cel")]
@@ -264,7 +264,7 @@ pub struct EvidenceLedgerBuilder {
     component: Option<String>,
     action: Option<String>,
     posterior: Option<Vec<f64>>,
-    expected_loss_by_action: HashMap<String, f64>,
+    expected_loss_by_action: BTreeMap<String, f64>,
     chosen_expected_loss: Option<f64>,
     calibration_score: Option<f64>,
     fallback_active: bool,

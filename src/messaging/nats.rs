@@ -19,7 +19,7 @@ use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWriteExt, ReadBuf};
 use crate::net::TcpStream;
 use crate::tracing_compat::warn;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::pin::Pin;
@@ -356,7 +356,7 @@ struct SubscriptionState {
 
 /// Shared state between client and subscriptions.
 struct SharedState {
-    subscriptions: Mutex<HashMap<u64, SubscriptionState>>,
+    subscriptions: Mutex<BTreeMap<u64, SubscriptionState>>,
     server_info: Mutex<Option<ServerInfo>>,
     closed: std::sync::atomic::AtomicBool,
 }
@@ -364,7 +364,7 @@ struct SharedState {
 impl SharedState {
     fn new() -> Self {
         Self {
-            subscriptions: Mutex::new(HashMap::new()),
+            subscriptions: Mutex::new(BTreeMap::new()),
             server_info: Mutex::new(None),
             closed: std::sync::atomic::AtomicBool::new(false),
         }

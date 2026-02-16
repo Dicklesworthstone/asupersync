@@ -505,7 +505,7 @@ fn emit_crash_evidence(sink: &Arc<dyn EvidenceSink>, action: &str, count: u32) {
         component: "channel_crash".to_string(),
         action: format!("inject_{action}"),
         posterior: vec![1.0],
-        expected_loss_by_action: std::collections::HashMap::from([(
+        expected_loss_by_action: std::collections::BTreeMap::from([(
             format!("inject_{action}"),
             0.0,
         )]),

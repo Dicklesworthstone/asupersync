@@ -29,7 +29,7 @@
 //! }
 //! ```
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -693,7 +693,7 @@ impl BulkheadPolicyBuilder {
 
 /// Registry for managing multiple named bulkheads.
 pub struct BulkheadRegistry {
-    bulkheads: RwLock<HashMap<String, Arc<Bulkhead>>>,
+    bulkheads: RwLock<BTreeMap<String, Arc<Bulkhead>>>,
     default_policy: BulkheadPolicy,
 }
 
@@ -702,7 +702,7 @@ impl BulkheadRegistry {
     #[must_use]
     pub fn new(default_policy: BulkheadPolicy) -> Self {
         Self {
-            bulkheads: RwLock::new(HashMap::new()),
+            bulkheads: RwLock::new(BTreeMap::new()),
             default_policy,
         }
     }
@@ -741,7 +741,7 @@ impl BulkheadRegistry {
 
     /// Get metrics for all bulkheads.
     #[must_use]
-    pub fn all_metrics(&self) -> HashMap<String, BulkheadMetrics> {
+    pub fn all_metrics(&self) -> BTreeMap<String, BulkheadMetrics> {
         let bulkheads = self.bulkheads.read().expect("lock poisoned");
         bulkheads
             .iter()

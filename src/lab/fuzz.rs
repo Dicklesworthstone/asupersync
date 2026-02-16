@@ -6,7 +6,7 @@
 
 use crate::lab::config::LabConfig;
 use crate::lab::runtime::{InvariantViolation, LabRuntime};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Configuration for the deterministic fuzzer.
 #[derive(Debug, Clone)]
@@ -84,7 +84,7 @@ pub struct FuzzReport {
     /// Findings (seeds that triggered violations).
     pub findings: Vec<FuzzFinding>,
     /// Violation counts by category.
-    pub violation_counts: HashMap<String, usize>,
+    pub violation_counts: BTreeMap<String, usize>,
     /// Certificate hashes seen (for determinism verification).
     pub unique_certificates: usize,
 }
@@ -137,8 +137,8 @@ impl FuzzHarness {
         F: Fn(&mut LabRuntime),
     {
         let mut findings = Vec::new();
-        let mut violation_counts: HashMap<String, usize> = HashMap::new();
-        let mut certificate_hashes = std::collections::HashSet::new();
+        let mut violation_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut certificate_hashes = std::collections::BTreeSet::new();
 
         for i in 0..self.config.iterations {
             let seed = self.config.base_seed.wrapping_add(i as u64);
@@ -340,7 +340,7 @@ mod tests {
                 certificate_hash: 123,
                 minimized_seed: Some(3),
             }],
-            violation_counts: HashMap::new(),
+            violation_counts: BTreeMap::new(),
             unique_certificates: 1,
         };
 

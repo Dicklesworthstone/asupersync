@@ -36,7 +36,7 @@
 use crate::cx::Cx;
 use crate::runtime::blocking_pool::{BlockingPool, BlockingPoolHandle};
 use crate::types::{CancelReason, Outcome};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -189,14 +189,14 @@ impl fmt::Display for SqliteValue {
 #[derive(Debug, Clone)]
 pub struct SqliteRow {
     /// Column names to indices mapping.
-    columns: Arc<HashMap<String, usize>>,
+    columns: Arc<BTreeMap<String, usize>>,
     /// Row values.
     values: Vec<SqliteValue>,
 }
 
 impl SqliteRow {
     /// Creates a new row from column names and values.
-    fn new(columns: Arc<HashMap<String, usize>>, values: Vec<SqliteValue>) -> Self {
+    fn new(columns: Arc<BTreeMap<String, usize>>, values: Vec<SqliteValue>) -> Self {
         Self { columns, values }
     }
 
@@ -535,7 +535,7 @@ impl SqliteConnection {
                 // Build column map
                 let column_names: Vec<String> =
                     stmt.column_names().iter().map(|s| s.to_string()).collect();
-                let columns: HashMap<String, usize> = column_names
+                let columns: BTreeMap<String, usize> = column_names
                     .iter()
                     .enumerate()
                     .map(|(i, name)| (name.clone(), i))
@@ -843,7 +843,7 @@ mod tests {
 
     #[test]
     fn test_sqlite_row_accessors() {
-        let mut columns = HashMap::new();
+        let mut columns = BTreeMap::new();
         columns.insert("id".to_string(), 0);
         columns.insert("name".to_string(), 1);
         let columns = Arc::new(columns);

@@ -5,7 +5,7 @@
 
 use super::exit::ExitCode;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Structured error following RFC 9457 (Problem Details) style.
 ///
@@ -32,8 +32,8 @@ pub struct CliError {
     pub docs_url: Option<String>,
 
     /// Additional context (varies by error type).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub context: HashMap<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub context: BTreeMap<String, serde_json::Value>,
 
     /// Exit code for this error.
     pub exit_code: i32,
@@ -49,7 +49,7 @@ impl CliError {
             detail: String::new(),
             suggestion: None,
             docs_url: None,
-            context: HashMap::new(),
+            context: BTreeMap::new(),
             exit_code: ExitCode::RUNTIME_ERROR,
         }
     }

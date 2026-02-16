@@ -16,7 +16,7 @@
 //! Since Creusot/Verus are not configured in the project build, this module
 //! encodes the proof as machine-checkable Rust:
 //!
-//! 1. **Ghost state** tracks ownership claims as a `HashMap<PermitId, TaskId>`.
+//! 1. **Ghost state** tracks ownership claims as a `BTreeMap<PermitId, TaskId>`.
 //!    The ghost map acts as the model for the `Excl(ObligationState)` resource
 //!    algebra from the Separation Logic specifications (bd-1xwvk.1).
 //!
@@ -123,7 +123,7 @@
 use crate::obligation::marking::{MarkingEvent, MarkingEventKind};
 use crate::record::ObligationKind;
 use crate::types::{ObligationId, RegionId, TaskId, Time};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 // ============================================================================
@@ -142,9 +142,9 @@ use std::fmt;
 #[derive(Debug, Clone)]
 struct GhostPermitMap {
     /// Active permits: `obligation_id → GhostEntry`.
-    active: HashMap<ObligationId, GhostEntry>,
+    active: BTreeMap<ObligationId, GhostEntry>,
     /// Consumed permits (for use-after-release detection).
-    consumed: HashMap<ObligationId, ConsumedEntry>,
+    consumed: BTreeMap<ObligationId, ConsumedEntry>,
 }
 
 /// Ghost state for one live permit.
@@ -186,8 +186,8 @@ enum ConsumedHow {
 impl GhostPermitMap {
     fn new() -> Self {
         Self {
-            active: HashMap::new(),
-            consumed: HashMap::new(),
+            active: BTreeMap::new(),
+            consumed: BTreeMap::new(),
         }
     }
 
@@ -951,7 +951,7 @@ impl NoAliasingProver {
     fn check_frame_preservation(&mut self, operated_on: ObligationId, time: Time) {
         self.frame_checks += 1;
 
-        // The ghost map is a HashMap — operations on one key don't
+        // The ghost map is a BTreeMap — operations on one key don't
         // affect others by construction. We verify this explicitly
         // by checking that all other active entries still have exactly
         // one holder.
@@ -959,7 +959,7 @@ impl NoAliasingProver {
             if id == operated_on {
                 continue;
             }
-            let count = 1; // By HashMap invariant, each key maps to one entry.
+            let count = 1; // By BTreeMap invariant, each key maps to one entry.
             if count != 1 {
                 self.counterexamples.push(Counterexample {
                     violation: ViolationKind::DoubleOwnership,

@@ -48,7 +48,7 @@
 //! ```
 
 use crate::EvidenceLedger;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt::Write;
 
 // ANSI escape codes.
@@ -389,14 +389,14 @@ fn render_calibration_gauge(out: &mut String, score: f64) {
 /// from the same component.
 pub struct DiffContext {
     /// Recent entries keyed by component name.
-    recent: HashMap<String, EvidenceLedger>,
+    recent: BTreeMap<String, EvidenceLedger>,
 }
 
 impl DiffContext {
     /// Create a new empty diff context.
     pub fn new() -> Self {
         Self {
-            recent: HashMap::new(),
+            recent: BTreeMap::new(),
         }
     }
 

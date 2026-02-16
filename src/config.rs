@@ -13,7 +13,7 @@ use crate::http::h1::server::Http1Config;
 use crate::http::pool::PoolConfig;
 use crate::observability::{LogLevel, ObservabilityConfig};
 use crate::security::AuthMode;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -487,7 +487,7 @@ impl RuntimeProfile {
 pub struct ConfigLoader {
     profile: RuntimeProfile,
     file_path: Option<PathBuf>,
-    overrides: HashMap<String, String>,
+    overrides: BTreeMap<String, String>,
 }
 
 impl ConfigLoader {
@@ -497,7 +497,7 @@ impl ConfigLoader {
         Self {
             profile: RuntimeProfile::Development,
             file_path: None,
-            overrides: HashMap::new(),
+            overrides: BTreeMap::new(),
         }
     }
 
@@ -612,7 +612,7 @@ fn load_from_file(path: &Path, profile: &RuntimeProfile) -> Result<RaptorQConfig
 }
 
 fn apply_env_overrides(config: &mut RaptorQConfig) -> Result<(), ConfigError> {
-    let mut overrides = HashMap::new();
+    let mut overrides = BTreeMap::new();
     for (key, value) in std::env::vars() {
         if key.starts_with("RAPTORQ_") {
             overrides.insert(key, value);
@@ -623,7 +623,7 @@ fn apply_env_overrides(config: &mut RaptorQConfig) -> Result<(), ConfigError> {
 
 fn apply_overrides(
     config: &mut RaptorQConfig,
-    overrides: &HashMap<String, String>,
+    overrides: &BTreeMap<String, String>,
 ) -> Result<(), ConfigError> {
     for (key, value) in overrides {
         apply_env_override(config, key, value)?;

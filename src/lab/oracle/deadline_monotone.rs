@@ -37,7 +37,7 @@
 //! ```
 
 use crate::types::{Budget, RegionId, Time};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// A deadline monotonicity violation.
@@ -95,7 +95,7 @@ struct RegionDeadlineEntry {
 #[derive(Debug, Default)]
 pub struct DeadlineMonotoneOracle {
     /// Region deadline entries: region -> entry.
-    regions: HashMap<RegionId, RegionDeadlineEntry>,
+    regions: BTreeMap<RegionId, RegionDeadlineEntry>,
     /// Detected violations.
     violations: Vec<DeadlineMonotoneViolation>,
 }

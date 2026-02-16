@@ -17,7 +17,7 @@ use crate::types::{ObjectId, ObjectParams, Symbol, SymbolKind};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::any::TypeId;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
@@ -159,7 +159,7 @@ pub struct TypeDescriptor {
 /// Registry for known types.
 #[derive(Debug, Default)]
 pub struct TypeRegistry {
-    types: HashMap<TypeId, TypeDescriptor>,
+    types: BTreeMap<TypeId, TypeDescriptor>,
 }
 
 impl TypeRegistry {
@@ -167,7 +167,7 @@ impl TypeRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            types: HashMap::new(),
+            types: BTreeMap::new(),
         }
     }
 

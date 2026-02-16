@@ -3,7 +3,7 @@
 //! Provides counters, gauges, and histograms for runtime statistics.
 
 use crate::types::{CancelKind, Outcome, RegionId, TaskId};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -173,9 +173,9 @@ impl Histogram {
 /// A collection of metrics.
 #[derive(Debug, Default)]
 pub struct Metrics {
-    counters: HashMap<String, Arc<Counter>>,
-    gauges: HashMap<String, Arc<Gauge>>,
-    histograms: HashMap<String, Arc<Histogram>>,
+    counters: BTreeMap<String, Arc<Counter>>,
+    gauges: BTreeMap<String, Arc<Gauge>>,
+    histograms: BTreeMap<String, Arc<Histogram>>,
 }
 
 impl Metrics {

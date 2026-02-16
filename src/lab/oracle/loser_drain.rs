@@ -26,7 +26,7 @@
 //! ```
 
 use crate::types::{RegionId, TaskId, Time};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// A loser drain violation.
@@ -89,11 +89,11 @@ struct RaceCompleteRecord {
 #[derive(Debug, Default)]
 pub struct LoserDrainOracle {
     /// Active races: race_id -> RaceRecord.
-    active_races: HashMap<u64, RaceRecord>,
+    active_races: BTreeMap<u64, RaceRecord>,
     /// Completed races: race_id -> RaceCompleteRecord.
-    completed_races: HashMap<u64, RaceCompleteRecord>,
+    completed_races: BTreeMap<u64, RaceCompleteRecord>,
     /// Task completion times: task -> completion_time.
-    task_completions: HashMap<TaskId, Time>,
+    task_completions: BTreeMap<TaskId, Time>,
     /// Next race ID.
     next_race_id: u64,
 }

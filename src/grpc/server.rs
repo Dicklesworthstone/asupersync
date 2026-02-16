@@ -2,7 +2,7 @@
 //!
 //! Provides the server-side infrastructure for hosting gRPC services.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -52,7 +52,7 @@ pub struct ServerBuilder {
     /// Server configuration.
     config: ServerConfig,
     /// Registered services.
-    services: HashMap<String, Arc<dyn ServiceHandler>>,
+    services: BTreeMap<String, Arc<dyn ServiceHandler>>,
 }
 
 impl std::fmt::Debug for ServerBuilder {
@@ -70,7 +70,7 @@ impl ServerBuilder {
     pub fn new() -> Self {
         Self {
             config: ServerConfig::default(),
-            services: HashMap::new(),
+            services: BTreeMap::new(),
         }
     }
 
@@ -154,7 +154,7 @@ pub struct Server {
     /// Server configuration.
     config: ServerConfig,
     /// Registered services.
-    services: HashMap<String, Arc<dyn ServiceHandler>>,
+    services: BTreeMap<String, Arc<dyn ServiceHandler>>,
 }
 
 impl std::fmt::Debug for Server {
@@ -181,7 +181,7 @@ impl Server {
 
     /// Get the registered services.
     #[must_use]
-    pub fn services(&self) -> &HashMap<String, Arc<dyn ServiceHandler>> {
+    pub fn services(&self) -> &BTreeMap<String, Arc<dyn ServiceHandler>> {
         &self.services
     }
 

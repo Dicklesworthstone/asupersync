@@ -4,7 +4,7 @@
 //! progress, and reports when decode thresholds are reached.
 
 use crate::types::{Symbol, SymbolId, SymbolKind};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::RwLock;
 
 /// Estimated overhead per symbol for bookkeeping.
@@ -90,8 +90,8 @@ pub enum InsertResult {
 /// A collection of symbols with threshold tracking.
 #[derive(Debug)]
 pub struct SymbolSet {
-    symbols: HashMap<SymbolId, Symbol>,
-    block_counts: HashMap<u8, BlockProgress>,
+    symbols: BTreeMap<SymbolId, Symbol>,
+    block_counts: BTreeMap<u8, BlockProgress>,
     total_count: usize,
     total_bytes: usize,
     memory_budget: Option<usize>,
@@ -110,8 +110,8 @@ impl SymbolSet {
     #[must_use]
     pub fn with_config(config: ThresholdConfig) -> Self {
         Self {
-            symbols: HashMap::new(),
-            block_counts: HashMap::new(),
+            symbols: BTreeMap::new(),
+            block_counts: BTreeMap::new(),
             total_count: 0,
             total_bytes: 0,
             memory_budget: None,
@@ -124,8 +124,8 @@ impl SymbolSet {
     #[must_use]
     pub fn with_memory_budget(config: ThresholdConfig, budget_bytes: usize) -> Self {
         Self {
-            symbols: HashMap::new(),
-            block_counts: HashMap::new(),
+            symbols: BTreeMap::new(),
+            block_counts: BTreeMap::new(),
             total_count: 0,
             total_bytes: 0,
             memory_budget: Some(budget_bytes),
@@ -317,14 +317,14 @@ impl SymbolSet {
     }
 
     /// Drains all symbols from the set.
-    pub fn drain(&mut self) -> impl Iterator<Item = (SymbolId, Symbol)> + '_ {
+    pub fn drain(&mut self) -> impl Iterator<Item = (SymbolId, Symbol)> {
         self.block_counts.clear();
         self.total_count = 0;
         self.total_bytes = 0;
         if let Some(budget) = self.memory_budget {
             self.memory_remaining = budget;
         }
-        self.symbols.drain()
+        std::mem::take(&mut self.symbols).into_iter()
     }
 
     /// Clears symbols for a specific block.

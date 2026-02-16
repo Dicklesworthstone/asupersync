@@ -35,7 +35,7 @@ use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -220,7 +220,7 @@ impl From<Stdio> for std_process::Stdio {
 pub struct Command {
     program: OsString,
     args: Vec<OsString>,
-    env: HashMap<OsString, OsString>,
+    env: BTreeMap<OsString, OsString>,
     env_clear: bool,
     current_dir: Option<PathBuf>,
     stdin: Stdio,
@@ -249,7 +249,7 @@ impl Command {
         Self {
             program: program.as_ref().to_os_string(),
             args: Vec::new(),
-            env: HashMap::new(),
+            env: BTreeMap::new(),
             env_clear: false,
             current_dir: None,
             stdin: Stdio::default(),

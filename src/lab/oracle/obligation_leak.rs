@@ -6,7 +6,7 @@
 use crate::record::{ObligationKind, ObligationState};
 use crate::runtime::RuntimeState;
 use crate::types::{ObligationId, RegionId, TaskId, Time};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// Diagnostic record for a leaked obligation.
@@ -68,7 +68,7 @@ struct ObligationSnapshot {
 /// Oracle that tracks obligation lifecycle events and checks for leaks.
 #[derive(Debug, Default)]
 pub struct ObligationLeakOracle {
-    obligations: HashMap<ObligationId, ObligationSnapshot>,
+    obligations: BTreeMap<ObligationId, ObligationSnapshot>,
     region_closes: Vec<(RegionId, Time)>,
 }
 

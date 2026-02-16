@@ -174,7 +174,7 @@ pub fn emit_scheduler_evidence(
         component: "scheduler".to_string(),
         action: suggestion.to_string(),
         posterior,
-        expected_loss_by_action: std::collections::HashMap::from([
+        expected_loss_by_action: std::collections::BTreeMap::from([
             ("meet_deadlines".to_string(), f64::from(timed_depth)),
             ("drain_cancel".to_string(), f64::from(cancel_depth)),
             ("process_ready".to_string(), f64::from(ready_depth)),
@@ -209,7 +209,7 @@ pub fn emit_cancel_evidence(
         component: "cancellation".to_string(),
         action: format!("cancel_{cancel_kind}"),
         posterior: vec![1.0],
-        expected_loss_by_action: std::collections::HashMap::from([(
+        expected_loss_by_action: std::collections::BTreeMap::from([(
             format!("cancel_{cancel_kind}"),
             0.0,
         )]),
@@ -245,7 +245,7 @@ pub fn emit_budget_evidence(
         component: "budget".to_string(),
         action: format!("exhausted_{exhaustion_kind}"),
         posterior: vec![1.0],
-        expected_loss_by_action: std::collections::HashMap::from([(
+        expected_loss_by_action: std::collections::BTreeMap::from([(
             format!("exhausted_{exhaustion_kind}"),
             0.0,
         )]),

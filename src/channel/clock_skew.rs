@@ -400,7 +400,7 @@ fn emit_skew_evidence(sink: &Arc<dyn EvidenceSink>, action: &str, base_ns: u64, 
         component: "clock_skew_injector".to_string(),
         action: format!("inject_{action}"),
         posterior: vec![1.0],
-        expected_loss_by_action: std::collections::HashMap::from([(
+        expected_loss_by_action: std::collections::BTreeMap::from([(
             format!("inject_{action}"),
             0.0,
         )]),

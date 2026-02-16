@@ -90,7 +90,7 @@
 
 use crate::record::{ObligationKind, ObligationState};
 use crate::types::{ObligationId, RegionId, Time};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 use super::marking::{MarkingEvent, MarkingEventKind};
@@ -334,7 +334,7 @@ struct ObligationSnapshot {
 #[derive(Debug, Default)]
 pub struct ContractChecker {
     /// Tracked obligations: id → snapshot.
-    obligations: HashMap<ObligationId, ObligationSnapshot>,
+    obligations: BTreeMap<ObligationId, ObligationSnapshot>,
     /// Detected violations.
     violations: Vec<ContractViolation>,
     /// Per-contract status.

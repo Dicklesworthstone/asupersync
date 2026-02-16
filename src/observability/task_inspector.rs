@@ -26,7 +26,7 @@ use crate::runtime::state::RuntimeState;
 use crate::time::TimerDriverHandle;
 use crate::tracing_compat::{debug, info, trace, warn};
 use crate::types::{ObligationId, Outcome, RegionId, TaskId, Time};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
@@ -223,7 +223,7 @@ pub struct TaskSummary {
     /// Completed tasks.
     pub completed: usize,
     /// Tasks grouped by region.
-    pub by_region: HashMap<RegionId, usize>,
+    pub by_region: BTreeMap<RegionId, usize>,
     /// Number of potentially stuck tasks.
     pub stuck_count: usize,
 }
@@ -404,7 +404,7 @@ impl TaskInspector {
     #[must_use]
     pub fn summary(&self) -> TaskSummary {
         let tasks = self.list_tasks();
-        let mut by_region: HashMap<RegionId, usize> = HashMap::new();
+        let mut by_region: BTreeMap<RegionId, usize> = BTreeMap::new();
         let mut created = 0;
         let mut running = 0;
         let mut cancelling = 0;

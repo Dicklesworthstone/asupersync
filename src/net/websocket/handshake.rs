@@ -25,7 +25,7 @@
 use crate::util::EntropySource;
 use base64::Engine;
 use sha1::{Digest, Sha1};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// RFC 6455 GUID for Sec-WebSocket-Accept calculation.
@@ -251,7 +251,7 @@ pub struct ClientHandshake {
     /// Requested extensions.
     extensions: Vec<String>,
     /// Additional headers.
-    headers: HashMap<String, String>,
+    headers: BTreeMap<String, String>,
 }
 
 impl ClientHandshake {
@@ -267,7 +267,7 @@ impl ClientHandshake {
             key: generate_client_key(entropy),
             protocols: Vec::new(),
             extensions: Vec::new(),
-            headers: HashMap::new(),
+            headers: BTreeMap::new(),
         })
     }
 
@@ -574,7 +574,7 @@ pub struct HttpRequest {
     /// Request path.
     pub path: String,
     /// HTTP headers (lowercase keys).
-    headers: HashMap<String, String>,
+    headers: BTreeMap<String, String>,
 }
 
 impl HttpRequest {
@@ -605,7 +605,7 @@ impl HttpRequest {
             .to_string();
 
         // Parse headers
-        let mut headers = HashMap::new();
+        let mut headers = BTreeMap::new();
         for line in lines {
             if line.is_empty() {
                 break;
@@ -639,7 +639,7 @@ pub struct HttpResponse {
     /// Status reason phrase.
     pub reason: String,
     /// HTTP headers (lowercase keys).
-    headers: HashMap<String, String>,
+    headers: BTreeMap<String, String>,
 }
 
 impl HttpResponse {
@@ -671,7 +671,7 @@ impl HttpResponse {
         let reason = parts.next().unwrap_or("").to_string();
 
         // Parse headers
-        let mut headers = HashMap::new();
+        let mut headers = BTreeMap::new();
         for line in lines {
             if line.is_empty() {
                 break;
@@ -781,7 +781,7 @@ mod tests {
             key: "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
             protocols: vec![],
             extensions: vec![],
-            headers: HashMap::new(),
+            headers: BTreeMap::new(),
         };
 
         let response = HttpResponse::parse(
@@ -803,7 +803,7 @@ mod tests {
             key: "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
             protocols: vec![],
             extensions: vec![],
-            headers: HashMap::new(),
+            headers: BTreeMap::new(),
         };
 
         let response = HttpResponse::parse(
@@ -826,7 +826,7 @@ mod tests {
             key: "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
             protocols: vec![],
             extensions: vec![],
-            headers: HashMap::new(),
+            headers: BTreeMap::new(),
         };
 
         let response = HttpResponse::parse(
@@ -852,7 +852,7 @@ mod tests {
             key: "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
             protocols: vec!["chat".to_string()],
             extensions: vec![],
-            headers: HashMap::new(),
+            headers: BTreeMap::new(),
         };
 
         let response = HttpResponse::parse(
@@ -878,7 +878,7 @@ mod tests {
             key: "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
             protocols: vec!["chat".to_string(), "superchat".to_string()],
             extensions: vec![],
-            headers: HashMap::new(),
+            headers: BTreeMap::new(),
         };
 
         let response = HttpResponse::parse(

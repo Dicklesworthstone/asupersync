@@ -379,7 +379,7 @@ fn emit_partition_evidence(sink: &Arc<dyn EvidenceSink>, action: &str, src: Acto
         component: "channel_partition".to_string(),
         action: format!("partition_{action}"),
         posterior: vec![1.0],
-        expected_loss_by_action: std::collections::HashMap::from([(
+        expected_loss_by_action: std::collections::BTreeMap::from([(
             format!("partition_{action}"),
             0.0,
         )]),

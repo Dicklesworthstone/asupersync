@@ -39,7 +39,7 @@
 
 use crate::record::task::TaskState;
 use crate::types::{CancelKind, CancelReason, RegionId, TaskId, Time};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// A violation of the cancellation protocol invariant.
@@ -320,15 +320,15 @@ impl TaskProtocolRecord {
 #[derive(Debug, Default)]
 pub struct CancellationProtocolOracle {
     /// Per-task protocol records.
-    tasks: HashMap<TaskId, TaskProtocolRecord>,
+    tasks: BTreeMap<TaskId, TaskProtocolRecord>,
     /// Map from region to its parent.
-    region_parents: HashMap<RegionId, Option<RegionId>>,
+    region_parents: BTreeMap<RegionId, Option<RegionId>>,
     /// Map from region to its children.
-    region_children: HashMap<RegionId, Vec<RegionId>>,
+    region_children: BTreeMap<RegionId, Vec<RegionId>>,
     /// Regions that have been cancelled.
-    cancelled_regions: HashMap<RegionId, CancelReason>,
+    cancelled_regions: BTreeMap<RegionId, CancelReason>,
     /// Map from task to owning region.
-    task_regions: HashMap<TaskId, RegionId>,
+    task_regions: BTreeMap<TaskId, RegionId>,
     /// Detected violations.
     violations: Vec<CancellationProtocolViolation>,
 }
@@ -641,7 +641,7 @@ impl CancellationProtocolOracle {
 
     /// Returns the set of regions that have been cancelled.
     #[must_use]
-    pub fn cancelled_regions(&self) -> &HashMap<RegionId, CancelReason> {
+    pub fn cancelled_regions(&self) -> &BTreeMap<RegionId, CancelReason> {
         &self.cancelled_regions
     }
 

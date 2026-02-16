@@ -77,7 +77,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 use franken_evidence::{EvidenceLedger, EvidenceLedgerBuilder};
@@ -265,7 +265,7 @@ impl LossMatrix {
     }
 
     /// Compute expected losses for all actions as a name-indexed map.
-    pub fn expected_losses(&self, posterior: &Posterior) -> HashMap<String, f64> {
+    pub fn expected_losses(&self, posterior: &Posterior) -> BTreeMap<String, f64> {
         self.action_names
             .iter()
             .enumerate()
@@ -525,7 +525,7 @@ pub struct DecisionAuditEntry {
     /// Snapshot of the posterior at decision time.
     pub posterior_snapshot: Vec<f64>,
     /// Expected loss for each candidate action.
-    pub expected_loss_by_action: HashMap<String, f64>,
+    pub expected_loss_by_action: BTreeMap<String, f64>,
     /// Unix timestamp in milliseconds.
     pub ts_unix_ms: u64,
 }
@@ -566,7 +566,7 @@ pub struct DecisionOutcome {
     /// Expected loss of the chosen action.
     pub expected_loss: f64,
     /// Expected losses for all candidate actions.
-    pub expected_losses: HashMap<String, f64>,
+    pub expected_losses: BTreeMap<String, f64>,
     /// Whether fallback was activated.
     pub fallback_active: bool,
     /// Full audit entry for this decision.

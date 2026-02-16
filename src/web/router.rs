@@ -12,7 +12,7 @@
 //!     .nest("/api/v1", api_v1_routes());
 //! ```
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use super::extract::Request;
 use super::handler::Handler;
@@ -32,14 +32,14 @@ const METHOD_OPTIONS: &str = "OPTIONS";
 
 /// A set of handlers for different HTTP methods on a single route.
 pub struct MethodRouter {
-    handlers: HashMap<String, Box<dyn Handler>>,
+    handlers: BTreeMap<String, Box<dyn Handler>>,
 }
 
 impl MethodRouter {
     /// Create an empty method router.
     fn new() -> Self {
         Self {
-            handlers: HashMap::new(),
+            handlers: BTreeMap::new(),
         }
     }
 
@@ -173,7 +173,7 @@ impl RoutePattern {
     }
 
     /// Try to match a path against this pattern, extracting parameters.
-    fn matches(&self, path: &str) -> Option<HashMap<String, String>> {
+    fn matches(&self, path: &str) -> Option<BTreeMap<String, String>> {
         let path_segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
         // Check for wildcard at the end.
@@ -190,7 +190,7 @@ impl RoutePattern {
             return None;
         }
 
-        let mut params = HashMap::new();
+        let mut params = BTreeMap::new();
 
         for (i, segment) in self.segments.iter().enumerate() {
             match segment {
@@ -478,7 +478,7 @@ mod tests {
         use crate::web::handler::FnHandler1;
 
         fn wildcard_handler(
-            Path(_params): Path<std::collections::HashMap<String, String>>,
+            Path(_params): Path<std::collections::BTreeMap<String, String>>,
         ) -> StatusCode {
             StatusCode::ACCEPTED
         }
@@ -489,7 +489,7 @@ mod tests {
                 "/files/*",
                 get(FnHandler1::<
                     _,
-                    Path<std::collections::HashMap<String, String>>,
+                    Path<std::collections::BTreeMap<String, String>>,
                 >::new(wildcard_handler)),
             );
 
@@ -503,7 +503,7 @@ mod tests {
         use crate::web::handler::FnHandler1;
 
         fn wildcard_handler(
-            Path(_params): Path<std::collections::HashMap<String, String>>,
+            Path(_params): Path<std::collections::BTreeMap<String, String>>,
         ) -> StatusCode {
             StatusCode::ACCEPTED
         }
@@ -513,7 +513,7 @@ mod tests {
                 "/files/*",
                 get(FnHandler1::<
                     _,
-                    Path<std::collections::HashMap<String, String>>,
+                    Path<std::collections::BTreeMap<String, String>>,
                 >::new(wildcard_handler)),
             )
             .route("/files/static", get(FnHandler::new(ok_handler)));
@@ -598,7 +598,7 @@ mod tests {
         use crate::web::handler::FnHandler1;
 
         fn wildcard_handler(
-            Path(params): Path<std::collections::HashMap<String, String>>,
+            Path(params): Path<std::collections::BTreeMap<String, String>>,
         ) -> String {
             params.get("*").cloned().unwrap_or_default()
         }
@@ -607,7 +607,7 @@ mod tests {
             "/files/*",
             get(FnHandler1::<
                 _,
-                Path<std::collections::HashMap<String, String>>,
+                Path<std::collections::BTreeMap<String, String>>,
             >::new(wildcard_handler)),
         );
 
