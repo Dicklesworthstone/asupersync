@@ -377,7 +377,9 @@ impl Connection {
 
     /// Queue initial settings frame.
     pub fn queue_initial_settings(&mut self) {
-        let settings = SettingsFrame::new(self.local_settings.to_settings_minimal());
+        let settings = SettingsFrame::new(self.local_settings.to_settings_minimal_for_role(
+            self.is_client,
+        ));
         self.pending_ops.push_back(PendingOp::Settings(settings));
     }
 
@@ -774,6 +776,14 @@ impl Connection {
 
         // Apply settings
         for setting in &frame.settings {
+            // RFC 7540 §6.5.2: A server MUST NOT send SETTINGS_ENABLE_PUSH.
+            // Therefore a client that receives it must treat this as PROTOCOL_ERROR.
+            if self.is_client && matches!(setting, Setting::EnablePush(_)) {
+                return Err(H2Error::protocol(
+                    "server MUST NOT send SETTINGS_ENABLE_PUSH",
+                ));
+            }
+
             self.remote_settings.apply(*setting)?;
 
             // Handle specific settings
@@ -1350,6 +1360,10 @@ mod tests {
         match frame {
             Frame::Settings(settings) => {
                 assert!(!settings.ack);
+                assert!(settings
+                    .settings
+                    .iter()
+                    .any(|setting| matches!(setting, Setting::EnablePush(false))));
             }
             _ => panic!("expected SETTINGS frame"),
         }
@@ -1379,6 +1393,35 @@ mod tests {
         // Remote settings should be updated
         assert_eq!(conn.remote_settings().max_concurrent_streams, 100);
         assert_eq!(conn.remote_settings().initial_window_size, 32768);
+    }
+
+    #[test]
+    fn test_connection_client_rejects_server_enable_push_setting() {
+        let mut conn = Connection::client(Settings::client());
+        let settings = SettingsFrame::new(vec![Setting::EnablePush(false)]);
+
+        let err = conn.process_frame(Frame::Settings(settings)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert!(!conn.has_pending_frames(), "invalid settings must not be ACKed");
+    }
+
+    #[test]
+    fn test_connection_server_initial_settings_omit_enable_push() {
+        let mut local = Settings::server();
+        local.enable_push = false;
+        let mut conn = Connection::server(local);
+        conn.queue_initial_settings();
+
+        let frame = conn.next_frame().expect("expected initial settings frame");
+        match frame {
+            Frame::Settings(settings) => {
+                assert!(!settings
+                    .settings
+                    .iter()
+                    .any(|setting| matches!(setting, Setting::EnablePush(_))));
+            }
+            _ => panic!("expected SETTINGS frame"),
+        }
     }
 
     #[test]
