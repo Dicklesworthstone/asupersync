@@ -114,7 +114,7 @@ impl<'a> Future for BarrierWaitFuture<'a> {
                     .state
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
-                
+
                 // Only decrement if the generation hasn't changed (barrier hasn't tripped).
                 if state.generation == generation {
                     if state.arrived > 0 {
@@ -122,11 +122,14 @@ impl<'a> Future for BarrierWaitFuture<'a> {
                     }
                     // Remove our waker to avoid phantom wakes (optional optimization).
                     state.waiters.retain(|w| !w.will_wake(cx.waker()));
-                    
+
+                    // Mark state as done so Drop doesn't decrement again.
+                    self.state = WaitState::Init;
                     return Poll::Ready(Err(BarrierWaitError::Cancelled));
                 } else {
                     // Generation changed means barrier tripped just before cancel.
                     // We treat this as success.
+                    self.state = WaitState::Init;
                     return Poll::Ready(Ok(BarrierWaitResult { is_leader: false }));
                 }
             } else {
@@ -149,12 +152,12 @@ impl<'a> Future for BarrierWaitFuture<'a> {
                         // Trip the barrier.
                         state.arrived = 0;
                         state.generation = state.generation.wrapping_add(1);
-                        
+
                         // Wake all waiters.
                         for waker in state.waiters.drain(..) {
                             waker.wake();
                         }
-                        
+
                         return Poll::Ready(Ok(BarrierWaitResult { is_leader: true }));
                     } else {
                         // Not full yet. Arrive and wait.
@@ -169,6 +172,7 @@ impl<'a> Future for BarrierWaitFuture<'a> {
                 WaitState::Waiting { generation } => {
                     if state.generation != generation {
                         // Generation advanced! We are done.
+                        self.state = WaitState::Init;
                         return Poll::Ready(Ok(BarrierWaitResult { is_leader: false }));
                     } else {
                         // Still waiting. Update waker if changed.
@@ -186,11 +190,31 @@ impl<'a> Future for BarrierWaitFuture<'a> {
                         if !found {
                             state.waiters.push(waker.clone());
                         }
-                        
+
                         return Poll::Pending;
                     }
                 }
             }
+        }
+    }
+}
+
+impl<'a> Drop for BarrierWaitFuture<'a> {
+    fn drop(&mut self) {
+        if let WaitState::Waiting { generation } = self.state {
+            // We must use a separate block or variable to handle the lock result
+            // because poisoning might happen.
+            let mut state = match self.barrier.state.lock() {
+                Ok(guard) => guard,
+                Err(poison) => poison.into_inner(),
+            };
+
+            // Only decrement if the generation hasn't changed (barrier hasn't tripped).
+            if state.generation == generation && state.arrived > 0 {
+                state.arrived -= 1;
+            }
+            // Note: We leave the waker in the list. It will be woken (harmlessly)
+            // when the barrier trips, and the list will be cleared then.
         }
     }
 }
