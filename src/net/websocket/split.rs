@@ -67,8 +67,8 @@ struct WebSocketShared<IO> {
     pending_pongs: Vec<Bytes>,
     /// True while one half is performing a frame write sequence.
     writer_active: bool,
-    /// Waker for a waiter blocked on `writer_active`.
-    writer_waiter: Option<Waker>,
+    /// Wakers for waiters blocked on `writer_active`.
+    writer_waiters: Vec<Waker>,
     /// Unique ID for reunite verification.
     id: u64,
 }
@@ -79,12 +79,12 @@ struct SplitWritePermit<IO> {
 
 impl<IO> Drop for SplitWritePermit<IO> {
     fn drop(&mut self) {
-        let wake = {
+        let waiters = {
             let mut shared = self.shared.lock();
             shared.writer_active = false;
-            shared.writer_waiter.take()
+            std::mem::take(&mut shared.writer_waiters)
         };
-        if let Some(waker) = wake {
+        for waker in waiters {
             waker.wake();
         }
     }
@@ -98,7 +98,14 @@ async fn acquire_write_permit<IO>(
     poll_fn(|cx| {
         let mut state = shared.lock();
         if state.writer_active {
-            state.writer_waiter = Some(cx.waker().clone());
+            let waiter = cx.waker();
+            if !state
+                .writer_waiters
+                .iter()
+                .any(|existing| existing.will_wake(waiter))
+            {
+                state.writer_waiters.push(waiter.clone());
+            }
             drop(state);
             Poll::Pending
         } else {
@@ -185,7 +192,7 @@ where
             protocol: self.protocol,
             pending_pongs: self.pending_pongs,
             writer_active: false,
-            writer_waiter: None,
+            writer_waiters: Vec::new(),
             id,
         }));
 
@@ -564,6 +571,9 @@ where
 mod tests {
     use super::*;
     use futures_lite::future;
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
 
     // In-memory I/O for testing
     struct TestIo {
@@ -756,9 +766,9 @@ mod tests {
             assert!(result.is_ok());
 
             // write_buf must be empty after flush regardless of outcome
-            let shared = read.shared.lock();
+            let is_empty = read.shared.lock().write_buf.is_empty();
             assert!(
-                shared.write_buf.is_empty(),
+                is_empty,
                 "write_buf must be cleared eagerly, not after write completes"
             );
         });
@@ -791,14 +801,13 @@ mod tests {
                 }
             }
 
-            let shared = read.shared.lock();
             // All three pong frames must be present in write_buf.
             // Each pong frame has at least 2-byte header + payload, so minimum
             // 8 + 8 + 8 = 24 bytes for 6-byte payloads.
+            let write_buf_len = read.shared.lock().write_buf.len();
             assert!(
-                shared.write_buf.len() >= 24,
-                "write_buf must contain all three pong frames, got {} bytes",
-                shared.write_buf.len()
+                write_buf_len >= 24,
+                "write_buf must contain all three pong frames, got {write_buf_len} bytes",
             );
         });
     }
@@ -846,6 +855,73 @@ mod tests {
             assert!(
                 !read.shared.lock().writer_active,
                 "writer_active must be false after permit is dropped"
+            );
+        });
+    }
+
+    struct CountingWake {
+        wake_count: AtomicUsize,
+    }
+
+    impl CountingWake {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                wake_count: AtomicUsize::new(0),
+            })
+        }
+
+        fn count(&self) -> usize {
+            self.wake_count.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Wake for CountingWake {
+        fn wake(self: Arc<Self>) {
+            self.wake_count.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.wake_count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn writer_permit_release_wakes_all_waiters() {
+        future::block_on(async {
+            let ws = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
+            let (read, _write) = ws.split();
+
+            // Hold permit so subsequent acquires become waiters.
+            let permit = acquire_write_permit(&read.shared).await;
+
+            let mut first_waiter = Box::pin(acquire_write_permit(&read.shared));
+            let mut second_waiter = Box::pin(acquire_write_permit(&read.shared));
+
+            let counter_a = CountingWake::new();
+            let counter_b = CountingWake::new();
+            let first_task_waker: Waker = Waker::from(Arc::clone(&counter_a));
+            let second_task_waker: Waker = Waker::from(Arc::clone(&counter_b));
+            let mut first_context = Context::from_waker(&first_task_waker);
+            let mut second_context = Context::from_waker(&second_task_waker);
+
+            assert!(matches!(
+                first_waiter.as_mut().poll(&mut first_context),
+                Poll::Pending
+            ));
+            assert!(matches!(
+                second_waiter.as_mut().poll(&mut second_context),
+                Poll::Pending
+            ));
+
+            drop(permit);
+
+            assert!(
+                counter_a.count() > 0,
+                "first waiter must be woken when permit is released"
+            );
+            assert!(
+                counter_b.count() > 0,
+                "second waiter must be woken when permit is released"
             );
         });
     }

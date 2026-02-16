@@ -1454,12 +1454,11 @@ mod tests {
 
         // Queue some tasks while the thread is blocked
         let counter = Arc::new(AtomicUsize::new(0));
-        let mut handles = Vec::new();
         for _ in 0..5 {
             let c = Arc::clone(&counter);
-            handles.push(pool.spawn(move || {
+            let _handle = pool.spawn(move || {
                 c.fetch_add(1, Ordering::Relaxed);
-            }));
+            });
         }
 
         // Release the blocker
