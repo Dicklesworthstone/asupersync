@@ -76,6 +76,21 @@ struct RegistrationInfo {
     interest: Interest,
 }
 
+#[derive(Debug)]
+struct ReactorState {
+    tokens: HashMap<Token, RegistrationInfo>,
+    fds: HashMap<i32, Token>,
+}
+
+impl ReactorState {
+    fn new() -> Self {
+        Self {
+            tokens: HashMap::new(),
+            fds: HashMap::new(),
+        }
+    }
+}
+
 /// Linux epoll-based reactor with edge-triggered mode.
 ///
 /// This reactor uses the `polling` crate to interface with Linux epoll,
@@ -97,8 +112,8 @@ struct RegistrationInfo {
 pub struct EpollReactor {
     /// The polling instance (wraps epoll on Linux).
     poller: Poller,
-    /// Maps tokens to registration info for bookkeeping.
-    registrations: Mutex<HashMap<Token, RegistrationInfo>>,
+    /// Reactor state (tokens and fds maps) protected by a mutex.
+    state: Mutex<ReactorState>,
     /// Reusable polling event buffer to avoid per-poll allocations.
     poll_events: Mutex<PollEvents>,
 }
@@ -126,7 +141,7 @@ impl EpollReactor {
 
         Ok(Self {
             poller,
-            registrations: Mutex::new(HashMap::new()),
+            state: Mutex::new(ReactorState::new()),
             poll_events: Mutex::new(PollEvents::with_capacity(
                 NonZeroUsize::new(DEFAULT_POLL_EVENTS_CAPACITY).expect("non-zero capacity"),
             )),
@@ -167,15 +182,15 @@ impl Reactor for EpollReactor {
         let raw_fd = source.as_raw_fd();
 
         // Check for duplicate registration first
-        let mut regs = self.registrations.lock();
-        if regs.contains_key(&token) {
+        let mut state = self.state.lock();
+        if state.tokens.contains_key(&token) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "token already registered",
             ));
         }
 
-        if regs.values().any(|info| info.raw_fd == raw_fd) {
+        if state.fds.contains_key(&raw_fd) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "fd already registered",
@@ -203,15 +218,17 @@ impl Reactor for EpollReactor {
         }
 
         // Track the registration for modify/deregister
-        regs.insert(token, RegistrationInfo { raw_fd, interest });
-        drop(regs);
+        state.tokens.insert(token, RegistrationInfo { raw_fd, interest });
+        state.fds.insert(raw_fd, token);
+        drop(state);
 
         Ok(())
     }
 
     fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
-        let mut regs = self.registrations.lock();
-        let info = regs
+        let mut state = self.state.lock();
+        let info = state
+            .tokens
             .get_mut(&token)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "token not registered"))?;
 
@@ -227,14 +244,15 @@ impl Reactor for EpollReactor {
 
         // Update our bookkeeping
         info.interest = interest;
-        drop(regs);
+        drop(state);
 
         Ok(())
     }
 
     fn deregister(&self, token: Token) -> io::Result<()> {
-        let mut regs = self.registrations.lock();
-        let info = regs
+        let mut state = self.state.lock();
+        let info = state
+            .tokens
             .get(&token)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "token not registered"))?;
 
@@ -249,24 +267,30 @@ impl Reactor for EpollReactor {
         // treat it as already deregistered from reactor bookkeeping perspective.
         match self.poller.delete(borrowed_fd) {
             Ok(()) => {
-                regs.remove(&token);
-                drop(regs);
+                if let Some(info) = state.tokens.remove(&token) {
+                    state.fds.remove(&info.raw_fd);
+                }
+                drop(state);
                 Ok(())
             }
             Err(err) => match err.raw_os_error() {
                 Some(libc::ENOENT) => {
-                    regs.remove(&token);
-                    drop(regs);
+                    if let Some(info) = state.tokens.remove(&token) {
+                        state.fds.remove(&info.raw_fd);
+                    }
+                    drop(state);
                     Ok(())
                 }
                 // Treat EBADF as benign only when the target fd itself is closed.
                 Some(libc::EBADF) if !fd_still_valid => {
-                    regs.remove(&token);
-                    drop(regs);
+                    if let Some(info) = state.tokens.remove(&token) {
+                        state.fds.remove(&info.raw_fd);
+                    }
+                    drop(state);
                     Ok(())
                 }
                 _ => {
-                    drop(regs);
+                    drop(state);
                     Err(err)
                 }
             },
@@ -306,13 +330,13 @@ impl Reactor for EpollReactor {
     }
 
     fn registration_count(&self) -> usize {
-        self.registrations.lock().len()
+        self.state.lock().tokens.len()
     }
 }
 
 impl std::fmt::Debug for EpollReactor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let reg_count = self.registrations.lock().len();
+        let reg_count = self.state.lock().tokens.len();
         f.debug_struct("EpollReactor")
             .field("registration_count", &reg_count)
             .finish_non_exhaustive()
@@ -435,15 +459,15 @@ mod tests {
             .expect("modify failed");
 
         // Verify bookkeeping was updated
-        let regs = reactor.registrations.lock();
-        let info = regs.get(&token).unwrap();
+        let state = reactor.state.lock();
+        let info = state.tokens.get(&token).unwrap();
         crate::assert_with_log!(
             info.interest == Interest::WRITABLE,
             "interest updated",
             Interest::WRITABLE,
             info.interest
         );
-        drop(regs);
+        drop(state);
 
         reactor.deregister(token).expect("deregister failed");
         crate::test_complete!("modify_interest");
