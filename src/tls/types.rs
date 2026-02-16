@@ -6,7 +6,7 @@
 #[cfg(feature = "tls")]
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer};
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
@@ -399,7 +399,7 @@ impl RootCertStore {
 ///
 /// Certificate pinning adds an additional layer of security by verifying
 /// that the server's certificate matches a known value.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CertificatePin {
     /// Pin by SPKI (Subject Public Key Info) SHA-256 hash.
     ///
@@ -525,7 +525,7 @@ impl CertificatePin {
 /// The set supports multiple pins to allow for key rotation without downtime.
 #[derive(Clone, Debug, Default)]
 pub struct CertificatePinSet {
-    pins: HashSet<CertificatePin>,
+    pins: BTreeSet<CertificatePin>,
     /// Whether to enforce pinning (fail if no pins match) or just warn.
     enforce: bool,
 }
@@ -534,7 +534,7 @@ impl CertificatePinSet {
     /// Create a new empty pin set.
     pub fn new() -> Self {
         Self {
-            pins: HashSet::new(),
+            pins: BTreeSet::new(),
             enforce: true,
         }
     }
@@ -542,7 +542,7 @@ impl CertificatePinSet {
     /// Create a pin set with enforcement disabled (report-only mode).
     pub fn report_only() -> Self {
         Self {
-            pins: HashSet::new(),
+            pins: BTreeSet::new(),
             enforce: false,
         }
     }
@@ -801,7 +801,7 @@ mod tests {
         assert_ne!(pin1, pin3);
 
         // Test hash by adding to HashSet
-        let mut set = std::collections::HashSet::new();
+        let mut set = std::collections::BTreeSet::new();
         set.insert(pin1.clone());
         assert!(set.contains(&pin2));
         assert!(!set.contains(&pin3));

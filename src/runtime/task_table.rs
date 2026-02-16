@@ -314,7 +314,11 @@ mod tests {
 
         let idx = table.insert_task_with(|_idx| {
             // Intentionally stale placeholder to verify table-side canonicalization.
-            TaskRecord::new(TaskId::from_arena(ArenaIndex::new(0, 0)), owner, Budget::INFINITE)
+            TaskRecord::new(
+                TaskId::from_arena(ArenaIndex::new(0, 0)),
+                owner,
+                Budget::INFINITE,
+            )
         });
 
         let canonical_id = TaskId::from_arena(idx);
