@@ -782,12 +782,20 @@ impl NameRegistry {
 
     /// Cancel a pending permit, removing it from the pending set.
     ///
+    /// If a waiter is queued for the freed name, it is granted a lease
+    /// (retrievable via [`take_granted`](Self::take_granted)).
+    ///
     /// The caller must also call [`NamePermit::abort`] on the permit itself
     /// to resolve the obligation.
     ///
     /// Returns `true` if the name was in the pending set.
-    pub fn cancel_permit(&mut self, name: &str) -> bool {
-        self.pending.remove(name).is_some()
+    pub fn cancel_permit(&mut self, name: &str, now: Time) -> bool {
+        if self.pending.remove(name).is_some() {
+            self.try_grant_to_first_waiter(name, now);
+            true
+        } else {
+            false
+        }
     }
 
     /// Register a name with an explicit collision policy.
@@ -1140,11 +1148,9 @@ impl NameRegistry {
             .filter(|(_, e)| e.holder == task)
             .map(|(name, e)| (name.clone(), e.holder, e.region))
             .collect();
-        let mut to_remove: Vec<String> = self
-            .leases
+        let mut to_remove: Vec<String> = active_removed
             .iter()
-            .filter(|(_, e)| e.holder == task)
-            .map(|(name, _)| name.clone())
+            .map(|(name, _, _)| name.clone())
             .collect();
         to_remove.extend(
             self.pending
@@ -1442,7 +1448,7 @@ mod tests {
 
         // Abort the permit obligation and cancel the pending entry.
         permit.abort().unwrap();
-        assert!(reg.cancel_permit("svc"));
+        assert!(reg.cancel_permit("svc", Time::from_secs(1)));
 
         // Now the name can be registered normally.
         let mut lease = reg
@@ -1473,7 +1479,7 @@ mod tests {
         );
 
         permit.abort().unwrap();
-        assert!(reg.cancel_permit("svc"));
+        assert!(reg.cancel_permit("svc", Time::ZERO));
 
         crate::test_complete!("registry_reserve_blocks_register");
     }
@@ -2522,7 +2528,7 @@ mod tests {
         );
 
         p1.abort().unwrap();
-        reg.cancel_permit("singleton");
+        reg.cancel_permit("singleton", Time::ZERO);
 
         crate::test_complete!("conformance_double_reserve_blocked");
     }
@@ -2545,7 +2551,7 @@ mod tests {
 
         permit.abort().unwrap();
         assert!(!permit.is_pending());
-        reg.cancel_permit("my_svc");
+        reg.cancel_permit("my_svc", Time::from_secs(42));
 
         crate::test_complete!("permit_accessors");
     }
@@ -2601,7 +2607,7 @@ mod tests {
         // Double abort is an error.
         assert_eq!(permit.abort().unwrap_err(), NameLeaseError::AlreadyResolved);
 
-        reg.cancel_permit("abortable");
+        reg.cancel_permit("abortable", Time::ZERO);
 
         crate::test_complete!("conformance_permit_abort_proof");
     }
@@ -2641,7 +2647,7 @@ mod tests {
             .expect("reserve ok");
 
         // Cancel the pending entry first.
-        assert!(reg.cancel_permit("ephemeral"));
+        assert!(reg.cancel_permit("ephemeral", Time::ZERO));
 
         // commit_permit should fail because the name is no longer pending.
         let err = reg.commit_permit(permit).unwrap_err();

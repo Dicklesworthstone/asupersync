@@ -1173,6 +1173,21 @@ impl<Caps> Cx<Caps> {
             )
         };
 
+        // Emit evidence for cancellation decisions observed at checkpoint.
+        if cancel_requested && mask_depth == 0 {
+            if let Some(ref sink) = self.handles.evidence_sink {
+                let kind_str = cancel_reason
+                    .as_ref()
+                    .map_or_else(|| "unknown".to_string(), |r| format!("{}", r.kind));
+                crate::evidence_sink::emit_cancel_evidence(
+                    sink.as_ref(),
+                    &kind_str,
+                    budget.poll_quota,
+                    budget.priority,
+                );
+            }
+        }
+
         Self::check_cancel_from_values(
             cancel_requested,
             mask_depth,
@@ -1312,33 +1327,6 @@ impl<Caps> Cx<Caps> {
         }
     }
 
-    /// Internal: checks cancellation without recording a checkpoint.
-    #[allow(clippy::result_large_err)]
-    fn check_cancel(&self) -> Result<(), crate::error::Error> {
-        let (cancel_requested, mask_depth, task, region, budget, budget_baseline, cancel_reason) = {
-            let inner = self.inner.read().expect("lock poisoned");
-            (
-                inner.cancel_requested,
-                inner.mask_depth,
-                inner.task,
-                inner.region,
-                inner.budget,
-                inner.budget_baseline,
-                inner.cancel_reason.clone(),
-            )
-        };
-
-        Self::check_cancel_from_values(
-            cancel_requested,
-            mask_depth,
-            task,
-            region,
-            budget,
-            budget_baseline,
-            cancel_reason.as_ref(),
-        )
-    }
-
     /// Executes a closure with cancellation masked.
     ///
     /// While masked, `checkpoint()` will return `Ok(())` even if cancellation
@@ -1376,20 +1364,13 @@ impl<Caps> Cx<Caps> {
     {
         {
             let mut inner = self.inner.write().expect("lock poisoned");
-            debug_assert!(
+            assert!(
                 inner.mask_depth < crate::types::task_context::MAX_MASK_DEPTH,
                 "mask depth exceeded MAX_MASK_DEPTH ({}): this violates INV-MASK-BOUNDED \
                  and prevents cancellation from ever being observed. \
                  Reduce nesting of Cx::masked() sections.",
                 crate::types::task_context::MAX_MASK_DEPTH,
             );
-            if inner.mask_depth >= crate::types::task_context::MAX_MASK_DEPTH {
-                error!(
-                    depth = inner.mask_depth,
-                    max = crate::types::task_context::MAX_MASK_DEPTH,
-                    "INV-MASK-BOUNDED violated: mask depth saturated, cancellation may be unobservable"
-                );
-            }
             inner.mask_depth += 1;
         }
 
