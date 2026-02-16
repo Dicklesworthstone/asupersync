@@ -269,11 +269,11 @@ mod imp {
                     Interest::ERROR
                 };
 
-                if !interest.is_empty() {
-                    events.push(Event::new(key, interest));
-                }
-
+                // Ignore stale completions for tokens that have been deregistered.
                 if let Some(info) = self.registrations.lock().get(&key).copied() {
+                    if !interest.is_empty() {
+                        events.push(Event::new(key, interest));
+                    }
                     let _ = self.rearm_poll(key, info);
                 }
             }
@@ -551,6 +551,48 @@ mod imp {
                 events.is_empty(),
                 "internal poll-remove completion must not surface as a user event"
             );
+        }
+
+        #[test]
+        fn test_poll_ignores_stale_completion_for_deregistered_token() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+
+            // Keep at least one real registration so poll() does not take the
+            // empty-registrations fast path.
+            let (left, _right) = UnixStream::pair().expect("unix stream pair");
+            let live = Token::new(11);
+            reactor
+                .register(&left, live, Interest::READABLE)
+                .expect("register live token should succeed");
+
+            let stale = Token::new(4242);
+            reactor
+                .submit_poll_add(stale, reactor.wake_fd.as_raw_fd(), Interest::READABLE)
+                .expect("stale poll add should succeed");
+            reactor.wake().expect("wake should succeed");
+
+            let mut stale_seen = false;
+            let mut events = Events::with_capacity(16);
+            for _ in 0..4 {
+                reactor
+                    .poll(&mut events, Some(Duration::from_millis(50)))
+                    .expect("poll should succeed");
+                if events.iter().any(|event| event.token == stale) {
+                    stale_seen = true;
+                    break;
+                }
+            }
+
+            assert!(
+                !stale_seen,
+                "stale completion must not surface as a user event"
+            );
+
+            reactor
+                .deregister(live)
+                .expect("deregister live token should succeed");
         }
     }
 }
