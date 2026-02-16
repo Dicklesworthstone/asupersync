@@ -739,7 +739,7 @@ impl MinPlusCurve {
 
         Self {
             samples,
-            tail_rate: self.tail_rate.saturating_add(other.tail_rate),
+            tail_rate: self.tail_rate.min(other.tail_rate),
         }
     }
 }
@@ -1707,5 +1707,28 @@ mod tests {
         let large_delay = delay_bound(&large_arrival, &service, 10, 20).unwrap_or(0);
 
         assert!(large_delay >= small_delay);
+    }
+
+    // -- Lemma 15: convolution tail rate is min of input rates --
+    // For min-plus convolution: (f ⊗ g)(t) = inf_s [f(s) + g(t-s)]
+    // the asymptotic growth rate is min(r_f, r_g), not r_f + r_g.
+
+    #[test]
+    fn lemma_convolution_tail_rate_is_min() {
+        let slow = MinPlusCurve::new(vec![0, 1], 1).expect("valid");
+        let fast = MinPlusCurve::new(vec![0, 3], 3).expect("valid");
+        let conv = slow.min_plus_convolution(&fast, 10);
+
+        // Tail rate must be min(1, 3) = 1
+        assert_eq!(conv.tail_rate(), 1);
+
+        // Verify beyond-horizon extrapolation matches the brute-force minimum
+        // at a point well past the computed samples.
+        let t = 20;
+        let mut brute = u64::MAX;
+        for s in 0..=t {
+            brute = brute.min(slow.value_at(s).saturating_add(fast.value_at(t - s)));
+        }
+        assert_eq!(conv.value_at(t), brute);
     }
 }
