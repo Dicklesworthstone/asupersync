@@ -591,8 +591,22 @@ impl Connection {
 
     /// Process HEADERS frame.
     fn process_headers(&mut self, frame: HeadersFrame) -> Result<Option<ReceivedFrame>, H2Error> {
+        // Validate stream creation before tracking last_stream_id.
+        // If get_or_create fails (e.g., invalid stream parity or monotonicity
+        // violation), we must not pollute last_stream_id — GOAWAY must only
+        // report the highest actually-processed stream (RFC 7540 §6.8).
+        {
+            let _ = self.streams.get_or_create(frame.stream_id)?;
+        }
         self.track_stream_id(frame.stream_id);
-        let stream = self.streams.get_or_create(frame.stream_id)?;
+
+        // Re-borrow the stream (guaranteed to exist after get_or_create).
+        let stream = self.streams.get_mut(frame.stream_id).ok_or_else(|| {
+            H2Error::connection(
+                ErrorCode::InternalError,
+                "stream disappeared after get_or_create",
+            )
+        })?;
         stream.recv_headers(frame.end_stream, frame.end_headers)?;
 
         if let Some(priority) = frame.priority {
@@ -3008,5 +3022,40 @@ mod tests {
             err.stream_id.is_none(),
             "idle-stream WINDOW_UPDATE must be a connection error, not a stream error"
         );
+    }
+
+    // =========================================================================
+    // last_stream_id Pollution Tests (asupersync-32jl1)
+    // =========================================================================
+
+    /// Regression: HEADERS on a stream with invalid parity must NOT bump
+    /// last_stream_id. If it did, a subsequent GOAWAY would advertise a higher
+    /// last_stream_id than actually processed, violating RFC 7540 §6.8.
+    #[test]
+    fn headers_on_wrong_parity_stream_does_not_pollute_last_stream_id() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        // Open stream 1 normally.
+        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        conn.process_frame(headers).unwrap();
+
+        // Send HEADERS on stream 2 (even = server-initiated, invalid from client).
+        let invalid = Frame::Headers(HeadersFrame::new(2, Bytes::new(), false, true));
+        let err = conn.process_frame(invalid).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+
+        // GOAWAY should report last_stream_id=1, not 2.
+        conn.goaway(ErrorCode::NoError, Bytes::new());
+        let frame = conn.next_frame().unwrap();
+        match frame {
+            Frame::GoAway(g) => {
+                assert_eq!(
+                    g.last_stream_id, 1,
+                    "last_stream_id must not be bumped by rejected HEADERS"
+                );
+            }
+            _ => panic!("expected GoAway"),
+        }
     }
 }
