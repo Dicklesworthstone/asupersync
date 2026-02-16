@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "commands": [
+    {
+      "id": "scripts.inventory",
+      "summary": "List available scripts in asupersync",
+      "command": [
+        "find",
+        "scripts",
+        "-maxdepth",
+        "2",
+        "-type",
+        "f"
+      ],
+      "risk": "safe"
+    },
+    {
+      "id": "scripts.sample",
+      "summary": "Run a sample script in asupersync (scripts/alloc_census.sh)",
+      "command": [
+        "bash",
+        "scripts/alloc_census.sh"
+      ],
+      "risk": "ask-first"
+    }
+  ]
+}
