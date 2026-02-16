@@ -44,7 +44,7 @@ pub fn find_divergence(a: &[TraceEvent], b: &[TraceEvent]) -> Option<TraceDiverg
     let b_events = b;
 
     for (i, (a_event, b_event)) in a_events.iter().zip(b_events.iter()).enumerate() {
-        if a_event.seq != b_event.seq || !events_match(a_event, b_event) {
+        if !events_match(a_event, b_event) {
             return Some(TraceDivergence {
                 position: i,
                 event_a: (*a_event).clone(),
@@ -644,6 +644,28 @@ mod tests {
     }
 
     #[test]
+    fn trace_seq_only_difference_no_divergence() {
+        init_test("trace_seq_only_difference_no_divergence");
+        let a = vec![TraceEvent::new(
+            1,
+            Time::ZERO,
+            TraceEventKind::UserTrace,
+            TraceData::Message("same".to_string()),
+        )];
+        let b = vec![TraceEvent::new(
+            99,
+            Time::ZERO,
+            TraceEventKind::UserTrace,
+            TraceData::Message("same".to_string()),
+        )];
+
+        let div = find_divergence(&a, &b);
+        let ok = div.is_none();
+        crate::assert_with_log!(ok, "seq-only differences ignored", true, ok);
+        crate::test_complete!("trace_seq_only_difference_no_divergence");
+    }
+
+    #[test]
     fn different_traces_find_divergence() {
         init_test("different_traces_find_divergence");
         let a = vec![TraceEvent::new(
@@ -875,6 +897,32 @@ mod tests {
         let equivalent = traces_equivalent(&events, &events);
         crate::assert_with_log!(equivalent, "identical traces equivalent", true, equivalent);
         crate::test_complete!("traces_equivalent_identical");
+    }
+
+    #[test]
+    fn traces_equivalent_ignores_sequence_numbers() {
+        init_test("traces_equivalent_ignores_sequence_numbers");
+        let a = vec![TraceEvent::new(
+            1,
+            Time::from_nanos(0),
+            TraceEventKind::Spawn,
+            TraceData::None,
+        )];
+        let b = vec![TraceEvent::new(
+            42,
+            Time::from_nanos(0),
+            TraceEventKind::Spawn,
+            TraceData::None,
+        )];
+
+        let equivalent = traces_equivalent(&a, &b);
+        crate::assert_with_log!(
+            equivalent,
+            "seq-only differences still equivalent",
+            true,
+            equivalent
+        );
+        crate::test_complete!("traces_equivalent_ignores_sequence_numbers");
     }
 
     #[test]

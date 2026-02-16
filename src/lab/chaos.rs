@@ -491,14 +491,15 @@ impl ChaosRng {
         if range.is_empty() {
             return Duration::ZERO;
         }
-        let start_nanos = range.start.as_nanos() as u64;
-        let end_nanos = range.end.as_nanos() as u64;
+        let start_nanos = range.start.as_nanos();
+        let end_nanos = range.end.as_nanos();
         if end_nanos <= start_nanos {
             return range.start;
         }
         let delta = end_nanos - start_nanos;
-        let offset = self.inner.next_u64() % delta;
-        Duration::from_nanos(start_nanos + offset)
+        let rand = (u128::from(self.inner.next_u64()) << 64) | u128::from(self.inner.next_u64());
+        let offset = rand % delta;
+        nanos_to_duration_saturating(start_nanos + offset)
     }
 
     /// Checks if I/O error should be injected based on config.
@@ -761,6 +762,18 @@ impl std::fmt::Display for ChaosStats {
     }
 }
 
+/// Converts nanoseconds into `Duration`, saturating at `Duration::MAX`.
+fn nanos_to_duration_saturating(nanos: u128) -> Duration {
+    const NANOS_PER_SEC: u128 = 1_000_000_000;
+    let secs = nanos / NANOS_PER_SEC;
+    let subsec = (nanos % NANOS_PER_SEC) as u32;
+    if secs > u128::from(u64::MAX) {
+        Duration::MAX
+    } else {
+        Duration::new(secs as u64, subsec)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -879,6 +892,23 @@ mod tests {
             let delay = rng.next_delay(&config);
             assert!(delay >= Duration::from_millis(10));
             assert!(delay < Duration::from_millis(100));
+        }
+    }
+
+    #[test]
+    fn rng_delay_generation_handles_large_duration_ranges() {
+        let start = Duration::from_secs(40_000_000_000);
+        let end = start + Duration::from_secs(100);
+        let config = ChaosConfig::new(42).with_delay_range(start..end);
+
+        let mut rng = config.rng();
+        for _ in 0..100 {
+            let delay = rng.next_delay(&config);
+            assert!(
+                delay >= start,
+                "delay {delay:?} should be >= start {start:?}"
+            );
+            assert!(delay < end, "delay {delay:?} should be < end {end:?}");
         }
     }
 
