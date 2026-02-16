@@ -171,6 +171,9 @@ impl RuntimeConfig {
         if self.cancel_lane_max_streak == 0 {
             self.cancel_lane_max_streak = 1;
         }
+        if self.governor_interval == 0 {
+            self.governor_interval = 1;
+        }
         if self.thread_name_prefix.is_empty() {
             self.thread_name_prefix = "asupersync-worker".to_string();
         }
@@ -305,7 +308,7 @@ mod tests {
             leak_escalation: None,
             logical_clock_mode: None,
             enable_governor: false,
-            governor_interval: 32,
+            governor_interval: 0,
         };
 
         config.normalize();
@@ -338,6 +341,12 @@ mod tests {
             "cancel_lane_max_streak",
             1,
             config.cancel_lane_max_streak
+        );
+        crate::assert_with_log!(
+            config.governor_interval == 1,
+            "governor_interval",
+            1,
+            config.governor_interval
         );
         crate::assert_with_log!(
             config.thread_name_prefix == "asupersync-worker",
@@ -407,7 +416,7 @@ mod tests {
             leak_escalation: None,
             logical_clock_mode: None,
             enable_governor: false,
-            governor_interval: 32,
+            governor_interval: 7,
         };
 
         config.normalize();
@@ -446,6 +455,12 @@ mod tests {
             "cancel_lane_max_streak",
             16,
             config.cancel_lane_max_streak
+        );
+        crate::assert_with_log!(
+            config.governor_interval == 7,
+            "governor_interval",
+            7,
+            config.governor_interval
         );
         crate::assert_with_log!(
             config.blocking.max_threads == 4,
