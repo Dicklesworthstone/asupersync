@@ -216,16 +216,22 @@ impl<T: Clone> FaultSender<T> {
 
         if should_reorder {
             self.record_reorder();
+            // Keep a copy of the caller's message so we can surface an
+            // error if an auto-flush fails while this value is part of it.
+            let value_for_error = value.clone();
             let needs_flush = {
                 let mut buffer = self.reorder_buffer.lock().expect("reorder buffer poisoned");
                 buffer.push(value);
                 buffer.len() >= self.config.reorder_buffer_size
             };
             if needs_flush {
-                // Value is already consumed into the buffer; if flush fails
-                // (e.g., receiver dropped), messages remain in the buffer.
-                // Callers should check `flush()` separately for cleanup.
-                let _ = self.flush(cx).await;
+                if let Err(err) = self.flush(cx).await {
+                    return Err(match err {
+                        SendError::Disconnected(()) => SendError::Disconnected(value_for_error),
+                        SendError::Cancelled(()) => SendError::Cancelled(value_for_error),
+                        SendError::Full(()) => SendError::Full(value_for_error),
+                    });
+                }
             }
             return Ok(());
         }
@@ -256,6 +262,7 @@ impl<T: Clone> FaultSender<T> {
     ///
     /// Call this after the message stream ends to ensure all buffered
     /// messages are delivered (eventual delivery guarantee).
+    #[allow(clippy::significant_drop_tightening)]
     pub async fn flush(&self, cx: &Cx) -> Result<(), SendError<()>> {
         let mut messages = {
             let mut buffer = self.reorder_buffer.lock().expect("reorder buffer poisoned");
@@ -282,13 +289,33 @@ impl<T: Clone> FaultSender<T> {
             stats.reorder_flushes += 1;
         }
 
-        for msg in messages {
-            self.inner.send(cx, msg).await.map_err(|e| match e {
-                SendError::Disconnected(_) => SendError::Disconnected(()),
-                SendError::Cancelled(_) => SendError::Cancelled(()),
-                SendError::Full(_) => SendError::Full(()),
-            })?;
-            self.record_sent();
+        let mut pending = messages.into_iter();
+        while let Some(msg) = pending.next() {
+            match self.inner.send(cx, msg).await {
+                Ok(()) => self.record_sent(),
+                Err(err) => {
+                    // Preserve undelivered messages for eventual delivery after
+                    // the caller resolves backpressure/disconnect conditions.
+                    let mut buffer = self.reorder_buffer.lock().expect("reorder buffer poisoned");
+                    match err {
+                        SendError::Disconnected(value) => {
+                            buffer.push(value);
+                            buffer.extend(pending);
+                            return Err(SendError::Disconnected(()));
+                        }
+                        SendError::Cancelled(value) => {
+                            buffer.push(value);
+                            buffer.extend(pending);
+                            return Err(SendError::Cancelled(()));
+                        }
+                        SendError::Full(value) => {
+                            buffer.push(value);
+                            buffer.extend(pending);
+                            return Err(SendError::Full(()));
+                        }
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -715,6 +742,23 @@ mod tests {
         let result = block_on(fault_tx.send(&cx, 1));
         assert!(matches!(result, Err(SendError::Disconnected(1))));
         assert_eq!(fault_tx.buffered_count(), 0);
+    }
+
+    #[test]
+    fn flush_requeues_messages_when_receiver_disconnects() {
+        let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
+        let config = FaultChannelConfig::new(42).with_reorder(1.0, 10);
+        let (fault_tx, rx) = fault_channel::<u32>(4, config, sink);
+        let cx = test_cx();
+
+        block_on(fault_tx.send(&cx, 10)).expect("buffer send");
+        block_on(fault_tx.send(&cx, 11)).expect("buffer send");
+        assert_eq!(fault_tx.buffered_count(), 2);
+
+        drop(rx);
+        let flush_result = block_on(fault_tx.flush(&cx));
+        assert!(matches!(flush_result, Err(SendError::Disconnected(()))));
+        assert_eq!(fault_tx.buffered_count(), 2);
     }
 
     #[test]
