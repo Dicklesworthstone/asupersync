@@ -173,6 +173,251 @@
       ]
     }
   },
+  "g1_budget_draft": {
+    "schema_version": "raptorq-g1-budget-draft-v1",
+    "bead_id": "bd-3v1cs",
+    "seed": 424242,
+    "workload_taxonomy": [
+      {
+        "workload_id": "RQ-G1-ENC-SMALL",
+        "family": "encode",
+        "traffic_shape": "small block, no repair, no loss",
+        "primary_metrics": ["median_ns", "p95_ns"]
+      },
+      {
+        "workload_id": "RQ-G1-DEC-SOURCE",
+        "family": "decode_source_only",
+        "traffic_shape": "small block, zero repair density",
+        "primary_metrics": ["median_ns", "p95_ns"]
+      },
+      {
+        "workload_id": "RQ-G1-DEC-REPAIR",
+        "family": "decode_repair_only",
+        "traffic_shape": "small block, high repair density",
+        "primary_metrics": ["median_ns", "p95_ns"]
+      },
+      {
+        "workload_id": "RQ-G1-GF256-ADDMUL",
+        "family": "kernel_hotspot",
+        "traffic_shape": "arithmetic hotspot",
+        "primary_metrics": ["median_ns", "p95_ns"]
+      },
+      {
+        "workload_id": "RQ-G1-SOLVER-MARKOWITZ",
+        "family": "dense_solver",
+        "traffic_shape": "solver stress shape",
+        "primary_metrics": ["median_ns", "p95_ns"]
+      },
+      {
+        "workload_id": "RQ-G1-PIPE-64K",
+        "family": "pipeline",
+        "traffic_shape": "small object",
+        "primary_metrics": ["throughput_mib_s"]
+      },
+      {
+        "workload_id": "RQ-G1-PIPE-256K",
+        "family": "pipeline",
+        "traffic_shape": "medium object",
+        "primary_metrics": ["throughput_mib_s"]
+      },
+      {
+        "workload_id": "RQ-G1-PIPE-1M",
+        "family": "pipeline",
+        "traffic_shape": "large object",
+        "primary_metrics": ["throughput_kib_s"]
+      },
+      {
+        "workload_id": "RQ-G1-E2E-RANDOM-LOWLOSS",
+        "family": "deterministic_e2e",
+        "traffic_shape": "low repair density, random loss",
+        "primary_metrics": ["decode_success", "median_ns"]
+      },
+      {
+        "workload_id": "RQ-G1-E2E-RANDOM-HIGHLOSS",
+        "family": "deterministic_e2e",
+        "traffic_shape": "high repair density, random loss",
+        "primary_metrics": ["decode_success", "median_ns"]
+      },
+      {
+        "workload_id": "RQ-G1-E2E-BURST-LATE",
+        "family": "deterministic_e2e",
+        "traffic_shape": "burst loss (late window)",
+        "primary_metrics": ["decode_success", "median_ns"]
+      }
+    ],
+    "budget_sheet": [
+      {
+        "workload_id": "RQ-G1-ENC-SMALL",
+        "metric_name": "median_ns",
+        "direction": "upper_bound",
+        "baseline": 123455.74,
+        "warning_budget": 145000.0,
+        "fail_budget": 160000.0
+      },
+      {
+        "workload_id": "RQ-G1-ENC-SMALL",
+        "metric_name": "p95_ns",
+        "direction": "upper_bound",
+        "baseline": 125662.9,
+        "warning_budget": 155000.0,
+        "fail_budget": 170000.0
+      },
+      {
+        "workload_id": "RQ-G1-DEC-SOURCE",
+        "metric_name": "median_ns",
+        "direction": "upper_bound",
+        "baseline": 18542.03,
+        "warning_budget": 24000.0,
+        "fail_budget": 30000.0
+      },
+      {
+        "workload_id": "RQ-G1-DEC-REPAIR",
+        "metric_name": "median_ns",
+        "direction": "upper_bound",
+        "baseline": 76791.45,
+        "warning_budget": 95000.0,
+        "fail_budget": 110000.0
+      },
+      {
+        "workload_id": "RQ-G1-GF256-ADDMUL",
+        "metric_name": "median_ns",
+        "direction": "upper_bound",
+        "baseline": 698.37,
+        "warning_budget": 850.0,
+        "fail_budget": 1000.0
+      },
+      {
+        "workload_id": "RQ-G1-SOLVER-MARKOWITZ",
+        "metric_name": "median_ns",
+        "direction": "upper_bound",
+        "baseline": 606508.43,
+        "warning_budget": 750000.0,
+        "fail_budget": 900000.0
+      },
+      {
+        "workload_id": "RQ-G1-PIPE-64K",
+        "metric_name": "throughput_mib_s",
+        "direction": "lower_bound",
+        "baseline": 11.562,
+        "warning_budget": 10.5,
+        "fail_budget": 9.5
+      },
+      {
+        "workload_id": "RQ-G1-PIPE-256K",
+        "metric_name": "throughput_mib_s",
+        "direction": "lower_bound",
+        "baseline": 2.6734,
+        "warning_budget": 2.35,
+        "fail_budget": 2.15
+      },
+      {
+        "workload_id": "RQ-G1-PIPE-1M",
+        "metric_name": "throughput_kib_s",
+        "direction": "lower_bound",
+        "baseline": 354.64,
+        "warning_budget": 325.0,
+        "fail_budget": 300.0
+      },
+      {
+        "workload_id": "RQ-G1-E2E-RANDOM-LOWLOSS",
+        "metric_name": "decode_success",
+        "direction": "exact",
+        "baseline": 1.0,
+        "warning_budget": 1.0,
+        "fail_budget": 1.0
+      },
+      {
+        "workload_id": "RQ-G1-E2E-RANDOM-HIGHLOSS",
+        "metric_name": "decode_success",
+        "direction": "exact",
+        "baseline": 1.0,
+        "warning_budget": 1.0,
+        "fail_budget": 1.0
+      },
+      {
+        "workload_id": "RQ-G1-E2E-BURST-LATE",
+        "metric_name": "decode_success",
+        "direction": "exact",
+        "baseline": 1.0,
+        "warning_budget": 1.0,
+        "fail_budget": 1.0
+      }
+    ],
+    "profile_gate_mapping": [
+      {
+        "profile": "fast",
+        "required_workloads": [
+          "RQ-G1-ENC-SMALL",
+          "RQ-G1-E2E-RANDOM-LOWLOSS"
+        ],
+        "runtime_envelope_minutes": 3,
+        "command": "rch exec -- target/release/deps/raptorq_benchmark-60b0ce0491bd21fa --bench raptorq_e2e/encode/k=32_sym=1024 --noplot --sample-size 10 --measurement-time 0.02 --warm-up-time 0.02"
+      },
+      {
+        "profile": "full",
+        "required_workloads": [
+          "RQ-G1-ENC-SMALL",
+          "RQ-G1-DEC-SOURCE",
+          "RQ-G1-DEC-REPAIR",
+          "RQ-G1-GF256-ADDMUL",
+          "RQ-G1-SOLVER-MARKOWITZ",
+          "RQ-G1-PIPE-64K",
+          "RQ-G1-PIPE-256K",
+          "RQ-G1-PIPE-1M",
+          "RQ-G1-E2E-RANDOM-LOWLOSS",
+          "RQ-G1-E2E-RANDOM-HIGHLOSS",
+          "RQ-G1-E2E-BURST-LATE"
+        ],
+        "runtime_envelope_minutes": 30,
+        "command": "rch exec -- ./scripts/run_perf_e2e.sh --bench raptorq_benchmark --bench phase0_baseline --seed 424242 --save-baseline baselines/ --no-compare"
+      },
+      {
+        "profile": "forensics",
+        "required_workloads": [
+          "RQ-G1-ENC-SMALL",
+          "RQ-G1-GF256-ADDMUL",
+          "RQ-G1-SOLVER-MARKOWITZ",
+          "RQ-G1-E2E-BURST-LATE"
+        ],
+        "runtime_envelope_minutes": 90,
+        "command": "rch exec -- valgrind --tool=callgrind --callgrind-out-file=target/perf-results/perf_20260214_143734/artifacts/callgrind_raptorq_encode_k32.out target/release/deps/raptorq_benchmark-60b0ce0491bd21fa --bench raptorq_e2e/encode/k=32_sym=1024 --noplot --sample-size 10 --measurement-time 0.02 --warm-up-time 0.02"
+      }
+    ],
+    "confidence_policy": {
+      "single_run_hard_fail_multiplier": 1.2,
+      "consecutive_runs_for_escalation": 2,
+      "notes": [
+        "Use deterministic seed 424242 for all profile gates.",
+        "Throughput budgets are lower bounds; latency budgets are upper bounds."
+      ]
+    },
+    "correctness_prerequisites": [
+      {"bead_id": "bd-1rxlv", "status": "closed"},
+      {"bead_id": "bd-61s90", "status": "open"},
+      {"bead_id": "bd-3bvdj", "status": "in_progress"},
+      {"bead_id": "bd-oeql8", "status": "open"},
+      {"bead_id": "bd-26pqk", "status": "open"}
+    ],
+    "structured_logging": {
+      "required_fields": [
+        "workload_id",
+        "profile",
+        "seed",
+        "metric_name",
+        "observed_value",
+        "warning_budget",
+        "fail_budget",
+        "decision",
+        "artifact_path",
+        "replay_ref"
+      ],
+      "artifact_path_patterns": {
+        "fast": "target/perf-results/fast/<timestamp>/summary.json",
+        "full": "target/perf-results/full/<timestamp>/report.json",
+        "forensics": "target/perf-results/forensics/<timestamp>/"
+      }
+    }
+  },
   "reproducibility": {
     "directional_consistency_rule": "rerun on same host/toolchain/seed and compare median+p95 directional deltas, not absolute nanosecond equality",
     "rerun_consistency_check": {

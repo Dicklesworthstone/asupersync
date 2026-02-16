@@ -17,6 +17,13 @@ This artifact now also carries the Track-G budget draft for bead `bd-3v1cs`:
 - Deterministic evaluation and confidence policy
 - Gate-profile mapping tied to correctness evidence
 
+Machine-readable contract:
+
+- `artifacts/raptorq_baseline_bench_profile_v1.json`
+- top-level key: `g1_budget_draft`
+- schema tag: `g1_budget_draft.schema_version = raptorq-g1-budget-draft-v1`
+- canonical sections: `workload_taxonomy`, `budget_sheet`, `profile_gate_mapping`, `confidence_policy`, `correctness_prerequisites`, `structured_logging`
+
 ## Quickstart Commands
 
 ### Fast

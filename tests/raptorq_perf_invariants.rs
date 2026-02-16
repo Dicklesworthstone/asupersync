@@ -18,7 +18,9 @@ use asupersync::raptorq::proof::ProofOutcome;
 use asupersync::raptorq::systematic::{ConstraintMatrix, SystematicEncoder, SystematicParams};
 use asupersync::types::ObjectId;
 use asupersync::util::DetRng;
+use std::collections::BTreeSet;
 
+const G1_BUDGET_SCHEMA_VERSION: &str = "raptorq-g1-budget-draft-v1";
 const REPLAY_CATALOG_ARTIFACT_PATH: &str = "artifacts/raptorq_replay_catalog_v1.json";
 const REPLAY_FIXTURE_REF: &str = "RQ-D9-REPLAY-CATALOG-V1";
 const REPLAY_SEED_SWEEP_ID: &str = "replay:rq-u-seed-sweep-structured-v1";
@@ -858,6 +860,281 @@ fn replay_catalog_schema_and_linkage() {
             "replay entry {replay_ref} must include remote repro command"
         );
     }
+}
+
+/// Validate G1 budget draft schema presence and key workload/profile coverage.
+#[test]
+fn g1_budget_draft_schema_and_coverage() {
+    let artifact_json = include_str!("../artifacts/raptorq_baseline_bench_profile_v1.json");
+    let artifact: serde_json::Value =
+        serde_json::from_str(artifact_json).expect("baseline profile artifact must be valid JSON");
+
+    let draft = artifact
+        .get("g1_budget_draft")
+        .expect("baseline artifact must include g1_budget_draft");
+    assert_eq!(
+        draft["schema_version"].as_str(),
+        Some(G1_BUDGET_SCHEMA_VERSION),
+        "unexpected G1 budget schema version"
+    );
+    assert_eq!(
+        draft["bead_id"].as_str(),
+        Some("bd-3v1cs"),
+        "G1 budget draft must stay anchored to bd-3v1cs"
+    );
+    assert_eq!(draft["seed"].as_u64(), Some(424242), "G1 seed mismatch");
+
+    let taxonomy = draft["workload_taxonomy"]
+        .as_array()
+        .expect("workload_taxonomy must be an array");
+    let workload_ids: BTreeSet<&str> = taxonomy
+        .iter()
+        .map(|entry| {
+            entry["workload_id"]
+                .as_str()
+                .expect("workload_taxonomy entry missing workload_id")
+        })
+        .collect();
+
+    let required_workloads = [
+        "RQ-G1-ENC-SMALL",
+        "RQ-G1-DEC-SOURCE",
+        "RQ-G1-DEC-REPAIR",
+        "RQ-G1-GF256-ADDMUL",
+        "RQ-G1-SOLVER-MARKOWITZ",
+        "RQ-G1-PIPE-64K",
+        "RQ-G1-PIPE-256K",
+        "RQ-G1-PIPE-1M",
+        "RQ-G1-E2E-RANDOM-LOWLOSS",
+        "RQ-G1-E2E-RANDOM-HIGHLOSS",
+        "RQ-G1-E2E-BURST-LATE",
+    ];
+    for workload_id in required_workloads {
+        assert!(
+            workload_ids.contains(workload_id),
+            "missing G1 workload taxonomy entry for {workload_id}"
+        );
+    }
+
+    let profiles = draft["profile_gate_mapping"]
+        .as_array()
+        .expect("profile_gate_mapping must be an array");
+    let profile_names: BTreeSet<&str> = profiles
+        .iter()
+        .map(|entry| {
+            entry["profile"]
+                .as_str()
+                .expect("profile entry missing profile")
+        })
+        .collect();
+    for profile in ["fast", "full", "forensics"] {
+        assert!(
+            profile_names.contains(profile),
+            "missing profile gate mapping for {profile}"
+        );
+    }
+    for entry in profiles {
+        let command = entry["command"]
+            .as_str()
+            .expect("profile command must be a string");
+        assert!(
+            command.contains("rch exec --"),
+            "profile command must use rch offload: {command}"
+        );
+        let workloads = entry["required_workloads"]
+            .as_array()
+            .expect("required_workloads must be an array");
+        assert!(
+            !workloads.is_empty(),
+            "profile {} must include at least one workload",
+            entry["profile"]
+                .as_str()
+                .expect("profile field missing while checking workload list")
+        );
+    }
+}
+
+/// Validate budget-sheet direction semantics for warn/fail thresholds.
+#[test]
+fn g1_budget_sheet_threshold_directions_are_consistent() {
+    let artifact_json = include_str!("../artifacts/raptorq_baseline_bench_profile_v1.json");
+    let artifact: serde_json::Value =
+        serde_json::from_str(artifact_json).expect("baseline profile artifact must be valid JSON");
+    let draft = artifact
+        .get("g1_budget_draft")
+        .expect("baseline artifact must include g1_budget_draft");
+
+    let taxonomy = draft["workload_taxonomy"]
+        .as_array()
+        .expect("workload_taxonomy must be an array");
+    let workload_ids: BTreeSet<&str> = taxonomy
+        .iter()
+        .map(|entry| {
+            entry["workload_id"]
+                .as_str()
+                .expect("workload_taxonomy entry missing workload_id")
+        })
+        .collect();
+
+    let budget_sheet = draft["budget_sheet"]
+        .as_array()
+        .expect("budget_sheet must be an array");
+    assert!(
+        !budget_sheet.is_empty(),
+        "budget_sheet must contain at least one metric row"
+    );
+
+    for row in budget_sheet {
+        let workload_id = row["workload_id"]
+            .as_str()
+            .expect("budget row missing workload_id");
+        assert!(
+            workload_ids.contains(workload_id),
+            "budget row references unknown workload_id {workload_id}"
+        );
+
+        let direction = row["direction"]
+            .as_str()
+            .expect("budget row missing direction");
+        let warning_budget = row["warning_budget"]
+            .as_f64()
+            .expect("budget row missing warning_budget");
+        let fail_budget = row["fail_budget"]
+            .as_f64()
+            .expect("budget row missing fail_budget");
+
+        match direction {
+            "upper_bound" => assert!(
+                warning_budget <= fail_budget,
+                "upper_bound metric must satisfy warning <= fail for {workload_id}"
+            ),
+            "lower_bound" => assert!(
+                warning_budget >= fail_budget,
+                "lower_bound metric must satisfy warning >= fail for {workload_id}"
+            ),
+            "exact" => assert!(
+                (warning_budget - fail_budget).abs() < f64::EPSILON,
+                "exact metric must satisfy warning == fail for {workload_id}"
+            ),
+            other => panic!("unknown budget direction {other} for {workload_id}"),
+        }
+    }
+
+    let required_fields = draft["structured_logging"]["required_fields"]
+        .as_array()
+        .expect("structured_logging.required_fields must be an array");
+    let required_field_names: BTreeSet<&str> = required_fields
+        .iter()
+        .map(|value| value.as_str().expect("required field must be string"))
+        .collect();
+    for field in [
+        "workload_id",
+        "profile",
+        "seed",
+        "metric_name",
+        "observed_value",
+        "warning_budget",
+        "fail_budget",
+        "decision",
+        "artifact_path",
+        "replay_ref",
+    ] {
+        assert!(
+            required_field_names.contains(field),
+            "structured logging field missing: {field}"
+        );
+    }
+}
+
+/// Validate the G1 profile-gate contract remains aligned with existing runtime tiers.
+#[test]
+fn g1_budget_profile_mapping_matches_runtime_tiers() {
+    let artifact_json = include_str!("../artifacts/raptorq_baseline_bench_profile_v1.json");
+    let artifact: serde_json::Value =
+        serde_json::from_str(artifact_json).expect("baseline profile artifact must be valid JSON");
+
+    let runtime_tiers = artifact["validation_harness_inventory"]["runtime_profile_tiers"]
+        .as_array()
+        .expect("runtime_profile_tiers must be an array");
+    let mut tier_command_by_name = std::collections::BTreeMap::new();
+    for tier in runtime_tiers {
+        let tier_name = tier["tier"].as_str().expect("tier missing name");
+        let command = tier["command"].as_str().expect("tier missing command");
+        tier_command_by_name.insert(tier_name.to_string(), command.to_string());
+    }
+
+    let draft = artifact
+        .get("g1_budget_draft")
+        .expect("baseline artifact must include g1_budget_draft");
+    let profile_mapping = draft["profile_gate_mapping"]
+        .as_array()
+        .expect("profile_gate_mapping must be an array");
+
+    for profile in profile_mapping {
+        let name = profile["profile"].as_str().expect("profile missing name");
+        let command = profile["command"]
+            .as_str()
+            .expect("profile mapping missing command");
+        let tier_command = tier_command_by_name
+            .get(name)
+            .unwrap_or_else(|| panic!("runtime_profile_tiers missing tier {name}"));
+        assert_eq!(
+            command, tier_command,
+            "profile gate command drift for {name}; keep g1_budget_draft and runtime_profile_tiers aligned"
+        );
+    }
+}
+
+/// Validate prerequisite linkage for correctness evidence references.
+#[test]
+fn g1_budget_prerequisite_evidence_linkage_is_well_formed() {
+    let artifact_json = include_str!("../artifacts/raptorq_baseline_bench_profile_v1.json");
+    let artifact: serde_json::Value =
+        serde_json::from_str(artifact_json).expect("baseline profile artifact must be valid JSON");
+    let draft = artifact
+        .get("g1_budget_draft")
+        .expect("baseline artifact must include g1_budget_draft");
+
+    let prereqs = draft["correctness_prerequisites"]
+        .as_array()
+        .expect("correctness_prerequisites must be an array");
+    assert!(
+        !prereqs.is_empty(),
+        "correctness_prerequisites must include at least one evidence bead"
+    );
+
+    let mut seen = BTreeSet::new();
+    for prereq in prereqs {
+        let bead_id = prereq["bead_id"]
+            .as_str()
+            .expect("correctness_prerequisites[].bead_id must be a string");
+        let status = prereq["status"]
+            .as_str()
+            .expect("correctness_prerequisites[].status must be a string");
+
+        assert!(
+            bead_id.starts_with("bd-"),
+            "prerequisite bead id must use bd-* external ref style: {bead_id}"
+        );
+        assert!(
+            seen.insert(bead_id.to_string()),
+            "duplicate prerequisite bead id: {bead_id}"
+        );
+        assert!(
+            matches!(status, "open" | "in_progress" | "closed"),
+            "invalid prerequisite status {status} for {bead_id}"
+        );
+    }
+
+    let d1 = prereqs
+        .iter()
+        .find(|entry| entry["bead_id"].as_str() == Some("bd-1rxlv"))
+        .expect("D1 golden-vector prerequisite (bd-1rxlv) must be listed");
+    assert_eq!(
+        d1["status"].as_str(),
+        Some("closed"),
+        "D1 (bd-1rxlv) should be closed for calibrated baseline evidence"
+    );
 }
 
 // ============================================================================
