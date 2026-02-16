@@ -134,6 +134,12 @@ impl FailurePredicate {
             Self::Custom(pred) => pred(error),
         }
     }
+
+    /// Returns true if this predicate always treats all errors as failures,
+    /// so callers can skip formatting the error string entirely.
+    fn is_all_errors(&self) -> bool {
+        matches!(self, Self::AllErrors)
+    }
 }
 
 /// Sliding window configuration for rate-based failure detection.
@@ -707,8 +713,10 @@ impl CircuitBreaker {
     pub fn record_failure(&self, permit: Permit, error: &str, now: Time) {
         let now_millis = now.as_millis();
 
-        // Check if this error counts as a failure
-        let counts_as_failure = self.policy.failure_predicate.is_failure(error);
+        // Check if this error counts as a failure.
+        // For AllErrors predicates, skip the string inspection entirely.
+        let counts_as_failure = self.policy.failure_predicate.is_all_errors()
+            || self.policy.failure_predicate.is_failure(error);
 
         if !counts_as_failure {
             self.total_ignored_errors.fetch_add(1, Ordering::Relaxed);
@@ -916,8 +924,13 @@ impl CircuitBreaker {
             }
             Err(e) => {
                 if let Some(p) = guard.permit.take() {
-                    let error_str = e.to_string();
-                    self.record_failure(p, &error_str, now);
+                    // For AllErrors predicate, skip the to_string() heap allocation
+                    // entirely — record_failure will short-circuit without inspecting it.
+                    if self.policy.failure_predicate.is_all_errors() {
+                        self.record_failure(p, "", now);
+                    } else {
+                        self.record_failure(p, &e.to_string(), now);
+                    }
                 }
                 Err(CircuitBreakerError::Inner(e))
             }

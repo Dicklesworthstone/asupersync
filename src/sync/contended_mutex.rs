@@ -52,13 +52,22 @@ mod inner {
     use std::sync::{LockResult, Mutex, MutexGuard, PoisonError};
     use std::time::Instant;
 
+    /// Metrics counters split into two cache lines to avoid false sharing.
+    /// Lock-path counters (acquisitions, contentions, wait_ns, max_wait_ns) are
+    /// updated during lock(); unlock-path counters (hold_ns, max_hold_ns) are
+    /// updated during drop(Guard). Separating them prevents cross-invalidation.
     #[derive(Debug)]
+    #[repr(C)]
     struct Metrics {
+        // ── Cache line 1: updated on lock() ──
         acquisitions: AtomicU64,
         contentions: AtomicU64,
         wait_ns: AtomicU64,
-        hold_ns: AtomicU64,
         max_wait_ns: AtomicU64,
+        // Pad to 64 bytes (4 × 8 = 32 bytes of data, 32 bytes padding)
+        _pad: [u8; 32],
+        // ── Cache line 2: updated on drop(Guard) ──
+        hold_ns: AtomicU64,
         max_hold_ns: AtomicU64,
     }
 
@@ -68,8 +77,9 @@ mod inner {
                 acquisitions: AtomicU64::new(0),
                 contentions: AtomicU64::new(0),
                 wait_ns: AtomicU64::new(0),
-                hold_ns: AtomicU64::new(0),
                 max_wait_ns: AtomicU64::new(0),
+                _pad: [0; 32],
+                hold_ns: AtomicU64::new(0),
                 max_hold_ns: AtomicU64::new(0),
             }
         }

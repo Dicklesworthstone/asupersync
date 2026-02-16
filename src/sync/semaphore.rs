@@ -465,13 +465,12 @@ impl Future for OwnedAcquireFuture {
             return Poll::Ready(Err(AcquireError::Cancelled));
         }
 
-        // Clone Arc first so we don't hold an immutable borrow of `self`
-        // while mutating `self.waiter_id` in the same poll.
-        let semaphore = Arc::clone(&self.semaphore);
+        // Extract waiter_id first to avoid borrow conflicts with self.semaphore.
+        let existing_waiter_id = self.waiter_id;
         // Single lock acquisition (same optimization as AcquireFuture).
-        let mut state = semaphore.state.lock();
+        let mut state = self.semaphore.state.lock();
 
-        let waiter_id = if let Some(id) = self.waiter_id {
+        let waiter_id = if let Some(id) = existing_waiter_id {
             id
         } else {
             let id = state.next_waiter_id;
