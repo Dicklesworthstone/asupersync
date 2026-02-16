@@ -223,7 +223,7 @@ impl Bulkhead {
 
     /// Get current metrics.
     #[must_use]
-    #[allow(clippy::significant_drop_tightening)]
+    #[allow(clippy::significant_drop_tightening, clippy::cast_precision_loss)]
     pub fn metrics(&self) -> BulkheadMetrics {
         let queue = self.queue.read().expect("lock poisoned");
         let active = queue.iter().filter(|e| e.result.is_none()).count() as u32;
@@ -238,6 +238,11 @@ impl Bulkhead {
         } else {
             0.0
         };
+        // Compute average lazily instead of per-grant in process_queue.
+        if m.total_executed > 0 {
+            m.avg_queue_wait_ms =
+                self.total_wait_time_ms.load(Ordering::Relaxed) as f64 / m.total_executed as f64;
+        }
         m
     }
 
@@ -332,11 +337,9 @@ impl Bulkhead {
                     if wait_ms > metrics.max_queue_wait_ms {
                         metrics.max_queue_wait_ms = wait_ms;
                     }
-                    let total = metrics.total_executed;
-                    if total > 0 {
-                        metrics.avg_queue_wait_ms =
-                            self.total_wait_time_ms.load(Ordering::Relaxed) as f64 / total as f64;
-                    }
+                    // avg_queue_wait_ms is computed lazily in metrics() from
+                    // total_wait_time_ms and total_executed, avoiding a float
+                    // division on every grant in the hot path.
                 }
 
                 return Some(entry.id);
