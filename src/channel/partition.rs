@@ -189,7 +189,8 @@ impl PartitionController {
     pub fn heal_all(&self) {
         let healed_edges = {
             let mut partitions = self.partitions.lock().expect("partition lock poisoned");
-            let mut healed_edges: Vec<(u64, u64)> = std::mem::take(&mut *partitions).into_iter().collect();
+            let mut healed_edges: Vec<(u64, u64)> =
+                std::mem::take(&mut *partitions).into_iter().collect();
             healed_edges.sort_unstable();
             drop(partitions);
             healed_edges

@@ -1476,7 +1476,10 @@ mod tests {
 
         // 5. Try to enqueue - should be rejected because queue is full of zombies/waiting
         let result = bh.enqueue(1, now);
-        assert!(matches!(result, Err(BulkheadError::QueueFull)), "Zombies should count towards queue limit");
+        assert!(
+            matches!(result, Err(BulkheadError::QueueFull)),
+            "Zombies should count towards queue limit"
+        );
 
         // 6. Claim id1 (removes it)
         let permit = bh.check_entry(id1, now).unwrap().unwrap();
