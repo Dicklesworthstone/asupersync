@@ -527,7 +527,7 @@ mod tests {
         let mut req = test_request("DELETE", "/users/99");
         req.headers
             .insert("Authorization".to_string(), "Bearer token".to_string());
-        let mut params = std::collections::HashMap::new();
+        let mut params = std::collections::BTreeMap::new();
         params.insert("id".to_string(), "99".to_string());
         req.path_params = params;
 
@@ -559,7 +559,7 @@ mod tests {
 
         let cx = test_cx();
         let mut req = test_request("GET", "/greet/alice");
-        let mut params = std::collections::HashMap::new();
+        let mut params = std::collections::BTreeMap::new();
         params.insert("name".to_string(), "alice".to_string());
         req.path_params = params;
 

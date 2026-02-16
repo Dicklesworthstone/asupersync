@@ -31,7 +31,7 @@ use asupersync::trace::scoring::{
 };
 use asupersync::trace::TraceEvent;
 use asupersync::types::{RegionId, TaskId, Time};
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 // =============================================================================
 // HELPER FUNCTIONS
@@ -325,7 +325,7 @@ fn bench_scoring(c: &mut Criterion) {
             &pairs,
             |b, pairs| {
                 b.iter_batched(
-                    HashSet::new,
+                    BTreeSet::new,
                     |mut seen| black_box(score_persistence(pairs, &mut seen, 42)),
                     BatchSize::SmallInput,
                 )
@@ -333,7 +333,7 @@ fn bench_scoring(c: &mut Criterion) {
         );
 
         // Warm scoring (classes already seen → no novelty)
-        let mut pre_seen: HashSet<ClassId> = HashSet::new();
+        let mut pre_seen: BTreeSet<ClassId> = BTreeSet::new();
         let _ = score_persistence(&pairs, &mut pre_seen, 42);
 
         group.bench_with_input(
@@ -358,7 +358,7 @@ fn bench_scoring(c: &mut Criterion) {
             &d,
             |b, d| {
                 b.iter_batched(
-                    HashSet::new,
+                    BTreeSet::new,
                     |mut seen| black_box(score_boundary_matrix(d, &mut seen, 42)),
                     BatchSize::SmallInput,
                 )
@@ -410,7 +410,7 @@ fn bench_end_to_end(c: &mut Criterion) {
 
         group.bench_function(format!("full_pipeline/{n}x{n}"), |b| {
             b.iter_batched(
-                HashSet::<ClassId>::new,
+                BTreeSet::<ClassId>::new,
                 |mut seen| {
                     let d = build_combined_filtration(n_usize);
                     let reduced = d.reduce();
