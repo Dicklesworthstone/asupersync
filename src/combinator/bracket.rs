@@ -216,38 +216,53 @@ where
     RF: Future<Output = ()>,
 {
     fn drop(&mut self) {
-        // If we're in the Using phase and have release_fn + resource, we must release.
-        // This handles the cancellation case where the future is dropped mid-use.
-        if matches!(self.state.phase, BracketPhase::Using(_)) {
-            if let (Some(release_fn), Some(resource)) = (
-                self.state.release_fn.take(),
-                self.state.resource_for_release.take(),
-            ) {
-                // Create the release future
-                let mut release_fut = Box::pin(release_fn(resource));
+        // Determine the release future to drive:
+        // - Using phase: resource acquired but use not complete; construct release future.
+        // - Releasing phase: release already started but not complete; drive existing future.
+        let release_fut: Option<Pin<Box<RF>>> = match &self.state.phase {
+            BracketPhase::Using(_) => {
+                // Cancel during use: construct the release future from saved state.
+                if let (Some(release_fn), Some(resource)) = (
+                    self.state.release_fn.take(),
+                    self.state.resource_for_release.take(),
+                ) {
+                    Some(Box::pin(release_fn(resource)))
+                } else {
+                    None
+                }
+            }
+            BracketPhase::Releasing(_) => {
+                // Cancel during release: extract the in-progress release future.
+                match std::mem::replace(&mut self.state.phase, BracketPhase::Done) {
+                    BracketPhase::Releasing(fut) => Some(fut),
+                    _ => unreachable!(),
+                }
+            }
+            _ => None,
+        };
 
-                // Drive it to completion synchronously using a noop waker.
-                // This is Phase 0 behavior; full implementation would use the
-                // runtime's cancel mask to run release asynchronously.
-                let waker = Waker::from(Arc::new(NoopWaker));
-                let mut cx = Context::from_waker(&waker);
+        if let Some(mut release_fut) = release_fut {
+            // Drive it to completion synchronously using a noop waker.
+            // This is Phase 0 behavior; full implementation would use the
+            // runtime's cancel mask to run release asynchronously.
+            let waker = Waker::from(Arc::new(NoopWaker));
+            let mut cx = Context::from_waker(&waker);
 
-                // Poll until complete (bounded iteration to prevent infinite loops)
-                // Most release futures complete quickly or immediately.
-                for _ in 0..10_000 {
-                    match release_fut.as_mut().poll(&mut cx) {
-                        Poll::Ready(()) => return,
-                        Poll::Pending => {
-                            // Yield to allow progress
-                            std::hint::spin_loop();
-                        }
+            // Poll until complete (bounded iteration to prevent infinite loops)
+            // Most release futures complete quickly or immediately.
+            for _ in 0..10_000 {
+                match release_fut.as_mut().poll(&mut cx) {
+                    Poll::Ready(()) => return,
+                    Poll::Pending => {
+                        // Yield to allow progress
+                        std::hint::spin_loop();
                     }
                 }
-
-                // If we get here, release is taking too long.
-                // In production, this would log a warning. For Phase 0, we accept
-                // potential resource leak for pathologically long-running release.
             }
+
+            // If we get here, release is taking too long.
+            // In production, this would log a warning. For Phase 0, we accept
+            // potential resource leak for pathologically long-running release.
         }
     }
 }
@@ -819,5 +834,70 @@ mod tests {
         ));
 
         assert_eq!(result, Ok(84));
+    }
+
+    // =========================================================================
+    // Drop-during-Releasing Regression Test
+    // =========================================================================
+
+    /// A release future that returns Pending on the first poll, then Ready
+    /// on the second. Simulates a release that needs multiple polls.
+    struct TwoPollRelease {
+        done: bool,
+        flag: Arc<AtomicBool>,
+    }
+
+    impl Future for TwoPollRelease {
+        type Output = ();
+        fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+            if self.done {
+                self.flag.store(true, Ordering::SeqCst);
+                Poll::Ready(())
+            } else {
+                self.done = true;
+                Poll::Pending
+            }
+        }
+    }
+
+    /// Regression: if the bracket future is dropped while the release future
+    /// is in progress (Releasing phase returns Pending then the bracket is
+    /// dropped), the Drop handler must drive the release future to completion.
+    /// Previously, the Drop handler only covered the Using phase, leaving the
+    /// release abandoned if cancelled during Releasing.
+    #[test]
+    fn bracket_drop_during_releasing_drives_release_to_completion() {
+        let released = Arc::new(AtomicBool::new(false));
+        let rel = released.clone();
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut fut = Box::pin(bracket(
+            async { Ok::<_, ()>(42_i32) },
+            |x| async move { Ok::<_, ()>(x) },
+            move |_| TwoPollRelease {
+                done: false,
+                flag: rel,
+            },
+        ));
+
+        // First poll: acquire succeeds, use succeeds, release returns Pending.
+        // Bracket is now in the Releasing phase.
+        let poll1 = fut.as_mut().poll(&mut cx);
+        assert!(
+            poll1.is_pending(),
+            "release future should return Pending on first poll"
+        );
+        assert!(!released.load(Ordering::SeqCst), "release not yet complete");
+
+        // Drop the bracket while in Releasing phase.
+        // The Drop handler must drive the release future to completion.
+        drop(fut);
+
+        assert!(
+            released.load(Ordering::SeqCst),
+            "release must complete even when bracket is dropped during Releasing phase"
+        );
     }
 }
