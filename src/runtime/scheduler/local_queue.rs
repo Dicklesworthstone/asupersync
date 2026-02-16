@@ -225,18 +225,23 @@ impl Stealer {
     pub fn steal(&self) -> Option<TaskId> {
         self.tasks.with_tasks_arena_mut(|arena| {
             let mut stack = self.inner.lock();
-            let task_id = stack.steal_one(arena)?;
-            let is_local = arena
-                .get(task_id.arena_index())
-                .is_some_and(crate::record::task::TaskRecord::is_local);
-            if is_local {
-                // Local (!Send) tasks must never be stolen; requeue and abort steal.
-                stack.push(task_id, arena);
-                drop(stack);
-                return None;
+            let mut remaining_attempts = stack.len();
+            while remaining_attempts > 0 {
+                remaining_attempts -= 1;
+                let task_id = stack.steal_one(arena)?;
+                let is_local = arena
+                    .get(task_id.arena_index())
+                    .is_some_and(crate::record::task::TaskRecord::is_local);
+                if is_local {
+                    // Local (!Send) tasks must never be stolen. Requeue and keep scanning:
+                    // there may still be stealable tasks behind this local tail entry.
+                    stack.push(task_id, arena);
+                    continue;
+                }
+                return Some(task_id);
             }
-            drop(stack);
-            Some(task_id)
+
+            None
         })
     }
 
@@ -352,6 +357,32 @@ mod tests {
         let stealer = queue.stealer();
         assert_eq!(stealer.steal(), None, "local task must not be stolen");
         assert_eq!(queue.pop(), Some(task(1)), "local task remains queued");
+        assert_eq!(queue.pop(), None);
+    }
+
+    #[test]
+    fn steal_skips_local_tail_and_finds_remote() {
+        let state = LocalQueue::test_state(1);
+        let queue = LocalQueue::new(Arc::clone(&state));
+
+        {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let record = guard.task_mut(task(0)).expect("task record missing");
+            record.mark_local();
+            drop(guard);
+        }
+
+        // Tail (FIFO oldest) is local; next entry is stealable.
+        queue.push(task(0));
+        queue.push(task(1));
+
+        let stealer = queue.stealer();
+        assert_eq!(
+            stealer.steal(),
+            Some(task(1)),
+            "stealer should skip local tail and still find remote task"
+        );
+        assert_eq!(queue.pop(), Some(task(0)), "local task remains queued");
         assert_eq!(queue.pop(), None);
     }
 
