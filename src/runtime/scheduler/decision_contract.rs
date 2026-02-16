@@ -200,7 +200,9 @@ impl DecisionContract for SchedulerDecisionContract {
     fn update_posterior(&self, posterior: &mut Posterior, observation: usize) {
         // Simple likelihood model: observed state gets high probability.
         let mut likelihoods = vec![0.1; state::COUNT];
-        likelihoods[observation] = 0.9;
+        if let Some(observed) = likelihoods.get_mut(observation) {
+            *observed = 0.9;
+        }
         posterior.bayesian_update(&likelihoods);
     }
 
@@ -395,5 +397,14 @@ mod tests {
         let outcome = evaluate(&c, &posterior, &test_ctx(0.95));
         // Conservative is very expensive everywhere, so aggressive/balanced wins.
         assert_ne!(outcome.action_index, action::CONSERVATIVE);
+    }
+
+    #[test]
+    fn update_posterior_out_of_range_is_noop() {
+        let c = SchedulerDecisionContract::new();
+        let mut posterior = Posterior::uniform(state::COUNT);
+        let before = posterior.probs().to_vec();
+        c.update_posterior(&mut posterior, state::COUNT + 5);
+        assert_eq!(posterior.probs(), before.as_slice());
     }
 }
