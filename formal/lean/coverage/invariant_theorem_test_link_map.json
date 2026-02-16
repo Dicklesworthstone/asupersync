@@ -1,8 +1,8 @@
 {
   "schema_version": "1.0.0",
   "link_map_id": "lean.invariant_theorem_test_link_map.v1",
-  "generated_by": "bd-2iwok",
-  "generated_at": "2026-02-16T20:00:00Z",
+  "generated_by": "asupersync-24rak",
+  "generated_at": "2026-02-16T20:10:00Z",
   "source_artifacts": {
     "invariant_status_inventory": "formal/lean/coverage/invariant_status_inventory.json",
     "theorem_surface_inventory": "formal/lean/coverage/theorem_surface_inventory.json",
@@ -734,6 +734,98 @@
       ]
     }
   ],
+  "cross_entity_liveness_composition": {
+    "contract_id": "lean.track3.cross_entity_liveness.v1",
+    "source_bead": "asupersync-24rak",
+    "invariant_ids": [
+      "inv.cancel.protocol",
+      "inv.race.losers_drained",
+      "inv.region_close.quiescence"
+    ],
+    "theorem_chain": [
+      {
+        "segment_id": "cancel_ladder",
+        "theorems": [
+          "cancel_protocol_terminates",
+          "cancel_steps_testable_bound",
+          "cancel_propagation_bounded"
+        ],
+        "guarantee": "Cancellation reaches bounded terminal progression before downstream close sequencing."
+      },
+      {
+        "segment_id": "race_loser_drain",
+        "theorems": [
+          "cancel_propagation_bounded",
+          "step_preserves_wellformed"
+        ],
+        "guarantee": "Race losers are cancellation-bounded and structurally wellformed while draining."
+      },
+      {
+        "segment_id": "close_quiescence",
+        "theorems": [
+          "close_implies_quiescent",
+          "close_quiescence_decomposition",
+          "close_complete_step"
+        ],
+        "guarantee": "Region close concludes only in quiescent state with completed close transition."
+      }
+    ],
+    "end_to_end_guarantees": [
+      {
+        "guarantee_id": "e2e.cancel_to_quiescence",
+        "statement": "Cancel protocol progression composes with close/quiescence proofs so cancellation-triggered shutdown returns only after quiescence.",
+        "depends_on_theorems": [
+          "cancel_protocol_terminates",
+          "cancel_steps_testable_bound",
+          "close_quiescence_decomposition",
+          "close_complete_step"
+        ],
+        "harness_ids": [
+          "harness.cancellation_obligation"
+        ],
+        "consumed_by": [
+          "tests/cancellation_conformance.rs",
+          "tests/refinement_conformance.rs",
+          "tests/region_lifecycle_conformance.rs"
+        ]
+      },
+      {
+        "guarantee_id": "e2e.race_loser_drain_to_quiescence",
+        "statement": "Race loser-drain sequencing composes with close/quiescence checks so raced scopes return only after loser cancellation is drained and quiescence is re-established.",
+        "depends_on_theorems": [
+          "cancel_propagation_bounded",
+          "step_preserves_wellformed",
+          "close_quiescence_decomposition"
+        ],
+        "harness_ids": [
+          "harness.race_loser_drain"
+        ],
+        "consumed_by": [
+          "tests/e2e/combinator/cancel_correctness/loser_drain.rs",
+          "tests/refinement_conformance.rs",
+          "tests/runtime_e2e.rs"
+        ]
+      }
+    ],
+    "conformance_harness_links": [
+      {
+        "harness_id": "harness.cancellation_obligation",
+        "required_artifacts": [
+          "normalized_trace_artifact",
+          "mismatch_payload_artifact",
+          "repro_manifest_artifact"
+        ]
+      },
+      {
+        "harness_id": "harness.race_loser_drain",
+        "required_artifacts": [
+          "normalized_trace_artifact",
+          "mismatch_payload_artifact",
+          "repro_manifest_artifact"
+        ]
+      }
+    ]
+  },
   "summary": {
     "invariants_total": 6,
     "invariants_with_theorem_witnesses": 5,

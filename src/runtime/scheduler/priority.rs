@@ -1770,40 +1770,68 @@ mod tests {
     #[test]
     fn pop_with_lane_rng_tiebreak_among_equal_priority() {
         init_test("pop_with_lane_rng_tiebreak_among_equal_priority");
-        let mut sched = Scheduler::new();
-
-        // Schedule 4 tasks all at priority 50
-        for i in 0..4 {
-            sched.schedule(task(i), 50);
-        }
-
-        // With different rng_hints, we should get different ordering
-        // (since all have equal priority, rng selects among them)
-        let mut results_hint_0 = Vec::new();
-        let mut sched_copy = Scheduler::new();
-        for i in 0..4 {
-            sched_copy.schedule(task(i), 50);
-        }
-
-        for step in 0..4 {
-            if let Some((t, _)) = sched.pop_with_lane(step) {
-                results_hint_0.push(t);
+        let run_with_hints = |hints: &[u64]| -> Vec<TaskId> {
+            let mut sched = Scheduler::new();
+            for i in 0..4 {
+                sched.schedule(task(i), 50);
             }
-        }
 
-        for step in 0..4 {
-            if let Some((t, _)) = sched_copy.pop_with_lane(step + 42) {
-                results_hint_0.push(t);
+            let mut popped = Vec::new();
+            for &hint in hints {
+                if let Some((t, lane)) = sched.pop_with_lane(hint) {
+                    crate::assert_with_log!(
+                        matches!(lane, DispatchLane::Ready),
+                        "equal-priority dispatch stays in ready lane",
+                        true,
+                        true
+                    );
+                    popped.push(t);
+                }
             }
-        }
+            popped
+        };
 
-        // All 8 pops should succeed (4 from each scheduler)
+        let hints_a = [0, 1, 2, 3];
+        let hints_b = [0, 1, 2, 3];
+        let hints_c = [42, 43, 44, 45];
+
+        let order_a = run_with_hints(&hints_a);
+        let order_b = run_with_hints(&hints_b);
+        let order_c = run_with_hints(&hints_c);
+
+        // Same hints from same initial state must be deterministic.
         crate::assert_with_log!(
-            results_hint_0.len() == 8,
-            "all tasks dispatched from both schedulers",
-            8usize,
-            results_hint_0.len()
+            order_a == order_b,
+            "same hint sequence yields same pop order",
+            true,
+            order_a == order_b
         );
+        // Distinct hints should perturb tie-breaking among equal priorities.
+        crate::assert_with_log!(
+            order_a != order_c,
+            "different hint sequence yields different pop order",
+            true,
+            order_a != order_c
+        );
+
+        // Each run must pop each task exactly once.
+        for order in [&order_a, &order_b, &order_c] {
+            crate::assert_with_log!(
+                order.len() == 4,
+                "all tasks dispatched",
+                4usize,
+                order.len()
+            );
+            let mut sorted = order.clone();
+            sorted.sort_by_key(|t| t.arena_index().index());
+            let expected = vec![task(0), task(1), task(2), task(3)];
+            crate::assert_with_log!(
+                sorted == expected,
+                "pop order is a permutation of scheduled tasks",
+                true,
+                sorted == expected
+            );
+        }
         crate::test_complete!("pop_with_lane_rng_tiebreak_among_equal_priority");
     }
 
