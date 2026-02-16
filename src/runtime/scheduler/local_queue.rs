@@ -102,12 +102,13 @@ impl LocalQueue {
 
     /// Schedules a task on the current thread-local queue.
     ///
-    /// Returns `true` if a local queue was available.
+    /// Returns `true` if the task was accepted by a local queue (or was already
+    /// queued there), `false` if no local queue is set or the task record is
+    /// missing from the backing arena.
     pub(crate) fn schedule_local(task: TaskId) -> bool {
         CURRENT_QUEUE.with(|slot| {
             slot.borrow().as_ref().is_some_and(|queue| {
-                queue.push(task);
-                true
+                queue.schedule_local_push(task)
             })
         })
     }
@@ -154,6 +155,24 @@ impl LocalQueue {
             let mut stack = self.inner.lock();
             stack.push(task, arena);
         });
+    }
+
+    /// Pushes a task from the TLS scheduling fast path.
+    ///
+    /// Returns `false` only when the task record does not exist in the backing
+    /// arena. Duplicate scheduling still returns `true` because the task is
+    /// already present in this queue.
+    #[inline]
+    fn schedule_local_push(&self, task: TaskId) -> bool {
+        self.tasks.with_tasks_arena_mut(|arena| {
+            if arena.get(task.arena_index()).is_none() {
+                return false;
+            }
+
+            let mut stack = self.inner.lock();
+            stack.push(task, arena);
+            true
+        })
     }
 
     /// Pushes multiple tasks to the local queue under one arena/queue lock.
@@ -741,5 +760,33 @@ mod tests {
         let result = src.stealer().steal_batch(&dest);
         assert!(!result, "steal_batch from empty should return false");
         assert!(dest.is_empty());
+    }
+
+    #[test]
+    fn schedule_local_returns_false_when_task_record_missing() {
+        let queue = queue(0);
+        let _guard = LocalQueue::set_current(queue.clone());
+
+        let scheduled = LocalQueue::schedule_local(task(1));
+        assert!(
+            !scheduled,
+            "schedule_local should report failure for missing task records"
+        );
+        assert!(queue.is_empty(), "queue should remain unchanged");
+    }
+
+    #[test]
+    fn schedule_local_duplicate_still_reports_success() {
+        let queue = queue(1);
+        queue.push(task(1));
+        let _guard = LocalQueue::set_current(queue.clone());
+
+        let scheduled = LocalQueue::schedule_local(task(1));
+        assert!(
+            scheduled,
+            "duplicate scheduling should still report success (already queued)"
+        );
+        assert_eq!(queue.pop(), Some(task(1)));
+        assert_eq!(queue.pop(), None, "duplicate schedule must not enqueue twice");
     }
 }
