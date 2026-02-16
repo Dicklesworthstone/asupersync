@@ -114,6 +114,12 @@ impl H2Error {
     /// Create a new stream-level error.
     #[must_use]
     pub fn stream(stream_id: u32, code: ErrorCode, message: impl Into<String>) -> Self {
+        if stream_id == 0 {
+            // Stream ID 0 is reserved for connection-level signaling in HTTP/2.
+            // Normalize accidental stream-0 construction to a connection error
+            // so downstream classification stays protocol-correct.
+            return Self::connection(code, message);
+        }
         Self {
             code,
             message: message.into(),
@@ -297,6 +303,31 @@ mod tests {
             stream_render.contains("stream 7")
         );
         crate::test_complete!("test_h2error_connection_and_stream_variants");
+    }
+
+    #[test]
+    fn test_h2error_stream_zero_normalized_to_connection_error() {
+        init_test("test_h2error_stream_zero_normalized_to_connection_error");
+        let err = H2Error::stream(0, ErrorCode::StreamClosed, "invalid stream id");
+        crate::assert_with_log!(
+            err.is_connection_error(),
+            "stream 0 normalized to connection-level",
+            true,
+            err.is_connection_error()
+        );
+        crate::assert_with_log!(
+            err.stream_id.is_none(),
+            "stream id must be none for normalized error",
+            true,
+            err.stream_id.is_none()
+        );
+        crate::assert_with_log!(
+            err.to_string().contains("connection error"),
+            "display reports connection-level error",
+            true,
+            err.to_string().contains("connection error")
+        );
+        crate::test_complete!("test_h2error_stream_zero_normalized_to_connection_error");
     }
 
     #[test]
