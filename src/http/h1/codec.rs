@@ -223,20 +223,45 @@ fn is_valid_header_name(name: &str) -> bool {
 
 /// Parse a single `Name: Value` header line.
 pub(super) fn parse_header_line(line: &str) -> Result<(String, String), HttpError> {
-    let colon = line.find(':').ok_or(HttpError::BadHeader)?;
-    let raw_name = &line[..colon];
-    let name = raw_name.trim();
-    let value = line[colon + 1..].trim().to_owned();
-    if raw_name != name {
+    let line_bytes = line.as_bytes();
+    let colon = line_bytes
+        .iter()
+        .position(|&b| b == b':')
+        .ok_or(HttpError::BadHeader)?;
+    let raw_name = &line_bytes[..colon];
+
+    // Header field names cannot be surrounded by whitespace.
+    if raw_name
+        .first()
+        .is_some_and(|b| b.is_ascii_whitespace())
+        || raw_name
+            .last()
+            .is_some_and(|b| b.is_ascii_whitespace())
+    {
         return Err(HttpError::InvalidHeaderName);
     }
+
+    let name = std::str::from_utf8(raw_name).map_err(|_| HttpError::InvalidHeaderName)?;
     if !is_valid_header_name(name) {
         return Err(HttpError::InvalidHeaderName);
     }
-    if value.contains('\r') || value.contains('\n') {
+
+    let mut value_start = colon + 1;
+    while value_start < line_bytes.len() && line_bytes[value_start].is_ascii_whitespace() {
+        value_start += 1;
+    }
+    let mut value_end = line_bytes.len();
+    while value_end > value_start && line_bytes[value_end - 1].is_ascii_whitespace() {
+        value_end -= 1;
+    }
+    let value_bytes = &line_bytes[value_start..value_end];
+
+    if value_bytes.iter().any(|&b| b == b'\r' || b == b'\n') {
         return Err(HttpError::InvalidHeaderValue);
     }
-    Ok((name.to_owned(), value))
+
+    let value = std::str::from_utf8(value_bytes).map_err(|_| HttpError::InvalidHeaderValue)?;
+    Ok((name.to_owned(), value.to_owned()))
 }
 
 pub(super) fn validate_header_field(name: &str, value: &str) -> Result<(), HttpError> {
@@ -495,22 +520,31 @@ fn decode_head(
     }
 
     let head_bytes = src.split_to(end);
-    let head_str =
-        std::str::from_utf8(head_bytes.as_ref()).map_err(|_| HttpError::BadRequestLine)?;
-
-    let mut lines = head_str.split("\r\n");
-    let request_line = lines.next().ok_or(HttpError::BadRequestLine)?;
+    let head = head_bytes.as_ref();
+    let request_line_end = head
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .ok_or(HttpError::BadRequestLine)?;
+    let request_line =
+        std::str::from_utf8(&head[..request_line_end]).map_err(|_| HttpError::BadRequestLine)?;
     let (method, uri, version) = parse_request_line(request_line)?;
 
-    let mut headers = Vec::new();
-    for line in lines {
-        if line.is_empty() {
+    let mut headers = Vec::with_capacity(8);
+    let mut cursor = &head[request_line_end + 2..];
+    while !cursor.is_empty() {
+        let line_end = cursor
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .ok_or(HttpError::BadHeader)?;
+        if line_end == 0 {
             break;
         }
+        let line = std::str::from_utf8(&cursor[..line_end]).map_err(|_| HttpError::BadHeader)?;
         headers.push(parse_header_line(line)?);
         if headers.len() > MAX_HEADERS {
             return Err(HttpError::TooManyHeaders);
         }
+        cursor = &cursor[line_end + 2..];
     }
 
     let kind = body_kind(version, &headers)?;
