@@ -894,6 +894,26 @@ mod tests {
     }
 
     #[test]
+    fn steal_batch_rejects_different_task_sources_without_mutation() {
+        let src = queue(3);
+        let dest = queue_with_task_table(3);
+
+        src.push(task(1));
+        src.push(task(2));
+
+        assert!(
+            !src.stealer().steal_batch(&dest),
+            "steal_batch must reject cross-arena transfer"
+        );
+        assert_eq!(dest.pop(), None, "destination must remain unchanged");
+
+        // Source queue contents and owner-visible order must remain intact.
+        assert_eq!(src.pop(), Some(task(2)));
+        assert_eq!(src.pop(), Some(task(1)));
+        assert_eq!(src.pop(), None);
+    }
+
+    #[test]
     fn test_local_queue_high_volume() {
         let count = 10_000;
         let queue = queue(count - 1);
