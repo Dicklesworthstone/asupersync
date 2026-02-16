@@ -14,6 +14,7 @@
 
 use std::time::Duration;
 
+use super::snapshot::{BudgetSnapshot, RegionSnapshot, TaskSnapshot, TaskState};
 use crate::error::{Error, ErrorKind};
 use crate::record::distributed_region::{
     ConsistencyLevel, DistributedRegionConfig, DistributedRegionRecord, DistributedRegionState,
@@ -23,7 +24,6 @@ use crate::record::region::{RegionRecord, RegionState};
 use crate::types::budget::Budget;
 use crate::types::cancel::CancelReason;
 use crate::types::{RegionId, TaskId, Time};
-use super::snapshot::{BudgetSnapshot, RegionSnapshot, TaskSnapshot, TaskState};
 
 // ---------------------------------------------------------------------------
 // RegionMode

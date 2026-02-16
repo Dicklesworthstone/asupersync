@@ -140,11 +140,8 @@ impl TcpSocket {
             TcpSocketFamily::V4 => socket2::Domain::IPV4,
             TcpSocketFamily::V6 => socket2::Domain::IPV6,
         };
-        let socket = socket2::Socket::new(
-            domain,
-            socket2::Type::STREAM,
-            Some(socket2::Protocol::TCP),
-        )?;
+        let socket =
+            socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
 
         if state.reuseaddr {
             socket.set_reuse_address(true)?;
@@ -304,17 +301,17 @@ mod tests {
             socket
                 .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
                 .expect("bind");
-            
+
             let stream = socket.connect(listen_addr).await;
             crate::assert_with_log!(stream.is_ok(), "connect with bind ok", true, stream.is_ok());
-            
+
             if let Ok(stream) = stream {
                 let local = stream.local_addr().expect("local addr");
                 // Verify we are indeed bound to local loopback (port will be non-zero)
                 crate::assert_with_log!(
-                    local.ip() == Ipv4Addr::LOCALHOST, 
-                    "local ip", 
-                    Ipv4Addr::LOCALHOST, 
+                    local.ip() == Ipv4Addr::LOCALHOST,
+                    "local ip",
+                    Ipv4Addr::LOCALHOST,
                     local.ip()
                 );
             }
