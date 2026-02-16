@@ -308,6 +308,23 @@ mod tests {
     }
 
     #[test]
+    fn insert_task_canonicalizes_record_id() {
+        let mut table = TaskTable::new();
+        let owner = RegionId::from_arena(ArenaIndex::new(1, 0));
+
+        let stale = TaskRecord::new(
+            TaskId::from_arena(ArenaIndex::new(0, 0)),
+            owner,
+            Budget::INFINITE,
+        );
+        let idx = table.insert_task(stale);
+
+        let canonical_id = TaskId::from_arena(idx);
+        let record = table.task(canonical_id).expect("task should exist");
+        assert_eq!(record.id, canonical_id);
+    }
+
+    #[test]
     fn insert_task_with_canonicalizes_record_id() {
         let mut table = TaskTable::new();
         let owner = RegionId::from_arena(ArenaIndex::new(1, 0));

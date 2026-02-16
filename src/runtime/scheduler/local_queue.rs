@@ -260,6 +260,9 @@ impl Stealer {
                 return Some(task_id);
             }
 
+            // Drop the queue lock before returning from the arena closure to
+            // minimize lock hold time on contention-heavy steal probes.
+            drop(stack);
             None
         })
     }

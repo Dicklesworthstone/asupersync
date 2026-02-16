@@ -26,3 +26,43 @@ impl Future for YieldNow {
 pub fn yield_now() -> YieldNow {
     YieldNow { yielded: false }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::task::Wake;
+
+    #[derive(Default)]
+    struct WakeCounter {
+        wakes: AtomicUsize,
+    }
+
+    impl Wake for WakeCounter {
+        fn wake(self: Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.wakes.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn yield_now_pending_then_ready_with_single_wake() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("yield_now_pending_then_ready_with_single_wake");
+
+        let wake_counter = Arc::new(WakeCounter::default());
+        let waker = std::task::Waker::from(Arc::clone(&wake_counter));
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = Box::pin(yield_now());
+
+        assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
+        assert_eq!(wake_counter.wakes.load(Ordering::Relaxed), 1);
+
+        assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Ready(())));
+        assert_eq!(wake_counter.wakes.load(Ordering::Relaxed), 1);
+    }
+}

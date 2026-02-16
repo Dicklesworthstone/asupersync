@@ -166,6 +166,32 @@ mod tests {
     }
 
     #[test]
+    fn wake_after_drain_requeues_task() {
+        init_test("wake_after_drain_requeues_task");
+        let state = Arc::new(WakerState::new());
+        let waker = state.waker_for(task(4));
+
+        waker.wake_by_ref();
+        let first = state.drain_woken();
+        crate::assert_with_log!(
+            first == vec![task(4)],
+            "first wake should queue task",
+            vec![task(4)],
+            first
+        );
+
+        waker.wake_by_ref();
+        let second = state.drain_woken();
+        crate::assert_with_log!(
+            second == vec![task(4)],
+            "task should be re-queueable after drain",
+            vec![task(4)],
+            second
+        );
+        crate::test_complete!("wake_after_drain_requeues_task");
+    }
+
+    #[test]
     fn waker_for_source_timer() {
         init_test("waker_for_source_timer");
         let state = Arc::new(WakerState::new());
