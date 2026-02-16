@@ -426,6 +426,43 @@ impl IntrusiveStack {
         self.len += 1;
     }
 
+    /// Pushes a task onto the bottom of the stack.
+    ///
+    /// This is used by steal paths that temporarily remove local (`!Send`) tasks
+    /// while scanning for stealable work, then restore them without perturbing
+    /// owner-observed ordering.
+    #[inline]
+    pub fn push_bottom(&mut self, task_id: TaskId, arena: &mut Arena<TaskRecord>) {
+        let Some(record) = arena.get_mut(task_id.arena_index()) else {
+            return;
+        };
+
+        if record.is_in_queue() {
+            return;
+        }
+
+        match self.bottom {
+            None => {
+                // Empty stack.
+                record.set_queue_links(None, None, self.tag);
+                self.top = Some(task_id);
+                self.bottom = Some(task_id);
+            }
+            Some(old_bottom) => {
+                // Link new task as older than current bottom.
+                record.set_queue_links(Some(old_bottom), None, self.tag);
+
+                if let Some(old_bottom_record) = arena.get_mut(old_bottom.arena_index()) {
+                    old_bottom_record.next_in_queue = Some(task_id);
+                }
+
+                self.bottom = Some(task_id);
+            }
+        }
+
+        self.len += 1;
+    }
+
     /// Pops a task from the top of the stack (LIFO).
     ///
     /// # Complexity
@@ -885,6 +922,27 @@ mod tests {
             assert_eq!(popped, Some(task(i)), "expected task {i}");
         }
         assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn stack_push_bottom_restores_owner_visible_order() {
+        let mut arena = setup_arena(3);
+        let mut stack = IntrusiveStack::new(QUEUE_TAG_READY);
+
+        stack.push(task(0), &mut arena);
+        stack.push(task(1), &mut arena);
+        stack.push(task(2), &mut arena);
+
+        // Temporarily remove oldest, then restore at bottom.
+        let oldest = stack.steal_one(&mut arena).expect("oldest task missing");
+        assert_eq!(oldest, task(0));
+        stack.push_bottom(oldest, &mut arena);
+
+        // Owner-observed order should remain unchanged.
+        assert_eq!(stack.pop(&mut arena), Some(task(2)));
+        assert_eq!(stack.pop(&mut arena), Some(task(1)));
+        assert_eq!(stack.pop(&mut arena), Some(task(0)));
+        assert_eq!(stack.pop(&mut arena), None);
     }
 
     #[test]

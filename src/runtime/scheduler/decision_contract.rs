@@ -143,24 +143,24 @@ impl SchedulerDecisionContract {
         let obligation_load = f64::from(snapshot.pending_obligations);
         let ready_load = f64::from(snapshot.ready_queue_depth);
         let drain_load = f64::from(snapshot.draining_regions);
-        let deadline = snapshot.deadline_pressure;
+        let deadline_signal = snapshot.deadline_pressure.clamp(0.0, 1.0);
 
         // Compute raw evidence scores (higher = more likely that state).
         // Healthy: everything low.
         let healthy_score =
-            1.0 / (1.0 + cancel_load + obligation_load * 0.5 + deadline * 2.0 + drain_load);
+            1.0 / (1.0 + cancel_load + obligation_load * 0.5 + deadline_signal * 2.0 + drain_load);
 
         // Congested: high ready queue or obligation backlog.
         let congested_score = (ready_load + obligation_load) / (1.0 + ready_load + obligation_load)
-            * (1.0 - deadline.min(1.0) * 0.5);
+            * (1.0 - deadline_signal * 0.5);
 
         // Unstable: high cancel/drain activity.
         let unstable_score = (cancel_load + drain_load) / (1.0 + cancel_load + drain_load)
-            * (1.0 - deadline.min(1.0) * 0.3);
+            * (1.0 - deadline_signal * 0.3);
 
-        // Partitioned: combined pressure.
-        let partitioned_score = (deadline.min(1.0) * 0.5 + cancel_load * 0.3 + drain_load * 0.2)
-            / (1.0 + cancel_load + drain_load + deadline);
+        // Partitioned: interaction of deadline pressure and cancel/drain pressure.
+        let cancel_drain_ratio = (cancel_load + drain_load) / (1.0 + cancel_load + drain_load);
+        let partitioned_score = deadline_signal * (0.5 + cancel_drain_ratio);
 
         // Floor to avoid zero likelihoods (keeps posterior well-defined).
         let floor = 0.01;
@@ -364,6 +364,27 @@ mod tests {
         let likelihoods = SchedulerDecisionContract::snapshot_likelihoods(&snapshot);
         // High queue should push congested higher.
         assert!(likelihoods[state::CONGESTED] > likelihoods[state::HEALTHY]);
+    }
+
+    #[test]
+    fn snapshot_likelihoods_high_deadline_pressure() {
+        let mut snapshot = zero_snapshot();
+        snapshot.deadline_pressure = 1.0;
+        let likelihoods = SchedulerDecisionContract::snapshot_likelihoods(&snapshot);
+        // High deadline pressure should not look healthy.
+        assert!(likelihoods[state::PARTITIONED] > likelihoods[state::HEALTHY]);
+    }
+
+    #[test]
+    fn snapshot_likelihoods_deadline_plus_cancel_pressure_prefers_partitioned() {
+        let mut snapshot = zero_snapshot();
+        snapshot.deadline_pressure = 1.0;
+        snapshot.cancel_requested_tasks = 40;
+        snapshot.cancelling_tasks = 30;
+        snapshot.draining_regions = 20;
+        let likelihoods = SchedulerDecisionContract::snapshot_likelihoods(&snapshot);
+        // Combined deadline + cancel/drain pressure should favor partitioned.
+        assert!(likelihoods[state::PARTITIONED] > likelihoods[state::UNSTABLE]);
     }
 
     #[test]

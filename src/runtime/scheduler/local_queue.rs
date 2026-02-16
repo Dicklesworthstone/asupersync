@@ -239,26 +239,44 @@ pub struct Stealer {
 }
 
 impl Stealer {
+    #[inline]
+    fn restore_skipped_locals(
+        stack: &mut IntrusiveStack,
+        arena: &mut Arena<TaskRecord>,
+        skipped_locals: &mut Vec<TaskId>,
+    ) {
+        // Skipped locals were popped from oldest -> newest. Reinsert newer -> older
+        // so the final queue order matches the pre-steal owner-visible order.
+        for task_id in skipped_locals.drain(..).rev() {
+            stack.push_bottom(task_id, arena);
+        }
+    }
+
     /// Steals a task from the queue.
     #[must_use]
     pub fn steal(&self) -> Option<TaskId> {
         self.tasks.with_tasks_arena_mut(|arena| {
             let mut stack = self.inner.lock();
             let mut remaining_attempts = stack.len();
+            let mut skipped_locals = Vec::new();
             while remaining_attempts > 0 {
                 remaining_attempts -= 1;
-                let task_id = stack.steal_one(arena)?;
+                let Some(task_id) = stack.steal_one(arena) else {
+                    break;
+                };
                 let is_local = arena
                     .get(task_id.arena_index())
                     .is_some_and(crate::record::task::TaskRecord::is_local);
                 if is_local {
-                    // Local (!Send) tasks must never be stolen. Requeue and keep scanning:
-                    // there may still be stealable tasks behind this local tail entry.
-                    stack.push(task_id, arena);
+                    // Local (!Send) tasks must never be stolen. Temporarily set
+                    // aside while scanning for remote work; restore afterwards.
+                    skipped_locals.push(task_id);
                     continue;
                 }
+                Self::restore_skipped_locals(&mut stack, arena, &mut skipped_locals);
                 return Some(task_id);
             }
+            Self::restore_skipped_locals(&mut stack, arena, &mut skipped_locals);
 
             // Drop the queue lock before returning from the arena closure to
             // minimize lock hold time on contention-heavy steal probes.
@@ -283,6 +301,7 @@ impl Stealer {
         self.tasks.with_tasks_arena_mut(|arena| {
             let mut stolen = 0usize;
             let mut src = self.inner.lock();
+            let mut skipped_locals = Vec::new();
 
             let initial_len = src.len();
             if initial_len == 0 {
@@ -302,12 +321,14 @@ impl Stealer {
                     .is_some_and(crate::record::task::TaskRecord::is_local);
                 if is_local {
                     // Local (!Send) tasks must not be transferred across workers.
-                    src.push(task_id, arena);
+                    // Preserve original owner-visible ordering when restoring.
+                    skipped_locals.push(task_id);
                     continue;
                 }
                 dest_stack.push(task_id, arena);
                 stolen += 1;
             }
+            Self::restore_skipped_locals(&mut src, arena, &mut skipped_locals);
 
             stolen > 0
         })
@@ -379,6 +400,38 @@ mod tests {
         let stealer = queue.stealer();
         assert_eq!(stealer.steal(), None, "local task must not be stolen");
         assert_eq!(queue.pop(), Some(task(1)), "local task remains queued");
+        assert_eq!(queue.pop(), None);
+    }
+
+    #[test]
+    fn failed_steal_probe_preserves_owner_local_order() {
+        let state = LocalQueue::test_state(3);
+        let queue = LocalQueue::new(Arc::clone(&state));
+        {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            for id in [1_u32, 2_u32, 3_u32] {
+                let record = guard.task_mut(task(id)).expect("task record missing");
+                record.mark_local();
+            }
+            drop(guard);
+        }
+
+        queue.push(task(1));
+        queue.push(task(2));
+        queue.push(task(3));
+
+        let stealer = queue.stealer();
+        assert_eq!(
+            stealer.steal(),
+            None,
+            "all-local queue should not be stealable"
+        );
+        assert_eq!(stealer.steal(), None, "repeated probes must be idempotent");
+
+        // Owner LIFO order must remain unchanged despite failed steal probes.
+        assert_eq!(queue.pop(), Some(task(3)));
+        assert_eq!(queue.pop(), Some(task(2)));
+        assert_eq!(queue.pop(), Some(task(1)));
         assert_eq!(queue.pop(), None);
     }
 
@@ -646,6 +699,37 @@ mod tests {
         }
 
         assert_eq!(seen.len(), 5, "no tasks should be lost");
+    }
+
+    #[test]
+    fn steal_batch_skips_local_without_reordering_owner_tasks() {
+        let state = LocalQueue::test_state(3);
+        let src = LocalQueue::new(Arc::clone(&state));
+        let dest = LocalQueue::new(Arc::clone(&state));
+        {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            for id in [1_u32, 2_u32] {
+                let record = guard.task_mut(task(id)).expect("task record missing");
+                record.mark_local();
+            }
+            drop(guard);
+        }
+
+        src.push(task(1));
+        src.push(task(2));
+        src.push(task(3));
+
+        assert!(
+            src.stealer().steal_batch(&dest),
+            "remote task should be stolen"
+        );
+        assert_eq!(dest.pop(), Some(task(3)));
+        assert_eq!(dest.pop(), None);
+
+        // Source still contains local tasks in original owner-visible order.
+        assert_eq!(src.pop(), Some(task(2)));
+        assert_eq!(src.pop(), Some(task(1)));
+        assert_eq!(src.pop(), None);
     }
 
     #[test]
