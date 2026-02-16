@@ -144,6 +144,12 @@ impl TcpStream {
             Domain::IPV6
         };
         let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+        
+        Self::connect_from_socket(socket, addr).await
+    }
+
+    /// Connects using an existing configured socket.
+    pub(crate) async fn connect_from_socket(socket: Socket, addr: SocketAddr) -> io::Result<Self> {
         socket.set_nonblocking(true)?;
 
         // 2. Attempt connect (non-blocking)

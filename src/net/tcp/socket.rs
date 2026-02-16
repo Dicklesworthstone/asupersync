@@ -128,12 +128,7 @@ impl TcpSocket {
             .state
             .into_inner()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.bound.is_some() || state.reuseaddr || state.reuseport {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "TcpSocket configuration before connect is not supported in Phase 0",
-            ));
-        }
+
         if !family_matches(state.family, addr) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -141,9 +136,31 @@ impl TcpSocket {
             ));
         }
 
-        // Async connect using TcpStream::connect
-        // ubs:ignore — TcpStream returned to caller; caller owns shutdown lifecycle
-        TcpStream::connect(addr).await
+        let domain = match state.family {
+            TcpSocketFamily::V4 => socket2::Domain::IPV4,
+            TcpSocketFamily::V6 => socket2::Domain::IPV6,
+        };
+        let socket = socket2::Socket::new(
+            domain,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )?;
+
+        if state.reuseaddr {
+            socket.set_reuse_address(true)?;
+        }
+
+        #[cfg(unix)]
+        if state.reuseport {
+            socket.set_reuse_port(true)?;
+        }
+
+        if let Some(bound) = state.bound {
+            socket.bind(&socket2::SockAddr::from(bound))?;
+        }
+
+        // Async connect using the configured socket
+        TcpStream::connect_from_socket(socket, addr).await
     }
 }
 
@@ -270,25 +287,43 @@ mod tests {
     }
 
     #[test]
-    fn test_connect_rejects_configuration() {
-        init_test("test_connect_rejects_configuration");
+    fn test_connect_with_bind_success() {
+        init_test("test_connect_with_bind_success");
+        let listener = net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("bind listener");
+        let listen_addr = listener.local_addr().expect("local addr");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let _ = listener.accept().expect("accept");
+            let _ = tx.send(());
+        });
+
         futures_lite::future::block_on(async {
             let socket = TcpSocket::new_v4().expect("new_v4");
+            // Bind to an ephemeral port
             socket
                 .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
                 .expect("bind");
-            let err = socket
-                .connect(SocketAddr::from((Ipv4Addr::LOCALHOST, 80)))
-                .await
-                .expect_err("connect should reject bound socket");
-            crate::assert_with_log!(
-                err.kind() == io::ErrorKind::Unsupported,
-                "connect configuration rejected",
-                io::ErrorKind::Unsupported,
-                err.kind()
-            );
+            
+            let stream = socket.connect(listen_addr).await;
+            crate::assert_with_log!(stream.is_ok(), "connect with bind ok", true, stream.is_ok());
+            
+            if let Ok(stream) = stream {
+                let local = stream.local_addr().expect("local addr");
+                // Verify we are indeed bound to local loopback (port will be non-zero)
+                crate::assert_with_log!(
+                    local.ip() == Ipv4Addr::LOCALHOST, 
+                    "local ip", 
+                    Ipv4Addr::LOCALHOST, 
+                    local.ip()
+                );
+            }
         });
-        crate::test_complete!("test_connect_rejects_configuration");
+
+        let accepted = rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        crate::assert_with_log!(accepted, "accepted connection", true, accepted);
+        handle.join().expect("join accept thread");
+        crate::test_complete!("test_connect_with_bind_success");
     }
 
     #[test]
