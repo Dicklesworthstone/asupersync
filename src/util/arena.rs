@@ -293,36 +293,35 @@ impl<T> Arena<T> {
         }
         self.len = new_len;
 
-        // Pass 2: Rebuild free list.
-        // We collect indices of all vacant slots to avoid double-mutable borrow issues.
-        let mut vacant_indices = Vec::new();
-        for (i, slot) in self.slots.iter().enumerate() {
-            if matches!(slot, Slot::Vacant { .. }) {
-                vacant_indices.push(i);
-            }
-        }
+        // Pass 2: Rebuild free list in-place.
+        let mut first_free = None;
+        let mut last_free: Option<usize> = None;
 
-        if vacant_indices.is_empty() {
-            self.free_head = None;
-            return;
-        }
+        for i in 0..self.slots.len() {
+            // Check if vacant (read-only borrow)
+            let is_vacant = matches!(self.slots[i], Slot::Vacant { .. });
 
-        self.free_head = Some(vacant_indices[0] as u32);
-
-        // Link them up
-        for i in 0..vacant_indices.len() - 1 {
-            let curr = vacant_indices[i];
-            let next = vacant_indices[i + 1];
-            if let Slot::Vacant { next_free, .. } = &mut self.slots[curr] {
-                *next_free = Some(next as u32);
+            if is_vacant {
+                if let Some(prev) = last_free {
+                    // Link previous to current (mutable borrow of distinct element)
+                    if let Slot::Vacant { next_free, .. } = &mut self.slots[prev] {
+                        *next_free = Some(i as u32);
+                    }
+                } else {
+                    first_free = Some(i as u32);
+                }
+                last_free = Some(i);
             }
         }
 
         // Terminate the last one
-        let last = *vacant_indices.last().unwrap();
-        if let Slot::Vacant { next_free, .. } = &mut self.slots[last] {
-            *next_free = None;
+        if let Some(last) = last_free {
+            if let Slot::Vacant { next_free, .. } = &mut self.slots[last] {
+                *next_free = None;
+            }
         }
+
+        self.free_head = first_free;
     }
 
     /// Returns true if the index is valid and points to an occupied slot.
@@ -459,5 +458,40 @@ mod tests {
         assert_eq!(reused.index(), idx1.index());
         assert_ne!(reused.generation(), idx1.generation());
         assert_eq!(arena.get(reused), Some(&30));
+    }
+
+    #[test]
+    fn test_retain() {
+        let mut arena = Arena::new();
+        let idx0 = arena.insert(0);
+        let idx1 = arena.insert(1);
+        let idx2 = arena.insert(2);
+        let idx3 = arena.insert(3);
+
+        assert_eq!(arena.len(), 4);
+
+        // Remove odd numbers
+        arena.retain(|&mut val| val % 2 == 0);
+
+        assert_eq!(arena.len(), 2);
+        assert_eq!(arena.get(idx0), Some(&0));
+        assert_eq!(arena.get(idx1), None);
+        assert_eq!(arena.get(idx2), Some(&2));
+        assert_eq!(arena.get(idx3), None);
+
+        // Insert new items - should reuse slots of 1 and 3 (indices 1 and 3)
+        // Free list order is linear (0..N) after retain rebuilds it.
+        // So first free should be 1, then 3.
+
+        let idx_new_a = arena.insert(10);
+        let idx_new_b = arena.insert(30);
+
+        assert_eq!(idx_new_a.index(), 1);
+        assert_eq!(idx_new_b.index(), 3);
+        assert_eq!(arena.len(), 4);
+
+        // Generations should be bumped
+        assert_ne!(idx_new_a.generation(), idx1.generation());
+        assert_ne!(idx_new_b.generation(), idx3.generation());
     }
 }
