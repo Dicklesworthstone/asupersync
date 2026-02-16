@@ -399,8 +399,12 @@ impl DeadlineMonitor {
                 }
 
                 if !entry.warned {
-                    let no_progress = now_instant.duration_since(entry.last_progress)
+                    let wall_no_progress = now_instant.duration_since(entry.last_progress)
                         >= self.config.checkpoint_timeout;
+                    let logical_no_progress = entry.last_checkpoint_seen.is_none()
+                        && now.duration_since(task.created_at())
+                            >= duration_to_nanos(self.config.checkpoint_timeout);
+                    let no_progress = wall_no_progress || logical_no_progress;
 
                     let warning = match (approaching_deadline, no_progress) {
                         (true, true) => Some(WarningReason::ApproachingDeadlineNoProgress),
@@ -561,7 +565,7 @@ mod tests {
             RegionId::new_for_test(1, 0),
             Time::from_secs(0),
             Time::from_secs(100),
-            None,
+            Some(Instant::now()),
             None,
             None,
         );
@@ -623,6 +627,47 @@ mod tests {
             recorded
         );
         crate::test_complete!("warns_on_no_progress");
+    }
+
+    #[test]
+    fn warns_on_no_progress_for_old_task_without_checkpoint_on_first_scan() {
+        init_test("warns_on_no_progress_for_old_task_without_checkpoint_on_first_scan");
+        let config = MonitorConfig {
+            check_interval: Duration::ZERO,
+            warning_threshold_fraction: 0.0,
+            checkpoint_timeout: Duration::from_secs(10),
+            adaptive: AdaptiveDeadlineConfig::default(),
+            enabled: true,
+        };
+        let mut monitor = DeadlineMonitor::new(config);
+
+        let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
+        let warnings_ref = warnings.clone();
+        monitor.on_warning(move |warning| {
+            warnings_ref.lock().unwrap().push(warning.reason);
+        });
+
+        let task = make_task(
+            TaskId::new_for_test(21, 0),
+            RegionId::new_for_test(1, 0),
+            Time::from_secs(0),
+            Time::from_secs(1_000),
+            None,
+            None,
+            None,
+        );
+
+        // Task age is 100s without checkpoints; first scan should detect NoProgress immediately.
+        monitor.check(Time::from_secs(100), std::iter::once(&task));
+
+        let recorded = warnings.lock().unwrap().clone();
+        crate::assert_with_log!(
+            recorded.as_slice() == [WarningReason::NoProgress],
+            "old task without checkpoint warns on first scan",
+            vec![WarningReason::NoProgress],
+            recorded
+        );
+        crate::test_complete!("warns_on_no_progress_for_old_task_without_checkpoint_on_first_scan");
     }
 
     #[test]
