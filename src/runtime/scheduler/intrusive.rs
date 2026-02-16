@@ -110,6 +110,7 @@ impl IntrusiveRing {
     /// Creates a new empty intrusive ring with the given queue tag.
     #[must_use]
     pub const fn new(tag: u8) -> Self {
+        assert!(tag != 0, "queue tag 0 is reserved for \"not in any queue\"");
         Self {
             head: None,
             tail: None,
@@ -335,7 +336,7 @@ impl IntrusiveRing {
 
 impl Default for IntrusiveRing {
     fn default() -> Self {
-        Self::new(0)
+        Self::new(QUEUE_TAG_READY)
     }
 }
 
@@ -366,6 +367,7 @@ impl IntrusiveStack {
     /// Creates a new empty intrusive stack with the given queue tag.
     #[must_use]
     pub const fn new(tag: u8) -> Self {
+        assert!(tag != 0, "queue tag 0 is reserved for \"not in any queue\"");
         Self {
             top: None,
             bottom: None,
@@ -622,6 +624,29 @@ mod tests {
         assert!(ring.is_empty());
         assert_eq!(ring.len(), 0);
         assert!(ring.peek_front().is_none());
+    }
+
+    #[test]
+    fn default_ring_uses_ready_tag() {
+        let mut arena = setup_arena(1);
+        let mut ring = IntrusiveRing::default();
+        assert_eq!(ring.tag(), QUEUE_TAG_READY);
+
+        ring.push_back(task(0), &mut arena);
+        assert_eq!(ring.pop_front(&mut arena), Some(task(0)));
+        assert!(ring.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "queue tag 0 is reserved")]
+    fn ring_rejects_zero_tag() {
+        let _ring = IntrusiveRing::new(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "queue tag 0 is reserved")]
+    fn stack_rejects_zero_tag() {
+        let _stack = IntrusiveStack::new(0);
     }
 
     #[test]
