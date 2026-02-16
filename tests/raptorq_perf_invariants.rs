@@ -18,9 +18,10 @@ use asupersync::raptorq::proof::ProofOutcome;
 use asupersync::raptorq::systematic::{ConstraintMatrix, SystematicEncoder, SystematicParams};
 use asupersync::types::ObjectId;
 use asupersync::util::DetRng;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 const G1_BUDGET_SCHEMA_VERSION: &str = "raptorq-g1-budget-draft-v1";
+const BEADS_ISSUES_JSONL: &str = include_str!("../.beads/issues.jsonl");
 const REPLAY_CATALOG_ARTIFACT_PATH: &str = "artifacts/raptorq_replay_catalog_v1.json";
 const REPLAY_FIXTURE_REF: &str = "RQ-D9-REPLAY-CATALOG-V1";
 const REPLAY_SEED_SWEEP_ID: &str = "replay:rq-u-seed-sweep-structured-v1";
@@ -882,7 +883,7 @@ fn g1_budget_draft_schema_and_coverage() {
         Some("bd-3v1cs"),
         "G1 budget draft must stay anchored to bd-3v1cs"
     );
-    assert_eq!(draft["seed"].as_u64(), Some(424242), "G1 seed mismatch");
+    assert_eq!(draft["seed"].as_u64(), Some(424_242), "G1 seed mismatch");
 
     let taxonomy = draft["workload_taxonomy"]
         .as_array()
@@ -1104,6 +1105,21 @@ fn g1_budget_prerequisite_evidence_linkage_is_well_formed() {
     );
 
     let mut seen = BTreeSet::new();
+    let mut expected_refs = BTreeSet::new();
+    let mut external_ref_status = BTreeMap::new();
+    for line in BEADS_ISSUES_JSONL.lines() {
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(external_ref) = entry["external_ref"].as_str() else {
+            continue;
+        };
+        let Some(status) = entry["status"].as_str() else {
+            continue;
+        };
+        external_ref_status.insert(external_ref.to_string(), status.to_string());
+    }
+
     for prereq in prereqs {
         let bead_id = prereq["bead_id"]
             .as_str()
@@ -1120,11 +1136,31 @@ fn g1_budget_prerequisite_evidence_linkage_is_well_formed() {
             seen.insert(bead_id.to_string()),
             "duplicate prerequisite bead id: {bead_id}"
         );
+        expected_refs.insert(bead_id.to_string());
         assert!(
             matches!(status, "open" | "in_progress" | "closed"),
             "invalid prerequisite status {status} for {bead_id}"
         );
+        let tracker_status = external_ref_status.get(bead_id).unwrap_or_else(|| {
+            panic!("missing prerequisite bead {bead_id} in .beads/issues.jsonl")
+        });
+        assert_eq!(
+            status, tracker_status,
+            "status drift for prerequisite {bead_id}: artifact has {status}, tracker has {tracker_status}"
+        );
     }
+
+    let required_refs = BTreeSet::from([
+        "bd-1rxlv".to_string(),
+        "bd-61s90".to_string(),
+        "bd-3bvdj".to_string(),
+        "bd-oeql8".to_string(),
+        "bd-26pqk".to_string(),
+    ]);
+    assert_eq!(
+        expected_refs, required_refs,
+        "g1 correctness_prerequisites must track canonical D1/D5/D6/D7/D9 bead set"
+    );
 
     let d1 = prereqs
         .iter()
