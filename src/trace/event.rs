@@ -2199,7 +2199,7 @@ mod tests {
         );
         match &e.data {
             TraceData::Exit { reason, .. } => {
-                matches!(reason, DownReason::Cancelled(_));
+                assert!(matches!(reason, DownReason::Cancelled(_)));
             }
             _ => panic!("wrong variant"),
         }

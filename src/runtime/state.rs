@@ -1948,6 +1948,12 @@ impl RuntimeState {
         self.tasks
             .store_spawned_task(task_id, StoredTask::new_with_id(wrapped_future, task_id));
 
+        // Mark the task as notified since it will be immediately injected into
+        // the ready queue by the caller (drain_ready_async_finalizers).
+        if let Some(record) = self.task(task_id) {
+            record.wake_state.notify();
+        }
+
         Some((task_id, budget.priority))
     }
 
