@@ -350,6 +350,7 @@ impl ClientHandshake {
     /// - Status is not 101 Switching Protocols
     /// - Required headers are missing
     /// - Sec-WebSocket-Accept is invalid
+    /// - Server-selected subprotocol was not requested by the client
     pub fn validate_response(&self, response: &HttpResponse) -> Result<(), HandshakeError> {
         // Check status code
         if response.status != 101 {
@@ -387,6 +388,17 @@ impl ClientHandshake {
                 expected,
                 actual: accept.to_string(),
             });
+        }
+
+        // Validate subprotocol negotiation when server selected one.
+        if let Some(offered_protocol) = response.header("sec-websocket-protocol") {
+            let offered = offered_protocol.trim().to_string();
+            if !self.protocols.iter().any(|requested| requested == &offered) {
+                return Err(HandshakeError::ProtocolMismatch {
+                    requested: self.protocols.clone(),
+                    offered: Some(offered),
+                });
+            }
         }
 
         Ok(())
@@ -805,6 +817,81 @@ mod tests {
 
         let err = handshake.validate_response(&response).unwrap_err();
         assert!(matches!(err, HandshakeError::InvalidAccept { .. }));
+    }
+
+    #[test]
+    fn test_client_validate_response_unsolicited_protocol_rejected() {
+        let handshake = ClientHandshake {
+            url: WsUrl::parse("ws://example.com/chat").expect("valid url"),
+            key: "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
+            protocols: vec![],
+            extensions: vec![],
+            headers: HashMap::new(),
+        };
+
+        let response = HttpResponse::parse(
+            b"HTTP/1.1 101 Switching Protocols\r\n\
+              Upgrade: websocket\r\n\
+              Connection: Upgrade\r\n\
+              Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\
+              Sec-WebSocket-Protocol: chat\r\n\
+              \r\n",
+        )
+        .expect("response must parse");
+
+        let err = handshake
+            .validate_response(&response)
+            .expect_err("unsolicited protocol must be rejected");
+        assert!(matches!(err, HandshakeError::ProtocolMismatch { .. }));
+    }
+
+    #[test]
+    fn test_client_validate_response_unrequested_protocol_rejected() {
+        let handshake = ClientHandshake {
+            url: WsUrl::parse("ws://example.com/chat").expect("valid url"),
+            key: "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
+            protocols: vec!["chat".to_string()],
+            extensions: vec![],
+            headers: HashMap::new(),
+        };
+
+        let response = HttpResponse::parse(
+            b"HTTP/1.1 101 Switching Protocols\r\n\
+              Upgrade: websocket\r\n\
+              Connection: Upgrade\r\n\
+              Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\
+              Sec-WebSocket-Protocol: superchat\r\n\
+              \r\n",
+        )
+        .expect("response must parse");
+
+        let err = handshake
+            .validate_response(&response)
+            .expect_err("protocol not in request must be rejected");
+        assert!(matches!(err, HandshakeError::ProtocolMismatch { .. }));
+    }
+
+    #[test]
+    fn test_client_validate_response_requested_protocol_accepted() {
+        let handshake = ClientHandshake {
+            url: WsUrl::parse("ws://example.com/chat").expect("valid url"),
+            key: "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
+            protocols: vec!["chat".to_string(), "superchat".to_string()],
+            extensions: vec![],
+            headers: HashMap::new(),
+        };
+
+        let response = HttpResponse::parse(
+            b"HTTP/1.1 101 Switching Protocols\r\n\
+              Upgrade: websocket\r\n\
+              Connection: Upgrade\r\n\
+              Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\
+              Sec-WebSocket-Protocol: superchat\r\n\
+              \r\n",
+        )
+        .expect("response must parse");
+
+        assert!(handshake.validate_response(&response).is_ok());
     }
 
     #[test]
