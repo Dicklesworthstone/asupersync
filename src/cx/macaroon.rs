@@ -783,6 +783,13 @@ impl MacaroonToken {
             return None;
         }
         let sig_bytes: [u8; AUTH_KEY_SIZE] = data[pos..pos + AUTH_KEY_SIZE].try_into().ok()?;
+        pos += AUTH_KEY_SIZE;
+
+        // Reject trailing bytes — a well-formed token is exactly `pos` bytes.
+        if pos != data.len() {
+            return None;
+        }
+
         let signature = MacaroonSignature::from_bytes(sig_bytes);
 
         Some(Self {
@@ -974,6 +981,13 @@ fn hmac_compute(key: &AuthKey, message: &[u8]) -> AuthKey {
 /// XOR-pad two byte slices of equal length. Used for encrypting/decrypting
 /// third-party caveat verification keys.
 fn xor_pad(a: &[u8], b: &[u8]) -> Vec<u8> {
+    debug_assert_eq!(
+        a.len(),
+        b.len(),
+        "xor_pad: slices must have equal length ({} vs {})",
+        a.len(),
+        b.len()
+    );
     a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect()
 }
 
