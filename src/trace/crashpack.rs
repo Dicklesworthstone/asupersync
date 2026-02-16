@@ -672,9 +672,18 @@ impl CrashPackBuilder {
     pub fn build(self) -> CrashPack {
         let failure = self.failure.expect("CrashPackBuilder requires a failure");
 
-        // Sort supervision log by virtual time for determinism
+        // Sort supervision log with a total order for determinism.
+        // Equal virtual times are expected in practice; include stable
+        // secondary keys so serialization does not depend on insertion order.
         let mut supervision_log = self.supervision_log;
-        supervision_log.sort_by_key(|s| s.virtual_time);
+        supervision_log.sort_by(|a, b| {
+            a.virtual_time
+                .cmp(&b.virtual_time)
+                .then_with(|| a.task.cmp(&b.task))
+                .then_with(|| a.region.cmp(&b.region))
+                .then_with(|| a.decision.cmp(&b.decision))
+                .then_with(|| a.context.cmp(&b.context))
+        });
 
         // Build attachment table of contents from non-empty sections
         let mut attachments = Vec::new();
@@ -1270,6 +1279,53 @@ mod tests {
         assert_eq!(pack.supervision_log[2].virtual_time, Time::from_secs(15));
 
         crate::test_complete!("supervision_log_sorted_by_vt");
+    }
+
+    #[test]
+    fn supervision_log_equal_vt_has_deterministic_total_order() {
+        init_test("supervision_log_equal_vt_has_deterministic_total_order");
+
+        let s1 = SupervisionSnapshot {
+            virtual_time: Time::from_secs(5),
+            task: tid(2),
+            region: rid(0),
+            decision: "restart".into(),
+            context: Some("ctx-b".into()),
+        };
+        let s2 = SupervisionSnapshot {
+            virtual_time: Time::from_secs(5),
+            task: tid(1),
+            region: rid(0),
+            decision: "restart".into(),
+            context: Some("ctx-a".into()),
+        };
+        let s3 = SupervisionSnapshot {
+            virtual_time: Time::from_secs(5),
+            task: tid(1),
+            region: rid(0),
+            decision: "escalate".into(),
+            context: Some("ctx-a".into()),
+        };
+
+        let pack_a = CrashPack::builder(CrashPackConfig::default())
+            .failure(sample_failure())
+            .supervision_snapshot(s1.clone())
+            .supervision_snapshot(s2.clone())
+            .supervision_snapshot(s3.clone())
+            .build();
+
+        let pack_b = CrashPack::builder(CrashPackConfig::default())
+            .failure(sample_failure())
+            .supervision_snapshot(s3.clone())
+            .supervision_snapshot(s1.clone())
+            .supervision_snapshot(s2.clone())
+            .build();
+
+        // Same logical entries must yield identical ordering regardless of insertion order.
+        assert_eq!(pack_a.supervision_log, pack_b.supervision_log);
+        assert_eq!(pack_a.supervision_log, vec![s3, s2, s1]);
+
+        crate::test_complete!("supervision_log_equal_vt_has_deterministic_total_order");
     }
 
     #[test]
