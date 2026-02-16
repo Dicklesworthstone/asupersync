@@ -60,7 +60,7 @@
 use super::{Event, Events, Interest, Reactor, Source, Token};
 use libc::{fcntl, F_GETFD};
 use parking_lot::Mutex;
-use polling::{Event as PollEvent, Events as PollEvents, Poller};
+use polling::{Event as PollEvent, Events as PollEvents, PollMode, Poller};
 use std::collections::BTreeMap;
 use std::io;
 use std::num::NonZeroUsize;
@@ -154,11 +154,31 @@ impl EpollReactor {
         let readable = interest.is_readable();
         let writable = interest.is_writable();
 
-        match (readable, writable) {
+        let mut event = match (readable, writable) {
             (true, true) => PollEvent::all(key),
             (true, false) => PollEvent::readable(key),
             (false, true) => PollEvent::writable(key),
             (false, false) => PollEvent::none(key),
+        };
+
+        if interest.is_hup() {
+            event = event.with_interrupt();
+        }
+        if interest.is_priority() {
+            event = event.with_priority();
+        }
+
+        event
+    }
+
+    /// Converts our interest mode flags to polling crate poll mode.
+    fn interest_to_poll_mode(interest: Interest) -> PollMode {
+        match (interest.is_edge_triggered(), interest.is_oneshot()) {
+            (true, true) => PollMode::EdgeOneshot,
+            (true, false) => PollMode::Edge,
+            (false, true) => PollMode::Oneshot,
+            // Preserve current behavior for non-edge registrations.
+            (false, false) => PollMode::Oneshot,
         }
     }
 
@@ -171,6 +191,15 @@ impl EpollReactor {
         }
         if event.writable {
             interest = interest.add(Interest::WRITABLE);
+        }
+        if event.is_interrupt() {
+            interest = interest.add(Interest::HUP);
+        }
+        if event.is_priority() {
+            interest = interest.add(Interest::PRIORITY);
+        }
+        if event.is_err() == Some(true) {
+            interest = interest.add(Interest::ERROR);
         }
 
         interest
@@ -205,6 +234,7 @@ impl Reactor for EpollReactor {
 
         // Create the polling event with the token as the key
         let event = Self::interest_to_poll_event(token, interest);
+        let mode = Self::interest_to_poll_mode(interest);
 
         // SAFETY: We trust that the caller maintains the invariant that the
         // source (and its file descriptor) remains valid until deregistered.
@@ -214,7 +244,7 @@ impl Reactor for EpollReactor {
         // SAFETY: `borrowed_fd` remains valid for the duration of registration and
         // is explicitly removed in `deregister`.
         unsafe {
-            self.poller.add(&borrowed_fd, event)?;
+            self.poller.add_with_mode(&borrowed_fd, event, mode)?;
         }
 
         // Track the registration for modify/deregister
@@ -237,6 +267,7 @@ impl Reactor for EpollReactor {
 
         // Create the new polling event
         let event = Self::interest_to_poll_event(token, interest);
+        let mode = Self::interest_to_poll_mode(interest);
 
         // SAFETY: We stored the raw_fd during registration and trust it's still valid.
         // The caller is responsible for ensuring the fd remains valid until deregistered.
@@ -244,7 +275,7 @@ impl Reactor for EpollReactor {
 
         // Modify the epoll registration. If the kernel reports stale registration state,
         // clean stale bookkeeping so fd-number reuse does not get blocked indefinitely.
-        let result = match self.poller.modify(borrowed_fd, event) {
+        let result = match self.poller.modify_with_mode(borrowed_fd, event, mode) {
             Ok(()) => {
                 if let Some(info) = state.tokens.get_mut(&token) {
                     info.interest = interest;
@@ -1060,6 +1091,22 @@ mod tests {
         let event = EpollReactor::interest_to_poll_event(Token::new(4), Interest::NONE);
         crate::assert_with_log!(!event.readable, "readable unset", false, event.readable);
         crate::assert_with_log!(!event.writable, "writable unset", false, event.writable);
+
+        // Test priority + interrupt extras
+        let event = EpollReactor::interest_to_poll_event(
+            Token::new(5),
+            Interest::READABLE
+                .add(Interest::PRIORITY)
+                .add(Interest::HUP),
+        );
+        crate::assert_with_log!(event.readable, "readable set", true, event.readable);
+        crate::assert_with_log!(
+            event.is_priority(),
+            "priority set",
+            true,
+            event.is_priority()
+        );
+        crate::assert_with_log!(event.is_interrupt(), "hup set", true, event.is_interrupt());
         crate::test_complete!("interest_to_poll_event_mapping");
     }
 
@@ -1110,7 +1157,63 @@ mod tests {
             true,
             interest.is_writable()
         );
+
+        let event = PollEvent::readable(4).with_priority().with_interrupt();
+        let interest = EpollReactor::poll_event_to_interest(&event);
+        crate::assert_with_log!(
+            interest.is_readable(),
+            "readable set",
+            true,
+            interest.is_readable()
+        );
+        crate::assert_with_log!(
+            interest.is_priority(),
+            "priority set",
+            true,
+            interest.is_priority()
+        );
+        crate::assert_with_log!(interest.is_hup(), "hup set", true, interest.is_hup());
         crate::test_complete!("poll_event_to_interest_mapping");
+    }
+
+    #[test]
+    fn interest_to_poll_mode_mapping() {
+        init_test("interest_to_poll_mode_mapping");
+
+        let mode = EpollReactor::interest_to_poll_mode(Interest::READABLE);
+        crate::assert_with_log!(
+            mode == PollMode::Oneshot,
+            "default oneshot",
+            true,
+            mode == PollMode::Oneshot
+        );
+
+        let mode = EpollReactor::interest_to_poll_mode(Interest::READABLE.with_edge_triggered());
+        crate::assert_with_log!(
+            mode == PollMode::Edge,
+            "edge mode",
+            true,
+            mode == PollMode::Edge
+        );
+
+        let mode = EpollReactor::interest_to_poll_mode(Interest::READABLE.with_oneshot());
+        crate::assert_with_log!(
+            mode == PollMode::Oneshot,
+            "oneshot mode",
+            true,
+            mode == PollMode::Oneshot
+        );
+
+        let mode = EpollReactor::interest_to_poll_mode(
+            Interest::READABLE.with_edge_triggered().with_oneshot(),
+        );
+        crate::assert_with_log!(
+            mode == PollMode::EdgeOneshot,
+            "edge oneshot mode",
+            true,
+            mode == PollMode::EdgeOneshot
+        );
+        crate::test_complete!("interest_to_poll_mode_mapping");
     }
 
     #[test]
