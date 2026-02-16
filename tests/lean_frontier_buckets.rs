@@ -288,3 +288,34 @@ fn declaration_order_helpers_precede_master_preservation_theorem() {
         );
     }
 }
+
+#[test]
+fn preservation_helper_prelude_uses_single_canonical_helper_paths() {
+    let helper_markers = [
+        "theorem scheduler_change_preserves_wellformed {Value Error Panic : Type}",
+        "theorem setTask_same_region_preserves_wellformed {Value Error Panic : Type}",
+        "theorem setRegion_structural_preserves_wellformed {Value Error Panic : Type}",
+    ];
+    let rewrite_guidance_markers = [
+        "-- Safe rewrite/simplification rules for preservation branches:",
+        "--   (1) Prefer local `simpa [get*, set*]` normalizations over broad global simp.",
+        "--   (2) Split identifier cases with `by_cases` before rewriting equalities.",
+        "--   (3) Derive update equalities with `have hEq := by simpa [...] using h`.",
+        "--   (4) Route through canonical helpers in this prelude; avoid local variants.",
+    ];
+
+    for marker in helper_markers {
+        let occurrences = ASUPERSYNC_LEAN.match_indices(marker).count();
+        assert_eq!(
+            occurrences, 1,
+            "helper theorem marker '{marker}' must appear exactly once (found {occurrences})"
+        );
+    }
+
+    for marker in rewrite_guidance_markers {
+        assert!(
+            ASUPERSYNC_LEAN.contains(marker),
+            "rewrite guidance marker missing: {marker}"
+        );
+    }
+}
