@@ -137,10 +137,15 @@ impl<T, E> MapReduceResult<T, E> {
         }
     }
 
-    /// Returns true if all tasks succeeded.
+    /// Returns true if all tasks succeeded and at least one task was present.
+    ///
+    /// Returns `false` for empty input (zero tasks) even though the
+    /// aggregate decision is `AllOk` (vacuously true), because callers
+    /// typically expect `reduced` to be `Some` when this returns `true`.
     #[must_use]
     pub fn all_succeeded(&self) -> bool {
-        matches!(self.decision, AggregateDecision::AllOk)
+        self.total_count > 0
+            && matches!(self.decision, AggregateDecision::AllOk)
             && self.successes.len() == self.total_count
     }
 
@@ -345,8 +350,8 @@ where
         },
     );
 
-    // Sort successes by index to ensure input-order reduction
-    successes.sort_by_key(|(i, _)| *i);
+    // Note: successes are already in input order since we iterate outcomes
+    // sequentially with enumerate(). No sort needed.
 
     // Reduce successful values (left fold in input order)
     let reduced = if successes.is_empty() {
@@ -439,7 +444,7 @@ pub fn map_reduce_to_result<T, E: Clone>(
         }
         AggregateDecision::FirstError(e) => {
             // Find the first error index (any index not in successes)
-            let success_indices: std::collections::HashSet<usize> =
+            let success_indices: std::collections::BTreeSet<usize> =
                 result.successes.iter().map(|(i, _)| *i).collect();
             let first_error_index = (0..result.total_count)
                 .find(|i| !success_indices.contains(i))
@@ -704,6 +709,22 @@ mod tests {
         assert!(matches!(decision, AggregateDecision::AllOk));
         assert_eq!(reduced, None); // No values to reduce
         assert!(successes.is_empty());
+    }
+
+    #[test]
+    fn map_reduce_result_empty_not_all_succeeded() {
+        // Empty input should NOT report all_succeeded() = true,
+        // even though the decision is vacuously AllOk.
+        // This prevents callers from doing result.reduced.unwrap() after
+        // checking all_succeeded(), which would panic on empty input.
+        let result: MapReduceResult<i32, &str> = MapReduceResult::new(
+            AggregateDecision::AllOk,
+            None,
+            vec![],
+            0,
+        );
+        assert!(!result.all_succeeded());
+        assert!(!result.has_reduced());
     }
 
     // ========== make_map_reduce_result tests ==========
