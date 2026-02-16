@@ -708,6 +708,9 @@ impl RegionBridge {
         // Apply state from snapshot.
         // Note: we can only set the local state if the snapshot state maps
         // to a valid transition. For simplicity, we just update sync state.
+        // TODO(Phase 4): Implement full state application. Currently this only acknowledges
+        // the snapshot sequence, effectively making the bridge write-only (pushing to replicas).
+        // For recovery or follower replicas, we need to update self.local state here.
         self.sync_state.last_synced_sequence = snapshot.sequence;
         self.sync_state.sync_pending = false;
 

@@ -320,7 +320,10 @@ impl RecoveryCollector {
             let max_expected = params
                 .total_source_symbols()
                 .saturating_add(self.config.min_symbols);
-            if cs.symbol.esi() > max_expected.saturating_add(100) {
+            // Allow a large buffer for additional repair symbols (e.g. high loss scenarios).
+            // RaptorQ supports up to 16M ESIs; 50k repair symbols is a safe upper bound
+            // that still catches obvious garbage.
+            if cs.symbol.esi() > max_expected.saturating_add(50_000) {
                 self.metrics.symbols_corrupt += 1;
                 return Err(Error::new(ErrorKind::CorruptedSymbol).with_message(format!(
                     "ESI {} exceeds expected range for object",
