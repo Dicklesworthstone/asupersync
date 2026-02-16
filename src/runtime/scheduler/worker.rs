@@ -12,7 +12,7 @@ use crate::tracing_compat::trace;
 use crate::types::{TaskId, Time};
 use crate::util::DetRng;
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
@@ -46,7 +46,7 @@ pub struct Worker {
     /// Timer driver for timestamps (optional).
     pub timer_driver: Option<TimerDriverHandle>,
     /// Tokens seen for I/O trace emission.
-    seen_io_tokens: HashSet<u64>,
+    seen_io_tokens: BTreeSet<u64>,
     /// Pre-allocated scratch vec for local waiters (reused across polls).
     scratch_local: Cell<Vec<TaskId>>,
     /// Pre-allocated scratch vec for global waiters (reused across polls).
@@ -91,7 +91,7 @@ impl Worker {
             io_driver,
             trace,
             timer_driver,
-            seen_io_tokens: HashSet::new(),
+            seen_io_tokens: BTreeSet::new(),
             scratch_local: Cell::new(Vec::new()),
             scratch_global: Cell::new(Vec::new()),
         }
