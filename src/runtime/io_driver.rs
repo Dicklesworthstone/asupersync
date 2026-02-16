@@ -563,16 +563,37 @@ impl IoRegistration {
     /// Explicitly deregisters without waiting for drop.
     pub fn deregister(self) -> io::Result<()> {
         if let Some(driver) = self.driver.upgrade() {
-            let result = {
+            let first = {
                 let mut guard = driver.lock().expect("lock poisoned");
                 guard.deregister(self.token)
             };
-            match result {
+            match first {
                 Ok(()) => {
                     std::mem::forget(self);
                     Ok(())
                 }
-                Err(err) => Err(err),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                    std::mem::forget(self);
+                    Ok(())
+                }
+                Err(first_err) => {
+                    // Best-effort retry for transient deregistration failures.
+                    let second = {
+                        let mut guard = driver.lock().expect("lock poisoned");
+                        guard.deregister(self.token)
+                    };
+                    match second {
+                        Ok(()) => {
+                            std::mem::forget(self);
+                            Ok(())
+                        }
+                        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                            std::mem::forget(self);
+                            Ok(())
+                        }
+                        Err(_second_err) => Err(first_err),
+                    }
+                }
             }
         } else {
             std::mem::forget(self);
@@ -714,6 +735,54 @@ mod tests {
             } else {
                 Ok(())
             }
+        }
+
+        fn poll(&self, _events: &mut Events, _timeout: Option<Duration>) -> io::Result<usize> {
+            Ok(0)
+        }
+
+        fn wake(&self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn registration_count(&self) -> usize {
+            0
+        }
+    }
+
+    struct AlwaysFailReactor {
+        deregister_calls: AtomicUsize,
+    }
+
+    impl AlwaysFailReactor {
+        fn new() -> Self {
+            Self {
+                deregister_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn deregister_calls(&self) -> usize {
+            self.deregister_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Reactor for AlwaysFailReactor {
+        fn register(
+            &self,
+            _source: &dyn Source,
+            _token: Token,
+            _interest: Interest,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn modify(&self, _token: Token, _interest: Interest) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn deregister(&self, _token: Token) -> io::Result<()> {
+            self.deregister_calls.fetch_add(1, Ordering::SeqCst);
+            Err(io::Error::other("persistent failure"))
         }
 
         fn poll(&self, _events: &mut Events, _timeout: Option<Duration>) -> io::Result<usize> {
@@ -905,8 +974,8 @@ mod tests {
     }
 
     #[test]
-    fn io_registration_deregister_error_allows_drop_retry() {
-        init_test("io_registration_deregister_error_allows_drop_retry");
+    fn io_registration_deregister_transient_error_returns_ok_after_retry() {
+        init_test("io_registration_deregister_transient_error_returns_ok_after_retry");
         let reactor = Arc::new(FlakyReactor::new());
         let reactor_handle: Arc<dyn Reactor> = reactor.clone();
         let driver = IoDriverHandle::new(reactor_handle);
@@ -918,12 +987,44 @@ mod tests {
             .expect("register should succeed");
 
         let result = reg.deregister();
-        crate::assert_with_log!(result.is_err(), "deregister fails", true, result.is_err());
+        crate::assert_with_log!(result.is_ok(), "deregister succeeds", true, result.is_ok());
 
         crate::assert_with_log!(driver.is_empty(), "driver empty", true, driver.is_empty());
         let calls = reactor.deregister_calls();
         crate::assert_with_log!(calls == 2, "deregister retried", 2usize, calls);
-        crate::test_complete!("io_registration_deregister_error_allows_drop_retry");
+        crate::test_complete!("io_registration_deregister_transient_error_returns_ok_after_retry");
+    }
+
+    #[test]
+    fn io_registration_deregister_persistent_error_returns_err() {
+        init_test("io_registration_deregister_persistent_error_returns_err");
+        let reactor = Arc::new(AlwaysFailReactor::new());
+        let reactor_handle: Arc<dyn Reactor> = reactor.clone();
+        let driver = IoDriverHandle::new(reactor_handle);
+        let source = TestFdSource;
+
+        let (waker, _) = create_test_waker();
+        let reg = driver
+            .register(&source, Interest::READABLE, waker)
+            .expect("register should succeed");
+
+        let result = reg.deregister();
+        crate::assert_with_log!(
+            result.is_err(),
+            "persistent deregister failure surfaces error",
+            true,
+            result.is_err()
+        );
+        // deregister() performs two attempts, and Drop performs one final best-effort retry.
+        let calls = reactor.deregister_calls();
+        crate::assert_with_log!(calls == 3, "three total deregister attempts", 3usize, calls);
+        crate::assert_with_log!(
+            !driver.is_empty(),
+            "driver retains registration after persistent failure",
+            false,
+            driver.is_empty()
+        );
+        crate::test_complete!("io_registration_deregister_persistent_error_returns_err");
     }
 
     #[test]
