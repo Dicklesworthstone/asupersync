@@ -20,8 +20,8 @@ use asupersync::record::obligation::{ObligationAbortReason, ObligationKind};
 use asupersync::runtime::scheduler::local_queue::LocalQueue;
 use asupersync::types::{Budget, CancelReason};
 use common::*;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 fn init() {
     init_test_logging();

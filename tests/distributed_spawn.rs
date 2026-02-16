@@ -2,7 +2,7 @@
 
 use asupersync::cx::Cx;
 use asupersync::lab::network::{DistributedHarness, NetworkConfig};
-use asupersync::remote::{spawn_remote, ComputationName, RemoteInput};
+use asupersync::remote::{ComputationName, RemoteInput, spawn_remote};
 use std::time::Duration;
 
 #[test]

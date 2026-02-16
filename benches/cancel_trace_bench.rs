@@ -11,23 +11,23 @@
 #![allow(missing_docs)]
 #![allow(clippy::semicolon_if_nothing_returned)]
 
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 
+use asupersync::Cx;
 use asupersync::config::RaptorQConfig;
 use asupersync::raptorq::{RaptorQReceiverBuilder, RaptorQSenderBuilder};
 use asupersync::runtime::RuntimeState;
 use asupersync::trace::boundary::SquareComplex;
-use asupersync::trace::canonicalize::{trace_fingerprint, TraceMonoid};
-use asupersync::trace::dpor::{detect_hb_races, detect_races, HappensBeforeGraph, RaceDetector};
+use asupersync::trace::canonicalize::{TraceMonoid, trace_fingerprint};
+use asupersync::trace::dpor::{HappensBeforeGraph, RaceDetector, detect_hb_races, detect_races};
 use asupersync::trace::event::{TraceData, TraceEvent, TraceEventKind};
 use asupersync::trace::event_structure::TracePoset;
 use asupersync::trace::scoring::{score_persistence, seed_fingerprint};
-use asupersync::transport::mock::{sim_channel, SimTransportConfig};
+use asupersync::transport::mock::{SimTransportConfig, sim_channel};
 use asupersync::types::{
     Budget, CancelKind, CancelReason, ObjectId, ObjectParams, RegionId, TaskId, Time,
 };
-use asupersync::Cx;
 use std::collections::HashSet;
 
 // =============================================================================

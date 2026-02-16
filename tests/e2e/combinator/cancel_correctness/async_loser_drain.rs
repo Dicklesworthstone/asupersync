@@ -16,8 +16,8 @@ use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::types::{Budget, Time};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::task::{Context, Poll};
 
 /// A future that yields a specified number of times before completing.

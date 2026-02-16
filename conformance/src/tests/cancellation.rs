@@ -20,11 +20,11 @@
 //! - CANCEL-007: Cancellation propagates via resource cleanup (channel drop)
 
 use crate::{
-    checkpoint, ConformanceTest, OneshotSender, RuntimeInterface, TestCategory, TestMeta,
-    TestResult,
+    ConformanceTest, OneshotSender, RuntimeInterface, TestCategory, TestMeta, TestResult,
+    checkpoint,
 };
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// Get all cancellation and race conformance tests.

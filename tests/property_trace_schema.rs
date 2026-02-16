@@ -16,14 +16,14 @@ mod common;
 use asupersync::remote::NodeId;
 use asupersync::trace::certificate::{CertificateVerifier, TraceCertificate};
 use asupersync::trace::compat::{
-    check_schema_compatibility, CompatStats, CompatibilityResult, TraceMigration, TraceMigrator,
+    CompatStats, CompatibilityResult, TraceMigration, TraceMigrator, check_schema_compatibility,
 };
 use asupersync::trace::distributed::{
     CausalOrder, CausalTracker, LamportClock, LamportTime, LogicalTime, VectorClock,
 };
-use asupersync::trace::event::{TraceData, TraceEvent, TraceEventKind, TRACE_EVENT_SCHEMA_VERSION};
+use asupersync::trace::event::{TRACE_EVENT_SCHEMA_VERSION, TraceData, TraceEvent, TraceEventKind};
 use asupersync::trace::replay::{
-    CompactRegionId, CompactTaskId, ReplayEvent, ReplayTrace, TraceMetadata, REPLAY_SCHEMA_VERSION,
+    CompactRegionId, CompactTaskId, REPLAY_SCHEMA_VERSION, ReplayEvent, ReplayTrace, TraceMetadata,
 };
 use asupersync::types::{RegionId, TaskId, Time};
 use common::{init_test_logging, test_proptest_config};

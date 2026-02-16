@@ -9,8 +9,8 @@ mod common;
 
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::record::{ObligationAbortReason, ObligationKind};
-use asupersync::trace::minimizer::{generate_narrative, ScenarioElement, TraceMinimizer};
-use asupersync::trace::{read_trace, write_trace, TraceMetadata};
+use asupersync::trace::minimizer::{ScenarioElement, TraceMinimizer, generate_narrative};
+use asupersync::trace::{TraceMetadata, read_trace, write_trace};
 use asupersync::types::{Budget, CancelKind, CancelReason, ObligationId};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;

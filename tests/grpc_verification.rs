@@ -22,14 +22,6 @@ use common::init_test_logging;
 use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::codec::{Decoder, Encoder};
 use asupersync::grpc::{
-    auth_bearer_interceptor,
-    auth_validator,
-    fn_interceptor,
-    logging_interceptor,
-    metadata_propagator,
-    rate_limiter,
-    timeout_interceptor,
-    trace_interceptor,
     Bidirectional,
     CallContext,
     // Client types
@@ -71,6 +63,14 @@ use asupersync::grpc::{
     ServingStatus,
     Status,
     StreamingRequest,
+    auth_bearer_interceptor,
+    auth_validator,
+    fn_interceptor,
+    logging_interceptor,
+    metadata_propagator,
+    rate_limiter,
+    timeout_interceptor,
+    trace_interceptor,
 };
 
 use std::pin::Pin;

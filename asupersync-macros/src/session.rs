@@ -7,11 +7,10 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
-    braced,
+    Ident, Token, Type, braced,
     parse::{Parse, ParseStream},
     parse_macro_input,
     punctuated::Punctuated,
-    Ident, Token, Type,
 };
 
 // ============================================================================
@@ -179,17 +178,17 @@ fn parse_session_body(input: ParseStream) -> syn::Result<SessionBody> {
         "end" => Ok(SessionBody::End),
         "send" => {
             let ty: Type = input.parse()?;
-            let _: Token![=>] = input.parse().map_err(|_| {
-                syn::Error::new(kw.span(), "expected `=>` after send type")
-            })?;
+            let _: Token![=>] = input
+                .parse()
+                .map_err(|_| syn::Error::new(kw.span(), "expected `=>` after send type"))?;
             let cont = parse_session_body(input)?;
             Ok(SessionBody::Send(ty, Box::new(cont)))
         }
         "recv" => {
             let ty: Type = input.parse()?;
-            let _: Token![=>] = input.parse().map_err(|_| {
-                syn::Error::new(kw.span(), "expected `=>` after recv type")
-            })?;
+            let _: Token![=>] = input
+                .parse()
+                .map_err(|_| syn::Error::new(kw.span(), "expected `=>` after recv type"))?;
             let cont = parse_session_body(input)?;
             Ok(SessionBody::Recv(ty, Box::new(cont)))
         }

@@ -7,8 +7,8 @@
 //! - Loser cancellation
 
 use crate::e2e::combinator::util::{DrainFlag, DrainTracker, NeverComplete};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// Test that race returns the first completing future's result.
 #[test]

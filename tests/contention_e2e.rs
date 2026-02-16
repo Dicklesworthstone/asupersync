@@ -12,14 +12,14 @@ mod common;
 
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::record::obligation::{ObligationAbortReason, ObligationKind};
-use asupersync::runtime::scheduler::three_lane::{PreemptionMetrics, ThreeLaneScheduler};
 use asupersync::runtime::RuntimeState;
+use asupersync::runtime::scheduler::three_lane::{PreemptionMetrics, ThreeLaneScheduler};
 use asupersync::sync::{ContendedMutex, LockMetricsSnapshot};
 use asupersync::test_utils::init_test_logging;
 use asupersync::time::{TimerDriverHandle, VirtualClock};
 use asupersync::types::{Budget, CancelReason, TaskId, Time};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 // ===========================================================================
@@ -468,7 +468,10 @@ fn run_mixed_workload(
         "contention harness result"
     );
 
-    assert!(oracle_pass, "Oracle failed: not all tasks completed. cancel={cancel_done}/{tasks_per_lane} timed={timed_done}/{tasks_per_lane} ready={ready_done}/{tasks_per_lane}");
+    assert!(
+        oracle_pass,
+        "Oracle failed: not all tasks completed. cancel={cancel_done}/{tasks_per_lane} timed={timed_done}/{tasks_per_lane} ready={ready_done}/{tasks_per_lane}"
+    );
 
     artifact
 }

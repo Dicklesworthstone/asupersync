@@ -15,13 +15,13 @@
 #![allow(missing_docs)]
 #![allow(clippy::semicolon_if_nothing_returned)]
 
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 
 use asupersync::obligation::lyapunov::{LyapunovGovernor, PotentialWeights, StateSnapshot};
 use asupersync::record::task::TaskRecord;
-use asupersync::runtime::scheduler::{GlobalInjector, Scheduler, ThreeLaneScheduler};
 use asupersync::runtime::RuntimeState;
+use asupersync::runtime::scheduler::{GlobalInjector, Scheduler, ThreeLaneScheduler};
 use asupersync::sync::ContendedMutex;
 use asupersync::types::{Budget, RegionId, TaskId, Time};
 use asupersync::util::ArenaIndex;

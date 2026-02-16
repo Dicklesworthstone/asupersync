@@ -92,7 +92,7 @@ fn build_received_symbols(
 }
 
 use asupersync::raptorq::test_log_schema::{
-    UnitDecodeStats, UnitLogEntry, UNIT_LOG_SCHEMA_VERSION,
+    UNIT_LOG_SCHEMA_VERSION, UnitDecodeStats, UnitLogEntry,
 };
 
 fn replay_log_context(replay_ref: &str, scenario_id: &str, seed: u64, outcome: &str) -> String {

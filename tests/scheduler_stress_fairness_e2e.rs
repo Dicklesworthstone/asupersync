@@ -20,14 +20,14 @@
 //!   Loom concurrency:   tests/scheduler_loom.rs
 //!   Regression perf:    tests/scheduler_regression.rs
 
-use asupersync::runtime::scheduler::three_lane::ThreeLaneScheduler;
 use asupersync::runtime::RuntimeState;
+use asupersync::runtime::scheduler::three_lane::ThreeLaneScheduler;
 use asupersync::sync::ContendedMutex;
 use asupersync::test_utils::init_test_logging;
 use asupersync::time::{TimerDriverHandle, VirtualClock};
 use asupersync::types::{Budget, TaskId, Time};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 // ===========================================================================

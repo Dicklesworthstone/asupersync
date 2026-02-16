@@ -24,12 +24,12 @@
 //! - §3.4: Obligations
 
 use crate::{
-    checkpoint, BroadcastReceiver, BroadcastSender, ConformanceTest, MpscReceiver, MpscSender,
-    OneshotSender, RuntimeInterface, TestCategory, TestMeta, TestResult,
+    BroadcastReceiver, BroadcastSender, ConformanceTest, MpscReceiver, MpscSender, OneshotSender,
+    RuntimeInterface, TestCategory, TestMeta, TestResult, checkpoint,
 };
 use std::env;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 // ============================================================================

@@ -11,7 +11,7 @@ use asupersync::trace::{
     TraceWriter,
 };
 use asupersync::types::Budget;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use std::path::Path;
 use tempfile::NamedTempFile;
 

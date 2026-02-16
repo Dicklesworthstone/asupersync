@@ -4,7 +4,7 @@
 //! full pipeline (builder → JSONL → read → render), schema migration,
 //! and galaxy-brain rendering determinism.
 
-use franken_evidence::export::{read_jsonl, ExporterConfig, JsonlExporter};
+use franken_evidence::export::{ExporterConfig, JsonlExporter, read_jsonl};
 use franken_evidence::render::{self, DiffContext};
 use franken_evidence::{EvidenceLedger, EvidenceLedgerBuilder, ValidationError};
 use proptest::prelude::*;

@@ -17,7 +17,7 @@ use asupersync::lab::config::LabConfig;
 use asupersync::lab::runtime::LabRuntime;
 use asupersync::lab::scenario::{
     CancellationSection, CancellationStrategy, ChaosSection, FaultAction, FaultEvent, LabSection,
-    NetworkPreset, NetworkSection, Participant, Scenario, SCENARIO_SCHEMA_VERSION,
+    NetworkPreset, NetworkSection, Participant, SCENARIO_SCHEMA_VERSION, Scenario,
 };
 use asupersync::lab::scenario_runner::ScenarioRunner;
 use common::*;

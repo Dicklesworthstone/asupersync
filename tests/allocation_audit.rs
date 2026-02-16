@@ -88,7 +88,7 @@ fn u64_to_f64(value: u64) -> f64 {
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::record::task::TaskRecord;
 use asupersync::runtime::scheduler::{GlobalInjector, GlobalQueue, LocalQueue, PriorityScheduler};
-use asupersync::runtime::{global_alloc_count, RegionHeap, RuntimeState};
+use asupersync::runtime::{RegionHeap, RuntimeState, global_alloc_count};
 use asupersync::sync::ContendedMutex;
 use asupersync::types::{Budget, RegionId, TaskId, Time};
 use std::sync::{Arc, Mutex};

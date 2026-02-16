@@ -1,7 +1,7 @@
 use crate::websocket_e2e::util::{init_ws_test, read_http_headers};
 use asupersync::cx::Cx;
-use asupersync::net::websocket::{CloseReason, Message, WebSocket, WebSocketAcceptor};
 use asupersync::net::TcpListener;
+use asupersync::net::websocket::{CloseReason, Message, WebSocket, WebSocketAcceptor};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::mpsc;

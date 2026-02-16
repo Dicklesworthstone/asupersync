@@ -328,8 +328,8 @@ fn parse_conformance_args_str(input: &str) -> Result<ConformanceArgs, String> {
             "requirement" => requirement = Some(value),
             other => {
                 return Err(format!(
-                "conformance attribute has unknown key '{other}', expected 'spec' or 'requirement'"
-            ))
+                    "conformance attribute has unknown key '{other}', expected 'spec' or 'requirement'"
+                ));
             }
         }
     }
@@ -421,7 +421,7 @@ fn parse_string_literal(input: &str) -> Result<String, String> {
                 other => {
                     return Err(format!(
                         "conformance attribute contains unsupported escape: \\{other}"
-                    ))
+                    ));
                 }
             }
         } else {

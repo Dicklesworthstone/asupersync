@@ -18,7 +18,7 @@ use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::record::ObligationKind;
 use asupersync::trace::canonicalize::canonicalize;
 use asupersync::trace::event_structure::{OwnerKey, TracePoset};
-use asupersync::trace::{geodesic_normalize, GeodesicAlgorithm, GeodesicConfig, TraceEvent};
+use asupersync::trace::{GeodesicAlgorithm, GeodesicConfig, TraceEvent, geodesic_normalize};
 use asupersync::types::{Budget, CancelReason, Time};
 use serde::{Deserialize, Serialize};
 use std::hash::{DefaultHasher, Hash, Hasher};

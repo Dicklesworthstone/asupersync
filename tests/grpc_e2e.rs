@@ -15,11 +15,11 @@ use common::init_test_logging;
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::{Decoder, Encoder};
 use asupersync::grpc::{
-    auth_bearer_interceptor, auth_validator, fn_interceptor, logging_interceptor,
-    metadata_propagator, rate_limiter, timeout_interceptor, trace_interceptor, CallContext,
-    Channel, ChannelConfig, Code, GrpcClient, GrpcCodec, GrpcError, GrpcMessage,
+    CallContext, Channel, ChannelConfig, Code, GrpcClient, GrpcCodec, GrpcError, GrpcMessage,
     HealthCheckRequest, HealthService, Interceptor, InterceptorLayer, Metadata, MetadataValue,
-    MethodDescriptor, Request, Response, Server, ServingStatus, Status,
+    MethodDescriptor, Request, Response, Server, ServingStatus, Status, auth_bearer_interceptor,
+    auth_validator, fn_interceptor, logging_interceptor, metadata_propagator, rate_limiter,
+    timeout_interceptor, trace_interceptor,
 };
 use std::sync::Arc;
 use std::time::Duration;

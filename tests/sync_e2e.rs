@@ -18,18 +18,18 @@
 #[macro_use]
 mod common;
 
+use asupersync::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::sync::{
     Barrier, LockError, Mutex, Notify, OnceCell, RwLock, RwLockError, Semaphore,
 };
 use asupersync::types::{Budget, CancelReason};
-use asupersync::Cx;
 use common::*;
 use futures_lite::future::poll_fn;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
 fn init_test(test_name: &str) {

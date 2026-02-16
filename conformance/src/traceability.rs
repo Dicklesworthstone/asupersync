@@ -742,8 +742,8 @@ fn parse_conformance_args(input: &str) -> Result<ConformanceArgs, String> {
             "requirement" => requirement = Some(value),
             other => {
                 return Err(format!(
-                "conformance attribute has unknown key '{other}', expected 'spec' or 'requirement'"
-            ))
+                    "conformance attribute has unknown key '{other}', expected 'spec' or 'requirement'"
+                ));
             }
         }
     }
@@ -835,7 +835,7 @@ fn parse_string_literal(input: &str) -> Result<String, String> {
                 other => {
                     return Err(format!(
                         "conformance attribute contains unsupported escape: \\{other}"
-                    ))
+                    ));
                 }
             }
         } else {
@@ -1074,13 +1074,15 @@ mod tests {
         let scan = scan_conformance_attributes(std::slice::from_ref(&file)).unwrap();
         assert!(scan.warnings.is_empty());
         assert_eq!(scan.entries.len(), 2);
-        assert!(scan
-            .entries
-            .iter()
-            .any(|entry| entry.spec_section == "3.2.1"));
-        assert!(scan
-            .entries
-            .iter()
-            .any(|entry| entry.spec_section == "3.2.2"));
+        assert!(
+            scan.entries
+                .iter()
+                .any(|entry| entry.spec_section == "3.2.1")
+        );
+        assert!(
+            scan.entries
+                .iter()
+                .any(|entry| entry.spec_section == "3.2.2")
+        );
     }
 }
