@@ -1529,12 +1529,14 @@ impl ThreeLaneWorker {
     pub fn schedule_local(&self, task: TaskId, priority: u8) {
         let should_schedule = self.with_task_table_ref(|tt| {
             tt.task(task).is_none_or(|record| {
-                // SAFETY: Local (!Send) tasks must never be scheduled in the PriorityScheduler
-                // because it is exposed to work stealing. Use local_ready instead.
-                debug_assert!(
-                    !record.is_local(),
-                    "schedule_local called with local task {task:?}: local tasks must use local_ready queue"
-                );
+                // Local (!Send) tasks must never enter stealable structures.
+                if record.is_local() {
+                    error!(
+                        ?task,
+                        "schedule_local: refusing to enqueue local task into PriorityScheduler"
+                    );
+                    return false;
+                }
                 record.wake_state.notify()
             })
         });
@@ -1574,8 +1576,16 @@ impl ThreeLaneWorker {
     /// If the task record doesn't exist (e.g., in tests), allows scheduling.
     pub fn schedule_local_timed(&self, task: TaskId, deadline: Time) {
         let should_schedule = self.with_task_table_ref(|tt| {
-            tt.task(task)
-                .is_none_or(|record| record.wake_state.notify())
+            tt.task(task).is_none_or(|record| {
+                if record.is_local() {
+                    error!(
+                        ?task,
+                        "schedule_local_timed: refusing to enqueue local task into timed lane"
+                    );
+                    return false;
+                }
+                record.wake_state.notify()
+            })
         });
         if should_schedule {
             let mut local = self.local.lock().expect("local scheduler lock poisoned");
@@ -1829,7 +1839,6 @@ impl ThreeLaneWorker {
 
         match stored.poll(&mut cx) {
             Poll::Ready(outcome) => {
-                guard.completed = true;
                 // Map Outcome<(), ()> to Outcome<(), Error> for record.complete()
                 let task_outcome = outcome
                     .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
@@ -1891,10 +1900,10 @@ impl ThreeLaneWorker {
                     self.coordinator.wake_one();
                 }
                 drop(state);
+                guard.completed = true;
                 wake_state.clear();
             }
             Poll::Pending => {
-                guard.completed = true;
                 // Store task back: use task table for hot-path when sharded.
                 match stored {
                     AnyStoredTask::Global(t) => {
@@ -1966,6 +1975,7 @@ impl ThreeLaneWorker {
                     }
                 }
 
+                guard.completed = true;
                 self.consume_cancel_ack(task_id);
             }
         }
@@ -2929,6 +2939,86 @@ mod tests {
             local.len()
         };
         assert_eq!(count, 1, "should have exactly 1 task, not {count}");
+    }
+
+    #[test]
+    fn test_schedule_local_rejects_local_task() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let region = state
+            .lock()
+            .expect("runtime state lock poisoned")
+            .create_root_region(Budget::INFINITE);
+
+        let task_id = {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let (task_id, _handle) = guard
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task");
+            let record = guard.task_mut(task_id).expect("task record missing");
+            record.mark_local();
+            task_id
+        };
+
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let workers = scheduler.take_workers();
+        let worker = &workers[0];
+
+        worker.schedule_local(task_id, 100);
+
+        let popped = worker
+            .local
+            .lock()
+            .expect("local lock poisoned")
+            .pop_ready_only();
+        assert!(popped.is_none(), "local task must not enter ready lane");
+        assert!(
+            !worker
+                .local_ready
+                .lock()
+                .expect("local_ready lock poisoned")
+                .contains(&task_id),
+            "schedule_local must not route local tasks"
+        );
+    }
+
+    #[test]
+    fn test_schedule_local_timed_rejects_local_task() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let region = state
+            .lock()
+            .expect("runtime state lock poisoned")
+            .create_root_region(Budget::INFINITE);
+
+        let task_id = {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let (task_id, _handle) = guard
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task");
+            let record = guard.task_mut(task_id).expect("task record missing");
+            record.mark_local();
+            task_id
+        };
+
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let workers = scheduler.take_workers();
+        let worker = &workers[0];
+
+        worker.schedule_local_timed(task_id, Time::from_nanos(42));
+
+        let popped = worker
+            .local
+            .lock()
+            .expect("local lock poisoned")
+            .pop_timed_only(Time::from_nanos(100));
+        assert!(popped.is_none(), "local task must not enter timed lane");
+        assert!(
+            !worker
+                .local_ready
+                .lock()
+                .expect("local_ready lock poisoned")
+                .contains(&task_id),
+            "schedule_local_timed must not route local tasks"
+        );
     }
 
     #[test]

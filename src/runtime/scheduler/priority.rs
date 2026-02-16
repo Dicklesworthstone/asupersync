@@ -302,6 +302,13 @@ impl Default for Scheduler {
 }
 
 impl Scheduler {
+    #[inline]
+    fn tie_break_index(rng_hint: u64, len: usize) -> usize {
+        debug_assert!(len > 0);
+        let len_u64 = u64::try_from(len).expect("len should fit in u64");
+        (rng_hint % len_u64) as usize
+    }
+
     /// Creates a new empty scheduler.
     #[must_use]
     pub fn new() -> Self {
@@ -450,6 +457,10 @@ impl Scheduler {
     /// the task and the lane it was dispatched from.
     ///
     /// Lane priority: Cancel > Timed > Ready (same as `pop_with_rng_hint`).
+    ///
+    /// This method is deadline-agnostic for timed tasks. If your caller keeps
+    /// future timed tasks in the scheduler, use [`Self::pop_with_lane_if_due`]
+    /// instead to prevent dispatch before deadline.
     pub fn pop_with_lane(&mut self, rng_hint: u64) -> Option<(TaskId, DispatchLane)> {
         // For lab determinism, we want tie-breaking to vary with a seed while still being fully
         // deterministic for a given `rng_hint` sequence. We do this by selecting uniformly among
@@ -478,6 +489,45 @@ impl Scheduler {
         None
     }
 
+    /// Pop across all three lanes while enforcing timed deadline readiness.
+    ///
+    /// Lane priority remains Cancel > Timed > Ready, but timed tasks are
+    /// dispatched only when `deadline <= now`.
+    pub fn pop_with_lane_if_due(
+        &mut self,
+        rng_hint: u64,
+        now: Time,
+    ) -> Option<(TaskId, DispatchLane)> {
+        if let Some(entry) =
+            Self::pop_entry_with_rng(&mut self.cancel_lane, rng_hint, &mut self.scratch_entries)
+        {
+            self.scheduled.remove(entry.task);
+            return Some((entry.task, DispatchLane::Cancel));
+        }
+
+        let timed_due = self
+            .timed_lane
+            .peek()
+            .is_some_and(|entry| entry.deadline <= now);
+        if timed_due {
+            if let Some(entry) =
+                Self::pop_timed_with_rng(&mut self.timed_lane, rng_hint, &mut self.scratch_timed)
+            {
+                self.scheduled.remove(entry.task);
+                return Some((entry.task, DispatchLane::Timed));
+            }
+        }
+
+        if let Some(entry) =
+            Self::pop_entry_with_rng(&mut self.ready_lane, rng_hint, &mut self.scratch_entries)
+        {
+            self.scheduled.remove(entry.task);
+            return Some((entry.task, DispatchLane::Ready));
+        }
+
+        None
+    }
+
     /// Pop a task from the cancel lane using deterministic RNG tie-breaking.
     pub fn pop_cancel_with_rng(&mut self, rng_hint: u64) -> Option<(TaskId, DispatchLane)> {
         let entry =
@@ -489,12 +539,48 @@ impl Scheduler {
     /// Pop a task from timed or ready lanes (excluding cancel lane).
     ///
     /// Timed lane has priority over ready lane.
+    ///
+    /// This method is deadline-agnostic for timed tasks. If your caller keeps
+    /// future timed tasks in the scheduler, use
+    /// [`Self::pop_non_cancel_with_rng_if_due`] to prevent early dispatch.
     pub fn pop_non_cancel_with_rng(&mut self, rng_hint: u64) -> Option<(TaskId, DispatchLane)> {
         if let Some(entry) =
             Self::pop_timed_with_rng(&mut self.timed_lane, rng_hint, &mut self.scratch_timed)
         {
             self.scheduled.remove(entry.task);
             return Some((entry.task, DispatchLane::Timed));
+        }
+
+        if let Some(entry) =
+            Self::pop_entry_with_rng(&mut self.ready_lane, rng_hint, &mut self.scratch_entries)
+        {
+            self.scheduled.remove(entry.task);
+            return Some((entry.task, DispatchLane::Ready));
+        }
+
+        None
+    }
+
+    /// Pop from timed or ready lanes while enforcing timed deadline readiness.
+    ///
+    /// Timed lane retains priority over ready lane, but timed tasks are
+    /// dispatched only when `deadline <= now`.
+    pub fn pop_non_cancel_with_rng_if_due(
+        &mut self,
+        rng_hint: u64,
+        now: Time,
+    ) -> Option<(TaskId, DispatchLane)> {
+        let timed_due = self
+            .timed_lane
+            .peek()
+            .is_some_and(|entry| entry.deadline <= now);
+        if timed_due {
+            if let Some(entry) =
+                Self::pop_timed_with_rng(&mut self.timed_lane, rng_hint, &mut self.scratch_timed)
+            {
+                self.scheduled.remove(entry.task);
+                return Some((entry.task, DispatchLane::Timed));
+            }
         }
 
         if let Some(entry) =
@@ -531,7 +617,7 @@ impl Scheduler {
             scratch.push(lane.pop().expect("popped after peek"));
         }
 
-        let idx = (rng_hint as usize) % scratch.len();
+        let idx = Self::tie_break_index(rng_hint, scratch.len());
         let chosen = scratch.swap_remove(idx);
         for entry in scratch.drain(..) {
             lane.push(entry);
@@ -562,7 +648,7 @@ impl Scheduler {
             scratch.push(lane.pop().expect("popped after peek"));
         }
 
-        let idx = (rng_hint as usize) % scratch.len();
+        let idx = Self::tie_break_index(rng_hint, scratch.len());
         let chosen = scratch.swap_remove(idx);
         for entry in scratch.drain(..) {
             lane.push(entry);
@@ -1594,6 +1680,57 @@ mod tests {
     }
 
     #[test]
+    fn pop_with_lane_if_due_skips_future_timed_for_ready() {
+        init_test("pop_with_lane_if_due_skips_future_timed_for_ready");
+        let mut sched = Scheduler::new();
+        sched.schedule(task(1), 50);
+        sched.schedule_timed(task(2), Time::from_secs(100));
+
+        let result = sched.pop_with_lane_if_due(0, Time::from_secs(50));
+        crate::assert_with_log!(
+            result == Some((task(1), DispatchLane::Ready)),
+            "ready task dispatches while timed task is not due",
+            Some((task(1), DispatchLane::Ready)),
+            result
+        );
+        crate::test_complete!("pop_with_lane_if_due_skips_future_timed_for_ready");
+    }
+
+    #[test]
+    fn pop_with_lane_if_due_dispatches_timed_when_due() {
+        init_test("pop_with_lane_if_due_dispatches_timed_when_due");
+        let mut sched = Scheduler::new();
+        sched.schedule(task(1), 50);
+        sched.schedule_timed(task(2), Time::from_secs(100));
+
+        let result = sched.pop_with_lane_if_due(0, Time::from_secs(100));
+        crate::assert_with_log!(
+            result == Some((task(2), DispatchLane::Timed)),
+            "timed task dispatches once deadline is due",
+            Some((task(2), DispatchLane::Timed)),
+            result
+        );
+        crate::test_complete!("pop_with_lane_if_due_dispatches_timed_when_due");
+    }
+
+    #[test]
+    fn pop_non_cancel_with_rng_if_due_skips_future_timed() {
+        init_test("pop_non_cancel_with_rng_if_due_skips_future_timed");
+        let mut sched = Scheduler::new();
+        sched.schedule(task(1), 50);
+        sched.schedule_timed(task(2), Time::from_secs(100));
+
+        let result = sched.pop_non_cancel_with_rng_if_due(0, Time::from_secs(50));
+        crate::assert_with_log!(
+            result == Some((task(1), DispatchLane::Ready)),
+            "non-cancel pop dispatches ready when timed is not due",
+            Some((task(1), DispatchLane::Ready)),
+            result
+        );
+        crate::test_complete!("pop_non_cancel_with_rng_if_due_skips_future_timed");
+    }
+
+    #[test]
     fn pop_with_lane_rng_tiebreak_among_equal_priority() {
         init_test("pop_with_lane_rng_tiebreak_among_equal_priority");
         let mut sched = Scheduler::new();
@@ -2491,5 +2628,13 @@ mod tests {
             sched.is_empty()
         );
         crate::test_complete!("pop_timed_only_with_hint_groups_by_deadline_not_now");
+    }
+
+    #[test]
+    fn tie_break_index_uses_full_u64_entropy() {
+        // Regression: tie-break index must use all 64 bits so scheduling remains
+        // deterministic across 32-bit and 64-bit targets.
+        let idx = Scheduler::tie_break_index(1u64 << 32, 3);
+        assert_eq!(idx, 1);
     }
 }

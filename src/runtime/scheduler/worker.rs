@@ -8,7 +8,7 @@ use crate::runtime::RuntimeState;
 use crate::sync::ContendedMutex;
 use crate::time::TimerDriverHandle;
 use crate::trace::{TraceBufferHandle, TraceEvent};
-use crate::tracing_compat::trace;
+use crate::tracing_compat::{error, trace};
 use crate::types::{TaskId, Time};
 use crate::util::DetRng;
 use std::cell::Cell;
@@ -205,6 +205,78 @@ impl Worker {
     fn execute(&self, task_id: TaskId) {
         use crate::runtime::stored_task::AnyStoredTask;
 
+        // Guard panic-unwind path so a panicking task still transitions to
+        // terminal state and wakes dependents instead of leaking obligations.
+        struct TaskExecutionGuard<'a> {
+            worker: &'a Worker,
+            task_id: TaskId,
+            completed: bool,
+        }
+
+        impl Drop for TaskExecutionGuard<'_> {
+            fn drop(&mut self) {
+                if !self.completed && std::thread::panicking() {
+                    let mut state = self
+                        .worker
+                        .state
+                        .lock()
+                        .expect("runtime state lock poisoned");
+                    if let Some(record) = state.task_mut(self.task_id) {
+                        if !record.state.is_terminal() {
+                            record.complete(crate::types::Outcome::Panicked(
+                                crate::types::outcome::PanicPayload::new(
+                                    "task panicked during poll",
+                                ),
+                            ));
+                        }
+                    }
+
+                    let waiters = state.task_completed(self.task_id);
+                    let finalizers = state.drain_ready_async_finalizers();
+                    let mut local_waiters = self.worker.scratch_local.take();
+                    let mut global_waiters = self.worker.scratch_global.take();
+                    local_waiters.clear();
+                    global_waiters.clear();
+
+                    for waiter in waiters {
+                        if let Some(record) = state.task(waiter) {
+                            if record.wake_state.notify() {
+                                if record.is_local() {
+                                    match record.pinned_worker() {
+                                        Some(worker_id) if worker_id == self.worker.id => {
+                                            local_waiters.push(waiter);
+                                        }
+                                        Some(_worker_id) => {
+                                            error!(
+                                                ?waiter,
+                                                worker_id = _worker_id,
+                                                current_worker = self.worker.id,
+                                                "panic path: pinned local waiter has invalid worker id, wake skipped"
+                                            );
+                                        }
+                                        None => local_waiters.push(waiter),
+                                    }
+                                } else {
+                                    global_waiters.push(waiter);
+                                }
+                            }
+                        }
+                    }
+                    drop(state);
+
+                    for waiter in &global_waiters {
+                        self.worker.global.push(*waiter);
+                    }
+                    self.worker.local.push_many(&local_waiters);
+                    self.worker.scratch_local.set(local_waiters);
+                    self.worker.scratch_global.set(global_waiters);
+                    for (finalizer_task, _) in finalizers {
+                        self.worker.global.push(finalizer_task);
+                    }
+                }
+            }
+        }
+
         trace!(task_id = ?task_id, worker_id = self.id, "executing task");
 
         // Try to find the task in global state first
@@ -284,6 +356,11 @@ impl Worker {
         };
         let mut cx = Context::from_waker(&waker);
         let _cx_guard = crate::cx::Cx::set_current(task_cx);
+        let mut guard = TaskExecutionGuard {
+            worker: self,
+            task_id,
+            completed: false,
+        };
 
         let poll_start = Instant::now();
         match stored.poll(&mut cx) {
@@ -374,6 +451,7 @@ impl Worker {
                 for (finalizer_task, _) in finalizers {
                     self.global.push(finalizer_task);
                 }
+                guard.completed = true;
                 wake_state.clear();
             }
             Poll::Pending => {
@@ -415,6 +493,7 @@ impl Worker {
                     }
                     self.parker.unpark();
                 }
+                guard.completed = true;
             }
         }
         metrics.scheduler_tick(1, poll_start.elapsed());
@@ -942,6 +1021,77 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(1),
             "worker should exit promptly after shutdown, elapsed={elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn test_execute_panic_completes_task_and_wakes_waiters() {
+        use crate::record::task::TaskRecord;
+        use crate::runtime::stored_task::StoredTask;
+        use crate::runtime::RuntimeState;
+        use crate::sync::ContendedMutex;
+        use crate::types::{Budget, RegionId};
+
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let global = Arc::new(GlobalQueue::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let panicking_task = TaskId::new_for_test(0, 0);
+        let waiter_task = TaskId::new_for_test(1, 0);
+
+        {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let panicking_record = TaskRecord::new(
+                panicking_task,
+                RegionId::new_for_test(0, 0),
+                Budget::INFINITE,
+            );
+            let waiter_record =
+                TaskRecord::new(waiter_task, RegionId::new_for_test(0, 0), Budget::INFINITE);
+            let _panicking_idx = guard.insert_task(panicking_record);
+            let _waiter_idx = guard.insert_task(waiter_record);
+
+            guard
+                .task_mut(panicking_task)
+                .expect("panicking task should exist")
+                .add_waiter(waiter_task);
+
+            guard.store_spawned_task(
+                panicking_task,
+                StoredTask::new_with_id(
+                    async move { panic!("worker execute panic regression") },
+                    panicking_task,
+                ),
+            );
+        }
+
+        let worker = Worker::new(
+            0,
+            Vec::new(),
+            Arc::clone(&global),
+            Arc::clone(&state),
+            Arc::clone(&shutdown),
+        );
+
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            worker.execute(panicking_task);
+        }));
+        assert!(
+            panic_result.is_err(),
+            "panicking task should still propagate unwind to caller"
+        );
+
+        {
+            let guard = state.lock().expect("runtime state lock poisoned");
+            assert!(
+                guard.task(panicking_task).is_none(),
+                "panicking task should be completed and removed from runtime state"
+            );
+        }
+        assert_eq!(
+            global.pop(),
+            Some(waiter_task),
+            "panic path should wake and enqueue waiters"
         );
     }
 

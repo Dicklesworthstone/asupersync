@@ -103,6 +103,24 @@ impl Default for GlobalInjector {
 }
 
 impl GlobalInjector {
+    #[inline]
+    fn decrement_pending_count(&self) {
+        let _ = self
+            .pending_count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                count.checked_sub(1)
+            });
+    }
+
+    #[inline]
+    fn decrement_ready_count(&self) {
+        let _ = self
+            .ready_count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                count.checked_sub(1)
+            });
+    }
+
     /// Creates a new empty global injector.
     #[must_use]
     pub fn new() -> Self {
@@ -115,8 +133,8 @@ impl GlobalInjector {
     /// before any timed or ready work.
     #[inline]
     pub fn inject_cancel(&self, task: TaskId, priority: u8) {
-        self.cancel_queue.push(PriorityTask { task, priority });
         self.pending_count.fetch_add(1, Ordering::Relaxed);
+        self.cancel_queue.push(PriorityTask { task, priority });
     }
 
     /// Injects a task into the timed lane.
@@ -128,8 +146,8 @@ impl GlobalInjector {
         let generation = queue.next_generation;
         queue.next_generation += 1;
         queue.heap.push(TimedTask::new(task, deadline, generation));
-        drop(queue);
         self.pending_count.fetch_add(1, Ordering::Relaxed);
+        drop(queue);
     }
 
     /// Injects a task into the ready lane.
@@ -139,9 +157,9 @@ impl GlobalInjector {
     /// ordering is applied by the local `PriorityScheduler` after stealing.
     #[inline]
     pub fn inject_ready(&self, task: TaskId, priority: u8) {
-        self.ready_queue.push(PriorityTask { task, priority });
         self.ready_count.fetch_add(1, Ordering::Relaxed);
         self.pending_count.fetch_add(1, Ordering::Relaxed);
+        self.ready_queue.push(PriorityTask { task, priority });
     }
 
     /// Pops a task from the cancel lane.
@@ -152,7 +170,7 @@ impl GlobalInjector {
     pub fn pop_cancel(&self) -> Option<PriorityTask> {
         let result = self.cancel_queue.pop();
         if result.is_some() {
-            self.pending_count.fetch_sub(1, Ordering::Relaxed);
+            self.decrement_pending_count();
         }
         result
     }
@@ -167,7 +185,7 @@ impl GlobalInjector {
         let result = queue.heap.pop();
         drop(queue);
         if result.is_some() {
-            self.pending_count.fetch_sub(1, Ordering::Relaxed);
+            self.decrement_pending_count();
         }
         result
     }
@@ -193,7 +211,7 @@ impl GlobalInjector {
                 let result = queue.heap.pop();
                 drop(queue);
                 if result.is_some() {
-                    self.pending_count.fetch_sub(1, Ordering::Relaxed);
+                    self.decrement_pending_count();
                 }
                 return result;
             }
@@ -209,8 +227,8 @@ impl GlobalInjector {
     pub fn pop_ready(&self) -> Option<PriorityTask> {
         let result = self.ready_queue.pop();
         if result.is_some() {
-            self.ready_count.fetch_sub(1, Ordering::Relaxed);
-            self.pending_count.fetch_sub(1, Ordering::Relaxed);
+            self.decrement_ready_count();
+            self.decrement_pending_count();
         }
         result
     }
@@ -415,5 +433,33 @@ mod tests {
         let _ = injector.pop_timed();
         let _ = injector.pop_ready();
         assert_eq!(injector.len(), 0);
+    }
+
+    #[test]
+    fn pop_does_not_underflow_when_counter_lags() {
+        let injector = GlobalInjector::new();
+
+        // Simulate queue visibility preceding counter update due to interleaving.
+        injector.cancel_queue.push(PriorityTask {
+            task: task(10),
+            priority: 1,
+        });
+        assert_eq!(injector.pending_count.load(Ordering::Relaxed), 0);
+
+        let popped_cancel = injector.pop_cancel().expect("cancel task should pop");
+        assert_eq!(popped_cancel.task, task(10));
+        assert_eq!(injector.pending_count.load(Ordering::Relaxed), 0);
+
+        injector.ready_queue.push(PriorityTask {
+            task: task(11),
+            priority: 2,
+        });
+        assert_eq!(injector.ready_count.load(Ordering::Relaxed), 0);
+        assert_eq!(injector.pending_count.load(Ordering::Relaxed), 0);
+
+        let popped_ready = injector.pop_ready().expect("ready task should pop");
+        assert_eq!(popped_ready.task, task(11));
+        assert_eq!(injector.ready_count.load(Ordering::Relaxed), 0);
+        assert_eq!(injector.pending_count.load(Ordering::Relaxed), 0);
     }
 }

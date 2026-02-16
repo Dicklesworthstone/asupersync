@@ -46,6 +46,9 @@ impl WorkStealingScheduler {
         worker_count: usize,
         state: &std::sync::Arc<crate::sync::ContendedMutex<crate::runtime::RuntimeState>>,
     ) -> Self {
+        // A zero-worker scheduler cannot make progress; clamp to one worker
+        // to preserve forward progress for direct users of this API.
+        let worker_count = worker_count.max(1);
         Self {
             inner: ThreeLaneScheduler::new(worker_count, state),
         }
@@ -123,5 +126,17 @@ mod tests {
         }
 
         // If we reach here, shutdown worked!
+    }
+
+    #[test]
+    fn test_zero_worker_count_is_clamped_to_one() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = WorkStealingScheduler::new(0, &state);
+        let workers = scheduler.take_workers();
+        assert_eq!(
+            workers.len(),
+            1,
+            "scheduler must clamp zero workers to one for forward progress"
+        );
     }
 }
