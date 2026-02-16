@@ -241,22 +241,22 @@ impl TcpStream {
     fn register_interest(&mut self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
         if let Some(registration) = &mut self.registration {
             let combined = registration.interest() | interest;
-            // Always call set_interest to re-arm the reactor registration.
-            // The polling crate uses oneshot-style notifications: after an event
-            // fires, the registration is disarmed and must be re-armed via modify()
-            // before new events will be delivered.
-            if let Err(err) = registration.set_interest(combined) {
-                if err.kind() == io::ErrorKind::NotConnected {
+            // Re-arm reactor interest and conditionally update the waker in a
+            // single lock acquisition.  The waker clone is skipped when the
+            // task's waker hasn't changed (will_wake guard).
+            match registration.rearm(combined, cx.waker()) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {
+                    // Slab slot gone — fall through to fresh registration.
+                    self.registration = None;
+                }
+                Err(err) if err.kind() == io::ErrorKind::NotConnected => {
                     self.registration = None;
                     cx.waker().wake_by_ref();
                     return Ok(());
                 }
-                return Err(err);
+                Err(err) => return Err(err),
             }
-            if registration.update_waker(cx.waker().clone()) {
-                return Ok(());
-            }
-            self.registration = None;
         }
 
         let Some(current) = Cx::current() else {
@@ -360,20 +360,19 @@ fn rearm_connect_registration(
         return Ok(());
     };
 
-    if let Err(err) = existing.set_interest(Interest::WRITABLE) {
-        if err.kind() == io::ErrorKind::NotConnected {
+    match existing.rearm(Interest::WRITABLE, cx.waker()) {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            *registration = None;
+            Ok(())
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotConnected => {
             *registration = None;
             cx.waker().wake_by_ref();
-            return Ok(());
+            Ok(())
         }
-        return Err(err);
+        Err(err) => Err(err),
     }
-
-    if !existing.update_waker(cx.waker().clone()) {
-        *registration = None;
-    }
-
-    Ok(())
 }
 
 async fn wait_for_connect_fallback(socket: &Socket) -> io::Result<()> {
