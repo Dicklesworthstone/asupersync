@@ -72,11 +72,24 @@ impl<A: Future + Unpin, B: Future + Unpin> Future for Select<A, B> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
 
+        let mut left_ready = None;
+        let mut right_ready = None;
+
+        // Poll both futures each tick so loser-side initialization can happen
+        // even when the winner is immediately ready.
         if let Poll::Ready(val) = Pin::new(&mut this.a).poll(cx) {
-            return Poll::Ready(Either::Left(val));
+            left_ready = Some(val);
         }
 
         if let Poll::Ready(val) = Pin::new(&mut this.b).poll(cx) {
+            right_ready = Some(val);
+        }
+
+        if let Some(val) = left_ready {
+            return Poll::Ready(Either::Left(val));
+        }
+
+        if let Some(val) = right_ready {
             return Poll::Ready(Either::Right(val));
         }
 
@@ -699,11 +712,11 @@ mod tests {
 
         // Loser was dropped (cleanup via Drop) but NOT drained (not polled to completion)
         assert!(dropped.load(Ordering::SeqCst), "loser must be dropped");
-        // Loser was polled exactly once (during Select::poll) but never reached Ready
+        // Loser is polled for initialization but not drained to completion.
         assert_eq!(
             polled.load(Ordering::SeqCst),
-            0,
-            "loser should not be polled when winner is left-biased and immediately ready"
+            1,
+            "loser should be initialized (one poll) but not drained"
         );
     }
 
