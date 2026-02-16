@@ -1056,7 +1056,7 @@ impl RuntimeState {
         self.leak_count = self.leak_count.saturating_add(error.leaks.len() as u64);
 
         // Determine the effective response: check escalation threshold first.
-        let response = if let Some(ref esc) = self.leak_escalation {
+        let mut response = if let Some(ref esc) = self.leak_escalation {
             if self.leak_count >= esc.threshold {
                 esc.escalate_to
             } else {
@@ -1065,6 +1065,15 @@ impl RuntimeState {
         } else {
             self.obligation_leak_response
         };
+
+        // PREVENT DOUBLE PANIC: If we are already panicking, we must not panic again.
+        if matches!(response, ObligationLeakResponse::Panic) && std::thread::panicking() {
+            crate::tracing_compat::error!(
+                task_id = ?error.task_id,
+                "obligation leaks detected during panic; downgrading Panic policy to Log to prevent double-panic abort"
+            );
+            response = ObligationLeakResponse::Log;
+        }
 
         let leak_ids: Vec<ObligationId> = error.leaks.iter().map(|leak| leak.id).collect();
         match response {
@@ -2104,11 +2113,16 @@ impl RuntimeState {
             return false;
         }
 
-        // All tasks must be terminal (including any spawned by finalizers)
+        // All tasks must be terminal (including any spawned by finalizers).
+        // Use map_or(false, ...) instead of is_none_or: a task that was removed
+        // from the arena but still appears in the region's task list (ghost task
+        // during mid-cleanup in task_completed) must NOT be treated as terminal,
+        // otherwise re-entrant advance_region_state calls can prematurely close
+        // the region while task_completed is still processing obligations.
         let all_tasks_done = region
             .task_ids()
             .iter()
-            .all(|&task_id| self.task(task_id).is_none_or(|t| t.state.is_terminal()));
+            .all(|&task_id| self.task(task_id).is_some_and(|t| t.state.is_terminal()));
 
         if !all_tasks_done {
             return false;
@@ -2185,10 +2199,13 @@ impl RuntimeState {
                     }
 
                     // If finalizing and obligations remain with no live tasks, mark leaks.
+                    // Use map_or(false, ...) to prevent ghost tasks (removed from arena
+                    // but still in region list during task_completed mid-cleanup) from
+                    // triggering premature leak detection.
                     if let Some(region) = self.regions.get(region_id.arena_index()) {
                         if region.pending_obligations() > 0 {
                             let tasks_done = region.task_ids().iter().all(|&task_id| {
-                                self.task(task_id).is_none_or(|t| t.state.is_terminal())
+                                self.task(task_id).is_some_and(|t| t.state.is_terminal())
                             });
                             if tasks_done {
                                 let leaks = self
@@ -2215,6 +2232,19 @@ impl RuntimeState {
                         };
 
                         if closed {
+                            // Emit RegionCloseComplete trace event (pairs
+                            // with RegionCloseBegin emitted in cancel_request).
+                            let seq = self.next_trace_seq();
+                            self.trace.push_event(TraceEvent::new(
+                                seq,
+                                self.now,
+                                TraceEventKind::RegionCloseComplete,
+                                TraceData::Region {
+                                    region: region_id,
+                                    parent,
+                                },
+                            ));
+
                             // Emit region_closed metric with lifetime.
                             if let Some(region) = self.regions.get(region_id.arena_index()) {
                                 let lifetime = Duration::from_nanos(
