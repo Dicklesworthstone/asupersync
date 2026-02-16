@@ -365,7 +365,12 @@ pub struct CircuitBreaker {
 impl CircuitBreaker {
     /// Create a new circuit breaker with the given policy.
     #[must_use]
-    pub fn new(policy: CircuitBreakerPolicy) -> Self {
+    pub fn new(mut policy: CircuitBreakerPolicy) -> Self {
+        // Clamp max probes to supported range
+        if policy.half_open_max_probes > MAX_HALF_OPEN_PROBES {
+            policy.half_open_max_probes = MAX_HALF_OPEN_PROBES;
+        }
+
         let sliding_window = policy
             .sliding_window
             .as_ref()
@@ -839,15 +844,40 @@ impl CircuitBreaker {
             CircuitBreakerError::Inner(()) => unreachable!(),
         })?;
 
+        struct CallGuard<'a> {
+            cb: &'a CircuitBreaker,
+            permit: Option<Permit>,
+            now: Time,
+        }
+
+        impl<'a> Drop for CallGuard<'a> {
+            fn drop(&mut self) {
+                if let Some(permit) = self.permit.take() {
+                    // Panic occurred or early return without explicit success/failure
+                    self.cb.record_failure(permit, "Panic", self.now);
+                }
+            }
+        }
+
+        let mut guard = CallGuard {
+            cb: self,
+            permit: Some(permit),
+            now,
+        };
+
         // Execute the operation
         match op() {
             Ok(value) => {
-                self.record_success(permit, now);
+                if let Some(p) = guard.permit.take() {
+                    self.record_success(p, now);
+                }
                 Ok(value)
             }
             Err(e) => {
-                let error_str = e.to_string();
-                self.record_failure(permit, &error_str, now);
+                if let Some(p) = guard.permit.take() {
+                    let error_str = e.to_string();
+                    self.record_failure(p, &error_str, now);
+                }
                 Err(CircuitBreakerError::Inner(e))
             }
         }
@@ -1716,18 +1746,12 @@ mod tests {
             let _ = cb_clone.call::<(), _, _>(now, || panic!("oops"));
         });
 
-        // State should be HalfOpen with 1 probe active (LEAKED)
-        // If fixed, this should be Open (failed probe) or HalfOpen with 0 probes (ignored)
-        match cb.state() {
-            State::HalfOpen { probes_active, .. } => {
-                // Currently this assertion PASSES because of the bug
-                assert_eq!(probes_active, 1, "Probe was leaked!");
-            }
-            _ => panic!("Expected HalfOpen state"),
-        }
+        // State should be Open (probe failed due to panic)
+        // With the fix, the CallGuard records a failure on drop.
+        assert!(matches!(cb.state(), State::Open { .. }), "Panic should record failure and reopen circuit");
 
-        // Second probe rejected because slot is taken by leaked probe
+        // Subsequent call should be rejected as Open, not HalfOpenFull
         let result = cb.should_allow(now);
-        assert!(matches!(result, Err(CircuitBreakerError::HalfOpenFull)));
+        assert!(matches!(result, Err(CircuitBreakerError::Open { .. })));
     }
 }
