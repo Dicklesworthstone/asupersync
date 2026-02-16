@@ -198,8 +198,9 @@ impl LabConfigSummary {
     #[must_use]
     pub fn config_hash(&self) -> u64 {
         use std::hash::{Hash, Hasher};
-        // Use the same deterministic hasher the runtime uses elsewhere.
-        let mut h = std::collections::hash_map::DefaultHasher::new();
+        // DefaultHasher is NOT stable across Rust versions; DetHasher uses a
+        // fixed algorithm and seed for cross-version deterministic hashing.
+        let mut h = crate::util::DetHasher::default();
         self.seed.hash(&mut h);
         self.entropy_seed.hash(&mut h);
         self.worker_count.hash(&mut h);

@@ -5,6 +5,7 @@
 use std::collections::VecDeque;
 
 use crate::bytes::Bytes;
+use crate::util::det_hash::DetHashMap;
 
 use super::error::{ErrorCode, H2Error};
 use super::frame::PrioritySpec;
@@ -562,7 +563,7 @@ impl Stream {
 /// Stream store for managing multiple streams.
 #[derive(Debug)]
 pub struct StreamStore {
-    streams: std::collections::HashMap<u32, Stream>,
+    streams: DetHashMap<u32, Stream>,
     /// Next client-initiated stream ID (odd).
     next_client_stream_id: u32,
     /// Next server-initiated stream ID (even).
@@ -582,7 +583,7 @@ impl StreamStore {
     #[must_use]
     pub fn new(is_client: bool, initial_window_size: u32, max_header_list_size: u32) -> Self {
         Self {
-            streams: std::collections::HashMap::new(),
+            streams: DetHashMap::default(),
             next_client_stream_id: 1,
             next_server_stream_id: 2,
             max_concurrent_streams: u32::MAX,

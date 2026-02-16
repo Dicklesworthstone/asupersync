@@ -22,6 +22,7 @@ use crate::channel::oneshot;
 use crate::cx::Cx;
 use crate::trace::distributed::LogicalTime;
 use crate::types::{Budget, CancelReason, ObligationId, RegionId, TaskId, Time};
+use crate::util::det_hash::DetHashMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -998,7 +999,7 @@ pub enum DedupDecision {
 /// The store is designed for single-threaded use within the deterministic
 /// lab runtime. For production multi-threaded use, wrap in a lock.
 pub struct IdempotencyStore {
-    entries: std::collections::HashMap<IdempotencyKey, IdempotencyRecord>,
+    entries: DetHashMap<IdempotencyKey, IdempotencyRecord>,
     /// Default TTL for new entries.
     default_ttl: Duration,
 }
@@ -1008,7 +1009,7 @@ impl IdempotencyStore {
     #[must_use]
     pub fn new(default_ttl: Duration) -> Self {
         Self {
-            entries: std::collections::HashMap::new(),
+            entries: DetHashMap::default(),
             default_ttl,
         }
     }

@@ -15,7 +15,7 @@ use crate::error::{Error, ErrorKind};
 use crate::observability::LogEntry;
 use crate::time::TimeSource;
 use crate::types::Time;
-use std::collections::HashMap;
+use crate::util::det_hash::DetHashMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -294,7 +294,7 @@ pub struct Epoch {
     pub operation_count: u64,
 
     /// Custom metadata.
-    pub metadata: HashMap<String, String>,
+    pub metadata: DetHashMap<String, String>,
 }
 
 impl Epoch {
@@ -314,7 +314,7 @@ impl Epoch {
             ended_at: None,
             config,
             operation_count: 0,
-            metadata: HashMap::new(),
+            metadata: DetHashMap::default(),
         }
     }
 

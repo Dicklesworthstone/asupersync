@@ -82,23 +82,23 @@ impl Hasher for DetHasher {
     }
 
     fn write_i8(&mut self, i: i8) {
-        self.write_u8(i as u8);
+        self.write_u8(i.cast_unsigned());
     }
 
     fn write_i16(&mut self, i: i16) {
-        self.write_u16(i as u16);
+        self.write_u16(i.cast_unsigned());
     }
 
     fn write_i32(&mut self, i: i32) {
-        self.write_u32(i as u32);
+        self.write_u32(i.cast_unsigned());
     }
 
     fn write_i64(&mut self, i: i64) {
-        self.write_u64(i as u64);
+        self.write_u64(i.cast_unsigned());
     }
 
     fn write_i128(&mut self, i: i128) {
-        self.write_u128(i as u128);
+        self.write_u128(i.cast_unsigned());
     }
 
     fn write_isize(&mut self, i: isize) {
