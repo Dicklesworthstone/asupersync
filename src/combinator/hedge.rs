@@ -84,8 +84,7 @@ impl HedgeConfig {
     /// Returns true if the delay has elapsed.
     #[must_use]
     pub fn delay_elapsed(&self, start: Time, now: Time) -> bool {
-        let elapsed_nanos = now.as_nanos().saturating_sub(start.as_nanos());
-        elapsed_nanos >= self.hedge_delay_nanos_u64()
+        now >= self.deadline_from(start)
     }
 
     /// Computes the deadline time given a start time.
@@ -511,6 +510,16 @@ mod tests {
 
         let deadline = config.deadline_from(start);
         assert_eq!(deadline, Time::MAX);
+    }
+
+    #[test]
+    fn hedge_config_delay_elapsed_respects_saturated_deadline() {
+        let config = HedgeConfig::new(Duration::from_nanos(10));
+        let start = Time::from_nanos(u64::MAX - 5);
+
+        assert_eq!(config.deadline_from(start), Time::MAX);
+        assert!(!config.delay_elapsed(start, start));
+        assert!(config.delay_elapsed(start, Time::MAX));
     }
 
     // =========================================================================
