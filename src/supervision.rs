@@ -7620,6 +7620,7 @@ mod tests {
             alpha: 0.01,
             expected_rate: 1.0, // 1 restart/sec expected
             min_observations: 3,
+            tolerance: 1.2,
         });
 
         // Intensity at or below expected rate.
@@ -7642,6 +7643,7 @@ mod tests {
             alpha: 0.01,
             expected_rate: 0.05, // ~1 restart per 20s
             min_observations: 3,
+            tolerance: 1.2,
         });
 
         // Intensity far exceeding expected (100×).
@@ -7662,6 +7664,7 @@ mod tests {
             alpha: 0.01,
             expected_rate: 0.01,
             min_observations: 5,
+            tolerance: 1.2,
         });
 
         // Even extreme intensity doesn't trigger before min_observations.
@@ -7688,6 +7691,7 @@ mod tests {
             alpha: 0.01,
             expected_rate: 0.1, // expect ~1 restart per 10s
             min_observations: 3,
+            tolerance: 1.2,
         });
 
         // Rapid restarts: 20 in 1 second → intensity = 20/10 = 2.0
@@ -7710,6 +7714,7 @@ mod tests {
             alpha: 0.01,
             expected_rate: 0.01,
             min_observations: 3,
+            tolerance: 1.2,
         });
 
         for _ in 0..10 {
@@ -7746,6 +7751,7 @@ mod tests {
             alpha: 0.01,
             expected_rate: 1.0,
             min_observations: 3,
+            tolerance: 1.2,
         });
 
         // 1000 observations at or below expected rate.
@@ -7860,6 +7866,7 @@ mod tests {
                 alpha: 0.01,
                 expected_rate: 0.1,
                 min_observations: 3,
+                tolerance: 1.2,
             });
 
             let base = 1_000_000_000u64;
@@ -7894,6 +7901,7 @@ mod tests {
             alpha: 0.01,
             expected_rate: 0.05,
             min_observations: 3,
+            tolerance: 1.2,
         });
 
         // Track transitions: Clear → Watching → Alert.
@@ -7946,6 +7954,7 @@ mod tests {
                 alpha: 0.05,
                 expected_rate: 0.5,
                 min_observations: 3,
+                tolerance: 1.2,
             });
 
             let task = test_task_id();

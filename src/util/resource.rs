@@ -219,6 +219,12 @@ impl SymbolPool {
 
     /// Returns a buffer to the pool.
     pub fn deallocate(&mut self, mut buffer: SymbolBuffer) {
+        debug_assert!(buffer.in_use, "deallocating a buffer that is not marked in-use");
+        debug_assert_eq!(
+            buffer.len(),
+            self.config.symbol_size as usize,
+            "deallocating a buffer with wrong symbol_size"
+        );
         buffer.mark_free();
         self.free_list.push(buffer);
         self.allocated = self.allocated.saturating_sub(1);
@@ -232,9 +238,11 @@ impl SymbolPool {
         &self.stats
     }
 
-    /// Resets pool statistics.
+    /// Resets pool statistics while keeping current/peak usage in sync with actual state.
     pub fn reset_stats(&mut self) {
         self.stats = PoolStats::default();
+        self.stats.current_usage = self.allocated;
+        self.stats.peak_usage = self.allocated;
     }
 
     /// Shrinks the pool to its initial size.
@@ -516,11 +524,14 @@ impl NotificationBatch {
 }
 
 fn within_limits(usage: &ResourceUsage, limits: &ResourceLimits) -> bool {
+    // Note: max_per_object_memory is intentionally NOT checked here.
+    // `usage.symbol_memory` is the global cumulative usage, not a per-object
+    // value. Per-object enforcement belongs at the call-site that knows which
+    // individual object is requesting memory.
     usage.symbol_memory <= limits.max_symbol_memory
         && usage.encoding_ops <= limits.max_encoding_ops
         && usage.decoding_ops <= limits.max_decoding_ops
         && usage.symbols_in_flight <= limits.max_symbols_in_flight
-        && usage.symbol_memory <= limits.max_per_object_memory
 }
 
 fn compute_pressure(usage: &ResourceUsage, limits: &ResourceLimits) -> f64 {
@@ -706,5 +717,38 @@ mod tests {
             })
             .unwrap();
         assert!((tracker.pressure() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_reset_stats_preserves_current_usage() {
+        let mut pool = SymbolPool::new(PoolConfig::default());
+        let _buf = pool.allocate().expect("should allocate");
+        assert_eq!(pool.stats.current_usage, 1);
+        assert_eq!(pool.stats.allocations, 1);
+
+        pool.reset_stats();
+        // After reset, current_usage and peak_usage should reflect actual allocated count.
+        assert_eq!(pool.stats.current_usage, 1);
+        assert_eq!(pool.stats.peak_usage, 1);
+        // But cumulative counters should be zero.
+        assert_eq!(pool.stats.allocations, 0);
+        assert_eq!(pool.stats.deallocations, 0);
+    }
+
+    #[test]
+    fn test_within_limits_ignores_per_object_memory() {
+        // per_object_memory is smaller than total symbol_memory: must NOT block global checks.
+        let limits = ResourceLimits {
+            max_symbol_memory: 1000,
+            max_per_object_memory: 100,
+            ..Default::default()
+        };
+        let usage = ResourceUsage {
+            symbol_memory: 500,
+            ..Default::default()
+        };
+        // Global usage (500) exceeds per_object limit (100) but is within global limit (1000).
+        // within_limits must return true because per-object enforcement is not its job.
+        assert!(within_limits(&usage, &limits));
     }
 }
