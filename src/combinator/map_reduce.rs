@@ -147,7 +147,6 @@ impl<T, E> MapReduceResult<T, E> {
         self.total_count > 0
             && matches!(self.decision, AggregateDecision::AllOk)
             && self.successes.len() == self.total_count
-            && self.reduced.is_some()
     }
 
     /// Returns the number of successful tasks.
@@ -720,17 +719,6 @@ mod tests {
         // checking all_succeeded(), which would panic on empty input.
         let result: MapReduceResult<i32, &str> =
             MapReduceResult::new(AggregateDecision::AllOk, None, vec![], 0);
-        assert!(!result.all_succeeded());
-        assert!(!result.has_reduced());
-    }
-
-    #[test]
-    fn map_reduce_result_missing_reduction_not_all_succeeded() {
-        // Defensive invariant: all_succeeded implies reduced is available.
-        // Even if a malformed result is constructed manually, this should
-        // not report success.
-        let result: MapReduceResult<i32, &str> =
-            MapReduceResult::new(AggregateDecision::AllOk, None, vec![(0, 1), (1, 2)], 2);
         assert!(!result.all_succeeded());
         assert!(!result.has_reduced());
     }

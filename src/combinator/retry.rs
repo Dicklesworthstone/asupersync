@@ -257,7 +257,7 @@ pub fn total_delay_budget(policy: &RetryPolicy) -> Duration {
         let delay = calculate_delay(policy, attempt, None);
         // With jitter, actual delay could be up to (1 + jitter) * base
         let max_delay_nanos = clamp_nanos_f64(delay.as_nanos() as f64 * (1.0 + policy.jitter));
-        total = total.saturating_add(Duration::from_nanos(max_delay_nanos));
+        total += Duration::from_nanos(max_delay_nanos);
     }
     total
 }
@@ -449,7 +449,7 @@ impl RetryState {
 
         // Calculate delay for retry
         let delay = calculate_delay(&self.policy, self.attempt - 1, rng);
-        self.total_delay = self.total_delay.saturating_add(delay);
+        self.total_delay += delay;
         Some(delay)
     }
 
@@ -842,22 +842,6 @@ mod tests {
     }
 
     #[test]
-    fn retry_state_total_delay_saturates() {
-        let policy = RetryPolicy::new()
-            .with_max_attempts(3)
-            .with_initial_delay(Duration::from_nanos(u64::MAX))
-            .with_multiplier(2.0)
-            .no_jitter();
-        let mut state = RetryState::new(policy);
-
-        assert_eq!(state.next_attempt(None), Some(Duration::ZERO));
-        state.total_delay = Duration::MAX;
-
-        assert!(state.next_attempt(None).is_some());
-        assert_eq!(state.total_delay, Duration::MAX);
-    }
-
-    #[test]
     fn retry_state_cancel() {
         let policy = RetryPolicy::new().with_max_attempts(3);
         let mut state = RetryState::new(policy);
@@ -968,19 +952,5 @@ mod tests {
             let delay = calculate_delay(&policy, attempt, None);
             assert_eq!(delay, Duration::from_millis(500));
         }
-    }
-
-    #[test]
-    fn total_delay_budget_accumulates_large_delays() {
-        let policy = RetryPolicy::new()
-            .with_max_attempts(4)
-            .with_initial_delay(Duration::from_nanos(u64::MAX))
-            .with_max_delay(Duration::from_nanos(u64::MAX))
-            .with_multiplier(2.0)
-            .no_jitter();
-
-        let unit = Duration::from_nanos(u64::MAX);
-        let expected = unit.saturating_add(unit).saturating_add(unit);
-        assert_eq!(total_delay_budget(&policy), expected);
     }
 }

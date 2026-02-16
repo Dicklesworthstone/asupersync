@@ -1112,7 +1112,6 @@ impl PgConnection {
                                     PgError::AuthenticationFailed("password required".to_string())
                                 })?;
                                 self.authenticate_scram(cx, &options.user, password).await?;
-                                return Ok(());
                             } else {
                                 return Err(PgError::UnsupportedAuth(format!(
                                     "SASL mechanisms: {mechanisms:?}"

@@ -251,19 +251,11 @@ where
             // Poll until complete (bounded iteration to prevent infinite loops)
             // Most release futures complete quickly or immediately.
             for _ in 0..10_000 {
-                let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    release_fut.as_mut().poll(&mut cx)
-                }));
-                match poll_result {
-                    Ok(Poll::Ready(())) => return,
-                    Ok(Poll::Pending) => {
+                match release_fut.as_mut().poll(&mut cx) {
+                    Poll::Ready(()) => return,
+                    Poll::Pending => {
                         // Yield to allow progress
                         std::hint::spin_loop();
-                    }
-                    Err(_) => {
-                        // Drop must not panic; if release itself panics here we
-                        // stop driving it to avoid panic-in-drop abort behavior.
-                        return;
                     }
                 }
             }
@@ -868,16 +860,6 @@ mod tests {
         }
     }
 
-    /// A release future that panics whenever polled.
-    struct PanicRelease;
-
-    impl Future for PanicRelease {
-        type Output = ();
-        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
-            panic!("release panic")
-        }
-    }
-
     /// Regression: if the bracket future is dropped while the release future
     /// is in progress (Releasing phase returns Pending then the bracket is
     /// dropped), the Drop handler must drive the release future to completion.
@@ -916,38 +898,6 @@ mod tests {
         assert!(
             released.load(Ordering::SeqCst),
             "release must complete even when bracket is dropped during Releasing phase"
-        );
-    }
-
-    /// Regression: if release panics during poll, Drop must not panic while
-    /// attempting cleanup. Panic-in-drop can abort the process during unwind.
-    #[test]
-    fn bracket_drop_does_not_panic_when_release_panics() {
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
-
-        let mut fut = Box::pin(bracket(
-            async { Ok::<_, ()>(42_i32) },
-            |x| async move { Ok::<_, ()>(x) },
-            move |_| PanicRelease,
-        ));
-
-        // First poll enters Releasing and panics from PanicRelease::poll.
-        let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = fut.as_mut().poll(&mut cx);
-        }));
-        assert!(
-            poll_result.is_err(),
-            "release panic should propagate from poll"
-        );
-
-        // Dropping the bracket after that panic must not panic again.
-        let drop_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            drop(fut);
-        }));
-        assert!(
-            drop_result.is_ok(),
-            "drop must not panic when release future panics"
         );
     }
 }

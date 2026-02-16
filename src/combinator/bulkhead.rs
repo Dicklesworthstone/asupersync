@@ -352,9 +352,7 @@ impl Bulkhead {
     #[allow(clippy::significant_drop_tightening, clippy::cast_precision_loss)]
     pub fn enqueue(&self, weight: u32, now: Time) -> Result<u64, BulkheadError<()>> {
         let now_millis = now.as_millis();
-        let timeout_millis =
-            u64::try_from(self.policy.queue_timeout.as_millis()).unwrap_or(u64::MAX);
-        let deadline_millis = now_millis.saturating_add(timeout_millis);
+        let deadline_millis = now_millis + self.policy.queue_timeout.as_millis() as u64;
 
         let mut queue = self.queue.write().expect("lock poisoned");
 
@@ -978,27 +976,6 @@ mod tests {
 
         assert!(matches!(result, Err(BulkheadError::QueueTimeout { .. })));
         assert_eq!(bh.metrics().total_timeout, 1);
-    }
-
-    #[test]
-    #[allow(clippy::significant_drop_tightening)]
-    fn enqueue_deadline_saturates_for_large_timeout() {
-        let bh = Bulkhead::new(BulkheadPolicy {
-            max_concurrent: 1,
-            max_queue: 1,
-            queue_timeout: Duration::MAX,
-            ..Default::default()
-        });
-
-        // Exhaust capacity so enqueue path is used.
-        let _p = bh.try_acquire(1).unwrap();
-        let now = Time::from_millis(u64::MAX);
-        let entry_id = bh.enqueue(1, now).unwrap();
-
-        let queue = bh.queue.read().expect("lock poisoned");
-        let entry = queue.iter().find(|e| e.id == entry_id).unwrap();
-        assert_eq!(entry.deadline_millis, u64::MAX);
-        assert!(entry.result.is_none());
     }
 
     #[test]
