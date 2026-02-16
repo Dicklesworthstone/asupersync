@@ -3,7 +3,7 @@
   "inventory_id": "lean.theorem_surface.v1",
   "generated_by": "bd-3n3b2",
   "source_file": "formal/lean/Asupersync.lean",
-  "theorem_count": 136,
+  "theorem_count": 146,
   "theorems": [
     {
       "line": 188,
@@ -548,6 +548,46 @@
     {
       "line": 3826,
       "theorem": "cancelChild_preserves_wellformed_constructor"
+    },
+    {
+      "line": 3878,
+      "theorem": "task_cancel_requested_canonical_form"
+    },
+    {
+      "line": 3890,
+      "theorem": "task_cancelling_canonical_form"
+    },
+    {
+      "line": 3902,
+      "theorem": "task_finalizing_canonical_form"
+    },
+    {
+      "line": 3914,
+      "theorem": "region_closing_canonical_form"
+    },
+    {
+      "line": 3926,
+      "theorem": "region_draining_canonical_form"
+    },
+    {
+      "line": 3938,
+      "theorem": "region_finalizing_canonical_form"
+    },
+    {
+      "line": 3950,
+      "theorem": "obligation_reserved_canonical_form"
+    },
+    {
+      "line": 3961,
+      "theorem": "obligation_committed_canonical_form"
+    },
+    {
+      "line": 3972,
+      "theorem": "obligation_aborted_canonical_form"
+    },
+    {
+      "line": 3983,
+      "theorem": "obligation_leaked_canonical_form"
     }
   ]
 }

@@ -3,9 +3,9 @@
   "report_id": "lean.coverage.baseline.v1",
   "generated_by": "bd-5w2lq",
   "source_hashes_sha256": {
-    "theorem_surface_inventory": "8771782af487abd330e763d87776ff6b44a4be46f1667ecb2c8af8c7f8b16498",
-    "step_constructor_coverage": "beb61d306918873d004f13881f4030a8b274aa54b94f40c1911240c959eac41a",
-    "theorem_rule_traceability_ledger": "0e92b936c1ee0fe306ce1f66389e09887322e199d41e09ecdd698c19a3e54e91",
+    "theorem_surface_inventory": "6552daef1255d87ea48b654cee632ec5df34d907550a66b6e13b2bda69a0fad7",
+    "step_constructor_coverage": "3191148cc0cd6c3183ed81c4cd71ee5894020c9514002ed78670f757e3259c07",
+    "theorem_rule_traceability_ledger": "95feb454f59d3b25a481868129df8214d8e66ae47fd679261f43632e393e12c4",
     "invariant_status_inventory": "7ddc8b6ff078cbe15b4ac979ee091a06f738118714578a4ed9d30649bae1f447",
     "invariant_theorem_test_link_map": "18eb87e32c05041d26b5d6039c6e81a749d49b7b6bec1be608a4217ed402ef3f",
     "gap_risk_sequencing_plan": "f80eaef4a7d959d2e5c31d82cd3f5648c9c78340d8fa8c1f745cd0fc423a3b01",
@@ -16,9 +16,9 @@
   },
   "snapshot": {
     "theorem_surface": {
-      "theorem_count": 136,
+      "theorem_count": 146,
       "first_theorem": "removeObligationId_not_mem",
-      "last_theorem": "cancelChild_preserves_wellformed_constructor"
+      "last_theorem": "obligation_leaked_canonical_form"
     },
     "step_constructor_coverage": {
       "step_constructor_count": 22,

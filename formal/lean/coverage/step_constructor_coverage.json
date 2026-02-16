@@ -80,6 +80,7 @@
       "status": "covered",
       "mapped_theorems": [
         "reserve_creates_reserved",
+        "obligation_reserved_canonical_form",
         "reserve_holder_exists",
         "reserve_adds_to_ledger",
         "reserve_preserves_wellformed",
@@ -92,6 +93,7 @@
       "status": "covered",
       "mapped_theorems": [
         "commit_resolves",
+        "obligation_committed_canonical_form",
         "commit_removes_from_ledger",
         "commit_preserves_wellformed",
         "commit_resolves_obligation",
@@ -104,6 +106,7 @@
       "status": "covered",
       "mapped_theorems": [
         "abort_resolves",
+        "obligation_aborted_canonical_form",
         "abort_removes_from_ledger",
         "abort_preserves_wellformed",
         "abort_resolves_obligation",
@@ -116,6 +119,7 @@
       "status": "covered",
       "mapped_theorems": [
         "leak_marks_leaked",
+        "obligation_leaked_canonical_form",
         "leak_removes_from_ledger",
         "leak_preserves_wellformed",
         "leaked_obligation_stable"
@@ -128,6 +132,7 @@
       "mapped_theorems": [
         "cancel_request_preserves_obligation",
         "cancelling_from_cancelRequested",
+        "task_cancel_requested_canonical_form",
         "cancelRequest_preserves_wellformed",
         "cancel_step_strengthens_reason",
         "cancel_label_preserves_region_structure"
@@ -148,6 +153,7 @@
       "status": "covered",
       "mapped_theorems": [
         "cancel_ack_step",
+        "task_cancelling_canonical_form",
         "cancelAcknowledge_potential_decreases"
       ]
     },
@@ -157,6 +163,7 @@
       "status": "covered",
       "mapped_theorems": [
         "cancel_finalize_step",
+        "task_finalizing_canonical_form",
         "cancelFinalize_potential_decreases"
       ]
     },
@@ -200,7 +207,8 @@
       "constructor": "closeBegin",
       "status": "covered",
       "mapped_theorems": [
-        "close_begin_step"
+        "close_begin_step",
+        "region_closing_canonical_form"
       ]
     },
     {
@@ -209,6 +217,7 @@
       "status": "covered",
       "mapped_theorems": [
         "close_cancel_children_step",
+        "region_draining_canonical_form",
         "close_children_exist_completed",
         "cancel_label_preserves_region_structure"
       ]
@@ -219,6 +228,7 @@
       "status": "covered",
       "mapped_theorems": [
         "close_children_done_step",
+        "region_finalizing_canonical_form",
         "close_subregions_exist_closed"
       ]
     },

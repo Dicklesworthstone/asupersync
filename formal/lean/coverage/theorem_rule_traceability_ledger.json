@@ -1781,6 +1781,196 @@
         "formal/lean/coverage/step_constructor_coverage.json"
       ],
       "rule_status": "covered"
+    },
+    {
+      "theorem": "task_cancel_requested_canonical_form",
+      "theorem_line": 3878,
+      "rule_id": "step.cancelRequest",
+      "semantic_intent": "Canonical-form decomposition for cancel-requested task states.",
+      "assumptions": [
+        "Task state matches TaskState.cancelRequested _ _"
+      ],
+      "downstream_impact": [
+        "Makes canonical-form witnesses explicit for cancellation ladder proofs",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3878",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "task_cancelling_canonical_form",
+      "theorem_line": 3890,
+      "rule_id": "step.cancelAcknowledge",
+      "semantic_intent": "Canonical-form decomposition for cancelling task states.",
+      "assumptions": [
+        "Task state matches TaskState.cancelling _ _"
+      ],
+      "downstream_impact": [
+        "Makes canonical-form witnesses explicit for cancellation ladder proofs",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3890",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "task_finalizing_canonical_form",
+      "theorem_line": 3902,
+      "rule_id": "step.cancelFinalize",
+      "semantic_intent": "Canonical-form decomposition for finalizing task states.",
+      "assumptions": [
+        "Task state matches TaskState.finalizing _ _"
+      ],
+      "downstream_impact": [
+        "Makes canonical-form witnesses explicit for cancellation ladder proofs",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3902",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "region_closing_canonical_form",
+      "theorem_line": 3914,
+      "rule_id": "step.closeBegin",
+      "semantic_intent": "Canonical-form decomposition for closing region states.",
+      "assumptions": [
+        "Region state matches RegionState.closing"
+      ],
+      "downstream_impact": [
+        "Makes canonical-form witnesses explicit for region close ladder proofs",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3914",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "region_draining_canonical_form",
+      "theorem_line": 3926,
+      "rule_id": "step.closeCancelChildren",
+      "semantic_intent": "Canonical-form decomposition for draining region states.",
+      "assumptions": [
+        "Region state matches RegionState.draining"
+      ],
+      "downstream_impact": [
+        "Makes canonical-form witnesses explicit for region close ladder proofs",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3926",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "region_finalizing_canonical_form",
+      "theorem_line": 3938,
+      "rule_id": "step.closeChildrenDone",
+      "semantic_intent": "Canonical-form decomposition for finalizing region states.",
+      "assumptions": [
+        "Region state matches RegionState.finalizing"
+      ],
+      "downstream_impact": [
+        "Makes canonical-form witnesses explicit for region close ladder proofs",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3938",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "obligation_reserved_canonical_form",
+      "theorem_line": 3950,
+      "rule_id": "step.reserve",
+      "semantic_intent": "Canonical-form decomposition for reserved obligations.",
+      "assumptions": [
+        "Obligation state matches ObligationState.reserved"
+      ],
+      "downstream_impact": [
+        "Makes canonical-form witnesses explicit for obligation lifecycle proofs",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3950",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "obligation_committed_canonical_form",
+      "theorem_line": 3961,
+      "rule_id": "step.commit",
+      "semantic_intent": "Canonical-form decomposition for committed obligations.",
+      "assumptions": [
+        "Obligation state matches ObligationState.committed"
+      ],
+      "downstream_impact": [
+        "Makes canonical-form witnesses explicit for obligation lifecycle proofs",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3961",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "obligation_aborted_canonical_form",
+      "theorem_line": 3972,
+      "rule_id": "step.abort",
+      "semantic_intent": "Canonical-form decomposition for aborted obligations.",
+      "assumptions": [
+        "Obligation state matches ObligationState.aborted"
+      ],
+      "downstream_impact": [
+        "Makes canonical-form witnesses explicit for obligation lifecycle proofs",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3972",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "obligation_leaked_canonical_form",
+      "theorem_line": 3983,
+      "rule_id": "step.leak",
+      "semantic_intent": "Canonical-form decomposition for leaked obligations.",
+      "assumptions": [
+        "Obligation state matches ObligationState.leaked"
+      ],
+      "downstream_impact": [
+        "Makes canonical-form witnesses explicit for obligation lifecycle proofs",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3983",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
     }
   ]
 }
