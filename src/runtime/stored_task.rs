@@ -78,16 +78,16 @@ impl StoredTask {
     pub fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Outcome<(), ()>> {
         self.poll_count += 1;
         let poll_number = self.poll_count;
+        let budget_remaining = self.polls_remaining.take().unwrap_or(0);
 
         if let Some(task_id) = self.task_id {
-            let _budget_remaining = self.polls_remaining.unwrap_or(0);
             trace!(
                 task_id = ?task_id,
                 poll_number = poll_number,
-                budget_remaining = _budget_remaining,
+                budget_remaining = budget_remaining,
                 "task poll started"
             );
-            let _ = (task_id, poll_number, _budget_remaining);
+            let _ = (task_id, poll_number, budget_remaining);
         }
 
         let result = self.future.as_mut().poll(cx);
@@ -179,16 +179,16 @@ impl LocalStoredTask {
     pub fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Outcome<(), ()>> {
         self.poll_count += 1;
         let poll_number = self.poll_count;
+        let budget_remaining = self.polls_remaining.take().unwrap_or(0);
 
         if let Some(task_id) = self.task_id {
-            let _budget_remaining = self.polls_remaining.unwrap_or(0);
             trace!(
                 task_id = ?task_id,
                 poll_number = poll_number,
-                budget_remaining = _budget_remaining,
+                budget_remaining = budget_remaining,
                 "local task poll started"
             );
-            let _ = (task_id, poll_number, _budget_remaining);
+            let _ = (task_id, poll_number, budget_remaining);
         }
 
         let result = self.future.as_mut().poll(cx);
@@ -352,5 +352,39 @@ mod tests {
             before == after
         );
         crate::test_complete!("any_stored_task_is_local_stable_after_poll");
+    }
+
+    #[test]
+    fn stored_task_consumes_polls_remaining_after_poll() {
+        init_test("stored_task_consumes_polls_remaining_after_poll");
+        let mut task = StoredTask::new(async { Outcome::Ok(()) });
+        task.set_polls_remaining(7);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let _ = task.poll(&mut cx);
+        crate::assert_with_log!(
+            task.polls_remaining.is_none(),
+            "polls_remaining should be consumed by poll",
+            true,
+            task.polls_remaining.is_none()
+        );
+        crate::test_complete!("stored_task_consumes_polls_remaining_after_poll");
+    }
+
+    #[test]
+    fn local_stored_task_consumes_polls_remaining_after_poll() {
+        init_test("local_stored_task_consumes_polls_remaining_after_poll");
+        let mut task = LocalStoredTask::new(async { Outcome::Ok(()) });
+        task.set_polls_remaining(11);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let _ = task.poll(&mut cx);
+        crate::assert_with_log!(
+            task.polls_remaining.is_none(),
+            "polls_remaining should be consumed by poll for local tasks",
+            true,
+            task.polls_remaining.is_none()
+        );
+        crate::test_complete!("local_stored_task_consumes_polls_remaining_after_poll");
     }
 }

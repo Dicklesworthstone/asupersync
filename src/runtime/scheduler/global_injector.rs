@@ -109,17 +109,16 @@ impl Default for GlobalInjector {
 impl GlobalInjector {
     /// Decrements an advisory counter, saturating at zero.
     ///
-    /// Uses a single `fetch_sub` instead of a CAS loop. The brief underflow
-    /// window (between `fetch_sub` and `fetch_max(0)`) is acceptable because
-    /// these counters are only used for heuristic queue-depth decisions with
-    /// Relaxed ordering, and the value is immediately clamped back to zero.
-    /// Callers already tolerate stale/approximate counts.
+    /// Uses `fetch_update` with `checked_sub` so the counter never wraps to
+    /// `usize::MAX`, even transiently.  A `fetch_sub` + store-on-underflow
+    /// approach would be slightly cheaper in the common case but would expose
+    /// a brief window where readers see `usize::MAX`, which confuses `len()`,
+    /// `is_empty()`, and `has_timed_work()` callers.
     #[inline]
     fn saturating_decrement(counter: &AtomicUsize) {
-        if counter.fetch_sub(1, Ordering::Relaxed) == 0 {
-            // We underflowed (was already 0). Restore to 0.
-            counter.store(0, Ordering::Relaxed);
-        }
+        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            count.checked_sub(1)
+        });
     }
 
     /// Decrements the pending counter, saturating at zero.
