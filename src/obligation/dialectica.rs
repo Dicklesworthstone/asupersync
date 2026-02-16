@@ -390,6 +390,22 @@ impl ContractChecker {
             } => {
                 // Forward step: create the obligation.
                 // Contract: NoPartialCommit — obligation starts in Reserved, no intermediate.
+                // Duplicate reserve is a violation: the first reservation would be
+                // silently lost, hiding a potential ExhaustiveResolution failure.
+                if let Some(existing) = self.obligations.get(obligation) {
+                    self.violations.push(ContractViolation {
+                        contract: DialecticaContract::NoPartialCommit,
+                        time: event.time,
+                        description: format!(
+                            "obligation {obligation:?} reserved again (already in state {:?}, \
+                             reserved at t={})",
+                            existing.state, existing.reserved_at,
+                        ),
+                        obligation: Some(*obligation),
+                        region: Some(*region),
+                    });
+                    return;
+                }
                 self.obligations.insert(
                     *obligation,
                     ObligationSnapshot {
@@ -1346,5 +1362,24 @@ mod tests {
             r1_count >= 1
         );
         crate::test_complete!("checker_reuse");
+    }
+
+    #[test]
+    fn duplicate_reserve_detected() {
+        init_test("duplicate_reserve_detected");
+        let events = vec![
+            reserve(0, o(0), ObligationKind::SendPermit, t(0), r(0)),
+            reserve(5, o(0), ObligationKind::SendPermit, t(1), r(0)), // DUPLICATE!
+        ];
+
+        let mut checker = ContractChecker::new();
+        let result = checker.check(&events);
+        let clean = result.is_clean();
+        crate::assert_with_log!(!clean, "duplicate reserve not clean", false, clean);
+
+        let npc_violations = result.violations_for(DialecticaContract::NoPartialCommit);
+        let count = npc_violations.len();
+        crate::assert_with_log!(count >= 1, "duplicate reserve violation", true, count >= 1);
+        crate::test_complete!("duplicate_reserve_detected");
     }
 }
