@@ -39,8 +39,8 @@
 //!
 //! | Platform | Backend | Module |
 //! |----------|---------|--------|
-//! | Linux | epoll | `linux.rs` |
-//! | macOS/BSD | kqueue | `macos.rs` |
+//! | Linux | epoll | `epoll.rs` |
+//! | macOS/BSD | kqueue | `kqueue.rs` |
 //! | Windows | IOCP | `windows.rs` |
 //! | Testing | virtual | `lab.rs` |
 //!
@@ -355,8 +355,8 @@ impl IntoIterator for Events {
 ///
 /// | Platform | Backend | Module |
 /// |----------|---------|--------|
-/// | Linux | epoll | `linux.rs` |
-/// | macOS/BSD | kqueue | `macos.rs` |
+/// | Linux | epoll | `epoll.rs` |
+/// | macOS/BSD | kqueue | `kqueue.rs` |
 /// | Windows | IOCP | `windows.rs` |
 /// | Testing | virtual | `lab.rs` |
 ///
@@ -1093,6 +1093,13 @@ mod tests {
             true,
             result.is_err()
         );
+        let kind = result.expect_err("checked above").kind();
+        crate::assert_with_log!(
+            kind == io::ErrorKind::NotFound,
+            &format!("{name} deregister unknown token reports NotFound"),
+            io::ErrorKind::NotFound,
+            kind
+        );
     }
 
     fn compliance_check_modify_unknown(reactor: &dyn Reactor, name: &str) {
@@ -1102,6 +1109,13 @@ mod tests {
             &format!("{name} modify unknown token fails"),
             true,
             result.is_err()
+        );
+        let kind = result.expect_err("checked above").kind();
+        crate::assert_with_log!(
+            kind == io::ErrorKind::NotFound,
+            &format!("{name} modify unknown token reports NotFound"),
+            io::ErrorKind::NotFound,
+            kind
         );
     }
 
