@@ -18,6 +18,7 @@ This directory contains the canonical machine-readable artifacts for Lean proof 
 - `lean_full_repro_bundle_manifest.schema.json` - JSON Schema for `lean-full/repro_bundle_manifest.json` emitted by the full CI profile
 - `lean_frontier_buckets_v1.json` - deterministic frontier error buckets with failure-mode + bead linkage
 - `proof_guided_performance_opportunity_map.json` - deterministic Track-6 optimization envelope map with theorem-linked constraints and required conformance checks
+- `proof_impact_closed_loop_report_v1.json` - deterministic Track-6 closed-loop impact report linking coverage maturity to performance/reliability/correctness outcomes
 
 ## Ontology
 
@@ -279,6 +280,44 @@ optimization envelope map for Track-6 performance work. It defines:
 
 Validation is enforced in:
 - `tests/lean_proof_guided_performance_opportunity_map.rs`
+
+## Closed-Loop Impact Report (Track-6 / asupersync-3gf4i)
+
+`proof_impact_closed_loop_report_v1.json` is the canonical machine-readable
+closed-loop report contract for Track-6 measurement work. It defines:
+- deterministic periodicity and reproducibility rules (`weekly` cadence, UTC windows,
+  explicit `rch` command recording);
+- measurement framework contracts for:
+  - performance (`asupersync-228pu`)
+  - reliability (`asupersync-2ue65`)
+  - correctness (`asupersync-3o1ga`);
+- required before/after/delta fields, confidence notes, and attribution metadata
+  (`coverage_change_beads` + `source_field_path`);
+- explicit performance workload definitions and reproducible commands for
+  `asupersync-228pu` measurement cycles;
+- explicit reliability milestone snapshots and delta summaries for
+  `asupersync-2ue65` (diagnostic-time, incident-frequency, and severity-index trends);
+- reliability attribution method contract (`method_id`, required `rch` commands,
+  assumptions) plus mandatory caveats for confidence scoping;
+- explicit correctness maturity snapshots and delta summaries for
+  `asupersync-3o1ga` (regression-rate, rework burden, and time-to-diagnosis trends);
+- reproducible correctness query contract (`repro_queries`) and governance-adjustment
+  hooks for workflow/policy feedback;
+- playbook handoff contract feeding the final case-study bead (`asupersync-3gfir`),
+  including:
+  - repeatable workflow template (steps/checklists/failure modes/templates)
+  - three canonical case studies (performance/reliability/correctness) with
+    baseline/intervention/measured outcome, artifact links, bead lineage, and
+    reproducible commands.
+
+Validation is enforced in:
+- `tests/lean_proof_impact_closed_loop_report.rs`
+
+Canonical validation command:
+
+```bash
+rch exec -- cargo test --test lean_proof_impact_closed_loop_report -- --nocapture
+```
 
 ## Waiver Lifecycle Policy (Track-5.3a)
 

@@ -61,43 +61,11 @@ fn theorem_inventory_lines_are_positive_and_unique() {
     }
 }
 
-#[test]
-fn theorem_inventory_canonicalization_metadata_is_consistent() {
-    let inventory: Value =
-        serde_json::from_str(THEOREM_INVENTORY_JSON).expect("theorem inventory must parse");
-    let theorem_entries = inventory
-        .get("theorems")
-        .and_then(Value::as_array)
-        .expect("theorems must be an array");
-    let mut theorem_lines = BTreeMap::new();
-    for entry in theorem_entries {
-        let theorem = entry
-            .get("theorem")
-            .and_then(Value::as_str)
-            .expect("theorem name must be present");
-        let line = entry
-            .get("line")
-            .and_then(Value::as_u64)
-            .expect("theorem line must be present");
-        assert!(
-            theorem_lines.insert(theorem, line).is_none(),
-            "duplicate theorem entry in inventory: {theorem}"
-        );
-    }
-    let theorem_names = theorem_lines.keys().copied().collect::<BTreeSet<_>>();
-
-    let canonicalization = inventory
-        .get("lemma_canonicalization")
-        .expect("lemma_canonicalization metadata must be present");
-    let families = canonicalization
-        .get("families")
-        .and_then(Value::as_array)
-        .expect("lemma_canonicalization.families must be an array");
-    assert!(
-        !families.is_empty(),
-        "canonicalization metadata must define at least one family"
-    );
-
+fn assert_canonicalization_families(
+    families: &[Value],
+    theorem_names: &BTreeSet<&str>,
+    theorem_lines: &BTreeMap<&str, u64>,
+) {
     let mut family_ids = BTreeSet::new();
     let mut canonical_theorems = BTreeSet::new();
     let mut variant_theorems = BTreeSet::new();
@@ -168,15 +136,13 @@ fn theorem_inventory_canonicalization_metadata_is_consistent() {
             );
         }
     }
+}
 
-    let layering_rules = canonicalization
-        .get("layering_rules")
-        .and_then(Value::as_array)
-        .expect("lemma_canonicalization.layering_rules must be an array");
-    assert!(
-        !layering_rules.is_empty(),
-        "layering_rules must include at least one rule"
-    );
+fn assert_layering_rules(
+    layering_rules: &[Value],
+    theorem_names: &BTreeSet<&str>,
+    theorem_lines: &BTreeMap<&str, u64>,
+) {
     for rule in layering_rules {
         let rule_id = rule
             .get("rule_id")
@@ -260,6 +226,55 @@ fn theorem_inventory_canonicalization_metadata_is_consistent() {
             }
         }
     }
+}
+
+#[test]
+fn theorem_inventory_canonicalization_metadata_is_consistent() {
+    let inventory: Value =
+        serde_json::from_str(THEOREM_INVENTORY_JSON).expect("theorem inventory must parse");
+    let theorem_entries = inventory
+        .get("theorems")
+        .and_then(Value::as_array)
+        .expect("theorems must be an array");
+    let mut theorem_lines = BTreeMap::new();
+    for entry in theorem_entries {
+        let theorem = entry
+            .get("theorem")
+            .and_then(Value::as_str)
+            .expect("theorem name must be present");
+        let line = entry
+            .get("line")
+            .and_then(Value::as_u64)
+            .expect("theorem line must be present");
+        assert!(
+            theorem_lines.insert(theorem, line).is_none(),
+            "duplicate theorem entry in inventory: {theorem}"
+        );
+    }
+    let theorem_names = theorem_lines.keys().copied().collect::<BTreeSet<_>>();
+
+    let canonicalization = inventory
+        .get("lemma_canonicalization")
+        .expect("lemma_canonicalization metadata must be present");
+    let families = canonicalization
+        .get("families")
+        .and_then(Value::as_array)
+        .expect("lemma_canonicalization.families must be an array");
+    assert!(
+        !families.is_empty(),
+        "canonicalization metadata must define at least one family"
+    );
+    assert_canonicalization_families(families, &theorem_names, &theorem_lines);
+
+    let layering_rules = canonicalization
+        .get("layering_rules")
+        .and_then(Value::as_array)
+        .expect("lemma_canonicalization.layering_rules must be an array");
+    assert!(
+        !layering_rules.is_empty(),
+        "layering_rules must include at least one rule"
+    );
+    assert_layering_rules(layering_rules, &theorem_names, &theorem_lines);
 }
 
 #[test]
