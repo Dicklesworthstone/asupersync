@@ -4077,21 +4077,9 @@ theorem region_closing_canonical_form {Value Error Panic : Type}
       | RegionState.closing => True
       | _ => False) :
     region.state = RegionState.closing := by
-  cases hState : region.state
-  case open =>
-      exfalso
-      simpa [hState] using hMatch
+  cases hState : region.state <;> try (exfalso; simpa [hState] using hMatch)
   case closing =>
-      simpa [hState]
-  case draining =>
-      exfalso
-      simpa [hState] using hMatch
-  case finalizing =>
-      exfalso
-      simpa [hState] using hMatch
-  case closed _ =>
-      exfalso
-      simpa [hState] using hMatch
+    simpa [hState]
 
 /-- Canonical-form decomposition for `RegionState.draining`. -/
 theorem region_draining_canonical_form {Value Error Panic : Type}
@@ -4101,21 +4089,9 @@ theorem region_draining_canonical_form {Value Error Panic : Type}
       | RegionState.draining => True
       | _ => False) :
     region.state = RegionState.draining := by
-  cases hState : region.state
-  case open =>
-      exfalso
-      simpa [hState] using hMatch
-  case closing =>
-      exfalso
-      simpa [hState] using hMatch
+  cases hState : region.state <;> try (exfalso; simpa [hState] using hMatch)
   case draining =>
-      simpa [hState]
-  case finalizing =>
-      exfalso
-      simpa [hState] using hMatch
-  case closed _ =>
-      exfalso
-      simpa [hState] using hMatch
+    simpa [hState]
 
 /-- Canonical-form decomposition for `RegionState.finalizing`. -/
 theorem region_finalizing_canonical_form {Value Error Panic : Type}
@@ -4125,21 +4101,9 @@ theorem region_finalizing_canonical_form {Value Error Panic : Type}
       | RegionState.finalizing => True
       | _ => False) :
     region.state = RegionState.finalizing := by
-  cases hState : region.state
-  case open =>
-      exfalso
-      simpa [hState] using hMatch
-  case closing =>
-      exfalso
-      simpa [hState] using hMatch
-  case draining =>
-      exfalso
-      simpa [hState] using hMatch
+  cases hState : region.state <;> try (exfalso; simpa [hState] using hMatch)
   case finalizing =>
-      simpa [hState]
-  case closed _ =>
-      exfalso
-      simpa [hState] using hMatch
+    simpa [hState]
 
 /-- Canonical-form decomposition for `ObligationState.reserved`. -/
 theorem obligation_reserved_canonical_form {ob : ObligationRecord}
