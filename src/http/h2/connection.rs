@@ -377,9 +377,10 @@ impl Connection {
 
     /// Queue initial settings frame.
     pub fn queue_initial_settings(&mut self) {
-        let settings = SettingsFrame::new(self.local_settings.to_settings_minimal_for_role(
-            self.is_client,
-        ));
+        let settings = SettingsFrame::new(
+            self.local_settings
+                .to_settings_minimal_for_role(self.is_client),
+        );
         self.pending_ops.push_back(PendingOp::Settings(settings));
     }
 
@@ -1402,7 +1403,10 @@ mod tests {
 
         let err = conn.process_frame(Frame::Settings(settings)).unwrap_err();
         assert_eq!(err.code, ErrorCode::ProtocolError);
-        assert!(!conn.has_pending_frames(), "invalid settings must not be ACKed");
+        assert!(
+            !conn.has_pending_frames(),
+            "invalid settings must not be ACKed"
+        );
     }
 
     #[test]
