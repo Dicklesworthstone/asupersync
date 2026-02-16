@@ -24,7 +24,7 @@ use asupersync::web::handler::{FnHandler, FnHandler1};
 use asupersync::web::response::{Json, StatusCode};
 use asupersync::web::router::{get, post, Router};
 use common::*;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 fn init_test(test_name: &str) {
     init_test_logging();
@@ -856,13 +856,13 @@ fn e2e_http_query_edge_cases() {
 
     test_section!("empty_query");
     let req = Request::new("GET", "/search");
-    let result = Query::<HashMap<String, String>>::from_request_parts(&req);
+    let result = Query::<BTreeMap<String, String>>::from_request_parts(&req);
     // No query string — should either return empty map or error
     tracing::info!(is_ok = result.is_ok(), "empty query result");
 
     test_section!("special_characters");
     let req2 = Request::new("GET", "/search").with_query("key=value%20with%20spaces&empty=&flag");
-    let result2 = Query::<HashMap<String, String>>::from_request_parts(&req2);
+    let result2 = Query::<BTreeMap<String, String>>::from_request_parts(&req2);
     if let Ok(Query(params)) = &result2 {
         tracing::info!(params = ?params, "special chars parsed");
         if let Some(val) = params.get("key") {

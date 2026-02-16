@@ -138,7 +138,7 @@ mod tests {
         }
 
         let handler = FnHandler1::<_, Path<String>>::new(get_user);
-        let mut params = std::collections::HashMap::new();
+        let mut params = std::collections::BTreeMap::new();
         params.insert("id".to_string(), "42".to_string());
         let req = Request::new("GET", "/users/42").with_path_params(params);
         let resp = handler.call(req);

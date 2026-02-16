@@ -28,7 +28,7 @@ use asupersync::types::{
     Budget, CancelKind, CancelReason, ObjectId, ObjectParams, RegionId, TaskId, Time,
 };
 use asupersync::Cx;
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 // =============================================================================
 // DETERMINISTIC TRACE GENERATORS
@@ -423,7 +423,7 @@ fn bench_homology_scoring(c: &mut Criterion) {
             &events,
             |b, events| {
                 b.iter_batched(
-                    HashSet::new,
+                    BTreeSet::new,
                     |mut seen| {
                         let poset = TracePoset::from_trace(events);
                         let complex = SquareComplex::from_trace_poset(&poset);
