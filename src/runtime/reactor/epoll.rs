@@ -227,9 +227,10 @@ impl Reactor for EpollReactor {
 
     fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
         let mut state = self.state.lock();
-        let info = state
+        let raw_fd = state
             .tokens
-            .get_mut(&token)
+            .get(&token)
+            .map(|info| info.raw_fd)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "token not registered"))?;
 
         // Create the new polling event
@@ -237,16 +238,43 @@ impl Reactor for EpollReactor {
 
         // SAFETY: We stored the raw_fd during registration and trust it's still valid.
         // The caller is responsible for ensuring the fd remains valid until deregistered.
-        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(info.raw_fd) };
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
 
-        // Modify the epoll registration
-        self.poller.modify(borrowed_fd, event)?;
-
-        // Update our bookkeeping
-        info.interest = interest;
-        drop(state);
-
-        Ok(())
+        // Modify the epoll registration. If the kernel reports stale registration state,
+        // clean stale bookkeeping so fd-number reuse does not get blocked indefinitely.
+        match self.poller.modify(borrowed_fd, event) {
+            Ok(()) => {
+                if let Some(info) = state.tokens.get_mut(&token) {
+                    info.interest = interest;
+                }
+                Ok(())
+            }
+            Err(err) => match err.raw_os_error() {
+                Some(libc::ENOENT) => {
+                    if let Some(info) = state.tokens.remove(&token) {
+                        state.fds.remove(&info.raw_fd);
+                    }
+                    Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "token not registered",
+                    ))
+                }
+                Some(libc::EBADF) => {
+                    let fd_still_valid = unsafe { fcntl(raw_fd, F_GETFD) } != -1;
+                    if !fd_still_valid {
+                        if let Some(info) = state.tokens.remove(&token) {
+                            state.fds.remove(&info.raw_fd);
+                        }
+                        return Err(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            "token not registered",
+                        ));
+                    }
+                    Err(err)
+                }
+                _ => Err(err),
+            },
+        }
     }
 
     fn deregister(&self, token: Token) -> io::Result<()> {
@@ -808,6 +836,84 @@ mod tests {
             reactor.registration_count()
         );
         crate::test_complete!("deregister_closed_fd_is_best_effort");
+    }
+
+    #[test]
+    fn modify_closed_fd_cleans_stale_bookkeeping_for_fd_reuse() {
+        init_test("modify_closed_fd_cleans_stale_bookkeeping_for_fd_reuse");
+        let reactor = EpollReactor::new().expect("failed to create reactor");
+        let (old_sock, _old_peer) = UnixStream::pair().expect("failed to create unix stream pair");
+        let stale_fd = old_sock.as_raw_fd();
+        let stale_token = Token::new(89);
+        reactor
+            .register(&old_sock, stale_token, Interest::READABLE)
+            .expect("stale registration failed");
+        drop(old_sock);
+
+        let modify_result = reactor.modify(stale_token, Interest::WRITABLE);
+        crate::assert_with_log!(
+            modify_result.is_err(),
+            "modify on closed fd fails",
+            true,
+            modify_result.is_err()
+        );
+        let modify_kind = modify_result.unwrap_err().kind();
+        crate::assert_with_log!(
+            modify_kind == io::ErrorKind::NotFound,
+            "closed fd modify maps to not found",
+            io::ErrorKind::NotFound,
+            modify_kind
+        );
+        crate::assert_with_log!(
+            reactor.registration_count() == 0,
+            "closed fd modify removes stale bookkeeping",
+            0usize,
+            reactor.registration_count()
+        );
+
+        let (new_sock, mut write_peer) =
+            UnixStream::pair().expect("failed to create second unix stream pair");
+        let new_sock_fd = new_sock.as_raw_fd();
+        // Force fd-number reuse so stale bookkeeping and new source collide on raw fd.
+        let dup_result = unsafe { libc::dup2(new_sock_fd, stale_fd) };
+        crate::assert_with_log!(
+            dup_result == stale_fd,
+            "dup2 reused stale fd slot",
+            stale_fd,
+            dup_result
+        );
+
+        let reused_source = RawFdSource(stale_fd);
+        let new_token = Token::new(90);
+        reactor
+            .register(&reused_source, new_token, Interest::READABLE)
+            .expect("register reused fd after stale cleanup failed");
+
+        write_peer.write_all(b"x").expect("write failed");
+        let mut events = Events::with_capacity(8);
+        let count = reactor
+            .poll(&mut events, Some(Duration::from_millis(100)))
+            .expect("poll failed");
+        crate::assert_with_log!(count >= 1, "has events", true, count >= 1);
+        let mut found = false;
+        for event in &events {
+            if event.token == new_token && event.is_readable() {
+                found = true;
+                break;
+            }
+        }
+        crate::assert_with_log!(found, "readable event for reused fd token", true, found);
+
+        reactor
+            .deregister(new_token)
+            .expect("deregister reused fd token failed");
+        // SAFETY: If dup2 created a distinct extra descriptor at `stale_fd`,
+        // close it to avoid leaks. When source==target, `new_sock` already owns it.
+        if stale_fd != new_sock_fd {
+            let close_result = unsafe { libc::close(stale_fd) };
+            crate::assert_with_log!(close_result == 0, "close duplicated fd", 0, close_result);
+        }
+        crate::test_complete!("modify_closed_fd_cleans_stale_bookkeeping_for_fd_reuse");
     }
 
     #[test]
