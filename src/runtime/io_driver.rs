@@ -506,6 +506,10 @@ pub struct IoRegistration {
     token: Token,
     interest: Interest,
     driver: Weak<Mutex<IoDriver>>,
+    /// Cached copy of the last waker stored in the driver slab.
+    /// Used for `Waker::will_wake` comparison to avoid unnecessary
+    /// atomic ref-count bumps and mutex acquisitions on the hot path.
+    cached_waker: Option<Waker>,
 }
 
 impl IoRegistration {
@@ -514,6 +518,7 @@ impl IoRegistration {
             token,
             interest,
             driver,
+            cached_waker: None,
         }
     }
 
@@ -558,6 +563,48 @@ impl IoRegistration {
             let mut guard = driver.lock().expect("lock poisoned");
             guard.update_waker(self.token, waker)
         })
+    }
+
+    /// Re-arms the reactor interest and conditionally updates the waker
+    /// in a single lock acquisition.
+    ///
+    /// This replaces separate `set_interest` + `update_waker` calls on the
+    /// I/O poll hot path.  The waker update is skipped when
+    /// `Waker::will_wake` indicates the cached waker is still current,
+    /// avoiding an atomic ref-count bump (clone) and a slab write.
+    ///
+    /// Returns `Ok(true)` if the registration remains valid, `Ok(false)`
+    /// if the slab slot was removed (caller should clear the registration).
+    pub fn rearm(&mut self, interest: Interest, waker: &Waker) -> io::Result<bool> {
+        let Some(driver) = self.driver.upgrade() else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "I/O driver has been dropped",
+            ));
+        };
+        let mut guard = driver.lock().expect("lock poisoned");
+
+        // Re-arm reactor (oneshot semantics require this on every poll).
+        guard.modify_interest(self.token, interest)?;
+        self.interest = interest;
+
+        // Skip the waker clone when the task's waker hasn't changed.
+        if self
+            .cached_waker
+            .as_ref()
+            .is_none_or(|w| !w.will_wake(waker))
+        {
+            let slab_token = SlabToken::from_usize(self.token.0);
+            if let Some(slot) = guard.wakers.get_mut(slab_token) {
+                let cloned = waker.clone();
+                slot.clone_from(&cloned);
+                self.cached_waker = Some(cloned);
+            } else {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
     }
 
     /// Explicitly deregisters without waiting for drop.

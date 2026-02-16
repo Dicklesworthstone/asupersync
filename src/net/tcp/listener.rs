@@ -100,21 +100,20 @@ impl TcpListener {
         let mut registration = self.registration.lock().expect("lock poisoned");
 
         if let Some(existing) = registration.as_mut() {
-            // Always call set_interest to re-arm the reactor registration.
-            // The polling crate uses oneshot-style notifications: after an event
-            // fires, the registration is disarmed and must be re-armed via modify().
-            if let Err(err) = existing.set_interest(Interest::READABLE) {
-                if err.kind() == io::ErrorKind::NotConnected {
+            // Re-arm reactor interest and conditionally update the waker in a
+            // single lock acquisition (will_wake guard skips the clone).
+            match existing.rearm(Interest::READABLE, cx.waker()) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {
+                    *registration = None;
+                }
+                Err(err) if err.kind() == io::ErrorKind::NotConnected => {
                     *registration = None;
                     cx.waker().wake_by_ref();
                     return Ok(());
                 }
-                return Err(err);
+                Err(err) => return Err(err),
             }
-            if existing.update_waker(cx.waker().clone()) {
-                return Ok(());
-            }
-            *registration = None;
         }
 
         let Some(current) = Cx::current() else {
