@@ -54,6 +54,9 @@ use crate::types::Time;
 // Policy Configuration
 // =========================================================================
 
+/// Maximum allowed value for `half_open_max_probes` (24 bits).
+pub const MAX_HALF_OPEN_PROBES: u32 = 0x00FF_FFFF;
+
 /// Circuit breaker configuration.
 #[derive(Clone)]
 pub struct CircuitBreakerPolicy {
@@ -70,6 +73,8 @@ pub struct CircuitBreakerPolicy {
     pub open_duration: Duration,
 
     /// Maximum concurrent probes in half-open state.
+    ///
+    /// Clamped to [`MAX_HALF_OPEN_PROBES`] (16,777,215).
     pub half_open_max_probes: u32,
 
     /// Predicate to determine if error counts as failure.
@@ -964,9 +969,15 @@ impl CircuitBreakerPolicyBuilder {
     }
 
     /// Set the maximum concurrent probes in half-open state.
+    ///
+    /// This value is clamped to [`MAX_HALF_OPEN_PROBES`] (16,777,215).
     #[must_use]
     pub const fn half_open_max_probes(mut self, max_probes: u32) -> Self {
-        self.policy.half_open_max_probes = max_probes;
+        self.policy.half_open_max_probes = if max_probes > MAX_HALF_OPEN_PROBES {
+            MAX_HALF_OPEN_PROBES
+        } else {
+            max_probes
+        };
         self
     }
 
@@ -1566,6 +1577,16 @@ mod tests {
         assert_eq!(policy.success_threshold, 3);
         assert_eq!(policy.open_duration, Duration::from_mins(1));
         assert_eq!(policy.half_open_max_probes, 2);
+    }
+
+    #[test]
+    fn builder_clamps_max_probes() {
+        let policy = CircuitBreakerPolicyBuilder::new()
+            .half_open_max_probes(20_000_000) // > 2^24
+            .build();
+
+        assert_eq!(policy.half_open_max_probes, MAX_HALF_OPEN_PROBES);
+        assert_eq!(policy.half_open_max_probes, 0x00FF_FFFF);
     }
 
     // =========================================================================
