@@ -202,7 +202,7 @@ impl InjectionStrategy {
                     rng_state = rng_state
                         .wrapping_mul(6_364_136_223_846_793_005)
                         .wrapping_add(1_442_695_040_888_963_407);
-                    let j = (rng_state as usize) % (i + 1);
+                    let j = (rng_state % ((i + 1) as u64)) as usize;
                     indices.swap(i, j);
                 }
 
@@ -235,7 +235,7 @@ impl InjectionStrategy {
                     // Use upper bits for better distribution
                     // Precision loss is intentional here - we only need a random float in [0,1)
                     #[allow(clippy::cast_precision_loss)]
-                    let rand_val = (rng_state >> 32) as f64 / f64::from(u32::MAX);
+                    let rand_val = (rng_state >> 32) as f64 / (f64::from(u32::MAX) + 1.0);
                     if rand_val < *p {
                         selected.push(seq);
                     }

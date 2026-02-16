@@ -103,7 +103,7 @@ impl ExplorerConfig {
 }
 
 /// Result of a single exploration run.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RunResult {
     /// The seed used for this run.
     pub seed: u64,
@@ -606,7 +606,7 @@ impl ScheduleExplorer {
                 saturation,
             },
             top_unexplored: Vec::new(),
-            runs: Vec::new(), // Omit per-run details from report to save memory.
+            runs: self.results.clone(),
         }
     }
 
@@ -889,7 +889,7 @@ impl DporExplorer {
                 saturation,
             },
             top_unexplored,
-            runs: Vec::new(),
+            runs: self.results.clone(),
         }
     }
 
@@ -1129,7 +1129,7 @@ impl TopologyExplorer {
                 saturation,
             },
             top_unexplored: self.top_unexplored(DEFAULT_UNEXPLORED_LIMIT),
-            runs: Vec::new(),
+            runs: self.results.clone(),
         }
     }
 
@@ -1558,5 +1558,56 @@ mod tests {
         let contents = fs::read_to_string(tmp.path()).expect("read");
         let value: JsonValue = serde_json::from_str(&contents).expect("parse");
         assert!(value.get("coverage").is_some());
+    }
+
+    #[test]
+    fn schedule_report_includes_per_run_results() {
+        let mut explorer = ScheduleExplorer::new(ExplorerConfig::new(21, 3));
+        let report = explorer.explore(|runtime| {
+            let region = runtime.state.create_root_region(Budget::INFINITE);
+            let (task, _) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("task");
+            runtime.scheduler.lock().unwrap().schedule(task, 0);
+            runtime.run_until_quiescent();
+        });
+
+        assert_eq!(report.runs.len(), report.total_runs);
+        assert!(!report.runs.is_empty());
+    }
+
+    #[test]
+    fn dpor_report_includes_per_run_results() {
+        let mut explorer = DporExplorer::new(ExplorerConfig::new(31, 3));
+        let report = explorer.explore(|runtime| {
+            let region = runtime.state.create_root_region(Budget::INFINITE);
+            let (task, _) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("task");
+            runtime.scheduler.lock().unwrap().schedule(task, 0);
+            runtime.run_until_quiescent();
+        });
+
+        assert_eq!(report.runs.len(), report.total_runs);
+        assert!(!report.runs.is_empty());
+    }
+
+    #[test]
+    fn topology_report_includes_per_run_results() {
+        let mut explorer = TopologyExplorer::new(ExplorerConfig::new(41, 3));
+        let report = explorer.explore(|runtime| {
+            let region = runtime.state.create_root_region(Budget::INFINITE);
+            let (task, _) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("task");
+            runtime.scheduler.lock().unwrap().schedule(task, 0);
+            runtime.run_until_quiescent();
+        });
+
+        assert_eq!(report.runs.len(), report.total_runs);
+        assert!(!report.runs.is_empty());
     }
 }

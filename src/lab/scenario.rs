@@ -532,10 +532,11 @@ impl Scenario {
         if let ChaosSection::Custom {
             cancel_probability,
             delay_probability,
+            delay_min_ms,
+            delay_max_ms,
             io_error_probability,
             wakeup_storm_probability,
             budget_exhaustion_probability,
-            ..
         } = &self.chaos
         {
             for (name, val) in [
@@ -554,6 +555,14 @@ impl Scenario {
                         message: format!("probability must be in [0.0, 1.0], got {val}"),
                     });
                 }
+            }
+            if *delay_min_ms > *delay_max_ms {
+                errors.push(ValidationError {
+                    field: "chaos.delay_min_ms".into(),
+                    message: format!(
+                        "delay_min_ms ({delay_min_ms}) must be <= delay_max_ms ({delay_max_ms})"
+                    ),
+                });
             }
         }
     }
@@ -579,7 +588,6 @@ impl Scenario {
                         window[0].at_ms, window[1].at_ms
                     ),
                 });
-                break;
             }
         }
     }
@@ -613,10 +621,22 @@ impl Scenario {
                             cancel.strategy
                         ),
                     });
+                } else if cancel.count == Some(0) {
+                    errors.push(ValidationError {
+                        field: "cancellation.count".into(),
+                        message: "count must be >= 1".into(),
+                    });
                 }
             }
             CancellationStrategy::Probabilistic => {
-                if cancel.probability.is_none() {
+                if let Some(p) = cancel.probability {
+                    if !(0.0..=1.0).contains(&p) {
+                        errors.push(ValidationError {
+                            field: "cancellation.probability".into(),
+                            message: format!("probability must be in [0.0, 1.0], got {p}"),
+                        });
+                    }
+                } else {
                     errors.push(ValidationError {
                         field: "cancellation.probability".into(),
                         message: "strategy probabilistic requires a probability parameter".into(),
@@ -662,7 +682,8 @@ impl Scenario {
                 budget_exhaustion_probability,
             } => {
                 use std::time::Duration;
-                let chaos = super::chaos::ChaosConfig::new(self.lab.seed)
+                let chaos_seed = self.lab.entropy_seed.unwrap_or(self.lab.seed);
+                let chaos = super::chaos::ChaosConfig::new(chaos_seed)
                     .with_cancel_probability(*cancel_probability)
                     .with_delay_probability(*delay_probability)
                     .with_delay_range(

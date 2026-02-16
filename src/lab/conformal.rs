@@ -66,6 +66,10 @@ impl ConformalConfig {
     /// Create a config with the given miscoverage rate.
     #[must_use]
     pub fn new(alpha: f64) -> Self {
+        debug_assert!(
+            alpha > 0.0 && alpha < 1.0,
+            "alpha must be in (0, 1), got {alpha}"
+        );
         Self {
             alpha,
             ..Default::default()
@@ -382,7 +386,9 @@ impl ConformalCalibrator {
     /// `CalibrationReport` with prediction sets and coverage diagnostics.
     #[must_use]
     pub fn predict(&mut self, report: &OracleReport) -> Option<CalibrationReport> {
-        if !self.is_calibrated() {
+        let was_already_calibrated = self.is_calibrated();
+
+        if !was_already_calibrated {
             // Add to calibration set first.
             self.calibrate(report);
             if !self.is_calibrated() {
@@ -432,9 +438,9 @@ impl ConformalCalibrator {
             });
         }
 
-        // Add this observation to the calibration set for future predictions
-        // (only if not already added above during the transition from uncalibrated).
-        if self.n_calibration > self.config.min_calibration_samples {
+        // Grow the calibration set with this observation for future predictions,
+        // unless it was already added above during the uncalibrated→calibrated transition.
+        if was_already_calibrated {
             self.calibrate(report);
         }
 
@@ -565,6 +571,10 @@ impl HealthThresholdConfig {
     /// Create a config with the given miscoverage rate and mode.
     #[must_use]
     pub fn new(alpha: f64, mode: ThresholdMode) -> Self {
+        debug_assert!(
+            alpha > 0.0 && alpha < 1.0,
+            "alpha must be in (0, 1), got {alpha}"
+        );
         Self {
             alpha,
             mode,
@@ -711,6 +721,12 @@ impl HealthThresholdCalibrator {
 
     /// Add a calibration observation for a named metric.
     pub fn calibrate(&mut self, metric: &str, value: f64) {
+        // Non-finite calibration values can poison quantile computation.
+        // Ignore them so thresholds remain stable and deterministic.
+        if !value.is_finite() {
+            return;
+        }
+
         let cal = self
             .metrics
             .entry(metric.to_string())
@@ -743,6 +759,20 @@ impl HealthThresholdCalibrator {
             return None;
         }
 
+        // Non-finite observations are always anomalous; report explicitly
+        // without mutating calibration state.
+        if !value.is_finite() {
+            return Some(ThresholdCheck {
+                metric: metric.to_string(),
+                value,
+                threshold: self.threshold(metric)?,
+                conforming: false,
+                nonconformity_score: f64::INFINITY,
+                calibration_n: cal.n(),
+                coverage_target: 1.0 - self.config.alpha,
+            });
+        }
+
         let (nonconformity_score, threshold) = match self.config.mode {
             ThresholdMode::Upper => {
                 let score = value;
@@ -750,9 +780,13 @@ impl HealthThresholdCalibrator {
                 (score, threshold)
             }
             ThresholdMode::TwoSided => {
+                // Recompute nonconformity scores from the current full median so
+                // that both calibration and test scores use the same reference
+                // point, preserving exchangeability for the conformal guarantee.
                 let median = cal.median();
+                let scores: Vec<f64> = cal.values.iter().map(|v| (v - median).abs()).collect();
                 let score = (value - median).abs();
-                let threshold = conformal_quantile(&cal.nonconformity_scores, self.config.alpha);
+                let threshold = conformal_quantile(&scores, self.config.alpha);
                 (score, threshold)
             }
         };
@@ -798,10 +832,11 @@ impl HealthThresholdCalibrator {
 
         match self.config.mode {
             ThresholdMode::Upper => Some(conformal_quantile(&cal.values, self.config.alpha)),
-            ThresholdMode::TwoSided => Some(conformal_quantile(
-                &cal.nonconformity_scores,
-                self.config.alpha,
-            )),
+            ThresholdMode::TwoSided => {
+                let median = cal.median();
+                let scores: Vec<f64> = cal.values.iter().map(|v| (v - median).abs()).collect();
+                Some(conformal_quantile(&scores, self.config.alpha))
+            }
         }
     }
 
@@ -1320,6 +1355,42 @@ mod tests {
         assert!((r1.threshold - r2.threshold).abs() < f64::EPSILON);
         assert!((r1.nonconformity_score - r2.nonconformity_score).abs() < f64::EPSILON);
         assert_eq!(r1.conforming, r2.conforming);
+    }
+
+    #[test]
+    fn health_threshold_ignores_non_finite_calibration_values() {
+        let config = HealthThresholdConfig::new(0.05, ThresholdMode::Upper).min_samples(3);
+        let mut cal = HealthThresholdCalibrator::new(config);
+
+        for i in 1..=10 {
+            cal.calibrate("metric", f64::from(i));
+        }
+        cal.calibrate("metric", f64::NAN);
+        cal.calibrate("metric", f64::INFINITY);
+        cal.calibrate("metric", f64::NEG_INFINITY);
+
+        let counts = cal.metric_counts();
+        assert_eq!(counts.get("metric"), Some(&10));
+        let threshold = cal
+            .threshold("metric")
+            .expect("metric should be calibrated");
+        assert!(threshold.is_finite());
+    }
+
+    #[test]
+    fn health_threshold_non_finite_check_is_anomalous() {
+        let config = HealthThresholdConfig::new(0.05, ThresholdMode::Upper).min_samples(3);
+        let mut cal = HealthThresholdCalibrator::new(config);
+        for i in 1..=10 {
+            cal.calibrate("metric", f64::from(i));
+        }
+
+        let result = cal
+            .check("metric", f64::NAN)
+            .expect("metric should be calibrated");
+        assert!(!result.conforming);
+        assert!(result.nonconformity_score.is_infinite());
+        assert!(result.threshold.is_finite());
     }
 
     #[test]

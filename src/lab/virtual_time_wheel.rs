@@ -184,7 +184,10 @@ impl VirtualTimerWheel {
     /// Returns a handle that can be used to cancel the timer.
     pub fn insert(&mut self, deadline: u64, waker: Waker) -> VirtualTimerHandle {
         let timer_id = self.next_timer_id;
-        self.next_timer_id += 1;
+        self.next_timer_id = self
+            .next_timer_id
+            .checked_add(1)
+            .expect("virtual timer ID space exhausted");
 
         self.heap.push(VirtualTimer {
             deadline,

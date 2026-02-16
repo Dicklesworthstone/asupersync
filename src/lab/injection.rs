@@ -577,6 +577,9 @@ impl LabInjectionRunner {
             }
         }
 
+        // Reset mode so callers can inspect it between runs.
+        self.current_mode = InjectionMode::Recording;
+
         // Phase 4: Generate report
         let strategy_name = format!("{:?}", self.config.strategy);
         LabInjectionReport::from_results(

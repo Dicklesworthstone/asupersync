@@ -855,7 +855,7 @@ mod tests {
             vec![make_obligation(0, 0, ObligationStateSnapshot::Reserved)],
         );
 
-        let mut tampered = snapshot.clone();
+        let mut tampered = snapshot;
         tampered.snapshot.tasks[0].state = TaskStateSnapshot::Completed {
             outcome: crate::runtime::state::OutcomeSnapshot::Ok,
         };

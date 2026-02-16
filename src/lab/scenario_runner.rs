@@ -627,7 +627,7 @@ mod tests {
         let result = ScenarioRunner::run(&scenario).unwrap();
         assert!(result.passed());
 
-        let mut forced_non_quiescent = result.clone();
+        let mut forced_non_quiescent = result;
         forced_non_quiescent.lab_report.quiescent = false;
         assert!(!forced_non_quiescent.passed());
         crate::test_complete!("passed_requires_quiescence");
