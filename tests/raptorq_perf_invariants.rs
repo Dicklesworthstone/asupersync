@@ -22,6 +22,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const G1_BUDGET_SCHEMA_VERSION: &str = "raptorq-g1-budget-draft-v1";
 const BEADS_ISSUES_JSONL: &str = include_str!("../.beads/issues.jsonl");
+const RAPTORQ_BASELINE_PROFILE_MD: &str = include_str!("../docs/raptorq_baseline_bench_profile.md");
+const RAPTORQ_UNIT_MATRIX_MD: &str = include_str!("../docs/raptorq_unit_test_matrix.md");
 const REPLAY_CATALOG_ARTIFACT_PATH: &str = "artifacts/raptorq_replay_catalog_v1.json";
 const REPLAY_FIXTURE_REF: &str = "RQ-D9-REPLAY-CATALOG-V1";
 const REPLAY_SEED_SWEEP_ID: &str = "replay:rq-u-seed-sweep-structured-v1";
@@ -1170,6 +1172,95 @@ fn g1_budget_prerequisite_evidence_linkage_is_well_formed() {
         d1["status"].as_str(),
         Some("closed"),
         "D1 (bd-1rxlv) should be closed for calibrated baseline evidence"
+    );
+}
+
+fn markdown_status_for_bead(doc: &str, bead_id: &str) -> Option<String> {
+    for line in doc.lines() {
+        let trimmed = line.trim();
+        if !(trimmed.starts_with('|') && trimmed.contains(bead_id)) {
+            continue;
+        }
+        let cols = trimmed.split('|').map(str::trim).collect::<Vec<_>>();
+        if cols.len() < 5 {
+            continue;
+        }
+        let status = cols[3].trim_matches('`').trim();
+        if matches!(status, "open" | "in_progress" | "closed") {
+            return Some(status.to_string());
+        }
+    }
+    None
+}
+
+/// Keep baseline markdown prerequisite table synchronized with canonical
+/// g1_budget_draft.correctness_prerequisites rows.
+#[test]
+fn g1_budget_baseline_markdown_status_snapshot_matches_artifact() {
+    let artifact_json = include_str!("../artifacts/raptorq_baseline_bench_profile_v1.json");
+    let artifact: serde_json::Value =
+        serde_json::from_str(artifact_json).expect("baseline profile artifact must be valid JSON");
+    let prereqs = artifact["g1_budget_draft"]["correctness_prerequisites"]
+        .as_array()
+        .expect("correctness_prerequisites must be an array");
+
+    for prereq in prereqs {
+        let bead_id = prereq["bead_id"]
+            .as_str()
+            .expect("correctness_prerequisites[].bead_id must be a string");
+        let expected = prereq["status"]
+            .as_str()
+            .expect("correctness_prerequisites[].status must be a string");
+        let observed = markdown_status_for_bead(RAPTORQ_BASELINE_PROFILE_MD, bead_id)
+            .unwrap_or_else(|| panic!("baseline markdown snapshot missing status row for {bead_id}"));
+        assert_eq!(
+            observed, expected,
+            "baseline markdown status drift for {bead_id}: expected {expected}, found {observed}"
+        );
+    }
+}
+
+/// Keep D5 unit-matrix markdown prerequisite table synchronized with the
+/// canonical D5/D6/D7/D9 status rows in the G1 artifact.
+#[test]
+fn g1_budget_unit_matrix_markdown_status_snapshot_matches_artifact_subset() {
+    let artifact_json = include_str!("../artifacts/raptorq_baseline_bench_profile_v1.json");
+    let artifact: serde_json::Value =
+        serde_json::from_str(artifact_json).expect("baseline profile artifact must be valid JSON");
+    let prereqs = artifact["g1_budget_draft"]["correctness_prerequisites"]
+        .as_array()
+        .expect("correctness_prerequisites must be an array");
+
+    let expected_subset = BTreeSet::from([
+        "bd-61s90".to_string(),
+        "bd-26pqk".to_string(),
+        "bd-oeql8".to_string(),
+        "bd-3bvdj".to_string(),
+    ]);
+    let mut seen = BTreeSet::new();
+
+    for prereq in prereqs {
+        let bead_id = prereq["bead_id"]
+            .as_str()
+            .expect("correctness_prerequisites[].bead_id must be a string");
+        if !expected_subset.contains(bead_id) {
+            continue;
+        }
+        seen.insert(bead_id.to_string());
+        let expected = prereq["status"]
+            .as_str()
+            .expect("correctness_prerequisites[].status must be a string");
+        let observed = markdown_status_for_bead(RAPTORQ_UNIT_MATRIX_MD, bead_id)
+            .unwrap_or_else(|| panic!("unit matrix markdown snapshot missing status row for {bead_id}"));
+        assert_eq!(
+            observed, expected,
+            "unit matrix markdown status drift for {bead_id}: expected {expected}, found {observed}"
+        );
+    }
+
+    assert_eq!(
+        seen, expected_subset,
+        "unit matrix markdown must track canonical D5/D6/D7/D9 status subset"
     );
 }
 
