@@ -1692,4 +1692,42 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn call_panics_leak_probes() {
+        // This test demonstrates that panicking inside `call` leaks the probe permit,
+        // eventually preventing any further probes when half_open_max_probes is reached.
+        let cb = std::sync::Arc::new(CircuitBreaker::new(CircuitBreakerPolicy {
+            failure_threshold: 1,
+            open_duration: Duration::ZERO,
+            half_open_max_probes: 1,
+            ..Default::default()
+        }));
+        let now = Time::from_millis(0);
+
+        // Trip to Open
+        let permit = cb.should_allow(now).unwrap();
+        cb.record_failure(permit, "fail", now);
+        assert!(matches!(cb.state(), State::Open { .. }));
+
+        // First probe panics
+        let cb_clone = cb.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _ = cb_clone.call::<(), _, _>(now, || panic!("oops"));
+        });
+
+        // State should be HalfOpen with 1 probe active (LEAKED)
+        // If fixed, this should be Open (failed probe) or HalfOpen with 0 probes (ignored)
+        match cb.state() {
+            State::HalfOpen { probes_active, .. } => {
+                // Currently this assertion PASSES because of the bug
+                assert_eq!(probes_active, 1, "Probe was leaked!");
+            }
+            _ => panic!("Expected HalfOpen state"),
+        }
+
+        // Second probe rejected because slot is taken by leaked probe
+        let result = cb.should_allow(now);
+        assert!(matches!(result, Err(CircuitBreakerError::HalfOpenFull)));
+    }
 }

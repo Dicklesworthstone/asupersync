@@ -439,8 +439,17 @@ impl Bulkhead {
     /// Cancel a queued entry.
     pub fn cancel_entry(&self, entry_id: u64) {
         let mut queue = self.queue.write().expect("lock poisoned");
-        if let Some(entry) = queue.iter_mut().find(|e| e.id == entry_id) {
-            if entry.result.is_none() {
+        if let Some(idx) = queue.iter().position(|e| e.id == entry_id) {
+            let entry = &mut queue[idx];
+
+            if matches!(entry.result, Some(Ok(()))) {
+                // Permit was granted but not claimed. Release it.
+                self.release_permit(entry.weight);
+                // Remove the entry entirely since it's cancelled and permit returned
+                queue.remove(idx);
+                self.metrics.write().expect("lock poisoned").total_cancelled += 1;
+            } else if entry.result.is_none() {
+                // Still waiting. Mark as cancelled.
                 entry.result = Some(Err(RejectionReason::Cancelled));
                 self.metrics.write().expect("lock poisoned").total_cancelled += 1;
             }
@@ -1394,5 +1403,40 @@ mod tests {
         for p in permits {
             p.release_to(&bh);
         }
+    }
+
+    #[test]
+    fn cancel_entry_releases_permit_if_already_granted() {
+        let bh = Bulkhead::new(BulkheadPolicy {
+            max_concurrent: 1,
+            max_queue: 10,
+            ..Default::default()
+        });
+
+        let now = Time::from_millis(0);
+
+        // 1. Exhaust permits
+        let p1 = bh.try_acquire(1).unwrap();
+
+        // 2. Enqueue waiter
+        let entry_id = bh.enqueue(1, now).unwrap();
+
+        // 3. Release permit (making it available for the waiter)
+        p1.release_to(&bh);
+
+        // 4. Process queue (grants the permit to the waiter)
+        let granted_id = bh.process_queue(now);
+        assert_eq!(granted_id, Some(entry_id));
+
+        // At this point, the waiter has the permit reserved (available = 0)
+        // but hasn't claimed it via check_entry.
+        assert_eq!(bh.available(), 0);
+
+        // 5. Cancel the entry (simulate user dropping the future)
+        bh.cancel_entry(entry_id);
+
+        // 6. Verify permit is returned
+        // BUG: Without the fix, this assertion fails because the permit is leaked.
+        assert_eq!(bh.available(), 1, "permit should be released upon cancellation of granted entry");
     }
 }
