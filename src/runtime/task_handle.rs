@@ -83,10 +83,18 @@ impl<T> TaskHandle<T> {
         self.task_id
     }
 
-    /// Returns true if the task's result is ready.
+    /// Returns true if the task has reached a terminal join state.
+    ///
+    /// This is true when either:
+    /// - the result value is ready, or
+    /// - the join channel is already closed.
+    ///
+    /// The closed-channel case matters for drop semantics: dropping an
+    /// unpolled join future should not stamp an abort reason onto a task
+    /// that has already terminated and closed its join channel.
     #[must_use]
     pub fn is_finished(&self) -> bool {
-        self.receiver.is_ready()
+        self.receiver.is_ready() || self.receiver.is_closed()
     }
 
     /// Waits for the task to complete and returns its result.
@@ -490,5 +498,35 @@ mod tests {
             cancel_reason_is_none
         );
         crate::test_complete!("drop_join_does_not_abort_if_result_already_ready");
+    }
+
+    #[test]
+    fn drop_join_does_not_abort_if_channel_already_closed() {
+        init_test("drop_join_does_not_abort_if_channel_already_closed");
+        let cx = test_cx();
+        let task_id = TaskId::from_arena(ArenaIndex::new(10, 0));
+        let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        drop(tx);
+
+        let handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
+        drop(handle.join(&cx));
+
+        let (cancel_requested, cancel_reason_is_none) = {
+            let guard = cx.inner.read().expect("lock poisoned");
+            (guard.cancel_requested, guard.cancel_reason.is_none())
+        };
+        crate::assert_with_log!(
+            !cancel_requested,
+            "dropping a closed join must not request cancellation",
+            false,
+            cancel_requested
+        );
+        crate::assert_with_log!(
+            cancel_reason_is_none,
+            "dropping a closed join must not overwrite cancel reason",
+            true,
+            cancel_reason_is_none
+        );
+        crate::test_complete!("drop_join_does_not_abort_if_channel_already_closed");
     }
 }
