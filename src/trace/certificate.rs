@@ -20,7 +20,7 @@
 //! and checks that all invariant claims hold.
 
 use crate::trace::event::{TraceData, TraceEvent, TraceEventKind};
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
 
 /// A proof-carrying trace certificate.
@@ -279,7 +279,7 @@ impl CertificateVerifier {
 
 /// Check that every cancel ack is preceded by a cancel request for the same task.
 fn verify_cancel_ordering(events: &[TraceEvent]) -> bool {
-    let mut pending_cancels: HashSet<crate::types::TaskId> = HashSet::new();
+    let mut pending_cancels: BTreeSet<crate::types::TaskId> = BTreeSet::new();
 
     for event in events {
         match event.kind {

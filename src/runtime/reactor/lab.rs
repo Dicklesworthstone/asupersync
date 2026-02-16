@@ -35,7 +35,7 @@ use super::{Event, Interest, Reactor, Source, Token};
 use crate::lab::chaos::{ChaosConfig, ChaosRng, ChaosStats};
 use crate::tracing_compat::debug;
 use crate::types::Time;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -262,7 +262,7 @@ pub struct LabReactor {
 
 #[derive(Debug)]
 struct LabInner {
-    sockets: HashMap<Token, VirtualSocket>,
+    sockets: BTreeMap<Token, VirtualSocket>,
     pending: BinaryHeap<TimedEvent>,
     time: Time,
     /// Monotonic sequence counter for deterministic same-time event ordering.
@@ -276,7 +276,7 @@ impl LabReactor {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(LabInner {
-                sockets: HashMap::new(),
+                sockets: BTreeMap::new(),
                 pending: BinaryHeap::new(),
                 time: Time::ZERO,
                 next_sequence: 0,
@@ -291,7 +291,7 @@ impl LabReactor {
     pub fn with_chaos(config: ChaosConfig) -> Self {
         Self {
             inner: Mutex::new(LabInner {
-                sockets: HashMap::new(),
+                sockets: BTreeMap::new(),
                 pending: BinaryHeap::new(),
                 time: Time::ZERO,
                 next_sequence: 0,
@@ -782,7 +782,7 @@ impl Reactor for LabReactor {
                     next_sequence,
                     chaos,
                 } = &mut *inner;
-                let mut closed_tokens_emitted = HashSet::new();
+                let mut closed_tokens_emitted = BTreeSet::new();
 
                 for timed in ready_events {
                     let event = timed.event;

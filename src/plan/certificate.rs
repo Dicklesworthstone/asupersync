@@ -1048,10 +1048,10 @@ fn verify_dedup_race_join_result(
         }
     }
 
-    let mut intersection: std::collections::HashSet<PlanId> =
+    let mut intersection: std::collections::BTreeSet<PlanId> =
         join_children[0].iter().copied().collect();
     for join_nodes in join_children.iter().skip(1) {
-        let set: std::collections::HashSet<PlanId> = join_nodes.iter().copied().collect();
+        let set: std::collections::BTreeSet<PlanId> = join_nodes.iter().copied().collect();
         intersection.retain(|id| set.contains(id));
     }
     if intersection.len() != 1 {

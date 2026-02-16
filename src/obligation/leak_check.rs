@@ -4,7 +4,7 @@
 //! may be leaked (scope exit while still held).
 
 use crate::record::ObligationKind;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 // ============================================================================
@@ -14,7 +14,7 @@ use std::fmt;
 /// Identifies an obligation variable in the IR.
 ///
 /// Variables are lightweight handles: `ObligationVar(0)`, `ObligationVar(1)`, etc.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ObligationVar(pub u32);
 
 impl fmt::Display for ObligationVar {
@@ -300,7 +300,7 @@ impl fmt::Display for CheckResult {
 #[derive(Debug, Default)]
 pub struct LeakChecker {
     /// Current abstract state: var → state.
-    state: HashMap<ObligationVar, VarState>,
+    state: BTreeMap<ObligationVar, VarState>,
     /// Accumulated diagnostics.
     diagnostics: Vec<Diagnostic>,
     /// Current scope name (for diagnostic messages).
@@ -404,7 +404,7 @@ impl LeakChecker {
         }
 
         let entry_state = self.state.clone();
-        let mut arm_states: Vec<HashMap<ObligationVar, VarState>> = Vec::new();
+        let mut arm_states: Vec<BTreeMap<ObligationVar, VarState>> = Vec::new();
 
         // Analyze each arm independently, starting from the entry state.
         for arm in arms {
@@ -418,20 +418,20 @@ impl LeakChecker {
     }
 
     fn join_states(
-        states: &[HashMap<ObligationVar, VarState>],
-    ) -> HashMap<ObligationVar, VarState> {
+        states: &[BTreeMap<ObligationVar, VarState>],
+    ) -> BTreeMap<ObligationVar, VarState> {
         if states.is_empty() {
-            return HashMap::new();
+            return BTreeMap::new();
         }
         if states.len() == 1 {
             return states[0].clone();
         }
 
         // Collect all vars across all arms.
-        let all_vars: HashSet<ObligationVar> =
+        let all_vars: BTreeSet<ObligationVar> =
             states.iter().flat_map(|s| s.keys().copied()).collect();
 
-        let mut result = HashMap::new();
+        let mut result = BTreeMap::new();
         for var in all_vars {
             let mut joined = states[0].get(&var).copied().unwrap_or(VarState::Empty);
             for s in &states[1..] {

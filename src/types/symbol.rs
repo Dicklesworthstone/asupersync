@@ -39,7 +39,7 @@ pub const DEFAULT_SYMBOL_SIZE: usize = 1280;
 ///
 /// Objects are the high-level data units that get split into symbols
 /// for erasure-coded transmission. Each object has a unique 128-bit ID.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ObjectId {
     /// High 64 bits of the object ID.
     high: u64,
@@ -129,7 +129,7 @@ impl fmt::Display for ObjectId {
 /// For RaptorQ:
 /// - ESI < K: source symbols (original data)
 /// - ESI >= K: repair symbols (generated for redundancy)
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SymbolId {
     /// The object this symbol belongs to.
     object_id: ObjectId,
