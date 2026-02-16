@@ -472,6 +472,49 @@ mod tests {
     }
 
     #[test]
+    fn timed_pop_does_not_underflow_when_counter_lags() {
+        let injector = GlobalInjector::new();
+
+        // Simulate heap visibility preceding counter update due to interleaving.
+        {
+            let mut timed = injector.timed_queue.lock();
+            timed
+                .heap
+                .push(TimedTask::new(task(12), Time::from_secs(10), 0));
+        }
+        assert_eq!(injector.pending_count.load(Ordering::Relaxed), 0);
+
+        let popped_timed = injector.pop_timed().expect("timed task should pop");
+        assert_eq!(popped_timed.task, task(12));
+        assert_eq!(injector.pending_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn timed_pop_if_due_does_not_underflow_when_counter_lags() {
+        let injector = GlobalInjector::new();
+
+        // Simulate heap visibility preceding counter update due to interleaving.
+        {
+            let mut timed = injector.timed_queue.lock();
+            timed
+                .heap
+                .push(TimedTask::new(task(13), Time::from_secs(10), 0));
+        }
+        assert_eq!(injector.pending_count.load(Ordering::Relaxed), 0);
+
+        // Not due yet: no pop and counter remains saturated.
+        assert!(injector.pop_timed_if_due(Time::from_secs(9)).is_none());
+        assert_eq!(injector.pending_count.load(Ordering::Relaxed), 0);
+
+        // Once due, pop must not underflow the lagging counter.
+        let popped_timed = injector
+            .pop_timed_if_due(Time::from_secs(10))
+            .expect("timed task should pop when due");
+        assert_eq!(popped_timed.task, task(13));
+        assert_eq!(injector.pending_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
     fn concurrent_decrements_saturate_counters_at_zero() {
         for _ in 0..2_000 {
             let injector = Arc::new(GlobalInjector::new());

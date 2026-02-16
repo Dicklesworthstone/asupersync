@@ -328,6 +328,42 @@ mod tests {
     }
 
     #[test]
+    fn create_child_rolls_back_when_parent_is_closed() {
+        let mut table = RegionTable::new();
+        let parent = table.create_root(Budget::default(), Time::ZERO);
+
+        let parent_record = table.get(parent.arena_index()).unwrap();
+        assert!(parent_record.begin_close(None));
+
+        let result = table.create_child(parent, Budget::default(), Time::ZERO);
+        assert!(matches!(result, Err(RegionCreateError::ParentClosed(_))));
+        assert_eq!(table.len(), 1); // Child insert must be rolled back
+        assert!(table.child_ids(parent).unwrap().is_empty());
+    }
+
+    #[test]
+    fn create_child_uses_meet_for_effective_budget() {
+        let mut table = RegionTable::new();
+        let parent_budget = Budget::new()
+            .with_deadline(Time::from_secs(50))
+            .with_poll_quota(1_000)
+            .with_cost_quota(100)
+            .with_priority(80);
+        let child_budget = Budget::new()
+            .with_deadline(Time::from_secs(30))
+            .with_poll_quota(2_000)
+            .with_cost_quota(50)
+            .with_priority(200);
+        let expected = parent_budget.meet(child_budget);
+
+        let parent = table.create_root(parent_budget, Time::ZERO);
+        let child = table.create_child(parent, child_budget, Time::ZERO).unwrap();
+
+        let actual = table.budget(child).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn set_and_get_limits() {
         let mut table = RegionTable::new();
         let id = table.create_root(Budget::default(), Time::ZERO);

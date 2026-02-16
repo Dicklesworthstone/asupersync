@@ -1794,10 +1794,12 @@ mod tests {
         let hints_a = [0, 1, 2, 3];
         let hints_b = [0, 1, 2, 3];
         let hints_c = [42, 43, 44, 45];
+        let hints_d = [42, 43, 44, 45];
 
         let order_a = run_with_hints(&hints_a);
         let order_b = run_with_hints(&hints_b);
         let order_c = run_with_hints(&hints_c);
+        let order_d = run_with_hints(&hints_d);
 
         // Same hints from same initial state must be deterministic.
         crate::assert_with_log!(
@@ -1813,9 +1815,15 @@ mod tests {
             true,
             order_a != order_c
         );
+        crate::assert_with_log!(
+            order_c == order_d,
+            "alternate hint sequence is also deterministic",
+            true,
+            order_c == order_d
+        );
 
         // Each run must pop each task exactly once.
-        for order in [&order_a, &order_b, &order_c] {
+        for order in [&order_a, &order_b, &order_c, &order_d] {
             crate::assert_with_log!(
                 order.len() == 4,
                 "all tasks dispatched",

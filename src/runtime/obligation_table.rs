@@ -421,7 +421,8 @@ impl ObligationTable {
     /// Collects IDs of pending obligations held by a specific task.
     #[must_use]
     pub fn pending_obligation_ids_for_task(&self, task_id: TaskId) -> Vec<ObligationId> {
-        self.ids_for_holder(task_id)
+        let mut ids: Vec<ObligationId> = self
+            .ids_for_holder(task_id)
             .iter()
             .copied()
             .filter(|id| {
@@ -429,17 +430,22 @@ impl ObligationTable {
                     .get(id.arena_index())
                     .is_some_and(ObligationRecord::is_pending)
             })
-            .collect()
+            .collect();
+        ids.sort_unstable();
+        ids
     }
 
     /// Collects IDs of pending obligations in a specific region.
     #[must_use]
     pub fn pending_obligation_ids_for_region(&self, region: RegionId) -> Vec<ObligationId> {
-        self.obligations
+        let mut ids: Vec<ObligationId> = self
+            .obligations
             .iter()
             .filter(|(_, r)| r.region == region && r.is_pending())
             .map(|(idx, _)| ObligationId::from_arena(idx))
-            .collect()
+            .collect();
+        ids.sort_unstable();
+        ids
     }
 }
 
@@ -624,6 +630,28 @@ mod tests {
         let pending = table.pending_obligation_ids_for_task(task1);
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0], id3);
+    }
+
+    #[test]
+    fn pending_obligation_ids_for_task_is_sorted_after_slot_reuse() {
+        let mut table = ObligationTable::new();
+        let task = test_task_id(7);
+        let region = test_region_id(1);
+
+        let id0 = make_obligation(&mut table, ObligationKind::SendPermit, task, region);
+        let id1 = make_obligation(&mut table, ObligationKind::Ack, task, region);
+        let id2 = make_obligation(&mut table, ObligationKind::Lease, task, region);
+
+        // Reuse a hole at id1's arena slot so insertion order diverges from ID order.
+        let _removed = table.remove(id1.arena_index()).expect("obligation exists");
+        let id1_reused = make_obligation(&mut table, ObligationKind::IoOp, task, region);
+
+        let pending = table.pending_obligation_ids_for_task(task);
+        assert_eq!(pending.len(), 3);
+
+        let mut expected = vec![id0, id2, id1_reused];
+        expected.sort_unstable();
+        assert_eq!(pending, expected, "pending IDs should be canonicalized");
     }
 
     #[test]
