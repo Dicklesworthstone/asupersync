@@ -11,6 +11,8 @@ const INVARIANT_JSON: &str =
 const THEOREM_JSON: &str = include_str!("../formal/lean/coverage/theorem_surface_inventory.json");
 const TRACEABILITY_JSON: &str =
     include_str!("../formal/lean/coverage/theorem_rule_traceability_ledger.json");
+const RUNTIME_MAP_JSON: &str =
+    include_str!("../formal/lean/coverage/runtime_state_refinement_map.json");
 const BEADS_JSONL: &str = include_str!("../.beads/issues.jsonl");
 
 #[derive(Debug)]
@@ -186,6 +188,42 @@ fn assert_link_map_header(link_map: &Value) {
             .expect("link_map_id must be string"),
         "lean.invariant_theorem_test_link_map.v1"
     );
+    let generated_by = link_map
+        .get("generated_by")
+        .and_then(Value::as_str)
+        .expect("generated_by must be string");
+    assert!(
+        !generated_by.trim().is_empty(),
+        "generated_by must be non-empty"
+    );
+
+    let generated_at = link_map
+        .get("generated_at")
+        .and_then(Value::as_str)
+        .expect("generated_at must be string");
+    assert!(
+        generated_at.contains('T') && generated_at.ends_with('Z'),
+        "generated_at must be UTC RFC3339 (Z suffix)"
+    );
+
+    let source_artifacts = link_map
+        .get("source_artifacts")
+        .and_then(Value::as_object)
+        .expect("source_artifacts must be an object");
+    for required in [
+        "invariant_status_inventory",
+        "theorem_surface_inventory",
+        "theorem_rule_traceability_ledger",
+    ] {
+        let artifact = source_artifacts
+            .get(required)
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("source_artifacts.{required} must be string"));
+        assert!(
+            Path::new(artifact).exists(),
+            "source_artifact path must exist: {artifact}"
+        );
+    }
 }
 
 fn assert_witnesses(
@@ -857,7 +895,11 @@ fn assert_obligation_terminal_outcomes_row(obligation_row: &Value) {
         "committed_obligation_stable",
         "aborted_obligation_stable",
         "leaked_obligation_stable",
+        "obligation_in_ledger_blocks_close",
         "close_implies_ledger_empty",
+        "call_obligation_resolved_at_close",
+        "no_reserved_call_obligations_after_close",
+        "registry_lease_resolved_at_close",
     ] {
         assert!(
             obligation_theorems.contains(theorem),
@@ -933,4 +975,264 @@ fn obligation_invariant_tracks_terminal_outcomes_and_gap_contracts() {
     let link_map = parse_json(LINK_MAP_JSON, "link map");
     let rows = link_rows(&link_map);
     assert_obligation_terminal_outcomes_row(invariant_row(rows, "inv.obligation.no_leaks"));
+}
+
+fn assert_class_row<'a>(
+    row: &'a Value,
+    class: &str,
+    invariant_ids: &BTreeSet<String>,
+    cadence_ids: &BTreeSet<String>,
+) -> &'a str {
+    let linked_invariants = row
+        .get("invariant_ids")
+        .and_then(Value::as_array)
+        .expect("invariant_ids must be an array");
+    assert!(
+        !linked_invariants.is_empty(),
+        "{class} must link to at least one invariant_id"
+    );
+    for invariant in linked_invariants {
+        let invariant = invariant
+            .as_str()
+            .expect("invariant_ids entries must be strings");
+        assert!(
+            invariant_ids.contains(invariant),
+            "{class} references unknown invariant_id {invariant}"
+        );
+    }
+
+    let checklist_ids = row
+        .get("checklist_ids")
+        .and_then(Value::as_array)
+        .expect("checklist_ids must be an array");
+    assert!(
+        !checklist_ids.is_empty(),
+        "{class} must define checklist_ids"
+    );
+
+    let conformance_artifacts = row
+        .get("conformance_artifacts")
+        .and_then(Value::as_array)
+        .expect("conformance_artifacts must be an array");
+    assert!(
+        !conformance_artifacts.is_empty(),
+        "{class} must define conformance_artifacts"
+    );
+    for artifact in conformance_artifacts {
+        let artifact = artifact
+            .as_str()
+            .expect("conformance_artifacts entries must be strings");
+        assert!(
+            Path::new(artifact).exists(),
+            "{class} conformance artifact path missing: {artifact}"
+        );
+    }
+
+    let governance_cadence_ids = row
+        .get("governance_cadence_ids")
+        .and_then(Value::as_array)
+        .expect("governance_cadence_ids must be an array");
+    assert!(
+        !governance_cadence_ids.is_empty(),
+        "{class} must define governance_cadence_ids"
+    );
+    for cadence in governance_cadence_ids {
+        let cadence = cadence
+            .as_str()
+            .expect("governance_cadence_ids entries must be strings");
+        assert!(
+            cadence_ids.contains(cadence),
+            "{class} references unknown governance cadence_id {cadence}"
+        );
+    }
+
+    let failure_policy = row
+        .get("failure_policy")
+        .and_then(Value::as_str)
+        .expect("failure_policy must be a string");
+    assert!(
+        matches!(failure_policy, "fail-fast" | "fail-safe"),
+        "{class} failure_policy must be fail-fast or fail-safe"
+    );
+    assert!(
+        row.get("policy_rationale")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty()),
+        "{class} must define non-empty policy_rationale"
+    );
+    failure_policy
+}
+
+fn assert_assumption_class_matrix(
+    contract: &Value,
+    required_classes: &BTreeSet<&str>,
+    invariant_ids: &BTreeSet<String>,
+    cadence_ids: &BTreeSet<String>,
+) {
+    let class_rows = contract
+        .get("assumption_class_matrix")
+        .and_then(Value::as_array)
+        .expect("assumption_class_matrix must be an array");
+    let mut seen_classes = BTreeSet::new();
+    let mut seen_policies = BTreeSet::new();
+    for row in class_rows {
+        let class = row
+            .get("assumption_class")
+            .and_then(Value::as_str)
+            .expect("assumption_class must be a string");
+        assert!(
+            seen_classes.insert(class),
+            "assumption_class_matrix must not repeat class {class}"
+        );
+        assert!(
+            required_classes.contains(class),
+            "assumption_class_matrix references undeclared class {class}"
+        );
+        let failure_policy = assert_class_row(row, class, invariant_ids, cadence_ids);
+        seen_policies.insert(failure_policy);
+    }
+    assert_eq!(
+        seen_classes.len(),
+        required_classes.len(),
+        "assumption_class_matrix must cover all required assumption classes"
+    );
+    assert_eq!(
+        seen_policies,
+        BTreeSet::from(["fail-fast", "fail-safe"]),
+        "matrix must encode both fail-fast and fail-safe policies"
+    );
+}
+
+fn assert_incident_triage_flow(contract: &Value) {
+    let expected_steps = BTreeSet::from([
+        "classify_assumption",
+        "verify_guardrails",
+        "route_disposition",
+        "governance_escalation",
+    ]);
+    let mut seen_steps = BTreeSet::new();
+    for step in contract
+        .get("incident_triage_flow")
+        .and_then(Value::as_array)
+        .expect("incident_triage_flow must be an array")
+    {
+        let step_id = step
+            .get("step_id")
+            .and_then(Value::as_str)
+            .expect("incident_triage_flow.step_id must be a string");
+        assert!(
+            seen_steps.insert(step_id),
+            "incident_triage_flow must not repeat step_id {step_id}"
+        );
+        assert!(
+            expected_steps.contains(step_id),
+            "incident_triage_flow contains unknown step_id {step_id}"
+        );
+        assert!(
+            step.get("description")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty()),
+            "incident_triage_flow.{step_id}.description must be non-empty"
+        );
+        let required_outputs = step
+            .get("required_outputs")
+            .and_then(Value::as_array)
+            .expect("incident_triage_flow.required_outputs must be an array");
+        assert!(
+            !required_outputs.is_empty(),
+            "incident_triage_flow.{step_id} must define required_outputs"
+        );
+    }
+    assert_eq!(
+        seen_steps, expected_steps,
+        "incident_triage_flow must include all required step_ids"
+    );
+}
+
+#[test]
+fn reliability_hardening_contract_covers_assumption_classes_and_governance_flow() {
+    let link_map = parse_json(LINK_MAP_JSON, "link map");
+    let runtime_map = parse_json(RUNTIME_MAP_JSON, "runtime_state_refinement_map");
+
+    let contract = link_map
+        .get("reliability_hardening_contract")
+        .expect("reliability_hardening_contract must exist");
+    assert_eq!(
+        contract
+            .get("contract_id")
+            .and_then(Value::as_str)
+            .expect("contract_id must be a string"),
+        "lean.track6.reliability_hardening.v1"
+    );
+    assert_eq!(
+        contract
+            .get("source_bead")
+            .and_then(Value::as_str)
+            .expect("source_bead must be a string"),
+        "asupersync-2izu4"
+    );
+
+    let required_classes = contract
+        .get("classification_policy")
+        .and_then(|policy| policy.get("required_assumption_classes"))
+        .and_then(Value::as_array)
+        .expect("classification_policy.required_assumption_classes must be an array")
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .expect("required_assumption_classes entries must be strings")
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        required_classes,
+        BTreeSet::from([
+            "budget_constraints",
+            "cancellation_protocol",
+            "region_lifecycle",
+            "obligation_resolution",
+        ])
+    );
+
+    let severity_levels = contract
+        .get("classification_policy")
+        .and_then(|policy| policy.get("incident_severity_levels"))
+        .and_then(Value::as_array)
+        .expect("classification_policy.incident_severity_levels must be an array")
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .expect("incident_severity_levels entries must be strings")
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(severity_levels, BTreeSet::from(["sev1", "sev2", "sev3"]));
+
+    let cadence_ids = runtime_map
+        .get("reporting_and_signoff_contract")
+        .and_then(|contract| contract.get("report_cadence"))
+        .and_then(Value::as_array)
+        .expect("reporting_and_signoff_contract.report_cadence must be an array")
+        .iter()
+        .map(|entry| {
+            entry
+                .get("cadence_id")
+                .and_then(Value::as_str)
+                .expect("report_cadence cadence_id must be a string")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+
+    let invariant_ids = link_rows(&link_map)
+        .iter()
+        .map(|row| {
+            row.get("invariant_id")
+                .and_then(Value::as_str)
+                .expect("invariant_id must be string")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+
+    assert_assumption_class_matrix(contract, &required_classes, &invariant_ids, &cadence_ids);
+    assert_incident_triage_flow(contract);
 }

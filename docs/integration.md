@@ -538,6 +538,26 @@ Guardrail-gap escalation rule:
 - Any `fail` item without an immediate fix must create a blocker bead (prefix: `[GUARDRAIL-GAP]`) before merge/sign-off.
 - Blocker bead must include: impacted assumption class, violated checklist item, reproducible command/artifact, and owner.
 
+Reliability triage classification contract (Track-6 T6):
+
+- Canonical machine-readable source: `formal/lean/coverage/invariant_theorem_test_link_map.json` under `reliability_hardening_contract`.
+- Required assumption classes: `budget_constraints`, `cancellation_protocol`, `region_lifecycle`, `obligation_resolution`.
+- Each class maps to:
+  - linked invariants (`inv.*` IDs),
+  - deterministic checklist IDs from this section,
+  - conformance artifacts/tests,
+  - governance cadence IDs (`weekly`, `phase-exit`),
+  - explicit `failure_policy` (`fail-fast` or `fail-safe`) with rationale.
+
+Canonical incident triage flow (must be followed in order):
+1. `classify_assumption`: select one assumption class + severity (`sev1|sev2|sev3`).
+2. `verify_guardrails`: run class-specific checklist + conformance artifacts.
+3. `route_disposition`: apply class policy (`fail-fast` or `fail-safe`) and assign mitigation owner.
+4. `governance_escalation`: open/update blocker bead and record governance thread/sign-off status.
+
+Governance integration requirement:
+- Every unresolved reliability guardrail failure must be reviewed on the same cadence IDs used by the refinement reporting contract in `formal/lean/coverage/runtime_state_refinement_map.json` (`reporting_and_signoff_contract.report_cadence`).
+
 ### Proof-Safe Hot-Path Refactor Checklist (Track-6 T6.1b)
 
 Use this checklist for performance-oriented refactors that touch hot paths in:

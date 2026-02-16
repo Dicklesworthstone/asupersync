@@ -77,7 +77,7 @@ fn init_test(test_name: &str) {
     test_phase!(test_name);
 }
 
-const SEMANTICS_TRACE_FINGERPRINT: u64 = 7_089_537_941_211_056_616;
+const SEMANTICS_TRACE_FINGERPRINT: u64 = 17_536_848_186_479_526_199;
 const INVARIANT_LINK_MAP_JSON: &str =
     include_str!("../formal/lean/coverage/invariant_theorem_test_link_map.json");
 

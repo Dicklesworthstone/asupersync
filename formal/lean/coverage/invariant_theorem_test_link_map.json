@@ -2,6 +2,7 @@
   "schema_version": "1.0.0",
   "link_map_id": "lean.invariant_theorem_test_link_map.v1",
   "generated_by": "bd-2iwok",
+  "generated_at": "2026-02-16T20:00:00Z",
   "source_artifacts": {
     "invariant_status_inventory": "formal/lean/coverage/invariant_status_inventory.json",
     "theorem_surface_inventory": "formal/lean/coverage/theorem_surface_inventory.json",
@@ -13,6 +14,149 @@
     "test_paths_must_exist": true,
     "gap_rows_require_owner_and_dependency_blockers": true,
     "enforce_via_test": "tests/lean_invariant_theorem_test_link_map.rs"
+  },
+  "reliability_hardening_contract": {
+    "contract_id": "lean.track6.reliability_hardening.v1",
+    "source_bead": "asupersync-2izu4",
+    "classification_policy": {
+      "required_assumption_classes": [
+        "budget_constraints",
+        "cancellation_protocol",
+        "region_lifecycle",
+        "obligation_resolution"
+      ],
+      "incident_severity_levels": [
+        "sev1",
+        "sev2",
+        "sev3"
+      ]
+    },
+    "assumption_class_matrix": [
+      {
+        "assumption_class": "budget_constraints",
+        "invariant_ids": [
+          "inv.cancel.protocol",
+          "inv.region_close.quiescence"
+        ],
+        "checklist_ids": [
+          "budget_monotonicity",
+          "evidence_commands"
+        ],
+        "conformance_artifacts": [
+          "formal/lean/coverage/refinement_conformance_report_v1.json",
+          "tests/refinement_conformance.rs"
+        ],
+        "governance_cadence_ids": [
+          "weekly",
+          "phase-exit"
+        ],
+        "failure_policy": "fail-safe",
+        "policy_rationale": "Budget drift can be tolerated briefly only when cleanup budgets remain bounded and recovery evidence is retained."
+      },
+      {
+        "assumption_class": "cancellation_protocol",
+        "invariant_ids": [
+          "inv.cancel.protocol",
+          "inv.race.losers_drained"
+        ],
+        "checklist_ids": [
+          "cancel_protocol_order",
+          "race_loser_drain",
+          "evidence_commands"
+        ],
+        "conformance_artifacts": [
+          "tests/cancellation_conformance.rs",
+          "tests/refinement_conformance.rs"
+        ],
+        "governance_cadence_ids": [
+          "weekly",
+          "phase-exit"
+        ],
+        "failure_policy": "fail-fast",
+        "policy_rationale": "Cancellation-order regressions can strand work and obligations, so merges must stop until protocol ordering is restored."
+      },
+      {
+        "assumption_class": "region_lifecycle",
+        "invariant_ids": [
+          "inv.region_close.quiescence",
+          "inv.structured_concurrency.single_owner"
+        ],
+        "checklist_ids": [
+          "region_quiescence",
+          "determinism_surface",
+          "evidence_commands"
+        ],
+        "conformance_artifacts": [
+          "tests/region_lifecycle_conformance.rs",
+          "tests/refinement_conformance.rs"
+        ],
+        "governance_cadence_ids": [
+          "weekly",
+          "phase-exit"
+        ],
+        "failure_policy": "fail-safe",
+        "policy_rationale": "Operational mitigations may be applied while restoring lifecycle invariants, but unresolved leaks/quiescence gaps stay escalated."
+      },
+      {
+        "assumption_class": "obligation_resolution",
+        "invariant_ids": [
+          "inv.obligation.no_leaks",
+          "inv.region_close.quiescence"
+        ],
+        "checklist_ids": [
+          "obligation_totality",
+          "evidence_commands"
+        ],
+        "conformance_artifacts": [
+          "tests/cancel_obligation_invariants.rs",
+          "tests/obligation_lifecycle_e2e.rs"
+        ],
+        "governance_cadence_ids": [
+          "weekly",
+          "phase-exit"
+        ],
+        "failure_policy": "fail-fast",
+        "policy_rationale": "Unresolved obligations violate safety invariants directly and must block promotion until commit/abort/leak coverage is restored."
+      }
+    ],
+    "incident_triage_flow": [
+      {
+        "step_id": "classify_assumption",
+        "description": "Map incident symptom to exactly one assumption class before proposing remediation.",
+        "required_outputs": [
+          "assumption_class",
+          "candidate_invariant_ids",
+          "severity"
+        ]
+      },
+      {
+        "step_id": "verify_guardrails",
+        "description": "Run checklist and conformance evidence linked to the chosen assumption class.",
+        "required_outputs": [
+          "failed_checklist_items",
+          "conformance_artifacts",
+          "evidence_command_log"
+        ]
+      },
+      {
+        "step_id": "route_disposition",
+        "description": "Select fail-fast or fail-safe disposition using policy rationale and observed severity.",
+        "required_outputs": [
+          "failure_policy",
+          "mitigation_owner",
+          "next_review_cadence"
+        ]
+      },
+      {
+        "step_id": "governance_escalation",
+        "description": "Escalate unresolved guardrail failures into governance threads and blocker beads.",
+        "required_outputs": [
+          "blocker_bead_id",
+          "governance_thread",
+          "signoff_status"
+        ]
+      }
+    ]
   },
   "invariant_links": [
     {
