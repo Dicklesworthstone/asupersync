@@ -2,8 +2,8 @@
   "schema_version": "1.0",
   "artifact_id": "raptorq_baseline_bench_profile_v1",
   "bead_id": "bd-3s8zu",
-  "generated_at_utc": "2026-02-14T21:06:29Z",
-  "git_sha": "621e54283fef7b81101ad8af8b0aab2444279551",
+  "generated_at_utc": "2026-02-16T04:51:43Z",
+  "git_sha": "40fc41edeefbade5bcb3ee5f1260f61cec7769a3",
   "host": {
     "os": "Linux",
     "arch": "x86_64",
@@ -15,29 +15,29 @@
     "sockets": 2
   },
   "toolchain": {
-    "rustc": "rustc 1.95.0-nightly (47611e160 2026-02-12)",
-    "cargo": "cargo 1.95.0-nightly (ce69df6f7 2026-02-12)",
+    "rustc": "rustc 1.95.0-nightly (db3e99bba 2026-02-04)",
+    "cargo": "cargo 1.95.0-nightly (fe2f314ae 2026-01-30)",
     "criterion": "0.5.1"
   },
   "baseline_run": {
     "seed": 424242,
     "runner": "scripts/run_perf_e2e.sh",
     "command": "rch exec -- ./scripts/run_perf_e2e.sh --bench raptorq_benchmark --bench phase0_baseline --seed 424242 --save-baseline baselines/ --no-compare",
-    "report_path": "target/perf-results/perf_20260214_143734/report.json",
-    "baseline_current_path": "target/perf-results/perf_20260214_143734/artifacts/baseline_current.json",
+    "report_path": "target/perf-results/perf_20260215_222548/report.json",
+    "baseline_current_path": "target/perf-results/perf_20260215_222548/artifacts/baseline_current.json",
     "saved_baseline_path": "baselines/baseline_latest.json",
     "benchmarks": [
       {
         "name": "raptorq_benchmark",
         "exit_code": 0,
-        "duration_sec": 463,
-        "log_file": "target/perf-results/perf_20260214_143734/logs/raptorq_benchmark_20260214_143734.log"
+        "duration_sec": 670,
+        "log_file": "target/perf-results/perf_20260215_222548/logs/raptorq_benchmark_20260215_222548.log"
       },
       {
         "name": "phase0_baseline",
         "exit_code": 0,
-        "duration_sec": 863,
-        "log_file": "target/perf-results/perf_20260214_143734/logs/phase0_baseline_20260214_143734.log"
+        "duration_sec": 877,
+        "log_file": "target/perf-results/perf_20260215_222548/logs/phase0_baseline_20260215_222548.log"
       }
     ]
   },
@@ -45,64 +45,64 @@
     "raptorq_e2e_ns": [
       {
         "name": "raptorq_e2e/encode/k=32_sym=1024",
-        "median_ns": 123455.73866959065,
-        "p95_ns": 125662.90342487374
+        "median_ns": 288991.898255814,
+        "p95_ns": 296377.3939705883
       },
       {
         "name": "raptorq_e2e/decode_source_only/k=32_sym=1024",
-        "median_ns": 18542.03420479303,
-        "p95_ns": 18995.6062100894
+        "median_ns": 21167.800268753923,
+        "p95_ns": 21959.031701328186
       },
       {
         "name": "raptorq_e2e/decode_repair_only/k=32_sym=1024",
-        "median_ns": 76791.45179610307,
-        "p95_ns": 81979.40842490841
+        "median_ns": 97917.65737611213,
+        "p95_ns": 105037.92134986227
       }
     ],
     "kernel_hotspots_ns": [
       {
-        "name": "gf256_primitives/addmul_slice/4096",
-        "median_ns": 698.3702880847599,
-        "p95_ns": 797.9004453166517
+        "name": "gf256_primitives/addmul_slice/RQ-E-GF256-004_n4096_seed4100_k32_sym4096",
+        "median_ns": 2003.8308225402257,
+        "p95_ns": 2019.530482628274
       },
       {
         "name": "linalg_operations/row_scale_add/4096",
-        "median_ns": 717.4231450946249,
-        "p95_ns": 1246.2831576967355
+        "median_ns": 1993.3784798284046,
+        "p95_ns": 2019.0661897590362
       },
       {
         "name": "gaussian_elimination/solve_markowitz/64",
-        "median_ns": 606508.433982684,
-        "p95_ns": 610781.317051282
+        "median_ns": 799515.9595039508,
+        "p95_ns": 808401.4574731182
       }
     ],
     "pipeline_throughput_from_phase0_log": [
       {
         "name": "raptorq/pipeline/send_receive/65536",
-        "time_range": "[5.3824 ms 5.4056 ms 5.4248 ms]",
-        "throughput_range": "[11.521 MiB/s 11.562 MiB/s 11.612 MiB/s]"
+        "time_range": "[7.0823 ms 7.1029 ms 7.1309 ms]",
+        "throughput_range": "[8.7647 MiB/s 8.7992 MiB/s 8.8248 MiB/s]"
       },
       {
         "name": "raptorq/pipeline/send_receive/262144",
-        "time_range": "[92.222 ms 93.515 ms 94.862 ms]",
-        "throughput_range": "[2.6354 MiB/s 2.6734 MiB/s 2.7108 MiB/s]"
+        "time_range": "[118.66 ms 119.04 ms 119.48 ms]",
+        "throughput_range": "[2.0923 MiB/s 2.1001 MiB/s 2.1069 MiB/s]"
       },
       {
         "name": "raptorq/pipeline/send_receive/1048576",
-        "time_range": "[2.8780 s 2.8874 s 2.8992 s]",
-        "throughput_range": "[353.20 KiB/s 354.64 KiB/s 355.80 KiB/s]"
+        "time_range": "[3.0987 s 3.1085 s 3.1230 s]",
+        "throughput_range": "[327.89 KiB/s 329.42 KiB/s 330.46 KiB/s]"
       }
     ]
   },
   "profiler": {
     "perf_attempt": {
-      "command": "rch exec -- perf stat -x, -o target/perf-results/perf_20260214_143734/artifacts/perf_stat_raptorq_encode_k32.csv -- cargo bench --bench raptorq_benchmark raptorq_e2e/encode/k=32_sym=1024 -- --noplot --sample-size 20 --measurement-time 1 --warm-up-time 1",
+      "command": "rch exec -- perf stat -x, -o target/perf-results/perf_20260215_222548/artifacts/perf_stat_raptorq_encode_k32.csv -- cargo bench --bench raptorq_benchmark raptorq_e2e/encode/k=32_sym=1024 -- --noplot --sample-size 20 --measurement-time 1 --warm-up-time 1",
       "status": "blocked",
       "reason": "perf_event_paranoid=4 denies non-privileged perf counters"
     },
     "callgrind_fallback": {
-      "command": "rch exec -- valgrind --tool=callgrind --callgrind-out-file=target/perf-results/perf_20260214_143734/artifacts/callgrind_raptorq_encode_k32.out target/release/deps/raptorq_benchmark-60b0ce0491bd21fa --bench raptorq_e2e/encode/k=32_sym=1024 --noplot --sample-size 10 --measurement-time 0.02 --warm-up-time 0.02",
-      "artifact_path": "target/perf-results/perf_20260214_143734/artifacts/callgrind_raptorq_encode_k32.out",
+      "command": "rch exec -- valgrind --tool=callgrind --callgrind-out-file=target/perf-results/perf_20260215_222548/artifacts/callgrind_raptorq_encode_k32.out target/release/deps/raptorq_benchmark-60b0ce0491bd21fa --bench raptorq_e2e/encode/k=32_sym=1024 --noplot --sample-size 10 --measurement-time 0.02 --warm-up-time 0.02",
+      "artifact_path": "target/perf-results/perf_20260215_222548/artifacts/callgrind_raptorq_encode_k32.out",
       "ir_refs_total": 1448085214,
       "annotation_path": "generated ad hoc via callgrind_annotate",
       "note": "release binary is not fully symbolized; top entries are unresolved addresses"
@@ -146,7 +146,7 @@
       },
       {
         "tier": "forensics",
-        "command": "rch exec -- valgrind --tool=callgrind --callgrind-out-file=target/perf-results/perf_20260214_143734/artifacts/callgrind_raptorq_encode_k32.out target/release/deps/raptorq_benchmark-60b0ce0491bd21fa --bench raptorq_e2e/encode/k=32_sym=1024 --noplot --sample-size 10 --measurement-time 0.02 --warm-up-time 0.02"
+        "command": "rch exec -- valgrind --tool=callgrind --callgrind-out-file=target/perf-results/perf_20260215_222548/artifacts/callgrind_raptorq_encode_k32.out target/release/deps/raptorq_benchmark-60b0ce0491bd21fa --bench raptorq_e2e/encode/k=32_sym=1024 --noplot --sample-size 10 --measurement-time 0.02 --warm-up-time 0.02"
       }
     ],
     "structured_logging_contract": {
@@ -164,11 +164,11 @@
         "proof.summary_sha256"
       ],
       "artifact_paths": [
-        "target/perf-results/perf_20260214_143734/report.json",
-        "target/perf-results/perf_20260214_143734/artifacts/baseline_current.json",
-        "target/perf-results/perf_20260214_143734/logs/raptorq_benchmark_20260214_143734.log",
-        "target/perf-results/perf_20260214_143734/logs/phase0_baseline_20260214_143734.log",
-        "target/perf-results/perf_20260214_143734/artifacts/callgrind_raptorq_encode_k32.out",
+        "target/perf-results/perf_20260215_222548/report.json",
+        "target/perf-results/perf_20260215_222548/artifacts/baseline_current.json",
+        "target/perf-results/perf_20260215_222548/logs/raptorq_benchmark_20260215_222548.log",
+        "target/perf-results/perf_20260215_222548/logs/phase0_baseline_20260215_222548.log",
+        "target/perf-results/perf_20260215_222548/artifacts/callgrind_raptorq_encode_k32.out",
         "target/phase6-e2e/report_<timestamp>.txt"
       ]
     }
@@ -250,73 +250,73 @@
         "workload_id": "RQ-G1-ENC-SMALL",
         "metric_name": "median_ns",
         "direction": "upper_bound",
-        "baseline": 123455.74,
-        "warning_budget": 145000.0,
-        "fail_budget": 160000.0
+        "baseline": 288991.9,
+        "warning_budget": 339423.87,
+        "fail_budget": 374536.69
       },
       {
         "workload_id": "RQ-G1-ENC-SMALL",
         "metric_name": "p95_ns",
         "direction": "upper_bound",
-        "baseline": 125662.9,
-        "warning_budget": 155000.0,
-        "fail_budget": 170000.0
+        "baseline": 296377.39,
+        "warning_budget": 365569.28,
+        "fail_budget": 400946.95
       },
       {
         "workload_id": "RQ-G1-DEC-SOURCE",
         "metric_name": "median_ns",
         "direction": "upper_bound",
-        "baseline": 18542.03,
-        "warning_budget": 24000.0,
-        "fail_budget": 30000.0
+        "baseline": 21167.8,
+        "warning_budget": 27398.68,
+        "fail_budget": 34248.35
       },
       {
         "workload_id": "RQ-G1-DEC-REPAIR",
         "metric_name": "median_ns",
         "direction": "upper_bound",
-        "baseline": 76791.45,
-        "warning_budget": 95000.0,
-        "fail_budget": 110000.0
+        "baseline": 97917.66,
+        "warning_budget": 121135.59,
+        "fail_budget": 140262.26
       },
       {
         "workload_id": "RQ-G1-GF256-ADDMUL",
         "metric_name": "median_ns",
         "direction": "upper_bound",
-        "baseline": 698.37,
-        "warning_budget": 850.0,
-        "fail_budget": 1000.0
+        "baseline": 2003.83,
+        "warning_budget": 2438.9,
+        "fail_budget": 2869.3
       },
       {
         "workload_id": "RQ-G1-SOLVER-MARKOWITZ",
         "metric_name": "median_ns",
         "direction": "upper_bound",
-        "baseline": 606508.43,
-        "warning_budget": 750000.0,
-        "fail_budget": 900000.0
+        "baseline": 799515.96,
+        "warning_budget": 988670.46,
+        "fail_budget": 1186404.55
       },
       {
         "workload_id": "RQ-G1-PIPE-64K",
         "metric_name": "throughput_mib_s",
         "direction": "lower_bound",
-        "baseline": 11.562,
-        "warning_budget": 10.5,
-        "fail_budget": 9.5
+        "baseline": 8.83123,
+        "warning_budget": 8.02006,
+        "fail_budget": 7.25624
       },
       {
         "workload_id": "RQ-G1-PIPE-256K",
         "metric_name": "throughput_mib_s",
         "direction": "lower_bound",
-        "baseline": 2.6734,
-        "warning_budget": 2.35,
-        "fail_budget": 2.15
+        "baseline": 2.10972,
+        "warning_budget": 1.85451,
+        "fail_budget": 1.69668
       },
       {
         "workload_id": "RQ-G1-PIPE-1M",
         "metric_name": "throughput_kib_s",
         "direction": "lower_bound",
-        "baseline": 354.64,
-        "warning_budget": 325.0,
-        "fail_budget": 300.0
+        "baseline": 330.83,
+        "warning_budget": 303.18,
+        "fail_budget": 279.86
       },
       {
         "workload_id": "RQ-G1-E2E-RANDOM-LOWLOSS",
@@ -380,7 +380,7 @@
           "RQ-G1-E2E-BURST-LATE"
         ],
         "runtime_envelope_minutes": 90,
-        "command": "rch exec -- valgrind --tool=callgrind --callgrind-out-file=target/perf-results/perf_20260214_143734/artifacts/callgrind_raptorq_encode_k32.out target/release/deps/raptorq_benchmark-60b0ce0491bd21fa --bench raptorq_e2e/encode/k=32_sym=1024 --noplot --sample-size 10 --measurement-time 0.02 --warm-up-time 0.02"
+        "command": "rch exec -- valgrind --tool=callgrind --callgrind-out-file=target/perf-results/perf_20260215_222548/artifacts/callgrind_raptorq_encode_k32.out target/release/deps/raptorq_benchmark-60b0ce0491bd21fa --bench raptorq_e2e/encode/k=32_sym=1024 --noplot --sample-size 10 --measurement-time 0.02 --warm-up-time 0.02"
       }
     ],
     "confidence_policy": {
@@ -422,9 +422,9 @@
     "directional_consistency_rule": "rerun on same host/toolchain/seed and compare median+p95 directional deltas, not absolute nanosecond equality",
     "rerun_consistency_check": {
       "command": "rch exec -- target/release/deps/raptorq_benchmark-60b0ce0491bd21fa --bench raptorq_e2e/encode/k=32_sym=1024 --noplot --sample-size 10 --measurement-time 0.02 --warm-up-time 0.02",
-      "run_1_time_range": "[326.64 us 328.41 us 330.75 us]",
-      "run_2_time_range": "[328.09 us 329.94 us 332.57 us]",
-      "conclusion": "same-host reruns are directionally consistent (median remains ~329 us)"
+      "run_1_time_range": "[120.62 us 127.42 us 134.53 us]",
+      "run_2_time_range": "[196.20 us 199.42 us 202.23 us]",
+      "conclusion": "remote quick reruns on worker hosts can drift under load; use seeded full-corpus medians/p95 for gate calibration"
     },
     "rerun_commands": [
       "rch exec -- ./scripts/run_perf_e2e.sh --bench raptorq_benchmark --bench phase0_baseline --seed 424242 --save-baseline baselines/ --no-compare",
