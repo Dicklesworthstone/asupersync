@@ -297,6 +297,90 @@
       }
     ]
   },
+  "cross_entity_liveness_contract": {
+    "contract_id": "lean.track3.cross_entity_liveness.refinement.v1",
+    "source_bead": "asupersync-24rak",
+    "linked_invariants": [
+      "inv.cancel.protocol",
+      "inv.race.losers_drained",
+      "inv.region_close.quiescence"
+    ],
+    "segment_chain": [
+      {
+        "segment_id": "cancel_ladder",
+        "operation_ids": [
+          "runtime_state.cancel_request"
+        ],
+        "required_theorems": [
+          "cancel_protocol_terminates",
+          "cancel_steps_testable_bound",
+          "cancel_propagation_bounded"
+        ],
+        "handoff_to": "race_loser_drain"
+      },
+      {
+        "segment_id": "race_loser_drain",
+        "operation_ids": [
+          "scope.race_all_loser_drain"
+        ],
+        "required_theorems": [
+          "cancel_propagation_bounded",
+          "step_preserves_wellformed"
+        ],
+        "handoff_to": "close_quiescence"
+      },
+      {
+        "segment_id": "close_quiescence",
+        "operation_ids": [
+          "runtime_state.advance_region_state",
+          "runtime_state.task_completed"
+        ],
+        "required_theorems": [
+          "close_implies_quiescent",
+          "close_quiescence_decomposition",
+          "close_complete_step"
+        ],
+        "handoff_to": "terminal"
+      }
+    ],
+    "end_to_end_guarantees": [
+      {
+        "guarantee_id": "guarantee.cancel_to_quiescence",
+        "required_segments": [
+          "cancel_ladder",
+          "close_quiescence"
+        ],
+        "harness_id": "harness.cancellation_obligation",
+        "conformance_tests": [
+          "tests/cancellation_conformance.rs",
+          "tests/refinement_conformance.rs",
+          "tests/region_lifecycle_conformance.rs"
+        ],
+        "expected_trace_signatures": [
+          "cancel_protocol_terminates",
+          "close_implies_quiescent"
+        ]
+      },
+      {
+        "guarantee_id": "guarantee.race_loser_drain_to_quiescence",
+        "required_segments": [
+          "cancel_ladder",
+          "race_loser_drain",
+          "close_quiescence"
+        ],
+        "harness_id": "harness.race_loser_drain",
+        "conformance_tests": [
+          "tests/e2e/combinator/cancel_correctness/loser_drain.rs",
+          "tests/refinement_conformance.rs",
+          "tests/runtime_e2e.rs"
+        ],
+        "expected_trace_signatures": [
+          "race_all.losers_drained_before_return",
+          "close_quiescence_decomposition"
+        ]
+      }
+    ]
+  },
   "reporting_and_signoff_contract": {
     "contract_id": "lean.refinement_conformance_reporting_signoff.v1",
     "artifact_schema_version": "1.0.0",

@@ -2,6 +2,7 @@
 
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 const MAP_JSON: &str = include_str!("../formal/lean/coverage/runtime_state_refinement_map.json");
 const STEP_COVERAGE_JSON: &str =
@@ -889,6 +890,248 @@ fn runtime_state_refinement_map_conformance_harness_contract_is_complete() {
             "ci_consumers must define profile {profile}"
         );
     }
+}
+
+#[test]
+fn runtime_state_refinement_map_cross_entity_liveness_contract_is_wired() {
+    let map: Value =
+        serde_json::from_str(MAP_JSON).expect("runtime state refinement map must parse");
+    let theorem_lines = theorem_line_lookup();
+
+    let contract = map
+        .get("cross_entity_liveness_contract")
+        .expect("cross_entity_liveness_contract must exist");
+    assert_eq!(
+        contract
+            .get("contract_id")
+            .and_then(Value::as_str)
+            .expect("contract_id must be string"),
+        "lean.track3.cross_entity_liveness.refinement.v1"
+    );
+    assert_eq!(
+        contract
+            .get("source_bead")
+            .and_then(Value::as_str)
+            .expect("source_bead must be string"),
+        "asupersync-24rak"
+    );
+
+    let linked_invariants = contract
+        .get("linked_invariants")
+        .and_then(Value::as_array)
+        .expect("linked_invariants must be an array")
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .expect("linked_invariants entries must be strings")
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        linked_invariants,
+        BTreeSet::from([
+            "inv.cancel.protocol",
+            "inv.race.losers_drained",
+            "inv.region_close.quiescence"
+        ]),
+        "linked_invariants must carry the canonical cross-entity liveness set"
+    );
+
+    let mappings = map
+        .get("mappings")
+        .and_then(Value::as_array)
+        .expect("mappings must be an array");
+    let mapped_operation_ids = mappings
+        .iter()
+        .map(|entry| {
+            entry
+                .get("operation_id")
+                .and_then(Value::as_str)
+                .expect("operation_id must be string")
+        })
+        .collect::<BTreeSet<_>>();
+    let mapped_trace_signatures = mappings
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .get("expected_trace_signatures")
+                .and_then(Value::as_array)
+        })
+        .flat_map(|items| items.iter())
+        .map(|item| {
+            item.as_str()
+                .expect("expected_trace_signatures entries must be strings")
+        })
+        .collect::<BTreeSet<_>>();
+
+    let segments = contract
+        .get("segment_chain")
+        .and_then(Value::as_array)
+        .expect("segment_chain must be an array");
+    let mut seen_segments = BTreeSet::new();
+    for segment in segments {
+        let segment_id = segment
+            .get("segment_id")
+            .and_then(Value::as_str)
+            .expect("segment_id must be string");
+        assert!(
+            seen_segments.insert(segment_id),
+            "segment_chain must not repeat segment_id {segment_id}"
+        );
+        let operation_ids = segment
+            .get("operation_ids")
+            .and_then(Value::as_array)
+            .expect("operation_ids must be an array");
+        assert!(
+            !operation_ids.is_empty(),
+            "segment {segment_id} must include at least one operation_id"
+        );
+        for operation_id in operation_ids {
+            let operation_id = operation_id
+                .as_str()
+                .expect("operation_ids entries must be strings");
+            assert!(
+                mapped_operation_ids.contains(operation_id),
+                "segment {segment_id} references unknown operation_id {operation_id}"
+            );
+        }
+
+        let required_theorems = segment
+            .get("required_theorems")
+            .and_then(Value::as_array)
+            .expect("required_theorems must be an array");
+        assert!(
+            !required_theorems.is_empty(),
+            "segment {segment_id} must include required_theorems"
+        );
+        for theorem in required_theorems {
+            let theorem = theorem
+                .as_str()
+                .expect("required_theorems entries must be strings");
+            assert!(
+                theorem_lines.contains_key(theorem),
+                "segment {segment_id} references unknown theorem {theorem}"
+            );
+        }
+
+        let handoff_to = segment
+            .get("handoff_to")
+            .and_then(Value::as_str)
+            .expect("handoff_to must be string");
+        assert!(
+            !handoff_to.trim().is_empty(),
+            "segment {segment_id} must define handoff_to"
+        );
+    }
+    assert_eq!(
+        seen_segments,
+        BTreeSet::from(["cancel_ladder", "race_loser_drain", "close_quiescence"]),
+        "segment_chain must include canonical liveness segments"
+    );
+
+    let conformance_harness_ids = map
+        .get("conformance_harness_contract")
+        .and_then(|contract| contract.get("harnesses"))
+        .and_then(Value::as_array)
+        .expect("conformance_harness_contract.harnesses must be an array")
+        .iter()
+        .map(|entry| {
+            entry
+                .get("harness_id")
+                .and_then(Value::as_str)
+                .expect("harness_id must be string")
+        })
+        .collect::<BTreeSet<_>>();
+
+    let guarantees = contract
+        .get("end_to_end_guarantees")
+        .and_then(Value::as_array)
+        .expect("end_to_end_guarantees must be an array");
+    let mut seen_guarantees = BTreeSet::new();
+    for guarantee in guarantees {
+        let guarantee_id = guarantee
+            .get("guarantee_id")
+            .and_then(Value::as_str)
+            .expect("guarantee_id must be string");
+        assert!(
+            seen_guarantees.insert(guarantee_id),
+            "end_to_end_guarantees must not repeat guarantee_id {guarantee_id}"
+        );
+
+        let required_segments = guarantee
+            .get("required_segments")
+            .and_then(Value::as_array)
+            .expect("required_segments must be an array");
+        assert!(
+            !required_segments.is_empty(),
+            "guarantee {guarantee_id} must define required_segments"
+        );
+        for segment in required_segments {
+            let segment = segment
+                .as_str()
+                .expect("required_segments entries must be strings");
+            assert!(
+                seen_segments.contains(segment),
+                "guarantee {guarantee_id} references unknown segment {segment}"
+            );
+        }
+
+        let harness_id = guarantee
+            .get("harness_id")
+            .and_then(Value::as_str)
+            .expect("harness_id must be string");
+        assert!(
+            conformance_harness_ids.contains(harness_id),
+            "guarantee {guarantee_id} references unknown harness_id {harness_id}"
+        );
+
+        let conformance_tests = guarantee
+            .get("conformance_tests")
+            .and_then(Value::as_array)
+            .expect("conformance_tests must be an array");
+        assert!(
+            !conformance_tests.is_empty(),
+            "guarantee {guarantee_id} must define conformance_tests"
+        );
+        for test in conformance_tests {
+            let test = test
+                .as_str()
+                .expect("conformance_tests entries must be strings");
+            assert!(
+                Path::new(test).exists(),
+                "guarantee {guarantee_id} references missing conformance test path {test}"
+            );
+        }
+
+        let expected_trace_signatures = guarantee
+            .get("expected_trace_signatures")
+            .and_then(Value::as_array)
+            .expect("expected_trace_signatures must be an array");
+        assert!(
+            !expected_trace_signatures.is_empty(),
+            "guarantee {guarantee_id} must define expected_trace_signatures"
+        );
+        for signature in expected_trace_signatures {
+            let signature = signature
+                .as_str()
+                .expect("expected_trace_signatures entries must be strings");
+            let known_signature = theorem_lines.contains_key(signature)
+                || mapped_trace_signatures.contains(signature);
+            assert!(
+                known_signature,
+                "guarantee {guarantee_id} references unknown expected_trace_signature {signature}"
+            );
+        }
+    }
+
+    assert_eq!(
+        seen_guarantees,
+        BTreeSet::from([
+            "guarantee.cancel_to_quiescence",
+            "guarantee.race_loser_drain_to_quiescence"
+        ]),
+        "end_to_end_guarantees must include canonical liveness compositions"
+    );
 }
 
 #[test]

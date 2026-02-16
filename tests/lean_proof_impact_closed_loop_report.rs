@@ -728,9 +728,7 @@ fn assert_reliability_deltas(
     assert_reliability_attribution_and_caveats(evidence);
 }
 
-fn assert_reliability_attribution_and_caveats(
-    evidence: &serde_json::Map<String, Value>,
-) {
+fn assert_reliability_attribution_and_caveats(evidence: &serde_json::Map<String, Value>) {
     let attribution_method = as_object(
         evidence
             .get("attribution_method")
@@ -772,9 +770,7 @@ fn assert_reliability_attribution_and_caveats(
     assert!(!assumptions.is_empty(), "assumptions must not be empty");
 
     let reliability_caveats = as_array(
-        evidence
-            .get("caveats")
-            .expect("caveats is required"),
+        evidence.get("caveats").expect("caveats is required"),
         "report_snapshot.reliability_delta_evidence.caveats",
     );
     assert!(
@@ -988,9 +984,7 @@ fn assert_correctness_deltas(
     }
 
     let correctness_caveats = as_array(
-        evidence
-            .get("caveats")
-            .expect("caveats is required"),
+        evidence.get("caveats").expect("caveats is required"),
         "report_snapshot.correctness_delta_evidence.caveats",
     );
     assert!(
@@ -999,10 +993,7 @@ fn assert_correctness_deltas(
     );
 }
 
-fn assert_playbook_handoff(
-    snapshot: &serde_json::Map<String, Value>,
-    bead_ids: &BTreeSet<String>,
-) {
+fn assert_playbook_handoff(snapshot: &serde_json::Map<String, Value>, bead_ids: &BTreeSet<String>) {
     let handoff = as_object(
         snapshot
             .get("playbook_handoff_contract")
@@ -1066,10 +1057,7 @@ fn assert_playbook_handoff(
     assert_case_studies(handoff, bead_ids);
 }
 
-fn assert_case_studies(
-    handoff: &serde_json::Map<String, Value>,
-    bead_ids: &BTreeSet<String>,
-) {
+fn assert_case_studies(handoff: &serde_json::Map<String, Value>, bead_ids: &BTreeSet<String>) {
     let case_studies = as_array(
         handoff
             .get("case_studies")
