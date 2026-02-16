@@ -1059,12 +1059,17 @@ impl Connection {
                     data,
                     end_stream,
                 } => {
+                    let stream_avail = match self.streams.get(stream_id) {
+                        // If the stream has already been reset/closed, any
+                        // queued DATA is stale and must be discarded.
+                        Some(stream) if !stream.state().is_closed() => {
+                            stream.send_window().max(0).cast_unsigned()
+                        }
+                        _ => continue,
+                    };
+
                     // Determine the maximum sendable bytes from flow control windows and max_frame_size.
                     let conn_avail = self.send_window.max(0).cast_unsigned();
-                    let stream_avail = self
-                        .streams
-                        .get(stream_id)
-                        .map_or(0, |s| s.send_window().max(0).cast_unsigned());
                     let frame_size_limit = self.remote_settings.max_frame_size;
                     let max_send = conn_avail.min(stream_avail).min(frame_size_limit) as usize;
 
@@ -1100,9 +1105,10 @@ impl Connection {
                     let consumed = u32::try_from(to_send.len())
                         .expect("send_len already clamped to u32 range");
                     self.send_window -= consumed.cast_signed();
-                    if let Some(stream) = self.streams.get_mut(stream_id) {
-                        stream.consume_send_window(consumed);
-                    }
+                    let Some(stream) = self.streams.get_mut(stream_id) else {
+                        continue;
+                    };
+                    stream.consume_send_window(consumed);
 
                     return Some(Frame::Data(DataFrame::new(
                         stream_id,
@@ -2757,6 +2763,42 @@ mod tests {
         let data = Frame::Data(DataFrame::new(1, Bytes::from("test"), false));
         let err = conn.process_frame(data).unwrap_err();
         assert_eq!(err.code, ErrorCode::StreamClosed);
+    }
+
+    #[test]
+    fn test_reset_stream_drops_queued_outbound_data() {
+        let mut conn = Connection::client(Settings::client());
+        conn.state = ConnectionState::Open;
+
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+        let stream_id = conn.open_stream(headers, false).unwrap();
+
+        // Pretend request headers were already sent.
+        let frame = conn.next_frame().expect("expected request HEADERS");
+        match frame {
+            Frame::Headers(h) => assert_eq!(h.stream_id, stream_id),
+            other => panic!("expected HEADERS frame, got {other:?}"),
+        }
+
+        conn.send_data(stream_id, Bytes::from("queued"), true)
+            .unwrap();
+        conn.reset_stream(stream_id, ErrorCode::Cancel);
+
+        // Once reset, queued DATA for the stream must be discarded.
+        let frame = conn.next_frame().expect("expected RST_STREAM frame");
+        match frame {
+            Frame::RstStream(rst) => {
+                assert_eq!(rst.stream_id, stream_id);
+                assert_eq!(rst.error_code, ErrorCode::Cancel);
+            }
+            other => panic!("expected RST_STREAM frame, got {other:?}"),
+        }
+        assert!(conn.next_frame().is_none());
     }
 
     #[test]
