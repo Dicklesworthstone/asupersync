@@ -1212,7 +1212,9 @@ fn g1_budget_baseline_markdown_status_snapshot_matches_artifact() {
             .as_str()
             .expect("correctness_prerequisites[].status must be a string");
         let observed = markdown_status_for_bead(RAPTORQ_BASELINE_PROFILE_MD, bead_id)
-            .unwrap_or_else(|| panic!("baseline markdown snapshot missing status row for {bead_id}"));
+            .unwrap_or_else(|| {
+                panic!("baseline markdown snapshot missing status row for {bead_id}")
+            });
         assert_eq!(
             observed, expected,
             "baseline markdown status drift for {bead_id}: expected {expected}, found {observed}"
@@ -1250,8 +1252,10 @@ fn g1_budget_unit_matrix_markdown_status_snapshot_matches_artifact_subset() {
         let expected = prereq["status"]
             .as_str()
             .expect("correctness_prerequisites[].status must be a string");
-        let observed = markdown_status_for_bead(RAPTORQ_UNIT_MATRIX_MD, bead_id)
-            .unwrap_or_else(|| panic!("unit matrix markdown snapshot missing status row for {bead_id}"));
+        let observed =
+            markdown_status_for_bead(RAPTORQ_UNIT_MATRIX_MD, bead_id).unwrap_or_else(|| {
+                panic!("unit matrix markdown snapshot missing status row for {bead_id}")
+            });
         assert_eq!(
             observed, expected,
             "unit matrix markdown status drift for {bead_id}: expected {expected}, found {observed}"
