@@ -408,7 +408,8 @@ impl Drop for OwnedSemaphorePermit {
     }
 }
 
-struct OwnedAcquireFuture {
+/// Future returned by `OwnedSemaphorePermit::acquire`.
+pub struct OwnedAcquireFuture {
     semaphore: Arc<Semaphore>,
     cx: Cx, // Clone of Cx
     count: usize,
