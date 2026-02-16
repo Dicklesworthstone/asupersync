@@ -59,7 +59,7 @@ rch exec -- valgrind --tool=callgrind --callgrind-out-file=target/perf-results/p
 
 ## Draft Budget Sheet (G1)
 
-Budget source: `baseline_current.json` and phase0 throughput logs listed above. Values below are draft guardrails for CI profile wiring and should be recalibrated after D1/D5/D6 evidence is fully green.
+Budget source: `baseline_current.json` and phase0 throughput logs listed above. Values below are draft guardrails for CI profile wiring and should be recalibrated after D7 evidence is fully green.
 
 | Workload ID | Baseline | Warning Budget | Fail Budget |
 |---|---:|---:|---:|
@@ -137,26 +137,26 @@ Artifact path conventions by profile:
 
 Before closing `bd-3v1cs`, run this checklist and record evidence paths in bead comments:
 
-1. Confirm D1 (`bd-1rxlv`), D5 (`bd-61s90`), and D6 (`bd-3bvdj` / `asupersync-wdk6c`) are green in CI.
+1. Confirm D1 (`bd-1rxlv`), D5 (`bd-61s90`), D6 (`bd-3bvdj` / `asupersync-wdk6c`), and D9 (`bd-26pqk`) remain closed.
 2. Re-run full baseline corpus with fixed seed `424242` and record artifact paths.
 3. Recompute warning/fail budgets from the refreshed corpus and update this document.
 4. Verify `fast`/`full`/`forensics` runtime envelopes on the standard CI shape.
 5. Attach one deterministic repro command for each budget violation class.
 
-## Prerequisite Status Snapshot (2026-02-15)
+## Prerequisite Status Snapshot (2026-02-16)
 
 | Bead | Purpose | Current Status | Calibration Impact |
 |---|---|---|---|
 | `bd-1rxlv` | D1 golden-vector conformance | `closed` | prerequisite satisfied |
-| `bd-61s90` | D5 comprehensive unit matrix | `open` | unit-coverage evidence still partial for closure |
-| `bd-3bvdj` / `asupersync-wdk6c` | D6 deterministic E2E suite | `in_progress` | profile-aware deterministic runner is in place; keep scenario/replay mapping synchronized |
+| `bd-61s90` | D5 comprehensive unit matrix | `closed` | prerequisite satisfied |
+| `bd-3bvdj` / `asupersync-wdk6c` | D6 deterministic E2E suite | `closed` | deterministic profile suite is established and linked |
 | `bd-oeql8` | D7 structured logging/artifact schema | `open` | forensics schema contract still pending closure |
-| `bd-26pqk` | D9 replay catalog linkage | `open` | replay catalog delivered but bead not closed yet |
+| `bd-26pqk` | D9 replay catalog linkage | `closed` | prerequisite satisfied |
 
 Closure gate interpretation for `bd-3v1cs`:
 
 - This bead may publish and iterate draft budgets early.
-- Final closure requires a post-D5/D6/D7/D9 calibration pass with refreshed corpus artifacts and updated budget numbers committed in this document.
+- Final closure requires a post-D7 calibration pass with refreshed corpus artifacts and updated budget numbers committed in this document.
 
 ## Phase Note
 

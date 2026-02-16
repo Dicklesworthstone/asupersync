@@ -151,14 +151,14 @@ The D5 bead can close only when all of the following are true:
 4. Unit↔E2E linkage remains canonical and deterministic (`RQ-E2E-*` IDs), with at least one deterministic E2E counterpart per unit scenario family.
 5. Closure note includes reproducible `rch exec -- ...` commands and artifact paths used for final validation.
 
-### Status Snapshot (2026-02-15)
+### Status Snapshot (2026-02-16)
 
 | Bead | Scope | Current Status | Note for D5 Closure |
 |---|---|---|---|
-| `bd-61s90` | D5 comprehensive unit matrix | `in_progress` | this matrix remains authoritative, but closure requires replay-id/schema completion on all required paths |
-| `bd-26pqk` | D9 replay catalog | `open` | catalog artifact exists; keep replay references aligned with latest entries |
+| `bd-61s90` | D5 comprehensive unit matrix | `closed` | matrix contract is accepted; continue maintenance as coverage evolves |
+| `bd-26pqk` | D9 replay catalog | `closed` | replay catalog linkage is closed and remains a required reference |
 | `bd-oeql8` | D7 structured logging schema | `open` | schema contract enforcement still needed across all required suites |
-| `bd-3bvdj` / `asupersync-wdk6c` | D6 deterministic E2E suite | `in_progress` | deterministic profile/scenario runner now exists; keep unit-to-E2E linkage synchronized as scenarios evolve |
+| `bd-3bvdj` / `asupersync-wdk6c` | D6 deterministic E2E suite | `closed` | deterministic profile/scenario runner is in place and linked to unit families |
 
 ## Repro Commands
 

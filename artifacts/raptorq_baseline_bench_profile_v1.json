@@ -393,10 +393,10 @@
     },
     "correctness_prerequisites": [
       {"bead_id": "bd-1rxlv", "status": "closed"},
-      {"bead_id": "bd-61s90", "status": "open"},
-      {"bead_id": "bd-3bvdj", "status": "in_progress"},
+      {"bead_id": "bd-61s90", "status": "closed"},
+      {"bead_id": "bd-3bvdj", "status": "closed"},
       {"bead_id": "bd-oeql8", "status": "open"},
-      {"bead_id": "bd-26pqk", "status": "open"}
+      {"bead_id": "bd-26pqk", "status": "closed"}
     ],
     "structured_logging": {
       "required_fields": [
