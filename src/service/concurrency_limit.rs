@@ -5,7 +5,6 @@
 
 use super::{Layer, Service};
 use crate::cx::Cx;
-use crate::sync::semaphore::OwnedAcquireFuture;
 use crate::sync::{OwnedSemaphorePermit, Semaphore};
 use std::future::Future;
 use std::pin::Pin;
@@ -75,7 +74,13 @@ impl<S> Layer<S> for ConcurrencyLimitLayer {
 /// Internal state for the concurrency limit service.
 enum State {
     Idle,
-    Acquiring(Pin<Box<OwnedAcquireFuture>>),
+    Acquiring(
+        Pin<
+            Box<
+                dyn Future<Output = Result<OwnedSemaphorePermit, crate::sync::AcquireError>> + Send,
+            >,
+        >,
+    ),
     Ready(OwnedSemaphorePermit),
 }
 
@@ -234,9 +239,8 @@ where
 
     fn call(&mut self, req: Request) -> Self::Future {
         // Take the permit that was acquired in poll_ready
-        let permit = match std::mem::replace(&mut self.state, State::Idle) {
-            State::Ready(permit) => permit,
-            _ => panic!("poll_ready must be called before call"),
+        let State::Ready(permit) = std::mem::replace(&mut self.state, State::Idle) else {
+            panic!("poll_ready must be called before call");
         };
 
         ConcurrencyLimitFuture::new(self.inner.call(req), permit)
@@ -311,6 +315,10 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Arc::new(NoopWaker).into()
+    }
+
+    fn has_ready_permit<S>(svc: &ConcurrencyLimit<S>) -> bool {
+        matches!(&svc.state, State::Ready(_))
     }
 
     // A service that tracks concurrency
@@ -441,7 +449,7 @@ mod tests {
         let ready = svc.poll_ready(&mut cx);
         let ready_ok = matches!(ready, Poll::Ready(Ok(())));
         crate::assert_with_log!(ready_ok, "ready ok", true, ready_ok);
-        let has_permit = svc.permit.is_some();
+        let has_permit = has_ready_permit(&svc);
         crate::assert_with_log!(has_permit, "permit present", true, has_permit);
         let available = svc.available();
         crate::assert_with_log!(available == 1, "available", 1, available);
@@ -458,12 +466,12 @@ mod tests {
 
         // Acquire permit
         let _ = svc.poll_ready(&mut cx);
-        let has_permit = svc.permit.is_some();
+        let has_permit = has_ready_permit(&svc);
         crate::assert_with_log!(has_permit, "permit present", true, has_permit);
 
         // Call consumes permit
         let _future = svc.call(42);
-        let has_permit = svc.permit.is_some();
+        let has_permit = has_ready_permit(&svc);
         crate::assert_with_log!(!has_permit, "permit cleared", false, has_permit);
         crate::test_complete!("call_consumes_permit");
     }

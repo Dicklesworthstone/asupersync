@@ -198,8 +198,14 @@ impl DecisionContract for SchedulerDecisionContract {
     }
 
     fn update_posterior(&self, posterior: &mut Posterior, observation: usize) {
+        // Defensive guard: malformed posterior dimensions should not panic
+        // scheduler decision logic.
+        if posterior.len() != state::COUNT {
+            return;
+        }
+
         // Simple likelihood model: observed state gets high probability.
-        let mut likelihoods = vec![0.1; state::COUNT];
+        let mut likelihoods = [0.1; state::COUNT];
         if let Some(observed) = likelihoods.get_mut(observation) {
             *observed = 0.9;
         }
@@ -207,6 +213,9 @@ impl DecisionContract for SchedulerDecisionContract {
     }
 
     fn choose_action(&self, posterior: &Posterior) -> usize {
+        if posterior.len() != state::COUNT {
+            return self.fallback_action();
+        }
         self.losses.bayes_action(posterior)
     }
 
@@ -427,5 +436,21 @@ mod tests {
         let before = posterior.probs().to_vec();
         c.update_posterior(&mut posterior, state::COUNT + 5);
         assert_eq!(posterior.probs(), before.as_slice());
+    }
+
+    #[test]
+    fn update_posterior_wrong_dimension_is_noop() {
+        let c = SchedulerDecisionContract::new();
+        let mut posterior = Posterior::uniform(state::COUNT - 1);
+        let before = posterior.probs().to_vec();
+        c.update_posterior(&mut posterior, state::HEALTHY);
+        assert_eq!(posterior.probs(), before.as_slice());
+    }
+
+    #[test]
+    fn choose_action_wrong_dimension_uses_fallback() {
+        let c = SchedulerDecisionContract::new();
+        let posterior = Posterior::uniform(state::COUNT - 1);
+        assert_eq!(c.choose_action(&posterior), action::CONSERVATIVE);
     }
 }
