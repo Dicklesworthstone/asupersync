@@ -3996,7 +3996,7 @@ theorem task_cancel_requested_canonical_form {Value Error Panic : Type}
       | TaskState.cancelRequested _ _ => True
       | _ => False) :
     ∃ reason cleanup, task.state = TaskState.cancelRequested reason cleanup := by
-  cases hState : task.state <;> simp at hMatch
+  cases hState : task.state <;> try simp at hMatch
   case cancelRequested reason cleanup =>
     exact ⟨reason, cleanup, hState⟩
 
@@ -4008,7 +4008,7 @@ theorem task_cancelling_canonical_form {Value Error Panic : Type}
       | TaskState.cancelling _ _ => True
       | _ => False) :
     ∃ reason cleanup, task.state = TaskState.cancelling reason cleanup := by
-  cases hState : task.state <;> simp at hMatch
+  cases hState : task.state <;> try simp at hMatch
   case cancelling reason cleanup =>
     exact ⟨reason, cleanup, hState⟩
 
@@ -4020,7 +4020,7 @@ theorem task_finalizing_canonical_form {Value Error Panic : Type}
       | TaskState.finalizing _ _ => True
       | _ => False) :
     ∃ reason cleanup, task.state = TaskState.finalizing reason cleanup := by
-  cases hState : task.state <;> simp at hMatch
+  cases hState : task.state <;> try simp at hMatch
   case finalizing reason cleanup =>
     exact ⟨reason, cleanup, hState⟩
 
@@ -4032,7 +4032,7 @@ theorem region_closing_canonical_form {Value Error Panic : Type}
       | RegionState.closing => True
       | _ => False) :
     region.state = RegionState.closing := by
-  cases hState : region.state <;> simp at hMatch
+  cases hState : region.state <;> try simp at hMatch
   case closing =>
     simpa [hState]
 
@@ -4044,7 +4044,7 @@ theorem region_draining_canonical_form {Value Error Panic : Type}
       | RegionState.draining => True
       | _ => False) :
     region.state = RegionState.draining := by
-  cases hState : region.state <;> simp at hMatch
+  cases hState : region.state <;> try simp at hMatch
   case draining =>
     simpa [hState]
 
@@ -4056,7 +4056,7 @@ theorem region_finalizing_canonical_form {Value Error Panic : Type}
       | RegionState.finalizing => True
       | _ => False) :
     region.state = RegionState.finalizing := by
-  cases hState : region.state <;> simp at hMatch
+  cases hState : region.state <;> try simp at hMatch
   case finalizing =>
     simpa [hState]
 
@@ -4067,7 +4067,7 @@ theorem obligation_reserved_canonical_form {ob : ObligationRecord}
       | ObligationState.reserved => True
       | _ => False) :
     ob.state = ObligationState.reserved := by
-  cases hState : ob.state <;> simp at hMatch
+  cases hState : ob.state <;> try simp at hMatch
   case reserved =>
     simpa [hState]
 
@@ -4078,7 +4078,7 @@ theorem obligation_committed_canonical_form {ob : ObligationRecord}
       | ObligationState.committed => True
       | _ => False) :
     ob.state = ObligationState.committed := by
-  cases hState : ob.state <;> simp at hMatch
+  cases hState : ob.state <;> try simp at hMatch
   case committed =>
     simpa [hState]
 
@@ -4089,7 +4089,7 @@ theorem obligation_aborted_canonical_form {ob : ObligationRecord}
       | ObligationState.aborted => True
       | _ => False) :
     ob.state = ObligationState.aborted := by
-  cases hState : ob.state <;> simp at hMatch
+  cases hState : ob.state <;> try simp at hMatch
   case aborted =>
     simpa [hState]
 
@@ -4100,7 +4100,7 @@ theorem obligation_leaked_canonical_form {ob : ObligationRecord}
       | ObligationState.leaked => True
       | _ => False) :
     ob.state = ObligationState.leaked := by
-  cases hState : ob.state <;> simp at hMatch
+  cases hState : ob.state <;> try simp at hMatch
   case leaked =>
     simpa [hState]
 
