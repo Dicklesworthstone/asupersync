@@ -1,6 +1,5 @@
 #![allow(missing_docs)]
 
-
 use asupersync::cx::Cx;
 use asupersync::sync::{AsyncResourceFactory, GenericPool, Pool, PoolConfig};
 use std::future::Future;

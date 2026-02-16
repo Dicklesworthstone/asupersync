@@ -218,7 +218,9 @@ impl Reactor for EpollReactor {
         }
 
         // Track the registration for modify/deregister
-        state.tokens.insert(token, RegistrationInfo { raw_fd, interest });
+        state
+            .tokens
+            .insert(token, RegistrationInfo { raw_fd, interest });
         state.fds.insert(raw_fd, token);
         drop(state);
 

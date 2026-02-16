@@ -231,9 +231,13 @@ impl Drop for Registration {
             return;
         }
         if let Some(reactor) = self.reactor.upgrade() {
-            // Deregister, ignoring errors (source may already be gone
-            // or reactor may be shutting down)
-            let _ = reactor.deregister_by_token(self.token);
+            // Best-effort cleanup: retry once on non-NotFound errors to reduce
+            // stale-registration risk if the first deregister attempt fails transiently.
+            if let Err(err) = reactor.deregister_by_token(self.token) {
+                if err.kind() != io::ErrorKind::NotFound {
+                    let _ = reactor.deregister_by_token(self.token);
+                }
+            }
         }
     }
 }
@@ -507,6 +511,30 @@ mod tests {
         let count = reactor.deregister_count();
         crate::assert_with_log!(count == 2, "best-effort cleanup attempted", 2usize, count);
         crate::test_complete!("explicit_deregister_error_attempts_best_effort_cleanup");
+    }
+
+    #[test]
+    fn drop_retries_after_transient_deregister_error() {
+        init_test("drop_retries_after_transient_deregister_error");
+        let reactor = FlakyReactor::new();
+        let token = Token::new(11);
+
+        {
+            let _reg = Registration::new(
+                token,
+                Arc::downgrade(&reactor) as Weak<dyn ReactorHandle>,
+                Interest::READABLE,
+            );
+        }
+
+        let count = reactor.deregister_count();
+        crate::assert_with_log!(
+            count == 2,
+            "drop retries deregister once after transient error",
+            2usize,
+            count
+        );
+        crate::test_complete!("drop_retries_after_transient_deregister_error");
     }
 
     #[test]

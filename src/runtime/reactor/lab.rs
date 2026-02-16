@@ -2042,7 +2042,12 @@ mod tests {
             reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
             crate::assert_with_log!(events.len() == 1, "single HUP", 1usize, events.len());
             let first = events.iter().next().expect("event");
-            crate::assert_with_log!(first.is_hangup(), "first event is HUP", true, first.is_hangup());
+            crate::assert_with_log!(
+                first.is_hangup(),
+                "first event is HUP",
+                true,
+                first.is_hangup()
+            );
 
             // Closed is sticky; multiple queued readiness events still collapse to HUP.
             reactor.set_ready(token, Event::readable(token));
