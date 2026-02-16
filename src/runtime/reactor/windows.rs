@@ -73,6 +73,18 @@ mod iocp_impl {
 
             interest
         }
+
+        /// Returns true when a deregistration error indicates the socket is already gone.
+        ///
+        /// IOCP backends can surface slightly different OS errors depending on
+        /// the socket lifecycle timing. Treat these as best-effort cleanup.
+        fn is_already_gone_error(err: &io::Error) -> bool {
+            // ERROR_INVALID_HANDLE (6)
+            // ERROR_NOT_FOUND (1168)
+            // WSAENOTSOCK (10038)
+            matches!(err.raw_os_error(), Some(6 | 1168 | 10038))
+                || err.kind() == io::ErrorKind::NotFound
+        }
     }
 
     impl Reactor for IocpReactor {
@@ -89,6 +101,12 @@ mod iocp_impl {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     "token already registered",
+                ));
+            }
+            if regs.values().any(|info| info.raw_socket == raw_socket) {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "socket already registered",
                 ));
             }
 
@@ -126,10 +144,19 @@ mod iocp_impl {
         fn deregister(&self, token: Token) -> io::Result<()> {
             let mut regs = self.registrations.lock();
             let info = regs
-                .remove(&token)
+                .get(&token)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "token not registered"))?;
-            self.poller.delete(info.raw_socket)?;
-            Ok(())
+            match self.poller.delete(info.raw_socket) {
+                Ok(()) => {
+                    regs.remove(&token);
+                    Ok(())
+                }
+                Err(err) if Self::is_already_gone_error(&err) => {
+                    regs.remove(&token);
+                    Ok(())
+                }
+                Err(err) => Err(err),
+            }
         }
 
         fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
@@ -189,6 +216,29 @@ mod iocp_impl {
             let event = IocpReactor::interest_to_poll_event(token, Interest::NONE);
             let roundtrip = IocpReactor::poll_event_to_interest(&event);
             assert!(roundtrip.is_empty());
+        }
+
+        #[test]
+        fn duplicate_socket_register_fails_with_already_exists() {
+            use std::net::TcpListener;
+
+            let reactor = IocpReactor::new().expect("failed to create iocp reactor");
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+
+            reactor
+                .register(&listener, Token::new(1), Interest::READABLE)
+                .expect("first register should succeed");
+
+            let duplicate = reactor.register(&listener, Token::new(2), Interest::READABLE);
+            assert!(duplicate.is_err(), "duplicate socket register should fail");
+            assert_eq!(
+                duplicate.expect_err("duplicate should error").kind(),
+                io::ErrorKind::AlreadyExists
+            );
+
+            reactor
+                .deregister(Token::new(1))
+                .expect("deregister should succeed");
         }
     }
 }
