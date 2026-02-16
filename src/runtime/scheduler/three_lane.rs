@@ -726,10 +726,8 @@ impl ThreeLaneScheduler {
 
             // 1. Try scheduling on current thread (fastest, no locks if TLS setup)
             // ONLY if this thread is the owner.
-            if is_pinned_here {
-                if schedule_local_task(task) {
-                    return;
-                }
+            if is_pinned_here && schedule_local_task(task) {
+                return;
             }
 
             // 2. Try routing to pinned worker (cross-thread spawn)
@@ -799,10 +797,8 @@ impl ThreeLaneScheduler {
 
             // 1. Try scheduling on current thread (fastest, no locks if TLS setup)
             // ONLY if this thread is the owner.
-            if is_pinned_here {
-                if schedule_local_task(task) {
-                    return;
-                }
+            if is_pinned_here && schedule_local_task(task) {
+                return;
             }
 
             // 2. Try routing to pinned worker (cross-thread wake)
@@ -1655,6 +1651,7 @@ impl ThreeLaneWorker {
         }
 
         impl Drop for TaskExecutionGuard<'_> {
+            #[allow(clippy::significant_drop_tightening)] // false positive: guard still borrowed by wake_dependents_locked
             fn drop(&mut self) {
                 if !self.completed && std::thread::panicking() {
                     // 1. Mark task as Panicked (using hot-path task table if available)
@@ -4545,12 +4542,13 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::significant_drop_tightening)] // false positive: record borrows from guard
     fn test_local_task_cross_thread_wake_routes_correctly() {
         // Verify that `wake` schedules a pinned local task on the
         // owner worker instead of the current thread.
         use crate::runtime::RuntimeState;
         use crate::sync::ContendedMutex;
-        use crate::types::{Budget, RegionId};
+        use crate::types::Budget;
 
         // 1. Setup runtime state and scheduler with 2 workers
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
