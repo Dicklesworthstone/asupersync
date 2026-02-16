@@ -700,11 +700,7 @@ fn bridge_upgrade_preserves_state() {
 
 #[test]
 fn bridge_apply_snapshot_updates_state() {
-    let mut bridge = RegionBridge::new_local(
-        RegionId::new_for_test(1, 0),
-        None,
-        Budget::default(),
-    );
+    let mut bridge = RegionBridge::new_local(RegionId::new_for_test(1, 0), None, Budget::default());
 
     // Create a snapshot with different state
     let mut snapshot = RegionSnapshot::empty(RegionId::new_for_test(1, 0));
@@ -714,13 +710,11 @@ fn bridge_apply_snapshot_updates_state() {
         polls_remaining: Some(99),
         cost_remaining: Some(100),
     };
-    snapshot.tasks = vec![
-        TaskSnapshot {
-            task_id: TaskId::new_for_test(10, 0),
-            state: TaskState::Running,
-            priority: 10,
-        }
-    ];
+    snapshot.tasks = vec![TaskSnapshot {
+        task_id: TaskId::new_for_test(10, 0),
+        state: TaskState::Running,
+        priority: 10,
+    }];
     snapshot.cancel_reason = Some("Timeout".to_string());
 
     // Apply snapshot

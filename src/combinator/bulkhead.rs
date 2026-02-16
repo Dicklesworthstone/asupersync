@@ -1437,6 +1437,10 @@ mod tests {
 
         // 6. Verify permit is returned
         // BUG: Without the fix, this assertion fails because the permit is leaked.
-        assert_eq!(bh.available(), 1, "permit should be released upon cancellation of granted entry");
+        assert_eq!(
+            bh.available(),
+            1,
+            "permit should be released upon cancellation of granted entry"
+        );
     }
 }

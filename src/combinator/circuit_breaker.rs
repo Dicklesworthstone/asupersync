@@ -1748,7 +1748,10 @@ mod tests {
 
         // State should be Open (probe failed due to panic)
         // With the fix, the CallGuard records a failure on drop.
-        assert!(matches!(cb.state(), State::Open { .. }), "Panic should record failure and reopen circuit");
+        assert!(
+            matches!(cb.state(), State::Open { .. }),
+            "Panic should record failure and reopen circuit"
+        );
 
         // Subsequent call should be rejected as Open, not HalfOpenFull
         let result = cb.should_allow(now);

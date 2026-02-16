@@ -44,21 +44,29 @@ fn test_apply_snapshot_updates_local_state() {
     };
 
     // 3. Apply snapshot
-    bridge.apply_snapshot(&snapshot).expect("apply_snapshot failed");
+    bridge
+        .apply_snapshot(&snapshot)
+        .expect("apply_snapshot failed");
 
     // 4. Verify local state matches snapshot
     // This will fail until apply_snapshot is implemented
     assert_eq!(bridge.local_state(), RegionState::Closing, "State mismatch");
-    
+
     let tasks = bridge.local().task_ids();
-    assert!(tasks.contains(&TaskId::new_for_test(2, 0)), "Task 2 missing");
-    
+    assert!(
+        tasks.contains(&TaskId::new_for_test(2, 0)),
+        "Task 2 missing"
+    );
+
     let children = bridge.local().child_ids();
-    assert!(children.contains(&RegionId::new_for_test(3, 0)), "Child 3 missing");
-    
+    assert!(
+        children.contains(&RegionId::new_for_test(3, 0)),
+        "Child 3 missing"
+    );
+
     let budget = bridge.local().budget();
     assert_eq!(budget.poll_quota, 50, "Budget poll quota mismatch");
-    
+
     let reason = bridge.local().cancel_reason();
     assert!(reason.is_some(), "Cancel reason missing");
 }
