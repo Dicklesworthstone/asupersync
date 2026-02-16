@@ -1539,8 +1539,15 @@ impl ThreeLaneWorker {
     /// If the task record doesn't exist (e.g., in tests), allows scheduling.
     pub fn schedule_local(&self, task: TaskId, priority: u8) {
         let should_schedule = self.with_task_table_ref(|tt| {
-            tt.task(task)
-                .is_none_or(|record| record.wake_state.notify())
+            tt.task(task).is_none_or(|record| {
+                // SAFETY: Local (!Send) tasks must never be scheduled in the PriorityScheduler
+                // because it is exposed to work stealing. Use local_ready instead.
+                debug_assert!(
+                    !record.is_local(),
+                    "schedule_local called with local task {task:?}: local tasks must use local_ready queue"
+                );
+                record.wake_state.notify()
+            })
         });
         if should_schedule {
             let mut local = self.local.lock().expect("local scheduler lock poisoned");
