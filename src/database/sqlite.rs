@@ -49,9 +49,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 static SQLITE_POOL: OnceLock<BlockingPool> = OnceLock::new();
 
 fn get_sqlite_pool() -> BlockingPoolHandle {
-    SQLITE_POOL
-        .get_or_init(|| BlockingPool::new(1, 4))
-        .handle()
+    SQLITE_POOL.get_or_init(|| BlockingPool::new(1, 4)).handle()
 }
 
 /// Error type for SQLite operations.
@@ -794,8 +792,8 @@ impl rusqlite::ToSql for SqliteValue {
 mod tests {
     use super::*;
     use crate::cx::Cx;
-    use crate::types::Outcome;
     use crate::types::Budget;
+    use crate::types::Outcome;
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
     use futures_lite::future::block_on;

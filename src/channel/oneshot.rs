@@ -1120,12 +1120,22 @@ mod tests {
         let permit = tx.reserve(&cx);
         // At this point: sender_consumed=true, permit_outstanding=true
         let closed_during_permit = rx.is_closed();
-        crate::assert_with_log!(!closed_during_permit, "not closed during permit", false, closed_during_permit);
+        crate::assert_with_log!(
+            !closed_during_permit,
+            "not closed during permit",
+            false,
+            closed_during_permit
+        );
 
         permit.abort();
         // Now: sender_consumed=true, permit_outstanding=false, value=None → closed
         let closed_after_abort = rx.is_closed();
-        crate::assert_with_log!(closed_after_abort, "closed after abort", true, closed_after_abort);
+        crate::assert_with_log!(
+            closed_after_abort,
+            "closed after abort",
+            true,
+            closed_after_abort
+        );
         crate::test_complete!("is_closed_after_permit_abort");
     }
 
