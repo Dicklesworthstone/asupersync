@@ -378,6 +378,8 @@ const MAX_ALLOWED_TABLE_SIZE: usize = 1024 * 1024;
 /// Maximum allowed decoded string length to prevent DoS (256 KB).
 /// This bounds the allocation size before the header-list-size check runs.
 const MAX_STRING_LENGTH: usize = 256 * 1024;
+/// Maximum consecutive dynamic table size updates allowed at block start.
+const MAX_SIZE_UPDATES: usize = 16;
 
 /// HPACK decoder for decoding headers.
 #[derive(Debug)]
@@ -426,16 +428,35 @@ impl Decoder {
     ///
     /// Per RFC 7541 §4.2, dynamic table size updates are only permitted at the
     /// beginning of the header block (before the first header field
-    /// representation). Any size update after the first header is a
-    /// COMPRESSION_ERROR.
+    /// representation). Any size update after a header field representation is
+    /// a COMPRESSION_ERROR.
     pub fn decode(&mut self, src: &mut Bytes) -> Result<Vec<Header>, H2Error> {
         let mut headers = Vec::new();
         let mut total_size = 0;
-        let mut first_header_seen = false;
+
+        // RFC 7541 §4.2: dynamic table size updates are valid at the beginning
+        // of a header block and MAY appear multiple times there.
+        // Accept update-only blocks as valid.
+        let mut size_update_count = 0;
+        while !src.is_empty() && (src[0] & 0xe0 == 0x20) {
+            size_update_count += 1;
+            if size_update_count > MAX_SIZE_UPDATES {
+                return Err(H2Error::compression(
+                    "too many consecutive dynamic table size updates",
+                ));
+            }
+
+            let new_size = decode_integer(src, 5)?;
+            if new_size > self.allowed_table_size {
+                return Err(H2Error::compression(
+                    "dynamic table size update exceeds allowed maximum",
+                ));
+            }
+            self.dynamic_table.set_max_size(new_size);
+        }
 
         while !src.is_empty() {
-            let header = self.decode_header(src, !first_header_seen)?;
-            first_header_seen = true;
+            let header = self.decode_header(src)?;
             total_size += header.size();
             if total_size > self.max_header_list_size {
                 return Err(H2Error::compression("header list too large"));
@@ -448,80 +469,42 @@ impl Decoder {
 
     /// Decode a single header.
     ///
-    /// Uses iterative approach instead of recursion to prevent stack overflow
-    /// from malicious sequences of dynamic table size updates.
-    ///
-    /// `allow_size_updates` is true only before the first header field
-    /// representation in a block, per RFC 7541 §4.2.
-    fn decode_header(
-        &mut self,
-        src: &mut Bytes,
-        allow_size_updates: bool,
-    ) -> Result<Header, H2Error> {
-        // Maximum consecutive size updates allowed to prevent DoS
-        const MAX_SIZE_UPDATES: usize = 16;
-        let mut size_update_count = 0;
+    fn decode_header(&mut self, src: &mut Bytes) -> Result<Header, H2Error> {
+        if src.is_empty() {
+            return Err(H2Error::compression("unexpected end of header block"));
+        }
 
-        loop {
-            if src.is_empty() {
-                return Err(H2Error::compression("unexpected end of header block"));
-            }
+        let first = src[0];
 
-            let first = src[0];
+        if first & 0x80 != 0 {
+            // Indexed header field
+            let index = decode_integer(src, 7)?;
+            return self.get_indexed(index);
+        }
 
-            if first & 0x80 != 0 {
-                // Indexed header field
-                let index = decode_integer(src, 7)?;
-                return self.get_indexed(index);
-            }
+        if first & 0x40 != 0 {
+            // Literal with incremental indexing
+            let (name, value) = self.decode_literal(src, 6)?;
+            let header = Header::new(name, value);
+            self.dynamic_table.insert(header.clone());
+            return Ok(header);
+        }
 
-            if first & 0x40 != 0 {
-                // Literal with incremental indexing
-                let (name, value) = self.decode_literal(src, 6)?;
-                let header = Header::new(name, value);
-                self.dynamic_table.insert(header.clone());
-                return Ok(header);
-            }
+        if first & 0x20 != 0 {
+            return Err(H2Error::compression(
+                "dynamic table size update after first header in block",
+            ));
+        }
 
-            if first & 0x20 != 0 {
-                // Dynamic table size update — RFC 7541 §4.2 requires these
-                // appear only at the start of a header block.
-                if !allow_size_updates {
-                    return Err(H2Error::compression(
-                        "dynamic table size update after first header in block",
-                    ));
-                }
-                size_update_count += 1;
-                if size_update_count > MAX_SIZE_UPDATES {
-                    return Err(H2Error::compression(
-                        "too many consecutive dynamic table size updates",
-                    ));
-                }
-                let new_size = decode_integer(src, 5)?;
-                // Validate against allowed maximum to prevent DoS
-                if new_size > self.allowed_table_size {
-                    return Err(H2Error::compression(
-                        "dynamic table size update exceeds allowed maximum",
-                    ));
-                }
-                self.dynamic_table.set_max_size(new_size);
-                // Continue loop to decode next header (iterative instead of recursive)
-                if src.is_empty() {
-                    return Err(H2Error::compression("size update without header"));
-                }
-                continue;
-            }
-
-            if first & 0x10 != 0 {
-                // Literal never indexed
-                let (name, value) = self.decode_literal(src, 4)?;
-                return Ok(Header::new(name, value));
-            }
-
-            // Literal without indexing
+        if first & 0x10 != 0 {
+            // Literal never indexed
             let (name, value) = self.decode_literal(src, 4)?;
             return Ok(Header::new(name, value));
         }
+
+        // Literal without indexing
+        let (name, value) = self.decode_literal(src, 4)?;
+        Ok(Header::new(name, value))
     }
 
     /// Decode a literal header field.
@@ -1295,13 +1278,28 @@ mod tests {
     }
 
     #[test]
-    fn test_dynamic_table_size_update_without_header() {
+    fn test_dynamic_table_size_update_without_header_is_accepted() {
         let mut decoder = Decoder::new();
         let mut buf = BytesMut::new();
         encode_integer(&mut buf, 0, 5, 0x20);
 
         let mut src = buf.freeze();
-        assert_compression_error(decoder.decode(&mut src));
+        let headers = decoder.decode(&mut src).unwrap();
+        assert!(headers.is_empty());
+        assert_eq!(decoder.dynamic_table.max_size(), 0);
+    }
+
+    #[test]
+    fn test_multiple_size_updates_without_headers_apply_last_value() {
+        let mut decoder = Decoder::new();
+        let mut buf = BytesMut::new();
+        encode_integer(&mut buf, 1024, 5, 0x20);
+        encode_integer(&mut buf, 512, 5, 0x20);
+
+        let mut src = buf.freeze();
+        let headers = decoder.decode(&mut src).unwrap();
+        assert!(headers.is_empty());
+        assert_eq!(decoder.dynamic_table.max_size(), 512);
     }
 
     #[test]
