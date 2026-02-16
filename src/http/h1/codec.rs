@@ -712,8 +712,8 @@ impl Decoder for Http1Codec {
 impl Encoder<Response> for Http1Codec {
     type Error = HttpError;
 
+    #[allow(clippy::too_many_lines)]
     fn encode(&mut self, resp: Response, dst: &mut BytesMut) -> Result<(), HttpError> {
-
         let reason = if resp.reason.is_empty() {
             types::default_reason(resp.status)
         } else {

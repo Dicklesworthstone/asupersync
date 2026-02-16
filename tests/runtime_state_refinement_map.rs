@@ -893,6 +893,7 @@ fn runtime_state_refinement_map_conformance_harness_contract_is_complete() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn runtime_state_refinement_map_cross_entity_liveness_contract_is_wired() {
     let map: Value =
         serde_json::from_str(MAP_JSON).expect("runtime state refinement map must parse");
