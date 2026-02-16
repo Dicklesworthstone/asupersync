@@ -97,7 +97,7 @@
 
 use crate::record::{ObligationKind, ObligationState};
 use crate::types::{ObligationId, RegionId, TaskId, Time};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use super::marking::{MarkingEvent, MarkingEventKind};
@@ -555,13 +555,13 @@ pub struct JudgmentCondition {
     /// Resource predicates that must hold (separating conjunction).
     pub predicates: Vec<ResourcePredicate>,
     /// Pending counts per holder.
-    pub holder_pending: HashMap<TaskId, u64>,
+    pub holder_pending: BTreeMap<TaskId, u64>,
     /// Pending counts per region.
-    pub region_pending: HashMap<RegionId, u64>,
+    pub region_pending: BTreeMap<RegionId, u64>,
     /// Regions that must be open.
-    pub regions_open: HashSet<RegionId>,
+    pub regions_open: BTreeSet<RegionId>,
     /// Regions that must be closed.
-    pub regions_closed: HashSet<RegionId>,
+    pub regions_closed: BTreeSet<RegionId>,
 }
 
 impl JudgmentCondition {
@@ -570,10 +570,10 @@ impl JudgmentCondition {
     pub fn empty() -> Self {
         Self {
             predicates: Vec::new(),
-            holder_pending: HashMap::new(),
-            region_pending: HashMap::new(),
-            regions_open: HashSet::new(),
-            regions_closed: HashSet::new(),
+            holder_pending: BTreeMap::new(),
+            region_pending: BTreeMap::new(),
+            regions_open: BTreeSet::new(),
+            regions_closed: BTreeSet::new(),
         }
     }
 }
@@ -854,15 +854,15 @@ struct GhostObligation {
 #[derive(Debug, Default)]
 pub struct SeparationLogicVerifier {
     /// Ghost state for each obligation.
-    obligations: HashMap<ObligationId, GhostObligation>,
+    obligations: BTreeMap<ObligationId, GhostObligation>,
     /// Pending count per holder (authoritative).
-    holder_pending: HashMap<TaskId, u64>,
+    holder_pending: BTreeMap<TaskId, u64>,
     /// Pending count per region (authoritative).
-    region_pending: HashMap<RegionId, u64>,
+    region_pending: BTreeMap<RegionId, u64>,
     /// Closed regions.
-    closed_regions: HashSet<RegionId>,
+    closed_regions: BTreeSet<RegionId>,
     /// Resolved obligations (for use-after-release checking).
-    resolved: HashSet<ObligationId>,
+    resolved: BTreeSet<ObligationId>,
     /// Violations accumulated during verification.
     violations: Vec<SLViolation>,
     /// Counters.
@@ -1141,10 +1141,12 @@ impl SeparationLogicVerifier {
     /// ```
     fn verify_region_close(&mut self, region: RegionId, time: Time) {
         self.judgments_verified += 1;
+        let mut precondition_ok = true;
 
         // Check precondition: region pending count must be zero.
         let pending = self.region_pending.get(&region).copied().unwrap_or(0);
         if pending > 0 {
+            precondition_ok = false;
             self.violations.push(SLViolation {
                 property: SeparationProperty::RegionClosureQuiescence { region },
                 time,
@@ -1157,6 +1159,7 @@ impl SeparationLogicVerifier {
 
         // Check not already closed.
         if self.closed_regions.contains(&region) {
+            precondition_ok = false;
             self.violations.push(SLViolation {
                 property: SeparationProperty::RegionClosureQuiescence { region },
                 time,
@@ -1165,6 +1168,10 @@ impl SeparationLogicVerifier {
                      RegionOpen(r) precondition fails",
                 ),
             });
+        }
+
+        if !precondition_ok {
+            return;
         }
 
         // Establish postcondition.
@@ -2124,6 +2131,44 @@ mod tests {
         let sound = result.is_sound();
         crate::assert_with_log!(!sound, "double close detected", false, sound);
         crate::test_complete!("verifier_detects_double_close");
+    }
+
+    #[test]
+    fn verifier_failed_close_with_pending_does_not_poison_later_close() {
+        init_test("verifier_failed_close_with_pending_does_not_poison_later_close");
+        let events = vec![
+            reserve_event(0, o(0), ObligationKind::SendPermit, t(0), r(0)),
+            close_event(10, r(0)), // invalid: pending > 0
+            commit_event(20, o(0), r(0), ObligationKind::SendPermit),
+            close_event(30, r(0)), // should be valid after commit
+        ];
+
+        let mut verifier = SeparationLogicVerifier::new();
+        let result = verifier.verify(&events);
+
+        let quiescence_count = result
+            .violations_for_property(|p| {
+                matches!(p, SeparationProperty::RegionClosureQuiescence { .. })
+            })
+            .count();
+        crate::assert_with_log!(
+            quiescence_count == 1,
+            "only the first close should violate quiescence",
+            1,
+            quiescence_count
+        );
+
+        let poisoned_close = result
+            .violations
+            .iter()
+            .any(|v| v.description.contains("already closed"));
+        crate::assert_with_log!(
+            !poisoned_close,
+            "failed close should not mark region closed",
+            false,
+            poisoned_close
+        );
+        crate::test_complete!("verifier_failed_close_with_pending_does_not_poison_later_close");
     }
 
     // ---- Verifier: realistic scenarios -----------------------------------------

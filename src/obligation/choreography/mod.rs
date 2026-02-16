@@ -84,7 +84,7 @@ pub mod codegen;
 pub mod pipeline;
 
 use crate::obligation::calm::Monotonicity;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 // ============================================================================
@@ -690,7 +690,7 @@ impl GlobalProtocol {
         }
 
         // Check: interaction-level rules
-        let mut loop_labels = HashSet::new();
+        let mut loop_labels = BTreeSet::new();
         self.validate_interaction(&self.interaction, &declared, &mut loop_labels, &mut errors);
 
         errors
@@ -700,7 +700,7 @@ impl GlobalProtocol {
         &self,
         interaction: &Interaction,
         declared: &BTreeSet<&str>,
-        loop_labels: &mut HashSet<String>,
+        loop_labels: &mut BTreeSet<String>,
         errors: &mut Vec<ValidationError>,
     ) {
         match interaction {
