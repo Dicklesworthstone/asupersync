@@ -756,6 +756,11 @@ impl PushPromiseFrame {
             | ((u32::from(payload[1])) << 16)
             | ((u32::from(payload[2])) << 8)
             | u32::from(payload[3]);
+        if promised_stream_id == 0 {
+            return Err(H2Error::protocol(
+                "PUSH_PROMISE frame with promised stream ID 0",
+            ));
+        }
         payload = payload.slice(4..);
 
         // Remove padding
@@ -1560,6 +1565,20 @@ mod tests {
             stream_id: 1,
         };
         let payload = Bytes::from_static(&[0, 0, 2]);
+
+        let err = PushPromiseFrame::parse(&header, payload).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    fn test_push_promise_promised_stream_id_zero_rejected() {
+        let header = FrameHeader {
+            length: 5,
+            frame_type: FrameType::PushPromise as u8,
+            flags: headers_flags::END_HEADERS,
+            stream_id: 1,
+        };
+        let payload = Bytes::from_static(&[0, 0, 0, 0, 0]);
 
         let err = PushPromiseFrame::parse(&header, payload).unwrap_err();
         assert_eq!(err.code, ErrorCode::ProtocolError);
