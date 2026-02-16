@@ -221,9 +221,11 @@ where
                     }
 
                     // Fallback to async acquisition
-                    let cx =
-                        Cx::current().expect("ConcurrencyLimit must run within a runtime context");
-                    let future = OwnedAcquireFuture::new(self.semaphore.clone(), cx.clone(), 1);
+                    let Some(runtime_cx) = Cx::current() else {
+                        return Poll::Pending;
+                    };
+                    let future =
+                        OwnedAcquireFuture::new(self.semaphore.clone(), runtime_cx.clone(), 1);
                     self.state = State::Acquiring(Box::pin(future));
                 }
                 State::Acquiring(future) => match future.as_mut().poll(cx) {

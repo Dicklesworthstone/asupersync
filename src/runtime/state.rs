@@ -1909,7 +1909,7 @@ impl RuntimeState {
     /// finalizer per region (respecting the async barrier).
     pub fn drain_ready_async_finalizers(&mut self) -> Vec<(TaskId, u8)> {
         let mut scheduled = Vec::new();
-        let regions: Vec<RegionId> = self
+        let regions: SmallVec<[RegionId; 8]> = self
             .regions
             .iter()
             .filter(|(_, region)| {

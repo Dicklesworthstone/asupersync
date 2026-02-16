@@ -473,13 +473,14 @@ impl Future for OwnedAcquireFuture {
         // Single lock acquisition (same optimization as AcquireFuture).
         let mut state = self.semaphore.state.lock();
 
-        let (waiter_id, is_new_waiter) = if let Some(id) = existing_waiter_id {
-            (id, false)
-        } else {
-            let id = state.next_waiter_id;
-            state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-            (id, true)
-        };
+        let (waiter_id, is_new_waiter) = existing_waiter_id.map_or_else(
+            || {
+                let id = state.next_waiter_id;
+                state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
+                (id, true)
+            },
+            |id| (id, false),
+        );
 
         if state.closed {
             state.waiters.retain(|waiter| waiter.id != waiter_id);
