@@ -17,7 +17,7 @@ use crate::trace::distributed::{CausalOrder, LogicalTime};
 use crate::trace::event::{TraceData, TraceEvent, TraceEventKind};
 use crate::types::TaskId;
 use core::fmt;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 fn causal_order(a: &LogicalTime, b: &LogicalTime) -> CausalOrder {
     match a.partial_cmp(b) {
@@ -127,7 +127,7 @@ impl CausalOrderVerifier {
     /// Check that events on the same task have properly ordered logical times.
     fn check_same_task_ordering(&mut self, trace: &[TraceEvent]) {
         // Group events by task
-        let mut task_events: HashMap<TaskId, Vec<(usize, &TraceEvent)>> = HashMap::new();
+        let mut task_events: BTreeMap<TaskId, Vec<(usize, &TraceEvent)>> = BTreeMap::new();
 
         for (idx, event) in trace.iter().enumerate() {
             if event.logical_time.is_none() {
@@ -168,7 +168,7 @@ impl CausalOrderVerifier {
     /// strictly after the Spawn event for task T.
     fn check_causal_dependencies(&mut self, trace: &[TraceEvent]) {
         // Map task_id -> spawn event index
-        let mut spawn_events: HashMap<TaskId, (usize, &TraceEvent)> = HashMap::new();
+        let mut spawn_events: BTreeMap<TaskId, (usize, &TraceEvent)> = BTreeMap::new();
 
         for (idx, event) in trace.iter().enumerate() {
             if event.logical_time.is_none() {

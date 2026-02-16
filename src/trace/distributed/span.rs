@@ -3,7 +3,7 @@
 use super::context::SymbolTraceContext;
 use crate::types::symbol::{ObjectId, SymbolId};
 use crate::types::Time;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Status of a symbol span.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,7 +53,7 @@ pub struct SymbolSpan {
     object_id: Option<ObjectId>,
     symbol_id: Option<SymbolId>,
     symbol_count: Option<u32>,
-    attributes: HashMap<String, String>,
+    attributes: BTreeMap<String, String>,
     error_message: Option<String>,
 }
 
@@ -71,7 +71,7 @@ impl SymbolSpan {
             object_id: Some(object_id),
             symbol_id: None,
             symbol_count: None,
-            attributes: HashMap::new(),
+            attributes: BTreeMap::new(),
             error_message: None,
         }
     }
@@ -93,7 +93,7 @@ impl SymbolSpan {
             object_id: Some(symbol_id.object_id()),
             symbol_id: Some(symbol_id),
             symbol_count: None,
-            attributes: HashMap::new(),
+            attributes: BTreeMap::new(),
             error_message: None,
         }
     }
@@ -111,7 +111,7 @@ impl SymbolSpan {
             object_id: Some(symbol_id.object_id()),
             symbol_id: Some(symbol_id),
             symbol_count: None,
-            attributes: HashMap::new(),
+            attributes: BTreeMap::new(),
             error_message: None,
         }
     }
@@ -134,7 +134,7 @@ impl SymbolSpan {
             object_id: Some(object_id),
             symbol_id: None,
             symbol_count: Some(symbol_count),
-            attributes: HashMap::new(),
+            attributes: BTreeMap::new(),
             error_message: None,
         }
     }
@@ -206,7 +206,7 @@ impl SymbolSpan {
 
     /// Returns attributes.
     #[must_use]
-    pub fn attributes(&self) -> &HashMap<String, String> {
+    pub fn attributes(&self) -> &BTreeMap<String, String> {
         &self.attributes
     }
 

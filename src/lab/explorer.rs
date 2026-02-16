@@ -30,7 +30,7 @@ use crate::trace::scoring::{
 };
 use serde::Serialize;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::Path;
@@ -142,7 +142,7 @@ pub struct CoverageMetrics {
     /// Number of runs that discovered a new equivalence class.
     pub new_class_discoveries: usize,
     /// Per-class run counts (fingerprint -> count).
-    pub class_run_counts: HashMap<u64, usize>,
+    pub class_run_counts: BTreeMap<u64, usize>,
     /// Novelty histogram: novelty score -> run count.
     pub novelty_histogram: BTreeMap<u32, usize>,
     /// Saturation signals (deterministic summary).
@@ -271,7 +271,7 @@ impl ExplorationReport {
     /// equivalence class but produced different certificates (divergence).
     #[must_use]
     pub fn certificate_divergences(&self) -> Vec<(u64, u64)> {
-        let mut by_class: HashMap<u64, Vec<&RunResult>> = HashMap::new();
+        let mut by_class: BTreeMap<u64, Vec<&RunResult>> = BTreeMap::new();
         for r in &self.runs {
             by_class.entry(r.fingerprint).or_default().push(r);
         }
@@ -466,9 +466,9 @@ impl UnexploredSeedJson {
 /// detecting invariant violations.
 pub struct ScheduleExplorer {
     config: ExplorerConfig,
-    explored_seeds: HashSet<u64>,
-    known_fingerprints: HashSet<u64>,
-    class_counts: HashMap<u64, usize>,
+    explored_seeds: BTreeSet<u64>,
+    known_fingerprints: BTreeSet<u64>,
+    class_counts: BTreeMap<u64, usize>,
     results: Vec<RunResult>,
     violations: Vec<ViolationReport>,
     new_class_count: usize,
@@ -480,9 +480,9 @@ impl ScheduleExplorer {
     pub fn new(config: ExplorerConfig) -> Self {
         Self {
             config,
-            explored_seeds: HashSet::new(),
-            known_fingerprints: HashSet::new(),
-            class_counts: HashMap::new(),
+            explored_seeds: BTreeSet::new(),
+            known_fingerprints: BTreeSet::new(),
+            class_counts: BTreeMap::new(),
             results: Vec::new(),
             violations: Vec::new(),
             new_class_count: 0,
@@ -661,11 +661,11 @@ pub struct DporExplorer {
     /// Seeds pending exploration (derived from backtrack points).
     work_queue: VecDeque<u64>,
     /// Explored seeds.
-    explored_seeds: HashSet<u64>,
+    explored_seeds: BTreeSet<u64>,
     /// Known equivalence classes (fingerprint → monoid element).
-    known_classes: HashMap<u64, TraceMonoid>,
+    known_classes: BTreeMap<u64, TraceMonoid>,
     /// Per-class run counts.
-    class_counts: HashMap<u64, usize>,
+    class_counts: BTreeMap<u64, usize>,
     /// All run results.
     results: Vec<RunResult>,
     /// Violations found.
@@ -716,9 +716,9 @@ impl DporExplorer {
         Self {
             config,
             work_queue,
-            explored_seeds: HashSet::new(),
-            known_classes: HashMap::new(),
-            class_counts: HashMap::new(),
+            explored_seeds: BTreeSet::new(),
+            known_classes: BTreeMap::new(),
+            class_counts: BTreeMap::new(),
             results: Vec::new(),
             violations: Vec::new(),
             total_races: 0,
@@ -948,12 +948,12 @@ pub struct TopologyExplorer {
     /// Priority queue: (score, seed). Highest score popped first.
     frontier: BinaryHeap<(TopologicalScore, u64)>,
     /// Explored seeds.
-    explored_seeds: HashSet<u64>,
+    explored_seeds: BTreeSet<u64>,
     /// Known equivalence classes (fingerprint → run count).
-    known_fingerprints: HashSet<u64>,
-    class_counts: HashMap<u64, usize>,
+    known_fingerprints: BTreeSet<u64>,
+    class_counts: BTreeMap<u64, usize>,
     /// Seen persistence classes for novelty detection.
-    seen_classes: HashSet<ClassId>,
+    seen_classes: BTreeSet<ClassId>,
     /// Per-run results.
     results: Vec<RunResult>,
     /// Violations found.
@@ -977,10 +977,10 @@ impl TopologyExplorer {
         Self {
             config,
             frontier,
-            explored_seeds: HashSet::new(),
-            known_fingerprints: HashSet::new(),
-            class_counts: HashMap::new(),
-            seen_classes: HashSet::new(),
+            explored_seeds: BTreeSet::new(),
+            known_fingerprints: BTreeSet::new(),
+            class_counts: BTreeMap::new(),
+            seen_classes: BTreeSet::new(),
             results: Vec::new(),
             violations: Vec::new(),
             ledgers: Vec::new(),
@@ -1322,7 +1322,7 @@ mod tests {
             equivalence_classes: 3,
             total_runs: 10,
             new_class_discoveries: 3,
-            class_run_counts: HashMap::new(),
+            class_run_counts: BTreeMap::new(),
             novelty_histogram,
             saturation,
         };
@@ -1481,7 +1481,7 @@ mod tests {
 
         // With two tasks and different seeds, the scheduling order may differ.
         // Collect several seeds and check we see at least 1 unique hash.
-        let hashes: HashSet<u64> = (0..10).map(run).collect();
+        let hashes: BTreeSet<u64> = (0..10).map(run).collect();
         assert!(!hashes.is_empty());
     }
 

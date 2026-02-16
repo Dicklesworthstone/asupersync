@@ -21,7 +21,7 @@
 
 use crate::trace::replay::{CompactRegionId, ReplayEvent, ReplayTrace, TraceMetadata};
 use serde::Serialize;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 /// Newtype key for region IDs in hash maps (wraps the inner u64).
@@ -87,7 +87,7 @@ struct RegionNode {
 /// Returns: (tree, roots) where tree maps region keys to nodes
 /// and roots are regions with no parent.
 /// Compute subtree indices via post-order traversal.
-fn collect_subtree(region: RegionKey, tree: &mut HashMap<RegionKey, RegionNode>) -> Vec<usize> {
+fn collect_subtree(region: RegionKey, tree: &mut BTreeMap<RegionKey, RegionNode>) -> Vec<usize> {
     let children: Vec<RegionKey> = tree
         .get(&region)
         .map(|n| n.children.clone())
@@ -112,10 +112,10 @@ fn collect_subtree(region: RegionKey, tree: &mut HashMap<RegionKey, RegionNode>)
     indices
 }
 
-fn build_region_tree(events: &[ReplayEvent]) -> (HashMap<RegionKey, RegionNode>, Vec<RegionKey>) {
+fn build_region_tree(events: &[ReplayEvent]) -> (BTreeMap<RegionKey, RegionNode>, Vec<RegionKey>) {
     // First pass: discover all regions and parent relationships.
-    let mut parent_map: HashMap<RegionKey, Option<RegionKey>> = HashMap::new();
-    let mut region_events: HashMap<RegionKey, Vec<usize>> = HashMap::new();
+    let mut parent_map: BTreeMap<RegionKey, Option<RegionKey>> = BTreeMap::new();
+    let mut region_events: BTreeMap<RegionKey, Vec<usize>> = BTreeMap::new();
 
     for (idx, event) in events.iter().enumerate() {
         match event {
@@ -135,7 +135,7 @@ fn build_region_tree(events: &[ReplayEvent]) -> (HashMap<RegionKey, RegionNode>,
     }
 
     // Build tree nodes.
-    let mut tree: HashMap<RegionKey, RegionNode> = HashMap::new();
+    let mut tree: BTreeMap<RegionKey, RegionNode> = BTreeMap::new();
     let mut roots = Vec::new();
 
     // Initialize nodes.
@@ -174,10 +174,10 @@ fn build_region_tree(events: &[ReplayEvent]) -> (HashMap<RegionKey, RegionNode>,
 /// binding established by `TaskSpawned`.
 fn assign_task_events_to_regions(
     events: &[ReplayEvent],
-    tree: &mut HashMap<RegionKey, RegionNode>,
+    tree: &mut BTreeMap<RegionKey, RegionNode>,
 ) {
     // Build task → region map from TaskSpawned events.
-    let mut task_region: HashMap<u64, RegionKey> = HashMap::new();
+    let mut task_region: BTreeMap<u64, RegionKey> = BTreeMap::new();
     for event in events {
         if let ReplayEvent::TaskSpawned { task, region, .. } = event {
             task_region.insert(task.0, rkey(*region));
@@ -239,7 +239,7 @@ where
 struct PruneCtx<'a> {
     events: &'a [ReplayEvent],
     metadata: &'a TraceMetadata,
-    tree: &'a HashMap<RegionKey, RegionNode>,
+    tree: &'a BTreeMap<RegionKey, RegionNode>,
     max_evals: usize,
 }
 
@@ -290,7 +290,7 @@ fn try_prune_region<F>(
 fn top_down_prune<F>(
     events: &[ReplayEvent],
     metadata: &TraceMetadata,
-    tree: &HashMap<RegionKey, RegionNode>,
+    tree: &BTreeMap<RegionKey, RegionNode>,
     roots: &[RegionKey],
     oracle: &mut F,
     stats: &mut MinimizationStats,

@@ -22,7 +22,7 @@
 //! explanations for why one node outranks another.
 
 use crate::trace::gf2::{BoundaryMatrix, PersistencePairs};
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
@@ -73,7 +73,7 @@ impl PartialOrd for TopologicalScore {
 /// Two classes are "the same" if they have the same birth and death
 /// column indices in the reduced boundary matrix. This is deterministic
 /// because our reduction algorithm uses stable left-to-right pivoting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ClassId {
     /// Birth column index in the boundary matrix.
     pub birth: usize,
@@ -162,9 +162,9 @@ impl EvidenceLedger {
 ///
 /// An [`EvidenceLedger`] containing the score and per-class evidence.
 #[must_use]
-pub fn score_persistence<S: std::hash::BuildHasher>(
+pub fn score_persistence(
     pairs: &PersistencePairs,
-    seen_classes: &mut HashSet<ClassId, S>,
+    seen_classes: &mut BTreeSet<ClassId>,
     fingerprint: u64,
 ) -> EvidenceLedger {
     let mut entries = Vec::new();
@@ -233,9 +233,9 @@ pub fn seed_fingerprint(seed: u64) -> u64 {
 ///
 /// Reduces the matrix, extracts persistence pairs, and scores them.
 #[must_use]
-pub fn score_boundary_matrix<S: std::hash::BuildHasher>(
+pub fn score_boundary_matrix(
     matrix: &BoundaryMatrix,
-    seen_classes: &mut HashSet<ClassId, S>,
+    seen_classes: &mut BTreeSet<ClassId>,
     fingerprint: u64,
 ) -> EvidenceLedger {
     let reduced = matrix.reduce();
@@ -254,7 +254,7 @@ mod tests {
             pairs: vec![],
             unpaired: vec![],
         };
-        let mut seen = HashSet::new();
+        let mut seen = BTreeSet::new();
         let ledger = score_persistence(&pairs, &mut seen, 42);
         assert_eq!(ledger.score.novelty, 0);
         assert_eq!(ledger.score.persistence_sum, 0);
@@ -268,7 +268,7 @@ mod tests {
             pairs: vec![(0, 5), (1, 8)],
             unpaired: vec![3],
         };
-        let mut seen = HashSet::new();
+        let mut seen = BTreeSet::new();
         let ledger = score_persistence(&pairs, &mut seen, 100);
 
         assert_eq!(ledger.score.novelty, 3); // all new
@@ -283,7 +283,7 @@ mod tests {
             pairs: vec![(0, 5)],
             unpaired: vec![],
         };
-        let mut seen = HashSet::new();
+        let mut seen = BTreeSet::new();
 
         let l1 = score_persistence(&pairs, &mut seen, 1);
         assert_eq!(l1.score.novelty, 1);
@@ -344,8 +344,8 @@ mod tests {
             unpaired: vec![5],
         };
 
-        let mut seen1 = HashSet::new();
-        let mut seen2 = HashSet::new();
+        let mut seen1 = BTreeSet::new();
+        let mut seen2 = BTreeSet::new();
 
         let l1 = score_persistence(&pairs, &mut seen1, 42);
         let l2 = score_persistence(&pairs, &mut seen2, 42);
@@ -359,7 +359,7 @@ mod tests {
             pairs: vec![(0, 5)],
             unpaired: vec![3],
         };
-        let mut seen = HashSet::new();
+        let mut seen = BTreeSet::new();
         let ledger = score_persistence(&pairs, &mut seen, 0xFF);
 
         let summary = ledger.summary();
@@ -388,7 +388,7 @@ mod tests {
         d.set(4, 6);
         d.set(5, 6);
 
-        let mut seen = HashSet::new();
+        let mut seen = BTreeSet::new();
         let ledger = score_boundary_matrix(&d, &mut seen, 0);
 
         // Filled triangle: β0=1, β1=0 (cycle killed by face)

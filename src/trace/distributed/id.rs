@@ -4,7 +4,7 @@ use crate::util::DetRng;
 use core::fmt;
 
 /// A 128-bit trace identifier.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TraceId {
     high: u64,
     low: u64,

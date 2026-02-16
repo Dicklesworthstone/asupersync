@@ -5,7 +5,7 @@ use super::id::TraceId;
 use super::span::{SymbolSpan, SymbolSpanKind, SymbolSpanStatus};
 use crate::types::symbol::ObjectId;
 use crate::types::Time;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::RwLock;
 use std::time::Duration;
 
@@ -63,7 +63,7 @@ pub struct TraceSummary {
 
 /// Collector for symbol-based traces.
 pub struct SymbolTraceCollector {
-    traces: RwLock<HashMap<TraceId, TraceRecord>>,
+    traces: RwLock<BTreeMap<TraceId, TraceRecord>>,
     max_traces: usize,
     max_age: Duration,
     clock_skew_tolerance: Duration,
@@ -75,7 +75,7 @@ impl SymbolTraceCollector {
     #[must_use]
     pub fn new(local_region: RegionTag) -> Self {
         Self {
-            traces: RwLock::new(HashMap::new()),
+            traces: RwLock::new(BTreeMap::new()),
             max_traces: 10_000,
             max_age: Duration::from_hours(1),
             clock_skew_tolerance: Duration::from_millis(100),
@@ -283,7 +283,7 @@ impl SymbolTraceCollector {
             .collect()
     }
 
-    fn evict_oldest(&self, traces: &mut HashMap<TraceId, TraceRecord>, now: Time) {
+    fn evict_oldest(&self, traces: &mut BTreeMap<TraceId, TraceRecord>, now: Time) {
         let mut to_remove: Vec<_> = traces
             .iter()
             .filter(|(_, r)| r.is_complete)

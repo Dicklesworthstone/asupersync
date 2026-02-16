@@ -507,7 +507,7 @@ pub fn trace_coverage_analysis(events: &[TraceEvent]) -> TraceCoverageAnalysis {
 #[derive(Debug, Clone, Default)]
 pub struct SleepSet {
     /// Explored (divergence_index, race_hash) pairs.
-    explored: HashSet<u64>,
+    explored: BTreeSet<u64>,
 }
 
 impl SleepSet {
@@ -561,7 +561,7 @@ impl SleepSet {
     }
 }
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 #[cfg(test)]
 mod tests {

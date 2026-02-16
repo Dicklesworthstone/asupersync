@@ -14,7 +14,7 @@
 //! | Scenario-construction dependent (obligation leak, region structure) | `minimizer` |
 
 use crate::record::ObligationKind;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Instant;
 
@@ -118,15 +118,15 @@ impl fmt::Display for ScenarioElement {
 // ============================================================================
 
 struct ConcurrencyTree {
-    children: HashMap<usize, Vec<usize>>,
-    elements_by_region: HashMap<usize, Vec<usize>>,
+    children: BTreeMap<usize, Vec<usize>>,
+    elements_by_region: BTreeMap<usize, Vec<usize>>,
     non_root_regions: Vec<usize>,
 }
 
 impl ConcurrencyTree {
     fn build(elements: &[ScenarioElement]) -> Self {
-        let mut children: HashMap<usize, Vec<usize>> = HashMap::new();
-        let mut elements_by_region: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut children: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        let mut elements_by_region: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         let mut non_root_regions = Vec::new();
 
         for (i, elem) in elements.iter().enumerate() {
