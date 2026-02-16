@@ -5,6 +5,7 @@
 
 use super::{Layer, Service};
 use crate::cx::Cx;
+use crate::sync::semaphore::OwnedAcquireFuture;
 use crate::sync::{OwnedSemaphorePermit, Semaphore};
 use std::future::Future;
 use std::pin::Pin;
