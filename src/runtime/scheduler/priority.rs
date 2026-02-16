@@ -9,9 +9,8 @@
 //! Uses binary heaps for O(log n) insertion instead of O(n) VecDeque insertion.
 
 use crate::types::{TaskId, Time};
-use crate::util::{ArenaIndex, DetBuildHasher, DetHashSet};
+use crate::util::{ArenaIndex, DetBuildHasher, DetHashSet, DetHasher};
 use std::cmp::Ordering;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::BinaryHeap;
 use std::hash::{Hash, Hasher};
 
@@ -891,7 +890,7 @@ impl ScheduleCertificate {
 
     /// Record a scheduling decision: task dispatched from a lane at a step.
     pub fn record(&mut self, task: TaskId, lane: DispatchLane, step: u64) {
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = DetHasher::default();
         self.hash.hash(&mut hasher);
         // Pack the arena index for deterministic hashing.
         let idx = task.0;
@@ -2429,6 +2428,33 @@ mod tests {
             second
         );
         crate::test_complete!("move_to_cancel_lower_priority_is_noop");
+    }
+
+    #[test]
+    fn certificate_uses_deterministic_hasher() {
+        // Regression: ScheduleCertificate must produce identical hashes across
+        // Rust versions. Previously used std DefaultHasher which is not
+        // guaranteed stable; now uses DetHasher with a fixed seed.
+        let mut c1 = ScheduleCertificate::new();
+        c1.record(task(42), DispatchLane::Cancel, 0);
+        c1.record(task(7), DispatchLane::Ready, 1);
+        c1.record(task(13), DispatchLane::Timed, 2);
+
+        // The hash must be non-zero (meaningful accumulation).
+        assert_ne!(c1.hash(), 0, "certificate hash should be non-zero");
+
+        // Running the same sequence again must produce the exact same hash.
+        let mut c2 = ScheduleCertificate::new();
+        c2.record(task(42), DispatchLane::Cancel, 0);
+        c2.record(task(7), DispatchLane::Ready, 1);
+        c2.record(task(13), DispatchLane::Timed, 2);
+
+        assert_eq!(
+            c1.hash(),
+            c2.hash(),
+            "identical sequences must produce identical hashes"
+        );
+        assert!(c1.matches(&c2));
     }
 
     #[test]
