@@ -1247,17 +1247,20 @@ impl ThreeLaneWorker {
         // All global/fast paths returned nothing.  Check local cancel,
         // timed, and ready lanes under one lock acquisition (replaces 3
         // separate lock round-trips).
-        if check_cancel {
-            self.cancel_streak = 0;
-        }
         if let Some((lane, task)) = self.try_local_all_lanes(suggestion, check_cancel, now) {
             match lane {
                 0 => {
-                    self.cancel_streak = 1;
+                    self.cancel_streak = self.cancel_streak.saturating_add(1);
                     self.record_cancel_dispatch();
                 }
-                1 => self.preemption_metrics.timed_dispatches += 1,
-                _ => self.preemption_metrics.ready_dispatches += 1,
+                1 => {
+                    self.cancel_streak = 0;
+                    self.preemption_metrics.timed_dispatches += 1;
+                }
+                _ => {
+                    self.cancel_streak = 0;
+                    self.preemption_metrics.ready_dispatches += 1;
+                }
             }
             return Some(task);
         }
@@ -2395,6 +2398,40 @@ mod tests {
 
         let mut workers = scheduler.take_workers().into_iter();
         let mut worker = workers.next().unwrap();
+
+        let first = worker.next_task().expect("first dispatch");
+        let second = worker.next_task().expect("second dispatch");
+        let third = worker.next_task().expect("third dispatch");
+        let fourth = worker.next_task().expect("fourth dispatch");
+
+        assert!(cancel_tasks.contains(&first));
+        assert!(cancel_tasks.contains(&second));
+        assert_eq!(third, ready_task);
+        assert!(cancel_tasks.contains(&fourth));
+    }
+
+    #[test]
+    fn test_local_cancel_lane_fairness_limit() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 2);
+
+        let cancel_tasks = [
+            TaskId::new_for_test(1, 11),
+            TaskId::new_for_test(1, 12),
+            TaskId::new_for_test(1, 13),
+        ];
+        let ready_task = TaskId::new_for_test(1, 14);
+
+        let mut workers = scheduler.take_workers().into_iter();
+        let mut worker = workers.next().unwrap();
+
+        {
+            let mut local = worker.local.lock().unwrap();
+            for &task_id in &cancel_tasks {
+                local.schedule_cancel(task_id, 100);
+            }
+            local.schedule(ready_task, 50);
+        }
 
         let first = worker.next_task().expect("first dispatch");
         let second = worker.next_task().expect("second dispatch");
