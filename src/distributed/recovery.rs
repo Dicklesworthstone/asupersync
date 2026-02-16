@@ -297,10 +297,27 @@ impl RecoveryCollector {
 
     /// Adds a collected symbol, deduplicating by ESI.
     ///
-    /// Returns `true` if the symbol was accepted (new ESI), `false` if duplicate.
+    /// If an existing symbol for the same ESI is found but is unverified,
+    /// and the new symbol is verified, the existing symbol is replaced.
+    ///
+    /// Returns `true` if the symbol was accepted (new ESI or replaced unverified),
+    /// `false` if duplicate/rejected.
     pub fn add_collected(&mut self, cs: CollectedSymbol) -> bool {
         let esi = cs.symbol.esi();
         if self.seen_esi.contains(&esi) {
+            // Find existing symbol and check if we should upgrade/replace it.
+            // This prevents a poisoning attack where a bad peer sends unverified garbage first.
+            if let Some(idx) = self.collected.iter().position(|s| s.symbol.esi() == esi) {
+                if !self.collected[idx].verified && cs.verified {
+                    // Replace unverified with verified.
+                    self.collected[idx] = cs;
+                    // Metrics: replace counts as "received" (or improvement)?
+                    // We don't increment received/collected count because total unique ESIs is same.
+                    // But we might want to track this event.
+                    // For now, just return true.
+                    return true;
+                }
+            }
             self.metrics.symbols_duplicate += 1;
             return false;
         }
@@ -515,10 +532,11 @@ impl StateDecoder {
                 }
                 SymbolAcceptResult::Rejected(reason) => {
                     let message = format!("symbol rejected: {reason:?}");
-                    self.decoder_state = DecoderState::Failed {
-                        reason: message.clone(),
-                    };
-                    return Err(Error::new(ErrorKind::DecodingFailed).with_message(message));
+                    // Do not fail the entire batch just because one symbol was bad.
+                    // We might have enough valid symbols in the rest of the batch.
+                    // Just log it (conceptually) and continue.
+                    #[cfg(feature = "tracing-integration")]
+                    tracing::warn!(%message, "ignoring rejected symbol during recovery");
                 }
                 _ => {}
             }
