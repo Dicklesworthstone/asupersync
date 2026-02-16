@@ -1068,10 +1068,12 @@ impl ThreeLaneWorker {
 
                 // Quick check for new work in global and local queues.
                 // We use has_runnable_work(now) to avoid busy-looping on future timed tasks.
-                let local_has_runnable = self
-                    .local
-                    .lock()
-                    .is_ok_and(|local| local.has_runnable_work(now));
+                // Also grab next_deadline in the same lock acquisition so the parking
+                // path below doesn't need a second lock round-trip.
+                let (local_has_runnable, local_deadline) =
+                    self.local.lock().map_or((false, None), |local| {
+                        (local.has_runnable_work(now), local.next_deadline())
+                    });
                 let local_ready_has_work = self.local_ready.lock().is_ok_and(|q| !q.is_empty());
                 if self.global.has_runnable_work(now) || local_has_runnable || local_ready_has_work
                 {
@@ -1088,12 +1090,12 @@ impl ThreeLaneWorker {
                     // Park with timeout based on next timer deadline or IO polling needs.
                     let has_io = self.io_driver.is_some();
 
-                    // Calculate earliest deadline from all sources
+                    // Calculate earliest deadline from all sources.
+                    // local_deadline was pre-computed above (same lock acquisition).
                     let timer_deadline = self
                         .timer_driver
                         .as_ref()
                         .and_then(TimerDriverHandle::next_deadline);
-                    let local_deadline = self.local.lock().ok().and_then(|l| l.next_deadline());
                     let global_deadline = self.global.peek_earliest_deadline();
 
                     let next_deadline = [timer_deadline, local_deadline, global_deadline]
@@ -1192,36 +1194,33 @@ impl ThreeLaneWorker {
             .map_or(Time::ZERO, TimerDriverHandle::now);
 
         // ── PHASE 1: Global queues (lock-free) ───────────────────────
-        match suggestion {
-            SchedulingSuggestion::MeetDeadlines => {
-                // Deadline pressure: global timed first.
-                if let Some(tt) = self.global.pop_timed_if_due(now) {
-                    self.cancel_streak = 0;
-                    self.preemption_metrics.timed_dispatches += 1;
-                    return Some(tt.task);
-                }
-                if check_cancel {
-                    if let Some(pt) = self.global.pop_cancel() {
-                        self.cancel_streak += 1;
-                        self.record_cancel_dispatch();
-                        return Some(pt.task);
-                    }
+        if suggestion == SchedulingSuggestion::MeetDeadlines {
+            // Deadline pressure: global timed first.
+            if let Some(tt) = self.global.pop_timed_if_due(now) {
+                self.cancel_streak = 0;
+                self.preemption_metrics.timed_dispatches += 1;
+                return Some(tt.task);
+            }
+            if check_cancel {
+                if let Some(pt) = self.global.pop_cancel() {
+                    self.cancel_streak += 1;
+                    self.record_cancel_dispatch();
+                    return Some(pt.task);
                 }
             }
-            _ => {
-                // Default / drain: cancel > timed.
-                if check_cancel {
-                    if let Some(pt) = self.global.pop_cancel() {
-                        self.cancel_streak += 1;
-                        self.record_cancel_dispatch();
-                        return Some(pt.task);
-                    }
+        } else {
+            // Default / drain: cancel > timed.
+            if check_cancel {
+                if let Some(pt) = self.global.pop_cancel() {
+                    self.cancel_streak += 1;
+                    self.record_cancel_dispatch();
+                    return Some(pt.task);
                 }
-                if let Some(tt) = self.global.pop_timed_if_due(now) {
-                    self.cancel_streak = 0;
-                    self.preemption_metrics.timed_dispatches += 1;
-                    return Some(tt.task);
-                }
+            }
+            if let Some(tt) = self.global.pop_timed_if_due(now) {
+                self.cancel_streak = 0;
+                self.preemption_metrics.timed_dispatches += 1;
+                return Some(tt.task);
             }
         }
 
@@ -1248,71 +1247,19 @@ impl ThreeLaneWorker {
         // All global/fast paths returned nothing.  Check local cancel,
         // timed, and ready lanes under one lock acquisition (replaces 3
         // separate lock round-trips).
-        //
-        // If cancel was eligible but the global queue was empty, reset
-        // the streak (matches original try_cancel_work returning None).
         if check_cancel {
             self.cancel_streak = 0;
         }
-        {
-            let mut local = self.local.lock().expect("local scheduler lock poisoned");
-            let rng_hint = self.rng.next_u64();
-
-            let local_result = match suggestion {
-                SchedulingSuggestion::MeetDeadlines => {
-                    // timed > cancel > ready (deadline pressure).
-                    if let Some(task) = local.pop_timed_only_with_hint(rng_hint, now) {
-                        Some((1u8, task))
-                    } else if check_cancel {
-                        local
-                            .pop_cancel_only_with_hint(rng_hint)
-                            .map(|t| (0u8, t))
-                    } else {
-                        None
-                    }
+        if let Some((lane, task)) = self.try_local_all_lanes(suggestion, check_cancel, now) {
+            match lane {
+                0 => {
+                    self.cancel_streak = 1;
+                    self.record_cancel_dispatch();
                 }
-                _ => {
-                    // cancel > timed > ready (default / drain).
-                    if check_cancel {
-                        if let Some(task) = local.pop_cancel_only_with_hint(rng_hint) {
-                            Some((0u8, task))
-                        } else {
-                            local
-                                .pop_timed_only_with_hint(rng_hint, now)
-                                .map(|t| (1u8, t))
-                        }
-                    } else {
-                        local
-                            .pop_timed_only_with_hint(rng_hint, now)
-                            .map(|t| (1u8, t))
-                    }
-                }
-            };
-
-            // Ready lane is always last within the local scheduler.
-            let local_result = local_result
-                .or_else(|| local.pop_ready_only_with_hint(rng_hint).map(|t| (2u8, t)));
-
-            // Release the lock before updating metrics / calling methods
-            // on `self` (avoids borrow conflict with the MutexGuard).
-            drop(local);
-
-            if let Some((lane, task)) = local_result {
-                match lane {
-                    0 => {
-                        // Local cancel found: start a fresh streak at 1.
-                        self.cancel_streak = 1;
-                        self.record_cancel_dispatch();
-                    }
-                    1 => {
-                        self.preemption_metrics.timed_dispatches += 1;
-                    }
-                    _ => {
-                        self.preemption_metrics.ready_dispatches += 1;
-                    }
-                }
-                return Some(task);
+                1 => self.preemption_metrics.timed_dispatches += 1,
+                _ => self.preemption_metrics.ready_dispatches += 1,
             }
+            return Some(task);
         }
 
         // ── PHASE 4: Steal from other workers ────────────────────────
@@ -1540,6 +1487,54 @@ impl ThreeLaneWorker {
         let mut local = self.local.lock().expect("local scheduler lock poisoned");
         let rng_hint = self.rng.next_u64();
         local.pop_any_lane_with_hint(rng_hint, now)
+    }
+
+    /// Single-lock local lane check with suggestion-aware ordering.
+    ///
+    /// Acquires the local `PriorityScheduler` lock once and checks
+    /// cancel, timed, and ready lanes in the order dictated by the
+    /// governor suggestion.  Returns `(lane_tag, task_id)` where
+    /// lane_tag is 0=cancel, 1=timed, 2=ready.
+    fn try_local_all_lanes(
+        &mut self,
+        suggestion: SchedulingSuggestion,
+        check_cancel: bool,
+        now: Time,
+    ) -> Option<(u8, TaskId)> {
+        let mut local = self.local.lock().expect("local scheduler lock poisoned");
+        let rng_hint = self.rng.next_u64();
+
+        // Check cancel + timed in suggestion-specific order.
+        let result = if suggestion == SchedulingSuggestion::MeetDeadlines {
+            // timed > cancel (deadline pressure).
+            local
+                .pop_timed_only_with_hint(rng_hint, now)
+                .map(|t| (1u8, t))
+                .or_else(|| {
+                    check_cancel
+                        .then(|| local.pop_cancel_only_with_hint(rng_hint).map(|t| (0u8, t)))
+                        .flatten()
+                })
+        } else {
+            // cancel > timed (default / drain).
+            if check_cancel {
+                local
+                    .pop_cancel_only_with_hint(rng_hint)
+                    .map(|t| (0u8, t))
+                    .or_else(|| {
+                        local
+                            .pop_timed_only_with_hint(rng_hint, now)
+                            .map(|t| (1u8, t))
+                    })
+            } else {
+                local
+                    .pop_timed_only_with_hint(rng_hint, now)
+                    .map(|t| (1u8, t))
+            }
+        };
+
+        // Ready lane is always last.
+        result.or_else(|| local.pop_ready_only_with_hint(rng_hint).map(|t| (2u8, t)))
     }
 
     /// Tries to steal work from other workers.

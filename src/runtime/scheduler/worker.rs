@@ -12,7 +12,7 @@ use crate::tracing_compat::{error, trace};
 use crate::types::{TaskId, Time};
 use crate::util::DetRng;
 use std::cell::Cell;
-use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
@@ -45,8 +45,8 @@ pub struct Worker {
     pub trace: TraceBufferHandle,
     /// Timer driver for timestamps (optional).
     pub timer_driver: Option<TimerDriverHandle>,
-    /// Tokens seen for I/O trace emission.
-    seen_io_tokens: BTreeSet<u64>,
+    /// Tokens seen for I/O trace emission (HashSet for O(1) insert vs BTreeSet O(log n)).
+    seen_io_tokens: HashSet<u64>,
     /// Pre-allocated scratch vec for local waiters (reused across polls).
     scratch_local: Cell<Vec<TaskId>>,
     /// Pre-allocated scratch vec for global waiters (reused across polls).
@@ -91,7 +91,7 @@ impl Worker {
             io_driver,
             trace,
             timer_driver,
-            seen_io_tokens: BTreeSet::new(),
+            seen_io_tokens: HashSet::new(),
             scratch_local: Cell::new(Vec::new()),
             scratch_global: Cell::new(Vec::new()),
         }
@@ -248,11 +248,14 @@ impl Worker {
                                         }
                                         Some(_worker_id) => {
                                             error!(
-                                                ?waiter,
-                                                worker_id = _worker_id,
-                                                current_worker = self.worker.id,
-                                                "panic path: pinned local waiter has invalid worker id, wake skipped"
-                                            );
+                                            ?waiter,
+                                            worker_id = _worker_id,
+                                            current_worker = self.worker.id,
+                                            "panic path: pinned local waiter has invalid worker id, wake skipped"
+                                        );
+                                            // We consumed `notify()` above; clear the wake bit so a
+                                            // future valid wake is not permanently dedup-suppressed.
+                                            record.wake_state.clear();
                                         }
                                         None => local_waiters.push(waiter),
                                     }
@@ -279,11 +282,36 @@ impl Worker {
 
         trace!(task_id = ?task_id, worker_id = self.id, "executing task");
 
-        // Try to find the task in global state first
+        // Check local (thread-local) storage first — no lock required.
+        // This saves a full lock round-trip for local tasks (the common
+        // case on each worker) versus the previous approach of locking
+        // state, failing the global lookup, dropping, then re-locking.
+        let local_task = crate::runtime::local::remove_local_task(task_id);
+
         let (mut stored, task_cx, wake_state, metrics, cached_waker) = {
             let mut state = self.state.lock().expect("runtime state lock poisoned");
 
-            if let Some(stored) = state.remove_stored_future(task_id) {
+            if let Some(local_task) = local_task {
+                // Local task found — single lock acquisition for record info
+                if let Some(record) = state.task_mut(task_id) {
+                    record.start_running();
+                    record.wake_state.begin_poll();
+                    let task_cx = record.cx.clone();
+                    let wake_state = Arc::clone(&record.wake_state);
+                    let cached = record.cached_waker.take();
+                    let metrics = state.metrics_provider();
+                    drop(state);
+                    (
+                        AnyStoredTask::Local(local_task),
+                        task_cx,
+                        wake_state,
+                        metrics,
+                        cached,
+                    )
+                } else {
+                    return; // Task record missing
+                }
+            } else if let Some(stored) = state.remove_stored_future(task_id) {
                 // Global task found
                 if let Some(record) = state.task_mut(task_id) {
                     record.start_running();
@@ -304,34 +332,7 @@ impl Worker {
                     return; // Task record missing?
                 }
             } else {
-                // Not in global, check local
-                drop(state); // Drop lock before accessing thread-local
-
-                if let Some(local_task) = crate::runtime::local::remove_local_task(task_id) {
-                    // Local task found
-                    // We need to re-acquire state lock to get record info
-                    let mut state = self.state.lock().expect("runtime state lock poisoned");
-                    if let Some(record) = state.task_mut(task_id) {
-                        record.start_running();
-                        record.wake_state.begin_poll();
-                        let task_cx = record.cx.clone();
-                        let wake_state = Arc::clone(&record.wake_state);
-                        let cached = record.cached_waker.take();
-                        let metrics = state.metrics_provider();
-                        drop(state);
-                        (
-                            AnyStoredTask::Local(local_task),
-                            task_cx,
-                            wake_state,
-                            metrics,
-                            cached,
-                        )
-                    } else {
-                        return; // Task record missing
-                    }
-                } else {
-                    return; // Task not found anywhere
-                }
+                return; // Task not found anywhere
             }
         };
 
@@ -438,6 +439,9 @@ impl Worker {
                                             current_worker = self.id,
                                             "ready path: pinned local waiter has foreign worker id, wake skipped"
                                         );
+                                        // We consumed `notify()` above; clear the wake bit so a
+                                        // future valid wake is not permanently dedup-suppressed.
+                                        record.wake_state.clear();
                                     }
                                     None => local_waiters.push(waiter),
                                 }
@@ -1177,12 +1181,90 @@ mod tests {
                 guard.task(completing_task).is_none(),
                 "completed task should be removed from runtime state"
             );
+            let waiter_record = guard.task(waiter_task).expect("waiter task should exist");
             assert!(
-                guard.task(waiter_task).is_some(),
-                "foreign local waiter should remain in state"
+                !waiter_record.wake_state.is_notified(),
+                "foreign waiter wake state should be cleared when routing is skipped"
             );
             drop(guard);
         }
+
+        assert!(
+            global.pop().is_none(),
+            "foreign local waiter must not be routed to global queue"
+        );
+        assert!(
+            worker.local.pop().is_none(),
+            "foreign local waiter must not be routed to current worker local queue"
+        );
+    }
+
+    #[test]
+    fn test_execute_panic_with_foreign_local_waiter_clears_notified_state() {
+        use crate::record::task::TaskRecord;
+        use crate::runtime::stored_task::StoredTask;
+        use crate::runtime::RuntimeState;
+        use crate::sync::ContendedMutex;
+        use crate::types::{Budget, RegionId};
+
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let global = Arc::new(GlobalQueue::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let panicking_task = TaskId::new_for_test(0, 0);
+        let waiter_task = TaskId::new_for_test(1, 0);
+
+        {
+            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let panicking_record = TaskRecord::new(
+                panicking_task,
+                RegionId::new_for_test(0, 0),
+                Budget::INFINITE,
+            );
+            let mut waiter_record =
+                TaskRecord::new(waiter_task, RegionId::new_for_test(0, 0), Budget::INFINITE);
+            waiter_record.pin_to_worker(1);
+            let _panicking_idx = guard.insert_task(panicking_record);
+            let _waiter_idx = guard.insert_task(waiter_record);
+
+            guard
+                .task_mut(panicking_task)
+                .expect("panicking task should exist")
+                .add_waiter(waiter_task);
+
+            guard.store_spawned_task(
+                panicking_task,
+                StoredTask::new_with_id(
+                    async move { panic!("foreign waiter panic wake regression") },
+                    panicking_task,
+                ),
+            );
+        }
+
+        let worker = Worker::new(
+            0,
+            Vec::new(),
+            Arc::clone(&global),
+            Arc::clone(&state),
+            Arc::clone(&shutdown),
+        );
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            worker.execute(panicking_task);
+        }));
+        assert!(result.is_err(), "panicking task should propagate unwind");
+
+        let guard = state.lock().expect("runtime state lock poisoned");
+        let waiter_notified = guard
+            .task(waiter_task)
+            .expect("waiter task should exist")
+            .wake_state
+            .is_notified();
+        drop(guard);
+        assert!(
+            !waiter_notified,
+            "foreign waiter wake state should be cleared when panic-path routing is skipped"
+        );
 
         assert!(
             global.pop().is_none(),
