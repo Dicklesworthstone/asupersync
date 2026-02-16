@@ -33,7 +33,7 @@ use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::net::TcpStream;
 use crate::types::{CancelReason, Outcome};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::pin::Pin;
@@ -390,7 +390,7 @@ pub struct MySqlRow {
     /// Column metadata.
     columns: Arc<Vec<MySqlColumn>>,
     /// Column name to index mapping.
-    column_indices: Arc<HashMap<String, usize>>,
+    column_indices: Arc<BTreeMap<String, usize>>,
     /// Row values.
     values: Vec<MySqlValue>,
 }
@@ -984,13 +984,13 @@ impl MySqlConnection {
         if capabilities & capability::CLIENT_SECURE_CONNECTION != 0 {
             let part2_len = std::cmp::max(13, auth_data_len.saturating_sub(8)) as usize;
             let auth_data_2 = reader.read_bytes(part2_len.min(reader.remaining()))?;
-            // Remove trailing null if present
-            let trimmed = auth_data_2
-                .iter()
-                .copied()
-                .take_while(|&b| b != 0)
-                .collect::<Vec<_>>();
-            auth_plugin_data.extend_from_slice(&trimmed);
+            // Strip only the trailing null byte (nonce may contain embedded 0x00)
+            let end = if auth_data_2.last() == Some(&0) {
+                auth_data_2.len() - 1
+            } else {
+                auth_data_2.len()
+            };
+            auth_plugin_data.extend_from_slice(&auth_data_2[..end]);
         }
 
         // Auth plugin name (if capabilities include PLUGIN_AUTH)
@@ -1293,7 +1293,7 @@ impl MySqlConnection {
 
         // Read column definitions
         let mut columns = Vec::with_capacity(column_count);
-        let mut indices = HashMap::with_capacity(column_count);
+        let mut indices = BTreeMap::new();
 
         for i in 0..column_count {
             let (data, seq) = self.read_packet().await?;

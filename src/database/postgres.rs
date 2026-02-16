@@ -34,7 +34,7 @@ use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::net::TcpStream;
 use crate::types::{CancelReason, Outcome};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::pin::Pin;
@@ -312,7 +312,7 @@ pub struct PgRow {
     /// Column metadata.
     columns: Arc<Vec<PgColumn>>,
     /// Column name to index mapping.
-    column_indices: Arc<HashMap<String, usize>>,
+    column_indices: Arc<BTreeMap<String, usize>>,
     /// Row values.
     values: Vec<PgValue>,
 }
@@ -947,7 +947,7 @@ struct PgConnectionInner {
     /// Secret key for cancel requests.
     secret_key: i32,
     /// Server parameters.
-    parameters: HashMap<String, String>,
+    parameters: BTreeMap<String, String>,
     /// Transaction status.
     transaction_status: u8,
     /// Whether the connection is closed.
@@ -1020,7 +1020,7 @@ impl PgConnection {
                 read_buf: Vec::with_capacity(8192),
                 process_id: 0,
                 secret_key: 0,
-                parameters: HashMap::new(),
+                parameters: BTreeMap::new(),
                 transaction_status: b'I', // Idle
                 closed: false,
             },
@@ -1346,7 +1346,7 @@ impl PgConnection {
 
         // Process responses
         let mut columns: Option<Arc<Vec<PgColumn>>> = None;
-        let mut column_indices: Option<Arc<HashMap<String, usize>>> = None;
+        let mut column_indices: Option<Arc<BTreeMap<String, usize>>> = None;
         let mut rows = Vec::new();
 
         loop {
@@ -1395,7 +1395,10 @@ impl PgConnection {
                 b'E' => {
                     // ErrorResponse — drain to ReadyForQuery before returning so
                     // the connection stays synchronized for subsequent operations.
-                    let err = self.parse_error_response(&data).unwrap_err();
+                    let err = match self.parse_error_response(&data) {
+                        Err(e) => e,
+                        Ok(e) => e,
+                    };
                     loop {
                         let (drain_type, drain_data) = match self.read_message().await {
                             Ok(m) => m,
@@ -1495,7 +1498,10 @@ impl PgConnection {
                 b'E' => {
                     // ErrorResponse — drain to ReadyForQuery before returning so
                     // the connection stays synchronized for subsequent operations.
-                    let err = self.parse_error_response(&data).unwrap_err();
+                    let err = match self.parse_error_response(&data) {
+                        Err(e) => e,
+                        Ok(e) => e,
+                    };
                     loop {
                         let (drain_type, drain_data) = match self.read_message().await {
                             Ok(m) => m,
@@ -1648,7 +1654,7 @@ impl PgConnection {
     fn parse_row_description(
         &self,
         data: &[u8],
-    ) -> Result<(Vec<PgColumn>, HashMap<String, usize>), PgError> {
+    ) -> Result<(Vec<PgColumn>, BTreeMap<String, usize>), PgError> {
         let mut reader = MessageReader::new(data);
         let num_fields_i16 = reader.read_i16()?;
         if num_fields_i16 < 0 {
@@ -1659,7 +1665,7 @@ impl PgConnection {
         let num_fields = num_fields_i16 as usize;
 
         let mut columns = Vec::with_capacity(num_fields);
-        let mut indices = HashMap::with_capacity(num_fields);
+        let mut indices = BTreeMap::new();
 
         for i in 0..num_fields {
             let name = reader.read_cstring()?.to_string();
@@ -1987,7 +1993,7 @@ mod tests {
                 read_buf: Vec::new(),
                 process_id: 0,
                 secret_key: 0,
-                parameters: HashMap::new(),
+                parameters: BTreeMap::new(),
                 transaction_status: b'I',
                 closed: false,
             },
