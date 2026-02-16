@@ -416,6 +416,22 @@ pub struct OwnedAcquireFuture {
     waiter_id: Option<u64>,
 }
 
+impl OwnedAcquireFuture {
+    /// Construct a new acquire future with an owned `Cx`.
+    ///
+    /// This avoids the lifetime issue with the `async fn acquire` signature
+    /// which borrows `&Cx` (and thus ties the future's lifetime to the borrow).
+    pub(crate) fn new(semaphore: Arc<Semaphore>, cx: Cx, count: usize) -> Self {
+        assert!(count > 0, "cannot acquire 0 permits");
+        Self {
+            semaphore,
+            cx,
+            count,
+            waiter_id: None,
+        }
+    }
+}
+
 impl Drop for OwnedAcquireFuture {
     fn drop(&mut self) {
         if let Some(waiter_id) = self.waiter_id {

@@ -203,16 +203,16 @@ where
             match &mut self.state {
                 State::Idle => {
                     // Try to acquire synchronously first
-                    if let Ok(permit) =
-                        OwnedSemaphorePermit::try_acquire(self.semaphore.clone(), 1)
+                    if let Ok(permit) = OwnedSemaphorePermit::try_acquire(self.semaphore.clone(), 1)
                     {
                         self.state = State::Ready(permit);
                         return Poll::Ready(Ok(()));
                     }
 
                     // Fallback to async acquisition
-                    let cx = Cx::current().expect("ConcurrencyLimit must run within a runtime context");
-                    let future = OwnedSemaphorePermit::acquire(self.semaphore.clone(), &cx, 1);
+                    let cx =
+                        Cx::current().expect("ConcurrencyLimit must run within a runtime context");
+                    let future = OwnedAcquireFuture::new(self.semaphore.clone(), cx.clone(), 1);
                     self.state = State::Acquiring(Box::pin(future));
                 }
                 State::Acquiring(future) => match future.as_mut().poll(cx) {

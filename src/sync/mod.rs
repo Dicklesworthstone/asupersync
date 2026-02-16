@@ -35,7 +35,7 @@ mod notify;
 mod once_cell;
 mod pool;
 mod rwlock;
-mod semaphore;
+pub(crate) mod semaphore;
 
 pub use barrier::{Barrier, BarrierWaitError, BarrierWaitResult};
 pub use contended_mutex::{ContendedMutex, ContendedMutexGuard, LockMetricsSnapshot};
