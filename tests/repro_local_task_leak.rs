@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 // This test file was an attempt to reproduce a local task leakage bug via integration testing.
 // However, due to API limitations (accessing RuntimeState from tasks) and environment issues
 // (SIGHUP on test execution), the reproduction was moved to a unit test in:

@@ -1,9 +1,11 @@
+#![allow(missing_docs)]
+
 use asupersync::util::det_hash::DetHasher;
 use std::hash::Hasher;
 
 #[test]
 fn test_det_hasher_endianness() {
-    let val: u32 = 0x12345678;
+    let val: u32 = 0x1234_5678;
 
     let mut h1 = DetHasher::default();
     h1.write_u32(val);
@@ -25,7 +27,7 @@ fn test_det_hasher_endianness() {
 
 #[test]
 fn test_det_hasher_usize_width_portability() {
-    let val: usize = 0x12345678;
+    let val: usize = 0x1234_5678;
 
     let mut h1 = DetHasher::default();
     h1.write_usize(val);
