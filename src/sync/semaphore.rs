@@ -1274,7 +1274,7 @@ mod tests {
         init_test("waker_update_on_repoll");
         let cx1 = test_cx();
         let sem = Semaphore::new(1);
-        let _held = sem.try_acquire(1).expect("initial acquire");
+        let held = sem.try_acquire(1).expect("initial acquire");
 
         let w1 = CountingWaker::new();
         let w2 = CountingWaker::new();
@@ -1292,7 +1292,7 @@ mod tests {
         crate::assert_with_log!(still_pending, "pending with waker2", true, still_pending);
 
         // Release permit - should wake waker2 (the updated one), not waker1.
-        drop(_held);
+        drop(held);
         // The semaphore wakes the front waiter's stored waker.
         let w2_woken = w2.count() > 0;
         crate::assert_with_log!(w2_woken, "updated waker woken", true, w2_woken);

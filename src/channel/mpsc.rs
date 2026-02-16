@@ -1507,24 +1507,23 @@ mod tests {
         let p2 = block_on(tx.reserve(&cx)).expect("reserve 2");
 
         // Check: reserved=2, queue=0, used=2
-        {
+        let used = {
             let inner = tx.shared.inner.lock().expect("lock");
-            let used = inner.used_slots();
-            crate::assert_with_log!(used == 2, "used after 2 reserves", 2, used);
-        }
+            inner.used_slots()
+        };
+        crate::assert_with_log!(used == 2, "used after 2 reserves", 2, used);
 
         // Commit one, abort one.
         p1.send(10);
         p2.abort();
 
         // Check: reserved=0, queue=1, used=1
-        {
+        let (used, reserved) = {
             let inner = tx.shared.inner.lock().expect("lock");
-            let used = inner.used_slots();
-            let reserved = inner.reserved;
-            crate::assert_with_log!(used == 1, "used after send+abort", 1, used);
-            crate::assert_with_log!(reserved == 0, "reserved cleared", 0, reserved);
-        }
+            (inner.used_slots(), inner.reserved)
+        };
+        crate::assert_with_log!(used == 1, "used after send+abort", 1, used);
+        crate::assert_with_log!(reserved == 0, "reserved cleared", 0, reserved);
 
         let v = block_on(rx.recv(&cx)).expect("recv");
         crate::assert_with_log!(v == 10, "received committed value", 10, v);
@@ -1540,7 +1539,7 @@ mod tests {
         let cx = test_cx();
 
         // Fill the channel.
-        let _permit = block_on(tx.reserve(&cx)).expect("reserve fills channel");
+        let permit = block_on(tx.reserve(&cx)).expect("reserve fills channel");
 
         // Create a pending reserve future (adds to send_wakers).
         let mut reserve_fut = Box::pin(tx.reserve(&cx));
@@ -1550,7 +1549,7 @@ mod tests {
         assert!(matches!(poll, Poll::Pending));
 
         // Free capacity by aborting the first permit.
-        _permit.abort();
+        permit.abort();
 
         // Now capacity exists, but a waiter is queued. try_reserve must
         // refuse to jump the queue.

@@ -1393,7 +1393,7 @@ mod tests {
         let lock = RwLock::new(42_u32);
 
         // Queue a writer (it will count itself in writer_waiters).
-        let _write_guard = write_blocking(&lock, &cx);
+        let write_guard = write_blocking(&lock, &cx);
         let mut write_fut = lock.write(&cx);
         let pending = poll_once(&mut write_fut).is_none();
         crate::assert_with_log!(pending, "write future pending", true, pending);
@@ -1404,7 +1404,7 @@ mod tests {
         crate::assert_with_log!(read_pending, "read future pending", true, read_pending);
 
         // Release the active writer.
-        drop(_write_guard);
+        drop(write_guard);
 
         // Drop the queued write future. This decrements writer_waiters to 0,
         // which should wake the queued reader.
@@ -1477,7 +1477,7 @@ mod tests {
     #[test]
     fn test_owned_read_guard_basic() {
         init_test("test_owned_read_guard_basic");
-        let cx = test_cx();
+        let _cx = test_cx();
         let lock = StdArc::new(RwLock::new(42_u32));
 
         let guard =
@@ -1495,7 +1495,7 @@ mod tests {
     #[test]
     fn test_owned_write_guard_basic() {
         init_test("test_owned_write_guard_basic");
-        let cx = test_cx();
+        let _cx = test_cx();
         let lock = StdArc::new(RwLock::new(42_u32));
 
         let mut guard = OwnedRwLockWriteGuard::try_write(StdArc::clone(&lock))

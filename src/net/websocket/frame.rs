@@ -1247,7 +1247,7 @@ mod tests {
         buf.put_u8(0x7E);
         // Extended length = 100 (non-minimal: should use 7-bit form)
         buf.put_u16(100);
-        buf.put_slice(&vec![0u8; 100]);
+        buf.put_slice(&[0u8; 100]);
 
         let result = codec.decode(&mut buf);
         assert!(matches!(result, Err(WsError::ProtocolViolation(_))));
@@ -1263,7 +1263,7 @@ mod tests {
         buf.put_u8(0x7F);
         // Extended length = 200 (non-minimal: should use 2-byte form)
         buf.put_u64(200);
-        buf.put_slice(&vec![0u8; 200]);
+        buf.put_slice(&[0u8; 200]);
 
         let result = codec.decode(&mut buf);
         assert!(matches!(result, Err(WsError::ProtocolViolation(_))));
@@ -1352,7 +1352,7 @@ mod tests {
     fn close_frame_code_1005_panics() {
         // RFC 6455 §7.4.1: 1005 (No Status Received) MUST NOT be set as a
         // status code in a Close control frame by an endpoint.
-        Frame::close(Some(1005), None);
+        let _ = Frame::close(Some(1005), None);
     }
 
     #[test]
@@ -1360,7 +1360,7 @@ mod tests {
     fn close_frame_code_1006_panics() {
         // RFC 6455 §7.4.1: 1006 (Abnormal Closure) MUST NOT be set as a
         // status code in a Close control frame by an endpoint.
-        Frame::close(Some(1006), None);
+        let _ = Frame::close(Some(1006), None);
     }
 
     #[test]
@@ -1368,7 +1368,7 @@ mod tests {
     fn close_frame_code_1015_panics() {
         // RFC 6455 §7.4.1: 1015 (TLS Handshake) MUST NOT be set as a
         // status code in a Close control frame by an endpoint.
-        Frame::close(Some(1015), None);
+        let _ = Frame::close(Some(1015), None);
     }
 
     #[test]
@@ -1396,7 +1396,7 @@ mod tests {
         // FIN=1, opcode=Binary → 0x82; MASK=0, len=100 → 0x64
         buf.put_u8(0x82);
         buf.put_u8(100);
-        buf.put_slice(&vec![0u8; 100]);
+        buf.put_slice(&[0u8; 100]);
 
         let result = codec.decode(&mut buf);
         assert!(matches!(

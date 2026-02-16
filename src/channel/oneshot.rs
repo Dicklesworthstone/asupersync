@@ -1150,14 +1150,6 @@ mod tests {
 
     #[test]
     fn sender_drop_wakes_pending_receiver() {
-        // Dropping the sender should wake a pending receiver.
-        init_test("sender_drop_wakes_pending_receiver");
-        let cx = test_cx();
-        let (tx, rx) = channel::<i32>();
-
-        let waker_state = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let waker_state2 = std::sync::Arc::clone(&waker_state);
-
         struct CountWaker(std::sync::Arc<std::sync::atomic::AtomicUsize>);
         impl std::task::Wake for CountWaker {
             fn wake(self: std::sync::Arc<Self>) {
@@ -1165,8 +1157,18 @@ mod tests {
             }
         }
 
-        let waker = Waker::from(std::sync::Arc::new(CountWaker(waker_state2)));
-        let mut task_cx = Context::from_waker(&waker);
+        // Dropping the sender should wake a pending receiver.
+        init_test("sender_drop_wakes_pending_receiver");
+
+        let cx = test_cx();
+        let (tx, rx) = channel::<i32>();
+
+        let notify_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let poll_waker = Waker::from(std::sync::Arc::new(CountWaker(
+            std::sync::Arc::clone(&notify_count),
+        )));
+        let mut task_cx = Context::from_waker(&poll_waker);
         let mut fut = Box::pin(rx.recv(&cx));
 
         let poll = fut.as_mut().poll(&mut task_cx);
@@ -1174,8 +1176,8 @@ mod tests {
 
         drop(tx); // Should wake the receiver.
 
-        let wakes = waker_state.load(std::sync::atomic::Ordering::SeqCst);
-        crate::assert_with_log!(wakes == 1, "woken once", 1usize, wakes);
+        let notifications = notify_count.load(std::sync::atomic::Ordering::SeqCst);
+        crate::assert_with_log!(notifications == 1, "woken once", 1usize, notifications);
 
         let result = fut.as_mut().poll(&mut task_cx);
         let closed_ok = matches!(result, Poll::Ready(Err(RecvError::Closed)));
