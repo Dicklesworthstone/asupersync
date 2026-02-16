@@ -352,8 +352,9 @@ impl Stream {
 
     /// Transition state on receiving headers.
     pub fn recv_headers(&mut self, end_stream: bool, end_headers: bool) -> Result<(), H2Error> {
-        self.headers_complete = end_headers;
-
+        // Validate the state transition BEFORE modifying any fields.
+        // Setting headers_complete before validation would allow
+        // recv_continuation to accumulate fragments on a closed stream.
         match self.state {
             StreamState::Idle => {
                 self.state = if end_stream {
@@ -361,7 +362,6 @@ impl Stream {
                 } else {
                     StreamState::Open
                 };
-                Ok(())
             }
             StreamState::ReservedRemote => {
                 self.state = if end_stream {
@@ -369,26 +369,29 @@ impl Stream {
                 } else {
                     StreamState::HalfClosedLocal
                 };
-                Ok(())
             }
             StreamState::Open if end_stream => {
                 self.state = StreamState::HalfClosedRemote;
-                Ok(())
             }
             StreamState::HalfClosedLocal if end_stream => {
                 self.state = StreamState::Closed;
-                Ok(())
             }
             // Receiving headers without END_STREAM on an already-open stream
             // (e.g. informational 1xx or trailing headers before DATA) is valid
             // per RFC 7540 §8.1 — state stays unchanged.
-            StreamState::Open | StreamState::HalfClosedLocal => Ok(()),
-            _ => Err(H2Error::stream(
-                self.id,
-                ErrorCode::StreamClosed,
-                "cannot receive headers in current state",
-            )),
+            StreamState::Open | StreamState::HalfClosedLocal => {}
+            _ => {
+                return Err(H2Error::stream(
+                    self.id,
+                    ErrorCode::StreamClosed,
+                    "cannot receive headers in current state",
+                ));
+            }
         }
+
+        // Only update headers_complete after the state transition succeeds.
+        self.headers_complete = end_headers;
+        Ok(())
     }
 
     /// Process CONTINUATION frame.
@@ -397,6 +400,15 @@ impl Stream {
         header_block: Bytes,
         end_headers: bool,
     ) -> Result<(), H2Error> {
+        // Reject CONTINUATION on closed streams as defense-in-depth.
+        if self.state.is_closed() {
+            return Err(H2Error::stream(
+                self.id,
+                ErrorCode::StreamClosed,
+                "CONTINUATION on closed stream",
+            ));
+        }
+
         if self.headers_complete {
             return Err(H2Error::stream(
                 self.id,
@@ -1956,5 +1968,94 @@ mod tests {
         assert!(e3);
 
         assert!(!stream.has_pending_data());
+    }
+
+    // =========================================================================
+    // Regression Tests: recv_headers / recv_continuation state safety
+    // =========================================================================
+
+    /// Regression: recv_headers on a closed stream must not corrupt
+    /// headers_complete, which would allow continuation frames to
+    /// accumulate on an already-closed stream.
+    #[test]
+    fn recv_headers_on_closed_stream_does_not_corrupt_headers_complete() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+
+        // Close the stream via reset.
+        stream.reset(ErrorCode::Cancel);
+        assert_eq!(stream.state(), StreamState::Closed);
+
+        // headers_complete should still be true (the default).
+        assert!(
+            !stream.is_receiving_headers(),
+            "headers_complete should be true before the rejected recv_headers"
+        );
+
+        // Attempt to receive headers with end_headers=false on a closed stream.
+        // This MUST fail AND must NOT change headers_complete.
+        let result = stream.recv_headers(false, false);
+        assert!(result.is_err(), "recv_headers on Closed must fail");
+
+        // Critical assertion: headers_complete must remain true (unmodified).
+        assert!(
+            !stream.is_receiving_headers(),
+            "headers_complete must not be corrupted by a rejected recv_headers"
+        );
+    }
+
+    /// Regression: recv_continuation must reject frames on a closed stream.
+    #[test]
+    fn recv_continuation_rejects_closed_stream() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        // Start receiving headers without END_HEADERS.
+        stream.recv_headers(false, false).unwrap();
+        assert!(stream.is_receiving_headers());
+
+        // Close the stream via reset.
+        stream.reset(ErrorCode::Cancel);
+        assert_eq!(stream.state(), StreamState::Closed);
+
+        // CONTINUATION on a closed stream must be rejected.
+        let result = stream.recv_continuation(Bytes::from_static(b"fragment"), true);
+        assert!(
+            result.is_err(),
+            "recv_continuation must reject frames on a Closed stream"
+        );
+        assert_eq!(
+            result.unwrap_err().code,
+            ErrorCode::StreamClosed,
+            "error code should be StreamClosed"
+        );
+    }
+
+    /// Combined regression: reset → recv_headers (rejected, no corruption)
+    /// → recv_continuation (rejected by state check).
+    #[test]
+    fn reset_then_rejected_headers_then_continuation_all_rejected() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+
+        // Close via reset.
+        stream.reset(ErrorCode::Cancel);
+
+        // Rejected recv_headers must not open continuation path.
+        assert!(stream.recv_headers(false, false).is_err());
+        assert!(
+            !stream.is_receiving_headers(),
+            "rejected recv_headers must not flip headers_complete"
+        );
+
+        // Even if headers_complete were somehow false, the state check
+        // in recv_continuation provides a second barrier.
+        // Force the field to false to exercise the defense-in-depth path.
+        stream.headers_complete = false;
+        let result = stream.recv_continuation(Bytes::from_static(b"payload"), true);
+        assert!(
+            result.is_err(),
+            "recv_continuation state check must catch closed stream"
+        );
     }
 }
