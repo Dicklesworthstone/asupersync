@@ -69,6 +69,17 @@ impl Interest {
     /// Event fires on state CHANGE, not while condition persists.
     pub const EDGE_TRIGGERED: Self = Self(1 << 6);
 
+    /// All currently defined interest flags.
+    pub const ALL: Self = Self(
+        Self::READABLE.0
+            | Self::WRITABLE.0
+            | Self::ERROR.0
+            | Self::HUP.0
+            | Self::PRIORITY.0
+            | Self::ONESHOT.0
+            | Self::EDGE_TRIGGERED.0,
+    );
+
     /// Common combination for sockets.
     pub const SOCKET: Self =
         Self(Self::READABLE.0 | Self::WRITABLE.0 | Self::ERROR.0 | Self::HUP.0);
@@ -226,7 +237,7 @@ impl Not for Interest {
 
     #[inline]
     fn not(self) -> Self {
-        Self(!self.0)
+        Self((!self.0) & Self::ALL.0)
     }
 }
 
@@ -478,7 +489,47 @@ mod tests {
             false,
             not_readable.is_readable()
         );
+        crate::assert_with_log!(
+            (not_readable.bits() & !Interest::ALL.bits()) == 0,
+            "not keeps only defined bits",
+            0,
+            not_readable.bits() & !Interest::ALL.bits()
+        );
         crate::test_complete!("interest_bit_operators");
+    }
+
+    #[test]
+    fn interest_not_masks_undefined_bits() {
+        init_test("interest_not_masks_undefined_bits");
+        let unknown = Interest::from_bits(1 << 7);
+        let inverted = !unknown;
+
+        crate::assert_with_log!(
+            (inverted.bits() & !Interest::ALL.bits()) == 0,
+            "inverted mask excludes undefined bits",
+            0,
+            inverted.bits() & !Interest::ALL.bits()
+        );
+        crate::assert_with_log!(
+            !inverted.is_empty(),
+            "inverting unknown raw bits yields defined set complement",
+            true,
+            !inverted.is_empty()
+        );
+        crate::test_complete!("interest_not_masks_undefined_bits");
+    }
+
+    #[test]
+    fn interest_not_none_equals_all() {
+        init_test("interest_not_none_equals_all");
+        let inverted_none = !Interest::NONE;
+        crate::assert_with_log!(
+            inverted_none == Interest::ALL,
+            "inverting NONE yields all defined flags",
+            Interest::ALL,
+            inverted_none
+        );
+        crate::test_complete!("interest_not_none_equals_all");
     }
 
     #[test]

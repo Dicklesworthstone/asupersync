@@ -29,6 +29,11 @@
 
 use std::task::Waker;
 
+// SlabToken encodes two u32 fields (index + generation) into usize.
+// This representation is only lossless on 64-bit targets.
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("reactor token encoding requires 64-bit usize targets");
+
 /// Compact identifier for registered I/O sources.
 ///
 /// Tokens are indexes into a slab allocator. They encode:

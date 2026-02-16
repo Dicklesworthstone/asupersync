@@ -191,9 +191,10 @@ impl Registration {
         // If explicit deregistration succeeds, we "disarm" Drop so it doesn't attempt a second
         // deregistration.
         //
-        // If it fails (and the error is not NotFound), we make a best-effort *second* attempt
-        // before returning the error, then disarm Drop. This avoids leaking registrations in
-        // the common transient-failure case without risking repeated deregistration attempts.
+        // If it fails (and the error is not NotFound), we make a best-effort *second* attempt.
+        // If that retry succeeds (or reports NotFound), this explicit deregistration succeeded
+        // and should return Ok. Only persistent failures return Err. We then disarm Drop to
+        // avoid repeated deregistration attempts on a consumed handle.
         let this = self;
 
         this.reactor.upgrade().map_or_else(
@@ -213,11 +214,17 @@ impl Registration {
                         this.disarmed.set(true);
                         Ok(())
                     }
-                    Err(err) => {
+                    Err(first_err) => {
                         // Best-effort retry, then disarm Drop so we don't loop.
-                        let _ = reactor.deregister_by_token(this.token);
+                        let second = reactor.deregister_by_token(this.token);
                         this.disarmed.set(true);
-                        Err(err)
+                        match second {
+                            Ok(()) => Ok(()),
+                            Err(second_err) if second_err.kind() == io::ErrorKind::NotFound => {
+                                Ok(())
+                            }
+                            Err(_second_err) => Err(first_err),
+                        }
                     }
                 }
             },
@@ -325,6 +332,33 @@ mod tests {
             } else {
                 Ok(())
             }
+        }
+
+        fn modify_interest(&self, _token: Token, _interest: Interest) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct AlwaysFailReactor {
+        deregister_count: AtomicUsize,
+    }
+
+    impl AlwaysFailReactor {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                deregister_count: AtomicUsize::new(0),
+            })
+        }
+
+        fn deregister_count(&self) -> usize {
+            self.deregister_count.load(Ordering::SeqCst)
+        }
+    }
+
+    impl ReactorHandle for AlwaysFailReactor {
+        fn deregister_by_token(&self, _token: Token) -> io::Result<()> {
+            self.deregister_count.fetch_add(1, Ordering::SeqCst);
+            Err(io::Error::other("persistent failure"))
         }
 
         fn modify_interest(&self, _token: Token, _interest: Interest) -> io::Result<()> {
@@ -495,8 +529,8 @@ mod tests {
     }
 
     #[test]
-    fn explicit_deregister_error_attempts_best_effort_cleanup() {
-        init_test("explicit_deregister_error_attempts_best_effort_cleanup");
+    fn explicit_deregister_transient_error_recovers_and_returns_ok() {
+        init_test("explicit_deregister_transient_error_recovers_and_returns_ok");
         let reactor = FlakyReactor::new();
         let token = Token::new(7);
 
@@ -507,10 +541,39 @@ mod tests {
         );
 
         let result = reg.deregister();
-        crate::assert_with_log!(result.is_err(), "deregister fails", true, result.is_err());
+        crate::assert_with_log!(
+            result.is_ok(),
+            "deregister succeeds after retry",
+            true,
+            result.is_ok()
+        );
         let count = reactor.deregister_count();
         crate::assert_with_log!(count == 2, "best-effort cleanup attempted", 2usize, count);
-        crate::test_complete!("explicit_deregister_error_attempts_best_effort_cleanup");
+        crate::test_complete!("explicit_deregister_transient_error_recovers_and_returns_ok");
+    }
+
+    #[test]
+    fn explicit_deregister_persistent_error_returns_err_after_retry() {
+        init_test("explicit_deregister_persistent_error_returns_err_after_retry");
+        let reactor = AlwaysFailReactor::new();
+        let token = Token::new(8);
+
+        let reg = Registration::new(
+            token,
+            Arc::downgrade(&reactor) as Weak<dyn ReactorHandle>,
+            Interest::READABLE,
+        );
+
+        let result = reg.deregister();
+        crate::assert_with_log!(
+            result.is_err(),
+            "persistent failures surface an error",
+            true,
+            result.is_err()
+        );
+        let count = reactor.deregister_count();
+        crate::assert_with_log!(count == 2, "retry attempted once", 2usize, count);
+        crate::test_complete!("explicit_deregister_persistent_error_returns_err_after_retry");
     }
 
     #[test]

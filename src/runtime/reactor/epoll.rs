@@ -244,7 +244,7 @@ impl Reactor for EpollReactor {
 
         // Modify the epoll registration. If the kernel reports stale registration state,
         // clean stale bookkeeping so fd-number reuse does not get blocked indefinitely.
-        match self.poller.modify(borrowed_fd, event) {
+        let result = match self.poller.modify(borrowed_fd, event) {
             Ok(()) => {
                 if let Some(info) = state.tokens.get_mut(&token) {
                     info.interest = interest;
@@ -263,20 +263,23 @@ impl Reactor for EpollReactor {
                 }
                 Some(libc::EBADF) => {
                     let fd_still_valid = unsafe { fcntl(raw_fd, F_GETFD) } != -1;
-                    if !fd_still_valid {
+                    if fd_still_valid {
+                        Err(err)
+                    } else {
                         if let Some(info) = state.tokens.remove(&token) {
                             state.fds.remove(&info.raw_fd);
                         }
-                        return Err(io::Error::new(
+                        Err(io::Error::new(
                             io::ErrorKind::NotFound,
                             "token not registered",
-                        ));
+                        ))
                     }
-                    Err(err)
                 }
                 _ => Err(err),
             },
-        }
+        };
+        drop(state);
+        result
     }
 
     fn deregister(&self, token: Token) -> io::Result<()> {
