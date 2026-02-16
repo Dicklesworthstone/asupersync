@@ -229,6 +229,10 @@ struct BucketState {
 pub struct RateLimiter {
     policy: RateLimitPolicy,
 
+    /// Pre-computed tokens per millisecond in fixed-point scale.
+    /// Avoids FP division on every `refill_inner` call.
+    tokens_per_ms_fixed: f64,
+
     /// Protected bucket state.
     state: Mutex<BucketState>,
 
@@ -252,9 +256,16 @@ impl RateLimiter {
     #[must_use]
     pub fn new(policy: RateLimitPolicy) -> Self {
         let initial_tokens = u64::from(policy.burst) * FIXED_POINT_SCALE;
+        let period_ms = duration_to_millis_saturating(policy.period) as f64;
+        let tokens_per_ms_fixed = if period_ms > 0.0 {
+            (f64::from(policy.rate) / period_ms) * FIXED_POINT_SCALE as f64
+        } else {
+            0.0
+        };
 
         Self {
             policy,
+            tokens_per_ms_fixed,
             state: Mutex::new(BucketState {
                 tokens_fixed: initial_tokens,
                 last_refill: 0,
@@ -307,12 +318,9 @@ impl RateLimiter {
         }
 
         let elapsed_ms = now_millis - state.last_refill;
-        let period_ms = self.policy.period.as_millis() as f64;
 
-        if period_ms > 0.0 {
-            let tokens_per_ms =
-                (f64::from(self.policy.rate) / period_ms) * FIXED_POINT_SCALE as f64;
-            let tokens_to_add = (elapsed_ms as f64 * tokens_per_ms) as u64;
+        if self.tokens_per_ms_fixed > 0.0 {
+            let tokens_to_add = (elapsed_ms as f64 * self.tokens_per_ms_fixed) as u64;
             let max_tokens = u64::from(self.policy.burst) * FIXED_POINT_SCALE;
 
             state.tokens_fixed = (state.tokens_fixed + tokens_to_add).min(max_tokens);
@@ -728,20 +736,23 @@ impl SlidingWindowRateLimiter {
     #[must_use]
     #[allow(clippy::significant_drop_tightening, clippy::cast_possible_truncation)]
     pub fn try_acquire(&self, cost: u32, now: Time) -> bool {
-        self.cleanup_old(now);
-
         let now_millis = now.as_millis();
         let period_millis = duration_to_millis_saturating(self.policy.period);
 
-        // Hold write lock during both usage check and entry addition to prevent TOCTOU
+        // Single lock acquisition: cleanup expired + check usage + add entry
         let mut window = self.window.write().expect("lock poisoned");
 
-        // Calculate usage while holding write lock
-        let usage: u32 = window
-            .iter()
-            .filter(|(t, _)| now_millis.saturating_sub(*t) < period_millis)
-            .map(|(_, c)| c)
-            .sum();
+        // Cleanup expired entries inline (avoids separate cleanup_old lock)
+        while let Some((t, _)) = window.front() {
+            if now_millis.saturating_sub(*t) >= period_millis {
+                window.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        // Calculate usage — all remaining entries are within the window
+        let usage: u32 = window.iter().map(|(_, c)| c).sum();
 
         if usage + cost <= self.policy.rate {
             window.push_back((now_millis, cost));

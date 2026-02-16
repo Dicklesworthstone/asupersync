@@ -281,12 +281,17 @@ impl Bulkhead {
 
         let mut queue = self.queue.write().expect("lock poisoned");
 
-        // First, timeout expired entries
+        // First, timeout expired entries — count timeouts locally and batch-update
+        // the metrics lock once, instead of acquiring it per timed-out entry.
+        let mut timeout_count = 0u64;
         for entry in queue.iter_mut() {
             if entry.result.is_none() && now_millis >= entry.deadline_millis {
                 entry.result = Some(Err(RejectionReason::Timeout));
-                self.metrics.write().expect("lock poisoned").total_timeout += 1;
+                timeout_count += 1;
             }
+        }
+        if timeout_count > 0 {
+            self.metrics.write().expect("lock poisoned").total_timeout += timeout_count;
         }
 
         // Find first waiting entry that can be granted
