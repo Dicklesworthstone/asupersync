@@ -4,6 +4,8 @@
 //! concurrent requests. It uses a semaphore internally to track permits.
 
 use super::{Layer, Service};
+use crate::cx::Cx;
+use crate::sync::semaphore::OwnedAcquireFuture;
 use crate::sync::{OwnedSemaphorePermit, Semaphore};
 use std::future::Future;
 use std::pin::Pin;
@@ -70,6 +72,23 @@ impl<S> Layer<S> for ConcurrencyLimitLayer {
     }
 }
 
+/// Internal state for the concurrency limit service.
+enum State {
+    Idle,
+    Acquiring(Pin<Box<OwnedAcquireFuture>>),
+    Ready(OwnedSemaphorePermit),
+}
+
+impl std::fmt::Debug for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Idle => write!(f, "Idle"),
+            Self::Acquiring(_) => write!(f, "Acquiring(...)"),
+            Self::Ready(_) => write!(f, "Ready(...)"),
+        }
+    }
+}
+
 /// A service that limits concurrent requests.
 ///
 /// This service acquires a permit from a semaphore before dispatching
@@ -79,8 +98,7 @@ impl<S> Layer<S> for ConcurrencyLimitLayer {
 pub struct ConcurrencyLimit<S> {
     inner: S,
     semaphore: Arc<Semaphore>,
-    /// Permit acquired during poll_ready, consumed by call.
-    permit: Option<OwnedSemaphorePermit>,
+    state: State,
 }
 
 impl<S: Clone> Clone for ConcurrencyLimit<S> {
@@ -88,8 +106,7 @@ impl<S: Clone> Clone for ConcurrencyLimit<S> {
         Self {
             inner: self.inner.clone(),
             semaphore: self.semaphore.clone(),
-            // Don't clone the permit - each clone needs its own
-            permit: None,
+            state: State::Idle,
         }
     }
 }
@@ -101,7 +118,7 @@ impl<S> ConcurrencyLimit<S> {
         Self {
             inner,
             semaphore,
-            permit: None,
+            state: State::Idle,
         }
     }
 
@@ -182,30 +199,45 @@ where
             Poll::Ready(Ok(())) => {}
         }
 
-        // If we already have a permit, we're ready.
-        if self.permit.is_some() {
-            return Poll::Ready(Ok(()));
-        }
+        loop {
+            match &mut self.state {
+                State::Idle => {
+                    // Try to acquire synchronously first
+                    if let Ok(permit) =
+                        OwnedSemaphorePermit::try_acquire(self.semaphore.clone(), 1)
+                    {
+                        self.state = State::Ready(permit);
+                        return Poll::Ready(Ok(()));
+                    }
 
-        // Try to acquire a permit after inner readiness succeeds.
-        if let Ok(permit) = OwnedSemaphorePermit::try_acquire(self.semaphore.clone(), 1) {
-            self.permit = Some(permit);
-            Poll::Ready(Ok(()))
-        } else {
-            // No permits available - register waker and return pending.
-            // Note: The semaphore doesn't have built-in waker support,
-            // so we rely on the caller to retry poll_ready.
-            cx.waker().wake_by_ref();
-            Poll::Pending
+                    // Fallback to async acquisition
+                    let cx = Cx::current().expect("ConcurrencyLimit must run within a runtime context");
+                    let future = OwnedSemaphorePermit::acquire(self.semaphore.clone(), &cx, 1);
+                    self.state = State::Acquiring(Box::pin(future));
+                }
+                State::Acquiring(future) => match future.as_mut().poll(cx) {
+                    Poll::Ready(Ok(permit)) => {
+                        self.state = State::Ready(permit);
+                        return Poll::Ready(Ok(()));
+                    }
+                    Poll::Ready(Err(_)) => {
+                        // Reset state and return error (e.g. closed/cancelled)
+                        self.state = State::Idle;
+                        return Poll::Ready(Err(ConcurrencyLimitError::LimitExceeded));
+                    }
+                    Poll::Pending => return Poll::Pending,
+                },
+                State::Ready(_) => return Poll::Ready(Ok(())),
+            }
         }
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
         // Take the permit that was acquired in poll_ready
-        let permit = self
-            .permit
-            .take()
-            .expect("poll_ready must be called before call");
+        let permit = match std::mem::replace(&mut self.state, State::Idle) {
+            State::Ready(permit) => permit,
+            _ => panic!("poll_ready must be called before call"),
+        };
 
         ConcurrencyLimitFuture::new(self.inner.call(req), permit)
     }
