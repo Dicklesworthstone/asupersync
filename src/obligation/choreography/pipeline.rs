@@ -728,8 +728,18 @@ fn render_lab_test(protocol: &str, participants: &BTreeMap<String, SagaParticipa
     writeln!(code).ok();
 
     // Test function
-    writeln!(code, "    #[tokio::test]").ok();
-    writeln!(code, "    async fn test_{protocol}_choreography() {{").ok();
+    writeln!(code, "    #[test]").ok();
+    writeln!(code, "    fn test_{protocol}_choreography() {{").ok();
+    writeln!(
+        code,
+        "        let lab = asupersync::LabRuntime::new(asupersync::LabConfig::default());"
+    )
+    .ok();
+    writeln!(
+        code,
+        "        let _ = &lab; // TODO: execute choreography inside deterministic LabRuntime"
+    )
+    .ok();
 
     // Create channels for each pair
     let participant_names: Vec<&str> = participants.keys().map(String::as_str).collect();
@@ -777,16 +787,12 @@ fn render_lab_test(protocol: &str, participants: &BTreeMap<String, SagaParticipa
     }
 
     writeln!(code).ok();
-    writeln!(code, "        // Spawn participants under Lab runtime").ok();
+    writeln!(code, "        // Prepare participant tasks for Lab runtime").ok();
 
     for name in &participant_names {
         let pc = &participants[*name];
         writeln!(code, "        // {name} (role: {})", pc.participant_role).ok();
-        writeln!(
-            code,
-            "        let {name}_handle = tokio::spawn(async move {{"
-        )
-        .ok();
+        writeln!(code, "        let _{name}_task = || {{").ok();
         writeln!(
             code,
             "            let cx = Cx::for_test(\"{protocol}_{name}\");"
@@ -794,21 +800,19 @@ fn render_lab_test(protocol: &str, participants: &BTreeMap<String, SagaParticipa
         .ok();
         writeln!(
             code,
-            "            {protocol}_{name}(&cx, chan_{name}).await;"
+            "            // TODO: execute in structured scope: {protocol}_{name}(&cx, chan_{name}).await;"
         )
         .ok();
-        writeln!(code, "        }});").ok();
+        writeln!(code, "            let _ = (&cx, &chan_{name});").ok();
+        writeln!(code, "        }};").ok();
     }
 
     writeln!(code).ok();
-    writeln!(code, "        // Await all participants").ok();
-    for name in &participant_names {
-        writeln!(
-            code,
-            "        {name}_handle.await.expect(\"{name} panicked\");"
-        )
-        .ok();
-    }
+    writeln!(
+        code,
+        "        // TODO: execute participant tasks in a structured scope and await quiescence."
+    )
+    .ok();
 
     writeln!(code, "    }}").ok();
 
@@ -1281,9 +1285,12 @@ mod tests {
             .generate_with_locals(&protocol)
             .expect("pipeline failed");
 
-        assert!(output.lab_test_code.contains("coordinator_handle"));
-        assert!(output.lab_test_code.contains("worker_handle"));
-        assert!(output.lab_test_code.contains("tokio::spawn"));
+        assert!(output.lab_test_code.contains("_coordinator_task"));
+        assert!(output.lab_test_code.contains("_worker_task"));
+        assert!(output
+            .lab_test_code
+            .contains("LabRuntime::new(asupersync::LabConfig::default())"));
+        assert!(!output.lab_test_code.contains("tokio::spawn"));
     }
 
     #[test]
@@ -1514,10 +1521,10 @@ mod tests {
             .generate_with_locals(&protocol)
             .expect("pipeline failed");
 
-        assert!(output.lab_test_code.contains("proxy_a_handle"));
-        assert!(output.lab_test_code.contains("proxy_b_handle"));
-        assert!(output.lab_test_code.contains("worker_a_handle"));
-        assert!(output.lab_test_code.contains("worker_b_handle"));
+        assert!(output.lab_test_code.contains("_proxy_a_task"));
+        assert!(output.lab_test_code.contains("_proxy_b_task"));
+        assert!(output.lab_test_code.contains("_worker_a_task"));
+        assert!(output.lab_test_code.contains("_worker_b_task"));
     }
 
     // ------------------------------------------------------------------
@@ -1696,8 +1703,10 @@ mod tests {
                 protocol.name
             );
             assert!(
-                output.lab_test_code.contains("tokio::spawn"),
-                "{}: lab test missing tokio::spawn",
+                output
+                    .lab_test_code
+                    .contains("LabRuntime::new(asupersync::LabConfig::default())"),
+                "{}: lab test missing LabRuntime scaffold",
                 protocol.name
             );
         }

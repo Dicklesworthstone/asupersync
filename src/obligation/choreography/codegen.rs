@@ -661,7 +661,15 @@ fn render_handler_body(local: &LocalType, code: &mut String, indent: usize) {
             render_handler_body(forward, code, indent);
             writeln!(code, "{pad}// Compensation (on failure):").ok();
             writeln!(code, "{pad}// {{").ok();
-            render_handler_body(compensate, code, indent);
+            let mut compensation_stub = String::new();
+            render_handler_body(compensate, &mut compensation_stub, 0);
+            for line in compensation_stub.lines() {
+                if line.is_empty() {
+                    writeln!(code, "{pad}//").ok();
+                } else {
+                    writeln!(code, "{pad}// {line}").ok();
+                }
+            }
             writeln!(code, "{pad}// }}").ok();
         }
         LocalType::End => {
@@ -888,6 +896,30 @@ mod tests {
         assert!(code.contains("Compensation block"));
         assert!(code.contains("Forward:"));
         assert!(code.contains("Compensation (on failure):"));
+    }
+
+    #[test]
+    fn generated_code_compensation_actions_are_stubbed() {
+        let protocol = example_saga_compensation();
+        let output = compiler()
+            .compile(&protocol, "coordinator")
+            .expect("compilation failed");
+        let code = output.render();
+
+        let mut found_compensate_send = false;
+        for line in code.lines() {
+            if line.contains("let chan = chan.send(CompensateMsg") {
+                found_compensate_send = true;
+                assert!(
+                    line.trim_start().starts_with("//"),
+                    "Compensation send must be commented skeleton code, got: {line}"
+                );
+            }
+        }
+        assert!(
+            found_compensate_send,
+            "Expected generated compensation skeleton to include CompensateMsg send stubs"
+        );
     }
 
     // ------------------------------------------------------------------

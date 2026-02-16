@@ -487,6 +487,44 @@ impl Interaction {
                 .or_else(|| right.first_active_participant()),
         }
     }
+
+    /// Return all participants that may act first in this interaction.
+    ///
+    /// This differs from `first_active_participant()` for parallel composition:
+    /// in `Par`, either branch may progress first, so both branch starters are
+    /// considered "first active".
+    fn first_active_participants(&self) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        self.collect_first_active_participants(&mut out);
+        out
+    }
+
+    fn collect_first_active_participants(&self, out: &mut BTreeSet<String>) {
+        match self {
+            Self::Comm { sender, .. } => {
+                out.insert(sender.clone());
+            }
+            Self::Choice { decider, .. } => {
+                out.insert(decider.clone());
+            }
+            Self::Loop { body, .. } => body.collect_first_active_participants(out),
+            Self::Continue { .. } | Self::End => {}
+            Self::Compensate { forward, .. } => forward.collect_first_active_participants(out),
+            Self::Seq { first, second } => {
+                let mut first_set = BTreeSet::new();
+                first.collect_first_active_participants(&mut first_set);
+                if first_set.is_empty() {
+                    second.collect_first_active_participants(out);
+                } else {
+                    out.extend(first_set);
+                }
+            }
+            Self::Par { left, right } => {
+                left.collect_first_active_participants(out);
+                right.collect_first_active_participants(out);
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -758,19 +796,19 @@ impl GlobalProtocol {
         branch_name: &'static str,
         errors: &mut Vec<ValidationError>,
     ) {
-        match branch.first_active_participant() {
-            Some(first_sender) if first_sender == decider => {
-                // OK: decider is the first sender
-            }
-            Some(first_sender) => {
+        let first_senders = branch.first_active_participants();
+        if first_senders.is_empty() {
+            // Branch is End or Continue — acceptable (trivial branches).
+            return;
+        }
+
+        for first_sender in first_senders {
+            if first_sender != decider {
                 errors.push(ValidationError::KnowledgeOfChoice {
                     decider: decider.to_string(),
                     branch: branch_name,
-                    first_sender: Some(first_sender.to_string()),
+                    first_sender: Some(first_sender),
                 });
-            }
-            None => {
-                // Branch is End or Continue — acceptable (trivial branches).
             }
         }
     }
@@ -2403,6 +2441,40 @@ mod tests {
                     first_sender: Some(first_sender),
                     ..
                 } if first_sender == "b"
+            )
+        }));
+    }
+
+    #[test]
+    fn knowledge_of_choice_violation_detected_when_parallel_branch_starts_elsewhere() {
+        // Then branch starts with parallel sends from both `a` (decider) and `c`.
+        // Even though `a` can send first in one branch, `c` can also send first
+        // in the other branch, violating knowledge-of-choice for that branch.
+        let protocol = GlobalProtocol::builder("choice_parallel_mixed_starters")
+            .participant("a", "role")
+            .participant("b", "role")
+            .participant("c", "role")
+            .participant("d", "role")
+            .interaction(Interaction::choice(
+                "a",
+                "pred",
+                Interaction::par(
+                    Interaction::comm("a", "left_start", "Msg", "b"),
+                    Interaction::comm("c", "right_start", "Msg", "d"),
+                ),
+                Interaction::comm("a", "else_start", "Msg", "b"),
+            ))
+            .build();
+
+        let errors = protocol.validate();
+        assert!(errors.iter().any(|e| {
+            matches!(
+                e,
+                ValidationError::KnowledgeOfChoice {
+                    branch: "then",
+                    first_sender: Some(first_sender),
+                    ..
+                } if first_sender == "c"
             )
         }));
     }
