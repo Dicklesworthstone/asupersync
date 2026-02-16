@@ -335,7 +335,7 @@ impl ObligationLedger {
         let leaked: Vec<LeakedObligation> = self
             .obligations
             .iter()
-            .filter(|(_, o)| o.state == ObligationState::Reserved)
+            .filter(|(_, o)| o.is_pending() || o.is_leaked())
             .map(|(_, o)| LeakedObligation {
                 id: o.id,
                 kind: o.kind,
@@ -356,7 +356,7 @@ impl ObligationLedger {
         let leaked: Vec<LeakedObligation> = self
             .obligations
             .iter()
-            .filter(|(_, o)| o.region == region && o.state == ObligationState::Reserved)
+            .filter(|(_, o)| o.region == region && (o.is_pending() || o.is_leaked()))
             .map(|(_, o)| LeakedObligation {
                 id: o.id,
                 kind: o.kind,
@@ -592,6 +592,34 @@ mod tests {
         crate::assert_with_log!(stats.total_leaked == 1, "leaked", 1, stats.total_leaked);
         crate::assert_with_log!(stats.pending == 0, "pending", 0, stats.pending);
         crate::test_complete!("mark_leaked_updates_stats");
+    }
+
+    #[test]
+    fn check_leaks_includes_marked_leaked_obligations() {
+        init_test("check_leaks_includes_marked_leaked_obligations");
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+
+        let token = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
+        let leaked_id = token.id();
+        ledger.mark_leaked(leaked_id, Time::from_nanos(10));
+
+        let result = ledger.check_leaks();
+        crate::assert_with_log!(!result.is_clean(), "not clean", false, result.is_clean());
+        crate::assert_with_log!(
+            result.leaked.len() == 1,
+            "leak count",
+            1,
+            result.leaked.len()
+        );
+        crate::assert_with_log!(
+            result.leaked[0].id == leaked_id,
+            "leaked id",
+            leaked_id,
+            result.leaked[0].id
+        );
+        crate::test_complete!("check_leaks_includes_marked_leaked_obligations");
     }
 
     // ---- Task queries ----------------------------------------------------
