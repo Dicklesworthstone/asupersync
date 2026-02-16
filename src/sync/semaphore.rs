@@ -465,8 +465,9 @@ impl Future for OwnedAcquireFuture {
             return Poll::Ready(Err(AcquireError::Cancelled));
         }
 
-        // Single lock acquisition (same optimization as AcquireFuture).
-        let mut state = self.semaphore.state.lock();
+        // Single lock acquisition — clone the Arc to break borrow conflict with self.waiter_id.
+        let sem = Arc::clone(&self.semaphore);
+        let mut state = sem.state.lock();
 
         let waiter_id = if let Some(id) = self.waiter_id {
             id

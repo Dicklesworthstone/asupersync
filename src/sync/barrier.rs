@@ -96,7 +96,10 @@ enum WaitState {
     /// pushed.  On re-poll we try an O(1) indexed lookup first; if the slot
     /// has been invalidated by another waiter's cancellation (which uses
     /// `swap_remove`), we fall back to a linear scan.
-    Waiting { generation: u64, slot: usize },
+    Waiting {
+        generation: u64,
+        slot: usize,
+    },
 }
 
 /// Future returned by `Barrier::wait`.
@@ -177,7 +180,10 @@ impl<'a> Future for BarrierWaitFuture<'a> {
                         let gen = state.generation;
                         let slot = state.waiters.len();
                         state.waiters.push(cx.waker().clone());
-                        self.state = WaitState::Waiting { generation: gen, slot };
+                        self.state = WaitState::Waiting {
+                            generation: gen,
+                            slot,
+                        };
                         // Continue loop to re-poll (which will hit Waiting case) or return pending.
                         return Poll::Pending;
                     }
@@ -202,7 +208,10 @@ impl<'a> Future for BarrierWaitFuture<'a> {
                                 if w.will_wake(waker) {
                                     w.clone_from(waker);
                                     // Update slot for next re-poll.
-                                    self.state = WaitState::Waiting { generation, slot: i };
+                                    self.state = WaitState::Waiting {
+                                        generation,
+                                        slot: i,
+                                    };
                                     found = true;
                                     break;
                                 }
@@ -210,7 +219,10 @@ impl<'a> Future for BarrierWaitFuture<'a> {
                             if !found {
                                 let new_slot = state.waiters.len();
                                 state.waiters.push(waker.clone());
-                                self.state = WaitState::Waiting { generation, slot: new_slot };
+                                self.state = WaitState::Waiting {
+                                    generation,
+                                    slot: new_slot,
+                                };
                             }
                         }
 

@@ -758,8 +758,8 @@ impl CircuitBreaker {
                 });
 
         if let Some(rate) = failure_rate {
-             let mut m = self.metrics.write().expect("lock poisoned");
-             m.sliding_window_failure_rate = Some(rate);
+            let mut m = self.metrics.write().expect("lock poisoned");
+            m.sliding_window_failure_rate = Some(rate);
         }
 
         let mut event = None;
@@ -771,7 +771,8 @@ impl CircuitBreaker {
                 match state {
                     State::Closed { failures } => {
                         let new_failures = failures + 1;
-                        self.current_failure_streak.store(new_failures, Ordering::Relaxed);
+                        self.current_failure_streak
+                            .store(new_failures, Ordering::Relaxed);
 
                         if new_failures >= self.policy.failure_threshold || window_triggered {
                             let new_state = State::Open {
