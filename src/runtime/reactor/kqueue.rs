@@ -65,9 +65,10 @@
 
 use super::{Event, Events, Interest, Reactor, Source, Token};
 use parking_lot::Mutex;
-use polling::{Event as PollEvent, Poller};
+use polling::{Event as PollEvent, Events as PollingEvents, Poller};
 use std::collections::HashMap;
 use std::io;
+use std::num::NonZeroUsize;
 use std::os::fd::BorrowedFd;
 use std::time::Duration;
 
@@ -186,7 +187,9 @@ impl Reactor for KqueueReactor {
         let borrowed_fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
 
         // Add to kqueue via the polling crate
-        self.poller.add(&borrowed_fd, event)?;
+        // SAFETY: the caller must uphold the invariant that `source` remains valid
+        // (and thus its raw fd remains open) until `deregister()` is called.
+        unsafe { self.poller.add(&borrowed_fd, event)? };
 
         // Track the registration for modify/deregister
         regs.insert(token, RegistrationInfo { raw_fd, interest });
@@ -235,18 +238,16 @@ impl Reactor for KqueueReactor {
     fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
         events.clear();
 
-        // Allocate buffer for polling events (polling 2.x uses Vec<Event>)
-        let capacity = events.capacity().max(1);
-        let mut poll_events: Vec<PollEvent> = Vec::with_capacity(capacity);
-
+        let capacity = NonZeroUsize::new(events.capacity().max(1)).expect("max(1)");
+        let mut poll_events = PollingEvents::with_capacity(capacity);
         self.poller.wait(&mut poll_events, timeout)?;
 
         // Convert polling events to our Event type.
         // `Events` may drop entries when capacity is reached; report only
         // the number of events actually stored in `events`.
-        for poll_event in &poll_events {
+        for poll_event in poll_events.iter() {
             let token = Token(poll_event.key);
-            let interest = Self::poll_event_to_interest(poll_event);
+            let interest = Self::poll_event_to_interest(&poll_event);
             events.push(Event::new(token, interest));
         }
 

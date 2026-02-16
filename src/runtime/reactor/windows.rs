@@ -11,11 +11,17 @@ use super::{Event, Events, Interest, Reactor, Source, Token};
 // Windows implementation.
 #[cfg(target_os = "windows")]
 mod iocp_impl {
+    // Allow unsafe code for IOCP FFI operations via the polling crate.
+    // The unsafe operations (add) are necessary because the compiler cannot
+    // verify socket validity at compile time.
+    #![allow(unsafe_code)]
+
     use super::{Event, Events, Interest, Reactor, Source, Token};
     use parking_lot::Mutex;
-    use polling::{Event as PollEvent, Poller};
+    use polling::{Event as PollEvent, Events as PollEvents, Poller};
     use std::collections::HashMap;
     use std::io;
+    use std::num::NonZeroUsize;
     use std::os::windows::io::RawSocket;
     use std::time::Duration;
 
@@ -87,7 +93,11 @@ mod iocp_impl {
             }
 
             let event = Self::interest_to_poll_event(token, interest);
-            self.poller.add(raw_socket, event)?;
+            // SAFETY: the caller must uphold the invariant that `source` (and thus
+            // its raw socket) remains valid until `deregister()` is called.
+            unsafe {
+                self.poller.add(raw_socket, event)?;
+            }
 
             regs.insert(
                 token,
@@ -125,14 +135,16 @@ mod iocp_impl {
         fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
             events.clear();
 
-            let mut poll_events = Vec::with_capacity(events.capacity());
+            let requested_capacity =
+                NonZeroUsize::new(events.capacity().max(1)).expect("capacity >= 1");
+            let mut poll_events = PollEvents::with_capacity(requested_capacity);
             self.poller.wait(&mut poll_events, timeout)?;
 
             // `Events` may drop entries when capacity is reached; report only
             // the number of events actually stored in `events`.
-            for poll_event in &poll_events {
+            for poll_event in poll_events.iter() {
                 let token = Token(poll_event.key);
-                let interest = Self::poll_event_to_interest(poll_event);
+                let interest = Self::poll_event_to_interest(&poll_event);
                 events.push(Event::new(token, interest));
             }
 
