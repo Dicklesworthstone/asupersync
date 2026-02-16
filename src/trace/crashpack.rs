@@ -955,7 +955,8 @@ impl std::error::Error for CrashPackWriteError {
 ///
 /// # Deterministic Paths
 ///
-/// Artifact paths are deterministic: `crashpack-{seed:016x}-{fingerprint:016x}-v{version}.json`.
+/// Artifact paths are deterministic:
+/// `crashpack-{seed:016x}-{config_hash:016x}-{fingerprint:016x}-v{version}.json`.
 /// Two writes of the same crash pack produce the same path.
 pub trait CrashPackWriter: Send + Sync + std::fmt::Debug {
     /// Write a crash pack, returning an [`ArtifactId`] identifying the artifact.
@@ -970,12 +971,13 @@ pub trait CrashPackWriter: Send + Sync + std::fmt::Debug {
 
 /// Compute the deterministic artifact filename for a crash pack.
 ///
-/// Format: `crashpack-{seed:016x}-{fingerprint:016x}-v{version}.json`
+/// Format: `crashpack-{seed:016x}-{config_hash:016x}-{fingerprint:016x}-v{version}.json`
 #[must_use]
 pub fn artifact_filename(pack: &CrashPack) -> String {
     format!(
-        "crashpack-{:016x}-{:016x}-v{}.json",
+        "crashpack-{:016x}-{:016x}-{:016x}-v{}.json",
         pack.seed(),
+        pack.manifest.config.config_hash,
         pack.fingerprint(),
         pack.manifest.schema_version,
     )
@@ -1692,7 +1694,10 @@ mod tests {
         let name1 = artifact_filename(&pack);
         let name2 = artifact_filename(&pack);
         assert_eq!(name1, name2);
-        assert_eq!(name1, "crashpack-000000000000002a-00000000cafebabe-v1.json");
+        assert_eq!(
+            name1,
+            "crashpack-000000000000002a-0000000000000000-00000000cafebabe-v1.json"
+        );
 
         crate::test_complete!("artifact_filename_is_deterministic");
     }
@@ -1720,6 +1725,33 @@ mod tests {
         assert_ne!(artifact_filename(&pack_a), artifact_filename(&pack_b));
 
         crate::test_complete!("artifact_filename_varies_by_seed_and_fingerprint");
+    }
+
+    #[test]
+    fn artifact_filename_varies_by_config_hash() {
+        init_test("artifact_filename_varies_by_config_hash");
+
+        let pack_a = CrashPack::builder(CrashPackConfig {
+            seed: 42,
+            config_hash: 0xAAAA,
+            ..Default::default()
+        })
+        .failure(sample_failure())
+        .fingerprint(0x1234)
+        .build();
+
+        let pack_b = CrashPack::builder(CrashPackConfig {
+            seed: 42,
+            config_hash: 0xBBBB,
+            ..Default::default()
+        })
+        .failure(sample_failure())
+        .fingerprint(0x1234)
+        .build();
+
+        assert_ne!(artifact_filename(&pack_a), artifact_filename(&pack_b));
+
+        crate::test_complete!("artifact_filename_varies_by_config_hash");
     }
 
     #[test]
@@ -2891,7 +2923,7 @@ mod tests {
 
     /// Step 2: Write the crash pack to storage and read it back.
     ///
-    /// The artifact filename is deterministic: same seed + fingerprint
+    /// The artifact filename is deterministic: same seed + config hash + fingerprint
     /// always produces the same path.
     #[test]
     fn walkthrough_02_write_and_read_artifact() {
