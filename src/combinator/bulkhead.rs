@@ -981,6 +981,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::significant_drop_tightening)]
     fn enqueue_deadline_saturates_for_large_timeout() {
         let bh = Bulkhead::new(BulkheadPolicy {
             max_concurrent: 1,
