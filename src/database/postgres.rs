@@ -1392,8 +1392,22 @@ impl PgConnection {
                     break;
                 }
                 b'E' => {
-                    // ErrorResponse
-                    return Outcome::Err(self.parse_error_response(&data).unwrap_err());
+                    // ErrorResponse — drain to ReadyForQuery before returning so
+                    // the connection stays synchronized for subsequent operations.
+                    let err = self.parse_error_response(&data).unwrap_err();
+                    loop {
+                        let (drain_type, drain_data) = match self.read_message().await {
+                            Ok(m) => m,
+                            Err(_) => break,
+                        };
+                        if drain_type == b'Z' {
+                            if !drain_data.is_empty() {
+                                self.inner.transaction_status = drain_data[0];
+                            }
+                            break;
+                        }
+                    }
+                    return Outcome::Err(err);
                 }
                 b'N' => {
                     // NoticeResponse - ignore
@@ -1478,8 +1492,22 @@ impl PgConnection {
                     break;
                 }
                 b'E' => {
-                    // ErrorResponse
-                    return Outcome::Err(self.parse_error_response(&data).unwrap_err());
+                    // ErrorResponse — drain to ReadyForQuery before returning so
+                    // the connection stays synchronized for subsequent operations.
+                    let err = self.parse_error_response(&data).unwrap_err();
+                    loop {
+                        let (drain_type, drain_data) = match self.read_message().await {
+                            Ok(m) => m,
+                            Err(_) => break,
+                        };
+                        if drain_type == b'Z' {
+                            if !drain_data.is_empty() {
+                                self.inner.transaction_status = drain_data[0];
+                            }
+                            break;
+                        }
+                    }
+                    return Outcome::Err(err);
                 }
                 b'N' => {
                     // NoticeResponse - ignore
