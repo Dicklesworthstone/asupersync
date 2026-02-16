@@ -327,7 +327,7 @@ fn sync_004_barrier_synchronization() {
             thread::spawn(move || {
                 let cx: Cx = Cx::for_testing();
                 arrived.fetch_add(1, Ordering::SeqCst);
-                let result = barrier.wait(&cx).expect("barrier wait should succeed");
+                let result = block_on(barrier.wait(&cx)).expect("barrier wait should succeed");
                 if result.is_leader() {
                     leader_count.fetch_add(1, Ordering::SeqCst);
                 }
@@ -374,7 +374,7 @@ fn sync_004_barrier_synchronization() {
             let round2_count = Arc::clone(&round2_count);
             thread::spawn(move || {
                 let cx: Cx = Cx::for_testing();
-                barrier.wait(&cx).expect("round 2 wait should succeed");
+                block_on(barrier.wait(&cx)).expect("round 2 wait should succeed");
                 round2_count.fetch_add(1, Ordering::SeqCst);
             })
         })

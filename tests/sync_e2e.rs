@@ -650,7 +650,7 @@ fn e2e_sync_030_barrier_synchronization() {
             tracing::debug!(task = i, "arrived at barrier");
 
             // Wait at barrier
-            let result = b.wait(&cx).expect("barrier wait should succeed");
+            let result = futures_lite::future::block_on(b.wait(&cx)).expect("barrier wait should succeed");
 
             // Track leader
             if result.is_leader() {
