@@ -16,6 +16,7 @@ This directory contains the canonical machine-readable artifacts for Lean proof 
 - `baseline_report_v1.md` - human-readable baseline report synchronized with JSON snapshot
 - `ci_verification_profiles.json` - deterministic smoke/frontier/full CI profile definitions and comparability keys
 - `lean_frontier_buckets_v1.json` - deterministic frontier error buckets with failure-mode + bead linkage
+- `proof_guided_performance_opportunity_map.json` - deterministic Track-6 optimization envelope map with theorem-linked constraints and required conformance checks
 
 ## Ontology
 
@@ -221,6 +222,22 @@ Constraint-ID policy for optimization tracks:
   constraint IDs from `docs/integration.md`.
 - Missing constraint IDs indicate missing proof-impact linkage.
 - Constraint violations must be converted to blocker beads before merge/sign-off.
+
+## Proof-Guided Opportunity Map (Track-6 / bd-1lda7)
+
+`proof_guided_performance_opportunity_map.json` is the canonical machine-readable
+optimization envelope map for Track-6 performance work. It defines:
+- deterministic priority bands (`P0`-`P3`) with impact/risk/proof-confidence semantics
+- `PG-OPT-*` opportunity envelopes with explicit:
+  - allowed transformations
+  - prohibited transformations
+  - required `rch`-offloaded conformance checks
+  - theorem/invariant constraint anchors (`OPT-*`)
+- consumption contract fields required in performance bead payloads
+- closed-loop consumer bead linkage for impact measurement
+
+Validation is enforced in:
+- `tests/lean_proof_guided_performance_opportunity_map.rs`
 
 ## Waiver Lifecycle Policy (Track-5.3a)
 

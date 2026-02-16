@@ -1,0 +1,286 @@
+{
+  "schema_version": "1.0.0",
+  "map_id": "lean.proof_guided_performance_opportunity_map.v1",
+  "generated_by": "bd-1lda7",
+  "generated_at": "2026-02-16T02:09:30Z",
+  "source_artifacts": [
+    "docs/integration.md#optimization-constraint-sheet-track-6-t61a-bd-3fooi",
+    "docs/integration.md#proof-guided-performance-opportunity-map-track-6-support-bd-3cp69",
+    "formal/lean/coverage/runtime_state_refinement_map.json",
+    "formal/lean/coverage/invariant_theorem_test_link_map.json"
+  ],
+  "priority_rubric": [
+    {
+      "band": "P0",
+      "expected_impact": "high",
+      "proof_coverage_confidence": "high",
+      "risk_class": "medium",
+      "selection_rule": "Hot-path candidate with cross-workload benefit and high-confidence theorem anchors."
+    },
+    {
+      "band": "P1",
+      "expected_impact": "medium/high",
+      "proof_coverage_confidence": "high_or_medium",
+      "risk_class": "medium",
+      "selection_rule": "Material candidate with complete constraint linkage and deterministic conformance plan."
+    },
+    {
+      "band": "P2",
+      "expected_impact": "medium",
+      "proof_coverage_confidence": "medium",
+      "risk_class": "medium/high",
+      "selection_rule": "Candidate is allowed only when higher-band opportunities are blocked or already covered."
+    },
+    {
+      "band": "P3",
+      "expected_impact": "low_or_uncertain",
+      "proof_coverage_confidence": "low",
+      "risk_class": "high",
+      "selection_rule": "Experimental candidate; requires explicit blocker review before implementation starts."
+    }
+  ],
+  "constraint_catalog": [
+    {
+      "constraint_id": "OPT-LOCK-001",
+      "invariant": "inv.structured_concurrency.single_owner",
+      "anchor_artifact": "formal/lean/coverage/runtime_state_refinement_map.json"
+    },
+    {
+      "constraint_id": "OPT-CANCEL-001",
+      "invariant": "inv.cancel.protocol",
+      "anchor_artifact": "formal/lean/coverage/runtime_state_refinement_map.json"
+    },
+    {
+      "constraint_id": "OPT-CANCEL-002",
+      "invariant": "inv.race.losers_drained",
+      "anchor_artifact": "formal/lean/coverage/invariant_theorem_test_link_map.json"
+    },
+    {
+      "constraint_id": "OPT-OBL-001",
+      "invariant": "inv.obligation.no_leaks",
+      "anchor_artifact": "formal/lean/coverage/invariant_theorem_test_link_map.json"
+    },
+    {
+      "constraint_id": "OPT-DET-001",
+      "invariant": "inv.authority.no_ambient",
+      "anchor_artifact": "formal/lean/coverage/runtime_state_refinement_map.json"
+    },
+    {
+      "constraint_id": "OPT-HOT-001",
+      "invariant": "inv.region_close.quiescence",
+      "anchor_artifact": "formal/lean/coverage/runtime_state_refinement_map.json"
+    }
+  ],
+  "opportunities": [
+    {
+      "opportunity_id": "PG-OPT-001",
+      "priority_band": "P0",
+      "target_surface": [
+        "src/runtime/scheduler/**"
+      ],
+      "expected_impact": "Lower scheduler overhead and better tail latency under mixed ready/cancel load.",
+      "proof_coverage_confidence": "high",
+      "risk_class": "medium",
+      "allowed_transformations": [
+        "queue layout tuning",
+        "branch elimination",
+        "cache-local metadata packing",
+        "lock-contention reduction that preserves lock order"
+      ],
+      "prohibited_transformations": [
+        "changing cancel > timed > ready lane semantics",
+        "reordering multi-lock acquisition (E -> D -> B -> A -> C)"
+      ],
+      "required_conformance_checks": [
+        "rch exec -- cargo test --test refinement_conformance -- --nocapture",
+        "rch exec -- cargo test --test scheduler_lane_fairness -- --nocapture"
+      ],
+      "theorem_invariant_anchors": [
+        "OPT-LOCK-001",
+        "OPT-CANCEL-001",
+        "OPT-DET-001"
+      ],
+      "required_measurements": {
+        "metrics_before": [
+          "scheduler dispatch throughput",
+          "p95 dispatch latency"
+        ],
+        "metrics_after": [
+          "scheduler dispatch throughput",
+          "p95 dispatch latency"
+        ],
+        "determinism_evidence": [
+          "trace fingerprint stability under fixed seed"
+        ],
+        "acceptance_rule": "No regression in conformance checks and no semantic drift in deterministic trace fingerprints."
+      },
+      "consumer_beads": [
+        "bd-1lda7",
+        "bd-3q3z0"
+      ]
+    },
+    {
+      "opportunity_id": "PG-OPT-002",
+      "priority_band": "P1",
+      "target_surface": [
+        "src/cancel/**",
+        "src/combinator/race.rs",
+        "src/combinator/hedge.rs"
+      ],
+      "expected_impact": "Reduced cancellation-path latency and loser-drain overhead.",
+      "proof_coverage_confidence": "high",
+      "risk_class": "medium",
+      "allowed_transformations": [
+        "reduce allocations on cancel/drain path",
+        "streamline witness construction",
+        "deduplicate wake/drain bookkeeping"
+      ],
+      "prohibited_transformations": [
+        "collapsing request -> drain -> finalize phases",
+        "reporting completion before loser drain"
+      ],
+      "required_conformance_checks": [
+        "rch exec -- cargo test --test refinement_conformance -- --nocapture",
+        "rch exec -- cargo test --test cancellation_conformance -- --nocapture"
+      ],
+      "theorem_invariant_anchors": [
+        "OPT-CANCEL-001",
+        "OPT-CANCEL-002"
+      ],
+      "required_measurements": {
+        "metrics_before": [
+          "cancel-path latency",
+          "loser-drain completion latency"
+        ],
+        "metrics_after": [
+          "cancel-path latency",
+          "loser-drain completion latency"
+        ],
+        "determinism_evidence": [
+          "stable cancel-phase transitions in replay traces"
+        ],
+        "acceptance_rule": "Cancellation phase monotonicity remains intact and loser-drain checks stay green."
+      },
+      "consumer_beads": [
+        "bd-1lda7",
+        "bd-3q3z0"
+      ]
+    },
+    {
+      "opportunity_id": "PG-OPT-003",
+      "priority_band": "P1",
+      "target_surface": [
+        "src/obligation/**",
+        "src/runtime/obligation_table.rs"
+      ],
+      "expected_impact": "Lower obligation bookkeeping overhead in high-concurrency workflows.",
+      "proof_coverage_confidence": "medium",
+      "risk_class": "medium/high",
+      "allowed_transformations": [
+        "data-structure reshaping",
+        "indexed lookup improvements",
+        "lock-scoping reductions that preserve lifecycle semantics"
+      ],
+      "prohibited_transformations": [
+        "bypassing reserve/commit/abort boundaries",
+        "deferred or best-effort obligation resolution"
+      ],
+      "required_conformance_checks": [
+        "rch exec -- cargo test --test lean_invariant_theorem_test_link_map -- --nocapture",
+        "rch exec -- cargo test --test cancellation_conformance -- --nocapture"
+      ],
+      "theorem_invariant_anchors": [
+        "OPT-OBL-001",
+        "OPT-DET-001"
+      ],
+      "required_measurements": {
+        "metrics_before": [
+          "obligation table operation latency",
+          "obligation leak incidence"
+        ],
+        "metrics_after": [
+          "obligation table operation latency",
+          "obligation leak incidence"
+        ],
+        "determinism_evidence": [
+          "stable obligation-lifecycle trace signatures"
+        ],
+        "acceptance_rule": "No obligation leaks and no futurelock regressions in deterministic suites."
+      },
+      "consumer_beads": [
+        "bd-1lda7",
+        "bd-3q3z0"
+      ]
+    },
+    {
+      "opportunity_id": "PG-OPT-004",
+      "priority_band": "P2",
+      "target_surface": [
+        "src/runtime/task_table.rs",
+        "src/runtime/sharded_state.rs"
+      ],
+      "expected_impact": "Better throughput via cache-local table operations and reduced contention.",
+      "proof_coverage_confidence": "medium",
+      "risk_class": "medium",
+      "allowed_transformations": [
+        "table compaction/locality improvements",
+        "sharding refinements with unchanged ownership semantics"
+      ],
+      "prohibited_transformations": [
+        "introducing cross-shard ownership ambiguity",
+        "non-deterministic iteration order in state transitions"
+      ],
+      "required_conformance_checks": [
+        "rch exec -- cargo test --test refinement_conformance -- --nocapture",
+        "rch exec -- cargo test --test runtime_state_refinement_map -- --nocapture"
+      ],
+      "theorem_invariant_anchors": [
+        "OPT-HOT-001",
+        "OPT-LOCK-001",
+        "OPT-DET-001"
+      ],
+      "required_measurements": {
+        "metrics_before": [
+          "task table mutation throughput",
+          "sharded lock contention"
+        ],
+        "metrics_after": [
+          "task table mutation throughput",
+          "sharded lock contention"
+        ],
+        "determinism_evidence": [
+          "stable task/region lifecycle trace fingerprints"
+        ],
+        "acceptance_rule": "Lifecycle invariants remain preserved while throughput/latency metrics improve or hold."
+      },
+      "consumer_beads": [
+        "bd-1lda7",
+        "bd-3q3z0"
+      ]
+    }
+  ],
+  "consumption_contract": {
+    "required_template_fields": [
+      "opportunity_id",
+      "expected_impact",
+      "risk_class",
+      "allowed_transformations",
+      "prohibited_transformations",
+      "theorem_links",
+      "required_checks",
+      "evidence.metrics_before",
+      "evidence.metrics_after",
+      "evidence.determinism_proof"
+    ],
+    "must_reference_constraint_ids": true,
+    "must_include_measurement_artifacts": true,
+    "closed_loop_consumer_beads": [
+      "bd-3q3z0"
+    ],
+    "reject_conditions": [
+      "Candidate cannot be mapped to one PG-OPT-* envelope with explicit theorem linkage.",
+      "Candidate proposes a prohibited transformation.",
+      "Candidate omits deterministic conformance checks and before/after measurement artifacts."
+    ]
+  }
+}
