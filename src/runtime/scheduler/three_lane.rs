@@ -61,11 +61,11 @@ use crate::time::TimerDriverHandle;
 use crate::tracing_compat::{error, trace};
 use crate::types::{CxInner, TaskId, Time};
 use crate::util::DetRng;
-use parking_lot::Mutex as ParkingMutex;
+use parking_lot::Mutex;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use parking_lot::RwLock;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
@@ -81,7 +81,7 @@ const LOCAL_SCHEDULER_MAX_CAPACITY: usize = 1024;
 const SPIN_LIMIT: u32 = 64;
 const YIELD_LIMIT: u32 = 16;
 
-type LocalReadyQueue = ParkingMutex<Vec<TaskId>>;
+type LocalReadyQueue = Mutex<Vec<TaskId>>;
 
 /// Coordination for waking workers.
 #[derive(Debug)]
@@ -248,7 +248,6 @@ pub(crate) fn schedule_on_current_local(task: TaskId, priority: u8) -> bool {
         if let Some(local) = cell.borrow().as_ref() {
             local
                 .lock()
-                .expect("local scheduler lock poisoned")
                 .schedule(task, priority);
             return true;
         }
@@ -269,7 +268,6 @@ pub(crate) fn schedule_cancel_on_current_local(task: TaskId, priority: u8) -> bo
             if let Some(local) = cell.borrow().as_ref() {
                 local
                     .lock()
-                    .expect("local scheduler lock poisoned")
                     .move_to_cancel_lane(task, priority);
                 return true;
             }
@@ -399,7 +397,7 @@ impl ThreeLaneScheduler {
 
         // Get IO driver and timer driver from runtime state
         let (io_driver, timer_driver) = {
-            let guard = state.lock().expect("runtime state lock poisoned");
+            let guard = state.lock();
             (guard.io_driver_handle(), guard.timer_driver_handle())
         };
 
@@ -563,10 +561,10 @@ impl ThreeLaneScheduler {
     /// RuntimeState's embedded table.
     fn with_task_table_ref<R, F: FnOnce(&TaskTable) -> R>(&self, f: F) -> R {
         if let Some(tt) = &self.task_table {
-            let guard = tt.lock().expect("task table lock poisoned");
+            let guard = tt.lock();
             f(&guard)
         } else {
-            let state = self.state.lock().expect("runtime state lock poisoned");
+            let state = self.state.lock();
             f(&state.tasks)
         }
     }
@@ -594,7 +592,6 @@ impl ThreeLaneScheduler {
                     }
                     local
                         .lock()
-                        .expect("local scheduler lock poisoned")
                         .move_to_cancel_lane(task, priority);
                     if let Some(parker) = self.parkers.get(worker_id) {
                         parker.unpark();
@@ -986,10 +983,10 @@ impl ThreeLaneWorker {
     /// mutations.
     fn with_task_table<R, F: FnOnce(&mut TaskTable) -> R>(&self, f: F) -> R {
         if let Some(tt) = &self.task_table {
-            let mut guard = tt.lock().expect("task table lock poisoned");
+            let mut guard = tt.lock();
             f(&mut guard)
         } else {
-            let mut state = self.state.lock().expect("runtime state lock poisoned");
+            let mut state = self.state.lock();
             f(&mut state.tasks)
         }
     }
@@ -997,10 +994,10 @@ impl ThreeLaneWorker {
     /// Read-only version of [`with_task_table`] for task record lookups.
     fn with_task_table_ref<R, F: FnOnce(&TaskTable) -> R>(&self, f: F) -> R {
         if let Some(tt) = &self.task_table {
-            let guard = tt.lock().expect("task table lock poisoned");
+            let guard = tt.lock();
             f(&guard)
         } else {
-            let state = self.state.lock().expect("runtime state lock poisoned");
+            let state = self.state.lock();
             f(&state.tasks)
         }
     }
@@ -1089,9 +1086,10 @@ impl ThreeLaneWorker {
                 // Also grab next_deadline in the same lock acquisition so the parking
                 // path below doesn't need a second lock round-trip.
                 let (local_has_runnable, local_deadline) =
-                    self.local.lock().map_or((false, None), |local| {
+{
+                        let local = self.local.lock();
                         (local.has_runnable_work(now), local.next_deadline())
-                    });
+                    };
                 let local_ready_has_work = !self.local_ready.lock().is_empty();
                 if self.global.has_runnable_work(now) || local_has_runnable || local_ready_has_work
                 {
@@ -1333,12 +1331,12 @@ impl ThreeLaneWorker {
 
         // Take a snapshot under the state lock (bounded work, no allocs).
         let snapshot = {
-            let state = self.state.lock().expect("runtime state lock poisoned");
+            let state = self.state.lock();
             StateSnapshot::from_runtime_state(&state)
         };
 
         // Enrich with local queue depth.
-        let queue_depth = self.local.lock().map_or(0, |local| local.len());
+        let queue_depth = self.local.lock().len();
         #[allow(clippy::cast_possible_truncation)]
         let snapshot = snapshot.with_ready_queue_depth(queue_depth as u32);
 
@@ -1441,7 +1439,7 @@ impl ThreeLaneWorker {
         }
 
         // Local cancel
-        let mut local = self.local.lock().expect("local scheduler lock poisoned");
+        let mut local = self.local.lock();
         let rng_hint = self.rng.next_u64();
         local.pop_cancel_only_with_hint(rng_hint)
     }
@@ -1463,7 +1461,7 @@ impl ThreeLaneWorker {
         }
 
         // Local timed (already EDF ordered)
-        let mut local = self.local.lock().expect("local scheduler lock poisoned");
+        let mut local = self.local.lock();
         let rng_hint = self.rng.next_u64();
         local.pop_timed_only_with_hint(rng_hint, now)
     }
@@ -1489,7 +1487,7 @@ impl ThreeLaneWorker {
         }
 
         // Local ready (PriorityScheduler, O(log n) pop)
-        let mut local = self.local.lock().expect("local scheduler lock poisoned");
+        let mut local = self.local.lock();
         let rng_hint = self.rng.next_u64();
         local.pop_ready_only_with_hint(rng_hint)
     }
@@ -1505,7 +1503,7 @@ impl ThreeLaneWorker {
             .timer_driver
             .as_ref()
             .map_or(Time::ZERO, TimerDriverHandle::now);
-        let mut local = self.local.lock().expect("local scheduler lock poisoned");
+        let mut local = self.local.lock();
         let rng_hint = self.rng.next_u64();
         local.pop_any_lane_with_hint(rng_hint, now)
     }
@@ -1522,7 +1520,7 @@ impl ThreeLaneWorker {
         check_cancel: bool,
         now: Time,
     ) -> Option<(u8, TaskId)> {
-        let mut local = self.local.lock().expect("local scheduler lock poisoned");
+        let mut local = self.local.lock();
         let rng_hint = self.rng.next_u64();
 
         // Check cancel + timed in suggestion-specific order.
@@ -1662,7 +1660,7 @@ impl ThreeLaneWorker {
             })
         });
         if should_schedule {
-            let mut local = self.local.lock().expect("local scheduler lock poisoned");
+            let mut local = self.local.lock();
             local.schedule(task, priority);
         }
     }
@@ -1684,7 +1682,7 @@ impl ThreeLaneWorker {
         });
         let _ = remove_from_local_ready(&self.local_ready, task);
         {
-            let mut local = self.local.lock().expect("local scheduler lock poisoned");
+            let mut local = self.local.lock();
             local.move_to_cancel_lane(task, priority);
         }
         self.parker.unpark();
@@ -1709,7 +1707,7 @@ impl ThreeLaneWorker {
             })
         });
         if should_schedule {
-            let mut local = self.local.lock().expect("local scheduler lock poisoned");
+            let mut local = self.local.lock();
             local.schedule_timed(task, deadline);
         }
     }
@@ -1797,8 +1795,7 @@ impl ThreeLaneWorker {
                     let mut state = self
                         .worker
                         .state
-                        .lock()
-                        .expect("runtime state lock poisoned");
+                        .lock();
                     let waiters = state.task_completed(self.task_id);
                     let finalizers = state.drain_ready_async_finalizers();
 
@@ -1958,7 +1955,7 @@ impl ThreeLaneWorker {
                 // Map Outcome<(), ()> to Outcome<(), Error> for record.complete()
                 let task_outcome = outcome
                     .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
-                let mut state = self.state.lock().expect("runtime state lock poisoned");
+                let mut state = self.state.lock();
                 let cancel_ack = Self::consume_cancel_ack_locked(&mut state, task_id);
                 if let Some(record) = state.task_mut(task_id) {
                     if !record.state.is_terminal() {
@@ -2068,7 +2065,7 @@ impl ThreeLaneWorker {
                             // Cancel lane is not stolen by steal_ready_batch_into.
                             let _ = remove_from_local_ready(&self.local_ready, task_id);
                             let mut local =
-                                self.local.lock().expect("local scheduler lock poisoned");
+                                self.local.lock();
                             local.schedule_cancel(task_id, cancel_priority);
                         } else {
                             // Push to non-stealable local_ready queue.
@@ -2095,7 +2092,7 @@ impl ThreeLaneWorker {
 
     fn schedule_ready_finalizers(&self) -> bool {
         let tasks = {
-            let mut state = self.state.lock().expect("runtime state lock poisoned");
+            let mut state = self.state.lock();
             state.drain_ready_async_finalizers()
         };
         if tasks.is_empty() {
@@ -2222,17 +2219,15 @@ impl CancelLaneWaker {
         let Some(inner) = self.cx_inner.upgrade() else {
             return;
         };
-        let (cancel_requested, priority) = match inner.read() {
-            Ok(guard) => {
-                let priority = guard
-                    .cancel_reason
-                    .as_ref()
-                    .map_or(self.default_priority, |reason| {
-                        reason.cleanup_budget().priority
-                    });
-                (guard.cancel_requested, priority)
-            }
-            Err(_) => return,
+        let (cancel_requested, priority) = {
+            let guard = inner.read();
+            let priority = guard
+                .cancel_reason
+                .as_ref()
+                .map_or(self.default_priority, |reason| {
+                    reason.cleanup_budget().priority
+                });
+            (guard.cancel_requested, priority)
         };
 
         if !cancel_requested {
@@ -2274,17 +2269,15 @@ impl ThreeLaneLocalCancelWaker {
         let Some(inner) = self.cx_inner.upgrade() else {
             return;
         };
-        let (cancel_requested, priority) = match inner.read() {
-            Ok(guard) => {
-                let priority = guard
-                    .cancel_reason
-                    .as_ref()
-                    .map_or(self.default_priority, |reason| {
-                        reason.cleanup_budget().priority
-                    });
-                (guard.cancel_requested, priority)
-            }
-            Err(_) => return,
+        let (cancel_requested, priority) = {
+            let guard = inner.read();
+            let priority = guard
+                .cancel_reason
+                .as_ref()
+                .map_or(self.default_priority, |reason| {
+                    reason.cleanup_budget().priority
+                });
+            (guard.cancel_requested, priority)
         };
 
         if !cancel_requested {
@@ -2298,7 +2291,7 @@ impl ThreeLaneLocalCancelWaker {
         // move_to_cancel_lane relocates from ready/timed if already scheduled.
         {
             let _ = remove_from_local_ready(&self.local_ready, self.task_id);
-            let mut local = self.local.lock().expect("local scheduler lock poisoned");
+            let mut local = self.local.lock();
             local.move_to_cancel_lane(self.task_id, priority);
         }
         self.parker.unpark();
@@ -2455,7 +2448,7 @@ mod tests {
         let mut worker = workers.next().unwrap();
 
         {
-            let mut local = worker.local.lock().unwrap();
+            let mut local = worker.local.lock();
             for &task_id in &cancel_tasks {
                 local.schedule_cancel(task_id, 100);
             }
@@ -2481,7 +2474,7 @@ mod tests {
         // Add cancel and ready work to worker 0's local queue
         {
             let workers = &scheduler.workers;
-            let mut local0 = workers[0].local.lock().unwrap();
+            let mut local0 = workers[0].local.lock();
             local0.schedule_cancel(TaskId::new_for_test(1, 1), 100);
             local0.schedule(TaskId::new_for_test(1, 2), 50);
             local0.schedule(TaskId::new_for_test(1, 3), 50);
@@ -2509,18 +2502,17 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("runtime state lock poisoned")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let mut guard = state.lock();
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
             task_id
         };
         let waiter_id = {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let mut guard = state.lock();
             let (waiter_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -2528,7 +2520,7 @@ mod tests {
         };
 
         {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let mut guard = state.lock();
             if let Some(record) = guard.task_mut(task_id) {
                 record.add_waiter(waiter_id);
             }
@@ -2541,7 +2533,6 @@ mod tests {
 
         let completed = state
             .lock()
-            .expect("runtime state lock poisoned")
             .task(task_id)
             .is_none();
         assert!(completed, "task should be removed after completion");
@@ -2863,11 +2854,10 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("runtime state lock poisoned")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let mut guard = state.lock();
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -2901,11 +2891,10 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("runtime state lock poisoned")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let mut guard = state.lock();
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -2937,11 +2926,10 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("runtime state lock poisoned")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let mut guard = state.lock();
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -3039,7 +3027,6 @@ mod tests {
         assert!(
             local
                 .lock()
-                .expect("local scheduler lock poisoned")
                 .is_in_cancel_lane(task_id),
             "task should be promoted to cancel lane"
         );
@@ -3067,7 +3054,6 @@ mod tests {
         assert!(
             local
                 .lock()
-                .expect("local scheduler lock poisoned")
                 .is_in_cancel_lane(task_id),
             "task should be promoted to cancel lane"
         );
@@ -3078,11 +3064,10 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("runtime state lock poisoned")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let mut guard = state.lock();
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -3101,7 +3086,7 @@ mod tests {
 
         // Check local queue has only one entry
         let count = {
-            let local = worker.local.lock().expect("local lock poisoned");
+            let local = worker.local.lock();
             local.len()
         };
         assert_eq!(count, 1, "should have exactly 1 task, not {count}");
@@ -3112,11 +3097,10 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("runtime state lock poisoned")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let mut guard = state.lock();
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -3135,7 +3119,6 @@ mod tests {
         let popped = worker
             .local
             .lock()
-            .expect("local lock poisoned")
             .pop_ready_only();
         assert!(popped.is_none(), "local task must not enter ready lane");
         assert!(
@@ -3149,11 +3132,10 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("runtime state lock poisoned")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let mut guard = state.lock();
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -3172,7 +3154,6 @@ mod tests {
         let popped = worker
             .local
             .lock()
-            .expect("local lock poisoned")
             .pop_timed_only(Time::from_nanos(100));
         assert!(popped.is_none(), "local task must not enter timed lane");
         assert!(
@@ -3187,11 +3168,10 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("runtime state lock poisoned")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let mut guard = state.lock();
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -3213,7 +3193,7 @@ mod tests {
         // via the scheduler method would be blocked
         // The task is only in local queue
         let local_len = {
-            let local = worker.local.lock().expect("local lock poisoned");
+            let local = worker.local.lock();
             local.len()
         };
         assert_eq!(local_len, 1);
@@ -3263,11 +3243,10 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("runtime state lock poisoned")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let mut guard = state.lock();
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -3276,7 +3255,7 @@ mod tests {
 
         // Get the wake_state for direct manipulation
         let wake_state = {
-            let guard = state.lock().expect("runtime state lock poisoned");
+            let guard = state.lock();
             guard
                 .task(task_id)
                 .map(|r| Arc::clone(&r.wake_state))
@@ -3426,7 +3405,7 @@ mod tests {
 
         // Fill producer queue
         {
-            let mut q = producer_queue.lock().unwrap();
+            let mut q = producer_queue.lock();
             for i in 0..10000 {
                 q.schedule(TaskId::new_for_test(i, 0), 50);
             }
@@ -3473,7 +3452,7 @@ mod tests {
         let producer = std::thread::spawn(move || {
             b.wait();
             for i in 10000..15000 {
-                let mut guard = q.lock().unwrap();
+                let mut guard = q.lock();
                 guard.schedule(TaskId::new_for_test(i, 0), 50);
                 drop(guard);
                 std::thread::yield_now();
@@ -3490,7 +3469,7 @@ mod tests {
         // Drain remaining
         let mut remaining = 0;
         {
-            let mut q = producer_queue.lock().unwrap();
+            let mut q = producer_queue.lock();
             while q.pop().is_some() {
                 remaining += 1;
             }
@@ -4044,7 +4023,7 @@ mod tests {
 
         // Local queue should have the task
         let count = {
-            let local = worker_local.lock().unwrap();
+            let local = worker_local.lock();
             local.len()
         };
         assert_eq!(count, 1, "Local queue should have 1 task");
@@ -4059,7 +4038,7 @@ mod tests {
         assert!(!scheduler.global.has_ready_work());
 
         let count = {
-            let local = worker_local.lock().unwrap();
+            let local = worker_local.lock();
             local.len()
         };
         assert_eq!(count, 2, "Local queue should have 2 tasks");
@@ -4095,7 +4074,7 @@ mod tests {
 
         // Task should be in the fast queue, NOT the PriorityScheduler.
         assert!(!fast_queue.is_empty(), "task should be in fast_queue");
-        let priority_len = priority_sched.lock().unwrap().len();
+        let priority_len = priority_sched.lock().len();
         assert_eq!(priority_len, 0, "PriorityScheduler should be empty");
         assert!(!scheduler.global.has_ready_work(), "global should be empty");
     }
@@ -4116,7 +4095,7 @@ mod tests {
         }
 
         assert!(!fast_queue.is_empty(), "task should be in fast_queue");
-        let priority_len = priority_sched.lock().unwrap().len();
+        let priority_len = priority_sched.lock().len();
         assert_eq!(priority_len, 0, "PriorityScheduler should be empty");
     }
 
@@ -4135,7 +4114,6 @@ mod tests {
         worker
             .local
             .lock()
-            .unwrap()
             .schedule(TaskId::new_for_test(2, 0), 50);
 
         // First pop should come from fast_queue (task A).
@@ -4188,7 +4166,6 @@ mod tests {
         scheduler.workers[0]
             .local
             .lock()
-            .unwrap()
             .schedule(heap_task, 50);
 
         let mut workers = scheduler.take_workers();
@@ -4308,7 +4285,7 @@ mod tests {
 
         assert!(!fast_queue.is_empty(), "should be in fast_queue");
         assert_eq!(
-            priority_sched.lock().unwrap().len(),
+            priority_sched.lock().len(),
             0,
             "PriorityScheduler should be empty"
         );
@@ -4372,7 +4349,7 @@ mod tests {
             drop(queue);
         }
         assert_eq!(
-            priority_sched.lock().unwrap().len(),
+            priority_sched.lock().len(),
             0,
             "PriorityScheduler should be empty"
         );
@@ -4422,7 +4399,6 @@ mod tests {
             scheduler.workers[0]
                 .local
                 .lock()
-                .unwrap()
                 .schedule(TaskId::new_for_test(i, 0), 50);
         }
 
@@ -4625,18 +4601,17 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("runtime state lock poisoned")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("lock");
+            let mut guard = state.lock();
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
             id
         };
         let waiter_id = {
-            let mut guard = state.lock().expect("lock");
+            let mut guard = state.lock();
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -4648,7 +4623,7 @@ mod tests {
         };
 
         {
-            let mut guard = state.lock().expect("lock");
+            let mut guard = state.lock();
             if let Some(record) = guard.task_mut(task_id) {
                 record.add_waiter(waiter_id);
             }
@@ -4679,18 +4654,17 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("runtime state lock poisoned")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("lock");
+            let mut guard = state.lock();
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
             id
         };
         let waiter_id = {
-            let mut guard = state.lock().expect("lock");
+            let mut guard = state.lock();
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -4702,7 +4676,7 @@ mod tests {
         };
 
         {
-            let mut guard = state.lock().expect("lock");
+            let mut guard = state.lock();
             if let Some(record) = guard.task_mut(task_id) {
                 record.add_waiter(waiter_id);
             }
@@ -4736,18 +4710,17 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("runtime state lock poisoned")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("lock");
+            let mut guard = state.lock();
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
             id
         };
         let waiter_id = {
-            let mut guard = state.lock().expect("lock");
+            let mut guard = state.lock();
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -4755,7 +4728,7 @@ mod tests {
         };
 
         {
-            let mut guard = state.lock().expect("lock");
+            let mut guard = state.lock();
             if let Some(record) = guard.task_mut(task_id) {
                 record.add_waiter(waiter_id);
             }
@@ -4794,7 +4767,7 @@ mod tests {
 
         // 2. Create a task pinned to Worker 0
         let task_id = {
-            let mut guard = state.lock().expect("lock");
+            let mut guard = state.lock();
             let region = guard.create_root_region(Budget::INFINITE);
             let (tid, _) = guard
                 .create_task(region, Budget::INFINITE, async { 1 })
@@ -4869,7 +4842,6 @@ mod tests {
         assert!(
             task_table
                 .lock()
-                .expect("task table lock")
                 .task(task_id)
                 .is_some(),
             "task should be in sharded table"
@@ -4919,7 +4891,7 @@ mod tests {
         worker.schedule_local(task_id, 50);
 
         // Task should be in the worker's local scheduler.
-        let next = worker.local.lock().unwrap().pop_ready_only();
+        let next = worker.local.lock().pop_ready_only();
         assert!(next.is_some(), "task should be in local scheduler");
         assert_eq!(next.unwrap(), task_id);
     }
@@ -4935,7 +4907,7 @@ mod tests {
         worker.schedule_local_cancel(task_id, 50);
 
         // Task should be in the cancel lane.
-        let next = worker.local.lock().unwrap().pop_cancel_only();
+        let next = worker.local.lock().pop_cancel_only();
         assert!(next.is_some(), "task should be in local cancel lane");
         assert_eq!(next.unwrap(), task_id);
     }
@@ -4954,7 +4926,6 @@ mod tests {
         let next = worker
             .local
             .lock()
-            .unwrap()
             .pop_timed_only(Time::from_nanos(2000));
         assert!(next.is_some(), "task should be in local timed lane");
         assert_eq!(next.unwrap(), task_id);
@@ -4979,7 +4950,7 @@ mod tests {
 
         // Reset wake_state so we can inject again.
         {
-            let tt = task_table.lock().expect("task table lock");
+            let tt = task_table.lock();
             if let Some(record) = tt.task(task_id) {
                 record.wake_state.clear();
             }
@@ -5007,7 +4978,7 @@ mod tests {
             Budget::INFINITE,
         )));
         {
-            let mut tt = task_table.lock().expect("task table lock");
+            let mut tt = task_table.lock();
             if let Some(record) = tt.task_mut(task_id) {
                 record.cx_inner = Some(cx_inner.clone());
             }

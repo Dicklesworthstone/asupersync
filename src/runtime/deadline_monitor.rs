@@ -327,9 +327,7 @@ impl DeadlineMonitor {
             let Some(inner) = task.cx_inner.as_ref() else {
                 continue;
             };
-            let Ok(inner_guard) = inner.read() else {
-                continue;
-            };
+            let inner_guard = inner.read();
             let Some(deadline) = inner_guard.budget.deadline else {
                 continue;
             };
@@ -516,7 +514,8 @@ mod tests {
     use crate::record::TaskRecord;
     use crate::types::{Budget, CxInner, RegionId, TaskId};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Arc, Mutex, RwLock};
+    use parking_lot::RwLock;
+    use std::sync::{Arc, Mutex};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -1185,9 +1184,8 @@ mod tests {
         monitor.check(Time::from_secs(1), std::iter::once(&task));
 
         if let Some(inner) = task.cx_inner.as_ref() {
-            if let Ok(mut guard) = inner.write() {
-                guard.checkpoint_state.last_checkpoint = Some(second);
-            }
+            let mut guard = inner.write();
+            guard.checkpoint_state.last_checkpoint = Some(second);
         }
 
         monitor.check(Time::from_secs(2), std::iter::once(&task));
