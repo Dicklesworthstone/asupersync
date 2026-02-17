@@ -51,7 +51,7 @@ fn create_task(
     state: &Arc<ContendedMutex<RuntimeState>>,
     region: asupersync::types::RegionId,
 ) -> TaskId {
-    let mut guard = state.lock();
+    let mut guard = state.lock().expect("lock poisoned");
     let (id, _) = guard
         .create_task(region, Budget::INFINITE, async {})
         .unwrap();
@@ -373,7 +373,10 @@ fn run_mixed_workload(
     // Reset metrics before workload (clear any setup noise).
     state.reset_metrics();
 
-    let region = state.lock().create_root_region(Budget::INFINITE);
+    let region = state
+        .lock()
+        .expect("lock poisoned")
+        .create_root_region(Budget::INFINITE);
 
     let cancel_ids = create_n_tasks(&state, region, tasks_per_lane);
     let timed_ids = create_n_tasks(&state, region, tasks_per_lane);
@@ -405,7 +408,7 @@ fn run_mixed_workload(
     let lock_snapshot = state.snapshot();
 
     // Oracle: verify all tasks completed.
-    let guard = state.lock();
+    let guard = state.lock().expect("lock poisoned");
     let cancel_done = cancel_ids
         .iter()
         .filter(|id| guard.task(**id).is_none())
@@ -516,7 +519,10 @@ fn contention_task_spawn_lifecycle() {
     let state = setup_state();
     state.reset_metrics();
 
-    let region = state.lock().create_root_region(Budget::INFINITE);
+    let region = state
+        .lock()
+        .expect("lock poisoned")
+        .create_root_region(Budget::INFINITE);
     let done = Arc::new(AtomicUsize::new(0));
 
     // Multiple threads concurrently spawn tasks.
@@ -529,7 +535,7 @@ fn contention_task_spawn_lifecycle() {
         let done = Arc::clone(&done);
         handles.push(std::thread::spawn(move || {
             for _ in 0..tasks_per_thread {
-                let mut guard = state.lock();
+                let mut guard = state.lock().expect("lock poisoned");
                 let task_result = guard.create_task(region, Budget::INFINITE, async {});
                 if task_result.is_ok() {
                     done.fetch_add(1, Ordering::SeqCst);
@@ -579,7 +585,10 @@ fn contention_region_lifecycle() {
     init_test_logging();
 
     let state = setup_state();
-    let root = state.lock().create_root_region(Budget::INFINITE);
+    let root = state
+        .lock()
+        .expect("lock poisoned")
+        .create_root_region(Budget::INFINITE);
     state.reset_metrics();
 
     let num_threads = 4;
@@ -593,7 +602,7 @@ fn contention_region_lifecycle() {
         handles.push(std::thread::spawn(move || {
             for _ in 0..regions_per_thread {
                 let child = {
-                    let mut guard = state.lock();
+                    let mut guard = state.lock().expect("lock poisoned");
                     guard.create_child_region(root, Budget::INFINITE)
                 };
                 if child.is_ok() {
@@ -788,7 +797,10 @@ fn run_sharded_scheduling_workload(
     init_test_logging();
 
     let (state, clock) = setup_state_with_clock(1_000);
-    let region = state.lock().create_root_region(Budget::INFINITE);
+    let region = state
+        .lock()
+        .expect("lock poisoned")
+        .create_root_region(Budget::INFINITE);
 
     // Create tasks in RuntimeState for lifecycle management.
     let cancel_ids = create_n_tasks(&state, region, tasks_per_lane);
