@@ -25,7 +25,8 @@
 use crate::cx::Cx;
 use crate::runtime::blocking_pool::{BlockingPoolHandle, BlockingTaskHandle};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::task::Waker;
 use std::thread;
 
@@ -88,7 +89,7 @@ impl<T> BlockingOneshot<T> {
     }
 
     fn send(self, val: std::thread::Result<T>) {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = self.state.lock();
         guard.result = Some(val);
         guard.done = true;
         if let Some(waker) = guard.waker.take() {
@@ -108,7 +109,7 @@ impl<T> std::future::Future for BlockingOneshotReceiver<T> {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = self.state.lock();
         if guard.done {
             let result = guard.result.take().expect("result consumed twice");
             match result {
@@ -219,7 +220,6 @@ where
         .spawn(move || {
             let f = f_for_thread
                 .lock()
-                .expect("spawn_blocking_on_thread fn lock poisoned")
                 .take()
                 .expect("spawn_blocking_on_thread fn missing");
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
@@ -233,7 +233,6 @@ where
             FALLBACK_THREAD_COUNT.fetch_sub(1, Ordering::AcqRel);
             let f = f_cell
                 .lock()
-                .expect("spawn_blocking_on_thread fn lock poisoned")
                 .take()
                 .expect("spawn_blocking_on_thread fn missing");
             f()

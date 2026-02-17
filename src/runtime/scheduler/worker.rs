@@ -540,7 +540,8 @@ impl Worker {
             return false;
         };
         let mut acknowledged = false;
-        if let Ok(mut guard) = inner.write() {
+        {
+            let mut guard = inner.write();
             if guard.cancel_acknowledged {
                 guard.cancel_acknowledged = false;
                 acknowledged = true;

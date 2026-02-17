@@ -148,7 +148,8 @@ use crate::types::{Budget, CancelAttributionConfig};
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard};
+use parking_lot::{Mutex, MutexGuard};
+use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
@@ -1193,10 +1194,7 @@ impl<T> JoinState<T> {
 }
 
 fn lock_state<T>(state: &Mutex<T>) -> MutexGuard<'_, T> {
-    match state.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
+    state.lock()
 }
 
 fn run_task<F, T>(
