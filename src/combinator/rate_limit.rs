@@ -529,6 +529,11 @@ impl RateLimiter {
         let mut state = self.state.lock().expect("lock poisoned");
         self.refill_inner(&mut state, now_millis);
 
+        // Accumulate metrics on the stack, then flush once outside the loop.
+        let mut granted_count = 0u64;
+        let mut acc_wait_time = Duration::ZERO;
+        let mut max_wait_time = Duration::ZERO;
+
         for entry in queue.iter_mut() {
             // Skip already processed (granted/timeout/cancelled)
             if entry.result.is_some() {
@@ -545,31 +550,34 @@ impl RateLimiter {
                     first_granted = Some(entry.id);
                 }
 
-                // Update metrics
                 let wait_ms = now_millis.saturating_sub(entry.enqueued_at_millis);
-                self.total_allowed.fetch_add(1, Ordering::Relaxed);
-
-                let mut metrics = self.metrics.write().expect("lock poisoned");
-
                 let wait_duration = Duration::from_millis(wait_ms);
-                metrics.total_wait_time += wait_duration;
-
-                if wait_duration > metrics.max_wait_time {
-                    metrics.max_wait_time = wait_duration;
+                acc_wait_time += wait_duration;
+                if wait_duration > max_wait_time {
+                    max_wait_time = wait_duration;
                 }
-
-                let total_waited = self.total_waited.load(Ordering::Relaxed);
-                let total_ms = duration_to_millis_saturating(metrics.total_wait_time);
-
-                if total_waited > 0 {
-                    if let Some(avg_ms) = total_ms.checked_div(total_waited) {
-                        metrics.avg_wait_time = Duration::from_millis(avg_ms);
-                    }
-                }
+                granted_count += 1;
             } else {
-                // Stop at first ungrantable entry to preserve FIFO order?
-                // Yes, generally rate limiters should be FIFO.
+                // Stop at first ungrantable entry to preserve FIFO order.
                 break;
+            }
+        }
+
+        // Flush accumulated metrics in a single write lock acquisition.
+        if granted_count > 0 {
+            self.total_allowed.fetch_add(granted_count, Ordering::Relaxed);
+
+            let mut metrics = self.metrics.write().expect("lock poisoned");
+            metrics.total_wait_time += acc_wait_time;
+            if max_wait_time > metrics.max_wait_time {
+                metrics.max_wait_time = max_wait_time;
+            }
+            let total_waited = self.total_waited.load(Ordering::Relaxed);
+            let total_ms = duration_to_millis_saturating(metrics.total_wait_time);
+            if total_waited > 0 {
+                if let Some(avg_ms) = total_ms.checked_div(total_waited) {
+                    metrics.avg_wait_time = Duration::from_millis(avg_ms);
+                }
             }
         }
 

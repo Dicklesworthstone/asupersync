@@ -61,7 +61,7 @@ impl Barrier {
             state: Mutex::new(BarrierState {
                 arrived: 0,
                 generation: 0,
-                waiters: Vec::new(),
+                waiters: Vec::with_capacity(parties.saturating_sub(1)),
             }),
         }
     }

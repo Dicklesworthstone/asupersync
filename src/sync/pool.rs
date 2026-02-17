@@ -209,6 +209,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
+use smallvec::SmallVec;
+
 use crate::cx::Cx;
 
 /// Boxed future helper for async trait-like APIs.
@@ -1162,7 +1164,7 @@ where
     #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
     fn process_returns(&self) {
         let rx = self.return_rx.lock().expect("return_rx lock poisoned");
-        let mut waiters_to_wake = Vec::new();
+        let mut waiters_to_wake: SmallVec<[Waker; 4]> = SmallVec::new();
         while let Ok(ret) = rx.try_recv() {
             match ret {
                 PoolReturn::Return {

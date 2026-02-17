@@ -28,6 +28,7 @@ use parking_lot::Mutex as ParkingMutex;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
@@ -70,6 +71,10 @@ impl std::error::Error for TryAcquireError {}
 pub struct Semaphore {
     /// Internal state for permits and waiters.
     state: ParkingMutex<SemaphoreState>,
+    /// Lock-free shadow of available permits for read-heavy diagnostics.
+    permits_shadow: AtomicUsize,
+    /// Lock-free shadow of closed state for read-heavy checks.
+    closed_shadow: AtomicBool,
     /// Maximum permits (initial count).
     max_permits: usize,
 }
@@ -120,6 +125,8 @@ impl Semaphore {
                 waiters: VecDeque::new(),
                 next_waiter_id: 0,
             }),
+            permits_shadow: AtomicUsize::new(permits),
+            closed_shadow: AtomicBool::new(false),
             max_permits: permits,
         }
     }
@@ -127,7 +134,7 @@ impl Semaphore {
     /// Returns the number of currently available permits.
     #[must_use]
     pub fn available_permits(&self) -> usize {
-        self.state.lock().permits
+        self.permits_shadow.load(Ordering::Acquire)
     }
 
     /// Returns the maximum number of permits (initial count).
@@ -139,7 +146,7 @@ impl Semaphore {
     /// Returns true if the semaphore is closed.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.state.lock().closed
+        self.closed_shadow.load(Ordering::Acquire)
     }
 
     /// Closes the semaphore.
@@ -147,6 +154,7 @@ impl Semaphore {
         let waiters = {
             let mut state = self.state.lock();
             state.closed = true;
+            self.closed_shadow.store(true, Ordering::Release);
             state
                 .waiters
                 .drain(..)
@@ -181,6 +189,7 @@ impl Semaphore {
             Err(TryAcquireError)
         } else if state.permits >= count {
             state.permits -= count;
+            self.permits_shadow.store(state.permits, Ordering::Release);
             Ok(SemaphorePermit {
                 semaphore: self,
                 count,
@@ -198,6 +207,7 @@ impl Semaphore {
     pub fn add_permits(&self, count: usize) {
         let mut state = self.state.lock();
         state.permits = state.permits.saturating_add(count);
+        self.permits_shadow.store(state.permits, Ordering::Release);
         // Only wake the first waiter since FIFO ordering means only it can acquire.
         // Waking all waiters wastes CPU when only the front can make progress.
         // If the first waiter acquires and releases, it will wake the next.
@@ -282,6 +292,9 @@ impl<'a> Future for AcquireFuture<'a, '_> {
 
         if is_next_in_line && state.permits >= self.count {
             state.permits -= self.count;
+            self.semaphore
+                .permits_shadow
+                .store(state.permits, Ordering::Release);
 
             // Optimization: Since we verified we are next in line, we are either
             // at the front of the queue or the queue is empty. We can just pop
@@ -494,6 +507,9 @@ impl Future for OwnedAcquireFuture {
 
         if is_next_in_line && state.permits >= self.count {
             state.permits -= self.count;
+            self.semaphore
+                .permits_shadow
+                .store(state.permits, Ordering::Release);
 
             // Optimization: O(1) removal instead of O(N) retain
             if !state.waiters.is_empty() {
