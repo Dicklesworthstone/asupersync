@@ -121,6 +121,13 @@ struct OneShotInner<T> {
     permit_outstanding: bool,
     /// The waker to notify when a value is sent or the channel is closed.
     waker: Option<Waker>,
+    /// Monotonic waiter identity for the registered waker.
+    ///
+    /// This lets us clear a waiter only if the same `RecvFuture` that
+    /// registered it is being cancelled/dropped.
+    waker_id: Option<u64>,
+    /// Next waiter identity to assign.
+    next_waiter_id: u64,
 }
 
 impl<T> OneShotInner<T> {
@@ -131,6 +138,8 @@ impl<T> OneShotInner<T> {
             receiver_dropped: false,
             permit_outstanding: false,
             waker: None,
+            waker_id: None,
+            next_waiter_id: 0,
         }
     }
 
@@ -142,6 +151,18 @@ impl<T> OneShotInner<T> {
     /// Returns true if a value is ready to receive.
     fn is_ready(&self) -> bool {
         self.value.is_some()
+    }
+
+    /// Clears the registered waker and its waiter identity.
+    fn clear_waker(&mut self) {
+        self.waker = None;
+        self.waker_id = None;
+    }
+
+    /// Takes the registered waker and clears its waiter identity.
+    fn take_waker(&mut self) -> Option<Waker> {
+        self.waker_id = None;
+        self.waker.take()
     }
 }
 
@@ -245,7 +266,7 @@ impl<T> Drop for Sender<T> {
                 inner.sender_consumed = true;
                 // Take waker under lock, wake outside to avoid deadlock
                 // with inline-polling executors.
-                inner.waker.take()
+                inner.take_waker()
             }
         };
         if let Some(waker) = waker {
@@ -289,7 +310,7 @@ impl<T> SendPermit<T> {
                 // and release the lock as early as possible (mirrors the
                 // Ok path).
                 inner.permit_outstanding = false;
-                inner.waker = None;
+                inner.clear_waker();
                 drop(inner);
                 (Err(value), None)
             } else {
@@ -297,7 +318,7 @@ impl<T> SendPermit<T> {
                 inner.permit_outstanding = false;
                 // Take waker under lock, wake outside to avoid deadlock
                 // with inline-polling executors.
-                let waker = inner.waker.take();
+                let waker = inner.take_waker();
                 drop(inner);
                 (Ok(()), waker)
             }
@@ -320,7 +341,7 @@ impl<T> SendPermit<T> {
             let mut inner = self.inner.lock().expect("oneshot lock poisoned");
             inner.permit_outstanding = false;
             // Take waker under lock, wake outside.
-            inner.waker.take()
+            inner.take_waker()
         };
         if let Some(waker) = waker {
             waker.wake();
@@ -348,7 +369,7 @@ impl<T> Drop for SendPermit<T> {
                     return;
                 };
                 inner.permit_outstanding = false;
-                inner.waker.take()
+                inner.take_waker()
             };
             if let Some(waker) = waker {
                 waker.wake();
@@ -361,49 +382,61 @@ impl<T> Drop for SendPermit<T> {
 pub struct RecvFuture<'a, T> {
     receiver: &'a Receiver<T>,
     cx: &'a Cx,
+    waiter_id: Option<u64>,
 }
 
 impl<T> Future for RecvFuture<'_, T> {
     type Output = Result<T, RecvError>;
 
     fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut inner = self.receiver.inner.lock().expect("oneshot lock poisoned");
+        let this = self.get_mut();
+        let mut inner = this.receiver.inner.lock().expect("oneshot lock poisoned");
 
         // 1. Check if value is ready
         if let Some(value) = inner.value.take() {
             // Clear the stale waker so we don't retain executor state
             // after the channel is done.
-            inner.waker = None;
-            self.cx.trace("oneshot::recv received value");
+            inner.clear_waker();
+            this.waiter_id = None;
+            this.cx.trace("oneshot::recv received value");
             return Poll::Ready(Ok(value));
         }
 
         // 2. Check if channel is closed
         if inner.is_closed() {
-            inner.waker = None;
-            self.cx.trace("oneshot::recv channel closed");
+            inner.clear_waker();
+            this.waiter_id = None;
+            this.cx.trace("oneshot::recv channel closed");
             return Poll::Ready(Err(RecvError::Closed));
         }
 
         // 3. Check cancellation
-        if self.cx.checkpoint().is_err() {
+        if this.cx.checkpoint().is_err() {
             // Clear stale waiter if this future registered it.
-            if inner
-                .waker
-                .as_ref()
-                .is_some_and(|waker| waker.will_wake(ctx.waker()))
+            if this
+                .waiter_id
+                .is_some_and(|waiter_id| inner.waker_id == Some(waiter_id))
             {
-                inner.waker = None;
+                inner.clear_waker();
             }
-            self.cx.trace("oneshot::recv cancelled while waiting");
+            this.waiter_id = None;
+            this.cx.trace("oneshot::recv cancelled while waiting");
             return Poll::Ready(Err(RecvError::Cancelled));
         }
 
-        // 4. Register waker (skip clone if unchanged — common on re-poll)
-        match &inner.waker {
-            Some(existing) if existing.will_wake(ctx.waker()) => {}
-            _ => inner.waker = Some(ctx.waker().clone()),
+        // 4. Register waker (skip clone if unchanged and still owned by this waiter)
+        match (&inner.waker, inner.waker_id, this.waiter_id) {
+            (Some(existing), Some(inner_waiter_id), Some(my_waiter_id))
+                if inner_waiter_id == my_waiter_id && existing.will_wake(ctx.waker()) => {}
+            _ => {
+                let waiter_id = inner.next_waiter_id;
+                inner.next_waiter_id = inner.next_waiter_id.wrapping_add(1);
+                inner.waker = Some(ctx.waker().clone());
+                inner.waker_id = Some(waiter_id);
+                this.waiter_id = Some(waiter_id);
+            }
         }
+        drop(inner);
         Poll::Pending
     }
 }
@@ -415,10 +448,14 @@ impl<T> Drop for RecvFuture<'_, T> {
         let Ok(mut inner) = self.receiver.inner.lock() else {
             return;
         };
-        // Only clear if this future's waker is the one registered.
-        // We don't have direct equality, so unconditionally clear —
-        // oneshot has at most one receiver, so this is always correct.
-        inner.waker = None;
+        // Clear only if this future still owns the registered waiter slot.
+        if self
+            .waiter_id
+            .is_some_and(|waiter_id| inner.waker_id == Some(waiter_id))
+        {
+            inner.clear_waker();
+        }
+        self.waiter_id = None;
     }
 }
 
@@ -452,7 +489,11 @@ impl<T> Receiver<T> {
     /// Returns `Err(RecvError::Closed)` if the sender was dropped without sending.
     #[must_use]
     pub fn recv<'a>(&'a self, cx: &'a Cx) -> RecvFuture<'a, T> {
-        RecvFuture { receiver: self, cx }
+        RecvFuture {
+            receiver: self,
+            cx,
+            waiter_id: None,
+        }
     }
 
     /// Attempts to receive a value without blocking.
@@ -1193,5 +1234,77 @@ mod tests {
         let closed_ok = matches!(result, Poll::Ready(Err(RecvError::Closed)));
         crate::assert_with_log!(closed_ok, "closed after sender drop", true, closed_ok);
         crate::test_complete!("sender_drop_wakes_pending_receiver");
+    }
+
+    #[test]
+    fn dropping_stale_recv_future_does_not_clear_new_waiter() {
+        struct CountWaker(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl std::task::Wake for CountWaker {
+            fn wake(self: std::sync::Arc<Self>) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        init_test("dropping_stale_recv_future_does_not_clear_new_waiter");
+        let cx = test_cx();
+        let (tx, rx) = channel::<i32>();
+
+        let wake_counter_1 = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wake_counter_2 = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recv_waker_1 = Waker::from(std::sync::Arc::new(CountWaker(std::sync::Arc::clone(
+            &wake_counter_1,
+        ))));
+        let recv_waker_2 = Waker::from(std::sync::Arc::new(CountWaker(std::sync::Arc::clone(
+            &wake_counter_2,
+        ))));
+
+        let mut task_cx_1 = Context::from_waker(&recv_waker_1);
+        let mut task_cx_2 = Context::from_waker(&recv_waker_2);
+        let mut fut_1 = Box::pin(rx.recv(&cx));
+        let mut fut_2 = Box::pin(rx.recv(&cx));
+
+        let poll_1 = fut_1.as_mut().poll(&mut task_cx_1);
+        let poll_2 = fut_2.as_mut().poll(&mut task_cx_2);
+        crate::assert_with_log!(
+            matches!(poll_1, Poll::Pending),
+            "first recv pending",
+            true,
+            matches!(poll_1, Poll::Pending)
+        );
+        crate::assert_with_log!(
+            matches!(poll_2, Poll::Pending),
+            "second recv pending",
+            true,
+            matches!(poll_2, Poll::Pending)
+        );
+
+        // Drop stale future; this must not clear fut_2's waiter registration.
+        drop(fut_1);
+
+        tx.send(&cx, 5).expect("send should succeed");
+
+        let wake_count_1 = wake_counter_1.load(std::sync::atomic::Ordering::SeqCst);
+        let wake_count_2 = wake_counter_2.load(std::sync::atomic::Ordering::SeqCst);
+        crate::assert_with_log!(
+            wake_count_1 == 0,
+            "stale waiter not woken",
+            0usize,
+            wake_count_1
+        );
+        crate::assert_with_log!(
+            wake_count_2 == 1,
+            "active waiter woken once",
+            1usize,
+            wake_count_2
+        );
+
+        let result = fut_2.as_mut().poll(&mut task_cx_2);
+        crate::assert_with_log!(
+            matches!(result, Poll::Ready(Ok(5))),
+            "active future receives value",
+            "Ready(Ok(5))",
+            format!("{result:?}")
+        );
+        crate::test_complete!("dropping_stale_recv_future_does_not_clear_new_waiter");
     }
 }

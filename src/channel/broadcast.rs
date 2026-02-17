@@ -18,11 +18,20 @@
 
 use crate::cx::Cx;
 use crate::util::{Arena, ArenaIndex};
+use smallvec::SmallVec;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
+
+#[inline]
+fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
 
 /// Error returned when sending fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,15 +220,9 @@ impl<T> Clone for Sender<T> {
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
-        let mut wakers_to_wake = Vec::new();
+        let mut wakers_to_wake: SmallVec<[Waker; 4]> = SmallVec::new();
         {
-            let Ok(mut inner) = self.channel.inner.lock() else {
-                // Mutex poisoned — another thread panicked while holding the
-                // lock.  We cannot safely update sender_count, but waking
-                // through a poisoned lock would be unsound anyway.  Bail out
-                // to avoid a double-panic abort during unwinding.
-                return;
-            };
+            let mut inner = lock_recover(&self.channel.inner);
             inner.sender_count -= 1;
             if inner.sender_count == 0 {
                 inner.wakers.retain(|waker| {
@@ -275,7 +278,7 @@ impl<T: Clone> SendPermit<'_, T> {
 
         // Collect wakers under lock, wake outside to avoid deadlock
         // with inline-polling executors.
-        let mut wakers_to_wake = Vec::new();
+        let mut wakers_to_wake: SmallVec<[Waker; 4]> = SmallVec::new();
         inner.wakers.retain(|waker| {
             wakers_to_wake.push(waker.clone());
             false
@@ -325,11 +328,7 @@ pub struct Recv<'a, T> {
 impl<T> Recv<'_, T> {
     fn clear_waiter_registration(&mut self) {
         if let Some(token) = self.waiter.take() {
-            let Ok(mut inner) = self.receiver.channel.inner.lock() else {
-                // Mutex poisoned — bail out to avoid a double-panic abort
-                // during unwinding (this method is called from Drop).
-                return;
-            };
+            let mut inner = lock_recover(&self.receiver.channel.inner);
             inner.wakers.remove(token);
         }
     }
@@ -446,10 +445,7 @@ impl<T> Clone for Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        let Ok(mut inner) = self.channel.inner.lock() else {
-            // Mutex poisoned — bail out to avoid a double-panic abort.
-            return;
-        };
+        let mut inner = lock_recover(&self.channel.inner);
         inner.receiver_count -= 1;
     }
 }
@@ -491,6 +487,13 @@ mod tests {
                 Poll::Ready(v) => return v,
                 Poll::Pending => std::thread::yield_now(),
             }
+        }
+    }
+
+    fn recover_lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+        match mutex.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
         }
     }
 
@@ -1050,6 +1053,26 @@ mod tests {
     }
 
     #[test]
+    fn sender_drop_on_poisoned_mutex_still_updates_sender_count() {
+        init_test("sender_drop_on_poisoned_mutex_still_updates_sender_count");
+        let (tx, rx) = channel::<i32>(4);
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = tx.channel.inner.lock().expect("lock");
+            panic!("intentional poison");
+        }));
+
+        drop(tx);
+
+        let sender_count = {
+            let inner = recover_lock(&rx.channel.inner);
+            inner.sender_count
+        };
+        crate::assert_with_log!(sender_count == 0, "sender count cleared", 0, sender_count);
+        crate::test_complete!("sender_drop_on_poisoned_mutex_still_updates_sender_count");
+    }
+
+    #[test]
     fn receiver_drop_on_poisoned_mutex_does_not_panic() {
         init_test("receiver_drop_on_poisoned_mutex_does_not_panic");
         let (tx, rx) = channel::<i32>(4);
@@ -1065,6 +1088,32 @@ mod tests {
         // tx drop also should not panic.
         drop(tx);
         crate::test_complete!("receiver_drop_on_poisoned_mutex_does_not_panic");
+    }
+
+    #[test]
+    fn receiver_drop_on_poisoned_mutex_still_updates_receiver_count() {
+        init_test("receiver_drop_on_poisoned_mutex_still_updates_receiver_count");
+        let (tx, rx) = channel::<i32>(4);
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = tx.channel.inner.lock().expect("lock");
+            panic!("intentional poison");
+        }));
+
+        drop(rx);
+
+        let receiver_count = {
+            let inner = recover_lock(&tx.channel.inner);
+            inner.receiver_count
+        };
+        crate::assert_with_log!(
+            receiver_count == 0,
+            "receiver count decremented",
+            0,
+            receiver_count
+        );
+        drop(tx);
+        crate::test_complete!("receiver_drop_on_poisoned_mutex_still_updates_receiver_count");
     }
 
     #[test]
@@ -1092,6 +1141,17 @@ mod tests {
         // Dropping the Recv future (which has a registered waiter) must NOT
         // panic even though the mutex is poisoned.
         drop(fut);
+
+        let waiter_count = {
+            let inner = recover_lock(&tx.channel.inner);
+            inner.wakers.len()
+        };
+        crate::assert_with_log!(
+            waiter_count == 0,
+            "poisoned recv drop clears waiter",
+            0,
+            waiter_count
+        );
 
         // Clean up — these drops should also be graceful.
         drop(rx);
