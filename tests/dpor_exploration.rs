@@ -93,7 +93,7 @@ fn canonicalization_same_trace_same_fingerprint() {
             .state
             .create_task(region, Budget::INFINITE, async {})
             .expect("t1");
-        runtime.scheduler.lock().unwrap().schedule(t1, 0);
+        runtime.scheduler.lock().schedule(t1, 0);
         runtime.run_until_quiescent();
         let events: Vec<TraceEvent> = runtime.trace().snapshot();
         trace_fingerprint(&events)
@@ -106,7 +106,7 @@ fn canonicalization_same_trace_same_fingerprint() {
             .state
             .create_task(region, Budget::INFINITE, async {})
             .expect("t1");
-        runtime.scheduler.lock().unwrap().schedule(t1, 0);
+        runtime.scheduler.lock().schedule(t1, 0);
         runtime.run_until_quiescent();
         let events: Vec<TraceEvent> = runtime.trace().snapshot();
         trace_fingerprint(&events)
@@ -222,7 +222,7 @@ fn explorer_discovers_classes_for_concurrent_tasks() {
             .create_task(region, Budget::INFINITE, async {})
             .expect("t2");
         {
-            let mut sched = runtime.scheduler.lock().unwrap();
+            let mut sched = runtime.scheduler.lock();
             sched.schedule(t1, 0);
             sched.schedule(t2, 0);
         }
@@ -259,7 +259,7 @@ fn explorer_no_violations_single_task() {
             .state
             .create_task(region, Budget::INFINITE, async { 42 })
             .expect("t1");
-        runtime.scheduler.lock().unwrap().schedule(t1, 0);
+        runtime.scheduler.lock().schedule(t1, 0);
         runtime.run_until_quiescent();
     });
 
@@ -284,7 +284,7 @@ fn explorer_coverage_metrics_consistent() {
             .state
             .create_task(region, Budget::INFINITE, async {})
             .expect("t1");
-        runtime.scheduler.lock().unwrap().schedule(t1, 0);
+        runtime.scheduler.lock().schedule(t1, 0);
         runtime.run_until_quiescent();
     });
 

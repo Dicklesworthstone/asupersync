@@ -700,7 +700,7 @@ fn io_cancel_009_io_op_cancel_clears_obligation() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
 
     let io_op = IoOp::submit(
         &mut runtime.state,
@@ -717,7 +717,7 @@ fn io_cancel_009_io_op_cancel_clears_obligation() {
     let cancel_reason = CancelReason::shutdown();
     let tasks_to_cancel = runtime.state.cancel_request(region, &cancel_reason, None);
     {
-        let mut scheduler = runtime.scheduler.lock().unwrap();
+        let mut scheduler = runtime.scheduler.lock();
         for (task, priority) in tasks_to_cancel {
             scheduler.schedule_cancel(task, priority);
         }
@@ -768,7 +768,7 @@ fn io_cancel_010_region_close_waits_for_io_obligations() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
 
     let io_op = IoOp::submit(
         &mut runtime.state,
@@ -883,7 +883,7 @@ fn io_cancel_011_oracle_detects_io_obligation_leak() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
 
     let _io_op = IoOp::submit(
         &mut runtime.state,

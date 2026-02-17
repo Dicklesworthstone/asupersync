@@ -1053,7 +1053,7 @@ mod tests {
                 }
             };
 
-            let mut sched = runtime.scheduler.lock().expect("scheduler lock");
+            let mut sched = runtime.scheduler.lock();
             for task_id in &scheduled {
                 sched.schedule(*task_id, 0);
             }

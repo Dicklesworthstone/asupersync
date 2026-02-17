@@ -568,8 +568,8 @@ mod tests {
             })
             .unwrap();
 
-        runtime.scheduler.lock().unwrap().schedule(client_id, 0);
-        runtime.scheduler.lock().unwrap().schedule(server_id, 0);
+        runtime.scheduler.lock().schedule(client_id, 0);
+        runtime.scheduler.lock().schedule(server_id, 0);
         runtime.run_until_quiescent();
 
         assert_eq!(
@@ -638,8 +638,8 @@ mod tests {
             })
             .unwrap();
 
-        runtime.scheduler.lock().unwrap().schedule(client_id, 0);
-        runtime.scheduler.lock().unwrap().schedule(server_id, 0);
+        runtime.scheduler.lock().schedule(client_id, 0);
+        runtime.scheduler.lock().schedule(server_id, 0);
         runtime.run_until_quiescent();
 
         assert!(left_taken.load(Ordering::SeqCst), "server took left branch");
@@ -685,8 +685,8 @@ mod tests {
                 })
                 .unwrap();
 
-            runtime.scheduler.lock().unwrap().schedule(cid, 0);
-            runtime.scheduler.lock().unwrap().schedule(sid, 0);
+            runtime.scheduler.lock().schedule(cid, 0);
+            runtime.scheduler.lock().schedule(sid, 0);
             runtime.run_until_quiescent();
 
             result.load(Ordering::SeqCst)

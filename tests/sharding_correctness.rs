@@ -43,7 +43,7 @@ fn setup_trace_replay_scenario(runtime: &mut LabRuntime) {
                 i // return value doesn't matter, just needs to capture i
             })
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 }
 
@@ -70,7 +70,7 @@ fn sharding_region_close_quiescence() {
                 completed.fetch_add(1, Ordering::SeqCst);
             })
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     runtime.run_until_quiescent();
@@ -100,7 +100,7 @@ fn sharding_obligation_resolution() {
             asupersync::runtime::yield_now().await;
         })
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
 
     // Create and immediately commit obligations
     for i in 0..5 {
@@ -152,7 +152,7 @@ fn sharding_cancellation_drain() {
             completed.fetch_add(1, Ordering::SeqCst);
         })
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
 
     // Create an obligation held by the task
     let obl = runtime
@@ -166,7 +166,7 @@ fn sharding_cancellation_drain() {
             .state
             .cancel_request(root, &asupersync::types::CancelReason::user("test"), None);
     for (tid, priority) in tasks_to_schedule {
-        runtime.scheduler.lock().unwrap().schedule(tid, priority);
+        runtime.scheduler.lock().schedule(tid, priority);
     }
 
     // Abort the obligation (simulating cleanup during cancellation)
@@ -395,7 +395,7 @@ fn sharding_multiple_obligation_kinds() {
             asupersync::runtime::yield_now().await;
         })
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
 
     // Create obligations of different kinds
     let kinds = [
@@ -436,7 +436,7 @@ fn sharding_obligation_abort_then_quiescence() {
             asupersync::runtime::yield_now().await;
         })
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
 
     // Create obligations and abort them instead of committing
     for i in 0..5 {
@@ -480,7 +480,7 @@ fn sharding_mixed_commit_abort_obligations() {
             asupersync::runtime::yield_now().await;
         })
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
 
     // Interleave commits and aborts
     for i in 0..10 {
@@ -544,7 +544,7 @@ fn sharding_child_region_close_propagation() {
                 completed.fetch_add(1, Ordering::SeqCst);
             })
             .expect("create root task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     for _ in 0..5 {
@@ -558,7 +558,7 @@ fn sharding_child_region_close_propagation() {
                 completed.fetch_add(1, Ordering::SeqCst);
             })
             .expect("create child task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     runtime.run_until_quiescent();
@@ -590,7 +590,7 @@ fn sharding_cancel_child_region_obligations_drain() {
             }
         })
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
 
     let obl = runtime
         .state
@@ -602,7 +602,7 @@ fn sharding_cancel_child_region_obligations_drain() {
         .state
         .cancel_request(child, &CancelReason::user("cancel-child"), None);
     for (tid, priority) in tasks {
-        runtime.scheduler.lock().unwrap().schedule(tid, priority);
+        runtime.scheduler.lock().schedule(tid, priority);
     }
 
     // Abort the obligation during cancellation
@@ -649,7 +649,7 @@ fn sharding_cancel_root_with_deep_hierarchy() {
                 completed.fetch_add(1, Ordering::SeqCst);
             })
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     // Cancel root — should propagate to all descendants
@@ -657,7 +657,7 @@ fn sharding_cancel_root_with_deep_hierarchy() {
         .state
         .cancel_request(root, &CancelReason::user("cancel-root"), None);
     for (tid, priority) in tasks {
-        runtime.scheduler.lock().unwrap().schedule(tid, priority);
+        runtime.scheduler.lock().schedule(tid, priority);
     }
 
     runtime.run_until_quiescent();
@@ -694,7 +694,7 @@ fn sharding_task_completion_advances_region() {
             completed_clone.fetch_add(1, Ordering::SeqCst);
         })
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
 
     runtime.run_until_quiescent();
 
@@ -727,7 +727,7 @@ fn sharding_many_tasks_staggered_completion() {
                 completed.fetch_add(1, Ordering::SeqCst);
             })
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     runtime.run_until_quiescent();
@@ -819,7 +819,7 @@ fn sharding_cancel_with_pending_obligations_multiple_tasks() {
                 i
             })
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
 
         let obl = runtime
             .state
@@ -839,7 +839,7 @@ fn sharding_cancel_with_pending_obligations_multiple_tasks() {
         .state
         .cancel_request(root, &CancelReason::user("multi-cancel"), None);
     for (tid, priority) in tasks {
-        runtime.scheduler.lock().unwrap().schedule(tid, priority);
+        runtime.scheduler.lock().schedule(tid, priority);
     }
 
     // Abort all obligations
@@ -886,7 +886,7 @@ fn sharding_stress_50_tasks_with_obligations() {
                 completed.fetch_add(1, Ordering::SeqCst);
             })
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
 
         // Every other task gets an obligation that is immediately committed
         if i % 2 == 0 {
@@ -939,7 +939,7 @@ fn sharding_stress_cancel_mid_execution() {
                 completed.fetch_add(1, Ordering::SeqCst);
             })
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     // Cancel after initial setup (tasks are scheduled but haven't all completed)
@@ -947,7 +947,7 @@ fn sharding_stress_cancel_mid_execution() {
         .state
         .cancel_request(root, &CancelReason::user("mid-cancel"), None);
     for (tid, priority) in tasks {
-        runtime.scheduler.lock().unwrap().schedule(tid, priority);
+        runtime.scheduler.lock().schedule(tid, priority);
     }
 
     runtime.run_until_quiescent();
@@ -997,7 +997,7 @@ fn sharding_cancel_one_sibling_other_continues() {
                 flag.store(true, Ordering::SeqCst);
             })
             .expect("create task A");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     // Task in child B
@@ -1012,7 +1012,7 @@ fn sharding_cancel_one_sibling_other_continues() {
                 flag.store(true, Ordering::SeqCst);
             })
             .expect("create task B");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     // Cancel only child A
@@ -1020,7 +1020,7 @@ fn sharding_cancel_one_sibling_other_continues() {
         .state
         .cancel_request(child_a, &CancelReason::user("cancel-sibling"), None);
     for (tid, priority) in tasks {
-        runtime.scheduler.lock().unwrap().schedule(tid, priority);
+        runtime.scheduler.lock().schedule(tid, priority);
     }
 
     runtime.run_until_quiescent();
@@ -1059,7 +1059,7 @@ fn setup_complex_scenario(runtime: &mut LabRuntime) {
                 i
             })
             .expect("create root task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
 
         let obl = runtime
             .state
@@ -1087,7 +1087,7 @@ fn setup_complex_scenario(runtime: &mut LabRuntime) {
                 i + 100
             })
             .expect("create child task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 }
 
@@ -1141,7 +1141,7 @@ fn sharding_cancel_scenario_replay_determinism() {
                         i
                     })
                     .expect("create task");
-                runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+                runtime.scheduler.lock().schedule(task_id, 0);
             }
 
             // Cancel child region
@@ -1150,7 +1150,7 @@ fn sharding_cancel_scenario_replay_determinism() {
                     .state
                     .cancel_request(child, &CancelReason::user("replay-cancel"), None);
             for (tid, priority) in tasks {
-                runtime.scheduler.lock().unwrap().schedule(tid, priority);
+                runtime.scheduler.lock().schedule(tid, priority);
             }
 
             runtime.run_until_quiescent();
@@ -1194,7 +1194,7 @@ fn sharding_region_task_no_leaks() {
                     completed.fetch_add(1, Ordering::SeqCst);
                 })
                 .expect("create task");
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.scheduler.lock().schedule(task_id, 0);
         }
     }
 
@@ -1230,7 +1230,7 @@ fn sharding_budget_limited_tasks() {
                 completed.fetch_add(1, Ordering::SeqCst);
             })
             .expect("create budget-limited task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     runtime.run_until_quiescent();
@@ -1273,7 +1273,7 @@ fn sharding_parallel_child_regions_with_obligations() {
                     completed.fetch_add(1, Ordering::SeqCst);
                 })
                 .expect("create task");
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.scheduler.lock().schedule(task_id, 0);
 
             // Each task gets an obligation
             let obl = runtime

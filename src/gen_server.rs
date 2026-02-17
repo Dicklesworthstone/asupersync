@@ -1991,7 +1991,7 @@ mod tests {
         // Drop handle to disconnect
         drop(handle);
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
         runtime.run_until_quiescent();
 
         crate::test_complete!("gen_server_spawn_and_cast");
@@ -2026,12 +2026,12 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(client_task_id, 0);
         runtime.run_until_quiescent();
 
@@ -2077,7 +2077,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(client_task_id, 0);
         runtime.run_until_idle();
 
@@ -2092,7 +2092,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(client_task_id, 0);
         runtime.run_until_idle();
 
@@ -2112,7 +2112,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
@@ -2140,7 +2140,7 @@ mod tests {
 
         // Run runtime. The server should start, init, and enter loop.
         // It should NOT exit just because the starter dropped the handle.
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
         runtime.run_until_idle();
 
         let task = runtime.state.task(task_id).expect("task exists");
@@ -2157,9 +2157,9 @@ mod tests {
                 .state
                 .cancel_request(region, &CancelReason::user("test done"), None);
         for (tid, priority) in tasks_to_schedule {
-            runtime.scheduler.lock().unwrap().schedule(tid, priority);
+            runtime.scheduler.lock().schedule(tid, priority);
         }
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
         runtime.run_until_quiescent();
 
         assert!(
@@ -2209,7 +2209,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(client_task_id, 0);
         runtime.run_until_idle();
 
@@ -2224,7 +2224,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(client_task_id, 0);
         runtime.run_until_idle();
 
@@ -2244,7 +2244,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
@@ -2318,7 +2318,7 @@ mod tests {
 
         handle.stop();
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
         runtime.run_until_quiescent();
 
         assert!(handle.is_finished());
@@ -2343,7 +2343,7 @@ mod tests {
         runtime.state.store_spawned_task(task_id, stored);
 
         // Let the server start, then request stop.
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
         runtime.run_until_idle();
         handle.stop();
 
@@ -2361,7 +2361,7 @@ mod tests {
             "cast after stop must return ServerStopped, got {cast_err:?}"
         );
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
         runtime.run_until_quiescent();
         assert!(handle.is_finished());
 
@@ -2384,7 +2384,7 @@ mod tests {
         runtime.state.store_spawned_task(task_id, stored);
 
         handle.stop();
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
         runtime.run_until_quiescent();
         assert!(handle.is_finished());
 
@@ -2449,7 +2449,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime.run_until_idle();
 
@@ -2537,7 +2537,7 @@ mod tests {
         runtime.state.store_spawned_task(task_id, stored);
 
         // Start the server so casts are accepted.
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
         runtime.run_until_idle();
 
         // Queue a handful of casts, then disconnect. Shutdown must drain the mailbox
@@ -2548,7 +2548,7 @@ mod tests {
 
         handle.stop();
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
         runtime.run_until_quiescent();
 
         // Final count should be 0 (5 resets)
@@ -2582,7 +2582,7 @@ mod tests {
             let task_id = handle.task_id();
             runtime.state.store_spawned_task(task_id, stored);
 
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.scheduler.lock().schedule(task_id, 0);
             runtime.run_until_idle();
 
             // 5 resets then disconnect
@@ -2591,7 +2591,7 @@ mod tests {
             }
             handle.stop();
 
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.scheduler.lock().schedule(task_id, 0);
             runtime.run_until_quiescent();
 
             final_count.load(Ordering::SeqCst)
@@ -2894,7 +2894,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
@@ -2966,12 +2966,12 @@ mod tests {
             runtime.state.store_spawned_task(task_id_b, stored_b);
 
             // Let clients enqueue, then let the server drain.
-            runtime.scheduler.lock().unwrap().schedule(task_id_a, 0);
-            runtime.scheduler.lock().unwrap().schedule(task_id_b, 0);
+            runtime.scheduler.lock().schedule(task_id_a, 0);
+            runtime.scheduler.lock().schedule(task_id_b, 0);
             runtime
                 .scheduler
                 .lock()
-                .unwrap()
+                
                 .schedule(server_task_id, 0);
 
             runtime.run_until_quiescent();
@@ -2979,7 +2979,7 @@ mod tests {
             runtime
                 .scheduler
                 .lock()
-                .unwrap()
+                
                 .schedule(server_task_id, 0);
             runtime.run_until_quiescent();
 
@@ -3265,12 +3265,12 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(client_task_id, 0);
         runtime.run_until_quiescent();
 
@@ -3281,7 +3281,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
@@ -3315,7 +3315,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
@@ -3345,7 +3345,7 @@ mod tests {
         runtime.state.store_spawned_task(task_id, stored);
 
         // Schedule so Cx::current() is set
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
         runtime.run_until_idle();
 
         // First cast fills the mailbox
@@ -3535,7 +3535,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
@@ -3632,12 +3632,12 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(client_task_id, 0);
         runtime.run_until_quiescent();
 
@@ -3657,7 +3657,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
@@ -3724,7 +3724,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
@@ -3805,7 +3805,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime.run_until_idle();
 
@@ -3815,7 +3815,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime.run_until_idle();
 
@@ -3907,7 +3907,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
@@ -3981,7 +3981,7 @@ mod tests {
 
         // Schedule server + clients, let them make progress.
         {
-            let mut sched = runtime.scheduler.lock().unwrap();
+            let mut sched = runtime.scheduler.lock();
             sched.schedule(server_task_id, 0);
             sched.schedule(c1_id, 0);
             sched.schedule(c2_id, 0);
@@ -3991,7 +3991,7 @@ mod tests {
         // Stop the server (triggers cancellation of pending calls).
         handle.stop();
         {
-            let mut sched = runtime.scheduler.lock().unwrap();
+            let mut sched = runtime.scheduler.lock();
             sched.schedule(server_task_id, 0);
             sched.schedule(c1_id, 0);
             sched.schedule(c2_id, 0);
@@ -4029,7 +4029,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime.run_until_idle();
 
@@ -4038,7 +4038,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
@@ -4087,7 +4087,7 @@ mod tests {
 
         // Schedule both and let them process.
         {
-            let mut sched = runtime.scheduler.lock().unwrap();
+            let mut sched = runtime.scheduler.lock();
             sched.schedule(server_task_id, 0);
             sched.schedule(client_id, 0);
         }
@@ -4095,7 +4095,7 @@ mod tests {
 
         // Re-schedule for message processing.
         {
-            let mut sched = runtime.scheduler.lock().unwrap();
+            let mut sched = runtime.scheduler.lock();
             sched.schedule(server_task_id, 0);
             sched.schedule(client_id, 0);
         }
@@ -4119,7 +4119,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
@@ -4170,7 +4170,7 @@ mod tests {
 
             // Schedule all tasks.
             {
-                let mut sched = runtime.scheduler.lock().unwrap();
+                let mut sched = runtime.scheduler.lock();
                 sched.schedule(server_task_id, 0);
                 for &cid in &client_ids {
                     sched.schedule(cid, 0);
@@ -4180,7 +4180,7 @@ mod tests {
 
             // Re-schedule to process enqueued calls.
             {
-                let mut sched = runtime.scheduler.lock().unwrap();
+                let mut sched = runtime.scheduler.lock();
                 sched.schedule(server_task_id, 0);
                 for &cid in &client_ids {
                     sched.schedule(cid, 0);
@@ -4193,7 +4193,7 @@ mod tests {
             runtime
                 .scheduler
                 .lock()
-                .unwrap()
+                
                 .schedule(server_task_id, 0);
             runtime.run_until_quiescent();
 
@@ -4251,7 +4251,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
@@ -4288,7 +4288,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime.run_until_idle();
 
@@ -4307,13 +4307,13 @@ mod tests {
         runtime.state.store_spawned_task(cid, cs);
 
         {
-            let mut sched = runtime.scheduler.lock().unwrap();
+            let mut sched = runtime.scheduler.lock();
             sched.schedule(server_task_id, 0);
             sched.schedule(cid, 0);
         }
         runtime.run_until_idle();
         {
-            let mut sched = runtime.scheduler.lock().unwrap();
+            let mut sched = runtime.scheduler.lock();
             sched.schedule(server_task_id, 0);
             sched.schedule(cid, 0);
         }
@@ -4331,7 +4331,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
@@ -4395,13 +4395,13 @@ mod tests {
 
         // Run everything.
         {
-            let mut sched = runtime.scheduler.lock().unwrap();
+            let mut sched = runtime.scheduler.lock();
             sched.schedule(server_task_id, 0);
             sched.schedule(client_id, 0);
         }
         runtime.run_until_idle();
         {
-            let mut sched = runtime.scheduler.lock().unwrap();
+            let mut sched = runtime.scheduler.lock();
             sched.schedule(server_task_id, 0);
             sched.schedule(client_id, 0);
         }
@@ -4417,7 +4417,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
@@ -4491,13 +4491,13 @@ mod tests {
         runtime.state.store_spawned_task(client_id, cs);
 
         {
-            let mut sched = runtime.scheduler.lock().unwrap();
+            let mut sched = runtime.scheduler.lock();
             sched.schedule(server_task_id, 0);
             sched.schedule(client_id, 0);
         }
         runtime.run_until_idle();
         {
-            let mut sched = runtime.scheduler.lock().unwrap();
+            let mut sched = runtime.scheduler.lock();
             sched.schedule(server_task_id, 0);
             sched.schedule(client_id, 0);
         }
@@ -4523,7 +4523,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
@@ -4590,13 +4590,13 @@ mod tests {
         runtime.state.store_spawned_task(client_id, cs);
 
         {
-            let mut sched = runtime.scheduler.lock().unwrap();
+            let mut sched = runtime.scheduler.lock();
             sched.schedule(server_task_id, 0);
             sched.schedule(client_id, 0);
         }
         runtime.run_until_idle();
         {
-            let mut sched = runtime.scheduler.lock().unwrap();
+            let mut sched = runtime.scheduler.lock();
             sched.schedule(server_task_id, 0);
             sched.schedule(client_id, 0);
         }
@@ -4622,7 +4622,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
@@ -4710,7 +4710,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime.run_until_idle();
 
@@ -4719,7 +4719,7 @@ mod tests {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
@@ -5110,7 +5110,7 @@ mod tests {
             runtime
                 .scheduler
                 .lock()
-                .unwrap()
+                
                 .schedule(task_id, priority);
         }
         runtime.run_until_quiescent();
@@ -5189,7 +5189,7 @@ mod tests {
         assert_eq!(registry.lock().whereis("panic_svc"), Some(child_task));
 
         // Drive the child once so it crashes in on_start.
-        runtime.scheduler.lock().unwrap().schedule(child_task, 0);
+        runtime.scheduler.lock().schedule(child_task, 0);
         runtime.run_until_idle();
 
         // Region stop must still clean the registry + resolve the lease.
@@ -5202,7 +5202,7 @@ mod tests {
             runtime
                 .scheduler
                 .lock()
-                .unwrap()
+                
                 .schedule(task_id, priority);
         }
         runtime.run_until_quiescent();

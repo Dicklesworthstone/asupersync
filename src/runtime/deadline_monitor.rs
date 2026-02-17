@@ -914,7 +914,7 @@ mod tests {
 
         let warning = warnings
             .lock()
-            .unwrap()
+            .expect("poisoned")
             .first()
             .cloned()
             .expect("expected warning");

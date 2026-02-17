@@ -82,7 +82,7 @@ fn obligation_reserve_commit_clean() {
         .state
         .create_task(root, Budget::INFINITE, async {})
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     harness.exit_phase();
 
     harness.enter_phase("reserve_and_commit");
@@ -131,7 +131,7 @@ fn obligation_all_kinds_commit() {
         .state
         .create_task(root, Budget::INFINITE, async {})
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     harness.exit_phase();
 
     harness.enter_phase("reserve_and_commit_all_kinds");
@@ -174,7 +174,7 @@ fn obligation_reserve_abort_clean() {
         .state
         .create_task(root, Budget::INFINITE, async {})
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     harness.exit_phase();
 
     harness.enter_phase("reserve_and_abort");
@@ -218,7 +218,7 @@ fn obligation_mixed_commit_abort() {
         .state
         .create_task(root, Budget::INFINITE, async {})
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     harness.exit_phase();
 
     harness.enter_phase("mixed_resolve");
@@ -959,7 +959,7 @@ fn obligation_runtime_cancel_aborts_all() {
         .state
         .create_task(root, Budget::INFINITE, async {})
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     harness.exit_phase();
 
     harness.enter_phase("create_obligations");
@@ -1033,7 +1033,7 @@ fn obligation_commit_records_hold_duration() {
         .state
         .create_task(root, Budget::INFINITE, async {})
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     harness.exit_phase();
 
     harness.enter_phase("reserve_advance_commit");

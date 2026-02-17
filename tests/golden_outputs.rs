@@ -102,8 +102,8 @@ fn build_golden_trace_fixture(seed: u64) -> GoldenTraceFixture {
         .state
         .create_task(region, Budget::INFINITE, async {})
         .expect("t2");
-    runtime.scheduler.lock().unwrap().schedule(t1, 0);
-    runtime.scheduler.lock().unwrap().schedule(t2, 0);
+    runtime.scheduler.lock().schedule(t1, 0);
+    runtime.scheduler.lock().schedule(t2, 0);
     runtime.run_until_quiescent();
 
     let events: Vec<TraceEvent> = runtime.trace().snapshot();
@@ -638,7 +638,7 @@ fn run_plan(runtime: &mut LabRuntime, plan: &PlanDag, fixture_name: &str) -> Nod
     runtime.run_until_quiescent();
     let mut attempts = 0;
     while !runtime.is_quiescent() && attempts < 3 {
-        let mut sched = runtime.scheduler.lock().expect("scheduler lock");
+        let mut sched = runtime.scheduler.lock();
         for (_, record) in runtime.state.tasks_iter() {
             if record.is_runnable() {
                 let prio = record.cx_inner.as_ref().map_or(0, |inner| {
@@ -806,7 +806,6 @@ where
     runtime
         .scheduler
         .lock()
-        .expect("scheduler lock")
         .schedule(task_id, priority);
     SharedHandle::new(handle)
 }

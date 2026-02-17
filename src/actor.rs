@@ -1257,7 +1257,7 @@ mod tests {
         // messages via recv, then see Disconnected and stop gracefully.
         drop(handle);
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
         runtime.run_until_quiescent();
 
         assert_eq!(
@@ -1301,7 +1301,7 @@ mod tests {
         // The actor loop will: on_start → check cancel → break → drain → on_stop
         handle.stop();
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
         runtime.run_until_quiescent();
 
         // All 5 messages processed during drain phase
@@ -1342,7 +1342,7 @@ mod tests {
         handle.stop();
         assert!(actor_ref.is_alive(), "stopping actor is still alive");
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
         runtime.run_until_quiescent();
 
         assert!(
@@ -1443,7 +1443,7 @@ mod tests {
         // Drop handle to disconnect channel after the restarted actor processes messages
         drop(handle);
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
         runtime.run_until_quiescent();
 
         // Factory was called: once for initial + once for restart = fetch_add called twice
@@ -1489,7 +1489,7 @@ mod tests {
             }
             drop(handle);
 
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.scheduler.lock().schedule(task_id, 0);
             runtime.run_until_quiescent();
 
             on_stop_count.load(Ordering::SeqCst)

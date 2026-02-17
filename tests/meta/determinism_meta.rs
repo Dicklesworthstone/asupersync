@@ -10,7 +10,7 @@ fn run_program(runtime: &mut LabRuntime) {
         .state
         .create_task(region, Budget::INFINITE, async { 1u8 })
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     runtime.run_until_quiescent();
 }
 

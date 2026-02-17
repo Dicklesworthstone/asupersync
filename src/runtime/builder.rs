@@ -1445,7 +1445,6 @@ mod tests {
                 .expect("lab task spawn");
             lab.scheduler
                 .lock()
-                .expect("lab scheduler lock poisoned")
                 .schedule(task_id, Budget::INFINITE.priority);
             lab.run_until_quiescent();
         }
@@ -1501,7 +1500,6 @@ mod tests {
             .expect("lab sleep task spawn");
         lab.scheduler
             .lock()
-            .expect("lab scheduler lock poisoned")
             .schedule(task_id, Budget::INFINITE.priority);
 
         lab.step_for_test(); // register timer

@@ -220,7 +220,7 @@ fn test_steal_only_from_ready_lane_deterministic() {
 
     asupersync::test_section!("seed worker0 local queues");
     {
-        let mut local0 = worker0.local.lock().expect("local0 lock");
+        let mut local0 = worker0.local.lock();
         local0.schedule_cancel(cancel_task, 10);
         local0.schedule(ready_task1, 10);
         local0.schedule(ready_task2, 10);

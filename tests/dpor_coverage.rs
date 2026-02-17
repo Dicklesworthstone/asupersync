@@ -346,7 +346,7 @@ fn regression_dpor_coverage_metrics_populated() {
             .create_task(region, Budget::INFINITE, async {})
             .expect("t2");
         {
-            let mut sched = runtime.scheduler.lock().unwrap();
+            let mut sched = runtime.scheduler.lock();
             sched.schedule(t1, 0);
             sched.schedule(t2, 0);
         }
@@ -384,7 +384,7 @@ fn regression_dpor_coverage_metrics_deterministic() {
                 .state
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("t1");
-            runtime.scheduler.lock().unwrap().schedule(t1, 0);
+            runtime.scheduler.lock().schedule(t1, 0);
             runtime.run_until_quiescent();
         });
         explorer.dpor_coverage()
@@ -422,7 +422,7 @@ fn regression_dpor_hb_race_count_consistent() {
             .create_task(region, Budget::INFINITE, async {})
             .expect("t2");
         {
-            let mut sched = runtime.scheduler.lock().unwrap();
+            let mut sched = runtime.scheduler.lock();
             sched.schedule(t1, 0);
             sched.schedule(t2, 0);
         }
@@ -462,7 +462,7 @@ fn regression_dpor_vs_baseline_coverage() {
             .create_task(region, Budget::INFINITE, async {})
             .expect("t2");
         {
-            let mut sched = runtime.scheduler.lock().unwrap();
+            let mut sched = runtime.scheduler.lock();
             sched.schedule(t1, 0);
             sched.schedule(t2, 0);
         }
@@ -482,7 +482,7 @@ fn regression_dpor_vs_baseline_coverage() {
             .create_task(region, Budget::INFINITE, async {})
             .expect("t2");
         {
-            let mut sched = runtime.scheduler.lock().unwrap();
+            let mut sched = runtime.scheduler.lock();
             sched.schedule(t1, 0);
             sched.schedule(t2, 0);
         }
@@ -543,7 +543,7 @@ fn regression_dpor_vs_baseline_three_tasks() {
             .create_task(region, Budget::INFINITE, async {})
             .expect("t3");
         {
-            let mut sched = runtime.scheduler.lock().unwrap();
+            let mut sched = runtime.scheduler.lock();
             sched.schedule(t1, 0);
             sched.schedule(t2, 0);
             sched.schedule(t3, 0);
@@ -595,7 +595,7 @@ fn regression_saturation_single_task() {
             .state
             .create_task(region, Budget::INFINITE, async { 42 })
             .expect("t");
-        runtime.scheduler.lock().unwrap().schedule(t, 0);
+        runtime.scheduler.lock().schedule(t, 0);
         runtime.run_until_quiescent();
     });
 
@@ -626,7 +626,7 @@ fn regression_dpor_estimated_class_trend() {
             .create_task(region, Budget::INFINITE, async {})
             .expect("t2");
         {
-            let mut sched = runtime.scheduler.lock().unwrap();
+            let mut sched = runtime.scheduler.lock();
             sched.schedule(t1, 0);
             sched.schedule(t2, 0);
         }
@@ -841,7 +841,7 @@ fn regression_dpor_explorer_no_false_violations() {
             .create_task(region, Budget::INFINITE, async { 3 })
             .expect("t3");
         {
-            let mut sched = runtime.scheduler.lock().unwrap();
+            let mut sched = runtime.scheduler.lock();
             sched.schedule(t1, 0);
             sched.schedule(t2, 0);
             sched.schedule(t3, 0);

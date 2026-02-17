@@ -139,7 +139,7 @@ fn run_tasks_with_seed(seed: u64, task_count: usize, yields_per_task: usize) -> 
 
     // Schedule all tasks at the same priority.
     for task_id in task_ids {
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     // Run until quiescent
@@ -259,7 +259,7 @@ fn run_and_count_steps(seed: u64, task_count: usize, yields_per_task: usize) -> 
     }
 
     for task_id in task_ids {
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     runtime.run_until_quiescent();
@@ -322,11 +322,11 @@ fn run_with_time_advancement(seed: u64) -> Vec<(u64, String)> {
                 yield_now().await;
                 events_clone
                     .lock()
-                    .unwrap()
+                    .expect("poisoned")
                     .push((0, format!("task-{i}-start")));
             })
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     // Run initial tasks
@@ -338,7 +338,7 @@ fn run_with_time_advancement(seed: u64) -> Vec<(u64, String)> {
     // Record time advancement
     events
         .lock()
-        .unwrap()
+        .expect("poisoned")
         .push((runtime.now().as_nanos(), "time-advanced".to_string()));
 
     Arc::try_unwrap(events).unwrap().into_inner().unwrap()
@@ -521,7 +521,7 @@ fn test_lab_trace_capture_determinism() {
                 yield_now().await;
             })
             .expect("create task");
-        runtime1.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime1.scheduler.lock().schedule(task_id, 0);
     }
     runtime1.run_until_quiescent();
     let trace1_len = runtime1.trace().len();
@@ -536,7 +536,7 @@ fn test_lab_trace_capture_determinism() {
                 yield_now().await;
             })
             .expect("create task");
-        runtime2.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime2.scheduler.lock().schedule(task_id, 0);
     }
     runtime2.run_until_quiescent();
     let trace2_len = runtime2.trace().len();
@@ -577,7 +577,7 @@ fn record_replay_events(seed: u64, worker_count: usize) -> Vec<ReplayEvent> {
                 yield_n(3).await;
             })
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     runtime.run_until_quiescent();
@@ -638,7 +638,7 @@ fn run_with_priorities(seed: u64) -> Vec<(usize, u8)> {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule(task_id, priority);
     }
 
@@ -745,7 +745,7 @@ fn test_lab_quiescence_detection_determinism() {
                     yield_n(2).await;
                 })
                 .expect("create task");
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.scheduler.lock().schedule(task_id, 0);
         }
 
         let steps = runtime.run_until_quiescent();
@@ -813,7 +813,7 @@ fn run_cancel_drain_stress(seed: u64, task_count: usize) -> (usize, usize, bool,
                 }
             })
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
         task_ids.push(task_id);
     }
 
@@ -824,7 +824,7 @@ fn run_cancel_drain_stress(seed: u64, task_count: usize) -> (usize, usize, bool,
     let cancel_reason = CancelReason::shutdown();
     let tasks_to_cancel = runtime.state.cancel_request(region, &cancel_reason, None);
     {
-        let mut scheduler = runtime.scheduler.lock().unwrap();
+        let mut scheduler = runtime.scheduler.lock();
         for (task_id, priority) in tasks_to_cancel {
             scheduler.schedule_cancel(task_id, priority);
         }
@@ -975,7 +975,7 @@ fn test_lab_interleaved_completion_determinism() {
                     order.lock().unwrap().push((i, i));
                 })
                 .expect("create task");
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.scheduler.lock().schedule(task_id, 0);
         }
 
         runtime.run_until_quiescent();
@@ -1028,7 +1028,7 @@ fn run_io_cancel_scenario(seed: u64) -> (bool, usize, usize, u64) {
             }
         })
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
 
     // Model an in-flight I/O operation owned by runtime infrastructure rather than the user task.
     // If we tie the obligation to `task_id` and allow the task to complete, the runtime will
@@ -1049,7 +1049,7 @@ fn run_io_cancel_scenario(seed: u64) -> (bool, usize, usize, u64) {
     let cancel_reason = CancelReason::shutdown();
     let tasks_to_cancel = runtime.state.cancel_request(region, &cancel_reason, None);
     {
-        let mut scheduler = runtime.scheduler.lock().unwrap();
+        let mut scheduler = runtime.scheduler.lock();
         for (task_id, priority) in tasks_to_cancel {
             scheduler.schedule_cancel(task_id, priority);
         }
@@ -1116,7 +1116,7 @@ fn test_lab_io_quiescence_waits_for_obligation() {
         .state
         .create_task(region, Budget::INFINITE, async {})
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
 
     // Model an in-flight I/O operation owned by runtime infrastructure rather than the user task.
     // If we tie the obligation to `task_id` and allow the task to complete, the runtime will

@@ -26,17 +26,17 @@ fn run_counter_scenario(seed: u64) -> Vec<String> {
                 count += i;
                 events_sender
                     .lock()
-                    .unwrap()
+                    .expect("poisoned")
                     .push(format!("msg:{i}:total:{count}"));
             }
             events_sender
                 .lock()
-                .unwrap()
+                .expect("poisoned")
                 .push(format!("done:count={count}"));
         })
         .expect("create task");
 
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     runtime.run_until_quiescent();
 
     let result = events.lock().unwrap().clone();
@@ -78,7 +78,7 @@ fn run_multi_actor_scenario(seed: u64) -> Vec<String> {
 
     // Schedule both tasks
     {
-        let mut sched = runtime.scheduler.lock().unwrap();
+        let mut sched = runtime.scheduler.lock();
         sched.schedule(task_sender_id, 0);
         sched.schedule(task_receiver_id, 1);
     }

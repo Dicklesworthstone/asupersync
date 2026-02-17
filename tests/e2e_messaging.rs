@@ -226,7 +226,7 @@ fn e2e_tracked_mpsc_commit_with_lab_replay() {
             recv_store.lock().expect("recv_store lock").push(value);
         })
         .expect("create recv task");
-    runtime.scheduler.lock().unwrap().schedule(recv_task, 0);
+    runtime.scheduler.lock().schedule(recv_task, 0);
 
     test_section!("spawn_sender");
     let (send_task, _) = runtime
@@ -240,7 +240,7 @@ fn e2e_tracked_mpsc_commit_with_lab_replay() {
             tracing::info!(proof_kind = ?proof.kind(), "tracked permit committed");
         })
         .expect("create send task");
-    runtime.scheduler.lock().unwrap().schedule(send_task, 0);
+    runtime.scheduler.lock().schedule(send_task, 0);
 
     test_section!("run");
     runtime.run_until_quiescent();
@@ -284,7 +284,7 @@ fn e2e_tracked_mpsc_abort_with_lab_replay() {
             *recv_result.lock().expect("recv_result lock") = Some(recv);
         })
         .expect("create recv task");
-    runtime.scheduler.lock().unwrap().schedule(recv_task, 0);
+    runtime.scheduler.lock().schedule(recv_task, 0);
 
     test_section!("spawn_sender_abort");
     let (send_task, _) = runtime
@@ -298,7 +298,7 @@ fn e2e_tracked_mpsc_abort_with_lab_replay() {
             tracing::info!(proof_kind = ?proof.kind(), "tracked permit aborted");
         })
         .expect("create send task");
-    runtime.scheduler.lock().unwrap().schedule(send_task, 0);
+    runtime.scheduler.lock().schedule(send_task, 0);
 
     test_section!("run");
     runtime.run_until_quiescent();
@@ -347,7 +347,7 @@ fn e2e_tracked_mpsc_cancel_mid_reserve() {
             *outcome_store.lock().expect("outcome lock") = Some(result);
         })
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
 
     test_section!("block_then_cancel");
     for _ in 0..3 {
@@ -355,7 +355,8 @@ fn e2e_tracked_mpsc_cancel_mid_reserve() {
     }
     let reason = CancelReason::user("mid-reserve");
     let tasks = runtime.state.cancel_request(root, &reason, None);
-    if let Ok(mut scheduler) = runtime.scheduler.lock() {
+    {
+        let mut scheduler = runtime.scheduler.lock();
         for (task, priority) in tasks {
             scheduler.schedule_cancel(task, priority);
         }

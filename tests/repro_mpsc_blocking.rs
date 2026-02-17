@@ -61,8 +61,8 @@ fn repro_mpsc_deadlock_in_single_threaded_runtime() {
         })
         .expect("create sender");
 
-    lab.scheduler.lock().unwrap().schedule(recv_id, 0);
-    lab.scheduler.lock().unwrap().schedule(send_id, 0);
+    lab.scheduler.lock().schedule(recv_id, 0);
+    lab.scheduler.lock().schedule(send_id, 0);
 
     lab.run_until_quiescent();
 }

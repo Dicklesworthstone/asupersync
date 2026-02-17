@@ -66,7 +66,7 @@ fn schedule_yielding_tasks(
                 completions[idx].fetch_add(1, Ordering::SeqCst);
             })
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     completions
@@ -107,7 +107,7 @@ fn test_lab_executor_runs_task() {
 
     test_section!("schedule");
     // 3. Schedule the task (RuntimeState.create_task doesn't schedule)
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
 
     // 4. Run until quiescent
     let steps = runtime.run_until_quiescent();
@@ -224,7 +224,7 @@ fn test_lab_cancel_fairness_bound() {
     init_test("test_lab_cancel_fairness_bound");
     test_section!("setup");
     let mut runtime = LabRuntime::new(LabConfig::new(123).worker_count(1));
-    let cancel_limit = runtime.scheduler.lock().unwrap().cancel_streak_limit();
+    let cancel_limit = runtime.scheduler.lock().cancel_streak_limit();
     let cancel_count = cancel_limit + 3;
     let region = runtime.state.create_root_region(Budget::INFINITE);
     let order = Arc::new(AtomicUsize::new(0));
@@ -241,7 +241,7 @@ fn test_lab_cancel_fairness_bound() {
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule_cancel(task_id, 0);
     }
 
@@ -255,7 +255,7 @@ fn test_lab_cancel_fairness_bound() {
                 ready_position.store(position, Ordering::SeqCst);
             })
             .expect("create ready task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     test_section!("run");
@@ -299,7 +299,7 @@ fn test_lab_executor_wakes_task_yielding() {
         .expect("create task");
 
     test_section!("schedule");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
 
     test_section!("run");
     runtime.run_until_quiescent();
@@ -377,7 +377,7 @@ fn test_chaos_stats_tracking() {
         .expect("create task");
 
     test_section!("schedule");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
 
     test_section!("run");
     runtime.run_until_quiescent();
@@ -435,7 +435,7 @@ fn test_deadline_monitor_warns_on_approaching_deadline() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     runtime.advance_time_to(Time::from_secs(90));
 
     test_section!("run");
@@ -487,7 +487,7 @@ fn test_deadline_monitor_warns_at_threshold_boundary() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     runtime.advance_time_to(Time::from_secs(80));
 
     test_section!("run");
@@ -539,7 +539,7 @@ fn test_deadline_monitor_warns_on_no_progress() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     runtime.advance_time_to(Time::from_secs(100));
 
     test_section!("run");
@@ -591,7 +591,7 @@ fn test_deadline_monitor_warns_on_approaching_deadline_no_progress() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     runtime.advance_time_to(Time::from_secs(90));
 
     test_section!("run");
@@ -646,7 +646,7 @@ fn test_deadline_monitor_includes_checkpoint_message() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     runtime.advance_time_to(Time::from_secs(90));
 
     test_section!("run");
@@ -707,7 +707,7 @@ fn test_deadline_monitor_e2e_stuck_task_detection() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     runtime.advance_time_to(Time::from_secs(90));
 
     test_section!("run");
@@ -746,7 +746,7 @@ fn test_chaos_determinism() {
         })
         .expect("create task");
 
-    runtime1.scheduler.lock().unwrap().schedule(task_id1, 0);
+    runtime1.scheduler.lock().schedule(task_id1, 0);
     let steps1 = runtime1.run_until_quiescent();
     let stats1 = runtime1.chaos_stats().clone();
 
@@ -768,7 +768,7 @@ fn test_chaos_determinism() {
         })
         .expect("create task");
 
-    runtime2.scheduler.lock().unwrap().schedule(task_id2, 0);
+    runtime2.scheduler.lock().schedule(task_id2, 0);
     let steps2 = runtime2.run_until_quiescent();
     let stats2 = runtime2.chaos_stats().clone();
 
@@ -824,7 +824,7 @@ fn test_chaos_with_heavy_preset() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
 
     // Should complete despite chaos (or be cancelled by chaos)
     test_section!("run");
@@ -883,7 +883,7 @@ fn test_chaos_off_produces_no_injections() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     test_section!("run");
     runtime.run_until_quiescent();
 

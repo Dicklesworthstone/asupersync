@@ -1215,7 +1215,7 @@ mod tests {
                 .state
                 .create_task(region, Budget::INFINITE, async { 42 })
                 .expect("create task");
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.scheduler.lock().schedule(task_id, 0);
             runtime.run_until_quiescent();
         });
 
@@ -1242,7 +1242,7 @@ mod tests {
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("t2");
             {
-                let mut sched = runtime.scheduler.lock().unwrap();
+                let mut sched = runtime.scheduler.lock();
                 sched.schedule(t1, 0);
                 sched.schedule(t2, 0);
             }
@@ -1266,7 +1266,7 @@ mod tests {
                 .state
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("t1");
-            runtime.scheduler.lock().unwrap().schedule(t1, 0);
+            runtime.scheduler.lock().schedule(t1, 0);
             runtime.run_until_quiescent();
         });
 
@@ -1340,7 +1340,7 @@ mod tests {
                 .state
                 .create_task(region, Budget::INFINITE, async { 42 })
                 .expect("create task");
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.scheduler.lock().schedule(task_id, 0);
             runtime.run_until_quiescent();
         });
 
@@ -1362,7 +1362,7 @@ mod tests {
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("t2");
             {
-                let mut sched = runtime.scheduler.lock().unwrap();
+                let mut sched = runtime.scheduler.lock();
                 sched.schedule(t1, 0);
                 sched.schedule(t2, 0);
             }
@@ -1382,7 +1382,7 @@ mod tests {
                 .state
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("t1");
-            runtime.scheduler.lock().unwrap().schedule(t1, 0);
+            runtime.scheduler.lock().schedule(t1, 0);
             runtime.run_until_quiescent();
         });
 
@@ -1416,7 +1416,7 @@ mod tests {
                 .state
                 .create_task(region, Budget::INFINITE, async { 1 })
                 .expect("t");
-            runtime.scheduler.lock().unwrap().schedule(t, 0);
+            runtime.scheduler.lock().schedule(t, 0);
             runtime.run_until_quiescent();
         });
 
@@ -1436,7 +1436,7 @@ mod tests {
                     .state
                     .create_task(region, Budget::INFINITE, async { 99 })
                     .expect("t");
-                runtime.scheduler.lock().unwrap().schedule(t, 0);
+                runtime.scheduler.lock().schedule(t, 0);
                 runtime.run_until_quiescent();
             });
             let first = explorer
@@ -1466,7 +1466,7 @@ mod tests {
                     .create_task(region, Budget::INFINITE, async {})
                     .expect("t2");
                 {
-                    let mut sched = runtime.scheduler.lock().unwrap();
+                    let mut sched = runtime.scheduler.lock();
                     sched.schedule(t1, 0);
                     sched.schedule(t2, 0);
                 }
@@ -1494,7 +1494,7 @@ mod tests {
                 .state
                 .create_task(region, Budget::INFINITE, async { 42 })
                 .expect("t");
-            runtime.scheduler.lock().unwrap().schedule(t, 0);
+            runtime.scheduler.lock().schedule(t, 0);
             runtime.run_until_quiescent();
         });
 
@@ -1512,7 +1512,7 @@ mod tests {
                 .state
                 .create_task(region, Budget::INFINITE, async { 1 })
                 .expect("t");
-            runtime.scheduler.lock().unwrap().schedule(t, 0);
+            runtime.scheduler.lock().schedule(t, 0);
             runtime.run_until_quiescent();
         });
 
@@ -1530,7 +1530,7 @@ mod tests {
                 .state
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.scheduler.lock().schedule(task_id, 0);
             runtime.run_until_quiescent();
         });
 
@@ -1569,7 +1569,7 @@ mod tests {
                 .state
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("task");
-            runtime.scheduler.lock().unwrap().schedule(task, 0);
+            runtime.scheduler.lock().schedule(task, 0);
             runtime.run_until_quiescent();
         });
 
@@ -1586,7 +1586,7 @@ mod tests {
                 .state
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("task");
-            runtime.scheduler.lock().unwrap().schedule(task, 0);
+            runtime.scheduler.lock().schedule(task, 0);
             runtime.run_until_quiescent();
         });
 
@@ -1603,7 +1603,7 @@ mod tests {
                 .state
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("task");
-            runtime.scheduler.lock().unwrap().schedule(task, 0);
+            runtime.scheduler.lock().schedule(task, 0);
             runtime.run_until_quiescent();
         });
 

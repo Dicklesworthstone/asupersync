@@ -115,7 +115,7 @@ fn shared_handle_finds_completed_value() {
         );
 
         {
-            let mut sched = runtime.scheduler.lock().expect("lock");
+            let mut sched = runtime.scheduler.lock();
             sched.schedule(tid, 0);
         }
         runtime.run_until_quiescent();
@@ -172,7 +172,7 @@ fn shared_handle_polling_from_task() {
 
         // Schedule both tasks.
         {
-            let mut sched = runtime.scheduler.lock().expect("lock");
+            let mut sched = runtime.scheduler.lock();
             sched.schedule(leaf_tid, 0);
             sched.schedule(driver_tid, 0);
         }

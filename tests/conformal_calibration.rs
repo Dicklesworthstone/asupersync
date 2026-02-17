@@ -27,7 +27,7 @@ fn single_task_report(seed: u64) -> OracleReport {
         .state
         .create_task(region, Budget::INFINITE, async { 42 })
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(t, 0);
+    runtime.scheduler.lock().schedule(t, 0);
     runtime.run_until_quiescent();
     runtime.oracles.report(runtime.now())
 }

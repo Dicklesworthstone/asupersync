@@ -158,7 +158,7 @@ fn check_for_leak(elements: &[ScenarioElement]) -> bool {
                 if let Some(&rid) = regions.get(region_idx) {
                     if let Ok((tid, _)) = runtime.state.create_task(rid, Budget::INFINITE, async {})
                     {
-                        runtime.scheduler.lock().unwrap().schedule(tid, *lane);
+                        runtime.scheduler.lock().schedule(tid, *lane);
                         tasks.insert(*task_idx, tid);
                     }
                 }
@@ -486,7 +486,7 @@ fn replay_scenario_for_trace(runtime: &mut LabRuntime, seed: u64) {
             continue;
         };
         let lane = rng.next_u32(4) as u8;
-        runtime.scheduler.lock().unwrap().schedule(task_id, lane);
+        runtime.scheduler.lock().schedule(task_id, lane);
 
         let num_obligations = 1 + rng.next_u32(3);
         for j in 0..num_obligations {

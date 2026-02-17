@@ -1595,8 +1595,8 @@ mod tests {
         runtime.state.store_spawned_task(client_id, client_stored);
 
         // Schedule both server and client, run to quiescence.
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
-        runtime.scheduler.lock().unwrap().schedule(client_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(client_id, 0);
         runtime.run_until_quiescent();
 
         // Verify the client received the full history.
@@ -1642,8 +1642,8 @@ mod tests {
         let client_id = client_handle.task_id();
         runtime.state.store_spawned_task(client_id, client_stored);
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
-        runtime.scheduler.lock().unwrap().schedule(client_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(client_id, 0);
         runtime.run_until_quiescent();
 
         let history =
@@ -1704,8 +1704,8 @@ mod tests {
         let client_id = client_handle.task_id();
         runtime.state.store_spawned_task(client_id, client_stored);
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
-        runtime.scheduler.lock().unwrap().schedule(client_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(client_id, 0);
         runtime.run_until_quiescent();
 
         let history = futures_lite::future::block_on(client_handle.join(&cx)).expect("join ok");
@@ -1885,8 +1885,8 @@ mod tests {
         let client_id = client_handle.task_id();
         runtime.state.store_spawned_task(client_id, client_stored);
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
-        runtime.scheduler.lock().unwrap().schedule(client_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(client_id, 0);
         runtime.run_until_quiescent();
 
         let history = futures_lite::future::block_on(client_handle.join(&cx)).expect("join ok");

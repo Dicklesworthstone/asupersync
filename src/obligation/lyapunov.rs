@@ -1695,7 +1695,7 @@ mod tests {
                 })
                 .expect("create task");
 
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.scheduler.lock().schedule(task_id, 0);
         }
 
         // Warm up: let tasks run before cancelling.
@@ -1707,7 +1707,7 @@ mod tests {
         let cancel_reason = CancelReason::shutdown();
         let tasks_to_cancel = runtime.state.cancel_request(region, &cancel_reason, None);
         {
-            let mut scheduler = runtime.scheduler.lock().unwrap();
+            let mut scheduler = runtime.scheduler.lock();
             for (task_id, priority) in tasks_to_cancel {
                 scheduler.schedule_cancel(task_id, priority);
             }
@@ -1974,7 +1974,7 @@ mod tests {
                 }
             }
 
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.scheduler.lock().schedule(task_id, 0);
         }
 
         // Warm up: let tasks run a few steps and advance virtual time so
@@ -1992,7 +1992,7 @@ mod tests {
         let cancel_reason = CancelReason::shutdown();
         let tasks_to_cancel = runtime.state.cancel_request(region, &cancel_reason, None);
         {
-            let mut scheduler = runtime.scheduler.lock().unwrap();
+            let mut scheduler = runtime.scheduler.lock();
             for (task_id, priority) in tasks_to_cancel {
                 scheduler.schedule_cancel(task_id, priority);
             }

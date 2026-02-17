@@ -153,7 +153,7 @@ fn run_cancel_fanout(
             })
             .expect("create task");
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     // Warm up.
@@ -165,7 +165,7 @@ fn run_cancel_fanout(
     let cancel_reason = CancelReason::shutdown();
     let tasks_to_cancel = runtime.state.cancel_request(region, &cancel_reason, None);
     {
-        let mut scheduler = runtime.scheduler.lock().unwrap();
+        let mut scheduler = runtime.scheduler.lock();
         for (task_id, priority) in tasks_to_cancel {
             scheduler.schedule_cancel(task_id, priority);
         }
@@ -232,7 +232,7 @@ fn run_deadline_pressure(
                 }
             })
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     // Timed-lane tasks with tight deadlines.
@@ -257,7 +257,7 @@ fn run_deadline_pressure(
         runtime
             .scheduler
             .lock()
-            .unwrap()
+            
             .schedule_timed(task_id, deadline);
     }
 
@@ -268,7 +268,7 @@ fn run_deadline_pressure(
     let cancel_reason = CancelReason::shutdown();
     let tasks_to_cancel = runtime.state.cancel_request(region, &cancel_reason, None);
     {
-        let mut scheduler = runtime.scheduler.lock().unwrap();
+        let mut scheduler = runtime.scheduler.lock();
         for (task_id, priority) in tasks_to_cancel {
             scheduler.schedule_cancel(task_id, priority);
         }
@@ -355,7 +355,7 @@ fn run_obligation_debt(
             }
         }
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     for _ in 0..warmup_steps {
@@ -370,7 +370,7 @@ fn run_obligation_debt(
     let cancel_reason = CancelReason::shutdown();
     let tasks_to_cancel = runtime.state.cancel_request(region, &cancel_reason, None);
     {
-        let mut scheduler = runtime.scheduler.lock().unwrap();
+        let mut scheduler = runtime.scheduler.lock();
         for (task_id, priority) in tasks_to_cancel {
             scheduler.schedule_cancel(task_id, priority);
         }

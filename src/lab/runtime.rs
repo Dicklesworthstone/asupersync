@@ -2156,7 +2156,6 @@ impl Wake for TaskWaker {
     fn wake(self: Arc<Self>) {
         self.scheduler
             .lock()
-            .unwrap()
             .schedule(self.task_id, self.priority);
     }
 }
@@ -2175,7 +2174,6 @@ impl Wake for CancelTaskWaker {
     fn wake(self: Arc<Self>) {
         self.scheduler
             .lock()
-            .unwrap()
             .schedule_cancel(self.task_id, self.priority);
     }
 }

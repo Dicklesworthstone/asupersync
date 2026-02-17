@@ -35,7 +35,7 @@ fn run_with_seed(seed: u64) -> Vec<String> {
             if let Some(Message::Text(t)) = ws.recv(&cx).await.expect("recv") {
                 events_server
                     .lock()
-                    .unwrap()
+                    .expect("poisoned")
                     .push(format!("server:recv:{t}"));
                 ws.send(&cx, Message::text(t)).await.expect("send");
                 events_server.lock().unwrap().push("server:sent".into());
@@ -45,7 +45,7 @@ fn run_with_seed(seed: u64) -> Vec<String> {
     runtime
         .scheduler
         .lock()
-        .unwrap()
+        
         .schedule(server_task_id, 0);
 
     // Client task: read 101 response (from accept) and then use from_upgraded on the same stream.
@@ -55,7 +55,7 @@ fn run_with_seed(seed: u64) -> Vec<String> {
             let cx: Cx = Cx::for_testing();
             events_client
                 .lock()
-                .unwrap()
+                .expect("poisoned")
                 .push("client:drain_101".into());
 
             // Wait until the server writes the HTTP 101 response.
@@ -65,7 +65,7 @@ fn run_with_seed(seed: u64) -> Vec<String> {
             let mut ws = WebSocket::from_upgraded(client_io, WebSocketConfig::default());
             events_client
                 .lock()
-                .unwrap()
+                .expect("poisoned")
                 .push("client:connected".into());
 
             ws.send(&cx, Message::text("hello")).await.expect("send");
@@ -75,7 +75,7 @@ fn run_with_seed(seed: u64) -> Vec<String> {
             match msg {
                 Message::Text(t) => events_client
                     .lock()
-                    .unwrap()
+                    .expect("poisoned")
                     .push(format!("client:recv:{t}")),
                 other => panic!("unexpected: {other:?}"),
             }
@@ -84,7 +84,7 @@ fn run_with_seed(seed: u64) -> Vec<String> {
     runtime
         .scheduler
         .lock()
-        .unwrap()
+        
         .schedule(client_task_id, 0);
 
     runtime.run_until_quiescent();

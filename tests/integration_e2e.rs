@@ -555,7 +555,7 @@ fn e2e_deterministic_replay_multi_task() {
                     completed.fetch_add(1, Ordering::SeqCst);
                 })
                 .expect("create task");
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.scheduler.lock().schedule(task_id, 0);
         }
 
         runtime.run_until_quiescent();
@@ -584,7 +584,7 @@ fn e2e_deterministic_replay_multi_task() {
                     completed.fetch_add(1, Ordering::SeqCst);
                 })
                 .expect("create task");
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.scheduler.lock().schedule(task_id, 0);
         }
 
         runtime.run_until_quiescent();
@@ -816,7 +816,7 @@ fn e2e_stress_many_tasks_lab_no_leaks() {
                 completed.fetch_add(1, Ordering::SeqCst);
             })
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     test_section!("run-to-quiescence");
@@ -950,7 +950,7 @@ fn e2e_different_seeds_same_logical_outcome() {
                     completed.fetch_add(1, Ordering::SeqCst);
                 })
                 .expect("create task");
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.scheduler.lock().schedule(task_id, 0);
         }
 
         runtime.run_until_quiescent();
@@ -1199,7 +1199,7 @@ fn e2e_deterministic_complex_workload() {
                     counter.fetch_add(i + 1, Ordering::SeqCst);
                 })
                 .expect("create task");
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.scheduler.lock().schedule(task_id, 0);
         }
 
         runtime.run_until_quiescent();

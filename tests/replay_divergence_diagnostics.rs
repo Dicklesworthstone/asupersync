@@ -34,8 +34,8 @@ fn record_simple_trace() -> ReplayTrace {
         .create_task(region, Budget::INFINITE, async {})
         .expect("create task b");
 
-    runtime.scheduler.lock().unwrap().schedule(task_a, 0);
-    runtime.scheduler.lock().unwrap().schedule(task_b, 0);
+    runtime.scheduler.lock().schedule(task_a, 0);
+    runtime.scheduler.lock().schedule(task_b, 0);
 
     runtime.run_until_quiescent();
 

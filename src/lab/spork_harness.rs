@@ -745,7 +745,7 @@ mod tests {
     fn schedule_children(harness: &SporkAppHarness) {
         if let Some(app) = harness.app_handle() {
             let task_ids: Vec<_> = app.supervisor().started.iter().map(|c| c.task_id).collect();
-            let mut sched = harness.runtime().scheduler.lock().unwrap();
+            let mut sched = harness.runtime().scheduler.lock();
             for tid in task_ids {
                 sched.schedule(tid, 0);
             }

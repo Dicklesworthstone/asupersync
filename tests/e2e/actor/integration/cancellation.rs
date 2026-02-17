@@ -31,7 +31,7 @@ fn actor_respects_cancellation() {
                 if cx.is_cancel_requested() {
                     events_task
                         .lock()
-                        .unwrap()
+                        .expect("poisoned")
                         .push(format!("cancelled_at:{i}"));
                     break;
                 }
@@ -42,7 +42,7 @@ fn actor_respects_cancellation() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     runtime.run_until_quiescent();
 
     let trace = events.lock().unwrap().clone();
@@ -73,7 +73,7 @@ fn region_close_cancels_actors() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     runtime.run_until_quiescent();
 
     let trace = events.lock().unwrap().clone();

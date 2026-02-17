@@ -612,7 +612,7 @@ fn refinement_semantics_trace_golden() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     for _ in 0..4 {
         runtime.step_for_test();
     }
@@ -620,7 +620,7 @@ fn refinement_semantics_trace_golden() {
     let reason = CancelReason::timeout();
     let tasks_to_cancel = runtime.state.cancel_request(region, &reason, None);
     {
-        let mut scheduler = runtime.scheduler.lock().unwrap();
+        let mut scheduler = runtime.scheduler.lock();
         for (tid, priority) in tasks_to_cancel {
             scheduler.schedule_cancel(tid, priority);
         }

@@ -29,7 +29,7 @@ fn actor_fifo_message_ordering() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     runtime.run_until_quiescent();
 
     let trace = events.lock().unwrap().clone();
@@ -64,12 +64,12 @@ fn actor_concurrent_senders() {
             .create_task(region, Budget::INFINITE, async move {
                 events_sender
                     .lock()
-                    .unwrap()
+                    .expect("poisoned")
                     .push(format!("sender:{sender_id}:msg"));
             })
             .expect("create sender task");
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     runtime.run_until_quiescent();
@@ -116,7 +116,7 @@ fn actor_graceful_stop() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     runtime.run_until_quiescent();
 
     let trace = events.lock().unwrap().clone();

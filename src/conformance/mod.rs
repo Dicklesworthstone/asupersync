@@ -461,7 +461,7 @@ impl ConformanceTarget for LabRuntimeTarget {
             .create_task(root_region, Budget::INFINITE, wrapped)
             .expect("failed to create task");
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
 
         // Run until quiescent
         runtime.run_until_quiescent();

@@ -793,7 +793,7 @@ impl TestHarness {
                 self.runtime
                     .scheduler
                     .lock()
-                    .unwrap()
+                    
                     .schedule(task_id, 128);
                 self.tasks.push(task_id);
                 Some(task_id)

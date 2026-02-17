@@ -259,7 +259,7 @@ fn run_cross_entity_locking_lab_workload(
                     }
                 })
                 .expect("create task");
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.scheduler.lock().schedule(task_id, 0);
             task_ids.push(task_id);
             tasks_spawned += 1;
         }
@@ -319,7 +319,7 @@ fn run_cross_entity_locking_lab_workload(
                 runtime
                     .scheduler
                     .lock()
-                    .unwrap()
+                    
                     .schedule(task_id, priority);
             }
         }

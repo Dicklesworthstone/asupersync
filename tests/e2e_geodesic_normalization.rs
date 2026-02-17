@@ -130,7 +130,7 @@ fn run_scenario(name: &str, seed: u64, task_count: usize) -> ScenarioReport {
             .state
             .create_task(region, Budget::INFINITE, async {})
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     runtime.run_until_quiescent();
@@ -212,7 +212,7 @@ fn scenario_cancel_drain() -> ScenarioReport {
             .state
             .create_task(region, Budget::INFINITE, async {})
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
         task_ids.push(task_id);
     }
 
@@ -287,7 +287,7 @@ fn scenario_obligation_interleave() -> ScenarioReport {
             .state
             .create_task(region, Budget::INFINITE, async {})
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
         task_ids.push(task_id);
     }
 

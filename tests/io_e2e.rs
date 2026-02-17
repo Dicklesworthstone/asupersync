@@ -104,9 +104,7 @@ fn spawn_cancellable_task(runtime: &mut LabRuntime, region: RegionId) -> Option<
             }
         })
         .ok()?;
-    let Ok(mut scheduler) = runtime.scheduler.lock() else {
-        return None;
-    };
+    let mut scheduler = runtime.scheduler.lock();
     scheduler.schedule(task_id, 0);
     Some(task_id)
 }
@@ -114,9 +112,7 @@ fn spawn_cancellable_task(runtime: &mut LabRuntime, region: RegionId) -> Option<
 #[cfg(unix)]
 fn cancel_region(runtime: &mut LabRuntime, region: RegionId, reason: &CancelReason) -> bool {
     let tasks = runtime.state.cancel_request(region, reason, None);
-    let Ok(mut scheduler) = runtime.scheduler.lock() else {
-        return false;
-    };
+    let mut scheduler = runtime.scheduler.lock();
     for (task, priority) in tasks {
         scheduler.schedule_cancel(task, priority);
     }

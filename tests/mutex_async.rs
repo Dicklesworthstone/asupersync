@@ -83,8 +83,8 @@ fn test_mutex_contention_async() {
         .unwrap();
 
     test_section!("schedule");
-    runtime.scheduler.lock().unwrap().schedule(t1, 0);
-    runtime.scheduler.lock().unwrap().schedule(t2, 0);
+    runtime.scheduler.lock().schedule(t1, 0);
+    runtime.scheduler.lock().schedule(t2, 0);
 
     test_section!("run");
     runtime.run_until_quiescent();

@@ -1203,7 +1203,7 @@ fn run_accounting_schedule(
             continue;
         };
         accounting.admission_succeeded(AdmissionKind::Task);
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
 
         let num_obligations = rng.next_u32(max_obligations_per_task + 1);
         for _ in 0..num_obligations {
@@ -1420,7 +1420,7 @@ fn admission_limits_reject_excess_obligations() {
         .state
         .create_task(root, Budget::INFINITE, async {})
         .expect("task creation should succeed");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
 
     let mut created = Vec::new();
     let mut rejected_count: u32 = 0;

@@ -138,7 +138,7 @@ fn test_labruntime_task_cleanup_on_scope_exit() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     runtime.run_until_quiescent();
 
     assert!(
@@ -199,7 +199,7 @@ fn test_labruntime_simulated_race_cleanup() {
 
     // Schedule all tasks
     {
-        let mut sched = runtime.scheduler.lock().unwrap();
+        let mut sched = runtime.scheduler.lock();
         sched.schedule(winner_id, 0);
         sched.schedule(loser1_id, 0);
         sched.schedule(loser2_id, 0);

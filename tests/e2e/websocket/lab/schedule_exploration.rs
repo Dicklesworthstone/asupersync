@@ -31,7 +31,7 @@ fn run_smoke(seed: u64) {
     runtime
         .scheduler
         .lock()
-        .unwrap()
+        
         .schedule(server_task_id, 0);
 
     let (client_task_id, _) = runtime
@@ -47,7 +47,7 @@ fn run_smoke(seed: u64) {
     runtime
         .scheduler
         .lock()
-        .unwrap()
+        
         .schedule(client_task_id, 0);
 
     runtime.run_until_quiescent();

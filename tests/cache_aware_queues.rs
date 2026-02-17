@@ -737,7 +737,7 @@ fn e2e_lab_stress_no_task_loss() {
             .state
             .create_task(root, Budget::INFINITE, async {})
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
         created_ids.push(task_id);
     }
     tracing::info!(count = created_ids.len(), "Created tasks");
@@ -793,10 +793,10 @@ fn e2e_lab_mixed_priority_fairness() {
             .expect("create task");
 
         if i % 2 == 0 {
-            runtime.scheduler.lock().unwrap().schedule(task_id, 9); // high prio
+            runtime.scheduler.lock().schedule(task_id, 9); // high prio
             high_prio_ids.push(task_id);
         } else {
-            runtime.scheduler.lock().unwrap().schedule(task_id, 1); // low prio
+            runtime.scheduler.lock().schedule(task_id, 1); // low prio
             low_prio_ids.push(task_id);
         }
     }

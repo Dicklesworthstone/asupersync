@@ -650,7 +650,7 @@ fn e2e_lab_dispatch_allocation_profile() {
             .state
             .create_task(region, Budget::INFINITE, async {})
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(tid, 0);
+        runtime.scheduler.lock().schedule(tid, 0);
     }
 
     tracing::info!(task_count, "Lab runtime setup with tasks");
@@ -727,7 +727,7 @@ fn e2e_allocation_scaling_sublinear() {
                 .state
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
-            runtime.scheduler.lock().unwrap().schedule(tid, 0);
+            runtime.scheduler.lock().schedule(tid, 0);
         }
 
         let before = AllocSnapshot::take();

@@ -75,7 +75,7 @@ fn spawn_actor_in_lab<A: asupersync::actor::Actor>(
 }
 
 fn run_lab(runtime: &mut LabRuntime, task_id: asupersync::types::TaskId) {
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     runtime.run_until_quiescent();
 }
 

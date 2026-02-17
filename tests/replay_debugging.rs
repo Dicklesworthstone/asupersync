@@ -32,8 +32,8 @@ fn record_simple_trace() -> ReplayTrace {
         .create_task(region, Budget::INFINITE, async {})
         .expect("create task b");
 
-    runtime.scheduler.lock().unwrap().schedule(task_a, 0);
-    runtime.scheduler.lock().unwrap().schedule(task_b, 0);
+    runtime.scheduler.lock().schedule(task_a, 0);
+    runtime.scheduler.lock().schedule(task_b, 0);
 
     runtime.run_until_quiescent();
 
@@ -273,7 +273,7 @@ fn artifact_seed_extraction_and_deterministic_rerun() {
         .state
         .create_task(region, Budget::INFINITE, async {})
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task, 0);
+    runtime.scheduler.lock().schedule(task, 0);
     runtime.run_until_quiescent();
     let trace1 = runtime.finish_replay_trace().expect("first trace");
 
@@ -310,7 +310,7 @@ fn artifact_seed_extraction_and_deterministic_rerun() {
         .state
         .create_task(region2, Budget::INFINITE, async {})
         .expect("create task");
-    runtime2.scheduler.lock().unwrap().schedule(task2, 0);
+    runtime2.scheduler.lock().schedule(task2, 0);
     runtime2.run_until_quiescent();
     let trace2 = runtime2.finish_replay_trace().expect("second trace");
 
@@ -405,8 +405,8 @@ fn failure_triage_capture_manifest_replay_roundtrip() {
         .create_task(region, Budget::INFINITE, async {})
         .expect("create task b");
 
-    runtime.scheduler.lock().unwrap().schedule(task_a, 0);
-    runtime.scheduler.lock().unwrap().schedule(task_b, 0);
+    runtime.scheduler.lock().schedule(task_a, 0);
+    runtime.scheduler.lock().schedule(task_b, 0);
     runtime.run_until_quiescent();
 
     let trace = runtime.finish_replay_trace().expect("capture trace");
@@ -472,12 +472,12 @@ fn failure_triage_capture_manifest_replay_roundtrip() {
     replay_runtime
         .scheduler
         .lock()
-        .unwrap()
+        
         .schedule(replay_task_a, 0);
     replay_runtime
         .scheduler
         .lock()
-        .unwrap()
+        
         .schedule(replay_task_b, 0);
     replay_runtime.run_until_quiescent();
 
@@ -583,7 +583,7 @@ fn replay_context_reproduces_with_same_seed() {
         .state
         .create_task(region, Budget::INFINITE, async {})
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task, 0);
+    runtime.scheduler.lock().schedule(task, 0);
     runtime.run_until_quiescent();
     let original_trace = runtime.finish_replay_trace().expect("trace");
 
@@ -609,7 +609,7 @@ fn replay_context_reproduces_with_same_seed() {
         .state
         .create_task(replay_region, Budget::INFINITE, async {})
         .expect("replay task");
-    replay_rt.scheduler.lock().unwrap().schedule(replay_task, 0);
+    replay_rt.scheduler.lock().schedule(replay_task, 0);
     replay_rt.run_until_quiescent();
     let replay_trace = replay_rt.finish_replay_trace().expect("replay trace");
 

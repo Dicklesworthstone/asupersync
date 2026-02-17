@@ -1021,7 +1021,7 @@ fn run_plan(runtime: &mut LabRuntime, plan: &PlanDag) -> NodeValue {
             ?live_tasks,
             "plan runtime not quiescent before reschedule"
         );
-        let mut sched = runtime.scheduler.lock().expect("scheduler lock");
+        let mut sched = runtime.scheduler.lock();
         for (_, record) in runtime.state.tasks_iter() {
             if record.is_runnable() {
                 let prio = record.cx_inner.as_ref().map_or(0, |inner| {
@@ -1238,7 +1238,6 @@ where
     runtime
         .scheduler
         .lock()
-        .expect("scheduler lock")
         .schedule(task_id, priority);
     SharedHandle::new(handle)
 }

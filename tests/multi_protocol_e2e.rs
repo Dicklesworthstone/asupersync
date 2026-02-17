@@ -460,7 +460,7 @@ fn e2e_multi_timer_driven_timeouts() {
             c.fetch_add(1, Ordering::SeqCst);
         })
         .expect("http task");
-    runtime.scheduler.lock().unwrap().schedule(t1, 0);
+    runtime.scheduler.lock().schedule(t1, 0);
 
     // gRPC "handler" task
     let c = counter.clone();
@@ -470,7 +470,7 @@ fn e2e_multi_timer_driven_timeouts() {
             c.fetch_add(1, Ordering::SeqCst);
         })
         .expect("grpc task");
-    runtime.scheduler.lock().unwrap().schedule(t2, 0);
+    runtime.scheduler.lock().schedule(t2, 0);
 
     // WebSocket "handler" task
     let c = counter.clone();
@@ -480,7 +480,7 @@ fn e2e_multi_timer_driven_timeouts() {
             c.fetch_add(1, Ordering::SeqCst);
         })
         .expect("ws task");
-    runtime.scheduler.lock().unwrap().schedule(t3, 0);
+    runtime.scheduler.lock().schedule(t3, 0);
 
     test_section!("advance_time_and_run");
     runtime.advance_time_to(Time::from_millis(100));
@@ -542,7 +542,7 @@ fn e2e_multi_graceful_shutdown() {
                     c.fetch_add(1, Ordering::SeqCst);
                 })
                 .expect("create task");
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.scheduler.lock().schedule(task_id, 0);
         }
 
         tracing::info!(

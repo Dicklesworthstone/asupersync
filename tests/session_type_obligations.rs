@@ -746,8 +746,8 @@ fn e2e_send_recv_session_under_lab() {
         })
         .unwrap();
 
-    runtime.scheduler.lock().unwrap().schedule(client_id, 0);
-    runtime.scheduler.lock().unwrap().schedule(server_id, 0);
+    runtime.scheduler.lock().schedule(client_id, 0);
+    runtime.scheduler.lock().schedule(server_id, 0);
     runtime.run_until_quiescent();
 
     assert_eq!(client_result.load(Ordering::SeqCst), 126); // 42 * 3
@@ -801,8 +801,8 @@ fn e2e_choose_offer_under_lab() {
         })
         .unwrap();
 
-    runtime.scheduler.lock().unwrap().schedule(client_id, 0);
-    runtime.scheduler.lock().unwrap().schedule(server_id, 0);
+    runtime.scheduler.lock().schedule(client_id, 0);
+    runtime.scheduler.lock().schedule(server_id, 0);
     runtime.run_until_quiescent();
 
     assert_eq!(result.load(Ordering::SeqCst), 777);
@@ -847,8 +847,8 @@ fn e2e_deterministic_session_replay() {
             })
             .unwrap();
 
-        runtime.scheduler.lock().unwrap().schedule(cid, 0);
-        runtime.scheduler.lock().unwrap().schedule(sid, 0);
+        runtime.scheduler.lock().schedule(cid, 0);
+        runtime.scheduler.lock().schedule(sid, 0);
         runtime.run_until_quiescent();
 
         result.load(Ordering::SeqCst)
@@ -914,7 +914,7 @@ fn e2e_10_concurrent_sessions_under_lab() {
     }
 
     for &id in &task_ids {
-        runtime.scheduler.lock().unwrap().schedule(id, 0);
+        runtime.scheduler.lock().schedule(id, 0);
     }
     runtime.run_until_quiescent();
 

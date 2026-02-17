@@ -82,7 +82,7 @@ fn run_sync_determinism_with_seed(seed: u64) -> Vec<usize> {
             })
             .unwrap();
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     runtime.run_until_quiescent();
@@ -127,7 +127,7 @@ fn e2e_sync_001_mutex_fair_queuing() {
             })
             .unwrap();
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     test_section!("run");
@@ -240,7 +240,7 @@ fn e2e_sync_010_rwlock_concurrent_readers() {
             })
             .unwrap();
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     test_section!("run");
@@ -287,7 +287,7 @@ fn e2e_sync_011_rwlock_writer_exclusivity() {
             })
             .unwrap();
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     test_section!("run");
@@ -354,7 +354,7 @@ fn e2e_sync_012_rwlock_mixed_wait_cancel() {
             guard.with_write(|value| *value += 1);
         })
         .unwrap();
-    runtime.scheduler.lock().unwrap().schedule(hold_task, 10);
+    runtime.scheduler.lock().schedule(hold_task, 10);
 
     let cancel_reason = CancelReason::deadline().with_message("rwlock wait timeout");
     let waiters: [(bool, Option<u32>); 6] = [
@@ -441,7 +441,7 @@ fn e2e_sync_012_rwlock_mixed_wait_cancel() {
                 tracing::info!(idx, kind, polls, outcome, "rwlock waiter done");
             })
             .unwrap();
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
 
         if let Some(cancel_after) = cancel_after {
             let (cancel_task, _) = runtime
@@ -463,7 +463,7 @@ fn e2e_sync_012_rwlock_mixed_wait_cancel() {
                     );
                 })
                 .unwrap();
-            runtime.scheduler.lock().unwrap().schedule(cancel_task, 0);
+            runtime.scheduler.lock().schedule(cancel_task, 0);
         }
     }
 
@@ -542,7 +542,7 @@ fn e2e_sync_020_semaphore_permit_limiting() {
             })
             .unwrap();
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     test_section!("run");
@@ -723,7 +723,7 @@ fn e2e_sync_040_notify_one() {
             })
             .unwrap();
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     // Run a few steps to let waiters register
@@ -779,7 +779,7 @@ fn e2e_sync_041_notify_all() {
             })
             .unwrap();
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     // Run a few steps to let waiters register
@@ -843,7 +843,7 @@ fn e2e_sync_050_oncecell_single_init() {
             })
             .unwrap();
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     test_section!("run");
@@ -930,7 +930,7 @@ fn e2e_sync_100_stress_mixed_primitives() {
             })
             .unwrap();
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     test_section!("run");
@@ -1081,7 +1081,7 @@ fn e2e_sync_300_no_deadlock_proper_ordering() {
             })
             .unwrap();
 
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     test_section!("run");

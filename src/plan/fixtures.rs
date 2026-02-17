@@ -783,7 +783,7 @@ fn execute_plan_in_lab_core(
 
     // Schedule all tasks.
     {
-        let mut sched = runtime.scheduler.lock().expect("scheduler lock");
+        let mut sched = runtime.scheduler.lock();
         for tid in &task_ids {
             sched.schedule(*tid, 0);
         }
@@ -795,7 +795,7 @@ fn execute_plan_in_lab_core(
     let mut attempts = 0;
     while !runtime.is_quiescent() && attempts < 3 {
         {
-            let mut sched = runtime.scheduler.lock().expect("scheduler lock");
+            let mut sched = runtime.scheduler.lock();
             for (_, record) in runtime.state.tasks_iter() {
                 if record.is_runnable() {
                     sched.schedule(record.id, 0);

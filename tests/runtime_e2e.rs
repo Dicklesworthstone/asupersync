@@ -59,7 +59,8 @@ fn create_child_region(state: &mut RuntimeState, parent: RegionId) -> RegionId {
 fn cancel_region(runtime: &mut LabRuntime, region: RegionId, reason: &CancelReason) -> usize {
     let tasks = runtime.state.cancel_request(region, reason, None);
     let mut scheduled = 0usize;
-    if let Ok(mut scheduler) = runtime.scheduler.lock() {
+    {
+        let mut scheduler = runtime.scheduler.lock();
         for (task, priority) in tasks {
             scheduler.schedule_cancel(task, priority);
             scheduled += 1;
@@ -91,7 +92,7 @@ fn spawn_cancellable_loop(
             }
         })
         .expect("create cancellable task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     task_id
 }
 
@@ -152,7 +153,7 @@ fn e2e_task_spawn_and_quiescence() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     let steps = runtime.run_until_quiescent();
 
     assert_with_log!(steps > 0, "ran steps", "> 0", steps);
@@ -180,7 +181,7 @@ fn e2e_multiple_tasks_all_complete() {
                 c.fetch_add(1, Ordering::SeqCst);
             })
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     runtime.run_until_quiescent();
@@ -211,7 +212,7 @@ fn e2e_cancel_region_drains_tasks() {
             // task would do long work here
         })
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     runtime.run_until_quiescent();
 
     // Cancel the region
@@ -245,7 +246,7 @@ fn e2e_cancellation_storm() {
                     ts.fetch_add(1, Ordering::SeqCst);
                 })
                 .expect("create task");
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.scheduler.lock().schedule(task_id, 0);
         }
 
         // Cancel odd regions immediately
@@ -461,7 +462,7 @@ fn e2e_race_loser_cancellation_drain() {
             yield_now().await;
         })
         .expect("winner task");
-    runtime.scheduler.lock().unwrap().schedule(winner_task, 0);
+    runtime.scheduler.lock().schedule(winner_task, 0);
 
     let loser_task_a = spawn_cancellable_loop(&mut runtime, loser_region_a, 4096, None);
     let loser_task_b = spawn_cancellable_loop(&mut runtime, loser_region_b, 4096, None);
@@ -623,7 +624,7 @@ fn e2e_timer_storm() {
                 c.fetch_add(1, Ordering::SeqCst);
             })
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
 
         // Interleave time advances
         if i % 10 == 0 {
@@ -661,7 +662,7 @@ fn e2e_multiple_regions_all_quiesce() {
             o.lock().unwrap().push("region_a");
         })
         .expect("task a");
-    runtime.scheduler.lock().unwrap().schedule(t1, 0);
+    runtime.scheduler.lock().schedule(t1, 0);
 
     // Task in region_b
     let o = order.clone();
@@ -671,7 +672,7 @@ fn e2e_multiple_regions_all_quiesce() {
             o.lock().unwrap().push("region_b");
         })
         .expect("task b");
-    runtime.scheduler.lock().unwrap().schedule(t2, 0);
+    runtime.scheduler.lock().schedule(t2, 0);
 
     // Task in region_c
     let o = order.clone();
@@ -681,7 +682,7 @@ fn e2e_multiple_regions_all_quiesce() {
             o.lock().unwrap().push("region_c");
         })
         .expect("task c");
-    runtime.scheduler.lock().unwrap().schedule(t3, 0);
+    runtime.scheduler.lock().schedule(t3, 0);
 
     runtime.run_until_quiescent();
 
@@ -714,7 +715,7 @@ fn stress_many_tasks_single_region() {
                 c.fetch_add(1, Ordering::SeqCst);
             })
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     runtime.run_until_quiescent();
@@ -744,7 +745,7 @@ fn stress_many_regions_few_tasks() {
                 c.fetch_add(1, Ordering::SeqCst);
             })
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     runtime.run_until_quiescent();
@@ -775,7 +776,7 @@ fn e2e_deterministic_execution() {
                     c.fetch_add(1, Ordering::SeqCst);
                 })
                 .expect("create task");
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.scheduler.lock().schedule(task_id, 0);
         }
 
         runtime.run_until_quiescent();
@@ -798,7 +799,7 @@ fn e2e_trace_captures_events() {
         .state
         .create_task(root, Budget::INFINITE, async { 42 })
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     runtime.run_until_quiescent();
 
     let events = runtime.state.trace.snapshot();
@@ -835,7 +836,7 @@ fn e2e_nested_region_create_teardown() {
                 c.fetch_add(1, Ordering::SeqCst);
             })
             .unwrap_or_else(|e| panic!("create {label} task: {e}"));
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
     harness.exit_phase();
 
@@ -883,7 +884,7 @@ fn e2e_cancellation_propagates_through_region_tree() {
                 s.fetch_add(1, Ordering::SeqCst);
             })
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
     harness.exit_phase();
 
@@ -920,7 +921,7 @@ fn e2e_obligation_lifecycle() {
         .state
         .create_task(root, Budget::INFINITE, async {})
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     harness.exit_phase();
 
     harness.enter_phase("create_obligation");
@@ -963,7 +964,7 @@ fn e2e_obligation_abort_on_cancel() {
         .state
         .create_task(root, Budget::INFINITE, async {})
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     harness.exit_phase();
 
     harness.enter_phase("create_and_abort");
@@ -1155,7 +1156,7 @@ fn e2e_budget_poll_quota_enforcement() {
             p.fetch_add(1, Ordering::SeqCst);
         })
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     harness.exit_phase();
 
     harness.enter_phase("execute");
@@ -1196,7 +1197,7 @@ fn e2e_complex_workload_quiescence() {
                         t.fetch_add(1, Ordering::SeqCst);
                     })
                     .expect("create task");
-                runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+                runtime.scheduler.lock().schedule(task_id, 0);
             }
         }
     }
@@ -1241,7 +1242,7 @@ fn e2e_deterministic_nested_regions() {
                     c.fetch_add(1, Ordering::SeqCst);
                 })
                 .expect("create task");
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.scheduler.lock().schedule(task_id, 0);
         }
 
         runtime.run_until_quiescent();
@@ -1304,7 +1305,7 @@ fn e2e_cancel_with_pending_obligations() {
         .state
         .create_task(root, Budget::INFINITE, async {})
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
 
     test_section!("create_obligations");
     let mut obligations = Vec::new();
@@ -1375,7 +1376,7 @@ fn e2e_deep_cancel_propagation() {
                 c.fetch_add(1, Ordering::SeqCst);
             })
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     test_section!("run_tasks");
@@ -1435,7 +1436,7 @@ fn e2e_concurrent_cancel_reasons() {
                     c.fetch_add(1, Ordering::SeqCst);
                 })
                 .expect("create task");
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.scheduler.lock().schedule(task_id, 0);
         }
     }
     tracing::info!(
@@ -1496,7 +1497,7 @@ fn e2e_cancel_with_timer_interleave() {
                     c.fetch_add(1, Ordering::SeqCst);
                 })
                 .expect("create task");
-            runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+            runtime.scheduler.lock().schedule(task_id, 0);
         }
 
         // Advance time between waves
@@ -1562,7 +1563,7 @@ fn e2e_race_loser_drain() {
                 w.fetch_add(1, Ordering::SeqCst);
             })
             .expect("create task a");
-        runtime.scheduler.lock().unwrap().schedule(ta, 0);
+        runtime.scheduler.lock().schedule(ta, 0);
 
         let (tb, _) = runtime
             .state
@@ -1570,7 +1571,7 @@ fn e2e_race_loser_drain() {
                 // "loser" work
             })
             .expect("create task b");
-        runtime.scheduler.lock().unwrap().schedule(tb, 0);
+        runtime.scheduler.lock().schedule(tb, 0);
 
         // Run a few steps so "winner" likely completes
         for _ in 0..3 {
@@ -1611,7 +1612,7 @@ fn e2e_cancel_interrupts_obligation_commit() {
         .state
         .create_task(root, Budget::INFINITE, async {})
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
 
     test_section!("create_obligations_then_cancel");
     let ob1 = runtime
@@ -1686,7 +1687,7 @@ fn e2e_deterministic_cancel_storm() {
                         c.fetch_add(1, Ordering::SeqCst);
                     })
                     .expect("create task");
-                runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+                runtime.scheduler.lock().schedule(task_id, 0);
             }
 
             // Cancel every 3rd region
@@ -1740,7 +1741,7 @@ fn e2e_obligation_tracked_channel_commit() {
             *proof_kind_clone.lock().unwrap() = Some(proof.kind());
         })
         .expect("create send task");
-    runtime.scheduler.lock().unwrap().schedule(send_task, 0);
+    runtime.scheduler.lock().schedule(send_task, 0);
 
     let (recv_task, _handle) = runtime
         .state
@@ -1750,7 +1751,7 @@ fn e2e_obligation_tracked_channel_commit() {
             *recv_value_clone.lock().unwrap() = Some(value);
         })
         .expect("create recv task");
-    runtime.scheduler.lock().unwrap().schedule(recv_task, 0);
+    runtime.scheduler.lock().schedule(recv_task, 0);
     harness.exit_phase();
 
     harness.enter_phase("run");
@@ -1817,7 +1818,7 @@ fn e2e_obligation_tracked_oneshot_abort() {
             *proof_kind_clone.lock().unwrap() = Some(proof.kind());
         })
         .expect("create oneshot abort task");
-    runtime.scheduler.lock().unwrap().schedule(send_task, 0);
+    runtime.scheduler.lock().schedule(send_task, 0);
 
     let (recv_task, _handle) = runtime
         .state
@@ -1828,7 +1829,7 @@ fn e2e_obligation_tracked_oneshot_abort() {
             *recv_closed_clone.lock().unwrap() = Some(closed);
         })
         .expect("create oneshot recv task");
-    runtime.scheduler.lock().unwrap().schedule(recv_task, 0);
+    runtime.scheduler.lock().schedule(recv_task, 0);
     harness.exit_phase();
 
     harness.enter_phase("run");
@@ -1894,7 +1895,7 @@ fn e2e_obligation_cancel_mid_reserve() {
             *reserve_result_clone.lock().unwrap() = Some(result);
         })
         .expect("create reserve task");
-    runtime.scheduler.lock().unwrap().schedule(reserve_task, 0);
+    runtime.scheduler.lock().schedule(reserve_task, 0);
     harness.exit_phase();
 
     harness.enter_phase("block_then_cancel");
@@ -1966,7 +1967,7 @@ fn e2e_obligation_token_leak_detection() {
             *leak_detected_clone.lock().unwrap() = Some(leaked);
         })
         .expect("create leak task");
-    runtime.scheduler.lock().unwrap().schedule(leak_task, 0);
+    runtime.scheduler.lock().schedule(leak_task, 0);
     harness.exit_phase();
 
     harness.enter_phase("run");

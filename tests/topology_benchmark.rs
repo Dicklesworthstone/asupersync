@@ -124,7 +124,7 @@ fn run_deadlock_square(runtime: &mut LabRuntime) -> bool {
         .expect("t2");
 
     {
-        let mut sched = runtime.scheduler.lock().unwrap();
+        let mut sched = runtime.scheduler.lock();
         sched.schedule(t1, 0);
         sched.schedule(t2, 0);
     }
@@ -168,7 +168,7 @@ fn run_obligation_leak_scenario(runtime: &mut LabRuntime) {
         .expect("t2");
 
     {
-        let mut sched = runtime.scheduler.lock().unwrap();
+        let mut sched = runtime.scheduler.lock();
         sched.schedule(t1, 0);
         sched.schedule(t2, 0);
     }
@@ -243,7 +243,7 @@ fn run_lost_wakeup_scenario(runtime: &mut LabRuntime) -> bool {
         .expect("consumer");
 
     {
-        let mut sched = runtime.scheduler.lock().unwrap();
+        let mut sched = runtime.scheduler.lock();
         sched.schedule(t1, 0);
         sched.schedule(t2, 0);
     }
@@ -262,7 +262,7 @@ fn simple_concurrent_scenario(runtime: &mut LabRuntime) {
             .state
             .create_task(region, Budget::INFINITE, async move { i })
             .expect("task");
-        runtime.scheduler.lock().unwrap().schedule(task, 0);
+        runtime.scheduler.lock().schedule(task, 0);
     }
 
     runtime.run_until_quiescent();
@@ -352,7 +352,7 @@ fn run_dining_philosophers(runtime: &mut LabRuntime, num_philosophers: usize) ->
             })
             .expect("philosopher task");
 
-        runtime.scheduler.lock().unwrap().schedule(task, 0);
+        runtime.scheduler.lock().schedule(task, 0);
     }
 
     runtime.run_until_quiescent();
@@ -450,7 +450,7 @@ fn run_producer_consumer(
                 }
             })
             .expect("producer");
-        runtime.scheduler.lock().unwrap().schedule(task, 0);
+        runtime.scheduler.lock().schedule(task, 0);
     }
 
     // Spawn consumers
@@ -470,7 +470,7 @@ fn run_producer_consumer(
                 }
             })
             .expect("consumer");
-        runtime.scheduler.lock().unwrap().schedule(task, 0);
+        runtime.scheduler.lock().schedule(task, 0);
     }
 
     runtime.run_until_quiescent();

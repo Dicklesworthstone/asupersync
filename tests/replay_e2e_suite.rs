@@ -141,9 +141,9 @@ fn record_trace_with_seed(seed: u64) -> ReplayTrace {
         .create_task(region, Budget::INFINITE, async {})
         .expect("create task c");
 
-    runtime.scheduler.lock().unwrap().schedule(task_a, 0);
-    runtime.scheduler.lock().unwrap().schedule(task_b, 0);
-    runtime.scheduler.lock().unwrap().schedule(task_c, 0);
+    runtime.scheduler.lock().schedule(task_a, 0);
+    runtime.scheduler.lock().schedule(task_b, 0);
+    runtime.scheduler.lock().schedule(task_c, 0);
 
     runtime.run_until_quiescent();
     runtime.finish_replay_trace().expect("finish trace")
@@ -198,7 +198,7 @@ fn record_parity_trace_with_seed(seed: u64) -> ReplayTrace {
     }
 
     for task_id in task_ids {
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
     }
 
     let _ = runtime.state.cancel_request(

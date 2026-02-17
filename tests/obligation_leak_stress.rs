@@ -175,7 +175,7 @@ fn run_schedule(seed: u64) -> ScheduleOutcome {
 
         // Schedule the task on a random worker lane.
         let lane = rng.next_u32(4) as u8;
-        runtime.scheduler.lock().unwrap().schedule(task_id, lane);
+        runtime.scheduler.lock().schedule(task_id, lane);
         task_ids.push(task_id);
 
         // Create random obligations for this task.
