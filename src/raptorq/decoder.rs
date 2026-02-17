@@ -1274,6 +1274,7 @@ impl ReceivedSymbol {
 mod tests {
     use super::*;
     use crate::raptorq::systematic::SystematicEncoder;
+    use crate::raptorq::test_log_schema::{validate_unit_log_json, UnitDecodeStats, UnitLogEntry};
 
     fn rfc_eq_context(
         scenario_id: &str,
@@ -1291,6 +1292,56 @@ mod tests {
              repro_cmd='rch exec -- cargo test -p asupersync --lib \
              repair_equation_rfc6330 -- --nocapture'"
         )
+    }
+
+    fn to_unit_decode_stats(k: usize, dropped: usize, stats: &DecodeStats) -> UnitDecodeStats {
+        UnitDecodeStats {
+            k,
+            loss_pct: dropped.saturating_mul(100) / k.max(1),
+            dropped,
+            peeled: stats.peeled,
+            inactivated: stats.inactivated,
+            gauss_ops: stats.gauss_ops,
+            pivots: stats.pivots_selected,
+            peel_queue_pushes: stats.peel_queue_pushes,
+            peel_queue_pops: stats.peel_queue_pops,
+            peel_frontier_peak: stats.peel_frontier_peak,
+            dense_core_rows: stats.dense_core_rows,
+            dense_core_cols: stats.dense_core_cols,
+            dense_core_dropped_rows: stats.dense_core_dropped_rows,
+            fallback_reason: stats.peeling_fallback_reason.unwrap_or("none").to_string(),
+        }
+    }
+
+    fn emit_decoder_unit_log(
+        scenario_id: &str,
+        seed: u64,
+        parameter_set: &str,
+        outcome: &str,
+        repro_command: &str,
+        stats: Option<UnitDecodeStats>,
+    ) -> String {
+        let mut entry = UnitLogEntry::new(
+            scenario_id,
+            seed,
+            parameter_set,
+            "replay:rq-track-c-decoder-unit-v1",
+            outcome,
+        )
+        .with_repro_command(repro_command)
+        .with_artifact_path("artifacts/raptorq_track_c_decoder_unit_v1.json");
+        if let Some(stats) = stats {
+            entry = entry.with_decode_stats(stats);
+        }
+
+        let json = entry.to_json().expect("serialize decoder unit log entry");
+        let violations = validate_unit_log_json(&json);
+        let context = entry.to_context_string();
+        assert!(
+            violations.is_empty(),
+            "{context}: unit log schema violations: {violations:?}"
+        );
+        json
     }
 
     fn make_source_data(k: usize, symbol_size: usize) -> Vec<Vec<u8>> {
@@ -1469,6 +1520,26 @@ mod tests {
 
         let err = decoder.decode(&received).unwrap_err();
         assert!(matches!(err, DecodeError::InsufficientSymbols { .. }));
+
+        let dropped = k.saturating_sub(received.len());
+        let parameter_set = format!("k={k},symbol_size={symbol_size},dropped={dropped}");
+        let log_json = emit_decoder_unit_log(
+            "RQ-C-LOG-FAIL-INSUFFICIENT-001",
+            seed,
+            &parameter_set,
+            "decode_failure",
+            "rch exec -- cargo test -p asupersync --lib raptorq::decoder::tests::decode_insufficient_symbols_fails -- --nocapture",
+            None,
+        );
+        assert!(
+            log_json.contains("\"scenario_id\":\"RQ-C-LOG-FAIL-INSUFFICIENT-001\""),
+            "failure log must retain deterministic scenario id"
+        );
+        assert!(
+            log_json
+                .contains("\"artifact_path\":\"artifacts/raptorq_track_c_decoder_unit_v1.json\""),
+            "failure log must include artifact pointer"
+        );
     }
 
     #[test]
@@ -1679,6 +1750,24 @@ mod tests {
         assert_eq!(
             result1.stats.dense_core_cols, result2.stats.dense_core_cols,
             "dense-core column extraction must be deterministic"
+        );
+
+        let parameter_set = format!("k={k},symbol_size={symbol_size},dropped=0");
+        let log_json = emit_decoder_unit_log(
+            "RQ-C-LOG-SUCCESS-DET-001",
+            seed,
+            &parameter_set,
+            "ok",
+            "rch exec -- cargo test -p asupersync --lib raptorq::decoder::tests::decode_deterministic -- --nocapture",
+            Some(to_unit_decode_stats(k, 0, &result1.stats)),
+        );
+        assert!(
+            log_json.contains("\"outcome\":\"ok\""),
+            "success log should preserve deterministic outcome marker"
+        );
+        assert!(
+            log_json.contains("\"repro_command\":\"rch exec --"),
+            "success log must keep remote replay command"
         );
     }
 
