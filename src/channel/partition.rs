@@ -28,7 +28,7 @@
 //! Every partition, heal, and dropped-during-partition event is logged
 //! to an [`EvidenceSink`].
 
-use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use crate::channel::mpsc::{SendError, Sender};
@@ -116,7 +116,7 @@ pub enum PartitionBehavior {
 #[derive(Debug)]
 pub struct PartitionController {
     /// Active directed partitions: (src, dst) pairs.
-    partitions: Mutex<BTreeSet<(u64, u64)>>,
+    partitions: Mutex<HashSet<(u64, u64)>>,
     /// What happens when sending across a partition.
     behavior: PartitionBehavior,
     /// Injection statistics.
@@ -130,7 +130,7 @@ impl PartitionController {
     #[must_use]
     pub fn new(behavior: PartitionBehavior, evidence_sink: Arc<dyn EvidenceSink>) -> Self {
         Self {
-            partitions: Mutex::new(BTreeSet::new()),
+            partitions: Mutex::new(HashSet::new()),
             behavior,
             stats: Mutex::new(PartitionStats::default()),
             evidence_sink,
