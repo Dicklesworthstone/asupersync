@@ -257,6 +257,14 @@ pub struct UnitDecodeStats {
     pub dense_core_dropped_rows: usize,
     /// Deterministic fallback reason recorded by decode pipeline.
     pub fallback_reason: String,
+    /// True when hard-regime elimination was activated.
+    pub hard_regime_activated: bool,
+    /// Deterministic hard-regime branch label (`markowitz`/`block_schur_low_rank`).
+    pub hard_regime_branch: String,
+    /// Number of conservative hard-regime fallback transitions.
+    pub hard_regime_fallbacks: usize,
+    /// Deterministic conservative fallback reason for accelerated hard-regime paths.
+    pub conservative_fallback_reason: String,
 }
 
 // ============================================================================
@@ -519,6 +527,33 @@ pub fn validate_unit_log_json(json: &str) -> Vec<String> {
             violations.push(format!(
                 "unrecognized outcome '{outcome}': expected one of {valid_outcomes:?}"
             ));
+        }
+    }
+
+    if let Some(decode_stats) = value.get("decode_stats") {
+        for field in &[
+            "k",
+            "loss_pct",
+            "dropped",
+            "peeled",
+            "inactivated",
+            "gauss_ops",
+            "pivots",
+            "peel_queue_pushes",
+            "peel_queue_pops",
+            "peel_frontier_peak",
+            "dense_core_rows",
+            "dense_core_cols",
+            "dense_core_dropped_rows",
+            "fallback_reason",
+            "hard_regime_activated",
+            "hard_regime_branch",
+            "hard_regime_fallbacks",
+            "conservative_fallback_reason",
+        ] {
+            if value_missing_or_null(decode_stats, field) {
+                violations.push(format!("decode_stats.{field} is missing or null"));
+            }
         }
     }
 
@@ -785,6 +820,10 @@ mod tests {
             dense_core_cols: 3,
             dense_core_dropped_rows: 1,
             fallback_reason: "peeling_exhausted_to_dense_core".to_string(),
+            hard_regime_activated: true,
+            hard_regime_branch: "block_schur_low_rank".to_string(),
+            hard_regime_fallbacks: 1,
+            conservative_fallback_reason: "block_schur_failed_to_converge".to_string(),
         });
 
         let json = entry.to_json().expect("serialize");

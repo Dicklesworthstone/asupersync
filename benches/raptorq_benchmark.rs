@@ -13,6 +13,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 
 use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::{
+    dual_addmul_kernel_decision, dual_kernel_policy_snapshot, dual_mul_kernel_decision,
     gf256_add_slice, gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slice, gf256_mul_slices2,
     Gf256,
 };
@@ -22,6 +23,7 @@ use asupersync::raptorq::systematic::SystematicEncoder;
 const TRACK_E_ARTIFACT_PATH: &str = "artifacts/raptorq_track_e_gf256_bench_v1.json";
 const TRACK_E_REPRO_CMD: &str =
     "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives";
+const TRACK_E_POLICY_SCHEMA_VERSION: &str = "raptorq-track-e-dual-policy-v1";
 
 #[derive(Clone, Copy)]
 struct Gf256BenchScenario {
@@ -60,6 +62,32 @@ fn gf256_bench_context(scenario: &Gf256BenchScenario, outcome: &str) -> String {
         TRACK_E_ARTIFACT_PATH,
         TRACK_E_REPRO_CMD
     )
+}
+
+fn emit_track_e_policy_log(scenario: &Gf256BenchScenario) {
+    let policy = dual_kernel_policy_snapshot();
+    let mul_decision = dual_mul_kernel_decision(scenario.len, scenario.len);
+    let addmul_decision = dual_addmul_kernel_decision(scenario.len, scenario.len);
+    eprintln!(
+        "{{\"schema_version\":\"{}\",\"scenario_id\":\"{}\",\"seed\":{},\"kernel\":\"{:?}\",\"mode\":\"{:?}\",\"mul_window_min\":{},\"mul_window_max\":{},\"addmul_window_min\":{},\"addmul_window_max\":{},\"max_lane_ratio\":{},\"lane_len_a\":{},\"lane_len_b\":{},\"total_len\":{},\"mul_decision\":\"{:?}\",\"addmul_decision\":\"{:?}\",\"artifact_path\":\"{}\",\"repro_command\":\"{}\"}}",
+        TRACK_E_POLICY_SCHEMA_VERSION,
+        scenario.scenario_id,
+        scenario.seed,
+        policy.kernel,
+        policy.mode,
+        policy.mul_min_total,
+        policy.mul_max_total,
+        policy.addmul_min_total,
+        policy.addmul_max_total,
+        policy.max_lane_ratio,
+        scenario.len,
+        scenario.len,
+        scenario.len.saturating_mul(2),
+        mul_decision,
+        addmul_decision,
+        TRACK_E_ARTIFACT_PATH,
+        TRACK_E_REPRO_CMD,
+    );
 }
 
 fn reference_mul_slice(dst: &mut [u8], c: Gf256) {
@@ -211,6 +239,7 @@ fn bench_gf256_primitives(c: &mut Criterion) {
         let src = deterministic_bytes(scenario.len, scenario.seed);
         let c_val = Gf256::new(scenario.mul_const);
         validate_gf256_bit_exactness(&scenario, &src, c_val);
+        emit_track_e_policy_log(&scenario);
         let label = format!(
             "{}_n{}_seed{}_k{}_sym{}",
             scenario.scenario_id, scenario.len, scenario.seed, scenario.k, scenario.symbol_size

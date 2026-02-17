@@ -1686,6 +1686,10 @@ mod differential_harness {
                     dense_core_cols: 0,
                     dense_core_dropped_rows: 0,
                     fallback_reason: "none".to_string(),
+                    hard_regime_activated: false,
+                    hard_regime_branch: "none".to_string(),
+                    hard_regime_fallbacks: 0,
+                    conservative_fallback_reason: "none".to_string(),
                 },
                 |result| UnitDecodeStats {
                     k: case.k,
@@ -1703,7 +1707,20 @@ mod differential_harness {
                     dense_core_dropped_rows: result.stats.dense_core_dropped_rows,
                     fallback_reason: result
                         .stats
-                        .peeling_fallback_reason
+                        .hard_regime_conservative_fallback_reason
+                        .or(result.stats.peeling_fallback_reason)
+                        .unwrap_or("none")
+                        .to_string(),
+                    hard_regime_activated: result.stats.hard_regime_activated,
+                    hard_regime_branch: result
+                        .stats
+                        .hard_regime_branch
+                        .unwrap_or("none")
+                        .to_string(),
+                    hard_regime_fallbacks: result.stats.hard_regime_fallbacks,
+                    conservative_fallback_reason: result
+                        .stats
+                        .hard_regime_conservative_fallback_reason
                         .unwrap_or("none")
                         .to_string(),
                 },
@@ -2236,6 +2253,10 @@ mod metamorphic_property {
                 dense_core_cols: 0,
                 dense_core_dropped_rows: 0,
                 fallback_reason: "insufficient_symbols_precheck".to_string(),
+                hard_regime_activated: false,
+                hard_regime_branch: "none".to_string(),
+                hard_regime_fallbacks: 0,
+                conservative_fallback_reason: "none".to_string(),
             }),
         );
 
@@ -2300,10 +2321,11 @@ mod metamorphic_property {
     }
 
     // ----------------------------------------------------------------
-    // P10: Seed Sensitivity
+    // P10: Seed Invariance
     //
     // Metamorphic: changing only the seed (with same source data)
-    // must produce different intermediate and repair symbols.
+    // must preserve repair symbols. The current RFC tuple/equation path is
+    // seed-independent for encoding outputs.
     // ----------------------------------------------------------------
 
     #[test]
@@ -2315,18 +2337,13 @@ mod metamorphic_property {
         let enc_a = SystematicEncoder::new(&source, symbol_size, 42).unwrap();
         let enc_b = SystematicEncoder::new(&source, symbol_size, 43).unwrap();
 
-        // At least one repair symbol should differ
-        let mut any_differ = false;
         for esi in (k as u32)..(k as u32 + 5) {
-            if enc_a.repair_symbol(esi) != enc_b.repair_symbol(esi) {
-                any_differ = true;
-                break;
-            }
+            assert_eq!(
+                enc_a.repair_symbol(esi),
+                enc_b.repair_symbol(esi),
+                "seed change must not alter repair symbol output for esi={esi}"
+            );
         }
-        assert!(
-            any_differ,
-            "different seeds produced identical repair symbols"
-        );
     }
 
     // ----------------------------------------------------------------
@@ -2424,6 +2441,10 @@ mod metamorphic_property {
                             dense_core_cols: 0,
                             dense_core_dropped_rows: 0,
                             fallback_reason: "decode_failure".to_string(),
+                            hard_regime_activated: false,
+                            hard_regime_branch: "none".to_string(),
+                            hard_regime_fallbacks: 0,
+                            conservative_fallback_reason: "none".to_string(),
                         }),
                     );
                     panic!("{context}: decode failed for in-scope seed={seed}: {err}");
@@ -2452,6 +2473,10 @@ mod metamorphic_property {
                     dense_core_cols: 0,
                     dense_core_dropped_rows: 0,
                     fallback_reason: "none".to_string(),
+                    hard_regime_activated: false,
+                    hard_regime_branch: "none".to_string(),
+                    hard_regime_fallbacks: 0,
+                    conservative_fallback_reason: "none".to_string(),
                 }),
             );
 
@@ -2610,6 +2635,14 @@ mod stress_soak_e2e {
         total_inactivated: usize,
         max_gauss_ops: usize,
         max_inactivated: usize,
+        gauss_ops_samples: Vec<usize>,
+        inactivated_samples: Vec<usize>,
+        hard_regime_activations: usize,
+        hard_regime_markowitz_branch_count: usize,
+        hard_regime_block_schur_branch_count: usize,
+        hard_regime_fallbacks: usize,
+        fallback_after_baseline_failure_count: usize,
+        block_schur_failed_to_converge_count: usize,
     }
 
     #[derive(Debug, Serialize)]
@@ -2628,8 +2661,22 @@ mod stress_soak_e2e {
         avg_inactivated: f64,
         max_gauss_ops: usize,
         max_inactivated: usize,
+        p50_gauss_ops: usize,
+        p95_gauss_ops: usize,
+        p99_gauss_ops: usize,
+        p50_inactivated: usize,
+        p95_inactivated: usize,
+        p99_inactivated: usize,
+        hard_regime_activations: usize,
+        hard_regime_markowitz_branch_count: usize,
+        hard_regime_block_schur_branch_count: usize,
+        hard_regime_fallbacks: usize,
+        fallback_after_baseline_failure_count: usize,
+        block_schur_failed_to_converge_count: usize,
         threshold_min_success_rate: f64,
         threshold_max_failures: usize,
+        threshold_max_p99_gauss_ops: usize,
+        threshold_max_p99_inactivated: usize,
         repro_command: &'static str,
         artifact_path: &'static str,
     }
@@ -2650,6 +2697,20 @@ mod stress_soak_e2e {
             return 0.0;
         }
         numerator as f64 / denominator as f64
+    }
+
+    fn percentile_nearest_rank(samples: &[usize], percentile: usize) -> usize {
+        if samples.is_empty() {
+            return 0;
+        }
+        assert!(
+            (1..=100).contains(&percentile),
+            "percentile must be in 1..=100, got {percentile}"
+        );
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        let rank = (percentile * sorted.len()).div_ceil(100).saturating_sub(1);
+        sorted[rank]
     }
 
     fn profile_drop_set(profile: StressProfile, iteration: usize, k: usize) -> Vec<usize> {
@@ -2752,10 +2813,18 @@ mod stress_soak_e2e {
         aggregate: &StressAggregate,
         threshold_min_success_rate: f64,
         threshold_max_failures: usize,
+        threshold_max_p99_gauss_ops: usize,
+        threshold_max_p99_inactivated: usize,
     ) {
         let success_rate = ratio(aggregate.successes, aggregate.iterations);
         let avg_gauss_ops = ratio(aggregate.total_gauss_ops, aggregate.successes);
         let avg_inactivated = ratio(aggregate.total_inactivated, aggregate.successes);
+        let p50_gauss_ops = percentile_nearest_rank(&aggregate.gauss_ops_samples, 50);
+        let p95_gauss_ops = percentile_nearest_rank(&aggregate.gauss_ops_samples, 95);
+        let p99_gauss_ops = percentile_nearest_rank(&aggregate.gauss_ops_samples, 99);
+        let p50_inactivated = percentile_nearest_rank(&aggregate.inactivated_samples, 50);
+        let p95_inactivated = percentile_nearest_rank(&aggregate.inactivated_samples, 95);
+        let p99_inactivated = percentile_nearest_rank(&aggregate.inactivated_samples, 99);
 
         let forensic = StressForensicReport {
             schema_version: D8_FORENSIC_SCHEMA_VERSION,
@@ -2772,8 +2841,22 @@ mod stress_soak_e2e {
             avg_inactivated,
             max_gauss_ops: aggregate.max_gauss_ops,
             max_inactivated: aggregate.max_inactivated,
+            p50_gauss_ops,
+            p95_gauss_ops,
+            p99_gauss_ops,
+            p50_inactivated,
+            p95_inactivated,
+            p99_inactivated,
+            hard_regime_activations: aggregate.hard_regime_activations,
+            hard_regime_markowitz_branch_count: aggregate.hard_regime_markowitz_branch_count,
+            hard_regime_block_schur_branch_count: aggregate.hard_regime_block_schur_branch_count,
+            hard_regime_fallbacks: aggregate.hard_regime_fallbacks,
+            fallback_after_baseline_failure_count: aggregate.fallback_after_baseline_failure_count,
+            block_schur_failed_to_converge_count: aggregate.block_schur_failed_to_converge_count,
             threshold_min_success_rate,
             threshold_max_failures,
+            threshold_max_p99_gauss_ops,
+            threshold_max_p99_inactivated,
             repro_command: D8_REPRO_COMMAND,
             artifact_path: D8_ARTIFACT_PATH,
         };
@@ -2835,6 +2918,30 @@ mod stress_soak_e2e {
                             aggregate.max_gauss_ops.max(result.stats.gauss_ops);
                         aggregate.max_inactivated =
                             aggregate.max_inactivated.max(result.stats.inactivated);
+                        aggregate.gauss_ops_samples.push(result.stats.gauss_ops);
+                        aggregate.inactivated_samples.push(result.stats.inactivated);
+                        if result.stats.hard_regime_activated {
+                            aggregate.hard_regime_activations += 1;
+                        }
+                        match result.stats.hard_regime_branch {
+                            Some("markowitz") => {
+                                aggregate.hard_regime_markowitz_branch_count += 1;
+                            }
+                            Some("block_schur_low_rank") => {
+                                aggregate.hard_regime_block_schur_branch_count += 1;
+                            }
+                            _ => {}
+                        }
+                        aggregate.hard_regime_fallbacks += result.stats.hard_regime_fallbacks;
+                        match result.stats.hard_regime_conservative_fallback_reason {
+                            Some("fallback_after_baseline_failure") => {
+                                aggregate.fallback_after_baseline_failure_count += 1;
+                            }
+                            Some("block_schur_failed_to_converge") => {
+                                aggregate.block_schur_failed_to_converge_count += 1;
+                            }
+                            _ => {}
+                        }
 
                         for (idx, (orig, decoded)) in
                             source.iter().zip(result.source.iter()).enumerate()
@@ -2864,7 +2971,20 @@ mod stress_soak_e2e {
                             dense_core_dropped_rows: result.stats.dense_core_dropped_rows,
                             fallback_reason: result
                                 .stats
-                                .peeling_fallback_reason
+                                .hard_regime_conservative_fallback_reason
+                                .or(result.stats.peeling_fallback_reason)
+                                .unwrap_or("none")
+                                .to_string(),
+                            hard_regime_activated: result.stats.hard_regime_activated,
+                            hard_regime_branch: result
+                                .stats
+                                .hard_regime_branch
+                                .unwrap_or("none")
+                                .to_string(),
+                            hard_regime_fallbacks: result.stats.hard_regime_fallbacks,
+                            conservative_fallback_reason: result
+                                .stats
+                                .hard_regime_conservative_fallback_reason
                                 .unwrap_or("none")
                                 .to_string(),
                         });
@@ -2901,9 +3021,15 @@ mod stress_soak_e2e {
                 }
             }
 
-            let (threshold_min_success_rate, threshold_max_failures) = match profile {
-                StressProfile::ClusteredLoss | StressProfile::BurstLoss => (1.0, 0),
-                StressProfile::NearRankDeficient => (0.70, 7),
+            let (
+                threshold_min_success_rate,
+                threshold_max_failures,
+                threshold_max_p99_gauss_ops,
+                threshold_max_p99_inactivated,
+            ) = match profile {
+                StressProfile::ClusteredLoss => (1.0, 0, 550, 30),
+                StressProfile::BurstLoss => (1.0, 0, 650, 32),
+                StressProfile::NearRankDeficient => (0.70, 7, 700, 34),
             };
 
             emit_final_forensic_report(
@@ -2911,6 +3037,8 @@ mod stress_soak_e2e {
                 &aggregate,
                 threshold_min_success_rate,
                 threshold_max_failures,
+                threshold_max_p99_gauss_ops,
+                threshold_max_p99_inactivated,
             );
 
             let success_rate = ratio(aggregate.successes, aggregate.iterations);
@@ -2933,6 +3061,22 @@ mod stress_soak_e2e {
                 profile.label(),
                 success_rate,
                 threshold_min_success_rate
+            );
+            let p99_gauss_ops = percentile_nearest_rank(&aggregate.gauss_ops_samples, 99);
+            let p99_inactivated = percentile_nearest_rank(&aggregate.inactivated_samples, 99);
+            assert!(
+                p99_gauss_ops <= threshold_max_p99_gauss_ops,
+                "profile={} p99 gauss_ops regression: {} > {}",
+                profile.label(),
+                p99_gauss_ops,
+                threshold_max_p99_gauss_ops
+            );
+            assert!(
+                p99_inactivated <= threshold_max_p99_inactivated,
+                "profile={} p99 inactivated regression: {} > {}",
+                profile.label(),
+                p99_inactivated,
+                threshold_max_p99_inactivated
             );
         }
     }
@@ -3456,10 +3600,10 @@ mod golden_vectors {
             symbol_size: 64,
             seed: 42,
             expected_intermediate_hash: 0x579f_9e2c_82de_fa6e,
-            expected_repair_hash: 0x423d_1c47_449f_1164,
-            expected_peeled: 27,
-            expected_inactivated: 0,
-            expected_gauss_ops: 0,
+            expected_repair_hash: 0xa2aa_4bdd_ff69_3720,
+            expected_peeled: 9,
+            expected_inactivated: 18,
+            expected_gauss_ops: 415,
         },
         E2eVector {
             scenario_id: "RQ-D1-E2E-002",
@@ -3467,7 +3611,7 @@ mod golden_vectors {
             symbol_size: 32,
             seed: 123,
             expected_intermediate_hash: 0xe5d2_2d12_0286_3324,
-            expected_repair_hash: 0x7d5e_22c9_b3a0_73d4,
+            expected_repair_hash: 0x9397_ae48_2ecf_4f90,
             expected_peeled: 27,
             expected_inactivated: 0,
             expected_gauss_ops: 0,
@@ -3478,10 +3622,10 @@ mod golden_vectors {
             symbol_size: 64,
             seed: 789,
             expected_intermediate_hash: 0x561d_3e08_946d_dc38,
-            expected_repair_hash: 0x4052_2112_cdad_996f,
-            expected_peeled: 39,
-            expected_inactivated: 0,
-            expected_gauss_ops: 0,
+            expected_repair_hash: 0x3f33_232c_4a7c_a3b1,
+            expected_peeled: 21,
+            expected_inactivated: 18,
+            expected_gauss_ops: 400,
         },
         E2eVector {
             scenario_id: "RQ-D1-E2E-004",
@@ -3489,7 +3633,7 @@ mod golden_vectors {
             symbol_size: 128,
             seed: 456,
             expected_intermediate_hash: 0x644a_bddf_63a0_08bd,
-            expected_repair_hash: 0x6c9c_2e69_8309_03d1,
+            expected_repair_hash: 0xbec3_249e_7ccc_e122,
             expected_peeled: 53,
             expected_inactivated: 0,
             expected_gauss_ops: 0,

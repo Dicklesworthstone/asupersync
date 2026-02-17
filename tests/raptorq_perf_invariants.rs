@@ -744,7 +744,16 @@ fn seed_sweep_structured_logging() {
                     dense_core_dropped_rows: result.stats.dense_core_dropped_rows,
                     fallback_reason: result
                         .stats
-                        .peeling_fallback_reason
+                        .hard_regime_conservative_fallback_reason
+                        .or(result.stats.peeling_fallback_reason)
+                        .unwrap_or("none")
+                        .to_string(),
+                    hard_regime_activated: result.stats.hard_regime_activated,
+                    hard_regime_branch: result.stats.hard_regime_branch.unwrap_or("none").to_string(),
+                    hard_regime_fallbacks: result.stats.hard_regime_fallbacks,
+                    conservative_fallback_reason: result
+                        .stats
+                        .hard_regime_conservative_fallback_reason
                         .unwrap_or("none")
                         .to_string(),
                 });
@@ -796,6 +805,10 @@ fn seed_sweep_structured_logging() {
                     dense_core_cols: 0,
                     dense_core_dropped_rows: 0,
                     fallback_reason: "decode_failed_before_stats".to_string(),
+                    hard_regime_activated: false,
+                    hard_regime_branch: "none".to_string(),
+                    hard_regime_fallbacks: 0,
+                    conservative_fallback_reason: "none".to_string(),
                 });
                 eprintln!(
                     "{} FAIL: {e:?}",
@@ -1534,6 +1547,10 @@ fn unit_log_schema_contract() {
         dense_core_cols: 3,
         dense_core_dropped_rows: 1,
         fallback_reason: "peeling_exhausted_to_dense_core".to_string(),
+        hard_regime_activated: true,
+        hard_regime_branch: "markowitz".to_string(),
+        hard_regime_fallbacks: 0,
+        conservative_fallback_reason: "none".to_string(),
     });
 
     let json = entry.to_json().expect("serialize unit log entry");

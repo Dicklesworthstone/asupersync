@@ -501,6 +501,9 @@ pub enum InactivationStrategy {
     AllAtOnce,
     /// Hard-regime behavior: inactivate columns ordered by descending equation support.
     HighSupportFirst,
+    /// Accelerated hard-regime behavior: deterministic block-Schur partitioning with
+    /// conservative fallback to high-support ordering when assumptions break.
+    BlockSchurLowRank,
 }
 
 /// A single strategy transition event.

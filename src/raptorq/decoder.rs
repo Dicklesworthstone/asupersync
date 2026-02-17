@@ -158,6 +158,10 @@ pub struct DecodeStats {
     pub markowitz_pivots: usize,
     /// Number of times baseline elimination deterministically retried in hard regime.
     pub hard_regime_fallbacks: usize,
+    /// Hard-regime branch selected for dense elimination.
+    pub hard_regime_branch: Option<&'static str>,
+    /// Deterministic reason an accelerated hard-regime branch fell back to conservative mode.
+    pub hard_regime_conservative_fallback_reason: Option<&'static str>,
     /// Number of equation indices pushed into the deterministic peel queue.
     pub peel_queue_pushes: usize,
     /// Number of equation indices popped from the deterministic peel queue.
@@ -346,6 +350,29 @@ fn build_dense_core_rows(
     Ok((dense_rows, dropped_zero_rows))
 }
 
+const DENSE_COL_ABSENT: usize = usize::MAX;
+
+#[inline]
+fn build_dense_col_index_map(unsolved: &[usize]) -> Vec<usize> {
+    let Some(max_col) = unsolved.iter().copied().max() else {
+        return Vec::new();
+    };
+    let mut col_to_dense = vec![DENSE_COL_ABSENT; max_col.saturating_add(1)];
+    for (dense_col, &col) in unsolved.iter().enumerate() {
+        col_to_dense[col] = dense_col;
+    }
+    col_to_dense
+}
+
+#[inline]
+fn dense_col_index(col_to_dense: &[usize], col: usize) -> Option<usize> {
+    let dense_col = *col_to_dense.get(col)?;
+    if dense_col == DENSE_COL_ABSENT {
+        return None;
+    }
+    Some(dense_col)
+}
+
 fn failure_reason_with_trace(err: &DecodeError, elimination: &EliminationTrace) -> FailureReason {
     match err {
         DecodeError::SingularMatrix { row } => FailureReason::SingularMatrix {
@@ -359,6 +386,31 @@ fn failure_reason_with_trace(err: &DecodeError, elimination: &EliminationTrace) 
 const HARD_REGIME_MIN_COLS: usize = 8;
 const HARD_REGIME_DENSITY_PERCENT: usize = 35;
 const HARD_REGIME_NEAR_SQUARE_EXTRA_ROWS: usize = 2;
+const BLOCK_SCHUR_MIN_COLS: usize = 12;
+const BLOCK_SCHUR_MIN_DENSITY_PERCENT: usize = 45;
+const BLOCK_SCHUR_TRAILING_COLS: usize = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HardRegimePlan {
+    Markowitz,
+    BlockSchurLowRank { split_col: usize },
+}
+
+impl HardRegimePlan {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Markowitz => "markowitz",
+            Self::BlockSchurLowRank { .. } => "block_schur_low_rank",
+        }
+    }
+
+    const fn strategy(self) -> InactivationStrategy {
+        match self {
+            Self::Markowitz => InactivationStrategy::HighSupportFirst,
+            Self::BlockSchurLowRank { .. } => InactivationStrategy::BlockSchurLowRank,
+        }
+    }
+}
 
 fn matrix_nonzero_count(a: &[Gf256]) -> usize {
     a.iter().filter(|coef| !coef.is_zero()).count()
@@ -390,6 +442,43 @@ fn should_activate_hard_regime(n_rows: usize, n_cols: usize, a: &[Gf256]) -> boo
     dense || near_square
 }
 
+fn select_hard_regime_plan(n_rows: usize, n_cols: usize, a: &[Gf256]) -> HardRegimePlan {
+    let total_cells = n_rows.saturating_mul(n_cols);
+    if n_cols < BLOCK_SCHUR_MIN_COLS || total_cells == 0 {
+        return HardRegimePlan::Markowitz;
+    }
+    let nonzeros = matrix_nonzero_count(a);
+    let dense_enough =
+        nonzeros.saturating_mul(100) >= total_cells.saturating_mul(BLOCK_SCHUR_MIN_DENSITY_PERCENT);
+    if !dense_enough || n_cols <= BLOCK_SCHUR_TRAILING_COLS {
+        return HardRegimePlan::Markowitz;
+    }
+    let split_col = n_cols - BLOCK_SCHUR_TRAILING_COLS;
+    HardRegimePlan::BlockSchurLowRank { split_col }
+}
+
+fn row_cross_block_nnz(
+    a: &[Gf256],
+    n_cols: usize,
+    row: usize,
+    split_col: usize,
+    col: usize,
+) -> usize {
+    let row_off = row * n_cols;
+    let row_slice = &a[row_off..row_off + n_cols];
+    if col < split_col {
+        row_slice[split_col..]
+            .iter()
+            .filter(|coef| !coef.is_zero())
+            .count()
+    } else {
+        row_slice[..split_col]
+            .iter()
+            .filter(|coef| !coef.is_zero())
+            .count()
+    }
+}
+
 fn select_pivot_row(
     a: &[Gf256],
     n_rows: usize,
@@ -397,30 +486,44 @@ fn select_pivot_row(
     col: usize,
     row_used: &[bool],
     hard_regime: bool,
+    hard_plan: HardRegimePlan,
 ) -> Option<usize> {
     if !hard_regime {
         return (0..n_rows).find(|&row| !row_used[row] && !a[row * n_cols + col].is_zero());
     }
 
-    // Deterministic Markowitz-style selector:
-    // prefer sparser rows; break ties by lowest row index.
-    let mut best: Option<(usize, usize)> = None;
+    let mut best: Option<(usize, usize, usize)> = None;
     for row in 0..n_rows {
         if row_used[row] || a[row * n_cols + col].is_zero() {
             continue;
         }
+        let cross_block_nnz = match hard_plan {
+            HardRegimePlan::Markowitz => 0,
+            HardRegimePlan::BlockSchurLowRank { split_col } => {
+                row_cross_block_nnz(a, n_cols, row, split_col, col)
+            }
+        };
         let nnz = row_nonzero_count(a, n_cols, row);
         match best {
-            None => best = Some((row, nnz)),
-            Some((_best_row, best_nnz)) if nnz < best_nnz => best = Some((row, nnz)),
-            Some((best_row, best_nnz)) if nnz == best_nnz && row < best_row => {
-                best = Some((row, nnz));
+            None => best = Some((row, cross_block_nnz, nnz)),
+            Some((_best_row, best_cross, _best_nnz)) if cross_block_nnz < best_cross => {
+                best = Some((row, cross_block_nnz, nnz));
+            }
+            Some((_best_row, best_cross, best_nnz))
+                if cross_block_nnz == best_cross && nnz < best_nnz =>
+            {
+                best = Some((row, cross_block_nnz, nnz));
+            }
+            Some((best_row, best_cross, best_nnz))
+                if cross_block_nnz == best_cross && nnz == best_nnz && row < best_row =>
+            {
+                best = Some((row, cross_block_nnz, nnz));
             }
             _ => {}
         }
     }
 
-    best.map(|(row, _)| row)
+    best.map(|(row, _, _)| row)
 }
 
 // ============================================================================
@@ -865,9 +968,9 @@ impl InactivationDecoder {
             });
         }
 
-        // Column index mapping: unsolved column -> dense index
-        let col_to_dense: std::collections::HashMap<usize, usize> =
-            unsolved.iter().enumerate().map(|(i, &c)| (c, i)).collect();
+        // Column index mapping: unsolved column -> dense index.
+        // Dense vector lookup avoids per-term HashMap probes in this hot path.
+        let col_to_dense = build_dense_col_index_map(&unsolved);
 
         // Build flat row-major dense matrix A and RHS vector b.
         // Flat layout avoids per-row heap allocation and improves cache locality.
@@ -879,7 +982,7 @@ impl InactivationDecoder {
         for (row, &eq_idx) in dense_rows.iter().enumerate() {
             let row_off = row * n_cols;
             for &(col, coef) in &state.equations[eq_idx].terms {
-                if let Some(&dense_col) = col_to_dense.get(&col) {
+                if let Some(dense_col) = dense_col_index(&col_to_dense, col) {
                     a[row_off + dense_col] = coef;
                 }
             }
@@ -889,8 +992,11 @@ impl InactivationDecoder {
         let base_a = a;
         let base_b = b;
         let mut hard_regime = should_activate_hard_regime(n_rows, n_cols, &base_a);
+        let mut hard_plan = HardRegimePlan::Markowitz;
         if hard_regime {
             state.stats.hard_regime_activated = true;
+            hard_plan = select_hard_regime_plan(n_rows, n_cols, &base_a);
+            state.stats.hard_regime_branch = Some(hard_plan.label());
         }
 
         let mut pivot_row = vec![usize::MAX; n_cols];
@@ -909,7 +1015,8 @@ impl InactivationDecoder {
             let mut elimination_error = None;
 
             for col in 0..n_cols {
-                let pivot = select_pivot_row(&a, n_rows, n_cols, col, &row_used, hard_regime);
+                let pivot =
+                    select_pivot_row(&a, n_rows, n_cols, col, &row_used, hard_regime, hard_plan);
                 let Some(prow) = pivot else {
                     elimination_error = Some(singular_matrix_error(&unsolved, col));
                     break;
@@ -918,7 +1025,7 @@ impl InactivationDecoder {
                 pivot_row[col] = prow;
                 row_used[prow] = true;
                 pivots_selected += 1;
-                if hard_regime {
+                if hard_regime && matches!(hard_plan, HardRegimePlan::Markowitz) {
                     markowitz_pivots += 1;
                 }
 
@@ -968,7 +1075,18 @@ impl InactivationDecoder {
                 if !hard_regime {
                     hard_regime = true;
                     state.stats.hard_regime_activated = true;
+                    hard_plan = select_hard_regime_plan(n_rows, n_cols, &base_a);
+                    state.stats.hard_regime_branch = Some(hard_plan.label());
                     state.stats.hard_regime_fallbacks += 1;
+                    state.stats.hard_regime_conservative_fallback_reason =
+                        Some("fallback_after_baseline_failure");
+                    continue;
+                }
+                if matches!(hard_plan, HardRegimePlan::BlockSchurLowRank { .. }) {
+                    hard_plan = HardRegimePlan::Markowitz;
+                    state.stats.hard_regime_fallbacks += 1;
+                    state.stats.hard_regime_conservative_fallback_reason =
+                        Some("block_schur_failed_to_converge");
                     continue;
                 }
                 return Err(err);
@@ -1046,9 +1164,9 @@ impl InactivationDecoder {
             });
         }
 
-        // Column index mapping: unsolved column -> dense index
-        let col_to_dense: std::collections::HashMap<usize, usize> =
-            unsolved.iter().enumerate().map(|(i, &c)| (c, i)).collect();
+        // Column index mapping: unsolved column -> dense index.
+        // Dense vector lookup avoids per-term HashMap probes in this hot path.
+        let col_to_dense = build_dense_col_index_map(&unsolved);
 
         // Build flat row-major dense matrix A and RHS vector b.
         // Move (take) RHS data from state instead of cloning to avoid O(n_rows * symbol_size)
@@ -1059,7 +1177,7 @@ impl InactivationDecoder {
         for (row, &eq_idx) in dense_rows.iter().enumerate() {
             let row_off = row * n_cols;
             for &(col, coef) in &state.equations[eq_idx].terms {
-                if let Some(&dense_col) = col_to_dense.get(&col) {
+                if let Some(dense_col) = dense_col_index(&col_to_dense, col) {
                     a[row_off + dense_col] = coef;
                 }
             }
@@ -1071,11 +1189,14 @@ impl InactivationDecoder {
 
         trace.set_strategy(InactivationStrategy::AllAtOnce);
         let mut hard_regime = should_activate_hard_regime(n_rows, n_cols, &base_a);
+        let mut hard_plan = HardRegimePlan::Markowitz;
         if hard_regime {
             state.stats.hard_regime_activated = true;
+            hard_plan = select_hard_regime_plan(n_rows, n_cols, &base_a);
+            state.stats.hard_regime_branch = Some(hard_plan.label());
             trace.record_strategy_transition(
                 InactivationStrategy::AllAtOnce,
-                InactivationStrategy::HighSupportFirst,
+                hard_plan.strategy(),
                 "dense_or_near_square",
             );
         }
@@ -1093,7 +1214,8 @@ impl InactivationDecoder {
             let mut elimination_error = None;
 
             for col in 0..n_cols {
-                let pivot = select_pivot_row(&a, n_rows, n_cols, col, &row_used, hard_regime);
+                let pivot =
+                    select_pivot_row(&a, n_rows, n_cols, col, &row_used, hard_regime, hard_plan);
                 let Some(prow) = pivot else {
                     elimination_error = Some(singular_matrix_error(&unsolved, col));
                     break;
@@ -1102,7 +1224,7 @@ impl InactivationDecoder {
                 pivot_row[col] = prow;
                 row_used[prow] = true;
                 pivots_selected += 1;
-                if hard_regime {
+                if hard_regime && matches!(hard_plan, HardRegimePlan::Markowitz) {
                     markowitz_pivots += 1;
                 }
                 // Record pivot in proof trace (use original column index)
@@ -1156,11 +1278,31 @@ impl InactivationDecoder {
                 if !hard_regime {
                     hard_regime = true;
                     state.stats.hard_regime_activated = true;
+                    hard_plan = select_hard_regime_plan(n_rows, n_cols, &base_a);
+                    state.stats.hard_regime_branch = Some(hard_plan.label());
                     state.stats.hard_regime_fallbacks += 1;
+                    state.stats.hard_regime_conservative_fallback_reason =
+                        Some("fallback_after_baseline_failure");
                     trace.record_strategy_transition(
                         InactivationStrategy::AllAtOnce,
-                        InactivationStrategy::HighSupportFirst,
+                        hard_plan.strategy(),
                         "fallback_after_baseline_failure",
+                    );
+                    trace.pivots = 0;
+                    trace.pivot_events.clear();
+                    trace.row_ops = 0;
+                    trace.truncated = false;
+                    continue;
+                }
+                if matches!(hard_plan, HardRegimePlan::BlockSchurLowRank { .. }) {
+                    hard_plan = HardRegimePlan::Markowitz;
+                    state.stats.hard_regime_fallbacks += 1;
+                    state.stats.hard_regime_conservative_fallback_reason =
+                        Some("block_schur_failed_to_converge");
+                    trace.record_strategy_transition(
+                        InactivationStrategy::BlockSchurLowRank,
+                        InactivationStrategy::HighSupportFirst,
+                        "block_schur_failed_to_converge",
                     );
                     trace.pivots = 0;
                     trace.pivot_events.clear();
@@ -1309,7 +1451,18 @@ mod tests {
             dense_core_rows: stats.dense_core_rows,
             dense_core_cols: stats.dense_core_cols,
             dense_core_dropped_rows: stats.dense_core_dropped_rows,
-            fallback_reason: stats.peeling_fallback_reason.unwrap_or("none").to_string(),
+            fallback_reason: stats
+                .hard_regime_conservative_fallback_reason
+                .or(stats.peeling_fallback_reason)
+                .unwrap_or("none")
+                .to_string(),
+            hard_regime_activated: stats.hard_regime_activated,
+            hard_regime_branch: stats.hard_regime_branch.unwrap_or("none").to_string(),
+            hard_regime_fallbacks: stats.hard_regime_fallbacks,
+            conservative_fallback_reason: stats
+                .hard_regime_conservative_fallback_reason
+                .unwrap_or("none")
+                .to_string(),
         }
     }
 
@@ -1342,6 +1495,18 @@ mod tests {
             "{context}: unit log schema violations: {violations:?}"
         );
         json
+    }
+
+    #[test]
+    fn dense_col_index_map_handles_sparse_columns() {
+        let unsolved = vec![2, 7, 11];
+        let col_to_dense = build_dense_col_index_map(&unsolved);
+
+        assert_eq!(dense_col_index(&col_to_dense, 2), Some(0));
+        assert_eq!(dense_col_index(&col_to_dense, 7), Some(1));
+        assert_eq!(dense_col_index(&col_to_dense, 11), Some(2));
+        assert_eq!(dense_col_index(&col_to_dense, 3), None);
+        assert_eq!(dense_col_index(&col_to_dense, 99), None);
     }
 
     fn make_source_data(k: usize, symbol_size: usize) -> Vec<Vec<u8>> {
@@ -2176,6 +2341,32 @@ mod tests {
         }
     }
 
+    fn make_block_schur_rank_deficient_state(
+        params: &SystematicParams,
+        symbol_size: usize,
+        start_col: usize,
+        width: usize,
+    ) -> DecoderState {
+        let cols: Vec<usize> = (start_col..start_col + width).collect();
+        let mut equations = Vec::with_capacity(width);
+        let mut rhs = Vec::with_capacity(width);
+
+        for i in 0..width {
+            equations.push(Equation::new(cols.clone(), vec![Gf256::ONE; cols.len()]));
+            rhs.push(vec![(i as u8) + 1; symbol_size]);
+        }
+
+        DecoderState {
+            params: params.clone(),
+            equations,
+            rhs,
+            solved: vec![None; params.l],
+            active_cols: cols.into_iter().collect(),
+            inactive_cols: BTreeSet::new(),
+            stats: DecodeStats::default(),
+        }
+    }
+
     #[test]
     fn singular_matrix_reports_original_column_id() {
         let decoder = InactivationDecoder::new(8, 16, 123);
@@ -2446,6 +2637,58 @@ mod tests {
         assert_eq!(
             trace_one.strategy_transitions, trace_two.strategy_transitions,
             "hard-regime strategy transition history must be deterministic"
+        );
+    }
+
+    #[test]
+    fn hard_regime_plan_selects_block_schur_for_dense_large_core() {
+        let n_rows = 12;
+        let n_cols = 12;
+        let dense = vec![Gf256::ONE; n_rows * n_cols];
+        let plan = select_hard_regime_plan(n_rows, n_cols, &dense);
+        assert_eq!(
+            plan,
+            HardRegimePlan::BlockSchurLowRank { split_col: 8 },
+            "dense 12x12 system should select deterministic block-schur plan"
+        );
+    }
+
+    #[test]
+    fn block_schur_failure_falls_back_to_markowitz_with_reason() {
+        let decoder = InactivationDecoder::new(32, 1, 7070);
+        let params = decoder.params().clone();
+        let mut state = make_block_schur_rank_deficient_state(&params, 1, 4, 12);
+        let mut trace = EliminationTrace::default();
+
+        let err = decoder
+            .inactivate_and_solve_with_proof(&mut state, &mut trace)
+            .expect_err("rank-deficient block-schur candidate should fail deterministically");
+        assert!(matches!(err, DecodeError::SingularMatrix { .. }));
+        assert!(
+            state.stats.hard_regime_activated,
+            "dense rank-deficient system should activate hard regime"
+        );
+        assert_eq!(
+            state.stats.hard_regime_branch,
+            Some("block_schur_low_rank"),
+            "stats should expose deterministic accelerated branch selection"
+        );
+        assert_eq!(
+            state.stats.hard_regime_conservative_fallback_reason,
+            Some("block_schur_failed_to_converge"),
+            "stats should expose deterministic conservative fallback reason"
+        );
+        assert_eq!(
+            state.stats.hard_regime_fallbacks, 1,
+            "block-schur attempt should perform exactly one conservative fallback"
+        );
+        assert!(
+            trace.strategy_transitions.iter().any(|transition| {
+                transition.from == InactivationStrategy::BlockSchurLowRank
+                    && transition.to == InactivationStrategy::HighSupportFirst
+                    && transition.reason == "block_schur_failed_to_converge"
+            }),
+            "proof trace should record deterministic branch fallback transition"
         );
     }
 

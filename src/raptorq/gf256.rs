@@ -287,6 +287,53 @@ enum DualKernelOverride {
     ForceFused,
 }
 
+/// Public-facing dual-kernel policy mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DualKernelMode {
+    /// Heuristic mode using deterministic length/ratio windows.
+    Auto,
+    /// Force sequential scalarized dual-lane behavior.
+    Sequential,
+    /// Force fused dual-lane behavior.
+    Fused,
+}
+
+/// Deterministic dual-kernel dispatch decision for a lane pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DualKernelDecision {
+    /// Execute via sequential dual-lane operations.
+    Sequential,
+    /// Execute via fused dual-lane operation.
+    Fused,
+}
+
+impl DualKernelDecision {
+    /// Returns true when the decision selects fused dual-lane execution.
+    #[must_use]
+    pub const fn is_fused(self) -> bool {
+        matches!(self, Self::Fused)
+    }
+}
+
+/// Snapshot of the active deterministic dual-kernel policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DualKernelPolicySnapshot {
+    /// Runtime-selected kernel kind.
+    pub kernel: Gf256Kernel,
+    /// Effective policy mode.
+    pub mode: DualKernelMode,
+    /// Inclusive minimum total lane bytes for fused dual-mul path in auto mode.
+    pub mul_min_total: usize,
+    /// Inclusive maximum total lane bytes for fused dual-mul path in auto mode.
+    pub mul_max_total: usize,
+    /// Inclusive minimum total lane bytes for fused dual-addmul path in auto mode.
+    pub addmul_min_total: usize,
+    /// Inclusive maximum total lane bytes for fused dual-addmul path in auto mode.
+    pub addmul_max_total: usize,
+    /// Maximum allowed lane length ratio (`max(len_a,len_b)/min(...)`) in auto mode.
+    pub max_lane_ratio: usize,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct DualKernelPolicy {
     mode: DualKernelOverride,
@@ -369,6 +416,14 @@ fn parse_usize_env(key: &str) -> Option<usize> {
     std::env::var(key).ok()?.parse::<usize>().ok()
 }
 
+const fn to_public_mode(mode: DualKernelOverride) -> DualKernelMode {
+    match mode {
+        DualKernelOverride::Auto => DualKernelMode::Auto,
+        DualKernelOverride::ForceSequential => DualKernelMode::Sequential,
+        DualKernelOverride::ForceFused => DualKernelMode::Fused,
+    }
+}
+
 #[inline]
 fn lane_ratio_within(len_a: usize, len_b: usize, max_ratio: usize) -> bool {
     let lo = len_a.min(len_b);
@@ -382,33 +437,85 @@ fn in_window(total: usize, min_total: usize, max_total: usize) -> bool {
 }
 
 #[inline]
-fn should_use_dual_mul_fused(len_a: usize, len_b: usize) -> bool {
-    let policy = dual_policy();
+fn dual_mul_decision_with_policy(
+    policy: &DualKernelPolicy,
+    len_a: usize,
+    len_b: usize,
+) -> DualKernelDecision {
     match policy.mode {
-        DualKernelOverride::ForceSequential => false,
-        DualKernelOverride::ForceFused => true,
+        DualKernelOverride::ForceSequential => DualKernelDecision::Sequential,
+        DualKernelOverride::ForceFused => DualKernelDecision::Fused,
         DualKernelOverride::Auto => {
             let total = len_a.saturating_add(len_b);
-            in_window(total, policy.mul_min_total, policy.mul_max_total)
+            if in_window(total, policy.mul_min_total, policy.mul_max_total)
                 && lane_ratio_within(len_a, len_b, policy.max_lane_ratio)
+            {
+                DualKernelDecision::Fused
+            } else {
+                DualKernelDecision::Sequential
+            }
         }
     }
 }
 
 #[inline]
-fn should_use_dual_addmul_fused(len_a: usize, len_b: usize) -> bool {
-    let policy = dual_policy();
+fn should_use_dual_mul_fused(len_a: usize, len_b: usize) -> bool {
+    dual_mul_kernel_decision(len_a, len_b).is_fused()
+}
+
+#[inline]
+fn dual_addmul_decision_with_policy(
+    policy: &DualKernelPolicy,
+    len_a: usize,
+    len_b: usize,
+) -> DualKernelDecision {
     match policy.mode {
-        DualKernelOverride::ForceSequential => false,
-        DualKernelOverride::ForceFused => true,
+        DualKernelOverride::ForceSequential => DualKernelDecision::Sequential,
+        DualKernelOverride::ForceFused => DualKernelDecision::Fused,
         DualKernelOverride::Auto => {
             let total = len_a.saturating_add(len_b);
-            in_window(total, policy.addmul_min_total, policy.addmul_max_total)
+            if in_window(total, policy.addmul_min_total, policy.addmul_max_total)
                 && lane_ratio_within(len_a, len_b, policy.max_lane_ratio)
+            {
+                DualKernelDecision::Fused
+            } else {
+                DualKernelDecision::Sequential
+            }
         }
     }
 }
 
+/// Returns a deterministic snapshot of the active dual-lane fused-kernel policy.
+#[must_use]
+pub fn dual_kernel_policy_snapshot() -> DualKernelPolicySnapshot {
+    let policy = dual_policy();
+    DualKernelPolicySnapshot {
+        kernel: dispatch().kind,
+        mode: to_public_mode(policy.mode),
+        mul_min_total: policy.mul_min_total,
+        mul_max_total: policy.mul_max_total,
+        addmul_min_total: policy.addmul_min_total,
+        addmul_max_total: policy.addmul_max_total,
+        max_lane_ratio: policy.max_lane_ratio,
+    }
+}
+
+/// Returns the deterministic dual-lane decision for dual-mul path lengths.
+#[must_use]
+pub fn dual_mul_kernel_decision(len_a: usize, len_b: usize) -> DualKernelDecision {
+    dual_mul_decision_with_policy(dual_policy(), len_a, len_b)
+}
+
+/// Returns the deterministic dual-lane decision for dual-addmul path lengths.
+#[must_use]
+pub fn dual_addmul_kernel_decision(len_a: usize, len_b: usize) -> DualKernelDecision {
+    dual_addmul_decision_with_policy(dual_policy(), len_a, len_b)
+}
+
+#[inline]
+fn should_use_dual_addmul_fused(len_a: usize, len_b: usize) -> bool {
+    dual_addmul_kernel_decision(len_a, len_b).is_fused()
+}
 /// Returns the active runtime-selected GF(256) bulk kernel family.
 #[must_use]
 pub fn active_kernel() -> Gf256Kernel {
@@ -1945,5 +2052,33 @@ mod tests {
         assert!(!in_window(4096, 8192, 16384), "{context}");
         assert!(!in_window(20000, 8192, 16384), "{context}");
         assert!(!in_window(12000, 20000, 10000), "{context}");
+    }
+
+    #[test]
+    fn dual_policy_snapshot_is_consistent_with_decision_helpers() {
+        let snapshot = dual_kernel_policy_snapshot();
+        let mode = snapshot.mode;
+        assert!(
+            matches!(
+                mode,
+                DualKernelMode::Auto | DualKernelMode::Sequential | DualKernelMode::Fused
+            ),
+            "snapshot mode should be a valid public dual-kernel mode",
+        );
+
+        for (len_a, len_b) in [(0, 0), (64, 64), (512, 4096), (4096, 4096), (16384, 2048)] {
+            let mul_decision = dual_mul_kernel_decision(len_a, len_b);
+            let addmul_decision = dual_addmul_kernel_decision(len_a, len_b);
+            assert_eq!(
+                mul_decision.is_fused(),
+                should_use_dual_mul_fused(len_a, len_b),
+                "public mul decision helper should match internal gate",
+            );
+            assert_eq!(
+                addmul_decision.is_fused(),
+                should_use_dual_addmul_fused(len_a, len_b),
+                "public addmul decision helper should match internal gate",
+            );
+        }
     }
 }
