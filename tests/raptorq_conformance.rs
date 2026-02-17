@@ -1424,6 +1424,359 @@ mod pipeline_e2e {
 }
 
 // ============================================================================
+// Differential Harness Against Independent Reference Decode (bd-136cm / D2)
+// ============================================================================
+
+mod differential_harness {
+    use super::*;
+    use asupersync::raptorq::linalg::{DenseRow, GaussianResult, GaussianSolver};
+    use asupersync::raptorq::test_log_schema::{
+        validate_unit_log_json, UnitDecodeStats, UnitLogEntry,
+    };
+
+    const DIFF_REPLAY_REF: &str = "replay:rq-d2-diff-harness-v1";
+    const DIFF_ARTIFACT_PATH: &str = "artifacts/raptorq_d2_differential_harness_v1.json";
+    const DIFF_REPRO_COMMAND: &str = "rch exec -- cargo test --test raptorq_conformance differential_harness_selected_slice -- --nocapture";
+
+    #[derive(Clone, Copy)]
+    enum RepairBudget {
+        None,
+        ByDropped { extra: usize },
+    }
+
+    #[derive(Clone, Copy)]
+    struct DifferentialCase {
+        scenario_id: &'static str,
+        k: usize,
+        symbol_size: usize,
+        seed: u64,
+        drop_modulus: Option<usize>,
+        drop_remainder: usize,
+        repair_budget: RepairBudget,
+        expect_success: bool,
+        expected_error_kind: Option<&'static str>,
+    }
+
+    #[derive(Debug)]
+    struct ReferenceDecodeResult {
+        intermediate: Vec<Vec<u8>>,
+        source: Vec<Vec<u8>>,
+    }
+
+    #[derive(Debug)]
+    enum ReferenceDecodeError {
+        InsufficientSymbols,
+        SingularMatrix,
+        SymbolSizeMismatch,
+        SymbolEquationArityMismatch,
+        ColumnOutOfRange,
+    }
+
+    fn decoder_error_kind(err: &DecodeError) -> &'static str {
+        match err {
+            DecodeError::InsufficientSymbols { .. } => "insufficient_symbols",
+            DecodeError::SingularMatrix { .. } => "singular_matrix",
+            DecodeError::SymbolSizeMismatch { .. } => "symbol_size_mismatch",
+            DecodeError::SymbolEquationArityMismatch { .. } => "symbol_equation_arity_mismatch",
+        }
+    }
+
+    fn reference_error_kind(err: &ReferenceDecodeError) -> &'static str {
+        match err {
+            ReferenceDecodeError::InsufficientSymbols => "insufficient_symbols",
+            ReferenceDecodeError::SingularMatrix => "singular_matrix",
+            ReferenceDecodeError::SymbolSizeMismatch => "symbol_size_mismatch",
+            ReferenceDecodeError::SymbolEquationArityMismatch => "symbol_equation_arity_mismatch",
+            ReferenceDecodeError::ColumnOutOfRange => "column_out_of_range",
+        }
+    }
+
+    fn root_cause_label(
+        decoder: &Result<asupersync::raptorq::decoder::DecodeResult, DecodeError>,
+        reference: &Result<ReferenceDecodeResult, ReferenceDecodeError>,
+    ) -> Option<String> {
+        match (decoder, reference) {
+            (Ok(decoder_ok), Ok(reference_ok)) => {
+                if decoder_ok.source != reference_ok.source {
+                    Some("source_payload_mismatch".to_string())
+                } else if decoder_ok.intermediate != reference_ok.intermediate {
+                    Some("intermediate_symbol_mismatch".to_string())
+                } else {
+                    None
+                }
+            }
+            (Err(decoder_err), Err(reference_err)) => {
+                let decoder_kind = decoder_error_kind(decoder_err);
+                let reference_kind = reference_error_kind(reference_err);
+                if decoder_kind == reference_kind {
+                    None
+                } else {
+                    Some(format!(
+                        "error_kind_mismatch__decoder_{decoder_kind}__reference_{reference_kind}"
+                    ))
+                }
+            }
+            (Ok(_), Err(reference_err)) => Some(format!(
+                "reference_only_failure__{}",
+                reference_error_kind(reference_err)
+            )),
+            (Err(decoder_err), Ok(_)) => Some(format!(
+                "decoder_only_failure__{}",
+                decoder_error_kind(decoder_err)
+            )),
+        }
+    }
+
+    fn drop_indices_for(case: DifferentialCase) -> Vec<usize> {
+        case.drop_modulus.map_or_else(Vec::new, |modulus| {
+            (0..case.k)
+                .filter(|idx| idx % modulus == case.drop_remainder)
+                .collect()
+        })
+    }
+
+    fn max_repair_esi(case: DifferentialCase, l: usize, drop_count: usize) -> u32 {
+        match case.repair_budget {
+            RepairBudget::None => case.k as u32,
+            RepairBudget::ByDropped { extra } => (l + drop_count + extra) as u32,
+        }
+    }
+
+    fn reference_decode(
+        decoder: &InactivationDecoder,
+        symbols: &[ReceivedSymbol],
+    ) -> Result<ReferenceDecodeResult, ReferenceDecodeError> {
+        let params = decoder.params();
+        let l = params.l;
+        let k = params.k;
+        let symbol_size = params.symbol_size;
+
+        if symbols.len() < l {
+            return Err(ReferenceDecodeError::InsufficientSymbols);
+        }
+
+        let mut solver = GaussianSolver::new(symbols.len(), l);
+
+        for (row_idx, sym) in symbols.iter().enumerate() {
+            if sym.data.len() != symbol_size {
+                return Err(ReferenceDecodeError::SymbolSizeMismatch);
+            }
+            if sym.columns.len() != sym.coefficients.len() {
+                return Err(ReferenceDecodeError::SymbolEquationArityMismatch);
+            }
+
+            let mut row_coeffs = vec![0u8; l];
+            for (&column, &coefficient) in sym.columns.iter().zip(sym.coefficients.iter()) {
+                if column >= l {
+                    return Err(ReferenceDecodeError::ColumnOutOfRange);
+                }
+                // Equation coefficients sum in GF(256), where addition is XOR.
+                row_coeffs[column] ^= coefficient.raw();
+            }
+
+            solver.set_row(row_idx, &row_coeffs, DenseRow::new(sym.data.clone()));
+        }
+
+        match solver.solve_markowitz() {
+            GaussianResult::Solved(solution_rows) => {
+                let intermediate: Vec<Vec<u8>> = solution_rows
+                    .iter()
+                    .take(l)
+                    .map(|row| row.as_slice().to_vec())
+                    .collect();
+                let source = intermediate[..k].to_vec();
+                Ok(ReferenceDecodeResult {
+                    intermediate,
+                    source,
+                })
+            }
+            GaussianResult::Singular { .. } => Err(ReferenceDecodeError::SingularMatrix),
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn differential_harness_selected_slice() {
+        let cases = [
+            DifferentialCase {
+                scenario_id: "RQ-D2-DIFF-OK-001",
+                k: 10,
+                symbol_size: 64,
+                seed: 2024,
+                drop_modulus: Some(3),
+                drop_remainder: 1,
+                repair_budget: RepairBudget::ByDropped { extra: 3 },
+                expect_success: true,
+                expected_error_kind: None,
+            },
+            DifferentialCase {
+                scenario_id: "RQ-D2-DIFF-OK-002",
+                k: 16,
+                symbol_size: 32,
+                seed: 9001,
+                drop_modulus: Some(2),
+                drop_remainder: 0,
+                repair_budget: RepairBudget::ByDropped { extra: 2 },
+                expect_success: true,
+                expected_error_kind: None,
+            },
+            DifferentialCase {
+                scenario_id: "RQ-D2-DIFF-FAIL-INSUFFICIENT",
+                k: 12,
+                symbol_size: 48,
+                seed: 77,
+                drop_modulus: Some(1),
+                drop_remainder: 0,
+                repair_budget: RepairBudget::None,
+                expect_success: false,
+                expected_error_kind: Some("insufficient_symbols"),
+            },
+        ];
+
+        for case in cases {
+            let source = make_source_data(case.k, case.symbol_size, case.seed.wrapping_mul(17));
+            let encoder = SystematicEncoder::new(&source, case.symbol_size, case.seed)
+                .unwrap_or_else(|| panic!("scenario={} failed to build encoder", case.scenario_id));
+            let decoder = InactivationDecoder::new(case.k, case.symbol_size, case.seed);
+
+            let drop_indices = drop_indices_for(case);
+            let l = decoder.params().l;
+            let repair_esi_upper = max_repair_esi(case, l, drop_indices.len());
+            let received = build_received_symbols(
+                &encoder,
+                &decoder,
+                &source,
+                &drop_indices,
+                repair_esi_upper,
+                case.seed,
+            );
+
+            let decoder_result = decoder.decode(&received);
+            let reference_result = reference_decode(&decoder, &received);
+            let root_cause = root_cause_label(&decoder_result, &reference_result);
+
+            let outcome = match (&root_cause, &decoder_result, &reference_result) {
+                (None, Ok(_), Ok(_)) => "ok",
+                (None, Err(_), Err(_)) => "decode_failure",
+                (Some(_), Ok(_), Ok(_)) => "symbol_mismatch",
+                _ => "fail",
+            };
+
+            let loss_pct = (drop_indices.len() * 100).checked_div(case.k).unwrap_or(0);
+
+            let decode_stats = decoder_result.as_ref().map_or(
+                UnitDecodeStats {
+                    k: case.k,
+                    loss_pct,
+                    dropped: drop_indices.len(),
+                    peeled: 0,
+                    inactivated: 0,
+                    gauss_ops: 0,
+                    pivots: 0,
+                },
+                |result| UnitDecodeStats {
+                    k: case.k,
+                    loss_pct,
+                    dropped: drop_indices.len(),
+                    peeled: result.stats.peeled,
+                    inactivated: result.stats.inactivated,
+                    gauss_ops: result.stats.gauss_ops,
+                    pivots: result.stats.pivots_selected,
+                },
+            );
+
+            let parameter_set = format!(
+                "k={},symbol_size={},l={},received={},dropped={},expect_success={},root_cause={}",
+                case.k,
+                case.symbol_size,
+                l,
+                received.len(),
+                drop_indices.len(),
+                case.expect_success,
+                root_cause.as_deref().unwrap_or("none")
+            );
+            let log_entry = UnitLogEntry::new(
+                case.scenario_id,
+                case.seed,
+                &parameter_set,
+                DIFF_REPLAY_REF,
+                outcome,
+            )
+            .with_repro_command(DIFF_REPRO_COMMAND)
+            .with_artifact_path(DIFF_ARTIFACT_PATH)
+            .with_decode_stats(decode_stats);
+            let log_json = log_entry
+                .to_json()
+                .expect("serialize differential log entry");
+            let violations = validate_unit_log_json(&log_json);
+            let context = log_entry.to_context_string();
+
+            eprintln!("{log_json}");
+
+            assert!(
+                violations.is_empty(),
+                "{context}: unit log schema violations: {violations:?}"
+            );
+
+            if let Some(label) = root_cause {
+                panic!(
+                    "{context} root_cause={label} decoder={decoder_result:?} reference={reference_result:?}"
+                );
+            }
+
+            if case.expect_success {
+                let decoder_ok = decoder_result.as_ref().unwrap_or_else(|err| {
+                    panic!("{context}: decoder failed unexpectedly: {err:?}")
+                });
+                let reference_ok = reference_result.as_ref().unwrap_or_else(|err| {
+                    panic!("{context}: reference failed unexpectedly: {err:?}")
+                });
+                for (idx, (lhs, rhs)) in decoder_ok
+                    .source
+                    .iter()
+                    .zip(reference_ok.source.iter())
+                    .enumerate()
+                {
+                    assert_eq!(
+                        lhs, rhs,
+                        "{context}: source symbol mismatch at index={idx} root_cause=source_payload_mismatch"
+                    );
+                }
+                for (idx, (lhs, rhs)) in decoder_ok
+                    .intermediate
+                    .iter()
+                    .zip(reference_ok.intermediate.iter())
+                    .enumerate()
+                {
+                    assert_eq!(
+                        lhs, rhs,
+                        "{context}: intermediate symbol mismatch at index={idx} root_cause=intermediate_symbol_mismatch"
+                    );
+                }
+            } else {
+                let expected_kind = case.expected_error_kind.unwrap_or("insufficient_symbols");
+                let decoder_err = decoder_result.as_ref().err().unwrap_or_else(|| {
+                    panic!("{context}: expected decoder failure kind={expected_kind}")
+                });
+                let reference_err = reference_result.as_ref().err().unwrap_or_else(|| {
+                    panic!("{context}: expected reference failure kind={expected_kind}")
+                });
+                assert_eq!(
+                    decoder_error_kind(decoder_err),
+                    expected_kind,
+                    "{context}: unexpected decoder failure kind"
+                );
+                assert_eq!(
+                    reference_error_kind(reference_err),
+                    expected_kind,
+                    "{context}: unexpected reference failure kind"
+                );
+            }
+        }
+    }
+}
+
+// ============================================================================
 // Metamorphic + Property Erasure-Recovery Test Battery (bd-3syrq / D3)
 //
 // Deterministic property-based tests that verify codec invariants hold
@@ -1434,6 +1787,40 @@ mod pipeline_e2e {
 mod metamorphic_property {
     use super::*;
     use asupersync::raptorq::rfc6330::rand;
+    use asupersync::raptorq::test_log_schema::{
+        validate_unit_log_json, UnitDecodeStats, UnitLogEntry,
+    };
+
+    const D4_ARTIFACT_PATH: &str = "artifacts/raptorq_d4_decode_failure_policy_v1.json";
+    const D4_REPLAY_REF: &str = "replay:rq-d4-decode-failure-policy-v1";
+    const D4_REPRO_INSUFFICIENT: &str = "rch exec -- cargo test --test raptorq_conformance insufficient_symbols_returns_error -- --nocapture";
+    const D4_REPRO_MULTI_SEED: &str =
+        "rch exec -- cargo test --test raptorq_conformance multi_seed_erasure_stress -- --nocapture";
+
+    fn emit_d4_unit_log(
+        scenario_id: &str,
+        seed: u64,
+        parameter_set: &str,
+        outcome: &str,
+        repro_command: &str,
+        decode_stats: Option<UnitDecodeStats>,
+    ) -> String {
+        let mut entry = UnitLogEntry::new(scenario_id, seed, parameter_set, D4_REPLAY_REF, outcome)
+            .with_repro_command(repro_command)
+            .with_artifact_path(D4_ARTIFACT_PATH);
+        if let Some(stats) = decode_stats {
+            entry = entry.with_decode_stats(stats);
+        }
+        let json = entry.to_json().expect("serialize D4 unit log entry");
+        let violations = validate_unit_log_json(&json);
+        let context = entry.to_context_string();
+        assert!(
+            violations.is_empty(),
+            "{context}: unit log schema violations: {violations:?}"
+        );
+        eprintln!("{json}");
+        context
+    }
 
     // ----------------------------------------------------------------
     // Helper: deterministic erasure pattern generator
@@ -1799,19 +2186,35 @@ mod metamorphic_property {
             seed,
         );
 
+        let context = emit_d4_unit_log(
+            "RQ-D4-INSUFFICIENT-MUST-FAIL",
+            seed,
+            &format!(
+                "k={k},symbol_size={symbol_size},received={},required_l={}",
+                received.len(),
+                decoder.params().l
+            ),
+            "decode_failure",
+            D4_REPRO_INSUFFICIENT,
+            Some(UnitDecodeStats {
+                k,
+                loss_pct: 50,
+                dropped: drop_most.len(),
+                peeled: 0,
+                inactivated: 0,
+                gauss_ops: 0,
+                pivots: 0,
+            }),
+        );
+
         match decoder.decode(&received) {
-            // Expected errors for insufficient / rank-deficient systems.
-            Err(DecodeError::InsufficientSymbols { .. } | DecodeError::SingularMatrix { .. }) => {}
-            Err(e) => panic!("unexpected error variant: {e:?}"),
-            Ok(result) => {
-                // If decode somehow succeeds, it MUST be correct
-                for (i, (orig, dec)) in source.iter().zip(result.source.iter()).enumerate() {
-                    assert_eq!(
-                        orig, dec,
-                        "decoder succeeded with insufficient symbols but symbol {i} is corrupt!"
-                    );
-                }
-            }
+            Err(DecodeError::InsufficientSymbols { .. }) => {}
+            Err(err) => panic!(
+                "{context}: expected InsufficientSymbols for in-scope insufficient-symbol case, got {err:?}"
+            ),
+            Ok(_) => panic!(
+                "{context}: decoder unexpectedly succeeded in in-scope insufficient-symbol case"
+            ),
         }
     }
 
@@ -1910,23 +2313,57 @@ mod metamorphic_property {
         let symbol_size = 32;
         let num_erasures = 3;
         let extra_repair = num_erasures + 2;
+        let in_scope_seeds = [1u64, 7, 42, 123, 321, 456, 789, 999, 2024, 9001];
 
-        let mut successes = 0;
-        for seed in 0u64..50 {
+        for seed in in_scope_seeds {
             let source = make_source_data(k, symbol_size, seed);
             let drop_set = random_drop_set(k, num_erasures, seed + 5000);
+            let decoded = roundtrip(k, symbol_size, seed, &drop_set, extra_repair)
+                .unwrap_or_else(|err| {
+                    let context = emit_d4_unit_log(
+                        "RQ-D4-MULTI-SEED-IN-SCOPE",
+                        seed,
+                        &format!(
+                            "k={k},symbol_size={symbol_size},num_erasures={num_erasures},extra_repair={extra_repair},root_cause=decode_failure"
+                        ),
+                        "decode_failure",
+                        D4_REPRO_MULTI_SEED,
+                        Some(UnitDecodeStats {
+                            k,
+                            loss_pct: (num_erasures * 100) / k,
+                            dropped: num_erasures,
+                            peeled: 0,
+                            inactivated: 0,
+                            gauss_ops: 0,
+                            pivots: 0,
+                        }),
+                    );
+                    panic!("{context}: decode failed for in-scope seed={seed}: {err}");
+                });
 
-            let Ok(decoded) = roundtrip(k, symbol_size, seed, &drop_set, extra_repair) else {
-                continue; // skip seeds where encoder matrix is singular
-            };
+            let _ = emit_d4_unit_log(
+                "RQ-D4-MULTI-SEED-IN-SCOPE",
+                seed,
+                &format!(
+                    "k={k},symbol_size={symbol_size},num_erasures={num_erasures},extra_repair={extra_repair},root_cause=none"
+                ),
+                "ok",
+                D4_REPRO_MULTI_SEED,
+                Some(UnitDecodeStats {
+                    k,
+                    loss_pct: (num_erasures * 100) / k,
+                    dropped: num_erasures,
+                    peeled: 0,
+                    inactivated: 0,
+                    gauss_ops: 0,
+                    pivots: 0,
+                }),
+            );
 
-            successes += 1;
             for (i, (orig, dec)) in source.iter().zip(decoded.iter()).enumerate() {
                 assert_eq!(orig, dec, "seed={seed}: symbol {i} mismatch");
             }
         }
-        // At least 80% of seeds should work
-        assert!(successes >= 40, "too few successful seeds: {successes}/50");
     }
 
     // ----------------------------------------------------------------
@@ -2008,6 +2445,390 @@ mod metamorphic_property {
             first_success_overhead.is_some(),
             "decode never succeeded even with max overhead"
         );
+    }
+}
+
+// ============================================================================
+// Stress/Soak E2E deterministic profiles (bd-mztvq / D8)
+// ============================================================================
+
+mod stress_soak_e2e {
+    use super::*;
+    use asupersync::raptorq::test_log_schema::{
+        validate_unit_log_json, UnitDecodeStats, UnitLogEntry,
+    };
+    use serde::Serialize;
+
+    const D8_ARTIFACT_PATH: &str = "artifacts/raptorq_d8_stress_soak_v1.json";
+    const D8_REPRO_COMMAND: &str =
+        "rch exec -- cargo test --test raptorq_conformance soak_stress_profiles_deterministic_with_forensic_logs -- --nocapture";
+    const D8_FORENSIC_SCHEMA_VERSION: &str = "raptorq-d8-stress-forensic-v1";
+
+    #[derive(Clone, Copy)]
+    enum StressProfile {
+        ClusteredLoss,
+        BurstLoss,
+        NearRankDeficient,
+    }
+
+    impl StressProfile {
+        const fn label(self) -> &'static str {
+            match self {
+                Self::ClusteredLoss => "clustered_loss",
+                Self::BurstLoss => "burst_loss",
+                Self::NearRankDeficient => "near_rank_deficient",
+            }
+        }
+
+        const fn scenario_id(self) -> &'static str {
+            match self {
+                Self::ClusteredLoss => "RQ-D8-STRESS-CLUSTER",
+                Self::BurstLoss => "RQ-D8-STRESS-BURST",
+                Self::NearRankDeficient => "RQ-D8-STRESS-NEAR-RANK",
+            }
+        }
+
+        const fn replay_ref(self) -> &'static str {
+            match self {
+                Self::ClusteredLoss => "replay:rq-d8-stress-cluster-v1",
+                Self::BurstLoss => "replay:rq-d8-stress-burst-v1",
+                Self::NearRankDeficient => "replay:rq-d8-stress-near-rank-v1",
+            }
+        }
+
+        const fn base_seed(self) -> u64 {
+            match self {
+                Self::ClusteredLoss => 12_200,
+                Self::BurstLoss => 15_700,
+                Self::NearRankDeficient => 20_900,
+            }
+        }
+    }
+
+    #[derive(Default, Clone, Debug)]
+    struct StressAggregate {
+        iterations: usize,
+        successes: usize,
+        failures: usize,
+        corruption_events: usize,
+        total_gauss_ops: usize,
+        total_inactivated: usize,
+        max_gauss_ops: usize,
+        max_inactivated: usize,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct StressForensicReport {
+        schema_version: &'static str,
+        scenario_id: &'static str,
+        replay_ref: &'static str,
+        profile: &'static str,
+        seed_base: u64,
+        iterations: usize,
+        successes: usize,
+        failures: usize,
+        corruption_events: usize,
+        success_rate: f64,
+        avg_gauss_ops: f64,
+        avg_inactivated: f64,
+        max_gauss_ops: usize,
+        max_inactivated: usize,
+        threshold_min_success_rate: f64,
+        threshold_max_failures: usize,
+        repro_command: &'static str,
+        artifact_path: &'static str,
+    }
+
+    #[derive(Clone, Copy)]
+    struct PeriodicSummaryInput {
+        seed: u64,
+        k: usize,
+        symbol_size: usize,
+        iteration: usize,
+        dropped: usize,
+        last_decode: Option<UnitDecodeStats>,
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn ratio(numerator: usize, denominator: usize) -> f64 {
+        if denominator == 0 {
+            return 0.0;
+        }
+        numerator as f64 / denominator as f64
+    }
+
+    fn profile_drop_set(profile: StressProfile, iteration: usize, k: usize) -> Vec<usize> {
+        match profile {
+            StressProfile::ClusteredLoss => {
+                let window = 6usize;
+                let start = iteration % (k - window + 1);
+                (start..(start + window)).collect()
+            }
+            StressProfile::BurstLoss => {
+                let window = 4usize;
+                let start_a = (iteration * 2) % (k - window + 1);
+                let start_b = (iteration * 3 + 1) % (k - window + 1);
+                let mut drops: std::collections::BTreeSet<usize> = (start_a..(start_a + window))
+                    .chain(start_b..(start_b + window))
+                    .collect();
+                // Keep this profile bounded around ~40% loss.
+                while drops.len() > 8 {
+                    let last = *drops.iter().next_back().expect("non-empty set");
+                    drops.remove(&last);
+                }
+                drops.into_iter().collect()
+            }
+            StressProfile::NearRankDeficient => {
+                let heavy_loss = 10usize;
+                let start = (iteration + 1) % (k - heavy_loss + 1);
+                (start..(start + heavy_loss)).collect()
+            }
+        }
+    }
+
+    fn max_repair_esi_for_profile(
+        profile: StressProfile,
+        decoder: &InactivationDecoder,
+        drop_count: usize,
+    ) -> u32 {
+        let params = decoder.params();
+        let k = params.k;
+        let constraints = params.s + params.h;
+        let kept = k.saturating_sub(drop_count);
+        let minimum_repair = params.l.saturating_sub(constraints + kept);
+
+        let repair_count = match profile {
+            // Keep healthy margin in the easier profiles.
+            StressProfile::ClusteredLoss => minimum_repair + 4,
+            StressProfile::BurstLoss => minimum_repair + 3,
+            // Near-rank-deficient: intentionally close to threshold.
+            StressProfile::NearRankDeficient => minimum_repair + 1,
+        };
+        (k + repair_count) as u32
+    }
+
+    fn emit_periodic_summary(
+        profile: StressProfile,
+        aggregate: &StressAggregate,
+        input: PeriodicSummaryInput,
+    ) {
+        let outcome = if aggregate.failures == 0 {
+            "ok"
+        } else {
+            "fail"
+        };
+        let mut entry = UnitLogEntry::new(
+            profile.scenario_id(),
+            input.seed,
+            &format!(
+                "profile={},phase=periodic,iter={},k={},symbol_size={},dropped={},successes={},failures={},max_gauss_ops={},max_inactivated={}",
+                profile.label(),
+                input.iteration + 1,
+                input.k,
+                input.symbol_size,
+                input.dropped,
+                aggregate.successes,
+                aggregate.failures,
+                aggregate.max_gauss_ops,
+                aggregate.max_inactivated
+            ),
+            profile.replay_ref(),
+            outcome,
+        )
+        .with_repro_command(D8_REPRO_COMMAND)
+        .with_artifact_path(D8_ARTIFACT_PATH);
+
+        if let Some(stats) = input.last_decode {
+            entry = entry.with_decode_stats(stats);
+        }
+
+        let json = entry.to_json().expect("serialize periodic stress log");
+        let violations = validate_unit_log_json(&json);
+        let context = entry.to_context_string();
+        assert!(
+            violations.is_empty(),
+            "{context}: unit log schema violations: {violations:?}"
+        );
+        eprintln!("{json}");
+    }
+
+    fn emit_final_forensic_report(
+        profile: StressProfile,
+        aggregate: &StressAggregate,
+        threshold_min_success_rate: f64,
+        threshold_max_failures: usize,
+    ) {
+        let success_rate = ratio(aggregate.successes, aggregate.iterations);
+        let avg_gauss_ops = ratio(aggregate.total_gauss_ops, aggregate.successes);
+        let avg_inactivated = ratio(aggregate.total_inactivated, aggregate.successes);
+
+        let forensic = StressForensicReport {
+            schema_version: D8_FORENSIC_SCHEMA_VERSION,
+            scenario_id: profile.scenario_id(),
+            replay_ref: profile.replay_ref(),
+            profile: profile.label(),
+            seed_base: profile.base_seed(),
+            iterations: aggregate.iterations,
+            successes: aggregate.successes,
+            failures: aggregate.failures,
+            corruption_events: aggregate.corruption_events,
+            success_rate,
+            avg_gauss_ops,
+            avg_inactivated,
+            max_gauss_ops: aggregate.max_gauss_ops,
+            max_inactivated: aggregate.max_inactivated,
+            threshold_min_success_rate,
+            threshold_max_failures,
+            repro_command: D8_REPRO_COMMAND,
+            artifact_path: D8_ARTIFACT_PATH,
+        };
+        eprintln!(
+            "{}",
+            serde_json::to_string(&forensic).expect("serialize forensic report")
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn soak_stress_profiles_deterministic_with_forensic_logs() {
+        const ITERATIONS: usize = 24;
+        const K: usize = 18;
+        const SYMBOL_SIZE: usize = 48;
+        const SUMMARY_INTERVAL: usize = 8;
+
+        let profiles = [
+            StressProfile::ClusteredLoss,
+            StressProfile::BurstLoss,
+            StressProfile::NearRankDeficient,
+        ];
+
+        for profile in profiles {
+            let mut aggregate = StressAggregate::default();
+
+            for iteration in 0..ITERATIONS {
+                let seed = profile.base_seed().wrapping_add(iteration as u64);
+                let source = make_source_data(K, SYMBOL_SIZE, seed.wrapping_mul(31));
+                let encoder =
+                    SystematicEncoder::new(&source, SYMBOL_SIZE, seed).unwrap_or_else(|| {
+                        panic!(
+                            "profile={} seed={seed} encoder build failed",
+                            profile.label()
+                        )
+                    });
+                let decoder = InactivationDecoder::new(K, SYMBOL_SIZE, seed);
+
+                let drop_set = profile_drop_set(profile, iteration, K);
+                let max_repair_esi = max_repair_esi_for_profile(profile, &decoder, drop_set.len());
+                let received = build_received_symbols(
+                    &encoder,
+                    &decoder,
+                    &source,
+                    &drop_set,
+                    max_repair_esi,
+                    seed,
+                );
+
+                aggregate.iterations += 1;
+                let mut last_decode_stats = None;
+
+                match decoder.decode(&received) {
+                    Ok(result) => {
+                        aggregate.successes += 1;
+                        aggregate.total_gauss_ops += result.stats.gauss_ops;
+                        aggregate.total_inactivated += result.stats.inactivated;
+                        aggregate.max_gauss_ops =
+                            aggregate.max_gauss_ops.max(result.stats.gauss_ops);
+                        aggregate.max_inactivated =
+                            aggregate.max_inactivated.max(result.stats.inactivated);
+
+                        for (idx, (orig, decoded)) in
+                            source.iter().zip(result.source.iter()).enumerate()
+                        {
+                            assert_eq!(
+                                orig,
+                                decoded,
+                                "profile={} seed={seed} iteration={} corruption at symbol {idx}",
+                                profile.label(),
+                                iteration + 1
+                            );
+                        }
+
+                        last_decode_stats = Some(UnitDecodeStats {
+                            k: K,
+                            loss_pct: (drop_set.len() * 100) / K,
+                            dropped: drop_set.len(),
+                            peeled: result.stats.peeled,
+                            inactivated: result.stats.inactivated,
+                            gauss_ops: result.stats.gauss_ops,
+                            pivots: result.stats.pivots_selected,
+                        });
+                    }
+                    Err(err) => {
+                        aggregate.failures += 1;
+                        eprintln!(
+                            "{{\"schema_version\":\"{}\",\"scenario_id\":\"{}\",\"profile\":\"{}\",\"seed\":{},\"iteration\":{},\"outcome\":\"decode_failure\",\"error\":\"{:?}\",\"repro_command\":\"{}\",\"artifact_path\":\"{}\"}}",
+                            D8_FORENSIC_SCHEMA_VERSION,
+                            profile.scenario_id(),
+                            profile.label(),
+                            seed,
+                            iteration + 1,
+                            err,
+                            D8_REPRO_COMMAND,
+                            D8_ARTIFACT_PATH
+                        );
+                    }
+                }
+
+                if (iteration + 1).is_multiple_of(SUMMARY_INTERVAL) || iteration + 1 == ITERATIONS {
+                    emit_periodic_summary(
+                        profile,
+                        &aggregate,
+                        PeriodicSummaryInput {
+                            seed,
+                            k: K,
+                            symbol_size: SYMBOL_SIZE,
+                            iteration,
+                            dropped: drop_set.len(),
+                            last_decode: last_decode_stats,
+                        },
+                    );
+                }
+            }
+
+            let (threshold_min_success_rate, threshold_max_failures) = match profile {
+                StressProfile::ClusteredLoss | StressProfile::BurstLoss => (1.0, 0),
+                StressProfile::NearRankDeficient => (0.70, 7),
+            };
+
+            emit_final_forensic_report(
+                profile,
+                &aggregate,
+                threshold_min_success_rate,
+                threshold_max_failures,
+            );
+
+            let success_rate = ratio(aggregate.successes, aggregate.iterations);
+            assert_eq!(
+                aggregate.corruption_events,
+                0,
+                "profile={} observed corruption under stress",
+                profile.label()
+            );
+            assert!(
+                aggregate.failures <= threshold_max_failures,
+                "profile={} exceeded failure budget: failures={} threshold={}",
+                profile.label(),
+                aggregate.failures,
+                threshold_max_failures
+            );
+            assert!(
+                success_rate >= threshold_min_success_rate,
+                "profile={} success rate {:.3} below threshold {:.3}",
+                profile.label(),
+                success_rate,
+                threshold_min_success_rate
+            );
+        }
     }
 }
 
