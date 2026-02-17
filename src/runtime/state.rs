@@ -461,7 +461,7 @@ impl RuntimeState {
     /// Returns a locked guard to the I/O driver, if present.
     ///
     /// Returns `None` if the runtime was created without a reactor.
-    pub fn io_driver_mut(&self) -> Option<std::sync::MutexGuard<'_, IoDriver>> {
+    pub fn io_driver_mut(&self) -> Option<parking_lot::MutexGuard<'_, IoDriver>> {
         self.io_driver.as_ref().map(IoDriverHandle::lock)
     }
 

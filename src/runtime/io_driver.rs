@@ -43,7 +43,8 @@ use crate::runtime::reactor::{
 };
 use std::collections::HashMap;
 use std::io;
-use std::sync::{Arc, Mutex, Weak};
+use parking_lot::Mutex;
+use std::sync::{Arc, Weak};
 use std::task::Waker;
 use std::time::Duration;
 
@@ -426,7 +427,7 @@ impl IoDriverHandle {
         // we revert to holding the lock, but good practice for responsiveness.
         // Actually, since we don't hold the lock during poll, we can just lock.
         let token = {
-            let mut driver = self.inner.lock().expect("lock poisoned");
+            let mut driver = self.inner.lock();
             driver.register(source, interest, waker)?
         };
         Ok(IoRegistration::new(
@@ -439,28 +440,28 @@ impl IoDriverHandle {
     /// Updates the waker for an existing registration.
     #[must_use]
     pub fn update_waker(&self, token: Token, waker: Waker) -> bool {
-        let mut driver = self.inner.lock().expect("lock poisoned");
+        let mut driver = self.inner.lock();
         driver.update_waker(token, waker)
     }
 
     /// Returns true if the driver has no registered wakers.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        let driver = self.inner.lock().expect("lock poisoned");
+        let driver = self.inner.lock();
         driver.is_empty()
     }
 
     /// Returns the number of registered wakers.
     #[must_use]
     pub fn waker_count(&self) -> usize {
-        let driver = self.inner.lock().expect("lock poisoned");
+        let driver = self.inner.lock();
         driver.waker_count()
     }
 
     /// Returns a snapshot of the current I/O stats.
     #[must_use]
     pub fn stats(&self) -> IoStats {
-        let driver = self.inner.lock().expect("lock poisoned");
+        let driver = self.inner.lock();
         driver.stats().clone()
     }
 
@@ -474,7 +475,7 @@ impl IoDriverHandle {
     {
         // 1. Lock driver and take the events buffer to use for polling
         let mut events = {
-            let mut driver = self.inner.lock().expect("lock poisoned");
+            let mut driver = self.inner.lock();
             driver.take_events()
         };
 
@@ -483,7 +484,7 @@ impl IoDriverHandle {
         let poll_result = self.reactor.poll(&mut events, timeout);
 
         // 3. Re-acquire lock to dispatch wakers and restore the buffer
-        let mut driver = self.inner.lock().expect("lock poisoned");
+        let mut driver = self.inner.lock();
 
         // Update stats and dispatch if poll succeeded
         if let Ok(n) = poll_result {
@@ -499,12 +500,12 @@ impl IoDriverHandle {
     }
 
     /// Returns a lock guard for direct access to the driver.
-    pub fn lock(&self) -> std::sync::MutexGuard<'_, IoDriver> {
-        self.inner.lock().expect("lock poisoned")
+    pub fn lock(&self) -> parking_lot::MutexGuard<'_, IoDriver> {
+        self.inner.lock()
     }
 
     /// Attempts to acquire the lock for direct access to the driver.
-    pub fn try_lock(&self) -> std::sync::TryLockResult<std::sync::MutexGuard<'_, IoDriver>> {
+    pub fn try_lock(&self) -> Option<parking_lot::MutexGuard<'_, IoDriver>> {
         self.inner.try_lock()
     }
 }
@@ -561,7 +562,7 @@ impl IoRegistration {
             ));
         };
         {
-            let mut guard = driver.lock().expect("lock poisoned");
+            let mut guard = driver.lock();
             guard.modify_interest(self.token, interest)?;
         }
         self.interest = interest;
@@ -572,7 +573,7 @@ impl IoRegistration {
     #[must_use]
     pub fn update_waker(&self, waker: Waker) -> bool {
         self.driver.upgrade().is_some_and(|driver| {
-            let mut guard = driver.lock().expect("lock poisoned");
+            let mut guard = driver.lock();
             guard.update_waker(self.token, waker)
         })
     }
@@ -594,7 +595,7 @@ impl IoRegistration {
                 "I/O driver has been dropped",
             ));
         };
-        let mut guard = driver.lock().expect("lock poisoned");
+        let mut guard = driver.lock();
 
         // Re-arm reactor (oneshot semantics require this on every poll).
         guard.modify_interest(self.token, interest)?;
@@ -623,7 +624,7 @@ impl IoRegistration {
     pub fn deregister(self) -> io::Result<()> {
         if let Some(driver) = self.driver.upgrade() {
             let first = {
-                let mut guard = driver.lock().expect("lock poisoned");
+                let mut guard = driver.lock();
                 guard.deregister(self.token)
             };
             match first {
@@ -638,7 +639,7 @@ impl IoRegistration {
                 Err(first_err) => {
                     // Best-effort retry for transient deregistration failures.
                     let second = {
-                        let mut guard = driver.lock().expect("lock poisoned");
+                        let mut guard = driver.lock();
                         guard.deregister(self.token)
                     };
                     match second {
@@ -664,7 +665,7 @@ impl IoRegistration {
 impl Drop for IoRegistration {
     fn drop(&mut self) {
         if let Some(driver) = self.driver.upgrade() {
-            let mut guard = driver.lock().expect("lock poisoned");
+            let mut guard = driver.lock();
             let _ = guard.deregister(self.token);
         }
     }
@@ -686,7 +687,7 @@ mod tests {
     use crate::runtime::reactor::{Event, Interest, LabReactor, Token};
     use crate::test_utils::init_test_logging;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::task::Wake;
 
     /// A simple waker that sets a flag and counts wakes.
@@ -869,7 +870,7 @@ mod tests {
         }
 
         fn set_emit_token(&self, token: Token) {
-            let mut slot = self.emit_token.lock().expect("emit token lock poisoned");
+            let mut slot = self.emit_token.lock();
             *slot = Some(token);
         }
     }
@@ -894,7 +895,7 @@ mod tests {
 
         fn poll(&self, events: &mut Events, _timeout: Option<Duration>) -> io::Result<usize> {
             let emit_token = {
-                let guard = self.emit_token.lock().expect("emit token lock poisoned");
+                let guard = self.emit_token.lock();
                 *guard
             };
             if let Some(token) = emit_token {

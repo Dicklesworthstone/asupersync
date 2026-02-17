@@ -38,7 +38,7 @@ use crate::types::Time;
 use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::time::Duration;
 
 fn duration_to_nanos_saturating(duration: Duration) -> u64 {
@@ -317,7 +317,7 @@ impl LabReactor {
     ///
     /// This method is also known as `schedule_event()` in the spec.
     pub fn inject_event(&self, token: Token, mut event: Event, delay: Duration) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         let time = inner
             .time
             .saturating_add_nanos(duration_to_nanos_saturating(delay));
@@ -355,7 +355,7 @@ impl LabReactor {
     /// Returns the current virtual time.
     #[must_use]
     pub fn now(&self) -> Time {
-        self.inner.lock().unwrap().time
+        self.inner.lock().time
     }
 
     /// Returns the next scheduled event time, if any.
@@ -364,7 +364,7 @@ impl LabReactor {
     /// without relying on wall-clock time.
     #[must_use]
     pub fn next_event_time(&self) -> Option<Time> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock();
         inner.pending.peek().map(|event| event.time)
     }
 
@@ -372,7 +372,7 @@ impl LabReactor {
     ///
     /// This is useful for testing timeout behavior without going through poll().
     pub fn advance_time(&self, duration: Duration) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         inner.time = inner
             .time
             .saturating_add_nanos(duration_to_nanos_saturating(duration));
@@ -388,7 +388,7 @@ impl LabReactor {
     ///
     /// * `target` - The target virtual time to advance to
     pub fn advance_time_to(&self, target: Time) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         if target > inner.time {
             inner.time = target;
         }
@@ -435,7 +435,7 @@ impl LabReactor {
     /// reactor.set_fault_config(token, config)?;
     /// ```
     pub fn set_fault_config(&self, token: Token, config: FaultConfig) -> io::Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         match inner.sockets.get_mut(&token) {
             Some(socket) => {
                 socket.fault = Some(FaultState::new(token, config));
@@ -456,7 +456,7 @@ impl LabReactor {
     ///
     /// Returns `Err` if the token is not registered.
     pub fn clear_fault_config(&self, token: Token) -> io::Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         match inner.sockets.get_mut(&token) {
             Some(socket) => {
                 socket.fault = None;
@@ -498,7 +498,7 @@ impl LabReactor {
     /// reactor.inject_error(token, io::ErrorKind::BrokenPipe)?;
     /// ```
     pub fn inject_error(&self, token: Token, kind: io::ErrorKind) -> io::Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         match inner.sockets.get_mut(&token) {
             Some(socket) => {
                 if let Some(ref mut fault) = socket.fault {
@@ -544,7 +544,7 @@ impl LabReactor {
     /// // Next poll will deliver HUP event
     /// ```
     pub fn inject_close(&self, token: Token) -> io::Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
 
         // Verify token is registered
         if !inner.sockets.contains_key(&token) {
@@ -627,7 +627,7 @@ impl LabReactor {
     /// reactor.partition(token, false)?;
     /// ```
     pub fn partition(&self, token: Token, partitioned: bool) -> io::Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         match inner.sockets.get_mut(&token) {
             Some(socket) => {
                 if let Some(ref mut fault) = socket.fault {
@@ -656,7 +656,7 @@ impl LabReactor {
 
     /// Returns the last error kind injected for a token (for diagnostics).
     pub fn last_injected_error(&self, token: Token) -> Option<io::ErrorKind> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock();
         inner
             .sockets
             .get(&token)
@@ -668,7 +668,7 @@ impl LabReactor {
     ///
     /// Returns `(injected_errors, injected_closes, dropped_events)`.
     pub fn fault_stats(&self, token: Token) -> Option<(u64, u64, u64)> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock();
         inner.sockets.get(&token).and_then(|s| {
             s.fault.as_ref().map(|f| {
                 (
@@ -689,7 +689,7 @@ impl Default for LabReactor {
 
 impl Reactor for LabReactor {
     fn register(&self, _source: &dyn Source, token: Token, interest: Interest) -> io::Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         if inner.sockets.contains_key(&token) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -708,7 +708,7 @@ impl Reactor for LabReactor {
     }
 
     fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         match inner.sockets.get_mut(&token) {
             Some(socket) => {
                 socket.interest = interest;
@@ -722,7 +722,7 @@ impl Reactor for LabReactor {
     }
 
     fn deregister(&self, token: Token) -> io::Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         if inner.sockets.remove(&token).is_none() {
             drop(inner);
             return Err(io::Error::new(
@@ -750,7 +750,7 @@ impl Reactor for LabReactor {
         events.clear();
 
         let delivered_events = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock();
 
             // Advance time if timeout provided (simulated)
             if let Some(d) = timeout {
@@ -944,7 +944,7 @@ impl Reactor for LabReactor {
     }
 
     fn registration_count(&self) -> usize {
-        self.inner.lock().unwrap().sockets.len()
+        self.inner.lock().sockets.len()
     }
 }
 
@@ -1597,7 +1597,6 @@ mod tests {
         let last_kind = reactor
             .inner
             .lock()
-            .unwrap()
             .chaos
             .as_ref()
             .and_then(|chaos| chaos.last_io_error_kind);
@@ -1638,7 +1637,6 @@ mod tests {
         let delayed_at = reactor
             .inner
             .lock()
-            .unwrap()
             .pending
             .peek()
             .map(|te| te.time)
@@ -1689,14 +1687,12 @@ mod tests {
         let last_a = reactor_a
             .inner
             .lock()
-            .unwrap()
             .chaos
             .as_ref()
             .and_then(|chaos| chaos.last_io_error_kind);
         let last_b = reactor_b
             .inner
             .lock()
-            .unwrap()
             .chaos
             .as_ref()
             .and_then(|chaos| chaos.last_io_error_kind);
@@ -1895,7 +1891,6 @@ mod tests {
             let has_fault = reactor
                 .inner
                 .lock()
-                .unwrap()
                 .sockets
                 .get(&token)
                 .and_then(|s| s.fault.as_ref())
@@ -1908,7 +1903,6 @@ mod tests {
             let has_fault = reactor
                 .inner
                 .lock()
-                .unwrap()
                 .sockets
                 .get(&token)
                 .and_then(|s| s.fault.as_ref())
@@ -2265,7 +2259,6 @@ mod tests {
             let has_fault = reactor
                 .inner
                 .lock()
-                .unwrap()
                 .sockets
                 .get(&token)
                 .and_then(|s| s.fault.as_ref())

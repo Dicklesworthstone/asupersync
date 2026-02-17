@@ -131,7 +131,7 @@ impl Worker {
             // If we can acquire the IO driver lock, we become the I/O leader.
             // The leader polls the reactor with a short timeout.
             if let Some(io) = &self.io_driver {
-                if let Ok(mut driver) = io.try_lock() {
+                if let Some(mut driver) = io.try_lock() {
                     // Poll with a short timeout to check for I/O events without
                     // spinning too hot, but returning frequently to check for new tasks.
                     //

@@ -210,11 +210,14 @@ pub(crate) fn schedule_local_task(task: TaskId) -> bool {
 }
 
 fn remove_from_local_ready(queue: &Arc<LocalReadyQueue>, task: TaskId) -> bool {
-    let mut local_ready = queue.lock();
     let mut removed = false;
-    while let Some(pos) = local_ready.iter().position(|t| *t == task) {
-        local_ready.swap_remove(pos);
-        removed = true;
+    {
+        let mut local_ready = queue.lock();
+        while let Some(pos) = local_ready.iter().position(|t| *t == task) {
+            local_ready.swap_remove(pos);
+            removed = true;
+        }
+        drop(local_ready);
     }
     removed
 }
@@ -1039,7 +1042,7 @@ impl ThreeLaneWorker {
             // If we can acquire the IO driver lock, we become the I/O leader
             // and poll the reactor for ready events (e.g. TCP connect completion).
             if let Some(io) = &self.io_driver {
-                if let Ok(mut driver) = io.try_lock() {
+                if let Some(mut driver) = io.try_lock() {
                     let _ = driver.turn_with(Some(Duration::from_millis(1)), |_, _| {});
                     continue;
                 }
