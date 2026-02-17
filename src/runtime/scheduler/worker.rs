@@ -540,13 +540,12 @@ impl Worker {
             return false;
         };
         let mut acknowledged = false;
-        {
-            let mut guard = inner.write();
-            if guard.cancel_acknowledged {
-                guard.cancel_acknowledged = false;
-                acknowledged = true;
-            }
+        let mut guard = inner.write();
+        if guard.cancel_acknowledged {
+            guard.cancel_acknowledged = false;
+            acknowledged = true;
         }
+        drop(guard);
         if acknowledged {
             let _ = record.acknowledge_cancel();
         }

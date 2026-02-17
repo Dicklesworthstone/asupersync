@@ -52,6 +52,9 @@ pub struct Notify {
 struct WaiterSlab {
     entries: Vec<WaiterEntry>,
     free_slots: Vec<usize>,
+    /// Number of active waiters (those with a waker set). Maintained
+    /// incrementally so `active_count()` is O(1) instead of a linear scan.
+    active: usize,
 }
 
 /// Entry in the waiter queue.
@@ -70,11 +73,15 @@ impl WaiterSlab {
         Self {
             entries: Vec::new(),
             free_slots: Vec::new(),
+            active: 0,
         }
     }
 
     /// Insert a waiter entry, reusing a free slot if available.
     fn insert(&mut self, entry: WaiterEntry) -> usize {
+        if entry.waker.is_some() {
+            self.active += 1;
+        }
         if let Some(index) = self.free_slots.pop() {
             self.entries[index] = entry;
             index
@@ -88,6 +95,9 @@ impl WaiterSlab {
     /// Remove a waiter entry by index, returning its slot to the free list.
     fn remove(&mut self, index: usize) {
         if index < self.entries.len() {
+            if self.entries[index].waker.is_some() {
+                self.active -= 1;
+            }
             self.entries[index].waker = None;
             self.entries[index].notified = false;
             self.free_slots.push(index);
@@ -108,9 +118,9 @@ impl WaiterSlab {
         }
     }
 
-    /// Count active waiters (those with a waker set).
+    /// Count active waiters (those with a waker set).  O(1) via maintained counter.
     fn active_count(&self) -> usize {
-        self.entries.iter().filter(|e| e.waker.is_some()).count()
+        self.active
     }
 }
 
@@ -148,15 +158,20 @@ impl Notify {
         let mut waiters = self.waiters.lock();
 
         // Find a waiter to notify.
+        let mut found_waker = None;
         for entry in &mut waiters.entries {
             if !entry.notified && entry.waker.is_some() {
                 entry.notified = true;
-                if let Some(waker) = entry.waker.take() {
-                    drop(waiters); // Release lock before waking.
-                    waker.wake();
-                    return;
-                }
+                found_waker = entry.waker.take();
+                break;
             }
+        }
+
+        if let Some(waker) = found_waker {
+            waiters.active -= 1;
+            drop(waiters); // Release lock before waking.
+            waker.wake();
+            return;
         }
 
         // No waiters found, store the notification.
@@ -179,7 +194,7 @@ impl Notify {
         let wakers: SmallVec<[Waker; 8]> = {
             let mut waiters = self.waiters.lock();
 
-            waiters
+            let wakers: SmallVec<[Waker; 8]> = waiters
                 .entries
                 .iter_mut()
                 .filter_map(|entry| {
@@ -195,7 +210,9 @@ impl Notify {
                         None
                     }
                 })
-                .collect()
+                .collect();
+            waiters.active -= wakers.len();
+            wakers
         };
 
         // Wake all.

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::task::Waker;
 use std::time::Duration;
 
-use super::wheel::TimerWheel;
+use super::wheel::{TimerWheel, WakerBatch};
 
 #[inline]
 fn duration_to_nanos_saturating(duration: Duration) -> u64 {
@@ -289,7 +289,7 @@ impl<T: TimeSource> TimerDriver<T> {
 
     /// Helper to collect expired wakers while holding the lock.
     #[allow(clippy::significant_drop_tightening)]
-    fn collect_expired(&self, now: Time) -> Vec<Waker> {
+    fn collect_expired(&self, now: Time) -> WakerBatch {
         self.wheel.lock().collect_expired(now)
     }
 

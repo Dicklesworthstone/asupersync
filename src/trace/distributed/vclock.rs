@@ -107,7 +107,7 @@ impl LamportClock {
     /// Records a local event and returns the updated time.
     #[must_use]
     pub fn tick(&self) -> LamportTime {
-        LamportTime(self.counter.fetch_add(1, Ordering::SeqCst) + 1)
+        LamportTime(self.counter.fetch_add(1, Ordering::AcqRel) + 1)
     }
 
     /// Merges a received Lamport time and returns the updated time.
@@ -118,7 +118,7 @@ impl LamportClock {
             let next = current.max(sender.raw()) + 1;
             match self
                 .counter
-                .compare_exchange(current, next, Ordering::SeqCst, Ordering::Relaxed)
+                .compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire)
             {
                 Ok(_) => return LamportTime(next),
                 Err(actual) => current = actual,

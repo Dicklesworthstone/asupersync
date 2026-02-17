@@ -27,8 +27,9 @@ use asupersync::trace::replayer::TraceReplayer;
 use asupersync::types::{Budget, CancelKind, CancelReason, Outcome, RegionId, TaskId, Time};
 use asupersync::util::ArenaIndex;
 use common::*;
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 static ALLOC_TEST_GUARD: Mutex<()> = Mutex::new(());
@@ -58,15 +59,14 @@ fn create_child_region(state: &mut RuntimeState, parent: RegionId) -> RegionId {
 
 fn cancel_region(runtime: &mut LabRuntime, region: RegionId, reason: &CancelReason) -> usize {
     let tasks = runtime.state.cancel_request(region, reason, None);
-    let mut scheduled = 0usize;
-    {
-        let mut scheduler = runtime.scheduler.lock();
-        for (task, priority) in tasks {
-            scheduler.schedule_cancel(task, priority);
-            scheduled += 1;
-        }
+    let mut cancel_count = 0usize;
+    let mut scheduler = runtime.scheduler.lock();
+    for (task, priority) in tasks {
+        scheduler.schedule_cancel(task, priority);
+        cancel_count += 1;
     }
-    scheduled
+    drop(scheduler);
+    cancel_count
 }
 
 fn spawn_cancellable_loop(
@@ -652,14 +652,14 @@ fn e2e_multiple_regions_all_quiesce() {
     let region_b = runtime.state.create_root_region(Budget::INFINITE);
     let region_c = runtime.state.create_root_region(Budget::INFINITE);
 
-    let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let order = Arc::new(Mutex::new(Vec::new()));
 
     // Task in region_a
     let o = order.clone();
     let (t1, _) = runtime
         .state
         .create_task(region_a, Budget::INFINITE, async move {
-            o.lock().unwrap().push("region_a");
+            o.lock().push("region_a");
         })
         .expect("task a");
     runtime.scheduler.lock().schedule(t1, 0);
@@ -669,7 +669,7 @@ fn e2e_multiple_regions_all_quiesce() {
     let (t2, _) = runtime
         .state
         .create_task(region_b, Budget::INFINITE, async move {
-            o.lock().unwrap().push("region_b");
+            o.lock().push("region_b");
         })
         .expect("task b");
     runtime.scheduler.lock().schedule(t2, 0);
@@ -679,7 +679,7 @@ fn e2e_multiple_regions_all_quiesce() {
     let (t3, _) = runtime
         .state
         .create_task(region_c, Budget::INFINITE, async move {
-            o.lock().unwrap().push("region_c");
+            o.lock().push("region_c");
         })
         .expect("task c");
     runtime.scheduler.lock().schedule(t3, 0);
@@ -687,7 +687,7 @@ fn e2e_multiple_regions_all_quiesce() {
     runtime.run_until_quiescent();
 
     let final_len = {
-        let final_order = order.lock().unwrap();
+        let final_order = order.lock();
         final_order.len()
     };
     assert_with_log!(final_len == 3, "all tasks completed", 3, final_len);
@@ -996,9 +996,7 @@ fn e2e_obligation_abort_on_cancel() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn e2e_leak_regression_obligations_and_heap_limits() {
-    let _guard = ALLOC_TEST_GUARD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = ALLOC_TEST_GUARD.lock();
     init_test("e2e_leak_regression_obligations_and_heap_limits");
 
     test_section!("setup");
@@ -1738,7 +1736,7 @@ fn e2e_obligation_tracked_channel_commit() {
             let cx = Cx::current().expect("cx");
             let permit = tx.reserve(&cx).await.expect("reserve");
             let proof = permit.send(7);
-            *proof_kind_clone.lock().unwrap() = Some(proof.kind());
+            *proof_kind_clone.lock() = Some(proof.kind());
         })
         .expect("create send task");
     runtime.scheduler.lock().schedule(send_task, 0);
@@ -1748,7 +1746,7 @@ fn e2e_obligation_tracked_channel_commit() {
         .create_task(root, Budget::INFINITE, async move {
             let cx = Cx::current().expect("cx");
             let value = rx.recv(&cx).await.expect("recv");
-            *recv_value_clone.lock().unwrap() = Some(value);
+            *recv_value_clone.lock() = Some(value);
         })
         .expect("create recv task");
     runtime.scheduler.lock().schedule(recv_task, 0);
@@ -1760,9 +1758,9 @@ fn e2e_obligation_tracked_channel_commit() {
 
     harness.enter_phase("verify");
     let mut passed = true;
-    let value = *recv_value.lock().unwrap();
+    let value = *recv_value.lock();
     passed &= harness.assert_eq("recv_value", &Some(7u32), &value);
-    let kind = *proof_kind.lock().unwrap();
+    let kind = *proof_kind.lock();
     passed &= harness.assert_eq("proof_kind", &Some(ObligationKind::SendPermit), &kind);
     passed &= harness.assert_true("quiescent", runtime.is_quiescent());
     let pending = runtime.state.pending_obligation_count();
@@ -1815,7 +1813,7 @@ fn e2e_obligation_tracked_oneshot_abort() {
             let cx = Cx::current().expect("cx");
             let permit = tx.reserve(&cx);
             let proof = permit.abort();
-            *proof_kind_clone.lock().unwrap() = Some(proof.kind());
+            *proof_kind_clone.lock() = Some(proof.kind());
         })
         .expect("create oneshot abort task");
     runtime.scheduler.lock().schedule(send_task, 0);
@@ -1826,7 +1824,7 @@ fn e2e_obligation_tracked_oneshot_abort() {
             let cx = Cx::current().expect("cx");
             let result = rx.recv(&cx).await;
             let closed = matches!(result, Err(asupersync::channel::oneshot::RecvError::Closed));
-            *recv_closed_clone.lock().unwrap() = Some(closed);
+            *recv_closed_clone.lock() = Some(closed);
         })
         .expect("create oneshot recv task");
     runtime.scheduler.lock().schedule(recv_task, 0);
@@ -1838,9 +1836,9 @@ fn e2e_obligation_tracked_oneshot_abort() {
 
     harness.enter_phase("verify");
     let mut passed = true;
-    let closed = *recv_closed.lock().unwrap();
+    let closed = *recv_closed.lock();
     passed &= harness.assert_eq("recv_closed", &Some(true), &closed);
-    let kind = *proof_kind.lock().unwrap();
+    let kind = *proof_kind.lock();
     passed &= harness.assert_eq("proof_kind", &Some(ObligationKind::SendPermit), &kind);
     passed &= harness.assert_true("quiescent", runtime.is_quiescent());
     let pending = runtime.state.pending_obligation_count();
@@ -1892,7 +1890,7 @@ fn e2e_obligation_cancel_mid_reserve() {
         .create_task(root, Budget::INFINITE, async move {
             let cx = Cx::current().expect("cx");
             let result = tx.reserve(&cx).await.map(|_permit| ());
-            *reserve_result_clone.lock().unwrap() = Some(result);
+            *reserve_result_clone.lock() = Some(result);
         })
         .expect("create reserve task");
     runtime.scheduler.lock().schedule(reserve_task, 0);
@@ -1913,7 +1911,7 @@ fn e2e_obligation_cancel_mid_reserve() {
 
     harness.enter_phase("verify");
     let mut passed = true;
-    let result = *reserve_result.lock().unwrap();
+    let result = *reserve_result.lock();
     let cancelled = matches!(result, Some(Err(mpsc::SendError::Cancelled(()))));
     passed &= harness.assert_true("reserve_cancelled", cancelled);
     passed &= harness.assert_true("quiescent", runtime.is_quiescent());
@@ -1964,7 +1962,7 @@ fn e2e_obligation_token_leak_detection() {
             let token = scope.reserve_token::<SendPermit>("leaky_send_permit");
             let _raw = token.into_raw();
             let leaked = scope.close().is_err();
-            *leak_detected_clone.lock().unwrap() = Some(leaked);
+            *leak_detected_clone.lock() = Some(leaked);
         })
         .expect("create leak task");
     runtime.scheduler.lock().schedule(leak_task, 0);
@@ -1976,7 +1974,7 @@ fn e2e_obligation_token_leak_detection() {
 
     harness.enter_phase("verify");
     let mut passed = true;
-    let leaked = *leak_detected.lock().unwrap();
+    let leaked = *leak_detected.lock();
     passed &= harness.assert_eq("leak_detected", &Some(true), &leaked);
     passed &= harness.assert_true("quiescent", runtime.is_quiescent());
     harness.exit_phase();

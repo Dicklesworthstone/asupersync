@@ -7,6 +7,7 @@
 
 use core::fmt;
 use parking_lot::RwLock;
+use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -90,9 +91,9 @@ struct CancelTokenState {
     /// Cleanup budget for this cancellation.
     cleanup_budget: Budget,
     /// Child tokens (for hierarchical cancellation).
-    children: RwLock<Vec<SymbolCancelToken>>,
+    children: RwLock<SmallVec<[SymbolCancelToken; 2]>>,
     /// Listeners to notify on cancellation.
-    listeners: RwLock<Vec<Box<dyn CancelListener>>>,
+    listeners: RwLock<SmallVec<[Box<dyn CancelListener>; 2]>>,
 }
 
 /// A cancellation token that can be embedded in symbol metadata.
@@ -118,8 +119,8 @@ impl SymbolCancelToken {
                 cancelled_at: AtomicU64::new(0),
                 reason: RwLock::new(None),
                 cleanup_budget: Budget::default(),
-                children: RwLock::new(Vec::new()),
-                listeners: RwLock::new(Vec::new()),
+                children: RwLock::new(SmallVec::new()),
+                listeners: RwLock::new(SmallVec::new()),
             }),
         }
     }
@@ -135,8 +136,8 @@ impl SymbolCancelToken {
                 cancelled_at: AtomicU64::new(0),
                 reason: RwLock::new(None),
                 cleanup_budget: budget,
-                children: RwLock::new(Vec::new()),
-                listeners: RwLock::new(Vec::new()),
+                children: RwLock::new(SmallVec::new()),
+                listeners: RwLock::new(SmallVec::new()),
             }),
         }
     }
@@ -215,10 +216,13 @@ impl SymbolCancelToken {
                 listener.on_cancel(reason, now);
             }
 
-            // Cancel children without holding the lock.
+            // Drain children without holding the lock. Safe because
+            // `cancelled` is already true (CAS above), so any concurrent
+            // `child()` will observe the flag and cancel directly instead
+            // of pushing into this vec.
             let children = {
-                let children = self.state.children.read();
-                children.clone()
+                let mut children = self.state.children.write();
+                std::mem::take(&mut *children)
             };
             let parent_reason = CancelReason::parent_cancelled();
             for child in children {
@@ -325,8 +329,8 @@ impl SymbolCancelToken {
                 cancelled_at: AtomicU64::new(0),
                 reason: RwLock::new(None),
                 cleanup_budget: Budget::default(),
-                children: RwLock::new(Vec::new()),
-                listeners: RwLock::new(Vec::new()),
+                children: RwLock::new(SmallVec::new()),
+                listeners: RwLock::new(SmallVec::new()),
             }),
         })
     }
@@ -343,8 +347,8 @@ impl SymbolCancelToken {
                 cancelled_at: AtomicU64::new(0),
                 reason: RwLock::new(None),
                 cleanup_budget: Budget::default(),
-                children: RwLock::new(Vec::new()),
-                listeners: RwLock::new(Vec::new()),
+                children: RwLock::new(SmallVec::new()),
+                listeners: RwLock::new(SmallVec::new()),
             }),
         }
     }
@@ -595,7 +599,7 @@ pub struct CancelBroadcastMetrics {
 /// [`handle_message`][Self::handle_message]) add network dispatch.
 pub struct CancelBroadcaster<S: CancelSink> {
     /// Known peers.
-    peers: RwLock<Vec<PeerId>>,
+    peers: RwLock<SmallVec<[PeerId; 4]>>,
     /// Active cancellation tokens by object ID.
     active_tokens: RwLock<HashMap<ObjectId, SymbolCancelToken>>,
     /// Seen message sequences for deduplication (with insertion order).
@@ -606,8 +610,12 @@ pub struct CancelBroadcaster<S: CancelSink> {
     sink: S,
     /// Local sequence counter.
     next_sequence: AtomicU64,
-    /// Metrics.
-    metrics: RwLock<CancelBroadcastMetrics>,
+    /// Atomic metrics counters.
+    initiated: AtomicU64,
+    received: AtomicU64,
+    forwarded: AtomicU64,
+    duplicates: AtomicU64,
+    max_hops_reached: AtomicU64,
 }
 
 /// Deterministic dedup tracking with bounded memory.
@@ -640,13 +648,17 @@ impl<S: CancelSink> CancelBroadcaster<S> {
     /// Creates a new broadcaster with the given sink.
     pub fn new(sink: S) -> Self {
         Self {
-            peers: RwLock::new(Vec::new()),
+            peers: RwLock::new(SmallVec::new()),
             active_tokens: RwLock::new(HashMap::new()),
             seen_sequences: RwLock::new(SeenSequences::default()),
             max_seen: 10_000,
             sink,
             next_sequence: AtomicU64::new(0),
-            metrics: RwLock::new(CancelBroadcastMetrics::default()),
+            initiated: AtomicU64::new(0),
+            received: AtomicU64::new(0),
+            forwarded: AtomicU64::new(0),
+            duplicates: AtomicU64::new(0),
+            max_hops_reached: AtomicU64::new(0),
         }
     }
 
@@ -683,20 +695,22 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         reason: &CancelReason,
         now: Time,
     ) -> CancelMessage {
-        // Cancel local token
-        if let Some(token) = self.active_tokens.read().get(&object_id) {
-            token.cancel(reason, now);
-        }
+        // Single read lock: cancel local token + extract token_id.
+        let token_id = {
+            let tokens = self.active_tokens.read();
+            if let Some(token) = tokens.get(&object_id) {
+                token.cancel(reason, now);
+                token.token_id()
+            } else {
+                object_id.high() ^ object_id.low()
+            }
+        };
 
         let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
-        let token_id = self.active_tokens.read().get(&object_id).map_or_else(
-            || object_id.high() ^ object_id.low(),
-            SymbolCancelToken::token_id,
-        );
         let msg = CancelMessage::new(token_id, object_id, reason.kind(), now, sequence);
 
         self.mark_seen(object_id, msg.token_id(), sequence);
-        self.metrics.write().initiated += 1;
+        self.initiated.fetch_add(1, Ordering::Relaxed);
 
         msg
     }
@@ -709,12 +723,12 @@ impl<S: CancelSink> CancelBroadcaster<S> {
     pub fn receive_message(&self, msg: &CancelMessage, now: Time) -> Option<CancelMessage> {
         // Check for duplicate
         if self.is_seen(msg.object_id(), msg.token_id(), msg.sequence()) {
-            self.metrics.write().duplicates += 1;
+            self.duplicates.fetch_add(1, Ordering::Relaxed);
             return None;
         }
 
         self.mark_seen(msg.object_id(), msg.token_id(), msg.sequence());
-        self.metrics.write().received += 1;
+        self.received.fetch_add(1, Ordering::Relaxed);
 
         // Cancel local token if present
         if let Some(token) = self.active_tokens.read().get(&msg.object_id()) {
@@ -725,11 +739,11 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         // Forward if allowed
         msg.forwarded().map_or_else(
             || {
-                self.metrics.write().max_hops_reached += 1;
+                self.max_hops_reached.fetch_add(1, Ordering::Relaxed);
                 None
             },
             |forwarded| {
-                self.metrics.write().forwarded += 1;
+                self.forwarded.fetch_add(1, Ordering::Relaxed);
                 Some(forwarded)
             },
         )
@@ -757,7 +771,13 @@ impl<S: CancelSink> CancelBroadcaster<S> {
     /// Returns a snapshot of current metrics.
     #[must_use]
     pub fn metrics(&self) -> CancelBroadcastMetrics {
-        self.metrics.read().clone()
+        CancelBroadcastMetrics {
+            initiated: self.initiated.load(Ordering::Relaxed),
+            received: self.received.load(Ordering::Relaxed),
+            forwarded: self.forwarded.load(Ordering::Relaxed),
+            duplicates: self.duplicates.load(Ordering::Relaxed),
+            max_hops_reached: self.max_hops_reached.load(Ordering::Relaxed),
+        }
     }
 
     fn is_seen(&self, object_id: ObjectId, token_id: u64, sequence: u64) -> bool {
@@ -1446,6 +1466,44 @@ mod tests {
         assert!(parent.is_cancelled());
         assert!(child.is_cancelled());
         assert_eq!(child.reason().unwrap().kind, CancelKind::ParentCancelled);
+    }
+
+    #[test]
+    fn test_cancel_drains_children_and_late_child_is_not_queued() {
+        let mut rng = DetRng::new(7);
+        let parent = SymbolCancelToken::new(ObjectId::new_for_test(5), &mut rng);
+        let child_a = parent.child(&mut rng);
+        let child_b = parent.child(&mut rng);
+
+        assert_eq!(
+            parent.state.children.read().len(),
+            2,
+            "precondition: both children should be queued under parent"
+        );
+
+        let now = Time::from_millis(100);
+        assert!(
+            parent.cancel(&CancelReason::user("drain"), now),
+            "first caller should trigger cancellation"
+        );
+        assert!(child_a.is_cancelled(), "queued child A must be cancelled");
+        assert!(child_b.is_cancelled(), "queued child B must be cancelled");
+        assert_eq!(
+            parent.state.children.read().len(),
+            0,
+            "children vector must be drained after parent cancel"
+        );
+
+        let late_child = parent.child(&mut rng);
+        assert!(
+            late_child.is_cancelled(),
+            "late child should be cancelled immediately when parent already cancelled"
+        );
+        assert_eq!(
+            parent.state.children.read().len(),
+            0,
+            "late child should not be retained in parent children vector"
+        );
     }
 
     // ---- Cancel propagation: child cancel does not affect parent --------

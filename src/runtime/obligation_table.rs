@@ -10,7 +10,6 @@ use crate::types::{ObligationId, RegionId, TaskId, Time};
 use crate::util::{Arena, ArenaIndex};
 use smallvec::SmallVec;
 use std::backtrace::Backtrace;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Information returned when an obligation is committed.
@@ -100,8 +99,8 @@ pub struct ObligationCreateArgs {
 #[derive(Debug, Default)]
 pub struct ObligationTable {
     obligations: Arena<ObligationRecord>,
-    /// Secondary index: task → obligation IDs held by that task.
-    by_holder: HashMap<TaskId, SmallVec<[ObligationId; 4]>>,
+    /// Secondary index: task → obligation IDs, indexed by arena slot.
+    by_holder: Vec<Option<SmallVec<[ObligationId; 4]>>>,
 }
 
 impl ObligationTable {
@@ -110,7 +109,7 @@ impl ObligationTable {
     pub fn new() -> Self {
         Self {
             obligations: Arena::new(),
-            by_holder: HashMap::new(),
+            by_holder: Vec::new(),
         }
     }
 
@@ -133,11 +132,19 @@ impl ObligationTable {
     pub fn insert(&mut self, record: ObligationRecord) -> ArenaIndex {
         let holder = record.holder;
         let idx = self.obligations.insert(record);
-        self.by_holder
-            .entry(holder)
-            .or_default()
-            .push(ObligationId::from_arena(idx));
+        self.push_holder_id(holder, ObligationId::from_arena(idx));
         idx
+    }
+
+    #[inline]
+    fn push_holder_id(&mut self, holder: TaskId, ob_id: ObligationId) {
+        let slot = holder.arena_index().index() as usize;
+        if slot >= self.by_holder.len() {
+            self.by_holder.resize_with(slot + 1, || None);
+        }
+        self.by_holder[slot]
+            .get_or_insert_with(SmallVec::new)
+            .push(ob_id);
     }
 
     /// Inserts a new obligation record produced by `f` into the arena.
@@ -149,10 +156,7 @@ impl ObligationTable {
     {
         let idx = self.obligations.insert_with(f);
         if let Some(record) = self.obligations.get(idx) {
-            self.by_holder
-                .entry(record.holder)
-                .or_default()
-                .push(ObligationId::from_arena(idx));
+            self.push_holder_id(record.holder, ObligationId::from_arena(idx));
         }
         idx
     }
@@ -161,10 +165,11 @@ impl ObligationTable {
     pub fn remove(&mut self, index: ArenaIndex) -> Option<ObligationRecord> {
         let record = self.obligations.remove(index)?;
         let ob_id = ObligationId::from_arena(index);
-        if let Some(ids) = self.by_holder.get_mut(&record.holder) {
+        let slot = record.holder.arena_index().index() as usize;
+        if let Some(Some(ids)) = self.by_holder.get_mut(slot) {
             ids.retain(|id| *id != ob_id);
             if ids.is_empty() {
-                self.by_holder.remove(&record.holder);
+                self.by_holder[slot] = None;
             }
         }
         Some(record)
@@ -235,7 +240,7 @@ impl ObligationTable {
             })
         };
         let ob_id = ObligationId::from_arena(idx);
-        self.by_holder.entry(holder).or_default().push(ob_id);
+        self.push_holder_id(holder, ob_id);
         ob_id
     }
 
@@ -347,7 +352,11 @@ impl ObligationTable {
     /// Callers should filter by `is_pending()` if only active obligations are needed.
     #[must_use]
     pub fn ids_for_holder(&self, task_id: TaskId) -> &[ObligationId] {
-        self.by_holder.get(&task_id).map_or(&[], SmallVec::as_slice)
+        let slot = task_id.arena_index().index() as usize;
+        self.by_holder
+            .get(slot)
+            .and_then(Option::as_ref)
+            .map_or(&[], SmallVec::as_slice)
     }
 
     /// Collects pending obligation IDs for a task using the holder index.

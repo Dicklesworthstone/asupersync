@@ -114,7 +114,7 @@ fn request_cancel_and_drain(runtime: &mut LabRuntime, app_region: RegionId) {
             .cancel_request(app_region, &CancelReason::shutdown(), None);
 
         {
-            let mut scheduler = runtime.scheduler.lock().expect("lab scheduler lock");
+            let mut scheduler = runtime.scheduler.lock();
             for (task_id, priority) in to_cancel {
                 scheduler.schedule_cancel(task_id, priority);
             }
@@ -145,7 +145,7 @@ fn stop_named_server(
     drop(guard);
 
     {
-        let mut scheduler = runtime.scheduler.lock().expect("lab scheduler lock");
+        let mut scheduler = runtime.scheduler.lock();
         scheduler.schedule(counter_task, 0);
     }
 
@@ -198,7 +198,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })?;
 
     {
-        let mut scheduler = runtime.scheduler.lock().expect("lab scheduler lock");
+        let mut scheduler = runtime.scheduler.lock();
         scheduler.schedule(counter_task, 0);
         scheduler.schedule(client_task, 0);
     }

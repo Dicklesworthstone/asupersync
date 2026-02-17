@@ -118,12 +118,12 @@ impl FulfillmentProgress {
 
     /// Increments the fulfilled count by one.
     pub fn increment(&self) {
-        self.fulfilled.fetch_add(1, Ordering::SeqCst);
+        self.fulfilled.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Increments by a specific amount.
     pub fn add(&self, count: u32) {
-        self.fulfilled.fetch_add(count, Ordering::SeqCst);
+        self.fulfilled.fetch_add(count, Ordering::Relaxed);
     }
 
     /// Returns the total required.
@@ -135,7 +135,7 @@ impl FulfillmentProgress {
     /// Returns the current fulfilled count.
     #[must_use]
     pub fn fulfilled(&self) -> u32 {
-        self.fulfilled.load(Ordering::SeqCst)
+        self.fulfilled.load(Ordering::Relaxed)
     }
 
     /// Returns true if fulfillment is complete.
@@ -563,10 +563,10 @@ pub struct SymbolicObligationRegistry {
     by_id: RwLock<HashMap<ObligationId, ObligationEntry>>,
     /// Obligations by object ID.
     by_object: RwLock<HashMap<ObjectId, Vec<ObligationId>>>,
-    /// Obligations by holder task.
-    by_holder: RwLock<HashMap<TaskId, Vec<ObligationId>>>,
-    /// Obligations by region.
-    by_region: RwLock<HashMap<RegionId, Vec<ObligationId>>>,
+    /// Obligations by holder task (arena-slot indexed).
+    by_holder: RwLock<Vec<Option<Vec<ObligationId>>>>,
+    /// Obligations by region (arena-slot indexed).
+    by_region: RwLock<Vec<Option<Vec<ObligationId>>>>,
     /// Next obligation ID.
     next_id: AtomicU64,
 }
@@ -578,8 +578,8 @@ impl SymbolicObligationRegistry {
         Self {
             by_id: RwLock::new(HashMap::new()),
             by_object: RwLock::new(HashMap::new()),
-            by_holder: RwLock::new(HashMap::new()),
-            by_region: RwLock::new(HashMap::new()),
+            by_holder: RwLock::new(Vec::new()),
+            by_region: RwLock::new(Vec::new()),
             next_id: AtomicU64::new(1),
         }
     }
@@ -684,9 +684,11 @@ impl SymbolicObligationRegistry {
     /// Returns obligation IDs for a region.
     #[must_use]
     pub fn obligations_for_region(&self, region: RegionId) -> Vec<ObligationId> {
-        self.by_region
-            .read()
-            .get(&region)
+        let slot = region.arena_index().index() as usize;
+        let guard = self.by_region.read();
+        guard
+            .get(slot)
+            .and_then(Option::as_ref)
             .cloned()
             .unwrap_or_default()
     }
@@ -694,9 +696,11 @@ impl SymbolicObligationRegistry {
     /// Returns obligation IDs for a task.
     #[must_use]
     pub fn obligations_for_task(&self, task: TaskId) -> Vec<ObligationId> {
-        self.by_holder
-            .read()
-            .get(&task)
+        let slot = task.arena_index().index() as usize;
+        let guard = self.by_holder.read();
+        guard
+            .get(slot)
+            .and_then(Option::as_ref)
             .cloned()
             .unwrap_or_default()
     }
@@ -714,9 +718,10 @@ impl SymbolicObligationRegistry {
     /// Checks for pending obligations in a region (blocks region close).
     #[must_use]
     pub fn has_pending_in_region(&self, region: RegionId) -> bool {
+        let slot = region.arena_index().index() as usize;
         let ids = {
             let by_region = self.by_region.read();
-            by_region.get(&region).cloned()
+            by_region.get(slot).and_then(Option::as_ref).cloned()
         };
 
         let Some(ids) = ids else {
@@ -740,9 +745,10 @@ impl SymbolicObligationRegistry {
     pub fn pending_in_region(&self, region: RegionId) -> Vec<ObligationSummary> {
         let mut result = Vec::new();
 
+        let slot = region.arena_index().index() as usize;
         let ids = {
             let by_region = self.by_region.read();
-            by_region.get(&region).cloned()
+            by_region.get(slot).and_then(Option::as_ref).cloned()
         };
 
         let Some(ids) = ids else {
@@ -768,7 +774,7 @@ impl SymbolicObligationRegistry {
     }
 
     fn allocate_id(&self) -> ObligationId {
-        let raw = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let raw = self.next_id.fetch_add(1, Ordering::Relaxed);
         ObligationId::from_arena(ArenaIndex::new(raw as u32, 0))
     }
 
@@ -797,8 +803,22 @@ impl SymbolicObligationRegistry {
             .entry(object_id)
             .or_default()
             .push(id);
-        self.by_holder.write().entry(holder).or_default().push(id);
-        self.by_region.write().entry(region).or_default().push(id);
+        {
+            let holder_slot = holder.arena_index().index() as usize;
+            let mut by_holder = self.by_holder.write();
+            if holder_slot >= by_holder.len() {
+                by_holder.resize_with(holder_slot + 1, || None);
+            }
+            by_holder[holder_slot].get_or_insert_with(Vec::new).push(id);
+        }
+        {
+            let region_slot = region.arena_index().index() as usize;
+            let mut by_region = self.by_region.write();
+            if region_slot >= by_region.len() {
+                by_region.resize_with(region_slot + 1, || None);
+            }
+            by_region[region_slot].get_or_insert_with(Vec::new).push(id);
+        }
     }
 }
 

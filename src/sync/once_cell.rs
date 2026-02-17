@@ -15,8 +15,8 @@ use smallvec::SmallVec;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Condvar, Mutex as StdMutex, OnceLock};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Condvar, Mutex as StdMutex, OnceLock};
 use std::task::{Context, Poll, Waker};
 
 /// State values for OnceCell.
@@ -48,13 +48,14 @@ impl std::error::Error for OnceCellError {}
 #[derive(Debug)]
 struct InitWaiter {
     waker: Waker,
-    /// Flag indicating whether this waiter is still queued.
-    queued: Arc<AtomicBool>,
+    /// Stable waiter identity for refresh/removal without per-waiter allocation.
+    id: u64,
 }
 
 /// Internal state holding waiters.
 struct WaiterState {
-    waiters: Vec<InitWaiter>,
+    waiters: SmallVec<[InitWaiter; 4]>,
+    next_waiter_id: u64,
 }
 
 /// A cell that can be initialized exactly once.
@@ -88,12 +89,13 @@ pub struct OnceCell<T> {
 impl<T> OnceCell<T> {
     /// Creates a new uninitialized `OnceCell`.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             state: AtomicU8::new(UNINIT),
             value: OnceLock::new(),
             waiters: StdMutex::new(WaiterState {
-                waiters: Vec::new(),
+                waiters: SmallVec::new(),
+                next_waiter_id: 0,
             }),
             cvar: Condvar::new(),
         }
@@ -282,7 +284,7 @@ impl<T> OnceCell<T> {
                     // Another task is initializing. Wait for it.
                     WaitInit {
                         cell: self,
-                        waiter: None,
+                        waiter_id: None,
                     }
                     .await;
 
@@ -365,7 +367,7 @@ impl<T> OnceCell<T> {
                     // Another task is initializing. Wait for it.
                     WaitInit {
                         cell: self,
-                        waiter: None,
+                        waiter_id: None,
                     }
                     .await;
                     // The other task might have failed, check state.
@@ -417,68 +419,54 @@ impl<T> OnceCell<T> {
 
     /// Wakes all async waiters.
     fn wake_all(&self) {
-        let wakers: SmallVec<[(Waker, Arc<AtomicBool>); 4]> = {
+        let wakers: SmallVec<[Waker; 4]> = {
             let mut guard = match self.waiters.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            guard
-                .waiters
-                .drain(..)
-                .map(|w| (w.waker, w.queued))
-                .collect()
+            guard.waiters.drain(..).map(|w| w.waker).collect()
         };
 
-        for (waker, queued) in wakers {
-            queued.store(false, Ordering::Release);
+        for waker in wakers {
             waker.wake();
         }
     }
 
-    /// Registers a waker for async waiting with tracking to prevent unbounded growth.
-    fn register_waker(
-        &self,
-        waker: &Waker,
-        waiter_flag: Option<&Arc<AtomicBool>>,
-    ) -> Option<Arc<AtomicBool>> {
+    /// Registers a waker for async waiting with waiter-id tracking to prevent
+    /// unbounded queue growth.
+    fn register_waker(&self, waker: &Waker, waiter_id: &mut Option<u64>) {
         let mut guard = match self.waiters.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
 
-        let result = match waiter_flag {
-            Some(flag) if !flag.load(Ordering::Acquire) => {
-                // We were woken but not ready yet - re-register
-                flag.store(true, Ordering::Release);
-                guard.waiters.push(InitWaiter {
-                    waker: waker.clone(),
-                    queued: Arc::clone(flag),
-                });
-                None
-            }
-            Some(flag) => {
-                // Already queued: refresh to the latest task waker.
-                if let Some(existing) = guard.waiters.iter_mut().find(|entry| {
-                    Arc::ptr_eq(&entry.queued, flag) && entry.queued.load(Ordering::Acquire)
-                }) {
-                    if !existing.waker.will_wake(waker) {
-                        existing.waker.clone_from(waker);
-                    }
+        if let Some(id) = *waiter_id {
+            // Still queued: refresh to the latest task waker.
+            if let Some(existing) = guard.waiters.iter_mut().find(|entry| entry.id == id) {
+                if !existing.waker.will_wake(waker) {
+                    existing.waker.clone_from(waker);
                 }
-                None
-            }
-            None => {
-                // First time - create new waiter
-                let flag = Arc::new(AtomicBool::new(true));
+            } else {
+                // Dequeued while still waiting; re-register.
+                let new_id = guard.next_waiter_id;
+                guard.next_waiter_id += 1;
                 guard.waiters.push(InitWaiter {
                     waker: waker.clone(),
-                    queued: Arc::clone(&flag),
+                    id: new_id,
                 });
-                Some(flag)
+                *waiter_id = Some(new_id);
             }
-        };
+        } else {
+            // First time: create new waiter id.
+            let id = guard.next_waiter_id;
+            guard.next_waiter_id += 1;
+            guard.waiters.push(InitWaiter {
+                waker: waker.clone(),
+                id,
+            });
+            *waiter_id = Some(id);
+        }
         drop(guard);
-        result
     }
 }
 
@@ -544,8 +532,8 @@ impl<T> Drop for InitGuard<'_, T> {
 /// Future that waits for initialization to complete.
 struct WaitInit<'a, T> {
     cell: &'a OnceCell<T>,
-    /// Tracks whether we've registered a waiter to prevent unbounded queue growth.
-    waiter: Option<Arc<AtomicBool>>,
+    /// Tracks registered waiter identity to prevent unbounded queue growth.
+    waiter_id: Option<u64>,
 }
 
 impl<T> Future for WaitInit<'_, T> {
@@ -554,9 +542,7 @@ impl<T> Future for WaitInit<'_, T> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let state = self.cell.state.load(Ordering::Acquire);
         if state == INITIALIZING {
-            if let Some(new_waiter) = self.cell.register_waker(cx.waker(), self.waiter.as_ref()) {
-                self.waiter = Some(new_waiter);
-            }
+            self.cell.register_waker(cx.waker(), &mut self.waiter_id);
             // Double-check after registering.
             if self.cell.state.load(Ordering::Acquire) == INITIALIZING {
                 Poll::Pending
@@ -571,17 +557,14 @@ impl<T> Future for WaitInit<'_, T> {
 
 impl<T> Drop for WaitInit<'_, T> {
     fn drop(&mut self) {
-        if let Some(waiter) = self.waiter.as_ref() {
+        if let Some(waiter_id) = self.waiter_id {
             // Remove canceled waiter registrations immediately so repeated
             // cancel/drop cycles don't accumulate until wake_all() drains.
-            waiter.store(false, Ordering::Release);
             let mut guard = match self.cell.waiters.lock() {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            guard
-                .waiters
-                .retain(|entry| !Arc::ptr_eq(&entry.queued, waiter));
+            guard.waiters.retain(|entry| entry.id != waiter_id);
         }
     }
 }

@@ -7,11 +7,11 @@ use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
+use parking_lot::Mutex;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net;
 use std::pin::Pin;
-use parking_lot::Mutex;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
@@ -307,12 +307,7 @@ impl OwnedReadHalf {
             let mut other = other;
             other.shutdown_on_drop = false;
 
-            let registration = self
-                .inner
-                .state
-                .lock()
-                .registration
-                .take();
+            let registration = self.inner.state.lock().registration.take();
             Ok(super::UnixStream::from_parts(
                 self.inner.stream.clone(),
                 registration,

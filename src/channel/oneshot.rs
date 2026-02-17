@@ -46,9 +46,9 @@
 //! ```
 
 use crate::cx::Cx;
+use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
-use parking_lot::Mutex;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
@@ -387,6 +387,7 @@ impl<T> Future for RecvFuture<'_, T> {
             // after the channel is done.
             inner.clear_waker();
             this.waiter_id = None;
+            drop(inner);
             this.cx.trace("oneshot::recv received value");
             return Poll::Ready(Ok(value));
         }
@@ -395,6 +396,7 @@ impl<T> Future for RecvFuture<'_, T> {
         if inner.is_closed() {
             inner.clear_waker();
             this.waiter_id = None;
+            drop(inner);
             this.cx.trace("oneshot::recv channel closed");
             return Poll::Ready(Err(RecvError::Closed));
         }
@@ -409,6 +411,7 @@ impl<T> Future for RecvFuture<'_, T> {
                 inner.clear_waker();
             }
             this.waiter_id = None;
+            drop(inner);
             this.cx.trace("oneshot::recv cancelled while waiting");
             return Poll::Ready(Err(RecvError::Cancelled));
         }
@@ -434,13 +437,15 @@ impl<T> Drop for RecvFuture<'_, T> {
     fn drop(&mut self) {
         // If dropped while Pending (e.g., select/race loser), clear
         // the registered waker to avoid retaining stale executor state.
-        let mut inner = self.receiver.inner.lock();
-        // Clear only if this future still owns the registered waiter slot.
-        if self
-            .waiter_id
-            .is_some_and(|waiter_id| inner.waker_id == Some(waiter_id))
         {
-            inner.clear_waker();
+            let mut inner = self.receiver.inner.lock();
+            // Clear only if this future still owns the registered waiter slot.
+            if self
+                .waiter_id
+                .is_some_and(|waiter_id| inner.waker_id == Some(waiter_id))
+            {
+                inner.clear_waker();
+            }
         }
         self.waiter_id = None;
     }
@@ -492,16 +497,21 @@ impl<T> Receiver<T> {
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         let mut inner = self.inner.lock();
 
-        inner.value.take().map_or_else(
-            || {
-                if inner.is_closed() {
-                    Err(TryRecvError::Closed)
-                } else {
-                    Err(TryRecvError::Empty)
-                }
-            },
-            Ok,
-        )
+        if let Some(value) = inner.value.take() {
+            // Terminal success path: clear stale waiter registration.
+            inner.clear_waker();
+            drop(inner);
+            return Ok(value);
+        }
+
+        if inner.is_closed() {
+            // Terminal closed path: clear stale waiter registration.
+            inner.clear_waker();
+            drop(inner);
+            return Err(TryRecvError::Closed);
+        }
+
+        Err(TryRecvError::Empty)
     }
 
     /// Returns true if a value is ready to receive.
@@ -990,6 +1000,60 @@ mod tests {
         );
 
         crate::test_complete!("recv_closed_clears_stale_waker");
+    }
+
+    #[test]
+    fn try_recv_value_ready_clears_stale_waker() {
+        init_test("try_recv_value_ready_clears_stale_waker");
+        let cx = test_cx();
+        let (tx, rx) = channel::<i32>();
+
+        let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut fut = Box::pin(rx.recv(&cx));
+
+        let first = fut.as_mut().poll(&mut task_cx);
+        assert!(matches!(first, Poll::Pending));
+        assert!(rx.inner.lock().waker.is_some());
+
+        tx.send(&cx, 99).unwrap();
+        let value = rx.try_recv().unwrap();
+        crate::assert_with_log!(value == 99, "try_recv value", 99, value);
+
+        assert!(
+            rx.inner.lock().waker.is_none(),
+            "waker should be cleared after try_recv Ok"
+        );
+
+        drop(fut);
+        crate::test_complete!("try_recv_value_ready_clears_stale_waker");
+    }
+
+    #[test]
+    fn try_recv_closed_clears_stale_waker() {
+        init_test("try_recv_closed_clears_stale_waker");
+        let cx = test_cx();
+        let (tx, rx) = channel::<i32>();
+
+        let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut fut = Box::pin(rx.recv(&cx));
+
+        let first = fut.as_mut().poll(&mut task_cx);
+        assert!(matches!(first, Poll::Pending));
+        assert!(rx.inner.lock().waker.is_some());
+
+        drop(tx);
+        let closed = rx.try_recv();
+        assert!(matches!(closed, Err(TryRecvError::Closed)));
+
+        assert!(
+            rx.inner.lock().waker.is_none(),
+            "waker should be cleared after try_recv Closed"
+        );
+
+        drop(fut);
+        crate::test_complete!("try_recv_closed_clears_stale_waker");
     }
 
     /// Verify that SendPermit::send handles receiver-already-dropped

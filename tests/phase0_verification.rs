@@ -23,8 +23,9 @@ use asupersync::trace::{trace_fingerprint, TraceData, TraceEvent, TraceEventKind
 use asupersync::types::{Budget, CancelReason, Outcome, RegionId, TaskId, Time};
 use common::*;
 use futures_lite::future;
+use parking_lot::Mutex;
 use std::collections::{BTreeSet, HashMap};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 fn region(n: u32) -> RegionId {
     RegionId::new_for_test(n, 0)
@@ -289,18 +290,18 @@ fn e2e_finalizer_lifo_async_masked_execution() {
     assert_with_log!(unmasked, "cancel observed when unmasked", true, unmasked);
 
     let o1 = order.clone();
-    state.register_sync_finalizer(region, move || o1.lock().unwrap().push("f1"));
+    state.register_sync_finalizer(region, move || o1.lock().push("f1"));
 
     let o2 = order.clone();
     let cx_async = cx.clone();
     state.register_async_finalizer(region, async move {
-        o2.lock().unwrap().push("f2");
+        o2.lock().push("f2");
         let ok = cx_async.checkpoint().is_ok();
         assert_with_log!(ok, "async finalizer masked", true, ok);
     });
 
     let o3 = order.clone();
-    state.register_sync_finalizer(region, move || o3.lock().unwrap().push("f3"));
+    state.register_sync_finalizer(region, move || o3.lock().push("f3"));
 
     let mut finalizers = Vec::new();
     while let Some(finalizer) = state.pop_region_finalizer(region) {
@@ -317,7 +318,7 @@ fn e2e_finalizer_lifo_async_masked_execution() {
         }
     }
 
-    let order = order.lock().unwrap().clone();
+    let order = order.lock().clone();
     assert_with_log!(
         order == vec!["f3", "f2", "f1"],
         "finalizer LIFO order (sync + async)",
@@ -889,7 +890,7 @@ impl<T> SharedHandle<T> {
     where
         T: Clone,
     {
-        let mut state = self.inner.state.lock().expect("join state lock");
+        let mut state = self.inner.state.lock();
         match &*state {
             JoinState::Ready(result) => return Some(result.clone()),
             JoinState::InFlight => return None,
@@ -905,7 +906,7 @@ impl<T> SharedHandle<T> {
             Err(err) => Some(Err(err)),
         };
 
-        let mut state = self.inner.state.lock().expect("join state lock");
+        let mut state = self.inner.state.lock();
         if let Some(result) = result {
             *state = JoinState::Ready(result.clone());
             Some(result)
@@ -921,7 +922,7 @@ impl<T> SharedHandle<T> {
     {
         loop {
             let should_join = {
-                let mut state = self.inner.state.lock().expect("join state lock");
+                let mut state = self.inner.state.lock();
                 match &*state {
                     JoinState::Ready(result) => return result.clone(),
                     JoinState::InFlight => false,
@@ -935,7 +936,7 @@ impl<T> SharedHandle<T> {
             if should_join {
                 let result = self.inner.handle.join(cx).await;
                 {
-                    let mut state = self.inner.state.lock().expect("join state lock");
+                    let mut state = self.inner.state.lock();
                     *state = JoinState::Ready(result.clone());
                 }
                 return result;
@@ -1024,9 +1025,10 @@ fn run_plan(runtime: &mut LabRuntime, plan: &PlanDag) -> NodeValue {
         let mut sched = runtime.scheduler.lock();
         for (_, record) in runtime.state.tasks_iter() {
             if record.is_runnable() {
-                let prio = record.cx_inner.as_ref().map_or(0, |inner| {
-                    inner.read().budget.priority
-                });
+                let prio = record
+                    .cx_inner
+                    .as_ref()
+                    .map_or(0, |inner| inner.read().budget.priority);
                 sched.schedule(record.id, prio);
             }
         }
@@ -1073,7 +1075,7 @@ fn run_plan(runtime: &mut LabRuntime, plan: &PlanDag) -> NodeValue {
     for race in races {
         let fallback = *race.participants.first().expect("race participant");
         let winner = {
-            let winners = winners.lock().expect("winners lock");
+            let winners = winners.lock();
             winners.get(&race.race_id).copied().unwrap_or(fallback)
         };
         for participant in &race.participants {
@@ -1186,10 +1188,7 @@ fn build_node(
                 let (winner_result, winner_idx) = race_first(&child_handles).await;
                 if let Some(winner_task) = child_handles.get(winner_idx).map(SharedHandle::task_id)
                 {
-                    winners
-                        .lock()
-                        .expect("winners lock")
-                        .insert(race_id, winner_task);
+                    winners.lock().insert(race_id, winner_task);
                 }
                 for (idx, handle) in child_handles.iter().enumerate() {
                     if idx != winner_idx {
@@ -1232,13 +1231,8 @@ where
         .iter()
         .find(|(_, record)| record.id == task_id)
         .and_then(|(_, record)| record.cx_inner.as_ref())
-        .map_or(0, |inner| {
-            inner.read().budget.priority
-        });
-    runtime
-        .scheduler
-        .lock()
-        .schedule(task_id, priority);
+        .map_or(0, |inner| inner.read().budget.priority);
+    runtime.scheduler.lock().schedule(task_id, priority);
     SharedHandle::new(handle)
 }
 

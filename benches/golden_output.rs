@@ -457,7 +457,7 @@ fn scenario_lab_deterministic(seed: u64) -> String {
 
     // Exercise the scheduler via the lab's scheduler
     {
-        let mut sched = lab.scheduler.lock().expect("lab scheduler lock");
+        let mut sched = lab.scheduler.lock();
         for i in 0..20_u32 {
             let tid = task(i);
             match i % 3 {

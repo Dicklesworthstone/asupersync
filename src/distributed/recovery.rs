@@ -21,7 +21,7 @@ use crate::security::SecurityContext;
 use crate::types::symbol::{ObjectParams, Symbol};
 use crate::types::{RegionId, Time};
 use crate::RejectReason;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use super::snapshot::RegionSnapshot;
@@ -238,7 +238,7 @@ pub struct CollectionMetrics {
 pub struct RecoveryCollector {
     config: RecoveryConfig,
     collected: Vec<CollectedSymbol>,
-    seen_esi: HashSet<u32>,
+    esi_to_idx: HashMap<u32, usize>,
     /// Object parameters from metadata (set once known).
     pub object_params: Option<ObjectParams>,
     progress: RecoveryProgress,
@@ -254,7 +254,7 @@ impl RecoveryCollector {
         Self {
             config,
             collected: Vec::new(),
-            seen_esi: HashSet::new(),
+            esi_to_idx: HashMap::new(),
             object_params: None,
             progress: RecoveryProgress {
                 started_at: Time::ZERO,
@@ -304,24 +304,18 @@ impl RecoveryCollector {
     /// `false` if duplicate/rejected.
     pub fn add_collected(&mut self, cs: CollectedSymbol) -> bool {
         let esi = cs.symbol.esi();
-        if self.seen_esi.contains(&esi) {
-            // Find existing symbol and check if we should upgrade/replace it.
+        if let Some(&idx) = self.esi_to_idx.get(&esi) {
+            // O(1) lookup for upgrade path: replace unverified with verified.
             // This prevents a poisoning attack where a bad peer sends unverified garbage first.
-            if let Some(idx) = self.collected.iter().position(|s| s.symbol.esi() == esi) {
-                if !self.collected[idx].verified && cs.verified {
-                    // Replace unverified with verified.
-                    self.collected[idx] = cs;
-                    // Metrics: replace counts as "received" (or improvement)?
-                    // We don't increment received/collected count because total unique ESIs is same.
-                    // But we might want to track this event.
-                    // For now, just return true.
-                    return true;
-                }
+            if !self.collected[idx].verified && cs.verified {
+                self.collected[idx] = cs;
+                return true;
             }
             self.metrics.symbols_duplicate += 1;
             return false;
         }
-        self.seen_esi.insert(esi);
+        let idx = self.collected.len();
+        self.esi_to_idx.insert(esi, idx);
         self.metrics.symbols_received += 1;
         self.progress.symbols_collected += 1;
         self.collected.push(cs);
@@ -357,7 +351,7 @@ impl std::fmt::Debug for RecoveryCollector {
         f.debug_struct("RecoveryCollector")
             .field("config", &self.config)
             .field("collected", &self.collected.len())
-            .field("seen_esi", &self.seen_esi.len())
+            .field("esi_to_idx", &self.esi_to_idx.len())
             .field("object_params", &self.object_params)
             .field("phase", &self.progress.phase)
             .field("metrics", &self.metrics)
@@ -530,13 +524,11 @@ impl StateDecoder {
                 SymbolAcceptResult::Rejected(RejectReason::BlockAlreadyDecoded) => {
                     // Additional symbols after decode are fine; ignore them.
                 }
-                SymbolAcceptResult::Rejected(reason) => {
-                    let _message = format!("symbol rejected: {reason:?}");
+                SymbolAcceptResult::Rejected(_reason) => {
                     // Do not fail the entire batch just because one symbol was bad.
                     // We might have enough valid symbols in the rest of the batch.
-                    // Just log it (conceptually) and continue.
                     #[cfg(feature = "tracing-integration")]
-                    tracing::warn!(%message, "ignoring rejected symbol during recovery");
+                    tracing::warn!(reason = ?_reason, "ignoring rejected symbol during recovery");
                 }
                 _ => {}
             }
@@ -714,12 +706,12 @@ impl RecoveryOrchestrator {
             }
         };
 
-        // Collect contributing replicas.
+        // Collect contributing replicas (O(R) clones where R = unique replicas).
+        let mut seen_replicas = HashSet::new();
         let contributing: Vec<String> = symbols
             .iter()
+            .filter(|s| seen_replicas.insert(s.source_replica.as_str()))
             .map(|s| s.source_replica.clone())
-            .collect::<HashSet<_>>()
-            .into_iter()
             .collect();
 
         self.recovering = false;

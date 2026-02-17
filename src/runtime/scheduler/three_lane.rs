@@ -62,9 +62,9 @@ use crate::tracing_compat::{error, trace};
 use crate::types::{CxInner, TaskId, Time};
 use crate::util::DetRng;
 use parking_lot::Mutex;
+use parking_lot::RwLock;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use parking_lot::RwLock;
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
@@ -88,13 +88,23 @@ type LocalReadyQueue = Mutex<Vec<TaskId>>;
 pub(crate) struct WorkerCoordinator {
     parkers: Vec<Parker>,
     next_wake: AtomicUsize,
+    /// Bitmask for power-of-two worker counts (replaces IDIV with AND).
+    /// `None` when the count is zero or non-power-of-two.
+    mask: Option<usize>,
 }
 
 impl WorkerCoordinator {
     pub(crate) fn new(parkers: Vec<Parker>) -> Self {
+        let count = parkers.len();
+        let mask = if count > 0 && count.is_power_of_two() {
+            Some(count - 1)
+        } else {
+            None
+        };
         Self {
             parkers,
             next_wake: AtomicUsize::new(0),
+            mask,
         }
     }
 
@@ -105,7 +115,9 @@ impl WorkerCoordinator {
             return;
         }
         let idx = self.next_wake.fetch_add(1, Ordering::Relaxed);
-        self.parkers[idx % count].unpark();
+        // Use bitmask (AND) when worker count is power-of-two to avoid IDIV.
+        let slot = self.mask.map_or_else(|| idx % count, |mask| idx & mask);
+        self.parkers[slot].unpark();
     }
 
     #[inline]
@@ -214,16 +226,17 @@ pub(crate) fn schedule_local_task(task: TaskId) -> bool {
 }
 
 fn remove_from_local_ready(queue: &Arc<LocalReadyQueue>, task: TaskId) -> bool {
-    let mut removed = false;
-    {
-        let mut local_ready = queue.lock();
-        while let Some(pos) = local_ready.iter().position(|t| *t == task) {
+    let mut local_ready = queue.lock();
+    // Single scan: wake_state.notify() dedup prevents duplicate entries, so
+    // at most one match exists. The old `while` loop would scan the remainder
+    // of the Vec after the first removal for a match that can never be there.
+    local_ready
+        .iter()
+        .position(|t| *t == task)
+        .is_some_and(|pos| {
             local_ready.swap_remove(pos);
-            removed = true;
-        }
-        drop(local_ready);
-    }
-    removed
+            true
+        })
 }
 
 pub(crate) fn remove_from_current_local_ready(task: TaskId) -> bool {
@@ -246,9 +259,7 @@ pub(crate) fn schedule_on_current_local(task: TaskId, priority: u8) -> bool {
     // Slow path: O(log n) push to PriorityScheduler BinaryHeap
     CURRENT_LOCAL.with(|cell| {
         if let Some(local) = cell.borrow().as_ref() {
-            local
-                .lock()
-                .schedule(task, priority);
+            local.lock().schedule(task, priority);
             return true;
         }
         false
@@ -266,9 +277,7 @@ pub(crate) fn schedule_cancel_on_current_local(task: TaskId, priority: u8) -> bo
 
         CURRENT_LOCAL.with(|cell| {
             if let Some(local) = cell.borrow().as_ref() {
-                local
-                    .lock()
-                    .move_to_cancel_lane(task, priority);
+                local.lock().move_to_cancel_lane(task, priority);
                 return true;
             }
             // Should be unreachable if has_local was true
@@ -397,7 +406,7 @@ impl ThreeLaneScheduler {
 
         // Get IO driver and timer driver from runtime state
         let (io_driver, timer_driver) = {
-            let guard = state.lock().expect("poisoned");
+            let guard = state.lock();
             (guard.io_driver_handle(), guard.timer_driver_handle())
         };
 
@@ -561,10 +570,10 @@ impl ThreeLaneScheduler {
     /// RuntimeState's embedded table.
     fn with_task_table_ref<R, F: FnOnce(&TaskTable) -> R>(&self, f: F) -> R {
         if let Some(tt) = &self.task_table {
-            let guard = tt.lock().expect("poisoned");
+            let guard = tt.lock();
             f(&guard)
         } else {
-            let state = self.state.lock().expect("poisoned");
+            let state = self.state.lock();
             f(&state.tasks)
         }
     }
@@ -590,9 +599,7 @@ impl ThreeLaneScheduler {
                     if let Some(local_ready) = self.local_ready.get(worker_id) {
                         let _ = remove_from_local_ready(local_ready, task);
                     }
-                    local
-                        .lock()
-                        .move_to_cancel_lane(task, priority);
+                    local.lock().move_to_cancel_lane(task, priority);
                     if let Some(parker) = self.parkers.get(worker_id) {
                         parker.unpark();
                     }
@@ -983,10 +990,10 @@ impl ThreeLaneWorker {
     /// mutations.
     fn with_task_table<R, F: FnOnce(&mut TaskTable) -> R>(&self, f: F) -> R {
         if let Some(tt) = &self.task_table {
-            let mut guard = tt.lock().expect("poisoned");
+            let mut guard = tt.lock();
             f(&mut guard)
         } else {
-            let mut state = self.state.lock().expect("poisoned");
+            let mut state = self.state.lock();
             f(&mut state.tasks)
         }
     }
@@ -994,10 +1001,10 @@ impl ThreeLaneWorker {
     /// Read-only version of [`with_task_table`] for task record lookups.
     fn with_task_table_ref<R, F: FnOnce(&TaskTable) -> R>(&self, f: F) -> R {
         if let Some(tt) = &self.task_table {
-            let guard = tt.lock().expect("poisoned");
+            let guard = tt.lock();
             f(&guard)
         } else {
-            let state = self.state.lock().expect("poisoned");
+            let state = self.state.lock();
             f(&state.tasks)
         }
     }
@@ -1071,7 +1078,7 @@ impl ThreeLaneWorker {
 
             loop {
                 // Check shutdown before parking to avoid hanging in the backoff loop.
-                if self.shutdown.load(Ordering::Acquire) {
+                if self.shutdown.load(Ordering::Relaxed) {
                     break;
                 }
 
@@ -1081,18 +1088,8 @@ impl ThreeLaneWorker {
                     .as_ref()
                     .map_or(Time::ZERO, TimerDriverHandle::now);
 
-                // Quick check for new work in global and local queues.
-                // We use has_runnable_work(now) to avoid busy-looping on future timed tasks.
-                // Also grab next_deadline in the same lock acquisition so the parking
-                // path below doesn't need a second lock round-trip.
-                let (local_has_runnable, local_deadline) =
-{
-                        let local = self.local.lock();
-                        (local.has_runnable_work(now), local.next_deadline())
-                    };
-                let local_ready_has_work = !self.local_ready.lock().is_empty();
-                if self.global.has_runnable_work(now) || local_has_runnable || local_ready_has_work
-                {
+                // Lock-free check: global injector and fast queue (no mutex needed).
+                if self.global.has_runnable_work(now) || !self.fast_queue.is_empty() {
                     break;
                 }
 
@@ -1103,6 +1100,17 @@ impl ThreeLaneWorker {
                     std::thread::yield_now();
                     backoff += 1;
                 } else if self.enable_parking {
+                    // About to park: now check mutex-backed local queues.
+                    // Deferred from the spin/yield phases to avoid 160 mutex
+                    // round-trips per backoff cycle.
+                    let (local_has_runnable, local_deadline) = {
+                        let local = self.local.lock();
+                        (local.has_runnable_work(now), local.next_deadline())
+                    };
+                    let local_ready_has_work = !self.local_ready.lock().is_empty();
+                    if local_has_runnable || local_ready_has_work {
+                        break;
+                    }
                     // Park with timeout based on next timer deadline or IO polling needs.
                     let has_io = self.io_driver.is_some();
 
@@ -1331,7 +1339,7 @@ impl ThreeLaneWorker {
 
         // Take a snapshot under the state lock (bounded work, no allocs).
         let snapshot = {
-            let state = self.state.lock().expect("poisoned");
+            let state = self.state.lock();
             StateSnapshot::from_runtime_state(&state)
         };
 
@@ -1722,11 +1730,7 @@ impl ThreeLaneWorker {
     ) {
         for waiter in waiters {
             if let Some(record) = state.task(waiter) {
-                let waiter_priority = record
-                    .cx_inner
-                    .as_ref()
-                    .map(|inner| inner.read().budget.priority)
-                    .unwrap_or_default();
+                let waiter_priority = record.sched_priority;
                 if record.wake_state.notify() {
                     if record.is_local() {
                         if let Some(worker_id) = record.pinned_worker() {
@@ -1796,7 +1800,7 @@ impl ThreeLaneWorker {
                         .worker
                         .state
                         .lock()
-                        .expect("poisoned");
+                        .expect("runtime state lock poisoned");
                     let waiters = state.task_completed(self.task_id);
                     let finalizers = state.drain_ready_async_finalizers();
 
@@ -1812,50 +1816,31 @@ impl ThreeLaneWorker {
 
         trace!(task_id = ?task_id, worker_id = self.id, "executing task");
 
-        let (
-            mut stored,
-            task_cx,
-            wake_state,
-            priority,
-            cx_inner,
-            cached_waker,
-            cached_cancel_waker,
-        ) = {
-            // Remove stored future: use task table for hot-path when sharded.
-            let stored = {
-                let global_stored = self.with_task_table(|tt| tt.remove_stored_future(task_id));
-                global_stored.map_or_else(
-                    || {
-                        // Try local storage.
-                        let local = crate::runtime::local::remove_local_task(task_id);
-                        local.map(AnyStoredTask::Local)
-                    },
-                    |stored| Some(AnyStoredTask::Global(stored)),
-                )
-            };
-
-            let Some(stored) = stored else {
-                return;
-            };
-
-            // Update task record state: use task table when sharded.
-            let record_info = self.with_task_table(|tt| {
+        let (mut stored, wake_state, priority, cx_inner, cached_waker, cached_cancel_waker) = {
+            // Fast path: single lock for global tasks (remove stored future + read record).
+            let merged = self.with_task_table(|tt| {
+                let global_stored = tt.remove_stored_future(task_id)?;
                 let record = tt.task_mut(task_id)?;
                 record.start_running();
                 record.wake_state.begin_poll();
-                let priority = record
-                    .cx_inner
-                    .as_ref()
-                    .map(|inner| inner.read().budget.priority)
-                    .unwrap_or_default();
-                let task_cx = record.cx.clone();
-                let cx_inner = record.cx_inner.clone();
+                let priority = record.sched_priority;
                 let wake_state = Arc::clone(&record.wake_state);
-                // Take cached wakers to avoid holding the lock during poll
                 let cached_waker = record.cached_waker.take();
                 let cached_cancel_waker = record.cached_cancel_waker.take();
+                // Skip cx_inner Arc clone when both wakers are cached with correct
+                // priority. Saves one atomic inc+dec per poll on the hot path.
+                // finish_poll() re-loads from the task table if needed (rare).
+                let both_cached = cached_waker.is_some()
+                    && cached_cancel_waker
+                        .as_ref()
+                        .is_some_and(|(_, p)| *p == priority);
+                let cx_inner = if both_cached {
+                    None
+                } else {
+                    record.cx_inner.clone()
+                };
                 Some((
-                    task_cx,
+                    AnyStoredTask::Global(global_stored),
                     wake_state,
                     priority,
                     cx_inner,
@@ -1863,20 +1848,54 @@ impl ThreeLaneWorker {
                     cached_cancel_waker,
                 ))
             });
-            let Some((task_cx, wake_state, priority, cx_inner, cached_waker, cached_cancel_waker)) =
-                record_info
-            else {
-                return;
-            };
-            (
-                stored,
-                task_cx,
-                wake_state,
-                priority,
-                cx_inner,
-                cached_waker,
-                cached_cancel_waker,
-            )
+
+            if let Some(result) = merged {
+                result
+            } else {
+                // Slow path: local task (stored in TLS, not in global TaskTable).
+                let local = crate::runtime::local::remove_local_task(task_id);
+                let Some(local) = local else {
+                    return;
+                };
+                let record_info = self.with_task_table(|tt| {
+                    let record = tt.task_mut(task_id)?;
+                    record.start_running();
+                    record.wake_state.begin_poll();
+                    let priority = record.sched_priority;
+                    let wake_state = Arc::clone(&record.wake_state);
+                    let cached_waker = record.cached_waker.take();
+                    let cached_cancel_waker = record.cached_cancel_waker.take();
+                    let both_cached = cached_waker.is_some()
+                        && cached_cancel_waker
+                            .as_ref()
+                            .is_some_and(|(_, p)| *p == priority);
+                    let cx_inner = if both_cached {
+                        None
+                    } else {
+                        record.cx_inner.clone()
+                    };
+                    Some((
+                        wake_state,
+                        priority,
+                        cx_inner,
+                        cached_waker,
+                        cached_cancel_waker,
+                    ))
+                });
+                let Some((wake_state, priority, cx_inner, cached_waker, cached_cancel_waker)) =
+                    record_info
+                else {
+                    return;
+                };
+                (
+                    AnyStoredTask::Local(local),
+                    wake_state,
+                    priority,
+                    cx_inner,
+                    cached_waker,
+                    cached_cancel_waker,
+                )
+            }
         };
 
         let is_local = stored.is_local();
@@ -1902,48 +1921,60 @@ impl ThreeLaneWorker {
                     wake_state: Arc::clone(&wake_state),
                     global: Arc::clone(&self.global),
                     coordinator: Arc::clone(&self.coordinator),
-                    cx_inner: weak_inner,
+                    priority,
                 }))
             }
         };
-        // Create/reuse cancel waker if cx_inner exists
-        let cancel_waker_for_cache = cx_inner.as_ref().map_or_else(
-            || None,
-            |inner| {
-                let cancel_waker = match cached_cancel_waker {
-                    Some((w, cached_pri)) if cached_pri == priority => w,
-                    _ => {
-                        if is_local {
-                            Waker::from(Arc::new(ThreeLaneLocalCancelWaker {
-                                task_id,
-                                default_priority: priority,
-                                wake_state: Arc::clone(&wake_state),
-                                local: Arc::clone(&self.local),
-                                local_ready: Arc::clone(&self.local_ready),
-                                parker: self.parker.clone(),
-                                cx_inner: Arc::downgrade(inner),
-                            }))
-                        } else {
-                            Waker::from(Arc::new(CancelLaneWaker {
-                                task_id,
-                                default_priority: priority,
-                                wake_state: Arc::clone(&wake_state),
-                                global: Arc::clone(&self.global),
-                                coordinator: Arc::clone(&self.coordinator),
-                                cx_inner: Arc::downgrade(inner),
-                            }))
-                        }
-                    }
+        // Create/reuse cancel waker.
+        // Fast path: when cached with matching priority, skip cx_inner entirely
+        // (cx_inner may be None because we skipped the Arc clone above).
+        let cancel_waker_for_cache = if cached_cancel_waker
+            .as_ref()
+            .is_some_and(|(_, p)| *p == priority)
+        {
+            // Cancel waker cached with correct priority. No cx_inner needed.
+            cached_cancel_waker.map(|(w, _)| (w, priority))
+        } else {
+            // Cache miss: build new cancel waker. cx_inner was cloned above.
+            cx_inner.as_ref().map(|inner| {
+                let w = if is_local {
+                    Waker::from(Arc::new(ThreeLaneLocalCancelWaker {
+                        task_id,
+                        default_priority: priority,
+                        wake_state: Arc::clone(&wake_state),
+                        local: Arc::clone(&self.local),
+                        local_ready: Arc::clone(&self.local_ready),
+                        parker: self.parker.clone(),
+                        cx_inner: Arc::downgrade(inner),
+                    }))
+                } else {
+                    Waker::from(Arc::new(CancelLaneWaker {
+                        task_id,
+                        default_priority: priority,
+                        wake_state: Arc::clone(&wake_state),
+                        global: Arc::clone(&self.global),
+                        coordinator: Arc::clone(&self.coordinator),
+                        cx_inner: Arc::downgrade(inner),
+                    }))
                 };
-                {
-                    let mut guard = inner.write();
-                    guard.cancel_waker = Some(cancel_waker.clone());
+                // New waker: register in CxInner (read-first).
+                let needs_update = {
+                    let guard = inner.read();
+                    !guard
+                        .cancel_waker
+                        .as_ref()
+                        .is_some_and(|existing| existing.will_wake(&w))
+                };
+                if needs_update {
+                    inner.write().cancel_waker = Some(w.clone());
                 }
-                Some((cancel_waker, priority))
-            },
-        );
-        let mut cx = Context::from_waker(&waker);
-        let _cx_guard = crate::cx::Cx::set_current(task_cx);
+                (w, priority)
+            })
+        };
+        let poll_result = {
+            let mut cx = Context::from_waker(&waker);
+            stored.poll(&mut cx)
+        };
 
         let mut guard = TaskExecutionGuard {
             worker: self,
@@ -1951,12 +1982,16 @@ impl ThreeLaneWorker {
             completed: false,
         };
 
-        match stored.poll(&mut cx) {
+        match poll_result {
             Poll::Ready(outcome) => {
                 // Map Outcome<(), ()> to Outcome<(), Error> for record.complete()
                 let task_outcome = outcome
                     .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
-                let mut state = self.state.lock().expect("poisoned");
+                let mut state = self.state.lock();
+                // Deferred Cx clone: only set task context on completion path (skips 3
+                // Arc increments + decrements on the much more common Pending path).
+                let _cx_guard =
+                    crate::cx::Cx::set_current(state.task(task_id).and_then(|r| r.cx.clone()));
                 let cancel_ack = Self::consume_cancel_ack_locked(&mut state, task_id);
                 if let Some(record) = state.task_mut(task_id) {
                     if !record.state.is_terminal() {
@@ -2019,16 +2054,30 @@ impl ThreeLaneWorker {
             }
             Poll::Pending => {
                 // Store task back: use task table for hot-path when sharded.
+                // Move waker into cache (not clone) since it is not needed after this point.
+                // Store task back and cache wakers in a single lock acquisition.
+                // Also inline consume_cancel_ack with read-first optimization
+                // to eliminate the separate third lock acquisition on the Pending path.
                 match stored {
                     AnyStoredTask::Global(t) => {
-                        self.with_task_table(|tt| {
+                        self.with_task_table(move |tt| {
                             tt.store_spawned_task(task_id, t);
-                            // Cache wakers back in the task record for reuse on next poll
                             if let Some(record) = tt.task_mut(task_id) {
-                                record.cached_waker = Some((waker.clone(), priority));
-                                record
-                                    .cached_cancel_waker
-                                    .clone_from(&cancel_waker_for_cache);
+                                record.cached_waker = Some((waker, priority));
+                                record.cached_cancel_waker = cancel_waker_for_cache;
+                                // Inline cancel-ack: read-first to avoid write lock
+                                // when cancel_acknowledged is false (the common case).
+                                if let Some(inner) = record.cx_inner.as_ref() {
+                                    let needs_ack = inner.read().cancel_acknowledged;
+                                    if needs_ack {
+                                        let mut g = inner.write();
+                                        if g.cancel_acknowledged {
+                                            g.cancel_acknowledged = false;
+                                            drop(g);
+                                            let _ = record.acknowledge_cancel();
+                                        }
+                                    }
+                                }
                             }
                         });
                     }
@@ -2036,12 +2085,22 @@ impl ThreeLaneWorker {
                         crate::runtime::local::store_local_task(task_id, t);
                         // For local tasks, we also want to cache wakers in the global record
                         // (since record is global).
-                        self.with_task_table(|tt| {
+                        self.with_task_table(move |tt| {
                             if let Some(record) = tt.task_mut(task_id) {
-                                record.cached_waker = Some((waker.clone(), priority));
-                                record
-                                    .cached_cancel_waker
-                                    .clone_from(&cancel_waker_for_cache);
+                                record.cached_waker = Some((waker, priority));
+                                record.cached_cancel_waker = cancel_waker_for_cache;
+                                // Inline cancel-ack: read-first (same as global path above).
+                                if let Some(inner) = record.cx_inner.as_ref() {
+                                    let needs_ack = inner.read().cancel_acknowledged;
+                                    if needs_ack {
+                                        let mut g = inner.write();
+                                        if g.cancel_acknowledged {
+                                            g.cancel_acknowledged = false;
+                                            drop(g);
+                                            let _ = record.acknowledge_cancel();
+                                        }
+                                    }
+                                }
                             }
                         });
                     }
@@ -2050,7 +2109,14 @@ impl ThreeLaneWorker {
                 if wake_state.finish_poll() {
                     let mut cancel_priority = priority;
                     let mut schedule_cancel = false;
-                    if let Some(inner) = cx_inner.as_ref() {
+                    // cx_inner may be None if we skipped the Arc clone (both wakers
+                    // were cached). Re-load from task table on this rare path.
+                    let cx_inner_for_finish = if cx_inner.is_some() {
+                        cx_inner
+                    } else {
+                        self.with_task_table(|tt| tt.task(task_id).and_then(|r| r.cx_inner.clone()))
+                    };
+                    if let Some(inner) = cx_inner_for_finish.as_ref() {
                         let guard = inner.read();
                         if guard.cancel_requested {
                             schedule_cancel = true;
@@ -2065,8 +2131,7 @@ impl ThreeLaneWorker {
                             // Cancel still goes to PriorityScheduler for ordering.
                             // Cancel lane is not stolen by steal_ready_batch_into.
                             let _ = remove_from_local_ready(&self.local_ready, task_id);
-                            let mut local =
-                                self.local.lock();
+                            let mut local = self.local.lock();
                             local.schedule_cancel(task_id, cancel_priority);
                         } else {
                             // Push to non-stealable local_ready queue.
@@ -2086,14 +2151,13 @@ impl ThreeLaneWorker {
                 }
 
                 guard.completed = true;
-                self.consume_cancel_ack(task_id);
             }
         }
     }
 
     fn schedule_ready_finalizers(&self) -> bool {
         let tasks = {
-            let mut state = self.state.lock().expect("poisoned");
+            let mut state = self.state.lock();
             state.drain_ready_async_finalizers()
         };
         if tasks.is_empty() {
@@ -2125,18 +2189,19 @@ impl ThreeLaneWorker {
         let Some(inner) = record.cx_inner.as_ref() else {
             return false;
         };
-        let mut acknowledged = false;
-        {
-            let mut guard = inner.write();
-            if guard.cancel_acknowledged {
-                guard.cancel_acknowledged = false;
-                acknowledged = true;
-            }
+        // Read-first: skip the write lock when cancel_acknowledged is false
+        // (the common case). Only upgrade to write when the flag is set.
+        if !inner.read().cancel_acknowledged {
+            return false;
         }
-        if acknowledged {
+        let mut guard = inner.write();
+        if guard.cancel_acknowledged {
+            guard.cancel_acknowledged = false;
+            drop(guard);
             let _ = record.acknowledge_cancel();
+            return true;
         }
-        acknowledged
+        false
     }
 }
 
@@ -2145,19 +2210,15 @@ struct ThreeLaneWaker {
     wake_state: Arc<crate::record::task::TaskWakeState>,
     global: Arc<GlobalInjector>,
     coordinator: Arc<WorkerCoordinator>,
-    cx_inner: Weak<RwLock<CxInner>>,
+    /// Cached priority to avoid `Weak::upgrade` + `RwLock::read` on every wake.
+    /// Safe because `budget.priority` is immutable after task creation.
+    priority: u8,
 }
 
 impl ThreeLaneWaker {
     fn schedule(&self) {
         if self.wake_state.notify() {
-            let priority = self
-                .cx_inner
-                .upgrade()
-                .map(|inner| inner.read().budget.priority)
-                .unwrap_or_default();
-
-            self.global.inject_ready(self.task_id, priority);
+            self.global.inject_ready(self.task_id, self.priority);
             self.coordinator.wake_one();
         }
     }
@@ -2503,18 +2564,18 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("poisoned")
+            .expect("lock")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("poisoned");
+            let mut guard = state.lock();
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
             task_id
         };
         let waiter_id = {
-            let mut guard = state.lock().expect("poisoned");
+            let mut guard = state.lock();
             let (waiter_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -2522,7 +2583,7 @@ mod tests {
         };
 
         {
-            let mut guard = state.lock().expect("poisoned");
+            let mut guard = state.lock();
             if let Some(record) = guard.task_mut(task_id) {
                 record.add_waiter(waiter_id);
             }
@@ -2533,11 +2594,7 @@ mod tests {
 
         worker.execute(task_id);
 
-        let completed = state
-            .lock()
-            .expect("poisoned")
-            .task(task_id)
-            .is_none();
+        let completed = state.lock().task(task_id).is_none();
         assert!(completed, "task should be removed after completion");
 
         let scheduled_task = worker.global.pop_ready().map(|pt| pt.task);
@@ -2857,11 +2914,11 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("poisoned")
+            .expect("lock")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("poisoned");
+            let mut guard = state.lock();
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -2895,11 +2952,11 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("poisoned")
+            .expect("lock")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("poisoned");
+            let mut guard = state.lock();
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -2931,11 +2988,11 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("poisoned")
+            .expect("lock")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("poisoned");
+            let mut guard = state.lock();
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -3031,9 +3088,7 @@ mod tests {
         drop(queue);
 
         assert!(
-            local
-                .lock()
-                .is_in_cancel_lane(task_id),
+            local.lock().is_in_cancel_lane(task_id),
             "task should be promoted to cancel lane"
         );
     }
@@ -3058,9 +3113,7 @@ mod tests {
         drop(queue);
 
         assert!(
-            local
-                .lock()
-                .is_in_cancel_lane(task_id),
+            local.lock().is_in_cancel_lane(task_id),
             "task should be promoted to cancel lane"
         );
     }
@@ -3070,11 +3123,11 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("poisoned")
+            .expect("lock")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("poisoned");
+            let mut guard = state.lock();
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -3104,11 +3157,11 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("poisoned")
+            .expect("lock")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("poisoned");
+            let mut guard = state.lock();
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -3124,10 +3177,7 @@ mod tests {
 
         worker.schedule_local(task_id, 100);
 
-        let popped = worker
-            .local
-            .lock()
-            .pop_ready_only();
+        let popped = worker.local.lock().pop_ready_only();
         assert!(popped.is_none(), "local task must not enter ready lane");
         assert!(
             !worker.local_ready.lock().contains(&task_id),
@@ -3140,11 +3190,11 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("poisoned")
+            .expect("lock")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("poisoned");
+            let mut guard = state.lock();
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -3160,10 +3210,7 @@ mod tests {
 
         worker.schedule_local_timed(task_id, Time::from_nanos(42));
 
-        let popped = worker
-            .local
-            .lock()
-            .pop_timed_only(Time::from_nanos(100));
+        let popped = worker.local.lock().pop_timed_only(Time::from_nanos(100));
         assert!(popped.is_none(), "local task must not enter timed lane");
         assert!(
             !worker.local_ready.lock().contains(&task_id),
@@ -3177,11 +3224,11 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("poisoned")
+            .expect("lock")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("poisoned");
+            let mut guard = state.lock();
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -3226,7 +3273,7 @@ mod tests {
                     wake_state: Arc::clone(&wake_state),
                     global: Arc::clone(&global),
                     coordinator: Arc::clone(&coordinator),
-                    cx_inner: Weak::new(),
+                    priority: 0,
                 }))
             })
             .collect();
@@ -3253,11 +3300,11 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("poisoned")
+            .expect("lock")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("poisoned");
+            let mut guard = state.lock();
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -3266,7 +3313,7 @@ mod tests {
 
         // Get the wake_state for direct manipulation
         let wake_state = {
-            let guard = state.lock().expect("poisoned");
+            let guard = state.lock();
             guard
                 .task(task_id)
                 .map(|r| Arc::clone(&r.wake_state))
@@ -4122,10 +4169,7 @@ mod tests {
         // Push task A to fast_queue.
         worker.fast_queue.push(TaskId::new_for_test(1, 0));
         // Push task B to PriorityScheduler ready lane.
-        worker
-            .local
-            .lock()
-            .schedule(TaskId::new_for_test(2, 0), 50);
+        worker.local.lock().schedule(TaskId::new_for_test(2, 0), 50);
 
         // First pop should come from fast_queue (task A).
         let first = worker.try_ready_work();
@@ -4174,10 +4218,7 @@ mod tests {
 
         // Push task only into worker 0's PriorityScheduler.
         let heap_task = TaskId::new_for_test(1, 1);
-        scheduler.workers[0]
-            .local
-            .lock()
-            .schedule(heap_task, 50);
+        scheduler.workers[0].local.lock().schedule(heap_task, 50);
 
         let mut workers = scheduler.take_workers();
         let thief = &mut workers[1];
@@ -4612,18 +4653,18 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("poisoned")
+            .expect("lock")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("poisoned");
+            let mut guard = state.lock();
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
             id
         };
         let waiter_id = {
-            let mut guard = state.lock().expect("poisoned");
+            let mut guard = state.lock();
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -4635,7 +4676,7 @@ mod tests {
         };
 
         {
-            let mut guard = state.lock().expect("poisoned");
+            let mut guard = state.lock();
             if let Some(record) = guard.task_mut(task_id) {
                 record.add_waiter(waiter_id);
             }
@@ -4666,18 +4707,18 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("poisoned")
+            .expect("lock")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("poisoned");
+            let mut guard = state.lock();
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
             id
         };
         let waiter_id = {
-            let mut guard = state.lock().expect("poisoned");
+            let mut guard = state.lock();
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -4689,7 +4730,7 @@ mod tests {
         };
 
         {
-            let mut guard = state.lock().expect("poisoned");
+            let mut guard = state.lock();
             if let Some(record) = guard.task_mut(task_id) {
                 record.add_waiter(waiter_id);
             }
@@ -4723,18 +4764,18 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let region = state
             .lock()
-            .expect("poisoned")
+            .expect("lock")
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("poisoned");
+            let mut guard = state.lock();
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
             id
         };
         let waiter_id = {
-            let mut guard = state.lock().expect("poisoned");
+            let mut guard = state.lock();
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -4742,7 +4783,7 @@ mod tests {
         };
 
         {
-            let mut guard = state.lock().expect("poisoned");
+            let mut guard = state.lock();
             if let Some(record) = guard.task_mut(task_id) {
                 record.add_waiter(waiter_id);
             }
@@ -4781,7 +4822,7 @@ mod tests {
 
         // 2. Create a task pinned to Worker 0
         let task_id = {
-            let mut guard = state.lock().expect("poisoned");
+            let mut guard = state.lock();
             let region = guard.create_root_region(Budget::INFINITE);
             let (tid, _) = guard
                 .create_task(region, Budget::INFINITE, async { 1 })
@@ -4856,7 +4897,7 @@ mod tests {
         assert!(
             task_table
                 .lock()
-                .expect("task_table lock")
+                .expect("task table lock poisoned")
                 .task(task_id)
                 .is_some(),
             "task should be in sharded table"
@@ -4938,10 +4979,7 @@ mod tests {
         worker.schedule_local_timed(task_id, deadline);
 
         // Task should be in the timed lane.
-        let next = worker
-            .local
-            .lock()
-            .pop_timed_only(Time::from_nanos(2000));
+        let next = worker.local.lock().pop_timed_only(Time::from_nanos(2000));
         assert!(next.is_some(), "task should be in local timed lane");
         assert_eq!(next.unwrap(), task_id);
     }
@@ -4965,7 +5003,7 @@ mod tests {
 
         // Reset wake_state so we can inject again.
         {
-            let tt = task_table.lock().expect("task_table lock");
+            let tt = task_table.lock();
             if let Some(record) = tt.task(task_id) {
                 record.wake_state.clear();
             }
@@ -4993,7 +5031,7 @@ mod tests {
             Budget::INFINITE,
         )));
         {
-            let mut tt = task_table.lock().expect("task_table lock");
+            let mut tt = task_table.lock();
             if let Some(record) = tt.task_mut(task_id) {
                 record.cx_inner = Some(cx_inner.clone());
             }

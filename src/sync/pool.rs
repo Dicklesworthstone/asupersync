@@ -204,6 +204,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
@@ -402,7 +403,7 @@ pub struct PooledResource<R> {
     /// implementations that use only the public `new()` constructor get
     /// `None`, which is harmless — it just means notification relies on
     /// the next `process_returns` call instead of being immediate.
-    return_wakers: Option<Arc<PoolMutex<Vec<Waker>>>>,
+    return_wakers: Option<Arc<PoolMutex<SmallVec<[Waker; 4]>>>>,
 }
 
 impl<R> PooledResource<R> {
@@ -439,7 +440,7 @@ impl<R> PooledResource<R> {
     /// [`GenericPool`].  Called internally after construction so that
     /// returning/discarding the resource immediately wakes waiting
     /// acquirers.
-    fn with_return_notify(mut self, wakers: Arc<PoolMutex<Vec<Waker>>>) -> Self {
+    fn with_return_notify(mut self, wakers: Arc<PoolMutex<SmallVec<[Waker; 4]>>>) -> Self {
         self.return_wakers = Some(wakers);
         self
     }
@@ -813,22 +814,15 @@ where
             return Poll::Ready(());
         }
 
-        // Check if we are currently in the queue
-        let in_queue = self
-            .waiter_id
-            .is_some_and(|id| state.waiters.iter().any(|w| w.id == id));
-
-        if in_queue {
-            // Update waker if necessary.
-            if let Some(id) = self.waiter_id {
-                if let Some(w) = state.waiters.iter_mut().find(|w| w.id == id) {
-                    if !w.waker.will_wake(cx.waker()) {
-                        w.waker.clone_from(cx.waker());
-                    }
-                }
+        // Single-pass: check if already queued and update waker, or register.
+        let found = self.waiter_id.and_then(|id| {
+            state.waiters.iter_mut().find(|w| w.id == id)
+        });
+        if let Some(w) = found {
+            if !w.waker.will_wake(cx.waker()) {
+                w.waker.clone_from(cx.waker());
             }
         } else {
-            // We are not in the queue. Register.
             let id = state.next_waiter_id;
             state.next_waiter_id += 1;
             state.waiters.push_back(PoolWaiter {
@@ -972,7 +966,9 @@ where
     /// return/discard so that [`WaitForNotification`] futures are
     /// re-polled immediately instead of waiting for the next
     /// `process_returns` call.
-    return_wakers: Arc<PoolMutex<Vec<Waker>>>,
+    return_wakers: Arc<PoolMutex<SmallVec<[Waker; 4]>>>,
+    /// Lock-free snapshot of `GenericPoolState::closed` (monotone false→true).
+    closed: AtomicBool,
     /// Optional metrics handle for observability.
     #[cfg(feature = "metrics")]
     metrics: Option<PoolMetricsHandle>,
@@ -1003,7 +999,8 @@ where
             return_tx,
             return_rx: PoolMutex::new(return_rx),
             health_check_fn: None,
-            return_wakers: Arc::new(PoolMutex::new(Vec::new())),
+            return_wakers: Arc::new(PoolMutex::new(SmallVec::new())),
+            closed: AtomicBool::new(false),
             #[cfg(feature = "metrics")]
             metrics: None,
         }
@@ -1405,12 +1402,9 @@ where
                 // Process any pending returns
                 self.process_returns();
 
-                // Check if closed
-                {
-                    let state = self.state.lock();
-                    if state.closed {
-                        return Err(PoolError::Closed);
-                    }
+                // Check if closed (lock-free fast path).
+                if self.closed.load(Ordering::Acquire) {
+                    return Err(PoolError::Closed);
                 }
 
                 // Try to get a healthy idle resource.
@@ -1488,11 +1482,8 @@ where
 
         self.process_returns();
 
-        {
-            let state = self.state.lock();
-            if state.closed {
-                return None;
-            }
+        if self.closed.load(Ordering::Acquire) {
+            return None;
         }
 
         while let Some((resource, created_at)) = self.try_get_idle() {
@@ -1550,6 +1541,7 @@ where
             let waiters = {
                 let mut state = self.state.lock();
                 state.closed = true;
+                self.closed.store(true, Ordering::Release);
 
                 // Drain waiters, then wake after releasing the state lock.
                 let waiters: Vec<Waker> =
@@ -1865,9 +1857,12 @@ mod pool_metrics {
         /// Creates a handle for a named pool.
         #[must_use]
         pub fn handle(&self, pool_name: impl Into<String>) -> PoolMetricsHandle {
+            let pool_name = pool_name.into();
+            let labels = [KeyValue::new("pool_name", pool_name.clone())];
             PoolMetricsHandle {
                 metrics: self.clone(),
-                pool_name: pool_name.into(),
+                pool_name,
+                labels,
             }
         }
     }
@@ -1876,10 +1871,13 @@ mod pool_metrics {
     ///
     /// This struct wraps `PoolMetrics` and binds it to a specific pool name,
     /// automatically adding the `pool_name` label to all recorded metrics.
+    /// The label is pre-computed once at construction to avoid per-call
+    /// String allocation.
     #[derive(Clone)]
     pub struct PoolMetricsHandle {
         metrics: PoolMetrics,
         pool_name: String,
+        labels: [KeyValue; 1],
     }
 
     impl std::fmt::Debug for PoolMetricsHandle {
@@ -1899,32 +1897,47 @@ mod pool_metrics {
 
         /// Records a successful acquire operation.
         pub fn record_acquired(&self, duration: Duration) {
-            self.metrics.record_acquired(&self.pool_name, duration);
+            self.metrics.acquired_total.add(1, &self.labels);
+            self.metrics
+                .acquire_duration
+                .record(duration.as_secs_f64(), &self.labels);
         }
 
         /// Records a resource release (return to pool).
         pub fn record_released(&self, hold_duration: Duration) {
-            self.metrics.record_released(&self.pool_name, hold_duration);
+            self.metrics.released_total.add(1, &self.labels);
+            self.metrics
+                .hold_duration
+                .record(hold_duration.as_secs_f64(), &self.labels);
         }
 
         /// Records a resource creation.
         pub fn record_created(&self) {
-            self.metrics.record_created(&self.pool_name);
+            self.metrics.created_total.add(1, &self.labels);
         }
 
         /// Records a resource destruction.
         pub fn record_destroyed(&self, reason: DestroyReason) {
-            self.metrics.record_destroyed(&self.pool_name, reason);
+            let labels = [
+                self.labels[0].clone(),
+                KeyValue::new("reason", reason.as_label()),
+            ];
+            self.metrics.destroyed_total.add(1, &labels);
         }
 
         /// Records an acquire timeout.
         pub fn record_timeout(&self, wait_duration: Duration) {
-            self.metrics.record_timeout(&self.pool_name, wait_duration);
+            self.metrics.timeouts_total.add(1, &self.labels);
+            self.metrics
+                .wait_duration
+                .record(wait_duration.as_secs_f64(), &self.labels);
         }
 
         /// Records time spent waiting in queue.
         pub fn record_wait(&self, wait_duration: Duration) {
-            self.metrics.record_wait(&self.pool_name, wait_duration);
+            self.metrics
+                .wait_duration
+                .record(wait_duration.as_secs_f64(), &self.labels);
         }
 
         /// Updates gauge values from pool statistics.
@@ -1955,7 +1968,7 @@ mod tests {
     }
 
     struct ReentrantReturnWaker {
-        return_wakers: Arc<PoolMutex<Vec<Waker>>>,
+        return_wakers: Arc<PoolMutex<SmallVec<[Waker; 4]>>>,
         tx: mpsc::Sender<bool>,
     }
 
@@ -2016,7 +2029,7 @@ mod tests {
     fn pooled_resource_notifies_wakers_outside_return_waker_lock() {
         init_test("pooled_resource_notifies_wakers_outside_return_waker_lock");
         let (return_tx, _return_rx) = mpsc::channel();
-        let return_wakers = Arc::new(PoolMutex::new(Vec::new()));
+        let return_wakers = Arc::new(PoolMutex::new(SmallVec::<[Waker; 4]>::new()));
         let (probe_tx, probe_rx) = mpsc::channel();
 
         {

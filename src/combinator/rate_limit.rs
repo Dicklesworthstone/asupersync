@@ -31,10 +31,10 @@
 //! }
 //! ```
 
+use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::{Mutex, RwLock};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -243,13 +243,12 @@ pub struct RateLimiter {
     /// Next entry ID.
     next_id: AtomicU64,
 
-    /// Metrics.
-    metrics: RwLock<RateLimitMetrics>,
-
     // Atomic counters for hot path
     total_allowed: AtomicU64,
     total_rejected: AtomicU64,
     total_waited: AtomicU64,
+    total_wait_time_ms: AtomicU64,
+    max_wait_time_ms: AtomicU64,
 }
 
 impl RateLimiter {
@@ -274,10 +273,11 @@ impl RateLimiter {
             }),
             wait_queue: RwLock::new(VecDeque::new()),
             next_id: AtomicU64::new(0),
-            metrics: RwLock::new(RateLimitMetrics::default()),
             total_allowed: AtomicU64::new(0),
             total_rejected: AtomicU64::new(0),
             total_waited: AtomicU64::new(0),
+            total_wait_time_ms: AtomicU64::new(0),
+            max_wait_time_ms: AtomicU64::new(0),
         }
     }
 
@@ -304,15 +304,26 @@ impl RateLimiter {
             state.tokens_fixed as f64 / FIXED_POINT_SCALE as f64
         };
 
-        let mut m = self.metrics.read().clone();
-        m.available_tokens = available_tokens;
+        let total_waited = self.total_waited.load(Ordering::Relaxed);
+        let total_wait_time_ms = self.total_wait_time_ms.load(Ordering::Relaxed);
+        let max_wait_time_ms = self.max_wait_time_ms.load(Ordering::Relaxed);
+        let avg_wait_time = if total_waited > 0 {
+            Duration::from_millis(total_wait_time_ms / total_waited)
+        } else {
+            Duration::ZERO
+        };
 
-        // Use atomic values
-        m.total_allowed = self.total_allowed.load(Ordering::Relaxed);
-        m.total_rejected = self.total_rejected.load(Ordering::Relaxed);
-        m.total_waited = self.total_waited.load(Ordering::Relaxed);
-
-        m
+        RateLimitMetrics {
+            available_tokens,
+            total_allowed: self.total_allowed.load(Ordering::Relaxed),
+            total_rejected: self.total_rejected.load(Ordering::Relaxed),
+            total_waited,
+            total_wait_time: Duration::from_millis(total_wait_time_ms),
+            avg_wait_time,
+            max_wait_time: Duration::from_millis(max_wait_time_ms),
+            current_rate: 0.0,
+            next_token_available: None,
+        }
     }
 
     /// Refill tokens based on elapsed time.
@@ -493,7 +504,7 @@ impl RateLimiter {
         };
 
         let mut queue = self.wait_queue.write();
-        let entry_id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let entry_id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
         queue.push_back(QueueEntry {
             id: entry_id,
@@ -564,21 +575,26 @@ impl RateLimiter {
             }
         }
 
-        // Flush accumulated metrics in a single write lock acquisition.
+        // Flush accumulated metrics via atomics (no write lock needed).
         if granted_count > 0 {
             self.total_allowed
                 .fetch_add(granted_count, Ordering::Relaxed);
 
-            let mut metrics = self.metrics.write();
-            metrics.total_wait_time += acc_wait_time;
-            if max_wait_time > metrics.max_wait_time {
-                metrics.max_wait_time = max_wait_time;
-            }
-            let total_waited = self.total_waited.load(Ordering::Relaxed);
-            let total_ms = duration_to_millis_saturating(metrics.total_wait_time);
-            if total_waited > 0 {
-                if let Some(avg_ms) = total_ms.checked_div(total_waited) {
-                    metrics.avg_wait_time = Duration::from_millis(avg_ms);
+            let wait_ms = duration_to_millis_saturating(acc_wait_time);
+            self.total_wait_time_ms.fetch_add(wait_ms, Ordering::Relaxed);
+
+            // CAS loop for max_wait_time_ms
+            let new_max_ms = duration_to_millis_saturating(max_wait_time);
+            let mut cur = self.max_wait_time_ms.load(Ordering::Relaxed);
+            while new_max_ms > cur {
+                match self.max_wait_time_ms.compare_exchange_weak(
+                    cur,
+                    new_max_ms,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => cur = actual,
                 }
             }
         }
@@ -689,8 +705,9 @@ pub struct SlidingWindowRateLimiter {
     /// Timestamps of recent operations: (timestamp_millis, cost).
     window: RwLock<VecDeque<(u64, u32)>>,
 
-    /// Metrics.
-    metrics: RwLock<RateLimitMetrics>,
+    /// Running total of costs in the window. Maintained incrementally to
+    /// avoid O(n) summation on every `try_acquire`.
+    window_cost: AtomicU32,
 
     // Atomic counters
     total_allowed: AtomicU64,
@@ -704,7 +721,7 @@ impl SlidingWindowRateLimiter {
         Self {
             policy,
             window: RwLock::new(VecDeque::new()),
-            metrics: RwLock::new(RateLimitMetrics::default()),
+            window_cost: AtomicU32::new(0),
             total_allowed: AtomicU64::new(0),
             total_rejected: AtomicU64::new(0),
         }
@@ -718,17 +735,9 @@ impl SlidingWindowRateLimiter {
 
     /// Calculate current usage within the window.
     #[allow(clippy::cast_possible_truncation)]
-    fn current_usage(&self, now: Time) -> u32 {
-        let now_millis = now.as_millis();
-        let period_millis = duration_to_millis_saturating(self.policy.period);
-
-        let window = self.window.read();
-        window
-            .iter()
-            // Include entries where (now - t) < period, i.e., entry is within the window
-            .filter(|(t, _)| now_millis.saturating_sub(*t) < period_millis)
-            .map(|(_, cost)| cost)
-            .sum()
+    fn current_usage(&self, _now: Time) -> u32 {
+        // O(1): read the running total maintained by try_acquire and cleanup_old.
+        self.window_cost.load(Ordering::Relaxed)
     }
 
     /// Clean up old entries outside the window.
@@ -738,10 +747,12 @@ impl SlidingWindowRateLimiter {
         let period_millis = duration_to_millis_saturating(self.policy.period);
         let mut window = self.window.write();
 
-        while let Some((t, _)) = window.front() {
+        while let Some((t, c)) = window.front() {
             // Remove entries where (now - t) >= period, i.e., entry is outside the window
             if now_millis.saturating_sub(*t) >= period_millis {
+                let evicted_cost = *c;
                 window.pop_front();
+                self.window_cost.fetch_sub(evicted_cost, Ordering::Relaxed);
             } else {
                 break;
             }
@@ -758,20 +769,23 @@ impl SlidingWindowRateLimiter {
         // Single lock acquisition: cleanup expired + check usage + add entry
         let mut window = self.window.write();
 
-        // Cleanup expired entries inline (avoids separate cleanup_old lock)
-        while let Some((t, _)) = window.front() {
+        // Cleanup expired entries inline, decrementing the running cost total.
+        while let Some((t, c)) = window.front() {
             if now_millis.saturating_sub(*t) >= period_millis {
+                let evicted_cost = *c;
                 window.pop_front();
+                self.window_cost.fetch_sub(evicted_cost, Ordering::Relaxed);
             } else {
                 break;
             }
         }
 
-        // Calculate usage — all remaining entries are within the window
-        let usage: u32 = window.iter().map(|(_, c)| c).sum();
+        // O(1) usage from the running total (replaces O(n) summation).
+        let usage = self.window_cost.load(Ordering::Relaxed);
 
         if usage + cost <= self.policy.rate {
             window.push_back((now_millis, cost));
+            self.window_cost.fetch_add(cost, Ordering::Relaxed);
             drop(window);
             self.total_allowed.fetch_add(1, Ordering::Relaxed);
             true
@@ -828,16 +842,19 @@ impl SlidingWindowRateLimiter {
     /// Get metrics.
     #[must_use]
     pub fn metrics(&self) -> RateLimitMetrics {
-        let mut m = self.metrics.read().clone();
-        m.total_allowed = self.total_allowed.load(Ordering::Relaxed);
-        m.total_rejected = self.total_rejected.load(Ordering::Relaxed);
-        m
+        RateLimitMetrics {
+            total_allowed: self.total_allowed.load(Ordering::Relaxed),
+            total_rejected: self.total_rejected.load(Ordering::Relaxed),
+            ..RateLimitMetrics::default()
+        }
     }
 
     /// Reset the sliding window.
     pub fn reset(&self) {
         let mut window = self.window.write();
         window.clear();
+        drop(window);
+        self.window_cost.store(0, Ordering::Relaxed);
     }
 }
 
@@ -1771,7 +1788,7 @@ mod tests {
     }
 
     #[test]
-    fn metrics_does_not_hold_metrics_lock_while_waiting_on_state_lock() {
+    fn metrics_completes_after_state_lock_released() {
         use std::sync::{Arc, Barrier};
         use std::thread;
 
@@ -1795,13 +1812,8 @@ mod tests {
         // Let spawned thread attempt metrics() while state lock is held.
         thread::sleep(Duration::from_millis(10));
 
-        let metrics_write_guard = rl.metrics.try_write();
-        assert!(
-            metrics_write_guard.is_some(),
-            "metrics() must not hold metrics read-lock while blocked on state lock"
-        );
-        drop(metrics_write_guard);
-
+        // metrics() is now lock-free except for state.lock() (for available_tokens).
+        // Release state lock so the spawned thread can complete.
         drop(state_guard);
         handle.join().expect("metrics thread should complete");
     }

@@ -66,7 +66,7 @@ fn run_sync_determinism_with_seed(seed: u64) -> Vec<usize> {
     let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(5000));
     let region = runtime.state.create_root_region(Budget::INFINITE);
 
-    let results = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let results = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let mutex = Arc::new(Mutex::new(()));
 
     for i in 0..5 {
@@ -78,7 +78,7 @@ fn run_sync_determinism_with_seed(seed: u64) -> Vec<usize> {
             .create_task(region, Budget::INFINITE, async move {
                 let cx: Cx = Cx::for_testing();
                 let _guard = m.lock(&cx).await.expect("lock should succeed");
-                r.lock().unwrap().push(i);
+                r.lock().push(i);
             })
             .unwrap();
 
@@ -87,7 +87,7 @@ fn run_sync_determinism_with_seed(seed: u64) -> Vec<usize> {
 
     runtime.run_until_quiescent();
 
-    let guard = results.lock().unwrap();
+    let guard = results.lock();
     guard.clone()
 }
 

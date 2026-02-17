@@ -24,8 +24,8 @@
 //! println!("{}", logger.report());
 //! ```
 
+use parking_lot::Mutex;
 use std::fmt::Write as _;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 // ============================================================================
@@ -666,7 +666,7 @@ impl TestLogger {
         }
 
         let record = LogRecord { elapsed, event };
-        self.events.lock().expect("lock poisoned").push(record);
+        self.events.lock().push(record);
     }
 
     /// Logs a custom event.
@@ -696,13 +696,13 @@ impl TestLogger {
     /// Returns the number of captured events.
     #[must_use]
     pub fn event_count(&self) -> usize {
-        self.events.lock().expect("lock poisoned").len()
+        self.events.lock().len()
     }
 
     /// Returns a snapshot of all captured events.
     #[must_use]
     pub fn events(&self) -> Vec<LogRecord> {
-        self.events.lock().expect("lock poisoned").clone()
+        self.events.lock().clone()
     }
 
     /// Generates a detailed report of all captured events.
@@ -710,7 +710,7 @@ impl TestLogger {
     #[allow(clippy::cast_precision_loss)]
     #[allow(clippy::significant_drop_tightening)]
     pub fn report(&self) -> String {
-        let events = self.events.lock().expect("lock poisoned");
+        let events = self.events.lock();
         let mut report = String::new();
 
         let _ = writeln!(report, "=== Test Event Log ({} events) ===", events.len());
@@ -810,7 +810,7 @@ impl TestLogger {
     /// Panics if the number of empty polls exceeds `max_empty_polls`.
     pub fn assert_no_busy_loop(&self, max_empty_polls: usize) {
         let empty_polls = {
-            let events = self.events.lock().expect("lock poisoned");
+            let events = self.events.lock();
             events
                 .iter()
                 .filter(|r| {
@@ -841,7 +841,7 @@ impl TestLogger {
     /// Panics if any error events were logged.
     pub fn assert_no_errors(&self) {
         let error_messages: Vec<String> = {
-            let events = self.events.lock().expect("lock poisoned");
+            let events = self.events.lock();
             events
                 .iter()
                 .filter(|r| matches!(r.event, TestEvent::Error { .. }))
@@ -865,7 +865,7 @@ impl TestLogger {
     /// Panics if any spawned task did not have a corresponding completion event.
     pub fn assert_all_tasks_completed(&self) {
         let leaked: Vec<usize> = {
-            let events = self.events.lock().expect("lock poisoned");
+            let events = self.events.lock();
 
             let spawned: std::collections::HashSet<_> = events
                 .iter()
@@ -904,7 +904,7 @@ impl TestLogger {
 
     /// Clears all captured events.
     pub fn clear(&self) {
-        self.events.lock().expect("lock poisoned").clear();
+        self.events.lock().clear();
     }
 }
 

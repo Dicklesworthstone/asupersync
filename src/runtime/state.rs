@@ -177,6 +177,7 @@ impl MaskedFinalizer {
         }
         let mut guard = self.cx_inner.write();
         guard.mask_depth = guard.mask_depth.saturating_sub(1);
+        drop(guard);
         self.entered = false;
     }
 }
@@ -336,6 +337,13 @@ pub struct RuntimeState {
     /// `mark_obligation_leaked → advance_region_state → collect_obligation_leaks`
     /// discovers obligations already being processed by the outer caller.
     handling_leaks: bool,
+    /// Count of regions currently in `Finalizing` state.
+    ///
+    /// Incremented when `begin_finalize()` succeeds, decremented when
+    /// `complete_close()` succeeds.  Allows `drain_ready_async_finalizers`
+    /// to skip a full region-arena scan on every poll (the common case has
+    /// zero finalizing regions).
+    finalizing_region_count: usize,
 }
 
 impl std::fmt::Debug for RuntimeState {
@@ -359,6 +367,7 @@ impl std::fmt::Debug for RuntimeState {
             .field("leak_escalation", &self.leak_escalation)
             .field("leak_count", &self.leak_count)
             .field("handling_leaks", &self.handling_leaks)
+            .field("finalizing_region_count", &self.finalizing_region_count)
             .finish()
     }
 }
@@ -395,6 +404,7 @@ impl RuntimeState {
             leak_escalation: None,
             leak_count: 0,
             handling_leaks: false,
+            finalizing_region_count: 0,
         }
     }
 
@@ -1822,7 +1832,7 @@ impl RuntimeState {
     /// Returns the task's waiters that should be woken.
     #[allow(clippy::used_underscore_binding)]
     pub fn task_completed(&mut self, task_id: TaskId) -> SmallVec<[TaskId; 4]> {
-        let (owner, completion, _outcome_kind, waiters) = {
+        let (owner, completion, _outcome_kind) = {
             let Some(task) = self.task(task_id) else {
                 trace!(
                     task_id = ?task_id,
@@ -1831,8 +1841,11 @@ impl RuntimeState {
                 return SmallVec::new();
             };
             if let Some(inner) = task.cx_inner.as_ref() {
-                let mut guard = inner.write();
-                guard.cancel_waker = None;
+                // Read-first: skip the write lock when cancel_waker is already
+                // None (the common case — waker was cached back into the record).
+                if inner.read().cancel_waker.is_some() {
+                    inner.write().cancel_waker = None;
+                }
             }
 
             self.record_task_complete(task);
@@ -1848,9 +1861,13 @@ impl RuntimeState {
             };
             let owner = task.owner;
             let completion = TaskCompletionKind::from_state(&task.state);
-            let waiters = task.waiters.clone();
-            (owner, completion, outcome_kind, waiters)
+            (owner, completion, outcome_kind)
         };
+        // Take waiters by value (avoiding clone) since the task is about to be removed.
+        let waiters = self
+            .task_mut(task_id)
+            .map(|task| std::mem::take(&mut task.waiters))
+            .unwrap_or_default();
         let _waiter_count = waiters.len();
 
         // Remove the task record to prevent memory leaks
@@ -1905,8 +1922,11 @@ impl RuntimeState {
     ///
     /// This runs sync finalizers inline and schedules at most one async
     /// finalizer per region (respecting the async barrier).
-    pub fn drain_ready_async_finalizers(&mut self) -> Vec<(TaskId, u8)> {
-        let mut scheduled = Vec::new();
+    pub fn drain_ready_async_finalizers(&mut self) -> SmallVec<[(TaskId, u8); 2]> {
+        if self.finalizing_region_count == 0 {
+            return SmallVec::new();
+        }
+        let mut scheduled = SmallVec::new();
         let regions: SmallVec<[RegionId; 8]> = self
             .regions
             .iter()
@@ -2181,6 +2201,7 @@ impl RuntimeState {
                     };
 
                     if transition_to_finalizing {
+                        self.finalizing_region_count += 1;
                         // Re-process same region as Finalizing in next iteration
                         current = Some(region_id);
                     }
@@ -2229,6 +2250,8 @@ impl RuntimeState {
                         };
 
                         if closed {
+                            self.finalizing_region_count =
+                                self.finalizing_region_count.saturating_sub(1);
                             // Emit RegionCloseComplete trace event (pairs
                             // with RegionCloseBegin emitted in cancel_request).
                             let seq = self.next_trace_seq();
@@ -3275,8 +3298,9 @@ mod tests {
     use crate::trace::event::TRACE_EVENT_SCHEMA_VERSION;
     use crate::types::{CancelAttributionConfig, CancelKind};
     use crate::util::ArenaIndex;
+    use parking_lot::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::task::{Wake, Waker};
 
     #[derive(Default)]
@@ -3292,10 +3316,7 @@ mod tests {
         }
 
         fn task_completed(&self, _: TaskId, outcome: OutcomeKind, _: Duration) {
-            self.completions
-                .lock()
-                .expect("lock poisoned")
-                .push(outcome);
+            self.completions.lock().push(outcome);
         }
 
         fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
@@ -3541,11 +3562,7 @@ mod tests {
         }
         let _ = state.task_completed(task_id);
 
-        let saw_cancelled = metrics
-            .completions
-            .lock()
-            .expect("lock poisoned")
-            .contains(&OutcomeKind::Cancelled);
+        let saw_cancelled = metrics.completions.lock().contains(&OutcomeKind::Cancelled);
         crate::assert_with_log!(
             saw_cancelled,
             "cancelled outcome metric",
@@ -4533,15 +4550,15 @@ mod tests {
         let mut state = RuntimeState::new();
         let region = state.create_root_region(Budget::INFINITE);
 
-        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let order = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
         let o1 = order.clone();
         let o2 = order.clone();
         let o3 = order.clone();
 
         // Register finalizers: 1, 2, 3
-        state.register_sync_finalizer(region, move || o1.lock().unwrap().push(1));
-        state.register_sync_finalizer(region, move || o2.lock().unwrap().push(2));
-        state.register_sync_finalizer(region, move || o3.lock().unwrap().push(3));
+        state.register_sync_finalizer(region, move || o1.lock().push(1));
+        state.register_sync_finalizer(region, move || o2.lock().push(2));
+        state.register_sync_finalizer(region, move || o3.lock().push(3));
 
         // Pop and execute in LIFO order
         while let Some(finalizer) = state.pop_region_finalizer(region) {
@@ -4551,7 +4568,7 @@ mod tests {
         }
 
         // Should be 3, 2, 1 (LIFO)
-        let observed = order.lock().unwrap().clone();
+        let observed = order.lock().clone();
         crate::assert_with_log!(
             observed == vec![3, 2, 1],
             "finalizer order",
@@ -5102,7 +5119,6 @@ mod tests {
         let cancelled_count = metrics
             .completions
             .lock()
-            .expect("lock")
             .iter()
             .filter(|o| **o == OutcomeKind::Cancelled)
             .count();
@@ -6862,7 +6878,7 @@ mod tests {
         fn task_completed(&self, _: TaskId, _: OutcomeKind, _: Duration) {}
         fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
         fn region_closed(&self, id: RegionId, lifetime: Duration) {
-            self.closed.lock().expect("lock").push((id, lifetime));
+            self.closed.lock().push((id, lifetime));
         }
         fn cancellation_requested(&self, _: RegionId, _: CancelKind) {}
         fn drain_completed(&self, _: RegionId, _: Duration) {}
@@ -6902,7 +6918,7 @@ mod tests {
         let _ = state.task_completed(task);
 
         {
-            let closed = metrics.closed.lock().expect("lock");
+            let closed = metrics.closed.lock();
             crate::assert_with_log!(
                 closed.len() == 1,
                 "region_closed metric fired exactly once",

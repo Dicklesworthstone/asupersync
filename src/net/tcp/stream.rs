@@ -167,7 +167,7 @@ impl TcpStream {
 
     /// Connect with timeout.
     pub async fn connect_timeout(addr: SocketAddr, timeout_duration: Duration) -> io::Result<Self> {
-        let connect_future = Box::pin(Self::connect(addr));
+        let connect_future = std::pin::pin!(Self::connect(addr));
         match timeout(timeout_now(), timeout_duration, connect_future).await {
             Ok(Ok(stream)) => Ok(stream),
             Ok(Err(err)) => Err(err),

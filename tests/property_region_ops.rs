@@ -790,11 +790,7 @@ impl TestHarness {
         match result {
             Ok((task_id, _handle)) => {
                 // Schedule the task
-                self.runtime
-                    .scheduler
-                    .lock()
-                    
-                    .schedule(task_id, 128);
+                self.runtime.scheduler.lock().schedule(task_id, 128);
                 self.tasks.push(task_id);
                 Some(task_id)
             }

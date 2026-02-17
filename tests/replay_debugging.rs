@@ -469,16 +469,8 @@ fn failure_triage_capture_manifest_replay_roundtrip() {
         .create_task(replay_region, Budget::INFINITE, async {})
         .expect("replay task b");
 
-    replay_runtime
-        .scheduler
-        .lock()
-        
-        .schedule(replay_task_a, 0);
-    replay_runtime
-        .scheduler
-        .lock()
-        
-        .schedule(replay_task_b, 0);
+    replay_runtime.scheduler.lock().schedule(replay_task_a, 0);
+    replay_runtime.scheduler.lock().schedule(replay_task_b, 0);
     replay_runtime.run_until_quiescent();
 
     let replay_trace = replay_runtime.finish_replay_trace().expect("replay trace");

@@ -24,8 +24,8 @@
 
 use crate::cx::Cx;
 use crate::runtime::blocking_pool::{BlockingPoolHandle, BlockingTaskHandle};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use parking_lot::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::Waker;
 use std::thread;

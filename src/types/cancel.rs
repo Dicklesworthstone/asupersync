@@ -338,6 +338,24 @@ pub enum CancelWitnessError {
 }
 
 impl CancelKind {
+    /// Returns the variant name as a static string (matches `Debug` output).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "User",
+            Self::Timeout => "Timeout",
+            Self::Deadline => "Deadline",
+            Self::PollQuota => "PollQuota",
+            Self::CostBudget => "CostBudget",
+            Self::FailFast => "FailFast",
+            Self::RaceLost => "RaceLost",
+            Self::ParentCancelled => "ParentCancelled",
+            Self::ResourceUnavailable => "ResourceUnavailable",
+            Self::Shutdown => "Shutdown",
+            Self::LinkedExit => "LinkedExit",
+        }
+    }
+
     /// Returns the severity of this cancellation kind.
     ///
     /// Higher severity cancellations take precedence when strengthening.

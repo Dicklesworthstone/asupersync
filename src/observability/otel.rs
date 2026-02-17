@@ -53,10 +53,10 @@ use crate::observability::metrics::{MetricsProvider, OutcomeKind};
 use crate::types::{CancelKind, RegionId, TaskId};
 use opentelemetry::metrics::{Counter, Histogram, Meter, ObservableGauge};
 use opentelemetry::KeyValue;
+use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::{Mutex, RwLock};
 use std::sync::Arc;
 use std::time::Duration;
 

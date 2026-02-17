@@ -30,10 +30,15 @@
 //! - Space: O(SLOTS × LEVELS) + O(overflow timers)
 
 use crate::types::Time;
+use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::task::Waker;
 use std::time::Duration;
+
+/// Waker collection type for timer expiration. Stack-allocated for typical
+/// small batches (≤4 expired timers per tick).
+pub type WakerBatch = SmallVec<[Waker; 4]>;
 
 const LEVEL_COUNT: usize = 4;
 const SLOTS_PER_LEVEL: usize = 256;
@@ -536,7 +541,7 @@ impl TimerWheel {
     }
 
     /// Advances time and returns expired timer wakers.
-    pub fn collect_expired(&mut self, now: Time) -> Vec<Waker> {
+    pub fn collect_expired(&mut self, now: Time) -> WakerBatch {
         let now_nanos = now.as_nanos();
         let target_tick = now_nanos / LEVEL0_RESOLUTION_NS;
 
@@ -750,8 +755,8 @@ impl TimerWheel {
         }
     }
 
-    fn drain_ready(&mut self, now: Time) -> Vec<Waker> {
-        let mut wakers = Vec::new();
+    fn drain_ready(&mut self, now: Time) -> WakerBatch {
+        let mut wakers = WakerBatch::new();
 
         // Take the ready vec out so we can mutate it in-place while also
         // accessing self.active / self.coalescing through &mut self.

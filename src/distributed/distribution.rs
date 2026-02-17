@@ -174,7 +174,6 @@ impl SymbolDistributor {
         let mut outcomes = Vec::with_capacity(assignments.len());
 
         for assignment in assignments {
-            let replica_id = assignment.replica_id.clone();
             let symbols_for_replica: Vec<AuthenticatedSymbol> = assignment
                 .symbol_indices
                 .iter()
@@ -190,7 +189,7 @@ impl SymbolDistributor {
 
             // TODO: Execute these concurrently (respecting max_concurrent)
             let result = transport
-                .send_symbols(&replica_id, symbols_for_replica)
+                .send_symbols(&assignment.replica_id, symbols_for_replica)
                 .await;
 
             outcomes.push(match result {

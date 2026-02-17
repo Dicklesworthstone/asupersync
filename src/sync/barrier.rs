@@ -10,9 +10,10 @@
 //! - **Trip**: Once the barrier trips, all waiting tasks are woken and will
 //!   observe completion, even if cancelled concurrently.
 
+use parking_lot::Mutex;
+use smallvec::SmallVec;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Mutex, PoisonError};
 use std::task::{Context, Poll, Waker};
 
 use crate::cx::Cx;
@@ -38,7 +39,7 @@ impl std::error::Error for BarrierWaitError {}
 struct BarrierState {
     arrived: usize,
     generation: u64,
-    waiters: Vec<Waker>,
+    waiters: SmallVec<[Waker; 7]>,
 }
 
 /// Barrier for N-way rendezvous.
@@ -61,7 +62,7 @@ impl Barrier {
             state: Mutex::new(BarrierState {
                 arrived: 0,
                 generation: 0,
-                waiters: Vec::with_capacity(parties.saturating_sub(1)),
+                waiters: SmallVec::new(),
             }),
         }
     }
@@ -118,11 +119,7 @@ impl Future for BarrierWaitFuture<'_> {
         if let Err(_e) = self.cx.checkpoint() {
             // If we were waiting, we need to unregister.
             if let WaitState::Waiting { generation, slot } = self.state {
-                let mut state = self
-                    .barrier
-                    .state
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
+                let mut state = self.barrier.state.lock();
 
                 // Only decrement if the generation hasn't changed (barrier hasn't tripped).
                 if state.generation == generation {
@@ -153,11 +150,7 @@ impl Future for BarrierWaitFuture<'_> {
             return Poll::Ready(Err(BarrierWaitError::Cancelled));
         }
 
-        let mut state = self
-            .barrier
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.barrier.state.lock();
 
         match self.state {
             WaitState::Init => {
@@ -194,8 +187,7 @@ impl Future for BarrierWaitFuture<'_> {
                     // O(1) fast path: use the remembered slot index.
                     let waker = cx.waker();
                     if slot < state.waiters.len() && state.waiters[slot].will_wake(waker) {
-                        // Slot still valid — update in place (no-op if same waker).
-                        state.waiters[slot].clone_from(waker);
+                        // Slot still valid and waker unchanged — nothing to do.
                     } else {
                         // Slot invalidated by a concurrent cancellation's
                         // swap_remove.  Fall back to linear scan + push.
@@ -237,20 +229,19 @@ impl Future for BarrierWaitFuture<'_> {
 
 impl Drop for BarrierWaitFuture<'_> {
     fn drop(&mut self) {
-        if let WaitState::Waiting { generation, .. } = self.state {
-            // We must use a separate block or variable to handle the lock result
-            // because poisoning might happen.
-            let mut state = match self.barrier.state.lock() {
-                Ok(guard) => guard,
-                Err(poison) => poison.into_inner(),
-            };
+        if let WaitState::Waiting { generation, slot } = self.state {
+            let mut state = self.barrier.state.lock();
 
-            // Only decrement if the generation hasn't changed (barrier hasn't tripped).
-            if state.generation == generation && state.arrived > 0 {
-                state.arrived -= 1;
+            // Only clean up if the generation hasn't changed (barrier hasn't tripped).
+            if state.generation == generation {
+                if state.arrived > 0 {
+                    state.arrived -= 1;
+                }
+                // Remove the dead waker to avoid spurious wake overhead on trip.
+                if slot < state.waiters.len() {
+                    state.waiters.swap_remove(slot);
+                }
             }
-            // Note: We leave the waker in the list. It will be woken (harmlessly)
-            // when the barrier trips, and the list will be cleared then.
         }
     }
 }

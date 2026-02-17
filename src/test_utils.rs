@@ -34,8 +34,9 @@ pub use crate::test_ndjson::{
     write_artifact_bundle, NdjsonEvent, NdjsonLogger, NDJSON_SCHEMA_VERSION,
 };
 use crate::time::timeout;
+use parking_lot::Mutex;
 use std::future::Future;
-use std::sync::{Mutex, Once};
+use std::sync::Once;
 use std::time::Duration;
 use tracing_subscriber::fmt::format::FmtSpan;
 
@@ -71,8 +72,8 @@ pub fn init_test_logging_with_level(level: tracing::Level) {
 }
 
 /// Acquire the global environment lock for tests that mutate env vars.
-pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    ENV_LOCK.lock().expect("env lock poisoned")
+pub(crate) fn env_lock() -> parking_lot::MutexGuard<'static, ()> {
+    ENV_LOCK.lock()
 }
 
 /// Create a deterministic lab runtime for testing.

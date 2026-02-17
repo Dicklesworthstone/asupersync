@@ -31,6 +31,8 @@ use std::io;
 use std::time::Duration;
 
 #[cfg(feature = "kafka")]
+use parking_lot::Mutex;
+#[cfg(feature = "kafka")]
 use rdkafka::{
     client::ClientContext,
     config::ClientConfig,
@@ -42,8 +44,6 @@ use rdkafka::{
 use std::future::Future;
 #[cfg(feature = "kafka")]
 use std::pin::Pin;
-#[cfg(feature = "kafka")]
-use parking_lot::Mutex;
 #[cfg(feature = "kafka")]
 use std::sync::Arc;
 #[cfg(feature = "kafka")]

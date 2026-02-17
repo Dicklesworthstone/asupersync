@@ -96,12 +96,14 @@ struct MutexState {
     locked: bool,
     /// Queue of waiters.
     waiters: VecDeque<Waiter>,
+    /// Monotonic counter for waiter identity.
+    next_waiter_id: u64,
 }
 
 #[derive(Debug)]
 struct Waiter {
     waker: Waker,
-    queued: Arc<AtomicBool>,
+    id: u64,
 }
 
 impl<T> Mutex<T> {
@@ -114,6 +116,7 @@ impl<T> Mutex<T> {
             state: ParkingMutex::new(MutexState {
                 locked: false,
                 waiters: VecDeque::new(),
+                next_waiter_id: 0,
             }),
         }
     }
@@ -141,7 +144,7 @@ impl<T> Mutex<T> {
         LockFuture {
             mutex: self,
             cx,
-            waiter: None,
+            waiter_id: None,
         }
     }
 
@@ -185,15 +188,7 @@ impl<T> Mutex<T> {
         let waker_to_wake = {
             let mut state = self.state.lock();
             state.locked = false;
-            loop {
-                match state.waiters.pop_front() {
-                    Some(waiter) if waiter.queued.swap(false, Ordering::AcqRel) => {
-                        break Some(waiter.waker);
-                    }
-                    Some(_) => {}
-                    None => break None,
-                }
-            }
+            state.waiters.pop_front().map(|w| w.waker)
         };
         // Wake outside the lock
         if let Some(waker) = waker_to_wake {
@@ -212,7 +207,7 @@ impl<T: Default> Default for Mutex<T> {
 pub struct LockFuture<'a, 'b, T> {
     mutex: &'a Mutex<T>,
     cx: &'b Cx,
-    waiter: Option<Arc<AtomicBool>>,
+    waiter_id: Option<u64>,
 }
 
 impl<'a, T> Future for LockFuture<'a, '_, T> {
@@ -233,54 +228,43 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
         if !state.locked {
             // Acquire lock
             state.locked = true;
-            if let Some(waiter) = self.waiter.as_ref() {
-                waiter.store(false, Ordering::Release);
-            }
             return Poll::Ready(Ok(MutexGuard { mutex: self.mutex }));
         }
 
         // Register waiter or update existing waker. We must update the waker
         // when it changes because some executors provide different wakers on
         // each poll - failing to update would cause the task to never be woken.
-        let mut new_waiter = None;
-        match self.waiter.as_ref() {
-            Some(waiter) if !waiter.load(Ordering::Acquire) => {
-                // Was dequeued by unlock() but we're still waiting - re-register
-                // at the FRONT to preserve FIFO fairness (we were already at
-                // the front when dequeued, so we shouldn't lose our position).
-                waiter.store(true, Ordering::Release);
+        if let Some(waiter_id) = self.waiter_id {
+            if let Some(existing) = state.waiters.iter_mut().find(|w| w.id == waiter_id) {
+                // Still queued — update the waker in case it changed.
+                if !existing.waker.will_wake(context.waker()) {
+                    existing.waker.clone_from(context.waker());
+                }
+            } else {
+                // Was dequeued by unlock() but we're still waiting — re-register
+                // at the FRONT to preserve FIFO fairness.
+                let new_id = state.next_waiter_id;
+                state.next_waiter_id += 1;
                 state.waiters.push_front(Waiter {
                     waker: context.waker().clone(),
-                    queued: Arc::clone(waiter),
+                    id: new_id,
                 });
+                drop(state);
+                self.waiter_id = Some(new_id);
+                return Poll::Pending;
             }
-            Some(waiter) => {
-                // Already queued - update the waker in case it changed.
-                // This is critical for correctness with executors that provide
-                // new wakers on each poll.
-                if let Some(existing) = state
-                    .waiters
-                    .iter_mut()
-                    .find(|w| Arc::ptr_eq(&w.queued, waiter))
-                {
-                    if !existing.waker.will_wake(context.waker()) {
-                        existing.waker.clone_from(context.waker());
-                    }
-                }
-            }
-            None => {
-                let waiter = Arc::new(AtomicBool::new(true));
-                state.waiters.push_back(Waiter {
-                    waker: context.waker().clone(),
-                    queued: Arc::clone(&waiter),
-                });
-                new_waiter = Some(waiter);
-            }
+        } else {
+            let id = state.next_waiter_id;
+            state.next_waiter_id += 1;
+            state.waiters.push_back(Waiter {
+                waker: context.waker().clone(),
+                id,
+            });
+            drop(state);
+            self.waiter_id = Some(id);
+            return Poll::Pending;
         }
         drop(state);
-        if let Some(waiter) = new_waiter {
-            self.waiter = Some(waiter);
-        }
 
         Poll::Pending
     }
@@ -288,22 +272,18 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
 
 impl<T> Drop for LockFuture<'_, '_, T> {
     fn drop(&mut self) {
-        if let Some(waiter) = self.waiter.as_ref() {
+        if let Some(waiter_id) = self.waiter_id {
             let mut state = self.mutex.state.lock();
 
             // Try to remove from queue
             let initial_len = state.waiters.len();
-            state.waiters.retain(|w| !Arc::ptr_eq(&w.queued, waiter));
+            state.waiters.retain(|w| w.id != waiter_id);
             let removed = initial_len != state.waiters.len();
 
             if !removed {
-                // We weren't in the queue.
-                // Did unlock wake us?
-                let dequeued = !waiter.load(Ordering::Acquire);
-
-                // If we were dequeued AND the lock is free (because unlock set it to false and we didn't set it to true),
-                // then we must pass the baton to the next waiter.
-                if dequeued && !state.locked {
+                // We weren't in the queue — unlock() already dequeued us.
+                // If the lock is free, pass the baton to the next waiter.
+                if !state.locked {
                     if let Some(next) = state.waiters.front() {
                         next.waker.wake_by_ref();
                     }
@@ -373,27 +353,23 @@ impl<T> OwnedMutexGuard<T> {
         struct OwnedLockFuture<T> {
             mutex: Arc<Mutex<T>>,
             cx: Cx, // clone of cx
-            waiter: Option<Arc<AtomicBool>>,
+            waiter_id: Option<u64>,
         }
 
         impl<T> Drop for OwnedLockFuture<T> {
             fn drop(&mut self) {
-                if let Some(waiter) = self.waiter.as_ref() {
+                if let Some(waiter_id) = self.waiter_id {
                     let mut state = self.mutex.state.lock();
 
                     // Try to remove from queue
                     let initial_len = state.waiters.len();
-                    state.waiters.retain(|w| !Arc::ptr_eq(&w.queued, waiter));
+                    state.waiters.retain(|w| w.id != waiter_id);
                     let removed = initial_len != state.waiters.len();
 
                     if !removed {
-                        // We weren't in the queue.
-                        // Did unlock wake us?
-                        let dequeued = !waiter.load(Ordering::Acquire);
-
-                        // If we were dequeued AND the lock is free (because unlock set it to false and we didn't set it to true),
-                        // then we must pass the baton to the next waiter.
-                        if dequeued && !state.locked {
+                        // We weren't in the queue — unlock() already dequeued us.
+                        // If the lock is free, pass the baton to the next waiter.
+                        if !state.locked {
                             if let Some(next) = state.waiters.front() {
                                 next.waker.wake_by_ref();
                             }
@@ -415,50 +391,38 @@ impl<T> OwnedMutexGuard<T> {
                 let mut state = self.mutex.state.lock();
                 if !state.locked {
                     state.locked = true;
-                    if let Some(waiter) = self.waiter.as_ref() {
-                        waiter.store(false, Ordering::Release);
-                    }
                     return Poll::Ready(Ok(OwnedMutexGuard {
                         mutex: self.mutex.clone(),
                     }));
                 }
-                let mut new_waiter = None;
-                match self.waiter.as_ref() {
-                    Some(waiter) if !waiter.load(Ordering::Acquire) => {
-                        // Was dequeued by unlock() but we're still waiting - re-register
-                        // at the FRONT to preserve FIFO fairness (we were already at
-                        // the front when dequeued, so we shouldn't lose our position).
-                        waiter.store(true, Ordering::Release);
+                if let Some(waiter_id) = self.waiter_id {
+                    if let Some(existing) = state.waiters.iter_mut().find(|w| w.id == waiter_id) {
+                        if !existing.waker.will_wake(context.waker()) {
+                            existing.waker.clone_from(context.waker());
+                        }
+                    } else {
+                        let new_id = state.next_waiter_id;
+                        state.next_waiter_id += 1;
                         state.waiters.push_front(Waiter {
                             waker: context.waker().clone(),
-                            queued: Arc::clone(waiter),
+                            id: new_id,
                         });
+                        drop(state);
+                        self.waiter_id = Some(new_id);
+                        return Poll::Pending;
                     }
-                    Some(waiter) => {
-                        // Already queued - update the waker in case it changed.
-                        if let Some(existing) = state
-                            .waiters
-                            .iter_mut()
-                            .find(|w| Arc::ptr_eq(&w.queued, waiter))
-                        {
-                            if !existing.waker.will_wake(context.waker()) {
-                                existing.waker.clone_from(context.waker());
-                            }
-                        }
-                    }
-                    None => {
-                        let waiter = Arc::new(AtomicBool::new(true));
-                        state.waiters.push_back(Waiter {
-                            waker: context.waker().clone(),
-                            queued: Arc::clone(&waiter),
-                        });
-                        new_waiter = Some(waiter);
-                    }
+                } else {
+                    let id = state.next_waiter_id;
+                    state.next_waiter_id += 1;
+                    state.waiters.push_back(Waiter {
+                        waker: context.waker().clone(),
+                        id,
+                    });
+                    drop(state);
+                    self.waiter_id = Some(id);
+                    return Poll::Pending;
                 }
                 drop(state);
-                if let Some(waiter) = new_waiter {
-                    self.waiter = Some(waiter);
-                }
                 Poll::Pending
             }
         }
@@ -466,7 +430,7 @@ impl<T> OwnedMutexGuard<T> {
         OwnedLockFuture {
             mutex,
             cx: cx.clone(),
-            waiter: None,
+            waiter_id: None,
         }
         .await
     }

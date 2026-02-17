@@ -38,8 +38,8 @@
 //! let fault_tx = FaultSender::new(tx, config, sink);
 //! ```
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::channel::mpsc::{SendError, Sender};
@@ -621,10 +621,7 @@ mod tests {
         }
         block_on(fault_tx.flush(&cx)).expect("flush failed");
 
-        let cap = fault_tx
-            .reorder_buffer
-            .lock()
-            .capacity();
+        let cap = fault_tx.reorder_buffer.lock().capacity();
         assert!(
             cap >= buffer_size,
             "expected reorder buffer capacity >= {buffer_size}, got {cap}"

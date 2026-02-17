@@ -2023,16 +2023,8 @@ mod tests {
             .state
             .store_spawned_task(client_task_id, client_stored);
 
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(client_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(client_task_id, 0);
         runtime.run_until_quiescent();
 
         let result =
@@ -2064,7 +2056,7 @@ mod tests {
 
         let (client_handle, client_stored) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
-                *client_cx_cell_for_task.lock().expect("lock poisoned") = Some(cx.clone());
+                *client_cx_cell_for_task.lock() = Some(cx.clone());
                 server_ref.call(&cx, CounterCall::Get).await
             })
             .unwrap();
@@ -2074,11 +2066,7 @@ mod tests {
             .store_spawned_task(client_task_id, client_stored);
 
         // Poll the client once: it should enqueue the call and then block waiting for reply.
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(client_task_id, 0);
+        runtime.scheduler.lock().schedule(client_task_id, 0);
         runtime.run_until_idle();
 
         // Cancel the client deterministically, then poll it again to observe the cancellation.
@@ -2089,11 +2077,7 @@ mod tests {
             .expect("client cx published");
         client_cx.cancel_with(CancelKind::User, Some("gen_server call cancelled"));
 
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(client_task_id, 0);
+        runtime.scheduler.lock().schedule(client_task_id, 0);
         runtime.run_until_idle();
 
         let result =
@@ -2109,11 +2093,7 @@ mod tests {
 
         // Cleanup: disconnect the server and let it drain the queued call.
         drop(handle);
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
         crate::test_complete!("gen_server_call_cancellation_is_deterministic");
@@ -2196,7 +2176,7 @@ mod tests {
 
         let (client_handle, client_stored) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
-                *client_cx_cell_for_task.lock().expect("lock poisoned") = Some(cx.clone());
+                *client_cx_cell_for_task.lock() = Some(cx.clone());
                 server_ref.cast(&cx, CounterCast::Reset).await
             })
             .unwrap();
@@ -2206,11 +2186,7 @@ mod tests {
             .store_spawned_task(client_task_id, client_stored);
 
         // Poll the client once: it should block waiting for mailbox capacity.
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(client_task_id, 0);
+        runtime.scheduler.lock().schedule(client_task_id, 0);
         runtime.run_until_idle();
 
         // Cancel the client deterministically, then poll it again to observe the cancellation.
@@ -2221,11 +2197,7 @@ mod tests {
             .expect("client cx published");
         client_cx.cancel_with(CancelKind::User, Some("gen_server cast cancelled"));
 
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(client_task_id, 0);
+        runtime.scheduler.lock().schedule(client_task_id, 0);
         runtime.run_until_idle();
 
         let result =
@@ -2241,11 +2213,7 @@ mod tests {
 
         // Cleanup: disconnect the server and let it drain the mailbox.
         drop(handle);
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
         crate::test_complete!("gen_server_cast_cancellation_is_deterministic");
@@ -2446,11 +2414,7 @@ mod tests {
         runtime.state.store_spawned_task(server_task_id, stored);
 
         // Start server and let it park waiting on mailbox.recv().
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_idle();
 
         // Stop should wake the blocked recv waiter. No manual reschedule here.
@@ -2636,7 +2600,7 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
             let seen = Arc::clone(&self.seen);
             Box::pin(async move {
-                seen.lock().expect("lock poisoned").push(format!("{msg:?}"));
+                seen.lock().push(format!("{msg:?}"));
             })
         }
     }
@@ -2891,14 +2855,10 @@ mod tests {
 
         drop(handle);
 
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
-        let seen = seen.lock().expect("lock poisoned");
+        let seen = seen.lock();
         assert_eq!(seen.len(), 3);
         assert!(seen[0].contains("Down"));
         assert!(seen[1].contains("Exit"));
@@ -2968,22 +2928,14 @@ mod tests {
             // Let clients enqueue, then let the server drain.
             runtime.scheduler.lock().schedule(task_id_a, 0);
             runtime.scheduler.lock().schedule(task_id_b, 0);
-            runtime
-                .scheduler
-                .lock()
-                
-                .schedule(server_task_id, 0);
+            runtime.scheduler.lock().schedule(server_task_id, 0);
 
             runtime.run_until_quiescent();
             drop(handle);
-            runtime
-                .scheduler
-                .lock()
-                
-                .schedule(server_task_id, 0);
+            runtime.scheduler.lock().schedule(server_task_id, 0);
             runtime.run_until_quiescent();
 
-            let out = events.lock().expect("lock poisoned").clone();
+            let out = events.lock().clone();
             out
         }
 
@@ -3262,27 +3214,15 @@ mod tests {
             .state
             .store_spawned_task(client_task_id, stored_client);
 
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(client_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(client_task_id, 0);
         runtime.run_until_quiescent();
 
         assert_eq!(started_priority.load(Ordering::SeqCst), 200);
         assert_eq!(loop_priority.load(Ordering::SeqCst), 10);
 
         drop(handle);
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
         crate::test_complete!("gen_server_on_start_budget_priority_applied_and_restored");
@@ -3312,11 +3252,7 @@ mod tests {
         // Request stop: sets cancel_requested. on_stop must run masked.
         handle.stop();
 
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
         assert_eq!(stop_checkpoint_ok.load(Ordering::SeqCst), 1);
@@ -3532,11 +3468,7 @@ mod tests {
         // Cancel BEFORE scheduling (pre-cancel)
         handle.stop();
 
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
         // Init should be skipped
@@ -3629,16 +3561,8 @@ mod tests {
             .state
             .store_spawned_task(client_task_id, stored_client);
 
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(client_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(client_task_id, 0);
         runtime.run_until_quiescent();
 
         // After init, the main budget should have the original quota minus
@@ -3654,11 +3578,7 @@ mod tests {
         );
 
         drop(handle);
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
         crate::test_complete!("init_budget_consumption_propagates_to_main_budget");
@@ -3721,11 +3641,7 @@ mod tests {
         // Trigger stop
         handle.stop();
 
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
         let stop_quota = stop_poll_quota.load(Ordering::SeqCst);
@@ -3753,12 +3669,12 @@ mod tests {
             type Info = SystemMsg;
 
             fn on_start(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-                self.phases.lock().unwrap().push("init");
+                self.phases.lock().push("init");
                 Box::pin(async {})
             }
 
             fn on_stop(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-                self.phases.lock().unwrap().push("stop");
+                self.phases.lock().push("stop");
                 Box::pin(async {})
             }
 
@@ -3802,25 +3718,17 @@ mod tests {
         runtime.state.store_spawned_task(server_task_id, stored);
 
         // Schedule the server so init runs, then idle on recv
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_idle();
 
         // Stop the server and reschedule so on_stop runs
         let phases_clone = Arc::clone(&phases);
         handle.stop();
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_idle();
 
         {
-            let recorded = phases_clone.lock().unwrap();
+            let recorded = phases_clone.lock();
 
             // Stop must always run
             assert!(
@@ -3904,11 +3812,7 @@ mod tests {
 
         handle.stop();
 
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
         // priority = max(original=10, stop_budget=240) after meet
@@ -3961,7 +3865,7 @@ mod tests {
         let (c1_handle, c1_stored) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
                 let r = server_ref_1.call(&cx, CounterCall::Add(10)).await;
-                *result_1_clone.lock().unwrap() = Some(r);
+                *result_1_clone.lock() = Some(r);
             })
             .unwrap();
         let c1_id = c1_handle.task_id();
@@ -3973,7 +3877,7 @@ mod tests {
         let (c2_handle, c2_stored) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
                 let r = server_ref_2.call(&cx, CounterCall::Add(20)).await;
-                *result_2_clone.lock().unwrap() = Some(r);
+                *result_2_clone.lock() = Some(r);
             })
             .unwrap();
         let c2_id = c2_handle.task_id();
@@ -4002,7 +3906,7 @@ mod tests {
         // because the server shut down. The first call may have succeeded before stop.
         // All outcomes are acceptable: Ok (processed before stop), ServerStopped,
         // Cancelled, or NoReply.
-        drop(result_2.lock().unwrap());
+        drop(result_2.lock());
 
         crate::test_complete!("conformance_cancel_propagation_to_queued_calls");
     }
@@ -4026,20 +3930,12 @@ mod tests {
         let server_ref = handle.server_ref();
 
         // Start the server so init runs.
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_idle();
 
         // Stop the server and drain.
         handle.stop();
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
         // try_cast to a stopped server should fail.
@@ -4079,7 +3975,7 @@ mod tests {
         let (client, client_stored) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
                 let r = server_ref_for_call.call(&cx, CounterCall::Add(42)).await;
-                *call_result_clone.lock().unwrap() = Some(r);
+                *call_result_clone.lock() = Some(r);
             })
             .unwrap();
         let client_id = client.task_id();
@@ -4102,7 +3998,7 @@ mod tests {
         runtime.run_until_idle();
 
         // Phase 2: Verify the call result.
-        let call_r = call_result.lock().unwrap();
+        let call_r = call_result.lock();
         if let Some(ref r) = *call_r {
             match r {
                 Ok(value) => assert_eq!(*value, 42, "counter should be 42 after Add(42)"),
@@ -4116,11 +4012,7 @@ mod tests {
 
         // Phase 4: Graceful stop.
         handle.stop();
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
         // If we get here without panics, no obligations were leaked.
@@ -4159,7 +4051,7 @@ mod tests {
                 let (ch, cs) = scope
                     .spawn(&mut runtime.state, &cx, move |cx| async move {
                         if let Ok(val) = server_ref.call(&cx, CounterCall::Add(i * 10)).await {
-                            results_clone.lock().unwrap().push(val);
+                            results_clone.lock().push(val);
                         }
                     })
                     .unwrap();
@@ -4190,14 +4082,10 @@ mod tests {
 
             // Stop and drain.
             handle.stop();
-            runtime
-                .scheduler
-                .lock()
-                
-                .schedule(server_task_id, 0);
+            runtime.scheduler.lock().schedule(server_task_id, 0);
             runtime.run_until_quiescent();
 
-            let r = results.lock().unwrap().clone();
+            let r = results.lock().clone();
             r
         }
 
@@ -4248,11 +4136,7 @@ mod tests {
 
         // Drain and cleanup.
         drop(handle);
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
         crate::test_complete!("conformance_mailbox_overflow_reject_deterministic");
@@ -4285,11 +4169,7 @@ mod tests {
         server_ref.try_cast(TaggedCast::Set(100)).unwrap();
 
         // Process all messages.
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_idle();
 
         // The final value should be 100 (last Set wins).
@@ -4299,7 +4179,7 @@ mod tests {
         let (ch, cs) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
                 if let Ok(val) = result_ref.call(&cx, CounterCall::Get).await {
-                    *result_clone.lock().unwrap() = Some(val);
+                    *result_clone.lock() = Some(val);
                 }
             })
             .unwrap();
@@ -4322,17 +4202,13 @@ mod tests {
         // The server should have processed Set(2), then Set(100).
         // Set(1) was evicted. Final count = 100.
         assert_eq!(
-            *result.lock().unwrap(),
+            *result.lock(),
             Some(100),
             "DropOldest should evict oldest, keeping newest"
         );
 
         drop(handle);
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
         crate::test_complete!("conformance_mailbox_drop_oldest_preserves_newest");
@@ -4387,7 +4263,7 @@ mod tests {
         let (ch, cs) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
                 let r = server_ref.call(&cx, ()).await;
-                *call_result_clone.lock().unwrap() = Some(r);
+                *call_result_clone.lock() = Some(r);
             })
             .unwrap();
         let client_id = ch.task_id();
@@ -4408,17 +4284,13 @@ mod tests {
         runtime.run_until_idle();
 
         // The client should have received an error since the server aborted.
-        if let Some(ref result) = *call_result.lock().unwrap() {
+        if let Some(ref result) = *call_result.lock() {
             assert!(result.is_err(), "aborted reply should result in call error");
         }
 
         // Clean up.
         handle.stop();
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
         crate::test_complete!("conformance_budget_driven_call_timeout");
@@ -4484,7 +4356,7 @@ mod tests {
         let (ch, cs) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
                 let r = server_ref.call(&cx, 21).await;
-                *call_result_clone.lock().unwrap() = Some(r);
+                *call_result_clone.lock() = Some(r);
             })
             .unwrap();
         let client_id = ch.task_id();
@@ -4512,7 +4384,7 @@ mod tests {
 
         // Verify the caller received the correct value.
         {
-            let r = call_result.lock().unwrap();
+            let r = call_result.lock();
             match r.as_ref() {
                 Some(Ok(value)) => assert_eq!(*value, 42, "21 * 2 = 42"),
                 other => unreachable!("expected Ok(42), got {other:?}"),
@@ -4520,11 +4392,7 @@ mod tests {
         }
 
         handle.stop();
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
         crate::test_complete!("conformance_reply_linearity_send_commits");
@@ -4583,7 +4451,7 @@ mod tests {
         let (ch, cs) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
                 let r = server_ref.call(&cx, ()).await;
-                *call_err_clone.lock().unwrap() = Some(r);
+                *call_err_clone.lock() = Some(r);
             })
             .unwrap();
         let client_id = ch.task_id();
@@ -4611,7 +4479,7 @@ mod tests {
 
         // Caller should see an error, not Ok.
         {
-            let r = call_err.lock().unwrap();
+            let r = call_err.lock();
             match r.as_ref() {
                 Some(Err(_)) => { /* expected: aborted reply -> error */ }
                 other => unreachable!("expected call error after abort, got {other:?}"),
@@ -4619,11 +4487,7 @@ mod tests {
         }
 
         handle.stop();
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
         crate::test_complete!("conformance_reply_linearity_abort_is_clean");
@@ -4707,20 +4571,12 @@ mod tests {
         server_ref.try_cast(AccumCast::Add(30)).unwrap();
 
         // Start the server (init runs, then it will process casts).
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_idle();
 
         // Stop and let it drain remaining messages.
         handle.stop();
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(server_task_id, 0);
+        runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
         // The server should have processed all casts before stopping.
@@ -5107,11 +4963,7 @@ mod tests {
             None,
         );
         for (task_id, priority) in tasks_to_schedule {
-            runtime
-                .scheduler
-                .lock()
-                
-                .schedule(task_id, priority);
+            runtime.scheduler.lock().schedule(task_id, priority);
         }
         runtime.run_until_quiescent();
 
@@ -5199,11 +5051,7 @@ mod tests {
             None,
         );
         for (task_id, priority) in tasks_to_schedule {
-            runtime
-                .scheduler
-                .lock()
-                
-                .schedule(task_id, priority);
+            runtime.scheduler.lock().schedule(task_id, priority);
         }
         runtime.run_until_quiescent();
 

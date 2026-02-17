@@ -6,7 +6,8 @@ use crate::actor_e2e::util::init_actor_test;
 use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::types::{Budget, CancelReason};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 /// Test: Actor respects cancellation request.
 #[test]
@@ -24,28 +25,25 @@ fn actor_respects_cancellation() {
         .create_task(region, Budget::INFINITE, async move {
             let cx: Cx = Cx::for_testing();
 
-            events_task.lock().unwrap().push("started".into());
+            events_task.lock().push("started".into());
 
             // Simulate work with cancellation check
             for i in 0..10 {
                 if cx.is_cancel_requested() {
-                    events_task
-                        .lock()
-                        .expect("poisoned")
-                        .push(format!("cancelled_at:{i}"));
+                    events_task.lock().push(format!("cancelled_at:{i}"));
                     break;
                 }
-                events_task.lock().unwrap().push(format!("work:{i}"));
+                events_task.lock().push(format!("work:{i}"));
             }
 
-            events_task.lock().unwrap().push("exiting".into());
+            events_task.lock().push("exiting".into());
         })
         .expect("create task");
 
     runtime.scheduler.lock().schedule(task_id, 0);
     runtime.run_until_quiescent();
 
-    let trace = events.lock().unwrap().clone();
+    let trace = events.lock().clone();
 
     // Should have started and exited
     let has_started = trace.iter().any(|e| e == "started");
@@ -69,14 +67,14 @@ fn region_close_cancels_actors() {
     let (task_id, _) = runtime
         .state
         .create_task(region, Budget::INFINITE, async move {
-            events_task.lock().unwrap().push("actor:running".into());
+            events_task.lock().push("actor:running".into());
         })
         .expect("create task");
 
     runtime.scheduler.lock().schedule(task_id, 0);
     runtime.run_until_quiescent();
 
-    let trace = events.lock().unwrap().clone();
+    let trace = events.lock().clone();
 
     let has_running = trace.iter().any(|e| e == "actor:running");
     assert_with_log!(has_running, "actor should have run", true, has_running);

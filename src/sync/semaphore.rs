@@ -102,14 +102,20 @@ fn front_waiter_waker(state: &SemaphoreState) -> Option<Waker> {
 }
 
 fn remove_waiter_and_take_next_waker(state: &mut SemaphoreState, waiter_id: u64) -> Option<Waker> {
-    let was_front = state
+    if state
         .waiters
         .front()
-        .is_some_and(|waiter| waiter.id == waiter_id);
-    state.waiters.retain(|waiter| waiter.id != waiter_id);
-    if was_front {
+        .is_some_and(|waiter| waiter.id == waiter_id)
+    {
+        // O(1) removal: the waiter is at the front of the FIFO queue (common case).
+        state.waiters.pop_front();
         front_waiter_waker(state)
     } else {
+        // Non-front waiter: targeted removal stops at first match instead of
+        // scanning the entire deque like retain() would.
+        if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
+            state.waiters.remove(pos);
+        }
         None
     }
 }
@@ -122,7 +128,7 @@ impl Semaphore {
             state: ParkingMutex::new(SemaphoreState {
                 permits,
                 closed: false,
-                waiters: VecDeque::new(),
+                waiters: VecDeque::with_capacity(4),
                 next_waiter_id: 0,
             }),
             permits_shadow: AtomicUsize::new(permits),
@@ -151,18 +157,14 @@ impl Semaphore {
 
     /// Closes the semaphore.
     pub fn close(&self) {
-        let waiters = {
+        let taken = {
             let mut state = self.state.lock();
             state.closed = true;
             self.closed_shadow.store(true, Ordering::Release);
-            state
-                .waiters
-                .drain(..)
-                .map(|waiter| waiter.waker)
-                .collect::<Vec<_>>()
+            std::mem::take(&mut state.waiters)
         };
-        for waiter in waiters {
-            waiter.wake();
+        for waiter in taken {
+            waiter.waker.wake();
         }
     }
 
@@ -279,7 +281,9 @@ impl<'a> Future for AcquireFuture<'a, '_> {
         };
 
         if state.closed {
-            state.waiters.retain(|waiter| waiter.id != waiter_id);
+            if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
+                state.waiters.remove(pos);
+            }
             drop(state);
             self.waiter_id = None;
             return Poll::Ready(Err(AcquireError::Closed));
@@ -496,7 +500,9 @@ impl Future for OwnedAcquireFuture {
         );
 
         if state.closed {
-            state.waiters.retain(|waiter| waiter.id != waiter_id);
+            if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
+                state.waiters.remove(pos);
+            }
             drop(state);
             self.waiter_id = None;
             return Poll::Ready(Err(AcquireError::Closed));

@@ -274,12 +274,9 @@ impl Stealer {
 
         while stolen < steal_limit && remaining_attempts > 0 {
             remaining_attempts -= 1;
-            let Some(task_id) = src.steal_one(arena) else {
+            let Some((task_id, is_local)) = src.steal_one_with_locality(arena) else {
                 break;
             };
-            let is_local = arena
-                .get(task_id.arena_index())
-                .is_some_and(crate::record::task::TaskRecord::is_local);
             if is_local {
                 // Local (!Send) tasks must not be transferred across workers.
                 // Preserve original owner-visible ordering when restoring.
@@ -304,12 +301,9 @@ impl Stealer {
             let mut skipped_locals = SmallVec::<[TaskId; Self::SKIPPED_LOCALS_INLINE_CAP]>::new();
             while remaining_attempts > 0 {
                 remaining_attempts -= 1;
-                let Some(task_id) = stack.steal_one(arena) else {
+                let Some((task_id, is_local)) = stack.steal_one_with_locality(arena) else {
                     break;
                 };
-                let is_local = arena
-                    .get(task_id.arena_index())
-                    .is_some_and(crate::record::task::TaskRecord::is_local);
                 if is_local {
                     // Local (!Send) tasks must never be stolen. Temporarily set
                     // aside while scanning for remote work; restore afterwards.

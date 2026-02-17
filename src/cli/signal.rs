@@ -91,13 +91,13 @@ impl SignalHandler {
     /// Check if cancellation has been requested.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
+        self.cancelled.load(Ordering::Relaxed)
     }
 
     /// Get the number of signals received.
     #[must_use]
     pub fn signal_count(&self) -> u32 {
-        self.signal_count.load(Ordering::SeqCst)
+        self.signal_count.load(Ordering::Relaxed)
     }
 
     /// Check if force quit threshold has been reached.
@@ -111,8 +111,8 @@ impl SignalHandler {
     /// Returns true if this is a force-quit situation.
     #[must_use]
     pub fn record_signal(&self) -> bool {
-        self.cancelled.store(true, Ordering::SeqCst);
-        let count = self.signal_count.fetch_add(1, Ordering::SeqCst) + 1;
+        self.cancelled.store(true, Ordering::Relaxed);
+        let count = self.signal_count.fetch_add(1, Ordering::Relaxed) + 1;
         count >= self.force_quit_threshold
     }
 
@@ -128,8 +128,8 @@ impl SignalHandler {
     ///
     /// Useful for testing or when reusing a handler.
     pub fn reset(&self) {
-        self.cancelled.store(false, Ordering::SeqCst);
-        self.signal_count.store(0, Ordering::SeqCst);
+        self.cancelled.store(false, Ordering::Relaxed);
+        self.signal_count.store(0, Ordering::Relaxed);
     }
 }
 
@@ -145,12 +145,12 @@ impl CancellationToken {
     /// Check if cancellation has been requested.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
+        self.cancelled.load(Ordering::Relaxed)
     }
 
     /// Request cancellation.
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::SeqCst);
+        self.cancelled.store(true, Ordering::Relaxed);
     }
 }
 
@@ -159,29 +159,29 @@ impl CancellationToken {
 /// This uses the global signal state, which is useful for simple CLI tools.
 #[must_use]
 pub fn signal_received() -> bool {
-    SIGNAL_RECEIVED.load(Ordering::SeqCst)
+    SIGNAL_RECEIVED.load(Ordering::Relaxed)
 }
 
 /// Get the global signal count.
 #[must_use]
 pub fn global_signal_count() -> u32 {
-    SIGNAL_COUNT.load(Ordering::SeqCst)
+    SIGNAL_COUNT.load(Ordering::Relaxed)
 }
 
 /// Record a signal reception in global state.
 ///
 /// Returns the new signal count.
 pub fn record_global_signal() -> u32 {
-    SIGNAL_RECEIVED.store(true, Ordering::SeqCst);
-    SIGNAL_COUNT.fetch_add(1, Ordering::SeqCst) + 1
+    SIGNAL_RECEIVED.store(true, Ordering::Relaxed);
+    SIGNAL_COUNT.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 /// Reset global signal state.
 ///
 /// Primarily useful for testing.
 pub fn reset_global_signal_state() {
-    SIGNAL_RECEIVED.store(false, Ordering::SeqCst);
-    SIGNAL_COUNT.store(0, Ordering::SeqCst);
+    SIGNAL_RECEIVED.store(false, Ordering::Relaxed);
+    SIGNAL_COUNT.store(0, Ordering::Relaxed);
 }
 
 #[cfg(test)]

@@ -8,7 +8,8 @@ use asupersync::channel::session::tracked_channel;
 use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::types::{Budget, CancelReason};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 // =========================================================================
 // MPSC Queue: exactly-once delivery
@@ -223,7 +224,7 @@ fn e2e_tracked_mpsc_commit_with_lab_replay() {
                 return;
             };
             let value = rx.recv(&cx).await.expect("recv");
-            recv_store.lock().expect("recv_store lock").push(value);
+            recv_store.lock().push(value);
         })
         .expect("create recv task");
     runtime.scheduler.lock().schedule(recv_task, 0);
@@ -246,7 +247,7 @@ fn e2e_tracked_mpsc_commit_with_lab_replay() {
     runtime.run_until_quiescent();
 
     test_section!("verify");
-    let guard = received.lock().expect("received lock");
+    let guard = received.lock();
     assert_eq!(&*guard, &[42]);
     drop(guard);
     assert!(runtime.is_quiescent(), "runtime should be quiescent");
@@ -281,7 +282,7 @@ fn e2e_tracked_mpsc_abort_with_lab_replay() {
                 return;
             };
             let recv = rx.recv(&cx).await;
-            *recv_result.lock().expect("recv_result lock") = Some(recv);
+            *recv_result.lock() = Some(recv);
         })
         .expect("create recv task");
     runtime.scheduler.lock().schedule(recv_task, 0);
@@ -304,7 +305,7 @@ fn e2e_tracked_mpsc_abort_with_lab_replay() {
     runtime.run_until_quiescent();
 
     test_section!("verify");
-    let recv = result.lock().expect("result lock").take();
+    let recv = result.lock().take();
     assert!(matches!(recv, Some(Err(mpsc::RecvError::Disconnected))));
     assert!(runtime.is_quiescent(), "runtime should be quiescent");
     let trace = runtime.finish_replay_trace();
@@ -344,7 +345,7 @@ fn e2e_tracked_mpsc_cancel_mid_reserve() {
 
             tracing::info!(result = ?result, "second reserve result after cancel");
             hold.abort();
-            *outcome_store.lock().expect("outcome lock") = Some(result);
+            *outcome_store.lock() = Some(result);
         })
         .expect("create task");
     runtime.scheduler.lock().schedule(task_id, 0);
@@ -366,7 +367,7 @@ fn e2e_tracked_mpsc_cancel_mid_reserve() {
     runtime.run_until_quiescent();
 
     test_section!("verify");
-    let result = outcome.lock().expect("outcome lock").take();
+    let result = outcome.lock().take();
     assert!(matches!(result, Some(Err(mpsc::SendError::Cancelled(())))));
     assert!(runtime.is_quiescent(), "runtime should be quiescent");
     let trace = runtime.finish_replay_trace();

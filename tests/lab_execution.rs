@@ -10,10 +10,11 @@ use asupersync::lab::LabRuntime;
 use asupersync::runtime::{AdaptiveDeadlineConfig, DeadlineWarning, MonitorConfig, WarningReason};
 use asupersync::types::{Budget, Time};
 use common::*;
+use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 fn init_test(test_name: &str) {
@@ -238,11 +239,7 @@ fn test_lab_cancel_fairness_bound() {
                 order.fetch_add(1, Ordering::SeqCst);
             })
             .expect("create cancel task");
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule_cancel(task_id, 0);
+        runtime.scheduler.lock().schedule_cancel(task_id, 0);
     }
 
     {
@@ -421,7 +418,7 @@ fn test_deadline_monitor_warns_on_approaching_deadline() {
         enabled: true,
     };
     runtime.enable_deadline_monitoring_with_handler(config, move |warning| {
-        warnings_ref.lock().unwrap().push(warning);
+        warnings_ref.lock().push(warning);
     });
 
     let region = runtime.state.create_root_region(Budget::INFINITE);
@@ -442,7 +439,7 @@ fn test_deadline_monitor_warns_on_approaching_deadline() {
     runtime.run_until_quiescent();
 
     test_section!("verify");
-    let recorded = warnings.lock().unwrap();
+    let recorded = warnings.lock();
     assert_with_log!(
         recorded.len() == 1,
         "one warning emitted",
@@ -475,7 +472,7 @@ fn test_deadline_monitor_warns_at_threshold_boundary() {
         enabled: true,
     };
     runtime.enable_deadline_monitoring_with_handler(config, move |warning| {
-        warnings_ref.lock().unwrap().push(warning);
+        warnings_ref.lock().push(warning);
     });
 
     let region = runtime.state.create_root_region(Budget::INFINITE);
@@ -494,7 +491,7 @@ fn test_deadline_monitor_warns_at_threshold_boundary() {
     runtime.run_until_quiescent();
 
     test_section!("verify");
-    let recorded = warnings.lock().unwrap();
+    let recorded = warnings.lock();
     assert_with_log!(
         recorded.len() == 1,
         "one warning emitted at threshold boundary",
@@ -527,7 +524,7 @@ fn test_deadline_monitor_warns_on_no_progress() {
         enabled: true,
     };
     runtime.enable_deadline_monitoring_with_handler(config, move |warning| {
-        warnings_ref.lock().unwrap().push(warning);
+        warnings_ref.lock().push(warning);
     });
 
     let region = runtime.state.create_root_region(Budget::INFINITE);
@@ -546,7 +543,7 @@ fn test_deadline_monitor_warns_on_no_progress() {
     runtime.run_until_quiescent();
 
     test_section!("verify");
-    let recorded = warnings.lock().unwrap();
+    let recorded = warnings.lock();
     assert_with_log!(
         recorded.len() == 1,
         "one warning emitted",
@@ -579,7 +576,7 @@ fn test_deadline_monitor_warns_on_approaching_deadline_no_progress() {
         enabled: true,
     };
     runtime.enable_deadline_monitoring_with_handler(config, move |warning| {
-        warnings_ref.lock().unwrap().push(warning);
+        warnings_ref.lock().push(warning);
     });
 
     let region = runtime.state.create_root_region(Budget::INFINITE);
@@ -598,7 +595,7 @@ fn test_deadline_monitor_warns_on_approaching_deadline_no_progress() {
     runtime.run_until_quiescent();
 
     test_section!("verify");
-    let recorded = warnings.lock().unwrap();
+    let recorded = warnings.lock();
     assert_with_log!(
         recorded.len() == 1,
         "one warning emitted",
@@ -631,7 +628,7 @@ fn test_deadline_monitor_includes_checkpoint_message() {
         enabled: true,
     };
     runtime.enable_deadline_monitoring_with_handler(config, move |warning| {
-        warnings_ref.lock().unwrap().push(warning);
+        warnings_ref.lock().push(warning);
     });
 
     let region = runtime.state.create_root_region(Budget::INFINITE);
@@ -653,7 +650,7 @@ fn test_deadline_monitor_includes_checkpoint_message() {
     runtime.run_until_quiescent();
 
     test_section!("verify");
-    let recorded = warnings.lock().unwrap();
+    let recorded = warnings.lock();
     assert_with_log!(
         recorded.len() == 1,
         "one warning emitted",

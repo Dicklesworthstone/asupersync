@@ -2,9 +2,9 @@
 //!
 //! Provides a thread-safe cache for DNS lookup results with TTL-based expiration.
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 use super::lookup::LookupIp;
@@ -91,47 +91,34 @@ impl DnsCache {
 
     /// Looks up an IP address result from the cache.
     pub fn get_ip(&self, host: &str) -> Option<LookupIp> {
-        let entry = {
+        // Fast path: check expiry under read lock, clone only the data.
+        {
             let cache = self.ip_cache.read();
-            cache.get(host).cloned()
-        };
-
-        match entry {
-            Some(entry) if !entry.is_expired() => {
-                self.stat_hits.fetch_add(1, Ordering::Relaxed);
-                Some(entry.data)
-            }
-            Some(_) => {
-                let mut refreshed: Option<LookupIp> = None;
-                let mut evicted = false;
-                {
-                    let mut cache = self.ip_cache.write();
-                    if let Some(entry) = cache.get(host) {
-                        if entry.is_expired() {
-                            cache.remove(host);
-                            evicted = true;
-                        } else {
-                            refreshed = Some(entry.data.clone());
-                        }
-                    }
-                    drop(cache);
-                }
-
-                if let Some(data) = refreshed {
+            if let Some(entry) = cache.get(host) {
+                if !entry.is_expired() {
                     self.stat_hits.fetch_add(1, Ordering::Relaxed);
-                    return Some(data);
+                    return Some(entry.data.clone());
                 }
+            } else {
                 self.stat_misses.fetch_add(1, Ordering::Relaxed);
-                if evicted {
-                    self.stat_evictions.fetch_add(1, Ordering::Relaxed);
-                }
-                None
-            }
-            None => {
-                self.stat_misses.fetch_add(1, Ordering::Relaxed);
-                None
+                return None;
             }
         }
+
+        // Slow path: entry was expired — upgrade to write lock to evict.
+        let mut cache = self.ip_cache.write();
+        if let Some(entry) = cache.get(host) {
+            if entry.is_expired() {
+                cache.remove(host);
+                self.stat_evictions.fetch_add(1, Ordering::Relaxed);
+            } else {
+                // Another thread refreshed the entry between locks.
+                self.stat_hits.fetch_add(1, Ordering::Relaxed);
+                return Some(entry.data.clone());
+            }
+        }
+        self.stat_misses.fetch_add(1, Ordering::Relaxed);
+        None
     }
 
     /// Inserts an IP address lookup result into the cache.

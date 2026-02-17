@@ -335,7 +335,7 @@ impl PathSet {
         remote: impl Into<String>,
         chars: PathCharacteristics,
     ) -> PathId {
-        let id = PathId(self.next_id.fetch_add(1, Ordering::SeqCst));
+        let id = PathId(self.next_id.fetch_add(1, Ordering::Relaxed));
         let path = TransportPath::new(id, name, remote).with_characteristics(chars);
         self.register(path)
     }

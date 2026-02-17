@@ -42,7 +42,7 @@ use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use smallvec::SmallVec;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
@@ -120,6 +120,10 @@ impl std::error::Error for ModifyError {}
 struct WatchInner<T> {
     /// The current value and its version number.
     value: RwLock<(T, u64)>,
+    /// Lock-free mirror of the version in `value`. Updated under the write
+    /// lock, read without any lock. Eliminates RwLock acquisition for the
+    /// frequent version-only checks in `changed()`, `has_changed()`, etc.
+    version: AtomicU64,
     /// Number of active receivers (excluding sender's implicit subscription).
     receiver_count: AtomicUsize,
     /// Whether the sender has been dropped.
@@ -132,6 +136,7 @@ impl<T> WatchInner<T> {
     fn new(initial: T) -> Self {
         Self {
             value: RwLock::new((initial, 0)),
+            version: AtomicU64::new(0),
             receiver_count: AtomicUsize::new(1), // Counts the Receiver returned by channel()
             sender_dropped: AtomicBool::new(false),
             waiters: Mutex::new(SmallVec::new()),
@@ -147,7 +152,7 @@ impl<T> WatchInner<T> {
     }
 
     fn current_version(&self) -> u64 {
-        self.value.read().1
+        self.version.load(Ordering::Acquire)
     }
 
     fn wake_all_waiters(&self) {
@@ -163,20 +168,23 @@ impl<T> WatchInner<T> {
 
     fn register_waker(&self, waiter: WatchWaiter) {
         let mut waiters = self.waiters.lock();
-        // Stale entries can remain after cancelled/dropped wait futures.
-        // They have no owner `Receiver` reference, so only the waiters vec
-        // holds their flag (`strong_count == 1`). Prune before inserting.
-        waiters.retain(|entry| Arc::strong_count(&entry.queued) > 1);
-        if let Some(existing) = waiters
-            .iter_mut()
-            .find(|entry| Arc::ptr_eq(&entry.queued, &waiter.queued))
-        {
-            if !existing.waker.will_wake(&waiter.waker) {
-                existing.waker = waiter.waker;
+        // Single pass: prune stale entries and update existing in one traversal.
+        let mut found = false;
+        waiters.retain_mut(|entry| {
+            if Arc::strong_count(&entry.queued) <= 1 {
+                return false;
             }
-            return;
+            if !found && Arc::ptr_eq(&entry.queued, &waiter.queued) {
+                if !entry.waker.will_wake(&waiter.waker) {
+                    entry.waker.clone_from(&waiter.waker);
+                }
+                found = true;
+            }
+            true
+        });
+        if !found {
+            waiters.push(waiter);
         }
-        waiters.push(waiter);
     }
 
     /// Update the waker for an already-queued waiter without pre-cloning.
@@ -184,18 +192,21 @@ impl<T> WatchInner<T> {
     /// (caller should fall back to `register_waker` with a new `WatchWaiter`).
     fn refresh_waker(&self, queued: &Arc<AtomicBool>, new_waker: &Waker) -> bool {
         let mut waiters = self.waiters.lock();
-        waiters.retain(|entry| Arc::strong_count(&entry.queued) > 1);
-        if let Some(existing) = waiters
-            .iter_mut()
-            .find(|entry| Arc::ptr_eq(&entry.queued, queued))
-        {
-            if !existing.waker.will_wake(new_waker) {
-                existing.waker.clone_from(new_waker);
+        // Single pass: prune stale entries and refresh target in one traversal.
+        let mut found = false;
+        waiters.retain_mut(|entry| {
+            if Arc::strong_count(&entry.queued) <= 1 {
+                return false;
             }
-            return true;
-        }
-        drop(waiters);
-        false
+            if !found && Arc::ptr_eq(&entry.queued, queued) {
+                if !entry.waker.will_wake(new_waker) {
+                    entry.waker.clone_from(new_waker);
+                }
+                found = true;
+            }
+            true
+        });
+        found
     }
 }
 
@@ -254,6 +265,7 @@ impl<T> Sender<T> {
             let mut guard = self.inner.value.write();
             guard.0 = value;
             guard.1 = guard.1.wrapping_add(1);
+            self.inner.version.store(guard.1, Ordering::Release);
         }
 
         self.inner.wake_all_waiters();
@@ -283,6 +295,7 @@ impl<T> Sender<T> {
             let mut guard = self.inner.value.write();
             f(&mut guard.0);
             guard.1 = guard.1.wrapping_add(1);
+            self.inner.version.store(guard.1, Ordering::Release);
         }
 
         self.inner.wake_all_waiters();
@@ -867,6 +880,8 @@ mod tests {
         {
             let mut guard = tx.inner.value.write();
             guard.1 = u64::MAX - 1;
+            drop(guard);
+            tx.inner.version.store(u64::MAX - 1, Ordering::Release);
         }
         rx.seen_version = u64::MAX - 1;
 

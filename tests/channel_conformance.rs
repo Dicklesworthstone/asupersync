@@ -17,13 +17,14 @@ use conformance::{
     WatchRecvError, WatchSender,
 };
 use futures_lite::future;
+use parking_lot::Mutex;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -64,7 +65,7 @@ fn sleep_future(duration: Duration) -> impl Future<Output = ()> + Send {
         let mut join = None;
         let mut ready = false;
         let should_spawn = {
-            let mut guard = state_clone.lock().expect("sleep state lock poisoned");
+            let mut guard = state_clone.lock();
             if guard.done {
                 join = guard.join.take();
                 ready = true;
@@ -95,7 +96,7 @@ fn sleep_future(duration: Duration) -> impl Future<Output = ()> + Send {
                 std::thread::sleep(duration);
 
                 let waker = {
-                    let mut guard = thread_state.lock().expect("sleep state lock poisoned");
+                    let mut guard = thread_state.lock();
                     guard.done = true;
                     guard.waker.take()
                 };
@@ -103,7 +104,7 @@ fn sleep_future(duration: Duration) -> impl Future<Output = ()> + Send {
                     waker.wake();
                 }
             });
-            let mut guard = state_clone.lock().expect("sleep state lock poisoned");
+            let mut guard = state_clone.lock();
             guard.join = Some(handle);
         }
 

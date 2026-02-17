@@ -254,11 +254,7 @@ fn run_deadline_pressure(
                 }
             })
             .expect("create timed task");
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule_timed(task_id, deadline);
+        runtime.scheduler.lock().schedule_timed(task_id, deadline);
     }
 
     for _ in 0..warmup_steps {

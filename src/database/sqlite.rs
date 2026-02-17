@@ -36,10 +36,10 @@
 use crate::cx::Cx;
 use crate::runtime::blocking_pool::{BlockingPool, BlockingPoolHandle};
 use crate::types::{CancelReason, Outcome};
+use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
-use parking_lot::Mutex;
 use std::sync::{Arc, OnceLock};
 
 /// Global blocking pool for SQLite operations.
@@ -322,10 +322,7 @@ pub struct SqliteConnection {
 impl fmt::Debug for SqliteConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SqliteConnection")
-            .field(
-                "open",
-                &self.inner.lock().conn.is_some(),
-            )
+            .field("open", &self.inner.lock().conn.is_some())
             .finish()
     }
 }

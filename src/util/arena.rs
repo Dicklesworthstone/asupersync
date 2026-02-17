@@ -257,70 +257,52 @@ impl<T> Arena<T> {
     ///
     /// In other words, remove all elements `e` such that `f(&e)` returns `false`.
     /// This method operates in place and preserves the generation counters of removed elements.
+    ///
+    /// Uses a single pass over `self.slots` that applies the predicate and
+    /// rebuilds the free list simultaneously, instead of the two-pass approach.
     pub fn retain<F>(&mut self, mut f: F)
     where
         F: FnMut(&mut T) -> bool,
     {
-        // Pass 1: Apply predicate and mark slots as Vacant if needed.
         let mut new_len = 0;
-        for slot in &mut self.slots {
-            let is_occupied = matches!(*slot, Slot::Occupied { .. });
-            if is_occupied {
-                // Check if we should remove (and run side effects)
-                // We use a separate match to avoid holding the borrow of `slot` while calling `f`
-                let remove = match slot {
-                    Slot::Occupied { value, .. } => !f(value),
-                    Slot::Vacant { .. } => unreachable!(),
-                };
-
-                if remove {
-                    // Perform removal
-                    // Re-match to get generation (safe because previous borrow ended)
-                    let gen = if let Slot::Occupied { generation, .. } = slot {
-                        *generation
-                    } else {
-                        unreachable!()
-                    };
-
-                    *slot = Slot::Vacant {
-                        next_free: None,
-                        generation: gen.wrapping_add(1),
-                    };
-                } else {
-                    new_len += 1;
-                }
-            }
-        }
-        self.len = new_len;
-
-        // Pass 2: Rebuild free list in-place.
-        let mut first_free = None;
-        let mut last_free: Option<usize> = None;
+        let mut first_free: Option<u32> = None;
+        let mut prev_free: Option<usize> = None;
 
         for i in 0..self.slots.len() {
-            // Check if vacant (read-only borrow)
-            let is_vacant = matches!(self.slots[i], Slot::Vacant { .. });
+            // Apply predicate to occupied slots.
+            let kept = match &mut self.slots[i] {
+                Slot::Occupied { value, .. } => f(value),
+                Slot::Vacant { .. } => false,
+            };
 
-            if is_vacant {
-                if let Some(prev) = last_free {
-                    // Link previous to current (mutable borrow of distinct element)
-                    if let Slot::Vacant { next_free, .. } = &mut self.slots[prev] {
-                        *next_free = Some(i as u32);
-                    }
-                } else {
-                    first_free = Some(i as u32);
-                }
-                last_free = Some(i);
+            if kept {
+                new_len += 1;
+                continue;
             }
-        }
 
-        // Terminate the last one
-        if let Some(last) = last_free {
-            if let Slot::Vacant { next_free, .. } = &mut self.slots[last] {
+            // Slot is or becomes vacant. Convert occupied→vacant if needed.
+            if let Slot::Occupied { generation, .. } = &self.slots[i] {
+                let gen = *generation;
+                self.slots[i] = Slot::Vacant {
+                    next_free: None,
+                    generation: gen.wrapping_add(1),
+                };
+            } else if let Slot::Vacant { next_free, .. } = &mut self.slots[i] {
                 *next_free = None;
             }
+
+            // Link into free list.
+            if let Some(prev) = prev_free {
+                if let Slot::Vacant { next_free, .. } = &mut self.slots[prev] {
+                    *next_free = Some(i as u32);
+                }
+            } else {
+                first_free = Some(i as u32);
+            }
+            prev_free = Some(i);
         }
 
+        self.len = new_len;
         self.free_head = first_free;
     }
 

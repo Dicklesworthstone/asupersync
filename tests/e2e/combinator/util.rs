@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -136,8 +137,8 @@ pub struct ControllableFuture<T> {
 
 impl<T> ControllableFuture<T> {
     /// Create a new controllable future.
-    pub fn new(result: T) -> Arc<std::sync::Mutex<Self>> {
-        Arc::new(std::sync::Mutex::new(Self {
+    pub fn new(result: T) -> Arc<Mutex<Self>> {
+        Arc::new(Mutex::new(Self {
             result: Some(result),
             waker: None,
             ready: AtomicBool::new(false),
@@ -145,8 +146,8 @@ impl<T> ControllableFuture<T> {
     }
 
     /// Mark the future as ready to complete.
-    pub fn complete(this: &Arc<std::sync::Mutex<Self>>) {
-        let mut guard = this.lock().unwrap();
+    pub fn complete(this: &Arc<Mutex<Self>>) {
+        let mut guard = this.lock();
         guard.ready.store(true, Ordering::SeqCst);
         if let Some(waker) = guard.waker.take() {
             waker.wake();
@@ -156,12 +157,12 @@ impl<T> ControllableFuture<T> {
 
 /// Wrapper to make `ControllableFuture` a `Future`.
 pub struct ControllableFutureHandle<T> {
-    inner: Arc<std::sync::Mutex<ControllableFuture<T>>>,
+    inner: Arc<Mutex<ControllableFuture<T>>>,
 }
 
 impl<T> ControllableFutureHandle<T> {
     /// Create a handle from a controllable future.
-    pub fn new(inner: Arc<std::sync::Mutex<ControllableFuture<T>>>) -> Self {
+    pub fn new(inner: Arc<Mutex<ControllableFuture<T>>>) -> Self {
         Self { inner }
     }
 }
@@ -170,7 +171,7 @@ impl<T: Clone> Future for ControllableFutureHandle<T> {
     type Output = T;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock();
         if guard.ready.load(Ordering::SeqCst) {
             Poll::Ready(guard.result.clone().unwrap())
         } else {

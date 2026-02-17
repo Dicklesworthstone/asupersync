@@ -1225,10 +1225,7 @@ impl<Caps> Cx<Caps> {
     /// ```
     #[must_use]
     pub fn checkpoint_state(&self) -> crate::types::CheckpointState {
-        self.inner
-            .read()
-            .checkpoint_state
-            .clone()
+        self.inner.read().checkpoint_state.clone()
     }
 
     /// Internal: checks cancellation from extracted values.
@@ -1517,10 +1514,7 @@ impl<Caps> Cx<Caps> {
     /// Returns a snapshot of the current diagnostic context.
     #[must_use]
     pub fn diagnostic_context(&self) -> DiagnosticContext {
-        self.observability
-            .read()
-            .context
-            .clone()
+        self.observability.read().context.clone()
     }
 
     /// Replaces the current diagnostic context.
@@ -1538,10 +1532,7 @@ impl<Caps> Cx<Caps> {
     /// Returns the current log collector, if attached.
     #[must_use]
     pub fn log_collector(&self) -> Option<LogCollector> {
-        self.observability
-            .read()
-            .collector
-            .clone()
+        self.observability.read().collector.clone()
     }
 
     /// Attaches a trace buffer to this context.
@@ -1553,10 +1544,7 @@ impl<Caps> Cx<Caps> {
     /// Returns the current trace buffer handle, if attached.
     #[must_use]
     pub fn trace_buffer(&self) -> Option<TraceBufferHandle> {
-        self.observability
-            .read()
-            .trace
-            .clone()
+        self.observability.read().trace.clone()
     }
 
     /// Derives an observability state for a child task.
@@ -1858,11 +1846,7 @@ impl<Caps> Cx<Caps> {
     /// assert_eq!(chain[1].kind, CancelKind::Deadline);
     /// ```
     pub fn cancel_chain(&self) -> impl Iterator<Item = CancelReason> {
-        let cancel_reason = self
-            .inner
-            .read()
-            .cancel_reason
-            .clone();
+        let cancel_reason = self.inner.read().cancel_reason.clone();
         let chain: Vec<CancelReason> = cancel_reason
             .as_ref()
             .map(|r| r.chain().cloned().collect())

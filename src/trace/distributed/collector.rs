@@ -5,8 +5,8 @@ use super::id::TraceId;
 use super::span::{SymbolSpan, SymbolSpanKind, SymbolSpanStatus};
 use crate::types::symbol::ObjectId;
 use crate::types::Time;
-use std::collections::HashMap;
 use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::time::Duration;
 
 /// Stored trace record for a single trace ID.
@@ -159,10 +159,7 @@ impl SymbolTraceCollector {
     /// Gets a trace by ID.
     #[must_use]
     pub fn get_trace(&self, trace_id: TraceId) -> Option<TraceRecord> {
-        self.traces
-            .read()
-            .get(&trace_id)
-            .cloned()
+        self.traces.read().get(&trace_id).cloned()
     }
 
     /// Gets a summary for a trace.

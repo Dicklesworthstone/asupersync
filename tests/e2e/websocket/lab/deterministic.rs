@@ -28,9 +28,9 @@ fn run_with_seed(seed: u64) -> Vec<String> {
         .state
         .create_task(region, Budget::INFINITE, async move {
             let cx: Cx = Cx::for_testing();
-            events_server.lock().unwrap().push("server:accept".into());
+            events_server.lock().push("server:accept".into());
             let mut ws = acceptor.accept(&cx, &req, server_io).await.expect("accept");
-            events_server.lock().unwrap().push("server:accepted".into());
+            events_server.lock().push("server:accepted".into());
 
             if let Some(Message::Text(t)) = ws.recv(&cx).await.expect("recv") {
                 events_server
@@ -38,15 +38,11 @@ fn run_with_seed(seed: u64) -> Vec<String> {
                     .expect("poisoned")
                     .push(format!("server:recv:{t}"));
                 ws.send(&cx, Message::text(t)).await.expect("send");
-                events_server.lock().unwrap().push("server:sent".into());
+                events_server.lock().push("server:sent".into());
             }
         })
         .expect("create_task server");
-    runtime
-        .scheduler
-        .lock()
-        
-        .schedule(server_task_id, 0);
+    runtime.scheduler.lock().schedule(server_task_id, 0);
 
     // Client task: read 101 response (from accept) and then use from_upgraded on the same stream.
     let (client_task_id, _) = runtime
@@ -69,7 +65,7 @@ fn run_with_seed(seed: u64) -> Vec<String> {
                 .push("client:connected".into());
 
             ws.send(&cx, Message::text("hello")).await.expect("send");
-            events_client.lock().unwrap().push("client:sent".into());
+            events_client.lock().push("client:sent".into());
 
             let msg = ws.recv(&cx).await.expect("recv").expect("msg");
             match msg {
@@ -81,14 +77,10 @@ fn run_with_seed(seed: u64) -> Vec<String> {
             }
         })
         .expect("create_task client");
-    runtime
-        .scheduler
-        .lock()
-        
-        .schedule(client_task_id, 0);
+    runtime.scheduler.lock().schedule(client_task_id, 0);
 
     runtime.run_until_quiescent();
-    let snapshot = events.lock().unwrap().clone();
+    let snapshot = events.lock().clone();
     snapshot
 }
 

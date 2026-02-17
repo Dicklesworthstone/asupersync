@@ -398,7 +398,7 @@ impl LabReactor {
     ///
     /// Clears the wake flag and returns its previous value.
     pub fn check_and_clear_wake(&self) -> bool {
-        self.woken.swap(false, Ordering::SeqCst)
+        self.woken.swap(false, Ordering::AcqRel)
     }
 
     // ========================================================================
@@ -746,7 +746,7 @@ impl Reactor for LabReactor {
     #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
     fn poll(&self, events: &mut super::Events, timeout: Option<Duration>) -> io::Result<usize> {
         // Clear wake flag at poll entry
-        self.woken.store(false, Ordering::SeqCst);
+        self.woken.store(false, Ordering::Release);
         events.clear();
 
         let delivered_events = {
@@ -939,7 +939,7 @@ impl Reactor for LabReactor {
     }
 
     fn wake(&self) -> io::Result<()> {
-        self.woken.store(true, Ordering::SeqCst);
+        self.woken.store(true, Ordering::Release);
         Ok(())
     }
 

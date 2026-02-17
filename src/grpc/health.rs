@@ -20,10 +20,10 @@
 //!     .build();
 //! ```
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use parking_lot::RwLock;
 use std::sync::Arc;
 
 use super::service::{NamedService, ServiceDescriptor, ServiceHandler};

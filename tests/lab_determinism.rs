@@ -19,6 +19,7 @@ use asupersync::trace::ReplayEvent;
 use asupersync::types::{Budget, CancelReason};
 use asupersync::util::DetRng;
 use common::*;
+use parking_lot::Mutex;
 use std::future::Future;
 use std::io;
 #[cfg(unix)]
@@ -112,7 +113,7 @@ fn run_tasks_with_seed(seed: u64, task_count: usize, yields_per_task: usize) -> 
     let region = runtime.state.create_root_region(Budget::INFINITE);
 
     // Shared vector to track completion order
-    let completion_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let completion_order = Arc::new(Mutex::new(Vec::new()));
 
     // Spawn tasks
     let mut task_ids = Vec::new();
@@ -123,7 +124,7 @@ fn run_tasks_with_seed(seed: u64, task_count: usize, yields_per_task: usize) -> 
             .create_task(region, Budget::INFINITE, async move {
                 // Yield multiple times to create scheduling opportunities
                 yield_n(yields_per_task).await;
-                order.lock().unwrap().push(i);
+                order.lock().push(i);
             })
             .expect("create task");
         task_ids.push(task_id);
@@ -145,10 +146,7 @@ fn run_tasks_with_seed(seed: u64, task_count: usize, yields_per_task: usize) -> 
     // Run until quiescent
     runtime.run_until_quiescent();
 
-    Arc::try_unwrap(completion_order)
-        .unwrap()
-        .into_inner()
-        .unwrap()
+    Arc::try_unwrap(completion_order).unwrap().into_inner()
 }
 
 #[test]
@@ -311,7 +309,7 @@ fn run_with_time_advancement(seed: u64) -> Vec<(u64, String)> {
     let mut runtime = LabRuntime::new(LabConfig::new(seed));
     let region = runtime.state.create_root_region(Budget::INFINITE);
 
-    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let events = Arc::new(Mutex::new(Vec::new()));
 
     // Create tasks that record their execution time
     for i in 0..5 {
@@ -320,10 +318,7 @@ fn run_with_time_advancement(seed: u64) -> Vec<(u64, String)> {
             .state
             .create_task(region, Budget::INFINITE, async move {
                 yield_now().await;
-                events_clone
-                    .lock()
-                    .expect("poisoned")
-                    .push((0, format!("task-{i}-start")));
+                events_clone.lock().push((0, format!("task-{i}-start")));
             })
             .expect("create task");
         runtime.scheduler.lock().schedule(task_id, 0);
@@ -338,10 +333,9 @@ fn run_with_time_advancement(seed: u64) -> Vec<(u64, String)> {
     // Record time advancement
     events
         .lock()
-        .expect("poisoned")
         .push((runtime.now().as_nanos(), "time-advanced".to_string()));
 
-    Arc::try_unwrap(events).unwrap().into_inner().unwrap()
+    Arc::try_unwrap(events).unwrap().into_inner()
 }
 
 #[test]
@@ -622,7 +616,7 @@ fn run_with_priorities(seed: u64) -> Vec<(usize, u8)> {
     let mut runtime = LabRuntime::new(LabConfig::new(seed));
     let region = runtime.state.create_root_region(Budget::INFINITE);
 
-    let completion_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let completion_order = Arc::new(Mutex::new(Vec::new()));
 
     // Spawn tasks with different priorities
     let priorities = vec![0u8, 5, 10, 3, 7, 1, 9, 2, 8, 4];
@@ -632,22 +626,15 @@ fn run_with_priorities(seed: u64) -> Vec<(usize, u8)> {
             .state
             .create_task(region, Budget::INFINITE, async move {
                 yield_now().await;
-                order.lock().unwrap().push((i, priority));
+                order.lock().push((i, priority));
             })
             .expect("create task");
-        runtime
-            .scheduler
-            .lock()
-            
-            .schedule(task_id, priority);
+        runtime.scheduler.lock().schedule(task_id, priority);
     }
 
     runtime.run_until_quiescent();
 
-    Arc::try_unwrap(completion_order)
-        .unwrap()
-        .into_inner()
-        .unwrap()
+    Arc::try_unwrap(completion_order).unwrap().into_inner()
 }
 
 #[test]
@@ -963,7 +950,7 @@ fn test_lab_interleaved_completion_determinism() {
         let mut runtime = LabRuntime::new(LabConfig::new(s));
         let region = runtime.state.create_root_region(Budget::INFINITE);
 
-        let completion_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let completion_order = Arc::new(Mutex::new(Vec::new()));
 
         // Task i yields i times
         for i in 0..5 {
@@ -972,7 +959,7 @@ fn test_lab_interleaved_completion_determinism() {
                 .state
                 .create_task(region, Budget::INFINITE, async move {
                     yield_n(i).await;
-                    order.lock().unwrap().push((i, i));
+                    order.lock().push((i, i));
                 })
                 .expect("create task");
             runtime.scheduler.lock().schedule(task_id, 0);
@@ -980,10 +967,7 @@ fn test_lab_interleaved_completion_determinism() {
 
         runtime.run_until_quiescent();
 
-        Arc::try_unwrap(completion_order)
-            .unwrap()
-            .into_inner()
-            .unwrap()
+        Arc::try_unwrap(completion_order).unwrap().into_inner()
     };
 
     let result1 = run(seed);

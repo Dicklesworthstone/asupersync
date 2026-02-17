@@ -34,9 +34,10 @@ use asupersync::types::{
 };
 use asupersync::util::Arena;
 use futures_lite::future;
+use parking_lot::Mutex;
 use std::collections::{BTreeSet, HashMap};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 // ============================================================================
 // Checksum helper
@@ -514,7 +515,7 @@ impl<T> SharedHandle<T> {
     where
         T: Clone,
     {
-        let state = self.inner.state.lock().expect("join state lock");
+        let state = self.inner.state.lock();
         if let JoinState::Ready(result) = &*state {
             return Some(result.clone());
         }
@@ -527,7 +528,7 @@ impl<T> SharedHandle<T> {
         };
 
         if let Some(ref result) = result {
-            let mut state = self.inner.state.lock().expect("join state lock");
+            let mut state = self.inner.state.lock();
             *state = JoinState::Ready(result.clone());
         }
         result
@@ -541,7 +542,7 @@ impl<T> SharedHandle<T> {
         T: Clone,
     {
         let i_am_joiner = {
-            let mut state = self.inner.state.lock().expect("join state lock");
+            let mut state = self.inner.state.lock();
             match &*state {
                 JoinState::Ready(result) => return result.clone(),
                 JoinState::InFlight => false,
@@ -554,12 +555,12 @@ impl<T> SharedHandle<T> {
 
         if i_am_joiner {
             let result = self.inner.handle.join(cx).await;
-            *self.inner.state.lock().expect("join state lock") = JoinState::Ready(result.clone());
+            *self.inner.state.lock() = JoinState::Ready(result.clone());
             result
         } else {
             loop {
                 {
-                    let state = self.inner.state.lock().expect("join state lock");
+                    let state = self.inner.state.lock();
                     if let JoinState::Ready(result) = &*state {
                         return result.clone();
                     }
@@ -641,9 +642,10 @@ fn run_plan(runtime: &mut LabRuntime, plan: &PlanDag, fixture_name: &str) -> Nod
         let mut sched = runtime.scheduler.lock();
         for (_, record) in runtime.state.tasks_iter() {
             if record.is_runnable() {
-                let prio = record.cx_inner.as_ref().map_or(0, |inner| {
-                    inner.read().budget.priority
-                });
+                let prio = record
+                    .cx_inner
+                    .as_ref()
+                    .map_or(0, |inner| inner.read().budget.priority);
                 sched.schedule(record.id, prio);
             }
         }
@@ -660,7 +662,7 @@ fn run_plan(runtime: &mut LabRuntime, plan: &PlanDag, fixture_name: &str) -> Nod
     for race in races {
         let fallback = *race.participants.first().expect("race participant");
         let winner = {
-            let winners = winners.lock().expect("winners lock");
+            let winners = winners.lock();
             winners.get(&race.race_id).copied().unwrap_or(fallback)
         };
         for participant in &race.participants {
@@ -754,10 +756,7 @@ fn build_node(
                 let (winner_result, winner_idx) = race_first(&child_handles).await;
                 if let Some(winner_task) = child_handles.get(winner_idx).map(SharedHandle::task_id)
                 {
-                    winners
-                        .lock()
-                        .expect("winners lock")
-                        .insert(race_id, winner_task);
+                    winners.lock().insert(race_id, winner_task);
                 }
                 for (idx, handle) in child_handles.iter().enumerate() {
                     if idx != winner_idx {
@@ -800,13 +799,8 @@ where
         .iter()
         .find(|(_, record)| record.id == task_id)
         .and_then(|(_, record)| record.cx_inner.as_ref())
-        .map_or(0, |inner| {
-            inner.read().budget.priority
-        });
-    runtime
-        .scheduler
-        .lock()
-        .schedule(task_id, priority);
+        .map_or(0, |inner| inner.read().budget.priority);
+    runtime.scheduler.lock().schedule(task_id, priority);
     SharedHandle::new(handle)
 }
 

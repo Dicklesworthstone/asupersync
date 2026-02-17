@@ -62,10 +62,11 @@ where
 mod tests {
     use super::*;
     use futures_lite::future;
+    use parking_lot::{Condvar, Mutex};
     use std::future::poll_fn;
     use std::future::Future;
     use std::net::SocketAddr;
-    use std::sync::{Arc, Condvar, Mutex};
+    use std::sync::Arc;
     use std::task::Poll;
 
     #[test]
@@ -114,9 +115,9 @@ mod tests {
 
             fn to_socket_addrs(&self) -> io::Result<Self::Iter> {
                 let (lock, cvar) = &*self.gate;
-                let mut ready = lock.lock().expect("lock poisoned");
+                let mut ready = lock.lock();
                 while !*ready {
-                    ready = cvar.wait(ready).expect("condvar wait failed");
+                    cvar.wait(&mut ready);
                 }
                 drop(ready);
                 Ok(vec![self.addr].into_iter())
@@ -137,7 +138,7 @@ mod tests {
         drop(fut);
 
         let (lock, cvar) = &*gate;
-        let mut ready = lock.lock().expect("lock poisoned");
+        let mut ready = lock.lock();
         *ready = true;
         cvar.notify_one();
         drop(ready);

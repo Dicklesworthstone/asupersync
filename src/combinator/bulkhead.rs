@@ -29,10 +29,10 @@
 //! }
 //! ```
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -179,6 +179,10 @@ pub struct Bulkhead {
     /// Queue of waiting operations.
     queue: RwLock<Vec<QueueEntry>>,
 
+    /// Number of pending (result == None) entries. Maintained atomically
+    /// so `metrics()` can read queue depth without locking the queue.
+    pending_queue_count: AtomicU32,
+
     /// Next queue entry ID.
     next_id: AtomicU64,
 
@@ -214,6 +218,7 @@ impl Bulkhead {
             policy,
             available_permits: AtomicU32::new(available),
             queue: RwLock::new(Vec::with_capacity(max_queue)),
+            pending_queue_count: AtomicU32::new(0),
             next_id: AtomicU64::new(0),
             total_wait_time_ms: AtomicU64::new(0),
             total_executed_atomic: AtomicU64::new(0),
@@ -247,8 +252,7 @@ impl Bulkhead {
     #[must_use]
     #[allow(clippy::significant_drop_tightening, clippy::cast_precision_loss)]
     pub fn metrics(&self) -> BulkheadMetrics {
-        let queue = self.queue.read();
-        let active = queue.iter().filter(|e| e.result.is_none()).count() as u32;
+        let active = self.pending_queue_count.load(Ordering::Relaxed);
         let used_permits =
             self.policy.max_concurrent - self.available_permits.load(Ordering::Acquire);
 
@@ -313,9 +317,13 @@ impl Bulkhead {
     /// Returns the ID of any entry that was granted, or None.
     #[allow(clippy::cast_precision_loss)]
     pub fn process_queue(&self, now: Time) -> Option<u64> {
-        let now_millis = now.as_millis();
-
         let mut queue = self.queue.write();
+        self.process_queue_inner(&mut queue, now)
+    }
+
+    /// Inner queue processing logic that operates on an already-locked queue.
+    fn process_queue_inner(&self, queue: &mut Vec<QueueEntry>, now: Time) -> Option<u64> {
+        let now_millis = now.as_millis();
 
         // First, timeout expired entries — count timeouts locally and batch-update
         // the metrics lock once, instead of acquiring it per timed-out entry.
@@ -327,6 +335,9 @@ impl Bulkhead {
             }
         }
         if timeout_count > 0 {
+            #[allow(clippy::cast_possible_truncation)]
+            self.pending_queue_count
+                .fetch_sub(timeout_count as u32, Ordering::Relaxed);
             self.total_timeout_atomic
                 .fetch_add(timeout_count, Ordering::Relaxed);
         }
@@ -357,6 +368,7 @@ impl Bulkhead {
                     continue;
                 }
                 entry.result = Some(Ok(()));
+                self.pending_queue_count.fetch_sub(1, Ordering::Relaxed);
 
                 // Record wait time
                 let wait_ms = now_millis.saturating_sub(entry.enqueued_at_millis);
@@ -371,11 +383,6 @@ impl Bulkhead {
             }
         }
 
-        // Clean up old completed entries (only those that have been processed)
-        // Keep rejected entries so check_entry can return the proper error
-        // queue.retain(|e| !matches!(e.result, Some(Ok(()))));
-
-        drop(queue);
         None
     }
 
@@ -413,6 +420,7 @@ impl Bulkhead {
             result: None,
         });
 
+        self.pending_queue_count.fetch_add(1, Ordering::Relaxed);
         self.total_queued_atomic.fetch_add(1, Ordering::Relaxed);
 
         Ok(entry_id)
@@ -431,10 +439,10 @@ impl Bulkhead {
         entry_id: u64,
         now: Time,
     ) -> Result<Option<BulkheadPermit<'_>>, BulkheadError<()>> {
-        // First process the queue to handle timeouts and grants
-        let _ = self.process_queue(now);
-
+        // Single write lock: process queue + check entry in one acquisition.
         let mut queue = self.queue.write();
+        let _ = self.process_queue_inner(&mut queue, now);
+
         let entry_idx = queue.iter().position(|e| e.id == entry_id);
 
         if let Some(idx) = entry_idx {
@@ -486,6 +494,7 @@ impl Bulkhead {
             } else if entry.result.is_none() {
                 // Still waiting. Mark as cancelled.
                 entry.result = Some(Err(RejectionReason::Cancelled));
+                self.pending_queue_count.fetch_sub(1, Ordering::Relaxed);
                 drop(queue);
                 self.total_cancelled_atomic.fetch_add(1, Ordering::Relaxed);
             }
@@ -564,6 +573,8 @@ impl Bulkhead {
             }
         }
         queue.clear();
+        drop(queue);
+        self.pending_queue_count.store(0, Ordering::Relaxed);
     }
 }
 

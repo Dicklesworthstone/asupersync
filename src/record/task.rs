@@ -8,9 +8,9 @@ use crate::tracing_compat::trace;
 use crate::types::{
     Budget, CancelPhase, CancelReason, CancelWitness, CxInner, Outcome, RegionId, TaskId, Time,
 };
+use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::sync::atomic::{AtomicU8, Ordering};
-use parking_lot::RwLock;
 use std::sync::Arc;
 use std::task::Waker;
 #[cfg(feature = "tracing-integration")]
@@ -189,14 +189,23 @@ impl TaskWakeState {
 
     /// Marks a pending wake and returns true if scheduling should occur.
     pub fn notify(&self) -> bool {
-        let prev = self.state.swap(WakeState::Notified as u8, Ordering::AcqRel);
+        // Release is sufficient: we only need to publish the Notified state to
+        // readers who subsequently Acquire. The Acquire half of AcqRel is
+        // unnecessary because no caller reads memory through the returned prev
+        // value beyond comparing it to Idle.
+        let prev = self
+            .state
+            .swap(WakeState::Notified as u8, Ordering::Release);
         prev == WakeState::Idle as u8
     }
 
     /// Marks the task as being polled.
+    ///
+    /// Always called under a task table or runtime state lock, so the lock's
+    /// release semantics provide the needed ordering. Relaxed suffices here.
     pub fn begin_poll(&self) {
         self.state
-            .store(WakeState::Polling as u8, Ordering::Release);
+            .store(WakeState::Polling as u8, Ordering::Relaxed);
     }
 
     /// Finishes polling and returns true if a wake occurred during poll.

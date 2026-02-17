@@ -7,7 +7,6 @@ use crate::record::TaskRecord;
 use crate::runtime::stored_task::StoredTask;
 use crate::types::TaskId;
 use crate::util::{Arena, ArenaIndex};
-use std::collections::HashMap;
 
 /// Encapsulates task arena and stored futures for hot-path isolation.
 ///
@@ -21,11 +20,15 @@ use std::collections::HashMap;
 pub struct TaskTable {
     /// All task records indexed by arena slot.
     pub(crate) tasks: Arena<TaskRecord>,
-    /// Stored futures for polling.
+    /// Stored futures for polling, indexed by arena slot.
     ///
-    /// Maps task IDs to their pollable futures. When a task is created via
-    /// `spawn()`, its wrapped future is stored here for the executor to poll.
-    pub(crate) stored_futures: HashMap<TaskId, StoredTask>,
+    /// Parallel to the tasks arena: `stored_futures[slot]` holds the pollable
+    /// future for the task at that arena slot.  Using a flat `Vec` instead of
+    /// `HashMap<TaskId, StoredTask>` eliminates hashing on the two hottest
+    /// operations (remove + re-insert per poll cycle).
+    stored_futures: Vec<Option<StoredTask>>,
+    /// Number of occupied stored-future slots (avoids O(n) count).
+    stored_future_len: usize,
 }
 
 impl TaskTable {
@@ -34,7 +37,8 @@ impl TaskTable {
     pub fn new() -> Self {
         Self {
             tasks: Arena::new(),
-            stored_futures: HashMap::new(),
+            stored_futures: Vec::new(),
+            stored_future_len: 0,
         }
     }
 
@@ -63,9 +67,10 @@ impl TaskTable {
     /// Removes a task record by arena index.
     pub fn remove(&mut self, index: ArenaIndex) -> Option<TaskRecord> {
         let record = self.tasks.remove(index)?;
-        // Use slot-derived TaskId so cleanup stays correct even if record.id
-        // was stale/placeholder at insertion time.
-        self.stored_futures.remove(&TaskId::from_arena(index));
+        let slot = index.index() as usize;
+        if slot < self.stored_futures.len() && self.stored_futures[slot].take().is_some() {
+            self.stored_future_len -= 1;
+        }
         Some(record)
     }
 
@@ -126,25 +131,41 @@ impl TaskTable {
     /// Returns the removed record if it existed.
     pub fn remove_task(&mut self, task_id: TaskId) -> Option<TaskRecord> {
         let record = self.tasks.remove(task_id.arena_index())?;
-        self.stored_futures.remove(&task_id);
+        let slot = task_id.arena_index().index() as usize;
+        if slot < self.stored_futures.len() && self.stored_futures[slot].take().is_some() {
+            self.stored_future_len -= 1;
+        }
         Some(record)
     }
 
     /// Stores a spawned task's future for later polling.
     pub fn store_spawned_task(&mut self, task_id: TaskId, stored: StoredTask) {
-        self.stored_futures.insert(task_id, stored);
+        let slot = task_id.arena_index().index() as usize;
+        if slot >= self.stored_futures.len() {
+            self.stored_futures.resize_with(slot + 1, || None);
+        }
+        if self.stored_futures[slot].replace(stored).is_none() {
+            self.stored_future_len += 1;
+        }
     }
 
     /// Returns a mutable reference to a stored future.
     pub fn get_stored_future(&mut self, task_id: TaskId) -> Option<&mut StoredTask> {
-        self.stored_futures.get_mut(&task_id)
+        let slot = task_id.arena_index().index() as usize;
+        self.stored_futures.get_mut(slot)?.as_mut()
     }
 
     /// Removes and returns a stored future for polling.
     ///
     /// This is the hot-path operation called at the start of each poll cycle.
+    #[inline]
     pub fn remove_stored_future(&mut self, task_id: TaskId) -> Option<StoredTask> {
-        self.stored_futures.remove(&task_id)
+        let slot = task_id.arena_index().index() as usize;
+        let taken = self.stored_futures.get_mut(slot)?.take();
+        if taken.is_some() {
+            self.stored_future_len -= 1;
+        }
+        taken
     }
 
     /// Returns the number of live tasks (tasks in the arena).
@@ -156,7 +177,7 @@ impl TaskTable {
     /// Returns the number of stored futures.
     #[must_use]
     pub fn stored_future_count(&self) -> usize {
-        self.stored_futures.len()
+        self.stored_future_len
     }
 
     /// Provides direct access to the tasks arena.

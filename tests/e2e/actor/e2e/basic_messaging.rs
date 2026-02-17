@@ -6,7 +6,8 @@ use crate::actor_e2e::util::init_actor_test;
 use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::types::Budget;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 /// Test: Messages are processed in the order they arrive.
 #[test]
@@ -24,7 +25,7 @@ fn actor_fifo_message_ordering() {
         .state
         .create_task(region, Budget::INFINITE, async move {
             for i in 0..5 {
-                events_task.lock().unwrap().push(format!("msg:{i}"));
+                events_task.lock().push(format!("msg:{i}"));
             }
         })
         .expect("create task");
@@ -32,7 +33,7 @@ fn actor_fifo_message_ordering() {
     runtime.scheduler.lock().schedule(task_id, 0);
     runtime.run_until_quiescent();
 
-    let trace = events.lock().unwrap().clone();
+    let trace = events.lock().clone();
 
     // Verify FIFO ordering
     let expected = ["msg:0", "msg:1", "msg:2", "msg:3", "msg:4"];
@@ -62,10 +63,7 @@ fn actor_concurrent_senders() {
         let (task_id, _) = runtime
             .state
             .create_task(region, Budget::INFINITE, async move {
-                events_sender
-                    .lock()
-                    .expect("poisoned")
-                    .push(format!("sender:{sender_id}:msg"));
+                events_sender.lock().push(format!("sender:{sender_id}:msg"));
             })
             .expect("create sender task");
 
@@ -74,7 +72,7 @@ fn actor_concurrent_senders() {
 
     runtime.run_until_quiescent();
 
-    let trace = events.lock().unwrap().clone();
+    let trace = events.lock().clone();
 
     // All senders should have sent their message
     let count = trace.len();
@@ -106,20 +104,20 @@ fn actor_graceful_stop() {
     let (task_id, _) = runtime
         .state
         .create_task(region, Budget::INFINITE, async move {
-            events_task.lock().unwrap().push("started".into());
+            events_task.lock().push("started".into());
             // Simulate some work
             for i in 0..3 {
-                events_task.lock().unwrap().push(format!("work:{i}"));
+                events_task.lock().push(format!("work:{i}"));
             }
-            events_task.lock().unwrap().push("stopping".into());
-            events_task.lock().unwrap().push("stopped".into());
+            events_task.lock().push("stopping".into());
+            events_task.lock().push("stopped".into());
         })
         .expect("create task");
 
     runtime.scheduler.lock().schedule(task_id, 0);
     runtime.run_until_quiescent();
 
-    let trace = events.lock().unwrap().clone();
+    let trace = events.lock().clone();
 
     // Verify lifecycle events
     let has_started = trace.iter().any(|e| e == "started");

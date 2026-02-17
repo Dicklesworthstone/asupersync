@@ -49,7 +49,11 @@ impl GCounter {
 
     /// Increments the counter for the given replica by `amount`.
     pub fn increment(&mut self, node: &NodeId, amount: u64) {
-        *self.counts.entry(node.clone()).or_insert(0) += amount;
+        if let Some(v) = self.counts.get_mut(node) {
+            *v += amount;
+        } else {
+            self.counts.insert(node.clone(), amount);
+        }
     }
 
     /// Returns the global counter value (sum of all replicas).
@@ -74,8 +78,11 @@ impl Default for GCounter {
 impl Merge for GCounter {
     fn merge(&mut self, other: &Self) {
         for (node, &count) in &other.counts {
-            let entry = self.counts.entry(node.clone()).or_insert(0);
-            *entry = (*entry).max(count);
+            if let Some(v) = self.counts.get_mut(node) {
+                *v = (*v).max(count);
+            } else {
+                self.counts.insert(node.clone(), count);
+            }
         }
     }
 }
@@ -228,11 +235,16 @@ impl<V: Ord + Clone> ORSet<V> {
 
     /// Adds a value, tagging the addition with the given node.
     pub fn add(&mut self, value: V, node: &NodeId) {
-        let seq = self.sequences.entry(node.clone()).or_insert(0);
-        *seq += 1;
+        let seq = if let Some(s) = self.sequences.get_mut(node) {
+            *s += 1;
+            *s
+        } else {
+            self.sequences.insert(node.clone(), 1);
+            1
+        };
         let tag = Tag {
             node: node.clone(),
-            seq: *seq,
+            seq,
         };
         self.entries.entry(value).or_default().insert(tag);
     }
@@ -290,8 +302,11 @@ impl<V: Ord + Clone> Merge for ORSet<V> {
         }
         // Merge sequence counters (take max per node).
         for (node, &seq) in &other.sequences {
-            let entry = self.sequences.entry(node.clone()).or_insert(0);
-            *entry = (*entry).max(seq);
+            if let Some(v) = self.sequences.get_mut(node) {
+                *v = (*v).max(seq);
+            } else {
+                self.sequences.insert(node.clone(), seq);
+            }
         }
     }
 }
@@ -325,8 +340,11 @@ impl<V: Ord + Clone> MVRegister<V> {
     ///
     /// This causally supersedes all currently held values.
     pub fn set(&mut self, value: V, node: &NodeId) {
-        let ver = self.versions.entry(node.clone()).or_insert(0);
-        *ver += 1;
+        if let Some(v) = self.versions.get_mut(node) {
+            *v += 1;
+        } else {
+            self.versions.insert(node.clone(), 1);
+        }
         let version_snapshot = self.versions.clone();
         self.entries.clear();
         self.entries.insert((value, version_snapshot));
@@ -405,8 +423,11 @@ impl<V: Ord + Clone> Merge for MVRegister<V> {
 
         // Merge version counters.
         for (node, &ver) in &other.versions {
-            let entry = self.versions.entry(node.clone()).or_insert(0);
-            *entry = (*entry).max(ver);
+            if let Some(v) = self.versions.get_mut(node) {
+                *v = (*v).max(ver);
+            } else {
+                self.versions.insert(node.clone(), ver);
+            }
         }
     }
 }

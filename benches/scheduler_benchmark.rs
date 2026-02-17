@@ -30,6 +30,8 @@ use std::collections::{BinaryHeap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
+const BURST_TASKS: usize = 10_000;
+
 // =============================================================================
 // HELPER FUNCTIONS
 // =============================================================================
@@ -527,8 +529,6 @@ fn bench_scheduler_throughput(c: &mut Criterion) {
 fn bench_scheduler_capacity_profiles(c: &mut Criterion) {
     let mut group = c.benchmark_group("scheduler/capacity_profiles");
     group.sample_size(30);
-
-    const BURST_TASKS: usize = 10_000;
     let profiles: [(&str, Option<usize>); 4] = [
         ("default", None),
         ("cap_256", Some(256)),

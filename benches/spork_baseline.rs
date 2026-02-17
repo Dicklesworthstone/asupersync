@@ -105,13 +105,13 @@ fn bench_genserver_call(c: &mut Criterion) {
             runtime.state.store_spawned_task(client_id, cs);
 
             {
-                let mut sched = runtime.scheduler.lock().unwrap();
+                let mut sched = runtime.scheduler.lock();
                 sched.schedule(server_task_id, 0);
                 sched.schedule(client_id, 0);
             }
             runtime.run_until_idle();
             {
-                let mut sched = runtime.scheduler.lock().unwrap();
+                let mut sched = runtime.scheduler.lock();
                 sched.schedule(server_task_id, 0);
                 sched.schedule(client_id, 0);
             }
@@ -143,11 +143,7 @@ fn bench_genserver_call(c: &mut Criterion) {
                 let _ = server_ref.try_cast(BenchCast::Add(i));
             }
 
-            runtime
-                .scheduler
-                .lock()
-                .unwrap()
-                .schedule(server_task_id, 0);
+            runtime.scheduler.lock().schedule(server_task_id, 0);
             runtime.run_until_idle();
 
             std::hint::black_box(())

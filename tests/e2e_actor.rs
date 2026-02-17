@@ -51,7 +51,8 @@ use asupersync::cx::{Cx, Scope};
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::types::policy::FailFast;
 use asupersync::types::Budget;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 fn init_test(name: &str) {
     common::init_test_logging();
@@ -92,7 +93,7 @@ fn test_actor_counter_logs_start_and_stop() {
     drop(handle);
     run_lab(&mut runtime, task_id);
 
-    let trace = events.lock().unwrap().clone();
+    let trace = events.lock().clone();
     let has_start = trace.iter().any(|e| e == "started");
     let has_stop = trace.iter().any(|e| e.starts_with("stopped:count="));
 
@@ -116,7 +117,7 @@ fn test_actor_counter_increments_accumulate() {
     drop(handle);
     run_lab(&mut runtime, task_id);
 
-    let trace = events.lock().unwrap().clone();
+    let trace = events.lock().clone();
     let inc2 = trace.iter().any(|e| e == "increment:2->2");
     let inc3 = trace.iter().any(|e| e == "increment:3->5");
 
@@ -141,7 +142,7 @@ fn test_actor_counter_reset_clears_count() {
     drop(handle);
     run_lab(&mut runtime, task_id);
 
-    let trace = events.lock().unwrap().clone();
+    let trace = events.lock().clone();
     let reset = trace.iter().any(|e| e == "reset");
     let get_zero = trace.iter().any(|e| e == "get:0");
 
@@ -165,7 +166,7 @@ fn test_actor_counter_get_count_after_increment() {
     drop(handle);
     run_lab(&mut runtime, task_id);
 
-    let trace = events.lock().unwrap().clone();
+    let trace = events.lock().clone();
     let get_one = trace.iter().any(|e| e == "get:1");
     assert_with_log!(get_one, "count after increment", true, get_one);
 }
@@ -186,7 +187,7 @@ fn test_actor_echo_records_messages() {
     drop(handle);
     run_lab(&mut runtime, task_id);
 
-    let trace = events.lock().unwrap().clone();
+    let trace = events.lock().clone();
     let alpha = trace.iter().any(|e| e == "echo:recv:alpha");
     let beta = trace.iter().any(|e| e == "echo:recv:beta");
 
@@ -211,7 +212,7 @@ fn test_actor_echo_stop_reports_count() {
     drop(handle);
     run_lab(&mut runtime, task_id);
 
-    let trace = events.lock().unwrap().clone();
+    let trace = events.lock().clone();
     let stopped = trace.iter().any(|e| e == "echo:stopped:count=3");
     assert_with_log!(stopped, "stop count", true, stopped);
 }
@@ -253,7 +254,7 @@ fn test_actor_ref_clone_sends_messages() {
     drop(handle);
     run_lab(&mut runtime, task_id);
 
-    let trace = events.lock().unwrap().clone();
+    let trace = events.lock().clone();
     let inc1 = trace.iter().any(|e| e == "increment:1->1");
     let inc2 = trace.iter().any(|e| e == "increment:2->3");
     assert_with_log!(inc1, "increment 1", true, inc1);

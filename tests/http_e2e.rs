@@ -679,7 +679,8 @@ fn e2e_http_full_crud_pipeline() {
     init_test("e2e_http_full_crud_pipeline");
 
     test_section!("setup_api");
-    use std::sync::{Arc, Mutex};
+    use parking_lot::Mutex;
+    use std::sync::Arc;
 
     let _store: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
 

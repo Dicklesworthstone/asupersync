@@ -40,6 +40,7 @@ use crate::codec::{Decoder, Encoder};
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use parking_lot::Mutex;
+use smallvec::SmallVec;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -68,7 +69,7 @@ struct WebSocketShared<IO> {
     /// True while one half is performing a frame write sequence.
     writer_active: bool,
     /// Wakers for waiters blocked on `writer_active`.
-    writer_waiters: Vec<Waker>,
+    writer_waiters: SmallVec<[Waker; 2]>,
     /// Unique ID for reunite verification.
     id: u64,
 }
@@ -192,7 +193,7 @@ where
             protocol: self.protocol,
             pending_pongs: self.pending_pongs,
             writer_active: false,
-            writer_waiters: Vec::new(),
+            writer_waiters: SmallVec::new(),
             id,
         }));
 

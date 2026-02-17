@@ -8,7 +8,7 @@
 use crate::observability::metrics::MetricsProvider;
 use crate::record::TaskRecord;
 use crate::types::{RegionId, TaskId, Time};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -148,17 +148,19 @@ struct MonitoredTask {
     last_checkpoint_seen: Option<Instant>,
     warned: bool,
     violated: bool,
+    seen_gen: u64,
 }
 
 /// Monitors tasks for approaching deadlines and lack of progress.
 pub struct DeadlineMonitor {
     config: MonitorConfig,
     on_warning: Option<Box<dyn Fn(DeadlineWarning) + Send + Sync>>,
-    monitored: HashMap<TaskId, MonitoredTask>,
+    monitored: Vec<Option<MonitoredTask>>,
     history: HashMap<String, DurationHistory>,
     metrics_provider: Option<Arc<dyn MetricsProvider>>,
     last_scan_time: Option<Time>,
     last_scan_instant: Option<Instant>,
+    scan_generation: u64,
 }
 
 impl fmt::Debug for DeadlineMonitor {
@@ -179,11 +181,12 @@ impl DeadlineMonitor {
         Self {
             config,
             on_warning: None,
-            monitored: HashMap::new(),
+            monitored: Vec::new(),
             history: HashMap::new(),
             metrics_provider: None,
             last_scan_time: None,
             last_scan_instant: None,
+            scan_generation: 0,
         }
     }
 
@@ -213,19 +216,25 @@ impl DeadlineMonitor {
         now: Time,
     ) {
         let task_type = normalize_task_type(task_type);
-        self.history
-            .entry(task_type.to_string())
-            .or_insert_with(|| DurationHistory::new(self.config.adaptive.max_history))
-            .record(duration);
+        if let Some(h) = self.history.get_mut(task_type) {
+            h.record(duration);
+        } else {
+            self.history
+                .entry(task_type.to_string())
+                .or_insert_with(|| DurationHistory::new(self.config.adaptive.max_history))
+                .record(duration);
+        }
 
         if let Some(deadline) = deadline {
             let remaining = Duration::from_nanos(deadline.duration_since(now));
             self.emit_deadline_remaining(task_type, remaining);
 
             let deadline_exceeded = now > deadline;
+            let slot = task_id.arena_index().index() as usize;
             let already_violated = self
                 .monitored
-                .get(&task_id)
+                .get(slot)
+                .and_then(Option::as_ref)
                 .is_some_and(|entry| entry.violated);
             if deadline_exceeded && !already_violated {
                 let over_by = Duration::from_nanos(now.duration_since(deadline));
@@ -233,7 +242,10 @@ impl DeadlineMonitor {
             }
         }
 
-        self.monitored.remove(&task_id);
+        let slot = task_id.arena_index().index() as usize;
+        if slot < self.monitored.len() {
+            self.monitored[slot].take();
+        }
     }
 
     fn adaptive_warning_threshold(&self, task_type: &str, total: Duration) -> Duration {
@@ -316,8 +328,8 @@ impl DeadlineMonitor {
         }
         self.last_scan_time = Some(now);
         self.last_scan_instant = Some(now_instant);
-
-        let mut seen: HashSet<TaskId> = HashSet::new();
+        self.scan_generation = self.scan_generation.wrapping_add(1);
+        let gen = self.scan_generation;
 
         for task in tasks {
             if task.state.is_terminal() {
@@ -333,15 +345,12 @@ impl DeadlineMonitor {
             };
 
             let last_checkpoint = inner_guard.checkpoint_state.last_checkpoint;
-            let last_message = inner_guard.checkpoint_state.last_message.clone();
             let task_type_raw = inner_guard
                 .task_type
                 .clone()
                 .unwrap_or_else(|| "default".to_string());
-            let task_type = normalize_task_type(&task_type_raw).to_string();
+            let task_type = normalize_task_type(&task_type_raw);
             drop(inner_guard);
-
-            seen.insert(task.id);
 
             let remaining_nanos = deadline.duration_since(now);
             let remaining = Duration::from_nanos(remaining_nanos);
@@ -361,20 +370,23 @@ impl DeadlineMonitor {
             let mut warning_to_emit: Option<(DeadlineWarning, WarningReason, Duration)> = None;
 
             {
-                let entry = self
-                    .monitored
-                    .entry(task.id)
-                    .or_insert_with(|| MonitoredTask {
-                        task_id: task.id,
-                        region_id: task.owner,
-                        deadline,
-                        last_progress: last_checkpoint.unwrap_or(now_instant),
-                        last_checkpoint_seen: last_checkpoint,
-                        warned: false,
-                        violated: false,
-                    });
+                let slot = task.id.arena_index().index() as usize;
+                if slot >= self.monitored.len() {
+                    self.monitored.resize_with(slot + 1, || None);
+                }
+                let entry = self.monitored[slot].get_or_insert_with(|| MonitoredTask {
+                    task_id: task.id,
+                    region_id: task.owner,
+                    deadline,
+                    last_progress: last_checkpoint.unwrap_or(now_instant),
+                    last_checkpoint_seen: last_checkpoint,
+                    warned: false,
+                    violated: false,
+                    seen_gen: gen,
+                });
 
                 // Keep metadata up to date.
+                entry.seen_gen = gen;
                 entry.region_id = task.owner;
                 entry.deadline = deadline;
                 if let Some(checkpoint) = last_checkpoint {
@@ -413,6 +425,9 @@ impl DeadlineMonitor {
 
                     if let Some(reason) = warning {
                         entry.warned = true;
+                        // Clone last_message lazily — only when a warning is
+                        // actually emitted (once per task lifetime).
+                        let last_message = inner.read().checkpoint_state.last_message.clone();
                         let warning = DeadlineWarning {
                             task_id: entry.task_id,
                             region_id: entry.region_id,
@@ -440,7 +455,13 @@ impl DeadlineMonitor {
         }
 
         // Remove tasks that are no longer present in the scan.
-        self.monitored.retain(|task_id, _| seen.contains(task_id));
+        for entry in &mut self.monitored {
+            if let Some(monitored) = entry {
+                if monitored.seen_gen != gen {
+                    *entry = None;
+                }
+            }
+        }
     }
 
     fn emit_warning(&self, warning: DeadlineWarning) {
@@ -513,9 +534,9 @@ mod tests {
     use super::*;
     use crate::record::TaskRecord;
     use crate::types::{Budget, CxInner, RegionId, TaskId};
+    use parking_lot::{Mutex, RwLock};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use parking_lot::RwLock;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -556,7 +577,7 @@ mod tests {
         let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
         let warnings_ref = warnings.clone();
         monitor.on_warning(move |warning| {
-            warnings_ref.lock().unwrap().push(warning.reason);
+            warnings_ref.lock().push(warning.reason);
         });
 
         let task = make_task(
@@ -572,7 +593,7 @@ mod tests {
         monitor.check(Time::from_secs(90), std::iter::once(&task));
 
         let recorded = {
-            let recorded = warnings.lock().unwrap();
+            let recorded = warnings.lock();
             recorded.clone()
         };
         crate::assert_with_log!(
@@ -599,7 +620,7 @@ mod tests {
         let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
         let warnings_ref = warnings.clone();
         monitor.on_warning(move |warning| {
-            warnings_ref.lock().unwrap().push(warning.reason);
+            warnings_ref.lock().push(warning.reason);
         });
 
         let stale = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
@@ -616,7 +637,7 @@ mod tests {
         monitor.check(Time::from_secs(100), std::iter::once(&task));
 
         let recorded = {
-            let recorded = warnings.lock().unwrap();
+            let recorded = warnings.lock();
             recorded.clone()
         };
         crate::assert_with_log!(
@@ -643,7 +664,7 @@ mod tests {
         let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
         let warnings_ref = warnings.clone();
         monitor.on_warning(move |warning| {
-            warnings_ref.lock().unwrap().push(warning.reason);
+            warnings_ref.lock().push(warning.reason);
         });
 
         let task = make_task(
@@ -659,7 +680,7 @@ mod tests {
         // Task age is 100s without checkpoints; first scan should detect NoProgress immediately.
         monitor.check(Time::from_secs(100), std::iter::once(&task));
 
-        let recorded = warnings.lock().unwrap().clone();
+        let recorded = warnings.lock().clone();
         crate::assert_with_log!(
             recorded.as_slice() == [WarningReason::NoProgress],
             "old task without checkpoint warns on first scan",
@@ -684,7 +705,7 @@ mod tests {
         let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
         let warnings_ref = warnings.clone();
         monitor.on_warning(move |warning| {
-            warnings_ref.lock().unwrap().push(warning.reason);
+            warnings_ref.lock().push(warning.reason);
         });
 
         let task = make_task(
@@ -700,7 +721,7 @@ mod tests {
         monitor.check(Time::from_secs(9), std::iter::once(&task));
         monitor.check(Time::from_secs(9), std::iter::once(&task));
 
-        let count = warnings.lock().unwrap().len();
+        let count = warnings.lock().len();
         crate::assert_with_log!(count == 1, "warned once", 1usize, count);
         crate::test_complete!("warns_only_once_per_task");
     }
@@ -720,7 +741,7 @@ mod tests {
         let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
         let warnings_ref = warnings.clone();
         monitor.on_warning(move |warning| {
-            warnings_ref.lock().unwrap().push(warning.reason);
+            warnings_ref.lock().push(warning.reason);
         });
 
         let task = make_task(
@@ -735,13 +756,13 @@ mod tests {
 
         // First scan at t=0 should not warn.
         monitor.check(Time::from_secs(0), std::iter::once(&task));
-        let first_count = warnings.lock().unwrap().len();
+        let first_count = warnings.lock().len();
         crate::assert_with_log!(first_count == 0, "no warning at t=0", 0usize, first_count);
 
         // Immediate second call advances logical time beyond check_interval and near deadline.
         // This must produce a warning even when little wall-clock time has elapsed.
         monitor.check(Time::from_secs(90), std::iter::once(&task));
-        let recorded = warnings.lock().unwrap().clone();
+        let recorded = warnings.lock().clone();
         crate::assert_with_log!(
             recorded.as_slice() == [WarningReason::ApproachingDeadline],
             "warning emitted after logical-time advance",
@@ -766,7 +787,7 @@ mod tests {
         let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
         let warnings_ref = warnings.clone();
         monitor.on_warning(move |warning| {
-            warnings_ref.lock().unwrap().push(warning.reason);
+            warnings_ref.lock().push(warning.reason);
         });
 
         let task = make_task(
@@ -780,7 +801,7 @@ mod tests {
         );
 
         monitor.check(Time::from_secs(0), std::iter::once(&task));
-        let first_count = warnings.lock().unwrap().len();
+        let first_count = warnings.lock().len();
         crate::assert_with_log!(
             first_count == 0,
             "no warning on first scan",
@@ -790,7 +811,7 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(10));
         monitor.check(Time::from_secs(0), std::iter::once(&task));
-        let recorded = warnings.lock().unwrap().clone();
+        let recorded = warnings.lock().clone();
         crate::assert_with_log!(
             recorded.as_slice() == [WarningReason::NoProgress],
             "wall-clock fallback allows progress checks with stable logical time",
@@ -817,7 +838,7 @@ mod tests {
         let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
         let warnings_ref = warnings.clone();
         monitor.on_warning(move |warning| {
-            warnings_ref.lock().unwrap().push(warning.reason);
+            warnings_ref.lock().push(warning.reason);
         });
 
         let stale = Instant::now().checked_sub(Duration::from_secs(20)).unwrap();
@@ -834,7 +855,7 @@ mod tests {
         monitor.check(Time::from_secs(9), std::iter::once(&task));
 
         let recorded = {
-            let recorded = warnings.lock().unwrap();
+            let recorded = warnings.lock();
             recorded.clone()
         };
         crate::assert_with_log!(
@@ -862,7 +883,7 @@ mod tests {
         let warnings: Arc<Mutex<Vec<DeadlineWarning>>> = Arc::new(Mutex::new(Vec::new()));
         let warnings_ref = warnings.clone();
         monitor.on_warning(move |warning| {
-            warnings_ref.lock().unwrap().push(warning);
+            warnings_ref.lock().push(warning);
         });
 
         let task = make_task(
@@ -877,7 +898,7 @@ mod tests {
 
         monitor.check(Time::from_secs(10), std::iter::once(&task));
 
-        let empty = warnings.lock().unwrap().is_empty();
+        let empty = warnings.lock().is_empty();
         crate::assert_with_log!(empty, "no warnings", true, empty);
         crate::test_complete!("no_warning_with_recent_checkpoint");
     }
@@ -897,7 +918,7 @@ mod tests {
         let warnings: Arc<Mutex<Vec<DeadlineWarning>>> = Arc::new(Mutex::new(Vec::new()));
         let warnings_ref = warnings.clone();
         monitor.on_warning(move |warning| {
-            warnings_ref.lock().unwrap().push(warning);
+            warnings_ref.lock().push(warning);
         });
 
         let task = make_task(
@@ -912,12 +933,7 @@ mod tests {
 
         monitor.check(Time::from_secs(10), std::iter::once(&task));
 
-        let warning = warnings
-            .lock()
-            .expect("poisoned")
-            .first()
-            .cloned()
-            .expect("expected warning");
+        let warning = warnings.lock().first().cloned().expect("expected warning");
         crate::assert_with_log!(
             warning.reason == WarningReason::NoProgress,
             "reason",
@@ -971,11 +987,11 @@ mod tests {
         }
 
         fn deadline_remaining(&self, _: &str, remaining: Duration) {
-            self.remaining_samples.lock().unwrap().push(remaining);
+            self.remaining_samples.lock().push(remaining);
         }
 
         fn checkpoint_interval(&self, _: &str, interval: Duration) {
-            self.checkpoint_intervals.lock().unwrap().push(interval);
+            self.checkpoint_intervals.lock().push(interval);
         }
 
         fn task_stuck_detected(&self, _: &str) {
@@ -1026,7 +1042,7 @@ mod tests {
         let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
         let warnings_ref = warnings.clone();
         monitor.on_warning(move |warning| {
-            warnings_ref.lock().unwrap().push(warning.reason);
+            warnings_ref.lock().push(warning.reason);
         });
 
         let task = make_task(
@@ -1042,7 +1058,7 @@ mod tests {
         // Elapsed 25s > p50 (20s) => warning
         monitor.check(Time::from_secs(25), std::iter::once(&task));
 
-        let recorded = warnings.lock().unwrap().clone();
+        let recorded = warnings.lock().clone();
         crate::assert_with_log!(
             recorded.as_slice() == [WarningReason::ApproachingDeadline],
             "adaptive warning",
@@ -1081,7 +1097,7 @@ mod tests {
         let warnings: Arc<Mutex<Vec<WarningReason>>> = Arc::new(Mutex::new(Vec::new()));
         let warnings_ref = warnings.clone();
         monitor.on_warning(move |warning| {
-            warnings_ref.lock().unwrap().push(warning.reason);
+            warnings_ref.lock().push(warning.reason);
         });
 
         let task = make_task(
@@ -1097,7 +1113,7 @@ mod tests {
         // Elapsed 6s > fallback 5s => warning
         monitor.check(Time::from_secs(6), std::iter::once(&task));
 
-        let recorded = warnings.lock().unwrap().clone();
+        let recorded = warnings.lock().clone();
         crate::assert_with_log!(
             recorded.as_slice() == [WarningReason::ApproachingDeadline],
             "fallback warning",
@@ -1150,7 +1166,7 @@ mod tests {
 
         let violations = metrics.violations.load(Ordering::Relaxed);
         crate::assert_with_log!(violations == 1, "violations", 1u64, violations);
-        let remaining = metrics.remaining_samples.lock().unwrap().len();
+        let remaining = metrics.remaining_samples.lock().len();
         crate::assert_with_log!(remaining == 1, "remaining samples", 1usize, remaining);
         crate::test_complete!("deadline_metrics_emitted");
     }
@@ -1190,7 +1206,7 @@ mod tests {
 
         monitor.check(Time::from_secs(2), std::iter::once(&task));
 
-        let intervals = metrics.checkpoint_intervals.lock().unwrap().len();
+        let intervals = metrics.checkpoint_intervals.lock().len();
         crate::assert_with_log!(intervals == 1, "checkpoint intervals", 1usize, intervals);
         crate::test_complete!("checkpoint_interval_metrics_emitted");
     }

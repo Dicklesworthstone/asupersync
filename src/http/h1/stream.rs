@@ -514,8 +514,35 @@ impl ChunkedEncoder {
     }
 
     fn encode_chunk_into(data: &[u8], dst: &mut BytesMut) {
-        let size_line = format!("{:X}\r\n", data.len());
-        dst.extend_from_slice(size_line.as_bytes());
+        // Write hex size directly into a stack buffer to avoid a heap allocation per chunk.
+        let mut buf = [0u8; 18]; // max u64 hex = 16 digits + "\r\n"
+        let n = {
+            let len = data.len();
+            if len == 0 {
+                buf[0] = b'0';
+                buf[1] = b'\r';
+                buf[2] = b'\n';
+                3
+            } else {
+                let mut v = len;
+                let mut pos = 0;
+                while v > 0 {
+                    let digit = (v & 0xF) as u8;
+                    buf[pos] = if digit < 10 {
+                        b'0' + digit
+                    } else {
+                        b'A' + digit - 10
+                    };
+                    pos += 1;
+                    v >>= 4;
+                }
+                buf[..pos].reverse();
+                buf[pos] = b'\r';
+                buf[pos + 1] = b'\n';
+                pos + 2
+            }
+        };
+        dst.extend_from_slice(&buf[..n]);
         dst.extend_from_slice(data);
         dst.extend_from_slice(b"\r\n");
     }
@@ -881,8 +908,32 @@ impl ResponseHead {
         };
 
         let mut buf = BytesMut::with_capacity(256);
-        let line = format!("{} {} {}\r\n", self.version, self.status, reason);
-        buf.extend_from_slice(line.as_bytes());
+        // Write status line components directly to avoid a format! heap allocation.
+        buf.extend_from_slice(self.version.as_str().as_bytes());
+        buf.extend_from_slice(b" ");
+        {
+            let mut tmp = [0u8; 5]; // max u16 = 65535
+            let n = {
+                let mut v = self.status;
+                if v == 0 {
+                    tmp[0] = b'0';
+                    1
+                } else {
+                    let mut pos = 0;
+                    while v > 0 {
+                        tmp[pos] = b'0' + (v % 10) as u8;
+                        pos += 1;
+                        v /= 10;
+                    }
+                    tmp[..pos].reverse();
+                    pos
+                }
+            };
+            buf.extend_from_slice(&tmp[..n]);
+        }
+        buf.extend_from_slice(b" ");
+        buf.extend_from_slice(reason.as_bytes());
+        buf.extend_from_slice(b"\r\n");
 
         for (name, value) in &self.headers {
             buf.extend_from_slice(name.as_bytes());

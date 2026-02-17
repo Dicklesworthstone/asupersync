@@ -15,10 +15,11 @@
 mod common;
 
 use asupersync::sync::ContendedMutex;
+use parking_lot::Mutex;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 // ── Counting allocator (same pattern as allocation_audit.rs) ──────────
 
@@ -529,9 +530,7 @@ fn concurrent_multi_stealer_no_loss() {
 /// The intrusive heap should have zero allocations after warmup.
 #[test]
 fn intrusive_heap_zero_alloc_after_warmup() {
-    let _guard = ALLOC_TEST_GUARD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = ALLOC_TEST_GUARD.lock();
     init_test("intrusive_heap_zero_alloc_after_warmup");
 
     let mut arena = setup_arena(200);
@@ -575,9 +574,7 @@ fn intrusive_heap_zero_alloc_after_warmup() {
 /// Compare: PriorityScheduler (BinaryHeap) allocation profile for reference.
 #[test]
 fn priority_scheduler_allocation_baseline() {
-    let _guard = ALLOC_TEST_GUARD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = ALLOC_TEST_GUARD.lock();
     init_test("priority_scheduler_allocation_baseline");
 
     let mut sched = PriorityScheduler::new();
@@ -620,9 +617,7 @@ fn priority_scheduler_allocation_baseline() {
 /// Allocation comparison report: intrusive heap vs BinaryHeap.
 #[test]
 fn allocation_comparison_report() {
-    let _guard = ALLOC_TEST_GUARD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = ALLOC_TEST_GUARD.lock();
     init_test("allocation_comparison_report");
 
     let ops = 5000u32;
@@ -856,9 +851,7 @@ fn e2e_lab_mixed_priority_fairness() {
 /// Generate structured JSON allocation comparison report.
 #[test]
 fn cache_aware_queues_structured_report() {
-    let _guard = ALLOC_TEST_GUARD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = ALLOC_TEST_GUARD.lock();
     init_test("cache_aware_queues_structured_report");
 
     let ops = 2000u32;

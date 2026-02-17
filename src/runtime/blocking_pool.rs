@@ -42,9 +42,10 @@
 //! ```
 
 use crossbeam_queue::SegQueue;
+use parking_lot::{Condvar, Mutex};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle as ThreadJoinHandle};
 use std::time::Duration;
 
@@ -79,7 +80,7 @@ pub struct BlockingPool {
 
 impl fmt::Debug for BlockingPool {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let handles_len = self.inner.thread_handles.lock().map_or(0, |h| h.len());
+        let handles_len = self.inner.thread_handles.lock().len();
         f.debug_struct("BlockingPool")
             .field("min_threads", &self.inner.min_threads)
             .field("max_threads", &self.inner.max_threads)
@@ -165,7 +166,7 @@ impl BlockingTaskCompletion {
 
     fn signal_done(&self) {
         self.done.store(true, Ordering::Release);
-        let _guard = self.mutex.lock().unwrap();
+        let _guard = self.mutex.lock();
         self.condvar.notify_all();
     }
 
@@ -174,9 +175,9 @@ impl BlockingTaskCompletion {
             return;
         }
         {
-            let mut guard = self.mutex.lock().unwrap();
+            let mut guard = self.mutex.lock();
             while !self.done.load(Ordering::Acquire) {
-                guard = self.condvar.wait(guard).unwrap();
+                self.condvar.wait(&mut guard);
             }
             drop(guard);
         }
@@ -187,14 +188,13 @@ impl BlockingTaskCompletion {
             return true;
         }
         let deadline = std::time::Instant::now() + timeout;
-        let mut guard = self.mutex.lock().unwrap();
+        let mut guard = self.mutex.lock();
         while !self.done.load(Ordering::Acquire) {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 return false;
             }
-            let result = self.condvar.wait_timeout(guard, remaining).unwrap();
-            guard = result.0;
+            self.condvar.wait_for(&mut guard, remaining);
         }
         drop(guard);
         true
@@ -450,7 +450,7 @@ impl BlockingPool {
 
         // All threads have exited, now join the handles to clean up
         {
-            let mut handles = self.inner.thread_handles.lock().unwrap();
+            let mut handles = self.inner.thread_handles.lock();
             for handle in handles.drain(..) {
                 // Threads have already exited, so join returns immediately
                 let _ = handle.join();
@@ -469,12 +469,12 @@ impl BlockingPool {
     }
 
     fn notify_one(&self) {
-        let _guard = self.inner.mutex.lock().unwrap();
+        let _guard = self.inner.mutex.lock();
         self.inner.condvar.notify_one();
     }
 
     fn notify_all(&self) {
-        let _guard = self.inner.mutex.lock().unwrap();
+        let _guard = self.inner.mutex.lock();
         self.inner.condvar.notify_all();
     }
 }
@@ -531,7 +531,7 @@ impl BlockingPoolHandle {
         // Wake a waiting thread or spawn a new one if needed
         maybe_spawn_thread_on_inner(&self.inner);
         {
-            let _guard = self.inner.mutex.lock().unwrap();
+            let _guard = self.inner.mutex.lock();
             self.inner.condvar.notify_one();
         }
 
@@ -647,7 +647,7 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
         }
     }) {
         Ok(handle) => {
-            inner.thread_handles.lock().unwrap().push(handle);
+            inner.thread_handles.lock().push(handle);
         }
         Err(_) => {
             // Spawn failed — roll back the counter so active_threads
@@ -732,7 +732,7 @@ fn blocking_worker_loop(inner: &BlockingPoolInner) -> bool {
         if active > inner.min_threads {
             let timed_out = {
                 // Park with timeout.
-                let guard = inner.mutex.lock().unwrap();
+                let mut guard = inner.mutex.lock();
 
                 // Re-check queue under lock to prevent lost wakeup.
                 if !inner.queue.is_empty() {
@@ -740,10 +740,7 @@ fn blocking_worker_loop(inner: &BlockingPoolInner) -> bool {
                     continue;
                 }
 
-                let (guard, wait_result) = inner
-                    .condvar
-                    .wait_timeout(guard, inner.idle_timeout)
-                    .unwrap();
+                let wait_result = inner.condvar.wait_for(&mut guard, inner.idle_timeout);
                 drop(guard);
                 wait_result.timed_out()
             };
@@ -756,7 +753,7 @@ fn blocking_worker_loop(inner: &BlockingPoolInner) -> bool {
         } else {
             {
                 // We're at min_threads, park indefinitely.
-                let guard = inner.mutex.lock().unwrap();
+                let mut guard = inner.mutex.lock();
 
                 // Re-check queue under lock to prevent lost wakeup.
                 if !inner.queue.is_empty() {
@@ -764,7 +761,8 @@ fn blocking_worker_loop(inner: &BlockingPoolInner) -> bool {
                     continue;
                 }
 
-                drop(inner.condvar.wait(guard).unwrap());
+                inner.condvar.wait(&mut guard);
+                drop(guard);
             }
         }
     }
@@ -1216,7 +1214,7 @@ mod tests {
             let n = Arc::clone(&names);
             handles.push(pool.spawn(move || {
                 if let Some(name) = thread::current().name() {
-                    n.lock().unwrap().push(name.to_string());
+                    n.lock().push(name.to_string());
                 }
                 b.wait();
             }));
@@ -1227,7 +1225,7 @@ mod tests {
             h.wait();
         }
 
-        let recorded = names.lock().unwrap().clone();
+        let recorded = names.lock().clone();
         let unique: HashSet<_> = recorded.into_iter().collect();
         assert_eq!(unique.len(), 2, "Expected two unique thread names");
     }
@@ -1430,7 +1428,7 @@ mod tests {
         // Try to spawn when already at max
         spawn_thread_on_inner(&inner);
         assert_eq!(inner.active_threads.load(Ordering::Relaxed), 1);
-        assert_eq!(inner.thread_handles.lock().unwrap().len(), 0);
+        assert_eq!(inner.thread_handles.lock().len(), 0);
     }
 
     #[test]

@@ -33,6 +33,7 @@ pub use stream::{SymbolStream, SymbolStreamExt};
 use crate::security::authenticated::AuthenticatedSymbol;
 use crate::types::Symbol;
 use parking_lot::Mutex;
+use smallvec::SmallVec;
 use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -54,8 +55,8 @@ pub(crate) struct ChannelWaiter {
 pub(crate) struct SharedChannel {
     pub queue: Mutex<VecDeque<AuthenticatedSymbol>>,
     pub capacity: usize,
-    pub send_wakers: Mutex<Vec<ChannelWaiter>>,
-    pub recv_wakers: Mutex<Vec<ChannelWaiter>>,
+    pub send_wakers: Mutex<SmallVec<[ChannelWaiter; 2]>>,
+    pub recv_wakers: Mutex<SmallVec<[ChannelWaiter; 2]>>,
     pub closed: AtomicBool,
 }
 
@@ -65,8 +66,8 @@ impl SharedChannel {
         Self {
             queue: Mutex::new(VecDeque::new()),
             capacity,
-            send_wakers: Mutex::new(Vec::new()),
-            recv_wakers: Mutex::new(Vec::new()),
+            send_wakers: Mutex::new(SmallVec::new()),
+            recv_wakers: Mutex::new(SmallVec::new()),
             closed: AtomicBool::new(false),
         }
     }

@@ -75,8 +75,6 @@ pub struct GlobalInjector {
     timed_queue: Mutex<TimedQueue>,
     /// Ready lane: general ready tasks.
     ready_queue: SegQueue<PriorityTask>,
-    /// Approximate count of pending tasks (for metrics/decisions).
-    pending_count: AtomicUsize,
     /// Approximate count of ready-lane tasks only.
     ready_count: AtomicUsize,
     /// Approximate count of timed-lane tasks, allowing callers to skip
@@ -99,7 +97,6 @@ impl Default for GlobalInjector {
             cancel_queue: SegQueue::new(),
             timed_queue: Mutex::new(TimedQueue::default()),
             ready_queue: SegQueue::new(),
-            pending_count: AtomicUsize::new(0),
             ready_count: AtomicUsize::new(0),
             timed_count: AtomicUsize::new(0),
         }
@@ -119,12 +116,6 @@ impl GlobalInjector {
         let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
             count.checked_sub(1)
         });
-    }
-
-    /// Decrements the pending counter, saturating at zero.
-    #[inline]
-    fn decrement_pending_count(&self) {
-        Self::saturating_decrement(&self.pending_count);
     }
 
     /// Decrements the ready counter, saturating at zero.
@@ -151,7 +142,6 @@ impl GlobalInjector {
     /// before any timed or ready work.
     #[inline]
     pub fn inject_cancel(&self, task: TaskId, priority: u8) {
-        self.pending_count.fetch_add(1, Ordering::Relaxed);
         self.cancel_queue.push(PriorityTask { task, priority });
     }
 
@@ -164,7 +154,6 @@ impl GlobalInjector {
         // >= the true heap length.  A brief over-count is harmless (pop just
         // finds an empty heap and saturates back to 0).
         self.timed_count.fetch_add(1, Ordering::Relaxed);
-        self.pending_count.fetch_add(1, Ordering::Relaxed);
         let mut queue = self.timed_queue.lock();
         let generation = queue.next_generation;
         queue.next_generation += 1;
@@ -180,7 +169,6 @@ impl GlobalInjector {
     #[inline]
     pub fn inject_ready(&self, task: TaskId, priority: u8) {
         self.ready_count.fetch_add(1, Ordering::Relaxed);
-        self.pending_count.fetch_add(1, Ordering::Relaxed);
         self.ready_queue.push(PriorityTask { task, priority });
     }
 
@@ -190,11 +178,7 @@ impl GlobalInjector {
     #[inline]
     #[must_use]
     pub fn pop_cancel(&self) -> Option<PriorityTask> {
-        let result = self.cancel_queue.pop();
-        if result.is_some() {
-            self.decrement_pending_count();
-        }
-        result
+        self.cancel_queue.pop()
     }
 
     /// Pops a task from the timed lane (earliest deadline first).
@@ -211,7 +195,6 @@ impl GlobalInjector {
         drop(queue);
         if result.is_some() {
             self.decrement_timed_count();
-            self.decrement_pending_count();
         }
         result
     }
@@ -244,7 +227,6 @@ impl GlobalInjector {
                 drop(queue);
                 if result.is_some() {
                     self.decrement_timed_count();
-                    self.decrement_pending_count();
                 }
                 return result;
             }
@@ -261,7 +243,6 @@ impl GlobalInjector {
         let result = self.ready_queue.pop();
         if result.is_some() {
             self.decrement_ready_count();
-            self.decrement_pending_count();
         }
         result
     }
@@ -288,9 +269,14 @@ impl GlobalInjector {
     }
 
     /// Returns the approximate number of pending tasks across all lanes.
+    ///
+    /// Derived from per-lane counters; avoids a dedicated atomic counter
+    /// on every inject/pop.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.pending_count.load(Ordering::Relaxed)
+        self.cancel_queue.len()
+            + self.timed_count.load(Ordering::Relaxed)
+            + self.ready_count.load(Ordering::Relaxed)
     }
 
     /// Returns true if the cancel lane has pending work.
@@ -482,23 +468,19 @@ mod tests {
             task: task(10),
             priority: 1,
         });
-        assert_eq!(injector.pending_count.load(Ordering::Relaxed), 0);
 
         let popped_cancel = injector.pop_cancel().expect("cancel task should pop");
         assert_eq!(popped_cancel.task, task(10));
-        assert_eq!(injector.pending_count.load(Ordering::Relaxed), 0);
 
         injector.ready_queue.push(PriorityTask {
             task: task(11),
             priority: 2,
         });
         assert_eq!(injector.ready_count.load(Ordering::Relaxed), 0);
-        assert_eq!(injector.pending_count.load(Ordering::Relaxed), 0);
 
         let popped_ready = injector.pop_ready().expect("ready task should pop");
         assert_eq!(popped_ready.task, task(11));
         assert_eq!(injector.ready_count.load(Ordering::Relaxed), 0);
-        assert_eq!(injector.pending_count.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -515,11 +497,10 @@ mod tests {
                 .push(TimedTask::new(task(12), Time::from_secs(10), 0));
         }
         injector.timed_count.fetch_add(1, Ordering::Relaxed);
-        assert_eq!(injector.pending_count.load(Ordering::Relaxed), 0);
 
         let popped_timed = injector.pop_timed().expect("timed task should pop");
         assert_eq!(popped_timed.task, task(12));
-        assert_eq!(injector.pending_count.load(Ordering::Relaxed), 0);
+        assert_eq!(injector.timed_count.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -536,25 +517,23 @@ mod tests {
                 .push(TimedTask::new(task(13), Time::from_secs(10), 0));
         }
         injector.timed_count.fetch_add(1, Ordering::Relaxed);
-        assert_eq!(injector.pending_count.load(Ordering::Relaxed), 0);
 
-        // Not due yet: no pop and counter remains saturated.
+        // Not due yet: no pop and timed counter unchanged.
         assert!(injector.pop_timed_if_due(Time::from_secs(9)).is_none());
-        assert_eq!(injector.pending_count.load(Ordering::Relaxed), 0);
+        assert_eq!(injector.timed_count.load(Ordering::Relaxed), 1);
 
         // Once due, pop must not underflow the lagging counter.
         let popped_timed = injector
             .pop_timed_if_due(Time::from_secs(10))
             .expect("timed task should pop when due");
         assert_eq!(popped_timed.task, task(13));
-        assert_eq!(injector.pending_count.load(Ordering::Relaxed), 0);
+        assert_eq!(injector.timed_count.load(Ordering::Relaxed), 0);
     }
 
     #[test]
     fn concurrent_decrements_saturate_counters_at_zero() {
         for _ in 0..2_000 {
             let injector = Arc::new(GlobalInjector::new());
-            injector.pending_count.store(1, Ordering::Relaxed);
             injector.ready_count.store(1, Ordering::Relaxed);
             let barrier = Arc::new(Barrier::new(3));
 
@@ -562,7 +541,6 @@ mod tests {
             let b1 = Arc::clone(&barrier);
             let h1 = thread::spawn(move || {
                 b1.wait();
-                i1.decrement_pending_count();
                 i1.decrement_ready_count();
             });
 
@@ -570,7 +548,6 @@ mod tests {
             let b2 = Arc::clone(&barrier);
             let h2 = thread::spawn(move || {
                 b2.wait();
-                i2.decrement_pending_count();
                 i2.decrement_ready_count();
             });
 
@@ -578,11 +555,6 @@ mod tests {
             h1.join().expect("first decrement thread should complete");
             h2.join().expect("second decrement thread should complete");
 
-            assert_eq!(
-                injector.pending_count.load(Ordering::Relaxed),
-                0,
-                "pending counter must saturate at zero"
-            );
             assert_eq!(
                 injector.ready_count.load(Ordering::Relaxed),
                 0,

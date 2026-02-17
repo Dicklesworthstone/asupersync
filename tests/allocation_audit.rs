@@ -91,7 +91,8 @@ use asupersync::runtime::scheduler::{GlobalInjector, GlobalQueue, LocalQueue, Pr
 use asupersync::runtime::{global_alloc_count, RegionHeap, RuntimeState};
 use asupersync::sync::ContendedMutex;
 use asupersync::types::{Budget, RegionId, TaskId, Time};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 /// Serializes allocation-sensitive tests so the global allocator counter
 /// is not contaminated by concurrent test warmup/measurement phases.
@@ -128,9 +129,7 @@ fn setup_runtime_state(max_task_id: u32) -> Arc<ContendedMutex<RuntimeState>> {
 /// zero heap allocations after initial capacity is established.
 #[test]
 fn priority_scheduler_ready_lane_zero_alloc() {
-    let _guard = ALLOC_TEST_GUARD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = ALLOC_TEST_GUARD.lock();
     init_test("priority_scheduler_ready_lane_zero_alloc");
 
     let mut sched = PriorityScheduler::new();
@@ -186,9 +185,7 @@ fn priority_scheduler_ready_lane_zero_alloc() {
 /// Verify that PriorityScheduler cancel lane schedule + pop is zero-alloc.
 #[test]
 fn priority_scheduler_cancel_lane_zero_alloc() {
-    let _guard = ALLOC_TEST_GUARD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = ALLOC_TEST_GUARD.lock();
     init_test("priority_scheduler_cancel_lane_zero_alloc");
 
     let mut sched = PriorityScheduler::new();
@@ -232,9 +229,7 @@ fn priority_scheduler_cancel_lane_zero_alloc() {
 /// Verify that PriorityScheduler timed lane schedule + pop is zero-alloc.
 #[test]
 fn priority_scheduler_timed_lane_zero_alloc() {
-    let _guard = ALLOC_TEST_GUARD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = ALLOC_TEST_GUARD.lock();
     init_test("priority_scheduler_timed_lane_zero_alloc");
 
     let mut sched = PriorityScheduler::new();
@@ -286,9 +281,7 @@ fn priority_scheduler_timed_lane_zero_alloc() {
 /// are reused. We verify allocations stay within a small ceiling.
 #[test]
 fn global_queue_push_pop_allocation_ceiling() {
-    let _guard = ALLOC_TEST_GUARD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = ALLOC_TEST_GUARD.lock();
     init_test("global_queue_push_pop_allocation_ceiling");
 
     let queue = GlobalQueue::new();
@@ -363,9 +356,7 @@ fn global_queue_push_pop_allocation_ceiling() {
 /// ceilings.
 #[test]
 fn global_injector_allocation_ceiling() {
-    let _guard = ALLOC_TEST_GUARD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = ALLOC_TEST_GUARD.lock();
     init_test("global_injector_allocation_ceiling");
 
     let injector = GlobalInjector::new();
@@ -454,9 +445,7 @@ fn global_injector_allocation_ceiling() {
 /// Verify LocalQueue push/pop is zero-alloc (intrusive stack, no heap alloc).
 #[test]
 fn local_queue_push_pop_zero_alloc() {
-    let _guard = ALLOC_TEST_GUARD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = ALLOC_TEST_GUARD.lock();
     init_test("local_queue_push_pop_zero_alloc");
 
     let state = setup_runtime_state(255);
@@ -502,9 +491,7 @@ fn local_queue_push_pop_zero_alloc() {
 /// Verify LocalQueue steal is zero-alloc (just pointer manipulation).
 #[test]
 fn local_queue_steal_zero_alloc() {
-    let _guard = ALLOC_TEST_GUARD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = ALLOC_TEST_GUARD.lock();
     init_test("local_queue_steal_zero_alloc");
 
     let state = setup_runtime_state(255);
@@ -554,9 +541,7 @@ fn local_queue_steal_zero_alloc() {
 /// verifying allocation ceiling after warmup.
 #[test]
 fn mixed_lane_stress_allocation_ceiling() {
-    let _guard = ALLOC_TEST_GUARD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = ALLOC_TEST_GUARD.lock();
     init_test("mixed_lane_stress_allocation_ceiling");
 
     let mut sched = PriorityScheduler::new();
@@ -633,9 +618,7 @@ fn mixed_lane_stress_allocation_ceiling() {
 /// queue operations, and governor overhead.
 #[test]
 fn e2e_lab_dispatch_allocation_profile() {
-    let _guard = ALLOC_TEST_GUARD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = ALLOC_TEST_GUARD.lock();
     init_test("e2e_lab_dispatch_allocation_profile");
 
     // Phase 1: Set up the runtime and tasks (allocations expected here).
@@ -707,9 +690,7 @@ fn e2e_lab_dispatch_allocation_profile() {
 /// that allocation growth is sub-linear (amortization holds).
 #[test]
 fn e2e_allocation_scaling_sublinear() {
-    let _guard = ALLOC_TEST_GUARD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = ALLOC_TEST_GUARD.lock();
     init_test("e2e_allocation_scaling_sublinear");
 
     let task_counts = [10u32, 50, 100, 200];
@@ -810,9 +791,7 @@ fn e2e_allocation_scaling_sublinear() {
 /// with actual allocations.
 #[test]
 fn region_heap_alloc_count_consistency() {
-    let _guard = ALLOC_TEST_GUARD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = ALLOC_TEST_GUARD.lock();
     init_test("region_heap_alloc_count_consistency");
 
     test_section!("baseline");
@@ -874,9 +853,7 @@ fn region_heap_alloc_count_consistency() {
 /// This serves as the CI-consumable artifact for regression detection.
 #[test]
 fn allocation_audit_structured_report() {
-    let _guard = ALLOC_TEST_GUARD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = ALLOC_TEST_GUARD.lock();
     init_test("allocation_audit_structured_report");
 
     // NOTE: This test uses ceiling-based policies for ALL components because

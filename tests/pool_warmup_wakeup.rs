@@ -2,9 +2,10 @@
 
 use asupersync::cx::Cx;
 use asupersync::sync::{AsyncResourceFactory, GenericPool, Pool, PoolConfig};
+use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -51,7 +52,7 @@ impl Future for WaitOnce {
         if self.polled {
             Poll::Ready(())
         } else {
-            *self.waker.lock().unwrap() = Some(cx.waker().clone());
+            *self.waker.lock() = Some(cx.waker().clone());
             self.polled = true;
             Poll::Pending
         }
@@ -87,7 +88,7 @@ fn test_warmup_wakes_waiters() {
     let mut factory_task_waker = None;
     for _ in 0..50 {
         {
-            let mut lock = factory_waker.lock().unwrap();
+            let mut lock = factory_waker.lock();
             if lock.is_some() {
                 factory_task_waker = lock.take();
                 drop(lock);

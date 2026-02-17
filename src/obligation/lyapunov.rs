@@ -229,6 +229,27 @@ pub struct StateSnapshot {
 }
 
 impl StateSnapshot {
+    #[inline]
+    fn accumulate_cancel_phase_counts(
+        task_state: &crate::record::task::TaskState,
+        cancel_requested_tasks: &mut u32,
+        cancelling_tasks: &mut u32,
+        finalizing_tasks: &mut u32,
+    ) {
+        match task_state {
+            crate::record::task::TaskState::CancelRequested { .. } => {
+                *cancel_requested_tasks = cancel_requested_tasks.saturating_add(1);
+            }
+            crate::record::task::TaskState::Cancelling { .. } => {
+                *cancelling_tasks = cancelling_tasks.saturating_add(1);
+            }
+            crate::record::task::TaskState::Finalizing { .. } => {
+                *finalizing_tasks = finalizing_tasks.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+
     /// Constructs a snapshot from a live [`RuntimeState`](crate::runtime::RuntimeState).
     ///
     /// Design goals:
@@ -243,12 +264,9 @@ impl StateSnapshot {
         // 1s is an intentionally "coarse" knob: pressure reflects tasks that are
         // within ~1s of their deadline (or overdue), not far-future deadlines.
         const DEADLINE_PRESSURE_D0_NS: u64 = 1_000_000_000;
-
         let now = state.now;
-
         // -- Task scan: one pass to collect live count, cancel-phase counts,
         //    and deadline pressure. --
-
         let mut live_tasks: u32 = 0;
         let mut cancel_requested_tasks: u32 = 0;
         let mut cancelling_tasks: u32 = 0;
@@ -260,30 +278,24 @@ impl StateSnapshot {
                 continue;
             }
             live_tasks = live_tasks.saturating_add(1);
-
             // Count cancellation phases.
-            match &task.state {
-                crate::record::task::TaskState::CancelRequested { .. } => {
-                    cancel_requested_tasks = cancel_requested_tasks.saturating_add(1);
-                }
-                crate::record::task::TaskState::Cancelling { .. } => {
-                    cancelling_tasks = cancelling_tasks.saturating_add(1);
-                }
-                crate::record::task::TaskState::Finalizing { .. } => {
-                    finalizing_tasks = finalizing_tasks.saturating_add(1);
-                }
-                _ => {}
-            }
-
+            Self::accumulate_cancel_phase_counts(
+                &task.state,
+                &mut cancel_requested_tasks,
+                &mut cancelling_tasks,
+                &mut finalizing_tasks,
+            );
             // Deadline pressure contribution.
             let Some(cx_inner) = task.cx_inner.as_ref() else {
                 continue;
             };
-            let inner = cx_inner.read();
-            let Some(deadline) = inner.budget.deadline else {
+            let deadline = {
+                let inner = cx_inner.read();
+                inner.budget.deadline
+            };
+            let Some(deadline) = deadline else {
                 continue;
             };
-
             let deadline_ns = i128::from(deadline.as_nanos());
             let now_ns = i128::from(now.as_nanos());
             let slack_ns = deadline_ns - now_ns;
@@ -297,9 +309,7 @@ impl StateSnapshot {
                 deadline_pressure += term;
             }
         }
-
         // -- Obligation scan: one pass to collect totals + per-kind breakdown. --
-
         let mut pending_obligations: u32 = 0;
         let mut obligation_age_sum_ns: u64 = 0;
         let mut pending_send_permits: u32 = 0;
@@ -330,9 +340,7 @@ impl StateSnapshot {
                 }
             }
         }
-
         // -- Region scan: one pass for draining count. --
-
         let mut draining_regions: u32 = 0;
         for (_, region) in state.regions_iter() {
             match region.state() {

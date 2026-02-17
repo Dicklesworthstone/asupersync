@@ -23,6 +23,7 @@ use smallvec::SmallVec;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Waker};
 
@@ -91,14 +92,8 @@ struct SendWaiter {
 struct ChannelInner<T> {
     /// Buffered messages waiting to be received.
     queue: VecDeque<T>,
-    /// Maximum capacity of the queue.
-    capacity: usize,
     /// Number of reserved slots (permits outstanding).
     reserved: usize,
-    /// Whether the receiver has been dropped.
-    receiver_dropped: bool,
-    /// Number of active senders.
-    sender_count: usize,
     /// Wakers for senders waiting for capacity.
     send_wakers: VecDeque<SendWaiter>,
     /// Waker for the receiver waiting for messages.
@@ -111,12 +106,22 @@ struct ChannelInner<T> {
 struct ChannelShared<T> {
     /// Protected channel state.
     inner: Mutex<ChannelInner<T>>,
+    /// Number of active senders. Atomic so `Sender::clone` avoids the mutex
+    /// and `Receiver::is_closed` can read without locking.
+    sender_count: AtomicUsize,
+    /// Whether the receiver has been dropped. Atomic so `Sender::is_closed`
+    /// can read without locking. Monotone: transitions `false → true` once.
+    receiver_dropped: AtomicBool,
+    /// Maximum capacity of the queue. Write-once (set at construction),
+    /// stored outside the mutex so `capacity()` is lock-free.
+    capacity: usize,
 }
 
 impl<T: std::fmt::Debug> std::fmt::Debug for ChannelShared<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ChannelShared")
             .field("inner", &self.inner)
+            .field("sender_count", &self.sender_count.load(Ordering::Acquire))
             .finish_non_exhaustive()
     }
 }
@@ -125,10 +130,7 @@ impl<T> ChannelInner<T> {
     fn new(capacity: usize) -> Self {
         Self {
             queue: VecDeque::with_capacity(capacity),
-            capacity,
             reserved: 0,
-            receiver_dropped: false,
-            sender_count: 1,
             send_wakers: VecDeque::new(),
             recv_waker: None,
             next_waiter_id: 0,
@@ -141,13 +143,8 @@ impl<T> ChannelInner<T> {
     }
 
     /// Returns true if there's capacity for another reservation.
-    fn has_capacity(&self) -> bool {
-        self.used_slots() < self.capacity
-    }
-
-    /// Returns true if the channel is closed (all senders dropped).
-    fn is_closed(&self) -> bool {
-        self.sender_count == 0
+    fn has_capacity(&self, capacity: usize) -> bool {
+        self.used_slots() < capacity
     }
 
     /// Returns the waker for the next waiting sender, if any.
@@ -172,6 +169,9 @@ pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
 
     let shared = Arc::new(ChannelShared {
         inner: Mutex::new(ChannelInner::new(capacity)),
+        sender_count: AtomicUsize::new(1),
+        receiver_dropped: AtomicBool::new(false),
+        capacity,
     });
     let sender = Sender {
         shared: Arc::clone(&shared),
@@ -217,7 +217,7 @@ impl<T> Sender<T> {
     pub fn try_reserve(&self) -> Result<SendPermit<'_, T>, SendError<()>> {
         let mut inner = self.shared.inner.lock();
 
-        if inner.receiver_dropped {
+        if self.shared.receiver_dropped.load(Ordering::Relaxed) {
             return Err(SendError::Disconnected(()));
         }
 
@@ -225,7 +225,7 @@ impl<T> Sender<T> {
             return Err(SendError::Full(()));
         }
 
-        if inner.has_capacity() {
+        if inner.has_capacity(self.shared.capacity) {
             inner.reserved += 1;
             drop(inner);
             Ok(SendPermit {
@@ -253,7 +253,7 @@ impl<T> Sender<T> {
     /// Returns true if the receiver has been dropped.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.shared.inner.lock().receiver_dropped
+        self.shared.receiver_dropped.load(Ordering::Acquire)
     }
 
     /// Wakes the receiver if it is currently waiting in `recv()`.
@@ -272,7 +272,7 @@ impl<T> Sender<T> {
     /// Returns the channel's capacity.
     #[must_use]
     pub fn capacity(&self) -> usize {
-        self.shared.inner.lock().capacity
+        self.shared.capacity
     }
 
     /// Sends a value, evicting the oldest queued message if the channel is full.
@@ -288,11 +288,11 @@ impl<T> Sender<T> {
     pub fn send_evict_oldest(&self, value: T) -> Result<Option<T>, SendError<T>> {
         let mut inner = self.shared.inner.lock();
 
-        if inner.receiver_dropped {
+        if self.shared.receiver_dropped.load(Ordering::Relaxed) {
             return Err(SendError::Disconnected(value));
         }
 
-        let evicted = if inner.has_capacity() {
+        let evicted = if inner.has_capacity(self.shared.capacity) {
             None
         } else if let Some(oldest) = inner.queue.pop_front() {
             // Evict the oldest committed message (not a reserved slot).
@@ -343,11 +343,11 @@ impl<'a, T> Future for Reserve<'a, T> {
 
         let mut inner = self.sender.shared.inner.lock();
 
-        if inner.receiver_dropped {
+        if self.sender.shared.receiver_dropped.load(Ordering::Relaxed) {
             return Poll::Ready(Err(SendError::Disconnected(())));
         }
 
-        if inner.has_capacity() {
+        if inner.has_capacity(self.sender.shared.capacity) {
             inner.reserved += 1;
             // Remove self from queue
             if let Some(id) = self.waiter_id {
@@ -361,7 +361,7 @@ impl<'a, T> Future for Reserve<'a, T> {
 
                 // CASCADE: If there is still capacity, wake the *next* waiter.
                 // Extract waker now; wake after releasing the lock.
-                let cascade_waker = if inner.has_capacity() {
+                let cascade_waker = if inner.has_capacity(self.sender.shared.capacity) {
                     inner.take_next_sender_waker()
                 } else {
                     None
@@ -421,7 +421,7 @@ impl<T> Drop for Reserve<'_, T> {
                 }
 
                 // Propagate wake if we were blocking capacity.
-                if inner.has_capacity() {
+                if inner.has_capacity(self.sender.shared.capacity) {
                     inner.take_next_sender_waker()
                 } else {
                     None
@@ -437,10 +437,7 @@ impl<T> Drop for Reserve<'_, T> {
 
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        {
-            let mut inner = self.shared.inner.lock();
-            inner.sender_count += 1;
-        }
+        self.shared.sender_count.fetch_add(1, Ordering::Relaxed);
         Self {
             shared: Arc::clone(&self.shared),
         }
@@ -449,22 +446,22 @@ impl<T> Clone for Sender<T> {
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
-        let recv_waker = {
-            let mut inner = self.shared.inner.lock();
-            if inner.sender_count == 0 {
-                debug_assert!(false, "sender_count underflow in Sender::drop");
-            } else {
-                inner.sender_count -= 1;
+        let old = self.shared.sender_count.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(old > 0, "sender_count underflow in Sender::drop");
+        if old == 1 {
+            // Last sender dropped — acquire lock to take recv_waker.
+            // Re-check under lock in case a WeakSender::upgrade raced.
+            let recv_waker = {
+                let mut inner = self.shared.inner.lock();
+                if self.shared.sender_count.load(Ordering::Acquire) == 0 {
+                    inner.recv_waker.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(waker) = recv_waker {
+                waker.wake();
             }
-            if inner.sender_count == 0 {
-                inner.recv_waker.take()
-            } else {
-                None
-            }
-        };
-        // Wake receiver outside the lock to avoid wake-under-lock deadlocks.
-        if let Some(waker) = recv_waker {
-            waker.wake();
         }
     }
 }
@@ -487,14 +484,23 @@ impl<T> WeakSender<T> {
     #[must_use]
     pub fn upgrade(&self) -> Option<Sender<T>> {
         self.shared.upgrade().and_then(|shared| {
-            {
-                let mut guard = shared.inner.lock();
-                if guard.sender_count == 0 {
+            // CAS loop avoids touching the channel mutex on upgrade while still
+            // preventing resurrection from zero senders.
+            let mut observed = shared.sender_count.load(Ordering::Acquire);
+            loop {
+                if observed == 0 {
                     return None;
                 }
-                guard.sender_count += 1;
+                match shared.sender_count.compare_exchange_weak(
+                    observed,
+                    observed + 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return Some(Sender { shared }),
+                    Err(actual) => observed = actual,
+                }
             }
-            Some(Sender { shared })
         })
     }
 }
@@ -527,7 +533,7 @@ impl<T> SendPermit<'_, T> {
             inner.reserved -= 1;
         }
 
-        if inner.receiver_dropped {
+        if self.sender.shared.receiver_dropped.load(Ordering::Relaxed) {
             // Receiver is gone; drop the value and release capacity.
             // Collect wakers before dropping the lock to avoid wake-under-lock.
             if inner.send_wakers.is_empty() {
@@ -618,30 +624,29 @@ impl<T> Receiver<T> {
     /// Attempts to receive a value without blocking.
     pub fn try_recv(&self) -> Result<T, RecvError> {
         let mut inner = self.shared.inner.lock();
-
-        match inner.queue.pop_front() {
-            Some(value) => {
+        inner.queue.pop_front().map_or_else(
+            || {
+                if self.shared.sender_count.load(Ordering::Acquire) == 0 {
+                    Err(RecvError::Disconnected)
+                } else {
+                    Err(RecvError::Empty)
+                }
+            },
+            |value| {
                 let next_waker = inner.take_next_sender_waker();
                 drop(inner);
                 if let Some(w) = next_waker {
                     w.wake();
                 }
                 Ok(value)
-            }
-            None => {
-                if inner.is_closed() {
-                    Err(RecvError::Disconnected)
-                } else {
-                    Err(RecvError::Empty)
-                }
-            }
-        }
+            },
+        )
     }
 
     /// Returns true if all senders have been dropped.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.shared.inner.lock().is_closed()
+        self.shared.sender_count.load(Ordering::Acquire) == 0
     }
 
     /// Returns true if there are any queued messages.
@@ -665,7 +670,7 @@ impl<T> Receiver<T> {
     /// Returns the channel capacity.
     #[must_use]
     pub fn capacity(&self) -> usize {
-        self.shared.inner.lock().capacity
+        self.shared.capacity
     }
 }
 
@@ -695,7 +700,7 @@ impl<T> Future for Recv<'_, T> {
             return Poll::Ready(Ok(value));
         }
 
-        if inner.is_closed() {
+        if self.receiver.shared.sender_count.load(Ordering::Acquire) == 0 {
             return Poll::Ready(Err(RecvError::Disconnected));
         }
 
@@ -712,7 +717,7 @@ impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         let wakers: SmallVec<[Waker; 4]> = {
             let mut inner = self.shared.inner.lock();
-            inner.receiver_dropped = true;
+            self.shared.receiver_dropped.store(true, Ordering::Release);
             // Drain queued items to prevent memory leaks when senders are
             // long-lived (they hold Arc refs that keep the queue alive).
             inner.queue.clear();
@@ -1213,7 +1218,7 @@ mod tests {
         {
             let inner = tx.shared.inner.lock();
             let used = inner.used_slots();
-            let cap = inner.capacity;
+            let cap = tx.shared.capacity;
             drop(inner);
             crate::assert_with_log!(used <= cap, "capacity invariant", true, used <= cap);
         }
@@ -1249,7 +1254,7 @@ mod tests {
         {
             let inner = tx.shared.inner.lock();
             let used = inner.used_slots();
-            let cap = inner.capacity;
+            let cap = tx.shared.capacity;
             let qlen = inner.queue.len();
             drop(inner);
             crate::assert_with_log!(used <= cap, "capacity after eviction", true, used <= cap);

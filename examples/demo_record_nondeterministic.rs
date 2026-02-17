@@ -159,7 +159,7 @@ fn run_scenario(seed: u64, record: bool) -> SeedOutcome {
         };
 
         let lane = rng.next_u32(4) as u8;
-        runtime.scheduler.lock().unwrap().schedule(task_id, lane);
+        runtime.scheduler.lock().schedule(task_id, lane);
 
         let num_obligations = 1 + rng.next_u32(3);
         for j in 0..num_obligations {
@@ -318,7 +318,7 @@ fn replay_scenario_for_trace(runtime: &mut LabRuntime, seed: u64) {
             continue;
         };
         let lane = rng.next_u32(4) as u8;
-        runtime.scheduler.lock().unwrap().schedule(task_id, lane);
+        runtime.scheduler.lock().schedule(task_id, lane);
 
         let num_obligations = 1 + rng.next_u32(3);
         for j in 0..num_obligations {

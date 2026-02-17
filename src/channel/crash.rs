@@ -32,8 +32,8 @@
 //! Every crash, restart, and rejected-during-crash event is logged
 //! to an [`EvidenceSink`].
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::channel::mpsc::{SendError, Sender};
@@ -214,6 +214,12 @@ pub struct CrashController {
     state: Mutex<CrashState>,
     stats: CrashStats,
     evidence_sink: Arc<dyn EvidenceSink>,
+    /// Lock-free snapshot of `CrashState::crashed`.
+    crashed: AtomicBool,
+    /// Lock-free snapshot of `CrashState::exhausted`.
+    exhausted: AtomicBool,
+    /// Write-once: copied from config at construction, never mutated.
+    restart_mode: RestartMode,
 }
 
 struct CrashState {
@@ -222,7 +228,6 @@ struct CrashState {
     crash_count: u32,
     restart_count: u32,
     max_restarts: Option<u32>,
-    restart_mode: RestartMode,
 }
 
 impl std::fmt::Debug for CrashController {
@@ -248,10 +253,12 @@ impl CrashController {
                 crash_count: 0,
                 restart_count: 0,
                 max_restarts: config.max_restarts,
-                restart_mode: config.restart_mode,
             }),
             stats: CrashStats::new(),
             evidence_sink,
+            crashed: AtomicBool::new(false),
+            exhausted: AtomicBool::new(false),
+            restart_mode: config.restart_mode,
         }
     }
 
@@ -262,6 +269,7 @@ impl CrashController {
             return false;
         }
         state.crashed = true;
+        self.crashed.store(true, Ordering::Release);
         state.crash_count += 1;
         self.stats.crashes.fetch_add(1, Ordering::Relaxed);
         emit_crash_evidence(&self.evidence_sink, "crash", state.crash_count);
@@ -283,6 +291,7 @@ impl CrashController {
         if let Some(max) = state.max_restarts {
             if state.restart_count >= max {
                 state.exhausted = true;
+                self.exhausted.store(true, Ordering::Release);
                 emit_crash_evidence(
                     &self.evidence_sink,
                     "restart_exhausted",
@@ -293,6 +302,7 @@ impl CrashController {
         }
 
         state.crashed = false;
+        self.crashed.store(false, Ordering::Release);
         state.restart_count += 1;
         self.stats.restarts.fetch_add(1, Ordering::Relaxed);
         emit_crash_evidence(&self.evidence_sink, "restart", state.restart_count);
@@ -302,19 +312,19 @@ impl CrashController {
     /// Returns `true` if the actor is currently crashed.
     #[must_use]
     pub fn is_crashed(&self) -> bool {
-        self.state.lock().crashed
+        self.crashed.load(Ordering::Acquire)
     }
 
     /// Returns `true` if restart attempts are exhausted.
     #[must_use]
     pub fn is_exhausted(&self) -> bool {
-        self.state.lock().exhausted
+        self.exhausted.load(Ordering::Acquire)
     }
 
     /// Returns the restart mode configured for this controller.
     #[must_use]
     pub fn restart_mode(&self) -> RestartMode {
-        self.state.lock().restart_mode
+        self.restart_mode
     }
 
     /// Returns a reference to the crash statistics.

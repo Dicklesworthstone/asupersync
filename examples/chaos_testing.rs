@@ -108,7 +108,7 @@ fn example_light_chaos() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     runtime.run_until_quiescent();
 
     let stats = runtime.chaos_stats();
@@ -138,7 +138,7 @@ fn example_heavy_chaos() {
         })
         .expect("create task");
 
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     runtime.run_until_quiescent();
 
     let stats = runtime.chaos_stats();
@@ -169,7 +169,7 @@ fn example_deterministic_chaos() {
         .state
         .create_task(region1, Budget::INFINITE, async { yield_times(30).await })
         .expect("create task");
-    runtime1.scheduler.lock().unwrap().schedule(task_id1, 0);
+    runtime1.scheduler.lock().schedule(task_id1, 0);
     let steps1 = runtime1.run_until_quiescent();
     let stats1 = runtime1.chaos_stats();
 
@@ -181,7 +181,7 @@ fn example_deterministic_chaos() {
         .state
         .create_task(region2, Budget::INFINITE, async { yield_times(30).await })
         .expect("create task");
-    runtime2.scheduler.lock().unwrap().schedule(task_id2, 0);
+    runtime2.scheduler.lock().schedule(task_id2, 0);
     let steps2 = runtime2.run_until_quiescent();
     let stats2 = runtime2.chaos_stats();
 
@@ -219,7 +219,7 @@ fn example_custom_chaos() {
         .state
         .create_task(region, Budget::INFINITE, async { yield_times(100).await })
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     runtime.run_until_quiescent();
 
     let stats = runtime.chaos_stats();
@@ -245,7 +245,7 @@ fn example_chaos_stats() {
         .state
         .create_task(region, Budget::INFINITE, async { yield_times(1000).await })
         .expect("create task");
-    runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+    runtime.scheduler.lock().schedule(task_id, 0);
     runtime.run_until_quiescent();
 
     let stats = runtime.chaos_stats();

@@ -7,18 +7,19 @@
 //! - Resource cleanup
 
 use crate::e2e::combinator::util::{DrainFlag, DrainTracker, NeverComplete};
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 struct OrderTracker {
-    order: Arc<std::sync::Mutex<Vec<u32>>>,
+    order: Arc<Mutex<Vec<u32>>>,
     id: u32,
     succeeds: bool,
 }
 
 impl OrderTracker {
     fn evaluate(&self) -> Result<i32, ()> {
-        self.order.lock().unwrap().push(self.id);
+        self.order.lock().push(self.id);
         if self.succeeds {
             Ok(i32::try_from(self.id).expect("id fits i32"))
         } else {
@@ -158,7 +159,7 @@ fn test_first_ok_collects_errors() {
 /// Test priority ordering.
 #[test]
 fn test_first_ok_priority_order() {
-    let evaluation_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let evaluation_order = Arc::new(Mutex::new(Vec::new()));
 
     let trackers = vec![
         OrderTracker {
@@ -189,7 +190,7 @@ fn test_first_ok_priority_order() {
 
     assert_eq!(result, Some(2));
 
-    let order = evaluation_order.lock().unwrap().clone();
+    let order = evaluation_order.lock().clone();
     assert_eq!(order, vec![1, 2], "Should stop at first success");
 }
 

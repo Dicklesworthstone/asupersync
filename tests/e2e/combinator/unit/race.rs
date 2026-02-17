@@ -7,6 +7,7 @@
 //! - Loser cancellation
 
 use crate::e2e::combinator::util::{DrainFlag, DrainTracker, NeverComplete};
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -146,18 +147,18 @@ fn test_race_nested_cancellation() {
 #[test]
 fn test_race_same_tick_completion() {
     struct OrderTracker {
-        order: Arc<std::sync::Mutex<Vec<u32>>>,
+        order: Arc<Mutex<Vec<u32>>>,
         id: u32,
     }
 
     impl OrderTracker {
         fn complete(&self) {
-            self.order.lock().unwrap().push(self.id);
+            self.order.lock().push(self.id);
         }
     }
 
     // When multiple branches complete in same tick, first polled wins
-    let completion_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let completion_order = Arc::new(Mutex::new(Vec::new()));
 
     let tracker1 = OrderTracker {
         order: Arc::clone(&completion_order),
@@ -172,7 +173,7 @@ fn test_race_same_tick_completion() {
     tracker1.complete();
     tracker2.complete();
 
-    let order = completion_order.lock().unwrap().clone();
+    let order = completion_order.lock().clone();
     assert_eq!(order.len(), 2);
     assert_eq!(order[0], 1, "First polled should be recorded first");
 }

@@ -28,11 +28,7 @@ fn run_smoke(seed: u64) {
             }
         })
         .expect("create_task");
-    runtime
-        .scheduler
-        .lock()
-        
-        .schedule(server_task_id, 0);
+    runtime.scheduler.lock().schedule(server_task_id, 0);
 
     let (client_task_id, _) = runtime
         .state
@@ -44,11 +40,7 @@ fn run_smoke(seed: u64) {
             let _ = ws.recv(&cx).await.expect("recv");
         })
         .expect("create_task");
-    runtime
-        .scheduler
-        .lock()
-        
-        .schedule(client_task_id, 0);
+    runtime.scheduler.lock().schedule(client_task_id, 0);
 
     runtime.run_until_quiescent();
 }

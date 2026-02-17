@@ -10,11 +10,11 @@ use crate::net::tcp::traits::TcpListenerApi;
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 use crate::stream::Stream;
+use parking_lot::Mutex;
 use std::future::poll_fn;
 use std::io;
 use std::net::{self, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
-use parking_lot::Mutex;
 use std::task::{Context, Poll};
 
 /// A TCP listener.

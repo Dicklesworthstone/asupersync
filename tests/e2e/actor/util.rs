@@ -4,9 +4,10 @@ use asupersync::actor::{Actor, ActorHandle, ActorId, ActorRef};
 use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::types::Budget;
+use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Initialize actor test with logging.
 pub fn init_actor_test(test_name: &str) {
@@ -29,7 +30,7 @@ impl CounterActor {
     }
 
     fn log(&self, msg: &str) {
-        self.events.lock().unwrap().push(msg.to_string());
+        self.events.lock().push(msg.to_string());
     }
 }
 
@@ -100,7 +101,7 @@ impl EchoActor {
     }
 
     fn log(&self, msg: &str) {
-        self.events.lock().unwrap().push(msg.to_string());
+        self.events.lock().push(msg.to_string());
     }
 }
 
@@ -152,7 +153,7 @@ impl FailingActor {
     }
 
     fn log(&self, msg: &str) {
-        self.events.lock().unwrap().push(msg.to_string());
+        self.events.lock().push(msg.to_string());
     }
 }
 
@@ -203,5 +204,5 @@ where
     let mut runtime = test_lab_runtime(seed);
     setup(&mut runtime, Arc::clone(events));
     runtime.run_until_quiescent();
-    events.lock().unwrap().clone()
+    events.lock().clone()
 }

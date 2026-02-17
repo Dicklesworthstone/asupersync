@@ -517,8 +517,9 @@ mod tests {
     use crate::transport::SharedChannel;
     use crate::types::{Symbol, SymbolId, SymbolKind};
     use futures_lite::future;
+    use parking_lot::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::task::{Wake, Waker};
 
     fn init_test(name: &str) {
@@ -603,7 +604,7 @@ mod tests {
 
     impl SymbolSink for TrackingSink {
         fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             if state.closed {
                 drop(state);
                 return Poll::Ready(Err(SinkError::Closed));
@@ -622,7 +623,7 @@ mod tests {
             _cx: &mut Context<'_>,
             symbol: AuthenticatedSymbol,
         ) -> Poll<Result<(), SinkError>> {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             if state.closed {
                 drop(state);
                 return Poll::Ready(Err(SinkError::Closed));
@@ -645,7 +646,7 @@ mod tests {
         }
 
         fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             if state.closed {
                 drop(state);
                 return Poll::Ready(Err(SinkError::Closed));
@@ -656,7 +657,7 @@ mod tests {
         }
 
         fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock();
             state.closed = true;
             drop(state);
             Poll::Ready(Ok(()))
@@ -694,7 +695,7 @@ mod tests {
         );
 
         let sent_len = {
-            let state = sink.state.lock().unwrap();
+            let state = sink.state.lock();
             state.sent.len()
         };
         crate::assert_with_log!(sent_len == 1, "sent", 1usize, sent_len);
@@ -719,7 +720,7 @@ mod tests {
         );
 
         let sent_empty = {
-            let state = sink.state.lock().unwrap();
+            let state = sink.state.lock();
             state.sent.is_empty()
         };
         crate::assert_with_log!(sent_empty, "no sent", true, sent_empty);
@@ -734,7 +735,7 @@ mod tests {
 
         let count = future::block_on(async { sink.send_all(symbols).await.unwrap() });
         let (sent_len, flush_count) = {
-            let state = sink.state.lock().unwrap();
+            let state = sink.state.lock();
             (state.sent.len(), state.flush_count)
         };
 

@@ -2163,7 +2163,7 @@ pub mod trace_events {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use parking_lot::Mutex;
 
     #[test]
     fn node_id_basics() {
@@ -2233,10 +2233,7 @@ mod tests {
             destination: &NodeId,
             envelope: MessageEnvelope<RemoteMessage>,
         ) -> Result<(), RemoteError> {
-            self.sent
-                .lock()
-                .expect("capture runtime lock poisoned")
-                .push((destination.clone(), envelope));
+            self.sent.lock().push((destination.clone(), envelope));
             Ok(())
         }
 
@@ -2269,17 +2266,11 @@ mod tests {
             task_id: RemoteTaskId,
             _tx: oneshot::Sender<Result<RemoteOutcome, RemoteError>>,
         ) {
-            self.registered
-                .lock()
-                .expect("failing runtime lock poisoned")
-                .push(task_id);
+            self.registered.lock().push(task_id);
         }
 
         fn unregister_task(&self, task_id: RemoteTaskId) {
-            self.unregistered
-                .lock()
-                .expect("failing runtime lock poisoned")
-                .push(task_id);
+            self.unregistered.lock().push(task_id);
         }
     }
 
@@ -2300,7 +2291,7 @@ mod tests {
         .expect("spawn_remote should succeed");
 
         let (destination, envelope) = {
-            let sent = runtime.sent.lock().expect("capture runtime lock poisoned");
+            let sent = runtime.sent.lock();
             assert_eq!(sent.len(), 1);
             sent[0].clone()
         };
@@ -2334,16 +2325,8 @@ mod tests {
             other => unreachable!("expected TransportError, got {other:?}"),
         }
 
-        let registered = runtime
-            .registered
-            .lock()
-            .expect("failing runtime lock poisoned")
-            .clone();
-        let unregistered = runtime
-            .unregistered
-            .lock()
-            .expect("failing runtime lock poisoned")
-            .clone();
+        let registered = runtime.registered.lock().clone();
+        let unregistered = runtime.unregistered.lock().clone();
 
         assert_eq!(registered.len(), 1);
         assert_eq!(unregistered, registered);
@@ -3231,7 +3214,7 @@ mod tests {
 
     #[test]
     fn saga_step_failure_runs_compensations_reverse() {
-        use std::sync::{Arc, Mutex};
+        use std::sync::Arc;
 
         let order = Arc::new(Mutex::new(Vec::new()));
 
@@ -3242,7 +3225,7 @@ mod tests {
             "step-0",
             || Ok(()),
             move || {
-                o1.lock().unwrap().push(0);
+                o1.lock().push(0);
                 "comp-0".to_string()
             },
         )
@@ -3253,7 +3236,7 @@ mod tests {
             "step-1",
             || Ok(()),
             move || {
-                o2.lock().unwrap().push(1);
+                o2.lock().push(1);
                 "comp-1".to_string()
             },
         )
@@ -3265,7 +3248,7 @@ mod tests {
             "step-2",
             || Err("boom".to_string()),
             move || {
-                o3.lock().unwrap().push(2);
+                o3.lock().push(2);
                 "comp-2".to_string()
             },
         );
@@ -3286,13 +3269,13 @@ mod tests {
         assert_eq!(comps[1].step, 0); // step-0 second
 
         // Verify execution order: 1 then 0 (reverse)
-        let executed = order.lock().unwrap().clone();
+        let executed = order.lock().clone();
         assert_eq!(executed, vec![1, 0]);
     }
 
     #[test]
     fn saga_explicit_abort() {
-        use std::sync::{Arc, Mutex};
+        use std::sync::Arc;
 
         let compensated = Arc::new(Mutex::new(Vec::new()));
         let mut saga = Saga::new();
@@ -3302,7 +3285,7 @@ mod tests {
             "step-0",
             || Ok(()),
             move || {
-                c1.lock().unwrap().push("step-0");
+                c1.lock().push("step-0");
                 "undid step-0".to_string()
             },
         )
@@ -3313,7 +3296,7 @@ mod tests {
             "step-1",
             || Ok(()),
             move || {
-                c2.lock().unwrap().push("step-1");
+                c2.lock().push("step-1");
                 "undid step-1".to_string()
             },
         )
@@ -3328,7 +3311,7 @@ mod tests {
         assert_eq!(comps[0].description, "step-1"); // reverse order
         assert_eq!(comps[1].description, "step-0");
 
-        let executed = compensated.lock().unwrap().clone();
+        let executed = compensated.lock().clone();
         assert_eq!(executed, vec!["step-1", "step-0"]);
     }
 

@@ -25,12 +25,12 @@
 
 use super::traits::{TcpListenerApi, TcpStreamApi};
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::io;
 use std::net::{Shutdown, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use parking_lot::Mutex;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 

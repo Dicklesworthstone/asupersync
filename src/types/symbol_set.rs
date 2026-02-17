@@ -4,8 +4,8 @@
 //! progress, and reports when decode thresholds are reached.
 
 use crate::types::{Symbol, SymbolId, SymbolKind};
-use std::collections::HashMap;
 use parking_lot::RwLock;
+use std::collections::HashMap;
 
 /// Estimated overhead per symbol for bookkeeping.
 const SYMBOL_OVERHEAD_BYTES: usize = 32;
@@ -431,17 +431,13 @@ impl ConcurrentSymbolSet {
 
     /// Sets the block K value.
     pub fn set_block_k(&self, sbn: u8, k: u16) -> bool {
-        self.inner
-            .write()
-            .set_block_k(sbn, k)
+        self.inner.write().set_block_k(sbn, k)
     }
 
     /// Returns true if a block has reached threshold.
     #[must_use]
     pub fn threshold_reached(&self, sbn: u8) -> bool {
-        self.inner
-            .read()
-            .threshold_reached(sbn)
+        self.inner.read().threshold_reached(sbn)
     }
 }
 

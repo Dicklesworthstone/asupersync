@@ -6,11 +6,52 @@
 use crate::runtime::stored_task::LocalStoredTask;
 use crate::types::TaskId;
 use std::cell::RefCell;
-use std::collections::HashMap;
+
+/// Arena-indexed local task storage, replacing `HashMap<TaskId, LocalStoredTask>`
+/// with `Vec<Option<LocalStoredTask>>` for O(1) insert/remove on the spawn_local
+/// hot path.
+struct LocalTaskStore {
+    slots: Vec<Option<LocalStoredTask>>,
+    len: usize,
+}
+
+impl LocalTaskStore {
+    const fn new() -> Self {
+        Self {
+            slots: Vec::new(),
+            len: 0,
+        }
+    }
+
+    fn insert(&mut self, task_id: TaskId, task: LocalStoredTask) -> Option<LocalStoredTask> {
+        let slot = task_id.arena_index().index() as usize;
+        if slot >= self.slots.len() {
+            self.slots.resize_with(slot + 1, || None);
+        }
+        let prev = self.slots[slot].replace(task);
+        if prev.is_none() {
+            self.len += 1;
+        }
+        prev
+    }
+
+    fn remove(&mut self, task_id: TaskId) -> Option<LocalStoredTask> {
+        let slot = task_id.arena_index().index() as usize;
+        let taken = self.slots.get_mut(slot)?.take();
+        if taken.is_some() {
+            self.len -= 1;
+        }
+        taken
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+}
 
 thread_local! {
     /// Local tasks stored on the current thread.
-    static LOCAL_TASKS: RefCell<HashMap<TaskId, LocalStoredTask>> = RefCell::new(HashMap::new());
+    static LOCAL_TASKS: RefCell<LocalTaskStore> = const { RefCell::new(LocalTaskStore::new()) };
 }
 
 /// Stores a local task in the current thread's storage.
@@ -33,7 +74,7 @@ pub fn store_local_task(task_id: TaskId, task: LocalStoredTask) {
 /// Removes and returns a local task from the current thread's storage.
 #[must_use]
 pub fn remove_local_task(task_id: TaskId) -> Option<LocalStoredTask> {
-    LOCAL_TASKS.with(|tasks| tasks.borrow_mut().remove(&task_id))
+    LOCAL_TASKS.with(|tasks| tasks.borrow_mut().remove(task_id))
 }
 
 /// Returns the number of local tasks on this thread.

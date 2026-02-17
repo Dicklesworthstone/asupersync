@@ -29,6 +29,7 @@
 //! to an [`EvidenceSink`].
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::channel::mpsc::{SendError, Sender};
@@ -120,8 +121,13 @@ pub struct PartitionController {
     partitions: Mutex<HashSet<(u64, u64)>>,
     /// What happens when sending across a partition.
     behavior: PartitionBehavior,
-    /// Injection statistics.
-    stats: Mutex<PartitionStats>,
+    /// Number of active partitions, for lock-free fast-path in is_partitioned.
+    partition_count: AtomicUsize,
+    /// Diagnostic counters (relaxed atomics, no mutex needed).
+    partitions_created: AtomicU64,
+    partitions_healed: AtomicU64,
+    messages_dropped: AtomicU64,
+    messages_buffered: AtomicU64,
     /// Evidence sink for logging.
     evidence_sink: Arc<dyn EvidenceSink>,
 }
@@ -133,7 +139,11 @@ impl PartitionController {
         Self {
             partitions: Mutex::new(HashSet::new()),
             behavior,
-            stats: Mutex::new(PartitionStats::default()),
+            partition_count: AtomicUsize::new(0),
+            partitions_created: AtomicU64::new(0),
+            partitions_healed: AtomicU64::new(0),
+            messages_dropped: AtomicU64::new(0),
+            messages_buffered: AtomicU64::new(0),
             evidence_sink,
         }
     }
@@ -145,14 +155,16 @@ impl PartitionController {
     pub fn partition(&self, src: ActorId, dst: ActorId) {
         let created = {
             let mut partitions = self.partitions.lock();
-            partitions.insert((src.0, dst.0))
+            let created = partitions.insert((src.0, dst.0));
+            if created {
+                self.partition_count.fetch_add(1, Ordering::Relaxed);
+            }
+            drop(partitions);
+            created
         };
 
         if created {
-            {
-                let mut stats = self.stats.lock();
-                stats.partitions_created += 1;
-            }
+            self.partitions_created.fetch_add(1, Ordering::Relaxed);
             emit_partition_evidence(&self.evidence_sink, "create", src, dst);
         }
     }
@@ -169,14 +181,16 @@ impl PartitionController {
     pub fn heal(&self, src: ActorId, dst: ActorId) {
         let healed = {
             let mut partitions = self.partitions.lock();
-            partitions.remove(&(src.0, dst.0))
+            let healed = partitions.remove(&(src.0, dst.0));
+            if healed {
+                self.partition_count.fetch_sub(1, Ordering::Relaxed);
+            }
+            drop(partitions);
+            healed
         };
 
         if healed {
-            {
-                let mut stats = self.stats.lock();
-                stats.partitions_healed += 1;
-            }
+            self.partitions_healed.fetch_add(1, Ordering::Relaxed);
             emit_partition_evidence(&self.evidence_sink, "heal", src, dst);
         }
     }
@@ -190,19 +204,15 @@ impl PartitionController {
     /// Heal all active partitions.
     #[allow(clippy::cast_possible_truncation)]
     pub fn heal_all(&self) {
-        let healed_edges = {
+        let healed_edges: Vec<(u64, u64)> = {
             let mut partitions = self.partitions.lock();
-            let mut healed_edges: Vec<(u64, u64)> =
-                std::mem::take(&mut *partitions).into_iter().collect();
-            healed_edges.sort_unstable();
+            let edges = std::mem::take(&mut *partitions).into_iter().collect();
+            self.partition_count.store(0, Ordering::Relaxed);
             drop(partitions);
-            healed_edges
+            edges
         };
         let count = healed_edges.len() as u64;
-        {
-            let mut stats = self.stats.lock();
-            stats.partitions_healed += count;
-        }
+        self.partitions_healed.fetch_add(count, Ordering::Relaxed);
         for (src, dst) in healed_edges {
             emit_partition_evidence(
                 &self.evidence_sink,
@@ -216,18 +226,27 @@ impl PartitionController {
     /// Returns `true` if there is an active partition from `src` to `dst`.
     #[must_use]
     pub fn is_partitioned(&self, src: ActorId, dst: ActorId) -> bool {
+        // Fast-path: skip the lock when no partitions exist (the common case).
+        if self.partition_count.load(Ordering::Relaxed) == 0 {
+            return false;
+        }
         self.partitions.lock().contains(&(src.0, dst.0))
     }
 
     /// Returns the number of active directed partitions.
     #[must_use]
     pub fn active_partition_count(&self) -> usize {
-        self.partitions.lock().len()
+        self.partition_count.load(Ordering::Relaxed)
     }
 
     /// Returns a snapshot of the partition statistics.
     pub fn stats(&self) -> PartitionStats {
-        self.stats.lock().clone()
+        PartitionStats {
+            partitions_created: self.partitions_created.load(Ordering::Relaxed),
+            partitions_healed: self.partitions_healed.load(Ordering::Relaxed),
+            messages_dropped: self.messages_dropped.load(Ordering::Relaxed),
+            messages_buffered: self.messages_buffered.load(Ordering::Relaxed),
+        }
     }
 
     /// Returns the configured behavior for partitioned sends.
@@ -237,8 +256,7 @@ impl PartitionController {
     }
 
     fn record_drop(&self) {
-        let mut stats = self.stats.lock();
-        stats.messages_dropped += 1;
+        self.messages_dropped.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -375,16 +393,15 @@ fn emit_partition_evidence(sink: &Arc<dyn EvidenceSink>, action: &str, src: Acto
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64);
 
+    let action_str = format!("partition_{action}");
+
     #[allow(clippy::cast_precision_loss)]
     let entry = EvidenceLedger {
         ts_unix_ms: now_ms,
         component: "channel_partition".to_string(),
-        action: format!("partition_{action}"),
+        action: action_str.clone(),
         posterior: vec![1.0],
-        expected_loss_by_action: std::collections::BTreeMap::from([(
-            format!("partition_{action}"),
-            0.0,
-        )]),
+        expected_loss_by_action: std::collections::BTreeMap::from([(action_str, 0.0)]),
         chosen_expected_loss: 0.0,
         calibration_score: 1.0,
         fallback_active: false,

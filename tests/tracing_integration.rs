@@ -243,7 +243,8 @@ mod tests {
     use crate::common::*;
     use asupersync::runtime::RuntimeState;
     use asupersync::types::Budget;
-    use std::sync::{Arc, Mutex};
+    use parking_lot::Mutex;
+    use std::sync::Arc;
     use tracing::Subscriber;
     use tracing_subscriber::layer::{Context, Layer};
     use tracing_subscriber::prelude::*;
@@ -264,7 +265,7 @@ mod tests {
             _ctx: Context<'_, S>,
         ) {
             if attrs.metadata().name() == "region" {
-                let mut spans = self.spans.lock().unwrap();
+                let mut spans = self.spans.lock();
                 spans.push(format!("region_new: {:?}", attrs));
             }
         }
@@ -275,12 +276,12 @@ mod tests {
             values: &tracing::span::Record<'_>,
             _ctx: Context<'_, S>,
         ) {
-            let mut spans = self.spans.lock().unwrap();
+            let mut spans = self.spans.lock();
             spans.push(format!("region_record: {:?}", values));
         }
 
         fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-            let mut spans = self.spans.lock().unwrap();
+            let mut spans = self.spans.lock();
             spans.push(format!("event: {:?}", event));
         }
     }
@@ -304,7 +305,7 @@ mod tests {
 
             // Should have created a span
             {
-                let spans = spans.lock().unwrap();
+                let spans = spans.lock();
                 let span_count = spans.len();
                 assert_with_log!(
                     span_count > 0,
@@ -333,7 +334,7 @@ mod tests {
 
             // Check for update
             {
-                let spans = spans.lock().unwrap();
+                let spans = spans.lock();
                 let has_closing = spans
                     .iter()
                     .any(|s| s.contains("region_record") && s.contains("Closing"));
@@ -350,7 +351,7 @@ mod tests {
 
             // Check for final update
             {
-                let spans = spans.lock().unwrap();
+                let spans = spans.lock();
                 let has_closed = spans
                     .iter()
                     .any(|s| s.contains("region_record") && s.contains("Closed"));
@@ -381,7 +382,7 @@ mod tests {
 
             // Check for log
             {
-                let logs = logs.lock().unwrap();
+                let logs = logs.lock();
                 let has_task_log = logs
                     .iter()
                     .any(|s| s.contains("event") && s.contains("task created"));

@@ -135,12 +135,13 @@ struct State {
     writer_waiters: usize,
     reader_waiters: VecDeque<Waiter>,
     writer_queue: VecDeque<Waiter>,
+    next_waiter_id: u64,
 }
 
 #[derive(Debug, Clone)]
 struct Waiter {
     waker: Waker,
-    queued: Arc<AtomicBool>,
+    id: u64,
 }
 
 /// A cancel-aware read-write lock with writer-preference fairness.
@@ -212,7 +213,7 @@ impl<T> RwLock<T> {
         ReadFuture {
             lock: self,
             cx,
-            waiter: None,
+            waiter_id: None,
         }
     }
 
@@ -242,7 +243,7 @@ impl<T> RwLock<T> {
         WriteFuture {
             lock: self,
             cx,
-            waiter: None,
+            waiter_id: None,
             counted: false,
         }
     }
@@ -307,25 +308,11 @@ impl<T> RwLock<T> {
     }
 
     fn pop_writer_waiter(state: &mut State) -> Option<Waker> {
-        loop {
-            match state.writer_queue.pop_front() {
-                Some(waiter) if waiter.queued.swap(false, Ordering::AcqRel) => {
-                    return Some(waiter.waker);
-                }
-                Some(_) => {}
-                None => return None,
-            }
-        }
+        state.writer_queue.pop_front().map(|w| w.waker)
     }
 
     fn drain_reader_waiters(state: &mut State) -> SmallVec<[Waker; 4]> {
-        let mut wakers = SmallVec::new();
-        while let Some(waiter) = state.reader_waiters.pop_front() {
-            if waiter.queued.swap(false, Ordering::AcqRel) {
-                wakers.push(waiter.waker);
-            }
-        }
-        wakers
+        state.reader_waiters.drain(..).map(|w| w.waker).collect()
     }
 
     fn release_reader(&self) {
@@ -394,7 +381,7 @@ impl<T> Drop for WriterActiveGuard<'_, T> {
 pub struct ReadFuture<'a, 'b, T> {
     lock: &'a RwLock<T>,
     cx: &'b Cx,
-    waiter: Option<Arc<AtomicBool>>,
+    waiter_id: Option<u64>,
 }
 
 impl<'a, T> Future for ReadFuture<'a, '_, T> {
@@ -413,9 +400,6 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
 
         if !state.writer_active && state.writer_waiters == 0 {
             state.readers += 1;
-            if let Some(waiter) = self.waiter.as_ref() {
-                waiter.store(false, Ordering::Release);
-            }
             drop(state);
 
             let guard = ReaderCountGuard { lock: self.lock };
@@ -433,54 +417,42 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
                 }
             };
 
-            // If success, forget guard so it doesn't decrement (RwLockReadGuard will do it)
-            // If error (Poisoned), guard drops and calls release_reader.
-            // But RwLockReadGuard calls release_reader on drop.
-            // If we return Ready(Ok), we transfer responsibility to RwLockReadGuard.
-            // If we return Ready(Err), we must decrement.
-
             if matches!(&result, Poll::Ready(Ok(_))) {
                 std::mem::forget(guard);
             }
-            // If Err(Poisoned), guard drops and decrements.
-            // Correct.
 
             return result;
         }
 
-        let mut new_waiter = None;
-        match self.waiter.as_ref() {
-            Some(waiter) if !waiter.load(Ordering::Acquire) => {
-                waiter.store(true, Ordering::Release);
+        if let Some(waiter_id) = self.waiter_id {
+            if let Some(existing) = state.reader_waiters.iter_mut().find(|w| w.id == waiter_id) {
+                if !existing.waker.will_wake(context.waker()) {
+                    existing.waker.clone_from(context.waker());
+                }
+            } else {
+                // Dequeued — re-register at front
+                let new_id = state.next_waiter_id;
+                state.next_waiter_id += 1;
                 state.reader_waiters.push_front(Waiter {
                     waker: context.waker().clone(),
-                    queued: Arc::clone(waiter),
+                    id: new_id,
                 });
+                drop(state);
+                self.waiter_id = Some(new_id);
+                return Poll::Pending;
             }
-            Some(waiter) => {
-                if let Some(existing) = state
-                    .reader_waiters
-                    .iter_mut()
-                    .find(|w| Arc::ptr_eq(&w.queued, waiter))
-                {
-                    if !existing.waker.will_wake(context.waker()) {
-                        existing.waker.clone_from(context.waker());
-                    }
-                }
-            }
-            None => {
-                let waiter = Arc::new(AtomicBool::new(true));
-                state.reader_waiters.push_back(Waiter {
-                    waker: context.waker().clone(),
-                    queued: Arc::clone(&waiter),
-                });
-                new_waiter = Some(waiter);
-            }
+        } else {
+            let id = state.next_waiter_id;
+            state.next_waiter_id += 1;
+            state.reader_waiters.push_back(Waiter {
+                waker: context.waker().clone(),
+                id,
+            });
+            drop(state);
+            self.waiter_id = Some(id);
+            return Poll::Pending;
         }
         drop(state);
-        if let Some(waiter) = new_waiter {
-            self.waiter = Some(waiter);
-        }
 
         Poll::Pending
     }
@@ -489,23 +461,14 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
 impl<T> Drop for ReadFuture<'_, '_, T> {
     fn drop(&mut self) {
         let mut writer_waker = None;
-        if let Some(waiter) = self.waiter.as_ref() {
+        if let Some(waiter_id) = self.waiter_id {
             let mut state = self.lock.state.lock();
             let initial_len = state.reader_waiters.len();
-            state
-                .reader_waiters
-                .retain(|w| !Arc::ptr_eq(&w.queued, waiter));
+            state.reader_waiters.retain(|w| w.id != waiter_id);
             let removed = initial_len != state.reader_waiters.len();
 
-            if !removed {
-                let dequeued = !waiter.load(Ordering::Acquire);
-                if dequeued
-                    && state.readers == 0
-                    && !state.writer_active
-                    && state.writer_waiters > 0
-                {
-                    writer_waker = RwLock::<T>::pop_writer_waiter(&mut state);
-                }
+            if !removed && state.readers == 0 && !state.writer_active && state.writer_waiters > 0 {
+                writer_waker = RwLock::<T>::pop_writer_waiter(&mut state);
             }
         }
 
@@ -519,7 +482,7 @@ impl<T> Drop for ReadFuture<'_, '_, T> {
 pub struct WriteFuture<'a, 'b, T> {
     lock: &'a RwLock<T>,
     cx: &'b Cx,
-    waiter: Option<Arc<AtomicBool>>,
+    waiter_id: Option<u64>,
     counted: bool,
 }
 
@@ -541,10 +504,10 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
             self.counted = true;
         }
 
+        // Detect if we were dequeued by release_writer (our id is no longer in the queue).
         let dequeued = self
-            .waiter
-            .as_ref()
-            .is_some_and(|w| !w.load(Ordering::Acquire));
+            .waiter_id
+            .is_some_and(|id| !state.writer_queue.iter().any(|w| w.id == id));
         let can_acquire =
             !state.writer_active && state.readers == 0 && (dequeued || state.writer_waiters == 1);
 
@@ -553,9 +516,6 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
             if self.counted {
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
                 self.counted = false;
-            }
-            if let Some(waiter) = self.waiter.as_ref() {
-                waiter.store(false, Ordering::Release);
             }
             drop(state);
 
@@ -581,39 +541,35 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
             return result;
         }
 
-        let mut new_waiter = None;
-        match self.waiter.as_ref() {
-            Some(waiter) if !waiter.load(Ordering::Acquire) => {
-                waiter.store(true, Ordering::Release);
+        if let Some(waiter_id) = self.waiter_id {
+            if let Some(existing) = state.writer_queue.iter_mut().find(|w| w.id == waiter_id) {
+                if !existing.waker.will_wake(context.waker()) {
+                    existing.waker.clone_from(context.waker());
+                }
+            } else {
+                // Dequeued but can't acquire — re-register at front
+                let new_id = state.next_waiter_id;
+                state.next_waiter_id += 1;
                 state.writer_queue.push_front(Waiter {
                     waker: context.waker().clone(),
-                    queued: Arc::clone(waiter),
+                    id: new_id,
                 });
+                drop(state);
+                self.waiter_id = Some(new_id);
+                return Poll::Pending;
             }
-            Some(waiter) => {
-                if let Some(existing) = state
-                    .writer_queue
-                    .iter_mut()
-                    .find(|w| Arc::ptr_eq(&w.queued, waiter))
-                {
-                    if !existing.waker.will_wake(context.waker()) {
-                        existing.waker.clone_from(context.waker());
-                    }
-                }
-            }
-            None => {
-                let waiter = Arc::new(AtomicBool::new(true));
-                state.writer_queue.push_back(Waiter {
-                    waker: context.waker().clone(),
-                    queued: Arc::clone(&waiter),
-                });
-                new_waiter = Some(waiter);
-            }
+        } else {
+            let id = state.next_waiter_id;
+            state.next_waiter_id += 1;
+            state.writer_queue.push_back(Waiter {
+                waker: context.waker().clone(),
+                id,
+            });
+            drop(state);
+            self.waiter_id = Some(id);
+            return Poll::Pending;
         }
         drop(state);
-        if let Some(waiter) = new_waiter {
-            self.waiter = Some(waiter);
-        }
 
         Poll::Pending
     }
@@ -629,24 +585,15 @@ impl<T> Drop for WriteFuture<'_, '_, T> {
         let mut reader_wakers: SmallVec<[Waker; 4]> = SmallVec::new();
         let mut state = self.lock.state.lock();
 
-        if let Some(waiter) = self.waiter.as_ref() {
+        if let Some(waiter_id) = self.waiter_id {
             let initial_len = state.writer_queue.len();
-            state
-                .writer_queue
-                .retain(|w| !Arc::ptr_eq(&w.queued, waiter));
+            state.writer_queue.retain(|w| w.id != waiter_id);
             let removed = initial_len != state.writer_queue.len();
 
             state.writer_waiters = state.writer_waiters.saturating_sub(1);
 
-            if !removed {
-                let dequeued = !waiter.load(Ordering::Acquire);
-                if dequeued
-                    && !state.writer_active
-                    && state.readers == 0
-                    && state.writer_waiters > 0
-                {
-                    writer_waker = RwLock::<T>::pop_writer_waiter(&mut state);
-                }
+            if !removed && !state.writer_active && state.readers == 0 && state.writer_waiters > 0 {
+                writer_waker = RwLock::<T>::pop_writer_waiter(&mut state);
             }
         } else {
             state.writer_waiters = state.writer_waiters.saturating_sub(1);
@@ -742,7 +689,7 @@ impl<T> OwnedRwLockReadGuard<T> {
         OwnedReadFuture {
             lock,
             cx,
-            waiter: None,
+            waiter_id: None,
         }
     }
 
@@ -783,7 +730,7 @@ impl<T> OwnedRwLockWriteGuard<T> {
         OwnedWriteFuture {
             lock,
             cx,
-            waiter: None,
+            waiter_id: None,
             counted: false,
         }
     }
@@ -817,7 +764,7 @@ impl<T> Drop for OwnedRwLockWriteGuard<T> {
 pub struct OwnedReadFuture<'b, T> {
     lock: Arc<RwLock<T>>,
     cx: &'b Cx,
-    waiter: Option<Arc<AtomicBool>>,
+    waiter_id: Option<u64>,
 }
 
 impl<T> Future for OwnedReadFuture<'_, T> {
@@ -835,48 +782,40 @@ impl<T> Future for OwnedReadFuture<'_, T> {
         let mut state = self.lock.state.lock();
         if !state.writer_active && state.writer_waiters == 0 {
             state.readers += 1;
-            if let Some(waiter) = self.waiter.as_ref() {
-                waiter.store(false, Ordering::Release);
-            }
             drop(state);
             return Poll::Ready(Ok(OwnedRwLockReadGuard {
                 lock: Arc::clone(&self.lock),
             }));
         }
 
-        let mut new_waiter = None;
-        match self.waiter.as_ref() {
-            Some(waiter) if !waiter.load(Ordering::Acquire) => {
-                waiter.store(true, Ordering::Release);
+        if let Some(waiter_id) = self.waiter_id {
+            if let Some(existing) = state.reader_waiters.iter_mut().find(|w| w.id == waiter_id) {
+                if !existing.waker.will_wake(context.waker()) {
+                    existing.waker.clone_from(context.waker());
+                }
+            } else {
+                let new_id = state.next_waiter_id;
+                state.next_waiter_id += 1;
                 state.reader_waiters.push_front(Waiter {
                     waker: context.waker().clone(),
-                    queued: Arc::clone(waiter),
+                    id: new_id,
                 });
+                drop(state);
+                self.waiter_id = Some(new_id);
+                return Poll::Pending;
             }
-            Some(waiter) => {
-                if let Some(existing) = state
-                    .reader_waiters
-                    .iter_mut()
-                    .find(|w| Arc::ptr_eq(&w.queued, waiter))
-                {
-                    if !existing.waker.will_wake(context.waker()) {
-                        existing.waker.clone_from(context.waker());
-                    }
-                }
-            }
-            None => {
-                let waiter = Arc::new(AtomicBool::new(true));
-                state.reader_waiters.push_back(Waiter {
-                    waker: context.waker().clone(),
-                    queued: Arc::clone(&waiter),
-                });
-                new_waiter = Some(waiter);
-            }
+        } else {
+            let id = state.next_waiter_id;
+            state.next_waiter_id += 1;
+            state.reader_waiters.push_back(Waiter {
+                waker: context.waker().clone(),
+                id,
+            });
+            drop(state);
+            self.waiter_id = Some(id);
+            return Poll::Pending;
         }
         drop(state);
-        if let Some(waiter) = new_waiter {
-            self.waiter = Some(waiter);
-        }
 
         Poll::Pending
     }
@@ -885,23 +824,14 @@ impl<T> Future for OwnedReadFuture<'_, T> {
 impl<T> Drop for OwnedReadFuture<'_, T> {
     fn drop(&mut self) {
         let mut writer_waker = None;
-        if let Some(waiter) = self.waiter.as_ref() {
+        if let Some(waiter_id) = self.waiter_id {
             let mut state = self.lock.state.lock();
             let initial_len = state.reader_waiters.len();
-            state
-                .reader_waiters
-                .retain(|w| !Arc::ptr_eq(&w.queued, waiter));
+            state.reader_waiters.retain(|w| w.id != waiter_id);
             let removed = initial_len != state.reader_waiters.len();
 
-            if !removed {
-                let dequeued = !waiter.load(Ordering::Acquire);
-                if dequeued
-                    && state.readers == 0
-                    && !state.writer_active
-                    && state.writer_waiters > 0
-                {
-                    writer_waker = RwLock::<T>::pop_writer_waiter(&mut state);
-                }
+            if !removed && state.readers == 0 && !state.writer_active && state.writer_waiters > 0 {
+                writer_waker = RwLock::<T>::pop_writer_waiter(&mut state);
             }
         }
 
@@ -915,7 +845,7 @@ impl<T> Drop for OwnedReadFuture<'_, T> {
 pub struct OwnedWriteFuture<'b, T> {
     lock: Arc<RwLock<T>>,
     cx: &'b Cx,
-    waiter: Option<Arc<AtomicBool>>,
+    waiter_id: Option<u64>,
     counted: bool,
 }
 
@@ -940,9 +870,8 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
         }
 
         let dequeued = self
-            .waiter
-            .as_ref()
-            .is_some_and(|w| !w.load(Ordering::Acquire));
+            .waiter_id
+            .is_some_and(|id| !state.writer_queue.iter().any(|w| w.id == id));
         let can_acquire =
             !state.writer_active && state.readers == 0 && (dequeued || state.writer_waiters == 1);
 
@@ -952,46 +881,38 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
                 self.counted = false;
             }
-            if let Some(waiter) = self.waiter.as_ref() {
-                waiter.store(false, Ordering::Release);
-            }
             drop(state);
             return Poll::Ready(Ok(OwnedRwLockWriteGuard { lock }));
         }
 
-        let mut new_waiter = None;
-        match self.waiter.as_ref() {
-            Some(waiter) if !waiter.load(Ordering::Acquire) => {
-                waiter.store(true, Ordering::Release);
+        if let Some(waiter_id) = self.waiter_id {
+            if let Some(existing) = state.writer_queue.iter_mut().find(|w| w.id == waiter_id) {
+                if !existing.waker.will_wake(context.waker()) {
+                    existing.waker.clone_from(context.waker());
+                }
+            } else {
+                let new_id = state.next_waiter_id;
+                state.next_waiter_id += 1;
                 state.writer_queue.push_front(Waiter {
                     waker: context.waker().clone(),
-                    queued: Arc::clone(waiter),
+                    id: new_id,
                 });
+                drop(state);
+                self.waiter_id = Some(new_id);
+                return Poll::Pending;
             }
-            Some(waiter) => {
-                if let Some(existing) = state
-                    .writer_queue
-                    .iter_mut()
-                    .find(|w| Arc::ptr_eq(&w.queued, waiter))
-                {
-                    if !existing.waker.will_wake(context.waker()) {
-                        existing.waker.clone_from(context.waker());
-                    }
-                }
-            }
-            None => {
-                let waiter = Arc::new(AtomicBool::new(true));
-                state.writer_queue.push_back(Waiter {
-                    waker: context.waker().clone(),
-                    queued: Arc::clone(&waiter),
-                });
-                new_waiter = Some(waiter);
-            }
+        } else {
+            let id = state.next_waiter_id;
+            state.next_waiter_id += 1;
+            state.writer_queue.push_back(Waiter {
+                waker: context.waker().clone(),
+                id,
+            });
+            drop(state);
+            self.waiter_id = Some(id);
+            return Poll::Pending;
         }
         drop(state);
-        if let Some(waiter) = new_waiter {
-            self.waiter = Some(waiter);
-        }
 
         Poll::Pending
     }
@@ -1007,29 +928,15 @@ impl<T> Drop for OwnedWriteFuture<'_, T> {
         let mut reader_wakers: SmallVec<[Waker; 4]> = SmallVec::new();
         let mut state = self.lock.state.lock();
 
-        if let Some(waiter) = self.waiter.as_ref() {
-            let already_dequeued = !waiter.load(Ordering::Acquire);
-            let removed = if already_dequeued {
-                false
-            } else {
-                let initial_len = state.writer_queue.len();
-                state
-                    .writer_queue
-                    .retain(|w| !Arc::ptr_eq(&w.queued, waiter));
-                initial_len != state.writer_queue.len()
-            };
+        if let Some(waiter_id) = self.waiter_id {
+            let initial_len = state.writer_queue.len();
+            state.writer_queue.retain(|w| w.id != waiter_id);
+            let removed = initial_len != state.writer_queue.len();
 
             state.writer_waiters = state.writer_waiters.saturating_sub(1);
 
-            if !removed {
-                let dequeued = already_dequeued || !waiter.load(Ordering::Acquire);
-                if dequeued
-                    && !state.writer_active
-                    && state.readers == 0
-                    && state.writer_waiters > 0
-                {
-                    writer_waker = RwLock::<T>::pop_writer_waiter(&mut state);
-                }
+            if !removed && !state.writer_active && state.readers == 0 && state.writer_waiters > 0 {
+                writer_waker = RwLock::<T>::pop_writer_waiter(&mut state);
             }
         } else {
             state.writer_waiters = state.writer_waiters.saturating_sub(1);
@@ -1347,7 +1254,7 @@ mod tests {
         init_test("test_writer_fifo_ordering");
         let cx = test_cx();
         let lock = StdArc::new(RwLock::new(Vec::<u32>::new()));
-        let order = StdArc::new(std::sync::Mutex::new(Vec::new()));
+        let order = StdArc::new(parking_lot::Mutex::new(Vec::new()));
 
         // Hold a read lock so writers must queue.
         let read_guard = read_blocking(&lock, &cx);
@@ -1359,7 +1266,7 @@ mod tests {
             handles.push(thread::spawn(move || {
                 let cx = test_cx();
                 let mut guard = write_blocking(&lock_c, &cx);
-                order_c.lock().unwrap().push(id);
+                order_c.lock().push(id);
                 guard.push(id);
             }));
             // Small delay to ensure writers queue in id order.
@@ -1372,7 +1279,7 @@ mod tests {
             let _ = h.join();
         }
 
-        let final_order = order.lock().unwrap().clone();
+        let final_order = order.lock().clone();
         let data = lock.try_read().unwrap();
         // Both the acquisition order and data should match FIFO.
         crate::assert_with_log!(

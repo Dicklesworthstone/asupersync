@@ -924,7 +924,7 @@ impl Drop for DispatchGuard<'_> {
     fn drop(&mut self) {
         self.dispatcher
             .active_dispatches
-            .fetch_sub(1, Ordering::SeqCst);
+            .fetch_sub(1, Ordering::Release);
     }
 }
 
@@ -967,9 +967,9 @@ impl SymbolDispatcher {
         strategy: DispatchStrategy,
     ) -> Result<DispatchResult, DispatchError> {
         // Check concurrent dispatch limit
-        let active = self.active_dispatches.fetch_add(1, Ordering::SeqCst);
+        let active = self.active_dispatches.fetch_add(1, Ordering::AcqRel);
         if active >= self.config.max_concurrent {
-            self.active_dispatches.fetch_sub(1, Ordering::SeqCst);
+            self.active_dispatches.fetch_sub(1, Ordering::Release);
             return Err(DispatchError::Overloaded);
         }
 

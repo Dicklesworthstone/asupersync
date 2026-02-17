@@ -42,10 +42,10 @@
 //! }
 //! ```
 
+use parking_lot::RwLock;
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -375,6 +375,8 @@ pub struct CircuitBreaker {
     total_rejected: AtomicU64,
     total_ignored_errors: AtomicU64,
     current_failure_streak: AtomicU32,
+    times_opened: AtomicU64,
+    times_closed: AtomicU64,
 }
 
 impl CircuitBreaker {
@@ -401,6 +403,8 @@ impl CircuitBreaker {
             total_rejected: AtomicU64::new(0),
             total_ignored_errors: AtomicU64::new(0),
             current_failure_streak: AtomicU32::new(0),
+            times_opened: AtomicU64::new(0),
+            times_closed: AtomicU64::new(0),
         }
     }
 
@@ -416,14 +420,20 @@ impl CircuitBreaker {
     /// guarded by the RwLock.
     #[must_use]
     pub fn metrics(&self) -> CircuitBreakerMetrics {
-        let mut m = self.metrics.read().clone();
-        m.total_success = self.total_success.load(Ordering::Relaxed);
-        m.total_failure = self.total_failure.load(Ordering::Relaxed);
-        m.total_rejected = self.total_rejected.load(Ordering::Relaxed);
-        m.total_ignored_errors = self.total_ignored_errors.load(Ordering::Relaxed);
-        m.current_failure_streak = self.current_failure_streak.load(Ordering::Relaxed);
-        m.current_state = self.state(); // Prefer latest atomic state
-        m
+        CircuitBreakerMetrics {
+            total_success: self.total_success.load(Ordering::Relaxed),
+            total_failure: self.total_failure.load(Ordering::Relaxed),
+            total_rejected: self.total_rejected.load(Ordering::Relaxed),
+            total_ignored_errors: self.total_ignored_errors.load(Ordering::Relaxed),
+            times_opened: self.times_opened.load(Ordering::Relaxed),
+            times_closed: self.times_closed.load(Ordering::Relaxed),
+            current_failure_streak: self.current_failure_streak.load(Ordering::Relaxed),
+            current_state: self.state(),
+            sliding_window_failure_rate: self
+                .sliding_window
+                .as_ref()
+                .map(|w| w.read().failure_rate()),
+        }
     }
 
     /// Get the policy name.
@@ -460,8 +470,8 @@ impl CircuitBreaker {
                             .compare_exchange(
                                 current_bits,
                                 new_state.to_bits(),
-                                Ordering::SeqCst,
-                                Ordering::SeqCst,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
                             )
                             .is_ok()
                         {
@@ -500,8 +510,8 @@ impl CircuitBreaker {
                             .compare_exchange(
                                 current_bits,
                                 new_state.to_bits(),
-                                Ordering::SeqCst,
-                                Ordering::SeqCst,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
                             )
                             .is_ok()
                         {
@@ -538,7 +548,7 @@ impl CircuitBreaker {
             Permit::Normal => {
                 // Reset failure count in Closed state if needed
                 loop {
-                    let current_bits = self.state_bits.load(Ordering::SeqCst);
+                    let current_bits = self.state_bits.load(Ordering::Acquire);
                     let state = State::from_bits(current_bits);
                     match state {
                         State::Closed { failures } if failures > 0 => {
@@ -548,8 +558,8 @@ impl CircuitBreaker {
                                 .compare_exchange(
                                     current_bits,
                                     new_state.to_bits(),
-                                    Ordering::SeqCst,
-                                    Ordering::SeqCst,
+                                    Ordering::AcqRel,
+                                    Ordering::Acquire,
                                 )
                                 .is_ok()
                             {
@@ -565,7 +575,7 @@ impl CircuitBreaker {
             Permit::Probe => {
                 let mut event = None;
                 loop {
-                    let current_bits = self.state_bits.load(Ordering::SeqCst);
+                    let current_bits = self.state_bits.load(Ordering::Acquire);
                     let state = State::from_bits(current_bits);
                     match state {
                         State::HalfOpen {
@@ -581,14 +591,14 @@ impl CircuitBreaker {
                                     .compare_exchange(
                                         current_bits,
                                         new_state.to_bits(),
-                                        Ordering::SeqCst,
-                                        Ordering::SeqCst,
+                                        Ordering::AcqRel,
+                                        Ordering::Acquire,
                                     )
                                     .is_ok()
                                 {
                                     self.current_failure_streak.store(0, Ordering::Relaxed);
+                                    self.times_closed.fetch_add(1, Ordering::Relaxed);
                                     let mut m = self.metrics.write();
-                                    m.times_closed += 1;
                                     m.current_state = new_state;
                                     if self.policy.on_state_change.is_some() {
                                         // Populate atomic snapshots
@@ -608,8 +618,8 @@ impl CircuitBreaker {
                                     .compare_exchange(
                                         current_bits,
                                         new_state.to_bits(),
-                                        Ordering::SeqCst,
-                                        Ordering::SeqCst,
+                                        Ordering::AcqRel,
+                                        Ordering::Acquire,
                                     )
                                     .is_ok()
                                 {
@@ -648,6 +658,8 @@ impl CircuitBreaker {
         m.total_rejected = self.total_rejected.load(Ordering::Relaxed);
         m.total_ignored_errors = self.total_ignored_errors.load(Ordering::Relaxed);
         m.current_failure_streak = self.current_failure_streak.load(Ordering::Relaxed);
+        m.times_opened = self.times_opened.load(Ordering::Relaxed);
+        m.times_closed = self.times_closed.load(Ordering::Relaxed);
     }
 
     fn check_sliding_window_success(&self, now_millis: u64) {
@@ -665,7 +677,7 @@ impl CircuitBreaker {
     fn trigger_open_from_window(&self, now_millis: u64) {
         let mut event = None;
         loop {
-            let current_bits = self.state_bits.load(Ordering::SeqCst);
+            let current_bits = self.state_bits.load(Ordering::Acquire);
             let state = State::from_bits(current_bits);
 
             // Only transition if not already Open
@@ -681,14 +693,14 @@ impl CircuitBreaker {
                 .compare_exchange(
                     current_bits,
                     new_state.to_bits(),
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
                 )
                 .is_ok()
             {
                 {
+                    self.times_opened.fetch_add(1, Ordering::Relaxed);
                     let mut m = self.metrics.write();
-                    m.times_opened += 1;
                     m.current_state = new_state;
                     if let Some(ref w) = self.sliding_window {
                         w.write().reset();
@@ -725,7 +737,7 @@ impl CircuitBreaker {
             // Still need to release probe if applicable
             if matches!(permit, Permit::Probe) {
                 loop {
-                    let current_bits = self.state_bits.load(Ordering::SeqCst);
+                    let current_bits = self.state_bits.load(Ordering::Acquire);
                     let state = State::from_bits(current_bits);
                     match state {
                         State::HalfOpen {
@@ -741,8 +753,8 @@ impl CircuitBreaker {
                                 .compare_exchange(
                                     current_bits,
                                     new_state.to_bits(),
-                                    Ordering::SeqCst,
-                                    Ordering::SeqCst,
+                                    Ordering::AcqRel,
+                                    Ordering::Acquire,
                                 )
                                 .is_ok()
                             {
@@ -758,26 +770,21 @@ impl CircuitBreaker {
 
         self.total_failure.fetch_add(1, Ordering::Relaxed);
 
-        // Check sliding window if enabled (before acquiring metrics lock)
-        let (window_triggered, failure_rate) =
-            self.sliding_window
-                .as_ref()
-                .map_or((false, None), |window| {
-                    let mut w = window.write();
-                    w.record_failure(now_millis);
-                    (w.should_open(), Some(w.failure_rate()))
-                });
-
-        if let Some(rate) = failure_rate {
-            let mut m = self.metrics.write();
-            m.sliding_window_failure_rate = Some(rate);
-        }
+        // Check sliding window if enabled
+        let window_triggered = self
+            .sliding_window
+            .as_ref()
+            .is_some_and(|window| {
+                let mut w = window.write();
+                w.record_failure(now_millis);
+                w.should_open()
+            });
 
         let mut event = None;
 
         match permit {
             Permit::Normal => loop {
-                let current_bits = self.state_bits.load(Ordering::SeqCst);
+                let current_bits = self.state_bits.load(Ordering::Acquire);
                 let state = State::from_bits(current_bits);
                 match state {
                     State::Closed { failures } => {
@@ -794,13 +801,13 @@ impl CircuitBreaker {
                                 .compare_exchange(
                                     current_bits,
                                     new_state.to_bits(),
-                                    Ordering::SeqCst,
-                                    Ordering::SeqCst,
+                                    Ordering::AcqRel,
+                                    Ordering::Acquire,
                                 )
                                 .is_ok()
                             {
+                                self.times_opened.fetch_add(1, Ordering::Relaxed);
                                 let mut m = self.metrics.write();
-                                m.times_opened += 1;
                                 m.current_state = new_state;
                                 if let Some(ref w) = self.sliding_window {
                                     w.write().reset();
@@ -820,8 +827,8 @@ impl CircuitBreaker {
                                 .compare_exchange(
                                     current_bits,
                                     new_state.to_bits(),
-                                    Ordering::SeqCst,
-                                    Ordering::SeqCst,
+                                    Ordering::AcqRel,
+                                    Ordering::Acquire,
                                 )
                                 .is_ok()
                             {
@@ -834,7 +841,7 @@ impl CircuitBreaker {
             },
             Permit::Probe => {
                 loop {
-                    let current_bits = self.state_bits.load(Ordering::SeqCst);
+                    let current_bits = self.state_bits.load(Ordering::Acquire);
                     let state = State::from_bits(current_bits);
                     match state {
                         State::HalfOpen { .. } => {
@@ -847,13 +854,13 @@ impl CircuitBreaker {
                                 .compare_exchange(
                                     current_bits,
                                     new_state.to_bits(),
-                                    Ordering::SeqCst,
-                                    Ordering::SeqCst,
+                                    Ordering::AcqRel,
+                                    Ordering::Acquire,
                                 )
                                 .is_ok()
                             {
+                                self.times_opened.fetch_add(1, Ordering::Relaxed);
                                 let mut m = self.metrics.write();
-                                m.times_opened += 1;
                                 m.current_state = new_state;
                                 if let Some(ref w) = self.sliding_window {
                                     w.write().reset();
@@ -941,12 +948,9 @@ impl CircuitBreaker {
     /// Manually reset the circuit breaker to closed state.
     pub fn reset(&self) {
         let new_state = State::Closed { failures: 0 };
-        self.state_bits.store(new_state.to_bits(), Ordering::SeqCst);
+        self.state_bits
+            .store(new_state.to_bits(), Ordering::Release);
         self.current_failure_streak.store(0, Ordering::Relaxed);
-        {
-            let mut metrics = self.metrics.write();
-            metrics.current_state = new_state;
-        }
 
         if let Some(ref window) = self.sliding_window {
             window.write().reset();

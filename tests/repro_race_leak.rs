@@ -6,9 +6,10 @@ use common::*;
 use asupersync::cx::Cx;
 use asupersync::runtime::RuntimeState;
 use asupersync::types::Budget;
+use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 struct Flag {
@@ -21,7 +22,7 @@ impl Flag {
     }
 
     fn set(flag: &Arc<Mutex<Self>>) {
-        flag.lock().unwrap().set = true;
+        flag.lock().set = true;
     }
 }
 

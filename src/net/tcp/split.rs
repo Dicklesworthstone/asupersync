@@ -550,11 +550,12 @@ mod tests {
     use crate::runtime::reactor::{Events, Reactor, Source, Token};
     use crate::test_utils::init_test_logging;
     use crate::types::{Budget, RegionId, TaskId};
+    use parking_lot::Mutex;
     use std::collections::HashMap;
     use std::io::Write;
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Barrier, Mutex};
+    use std::sync::{Arc, Barrier};
     use std::task::{Context, Wake, Waker};
     use std::thread;
     use std::time::Duration;
@@ -632,7 +633,7 @@ mod tests {
             _interest: Interest,
         ) -> io::Result<()> {
             let fd = source.raw_fd();
-            let mut state = self.state.lock().expect("lock poisoned");
+            let mut state = self.state.lock();
 
             if state.source_to_token.contains_key(&fd) {
                 return Err(io::Error::new(
@@ -659,7 +660,7 @@ mod tests {
         }
 
         fn modify(&self, token: Token, _interest: Interest) -> io::Result<()> {
-            let state = self.state.lock().expect("lock poisoned");
+            let state = self.state.lock();
             if !state.token_to_source.contains_key(&token) {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
@@ -682,7 +683,7 @@ mod tests {
         }
 
         fn deregister(&self, token: Token) -> io::Result<()> {
-            let mut state = self.state.lock().expect("lock poisoned");
+            let mut state = self.state.lock();
             let Some(fd) = state.token_to_source.remove(&token) else {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
@@ -704,11 +705,7 @@ mod tests {
         }
 
         fn registration_count(&self) -> usize {
-            self.state
-                .lock()
-                .expect("lock poisoned")
-                .token_to_source
-                .len()
+            self.state.lock().token_to_source.len()
         }
     }
 

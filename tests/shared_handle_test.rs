@@ -7,6 +7,7 @@ use std::task::{Context, Poll};
 
 use asupersync::runtime::TaskHandle;
 use asupersync::types::Budget;
+use parking_lot::Mutex;
 
 // -- LabYieldOnce (copied from fixtures) --
 
@@ -42,7 +43,7 @@ enum LabJoinState {
 
 struct SharedLabInner {
     handle: TaskHandle<BTreeSet<String>>,
-    state: std::sync::Mutex<LabJoinState>,
+    state: Mutex<LabJoinState>,
 }
 
 #[derive(Clone)]
@@ -55,13 +56,13 @@ impl SharedLabHandle {
         Self {
             inner: std::sync::Arc::new(SharedLabInner {
                 handle,
-                state: std::sync::Mutex::new(LabJoinState::Empty),
+                state: Mutex::new(LabJoinState::Empty),
             }),
         }
     }
 
     fn try_join_probe(&self) -> Option<BTreeSet<String>> {
-        let mut state = self.inner.state.lock().unwrap();
+        let mut state = self.inner.state.lock();
         match &*state {
             LabJoinState::Ready(result) => {
                 let out = result.clone();

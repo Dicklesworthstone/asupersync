@@ -6,7 +6,8 @@
 use crate::actor_e2e::util::init_actor_test;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::types::Budget;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 /// Run a simple counter actor scenario and return the event trace.
 fn run_counter_scenario(seed: u64) -> Vec<String> {
@@ -24,22 +25,16 @@ fn run_counter_scenario(seed: u64) -> Vec<String> {
             let mut count = 0u64;
             for i in 0..5 {
                 count += i;
-                events_sender
-                    .lock()
-                    .expect("poisoned")
-                    .push(format!("msg:{i}:total:{count}"));
+                events_sender.lock().push(format!("msg:{i}:total:{count}"));
             }
-            events_sender
-                .lock()
-                .expect("poisoned")
-                .push(format!("done:count={count}"));
+            events_sender.lock().push(format!("done:count={count}"));
         })
         .expect("create task");
 
     runtime.scheduler.lock().schedule(task_id, 0);
     runtime.run_until_quiescent();
 
-    let result = events.lock().unwrap().clone();
+    let result = events.lock().clone();
     result
 }
 
@@ -56,11 +51,11 @@ fn run_multi_actor_scenario(seed: u64) -> Vec<String> {
     let (task_sender_id, _) = runtime
         .state
         .create_task(region, Budget::INFINITE, async move {
-            events_a.lock().unwrap().push("A:start".into());
+            events_a.lock().push("A:start".into());
             for i in 0..3 {
-                events_a.lock().unwrap().push(format!("A:send:{i}"));
+                events_a.lock().push(format!("A:send:{i}"));
             }
-            events_a.lock().unwrap().push("A:done".into());
+            events_a.lock().push("A:done".into());
         })
         .expect("create task A");
 
@@ -68,11 +63,11 @@ fn run_multi_actor_scenario(seed: u64) -> Vec<String> {
     let (task_receiver_id, _) = runtime
         .state
         .create_task(region, Budget::INFINITE, async move {
-            events_b.lock().unwrap().push("B:start".into());
+            events_b.lock().push("B:start".into());
             for i in 0..3 {
-                events_b.lock().unwrap().push(format!("B:recv:{i}"));
+                events_b.lock().push(format!("B:recv:{i}"));
             }
-            events_b.lock().unwrap().push("B:done".into());
+            events_b.lock().push("B:done".into());
         })
         .expect("create task B");
 
@@ -84,7 +79,7 @@ fn run_multi_actor_scenario(seed: u64) -> Vec<String> {
     }
 
     runtime.run_until_quiescent();
-    let result = events.lock().unwrap().clone();
+    let result = events.lock().clone();
     result
 }
 

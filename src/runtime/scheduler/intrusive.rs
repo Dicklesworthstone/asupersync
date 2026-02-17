@@ -509,11 +509,14 @@ impl IntrusiveStack {
     ///
     /// O(k) time where k is the number stolen. Allocates a Vec for the result.
     pub fn steal_batch(&mut self, max_steal: usize, arena: &mut Arena<TaskRecord>) -> Vec<TaskId> {
+        if self.is_empty() {
+            return Vec::new();
+        }
         let steal_count = (self.len / 2).max(1).min(max_steal);
         let mut stolen = Vec::with_capacity(steal_count);
 
         for _ in 0..steal_count {
-            if let Some(bottom_id) = self.steal_one(arena) {
+            if let Some((bottom_id, _)) = self.steal_one_with_locality(arena) {
                 stolen.push(bottom_id);
             } else {
                 break;
@@ -536,11 +539,14 @@ impl IntrusiveStack {
         arena: &mut Arena<TaskRecord>,
         dest: &mut Self,
     ) -> usize {
+        if self.is_empty() {
+            return 0;
+        }
         let steal_count = (self.len / 2).max(1).min(max_steal);
         let mut stolen = 0;
 
         for _ in 0..steal_count {
-            if let Some(task_id) = self.steal_one(arena) {
+            if let Some((task_id, _)) = self.steal_one_with_locality(arena) {
                 dest.push(task_id, arena);
                 stolen += 1;
             } else {
@@ -552,16 +558,23 @@ impl IntrusiveStack {
     }
 
     /// Steals one task from the bottom of the stack.
+    ///
+    /// Returns the stolen task and whether it is local (`!Send`), allowing
+    /// callers to avoid an extra arena lookup on steal paths that need locality.
     #[inline]
     #[must_use]
-    pub(crate) fn steal_one(&mut self, arena: &mut Arena<TaskRecord>) -> Option<TaskId> {
+    pub(crate) fn steal_one_with_locality(
+        &mut self,
+        arena: &mut Arena<TaskRecord>,
+    ) -> Option<(TaskId, bool)> {
         let bottom_id = self.bottom?;
 
-        let prev_up = {
+        let (prev_up, is_local) = {
             let record = arena.get_mut(bottom_id.arena_index())?;
+            let is_local = record.is_local();
             let prev_up = record.prev_in_queue; // Points up to newer task
             record.clear_queue_links();
-            prev_up
+            (prev_up, is_local)
         };
 
         self.bottom = prev_up;
@@ -580,7 +593,15 @@ impl IntrusiveStack {
         }
 
         self.len -= 1;
-        Some(bottom_id)
+        Some((bottom_id, is_local))
+    }
+
+    /// Steals one task from the bottom of the stack.
+    #[inline]
+    #[must_use]
+    pub(crate) fn steal_one(&mut self, arena: &mut Arena<TaskRecord>) -> Option<TaskId> {
+        self.steal_one_with_locality(arena)
+            .map(|(task_id, _)| task_id)
     }
 
     /// Returns true if the given task is in this stack.

@@ -3533,7 +3533,8 @@ mod tests {
         Ok(test_task_id())
     }
 
-    use std::sync::{Arc, Mutex};
+    use parking_lot::Mutex;
+    use std::sync::Arc;
 
     struct LoggingStart {
         name: &'static str,
@@ -3547,10 +3548,7 @@ mod tests {
             state: &mut RuntimeState,
             cx: &crate::cx::Cx,
         ) -> Result<TaskId, SpawnError> {
-            self.log
-                .lock()
-                .expect("poisoned")
-                .push(self.name.to_string());
+            self.log.lock().push(self.name.to_string());
             let handle = scope.spawn_registered(state, cx, |_cx| async move { 0u8 })?;
             Ok(handle.task_id())
         }
@@ -4132,7 +4130,7 @@ mod tests {
 
         assert_eq!(handle.started.len(), 3);
         assert_eq!(
-            *log.lock().expect("poisoned"),
+            *log.lock(),
             vec!["a".to_string(), "b".to_string(), "c".to_string()]
         );
 
@@ -6261,7 +6259,7 @@ mod tests {
             .expect("spawn");
 
         // Verify logged start order
-        let started: Vec<String> = log.lock().expect("poisoned").clone();
+        let started: Vec<String> = log.lock().clone();
         assert_eq!(started, vec!["db", "cache", "web"]);
 
         // deferred should not be started

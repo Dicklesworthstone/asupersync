@@ -32,9 +32,9 @@ use crate::trace::{TraceData, TraceEvent};
 use crate::types::Time;
 use crate::types::{ObligationId, RegionId, TaskId};
 use crate::util::{DetEntropy, DetRng};
-use std::collections::{HashMap, HashSet};
-use std::fmt;
 use parking_lot::Mutex;
+use std::collections::HashSet;
+use std::fmt;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
@@ -1507,9 +1507,7 @@ impl LabRuntime {
                         .state
                         .task(waiter)
                         .and_then(|t| t.cx_inner.as_ref())
-                        .map_or(0, |inner| {
-                            inner.read().budget.priority
-                        });
+                        .map_or(0, |inner| inner.read().budget.priority);
                     sched.schedule(waiter, prio);
                 }
             }
@@ -1666,8 +1664,7 @@ impl LabRuntime {
         let priority = record
             .cx_inner
             .as_ref()
-            .map(|inner| inner.read().budget.priority)
-            .unwrap_or(0);
+            .map_or(0, |inner| inner.read().budget.priority);
         let mut sched = self.scheduler.lock();
         sched.schedule_cancel(task_id, priority);
     }
@@ -1695,6 +1692,7 @@ impl LabRuntime {
             let mut guard = inner.write();
             if guard.cancel_acknowledged {
                 guard.cancel_acknowledged = false;
+                drop(guard);
                 acknowledged = true;
             }
         }
@@ -1982,7 +1980,8 @@ const DEFAULT_LAB_CANCEL_STREAK_LIMIT: usize = 16;
 pub struct LabScheduler {
     workers: Vec<crate::runtime::scheduler::PriorityScheduler>,
     scheduled: HashSet<TaskId>,
-    assignments: HashMap<TaskId, usize>,
+    /// Task → worker assignment, indexed by arena slot.
+    assignments: Vec<Option<usize>>,
     next_worker: usize,
     cancel_streak: Vec<usize>,
     cancel_streak_limit: usize,
@@ -1997,7 +1996,7 @@ impl LabScheduler {
                 .map(|_| crate::runtime::scheduler::PriorityScheduler::new())
                 .collect(),
             scheduled: HashSet::new(),
-            assignments: HashMap::new(),
+            assignments: Vec::new(),
             next_worker: 0,
             cancel_streak: vec![0; count],
             cancel_streak_limit,
@@ -2020,14 +2019,28 @@ impl LabScheduler {
         self.cancel_streak_limit
     }
 
-    fn assign_worker(&mut self, task: TaskId) -> usize {
-        if let Some(&worker) = self.assignments.get(&task) {
-            return worker;
+    #[inline]
+    fn set_assignment(&mut self, task: TaskId, worker: usize) {
+        let slot = task.arena_index().index() as usize;
+        if slot >= self.assignments.len() {
+            self.assignments.resize(slot + 1, None);
         }
+        self.assignments[slot] = Some(worker);
+    }
 
+    fn assign_worker(&mut self, task: TaskId) -> usize {
+        let slot = task.arena_index().index() as usize;
+        if slot < self.assignments.len() {
+            if let Some(worker) = self.assignments[slot] {
+                return worker;
+            }
+        }
         let worker = self.next_worker % self.workers.len();
         self.next_worker = self.next_worker.wrapping_add(1);
-        self.assignments.insert(task, worker);
+        if slot >= self.assignments.len() {
+            self.assignments.resize(slot + 1, None);
+        }
+        self.assignments[slot] = Some(worker);
         worker
     }
 
@@ -2049,7 +2062,8 @@ impl LabScheduler {
             return;
         }
 
-        if let Some(&worker) = self.assignments.get(&task) {
+        let slot = task.arena_index().index() as usize;
+        if let Some(&Some(worker)) = self.assignments.get(slot) {
             self.workers[worker].move_to_cancel_lane(task, priority);
         }
     }
@@ -2081,7 +2095,7 @@ impl LabScheduler {
             if let Some((task, lane)) = self.workers[worker].pop_cancel_with_rng(rng_hint) {
                 *cancel_streak += 1;
                 self.scheduled.remove(&task);
-                self.assignments.insert(task, worker);
+                self.set_assignment(task, worker);
                 return Some((task, lane));
             }
         }
@@ -2089,21 +2103,21 @@ impl LabScheduler {
         if let Some(task) = self.workers[worker].pop_timed_only_with_hint(rng_hint, now) {
             *cancel_streak = 0;
             self.scheduled.remove(&task);
-            self.assignments.insert(task, worker);
+            self.set_assignment(task, worker);
             return Some((task, DispatchLane::Timed));
         }
 
         if let Some(task) = self.workers[worker].pop_ready_only_with_hint(rng_hint) {
             *cancel_streak = 0;
             self.scheduled.remove(&task);
-            self.assignments.insert(task, worker);
+            self.set_assignment(task, worker);
             return Some((task, DispatchLane::Ready));
         }
 
         if let Some((task, lane)) = self.workers[worker].pop_cancel_with_rng(rng_hint) {
             *cancel_streak = 1;
             self.scheduled.remove(&task);
-            self.assignments.insert(task, worker);
+            self.set_assignment(task, worker);
             return Some((task, lane));
         }
 
@@ -2129,7 +2143,7 @@ impl LabScheduler {
                 self.workers[victim].pop_ready_only_with_hint(rng_hint.wrapping_add(offset as u64))
             {
                 self.scheduled.remove(&task);
-                self.assignments.insert(task, thief);
+                self.set_assignment(task, thief);
                 return Some(task);
             }
         }
@@ -2139,7 +2153,10 @@ impl LabScheduler {
 
     fn forget_task(&mut self, task: TaskId) {
         self.scheduled.remove(&task);
-        self.assignments.remove(&task);
+        let slot = task.arena_index().index() as usize;
+        if slot < self.assignments.len() {
+            self.assignments[slot] = None;
+        }
         for worker in &mut self.workers {
             worker.remove(task);
         }
@@ -2154,9 +2171,7 @@ struct TaskWaker {
 
 impl Wake for TaskWaker {
     fn wake(self: Arc<Self>) {
-        self.scheduler
-            .lock()
-            .schedule(self.task_id, self.priority);
+        self.scheduler.lock().schedule(self.task_id, self.priority);
     }
 }
 
@@ -2283,9 +2298,9 @@ mod tests {
     use crate::runtime::reactor::{Event, Interest};
     use crate::types::{Budget, CxInner, Outcome, TaskId};
     use crate::util::ArenaIndex;
-    use parking_lot::RwLock;
     use parking_lot::Mutex;
-use std::sync::Arc;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
     use std::task::{Wake, Waker};
     use std::time::Duration;
 

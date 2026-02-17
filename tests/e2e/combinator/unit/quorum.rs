@@ -7,6 +7,7 @@
 //! - Resource cleanup for non-quorum branches
 
 use crate::e2e::combinator::util::{DrainFlag, DrainTracker, NeverComplete};
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -146,17 +147,17 @@ fn test_quorum_mixed_outcomes() {
 #[test]
 fn test_quorum_timing() {
     struct TimedCompletion {
-        order: Arc<std::sync::Mutex<Vec<u32>>>,
+        order: Arc<Mutex<Vec<u32>>>,
         id: u32,
     }
 
     impl TimedCompletion {
         fn complete(&self) {
-            self.order.lock().unwrap().push(self.id);
+            self.order.lock().push(self.id);
         }
     }
 
-    let completion_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let completion_order = Arc::new(Mutex::new(Vec::new()));
 
     let completions = [
         TimedCompletion {
@@ -178,7 +179,7 @@ fn test_quorum_timing() {
     completions[1].complete();
     // Third not needed for quorum of 2
 
-    let order = completion_order.lock().unwrap().clone();
+    let order = completion_order.lock().clone();
     assert_eq!(order.len(), 2, "Only quorum contributors recorded");
 }
 
