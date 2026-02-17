@@ -228,7 +228,7 @@ fn is_valid_header_name_byte(b: u8) -> bool {
     )
 }
 
-fn parse_header_line_impl(line_bytes: &[u8]) -> Result<(&[u8], &[u8]), HttpError> {
+fn parse_header_line_bounds(line_bytes: &[u8]) -> Result<(usize, usize, usize), HttpError> {
     let colon = line_bytes
         .iter()
         .position(|&b| b == b':')
@@ -261,11 +261,13 @@ fn parse_header_line_impl(line_bytes: &[u8]) -> Result<(&[u8], &[u8]), HttpError
         return Err(HttpError::InvalidHeaderValue);
     }
 
-    Ok((raw_name, &line_bytes[value_start..value_end]))
+    Ok((colon, value_start, value_end))
 }
 
 fn parse_header_line_bytes(line_bytes: &[u8]) -> Result<(String, String), HttpError> {
-    let (name_bytes, value_bytes) = parse_header_line_impl(line_bytes)?;
+    let (colon, value_start, value_end) = parse_header_line_bounds(line_bytes)?;
+    let name_bytes = &line_bytes[..colon];
+    let value_bytes = &line_bytes[value_start..value_end];
     let name = std::str::from_utf8(name_bytes).map_err(|_| HttpError::BadHeader)?;
     let value = std::str::from_utf8(value_bytes).map_err(|_| HttpError::BadHeader)?;
     Ok((name.to_owned(), value.to_owned()))
@@ -273,9 +275,9 @@ fn parse_header_line_bytes(line_bytes: &[u8]) -> Result<(String, String), HttpEr
 
 /// Parse a single `Name: Value` header line.
 pub(super) fn parse_header_line(line: &str) -> Result<(String, String), HttpError> {
-    let (name_bytes, value_bytes) = parse_header_line_impl(line.as_bytes())?;
-    let name = std::str::from_utf8(name_bytes).map_err(|_| HttpError::BadHeader)?;
-    let value = std::str::from_utf8(value_bytes).map_err(|_| HttpError::BadHeader)?;
+    let (colon, value_start, value_end) = parse_header_line_bounds(line.as_bytes())?;
+    let name = &line[..colon];
+    let value = &line[value_start..value_end];
     Ok((name.to_owned(), value.to_owned()))
 }
 
