@@ -1937,7 +1937,8 @@ impl ThreeLaneWorker {
                         }
                     }
                 };
-                if let Ok(mut guard) = inner.write() {
+                {
+                    let mut guard = inner.write();
                     guard.cancel_waker = Some(cancel_waker.clone());
                 }
                 Some((cancel_waker, priority))
@@ -2052,12 +2053,11 @@ impl ThreeLaneWorker {
                     let mut cancel_priority = priority;
                     let mut schedule_cancel = false;
                     if let Some(inner) = cx_inner.as_ref() {
-                        if let Ok(guard) = inner.read() {
-                            if guard.cancel_requested {
-                                schedule_cancel = true;
-                                if let Some(reason) = guard.cancel_reason.as_ref() {
-                                    cancel_priority = reason.cleanup_budget().priority;
-                                }
+                        let guard = inner.read();
+                        if guard.cancel_requested {
+                            schedule_cancel = true;
+                            if let Some(reason) = guard.cancel_reason.as_ref() {
+                                cancel_priority = reason.cleanup_budget().priority;
                             }
                         }
                     }
@@ -2128,7 +2128,8 @@ impl ThreeLaneWorker {
             return false;
         };
         let mut acknowledged = false;
-        if let Ok(mut guard) = inner.write() {
+        {
+            let mut guard = inner.write();
             if guard.cancel_acknowledged {
                 guard.cancel_acknowledged = false;
                 acknowledged = true;
@@ -2155,7 +2156,7 @@ impl ThreeLaneWaker {
             let priority = self
                 .cx_inner
                 .upgrade()
-                .and_then(|inner| inner.read().ok().map(|g| g.budget.priority))
+                .map(|inner| inner.read().budget.priority)
                 .unwrap_or_default();
 
             self.global.inject_ready(self.task_id, priority);
@@ -2319,7 +2320,7 @@ mod tests {
     use super::*;
     use crate::record::task::TaskWakeState;
     use crate::types::{Budget, CancelKind, CancelReason, CxInner, RegionId, TaskId};
-    use std::sync::RwLock;
+    use parking_lot::RwLock;
     use std::time::Duration;
 
     #[test]
