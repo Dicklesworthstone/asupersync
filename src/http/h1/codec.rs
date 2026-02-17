@@ -187,31 +187,7 @@ impl Default for Http1Codec {
 /// Find the position of `\r\n\r\n` in `buf`, returning the index of the
 /// first byte after the delimiter.
 fn find_headers_end(buf: &[u8]) -> Option<usize> {
-    let mut i = 0usize;
-    while i + 3 < buf.len() {
-        if buf[i] == b'\r' && buf[i + 1] == b'\n' && buf[i + 2] == b'\r' && buf[i + 3] == b'\n'
-        {
-            return Some(i + 4);
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Find the first CRLF line terminator at or after `start`, returning the
-/// index of the `\r` byte.
-fn find_crlf(buf: &[u8], start: usize) -> Option<usize> {
-    if start >= buf.len() {
-        return None;
-    }
-    let mut i = start;
-    while i + 1 < buf.len() {
-        if buf[i] == b'\r' && buf[i + 1] == b'\n' {
-            return Some(i);
-        }
-        i += 1;
-    }
-    None
+    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
 }
 
 /// Parse the request line: `METHOD SP URI SP VERSION CRLF`.
@@ -547,7 +523,7 @@ impl ChunkedBodyDecoder {
 }
 
 fn split_line_crlf(src: &mut BytesMut, max_len: usize) -> Result<Option<BytesMut>, HttpError> {
-    let Some(line_end) = find_crlf(src.as_ref(), 0) else {
+    let Some(line_end) = src.as_ref().windows(2).position(|w| w == b"\r\n") else {
         if src.len() > max_len {
             return Err(HttpError::BadChunkedEncoding);
         }
@@ -580,7 +556,7 @@ fn decode_head(
     max_headers_size: usize,
 ) -> Result<Option<(Method, String, Version, Vec<(String, String)>, BodyKind)>, HttpError> {
     // Check request-line length limit
-    if let Some(line_end) = find_crlf(src.as_ref(), 0) {
+    if let Some(line_end) = src.as_ref().windows(2).position(|w| w == b"\r\n") {
         if line_end > MAX_REQUEST_LINE {
             return Err(HttpError::RequestLineTooLong);
         }
@@ -601,18 +577,26 @@ fn decode_head(
     let head = head_bytes.as_ref();
     let head_str = std::str::from_utf8(head).map_err(|_| HttpError::BadRequestLine)?;
     let head = head_str.as_bytes();
-    let request_line_end = find_crlf(head, 0).ok_or(HttpError::BadRequestLine)?;
+    let request_line_end = head
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .ok_or(HttpError::BadRequestLine)?;
     let request_line = &head_str[..request_line_end];
     let (method, uri, version) = parse_request_line(request_line)?;
 
     let mut headers = Vec::with_capacity(8);
     let mut cursor = request_line_end + 2;
     while cursor < head.len() {
-        let line_end = find_crlf(head, cursor).ok_or(HttpError::BadHeader)?;
-        if line_end == cursor {
+        let line_end = head[cursor..]
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .ok_or(HttpError::BadHeader)?;
+        if line_end == 0 {
             break;
         }
-        headers.push(parse_header_line(&head_str[cursor..line_end])?);
+        let line_start = cursor;
+        let line_end = cursor + line_end;
+        headers.push(parse_header_line(&head_str[line_start..line_end])?);
         if headers.len() > MAX_HEADERS {
             return Err(HttpError::TooManyHeaders);
         }
