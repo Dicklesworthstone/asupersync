@@ -4,7 +4,7 @@
 //! obligation protocol ([`ObligationRecord`]). Provides epoch-aware validity
 //! windows, deadline-based expiry, and RAII guards for automatic resolution.
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use crate::record::obligation::{
     ObligationAbortReason, ObligationKind, ObligationRecord, ObligationState,
@@ -285,11 +285,11 @@ impl SymbolObligation {
 #[derive(Debug)]
 pub struct SymbolObligationTracker {
     /// Pending obligations indexed by ID.
-    obligations: BTreeMap<ObligationId, SymbolObligation>,
+    obligations: HashMap<ObligationId, SymbolObligation>,
     /// Index by symbol ID for fast lookup.
-    by_symbol: BTreeMap<SymbolId, Vec<ObligationId>>,
+    by_symbol: HashMap<SymbolId, Vec<ObligationId>>,
     /// Index by object ID for decoding/encoding obligations.
-    by_object: BTreeMap<ObjectId, Vec<ObligationId>>,
+    by_object: HashMap<ObjectId, Vec<ObligationId>>,
     /// The region this tracker belongs to.
     region_id: RegionId,
 }
@@ -299,9 +299,9 @@ impl SymbolObligationTracker {
     #[must_use]
     pub fn new(region_id: RegionId) -> Self {
         Self {
-            obligations: BTreeMap::new(),
-            by_symbol: BTreeMap::new(),
-            by_object: BTreeMap::new(),
+            obligations: HashMap::new(),
+            by_symbol: HashMap::new(),
+            by_object: HashMap::new(),
             region_id,
         }
     }

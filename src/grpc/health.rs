@@ -20,7 +20,7 @@
 //!     .build();
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
@@ -134,7 +134,7 @@ impl Default for HealthCheckResponse {
 #[derive(Debug, Clone)]
 pub struct HealthService {
     /// Service statuses.
-    statuses: Arc<RwLock<BTreeMap<String, ServingStatus>>>,
+    statuses: Arc<RwLock<HashMap<String, ServingStatus>>>,
 }
 
 impl HealthService {
@@ -142,7 +142,7 @@ impl HealthService {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            statuses: Arc::new(RwLock::new(BTreeMap::new())),
+            statuses: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -315,7 +315,7 @@ impl Drop for HealthReporter {
 /// Builder for creating health services with initial statuses.
 #[derive(Debug, Default)]
 pub struct HealthServiceBuilder {
-    statuses: BTreeMap<String, ServingStatus>,
+    statuses: HashMap<String, ServingStatus>,
 }
 
 impl HealthServiceBuilder {

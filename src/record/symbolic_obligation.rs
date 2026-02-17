@@ -13,7 +13,7 @@
 //! - Dropping without resolution triggers leak detection
 
 use core::fmt;
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -559,13 +559,13 @@ struct ObligationEntry {
 /// runtime to detect leaked obligations and check region quiescence.
 pub struct SymbolicObligationRegistry {
     /// Obligations by ID.
-    by_id: RwLock<BTreeMap<ObligationId, ObligationEntry>>,
+    by_id: RwLock<HashMap<ObligationId, ObligationEntry>>,
     /// Obligations by object ID.
-    by_object: RwLock<BTreeMap<ObjectId, Vec<ObligationId>>>,
+    by_object: RwLock<HashMap<ObjectId, Vec<ObligationId>>>,
     /// Obligations by holder task.
-    by_holder: RwLock<BTreeMap<TaskId, Vec<ObligationId>>>,
+    by_holder: RwLock<HashMap<TaskId, Vec<ObligationId>>>,
     /// Obligations by region.
-    by_region: RwLock<BTreeMap<RegionId, Vec<ObligationId>>>,
+    by_region: RwLock<HashMap<RegionId, Vec<ObligationId>>>,
     /// Next obligation ID.
     next_id: AtomicU64,
 }
@@ -575,10 +575,10 @@ impl SymbolicObligationRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            by_id: RwLock::new(BTreeMap::new()),
-            by_object: RwLock::new(BTreeMap::new()),
-            by_holder: RwLock::new(BTreeMap::new()),
-            by_region: RwLock::new(BTreeMap::new()),
+            by_id: RwLock::new(HashMap::new()),
+            by_object: RwLock::new(HashMap::new()),
+            by_holder: RwLock::new(HashMap::new()),
+            by_region: RwLock::new(HashMap::new()),
             next_id: AtomicU64::new(1),
         }
     }

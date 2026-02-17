@@ -7,7 +7,7 @@ use crate::combinator::select::{Either, Select};
 use crate::server::shutdown::{ShutdownPhase, ShutdownSignal};
 use crate::sync::Notify;
 use crate::time::sleep_until;
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -65,7 +65,7 @@ pub struct ConnectionInfo {
 /// // guard dropped here — active_count returns to 0
 /// ```
 pub struct ConnectionManager {
-    state: Arc<Mutex<BTreeMap<ConnectionId, ConnectionInfo>>>,
+    state: Arc<Mutex<HashMap<ConnectionId, ConnectionInfo>>>,
     next_id: Arc<AtomicU64>,
     max_connections: Option<usize>,
     shutdown_signal: ShutdownSignal,
@@ -82,7 +82,7 @@ impl ConnectionManager {
     #[must_use]
     pub fn new(max_connections: Option<usize>, shutdown_signal: ShutdownSignal) -> Self {
         Self {
-            state: Arc::new(Mutex::new(BTreeMap::new())),
+            state: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(AtomicU64::new(1)),
             max_connections,
             shutdown_signal,
@@ -284,7 +284,7 @@ impl std::fmt::Debug for ConnectionManager {
 /// connections have completed.
 pub struct ConnectionGuard {
     id: ConnectionId,
-    state: Arc<Mutex<BTreeMap<ConnectionId, ConnectionInfo>>>,
+    state: Arc<Mutex<HashMap<ConnectionId, ConnectionInfo>>>,
     all_closed: Arc<Notify>,
 }
 
@@ -849,7 +849,7 @@ mod tests {
         let count_before = manager.active_count();
         crate::assert_with_log!(count_before == 1, "one active", 1, count_before);
 
-        // Drop guard - this should remove from BTreeMap and notify
+        // Drop guard - this should remove from HashMap and notify
         drop(guard);
 
         let count_after = manager.active_count();

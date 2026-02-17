@@ -4,14 +4,14 @@
 //! replicas are added or removed.
 
 use crate::util::det_hash::DetHasher;
-use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
 /// A deterministic consistent hash ring with virtual nodes.
 #[derive(Debug, Clone)]
 pub struct HashRing {
     vnodes_per_node: usize,
-    nodes: BTreeSet<String>,
+    nodes: HashSet<String>,
     ring: Vec<VirtualNode>,
 }
 
@@ -28,7 +28,7 @@ impl HashRing {
     pub fn new(vnodes_per_node: usize) -> Self {
         Self {
             vnodes_per_node,
-            nodes: BTreeSet::new(),
+            nodes: HashSet::new(),
             ring: Vec::new(),
         }
     }
@@ -103,7 +103,7 @@ impl HashRing {
         Some(self.ring[idx].node_id.as_str())
     }
 
-    /// Returns an iterator of node identifiers (ordered).
+    /// Returns an iterator of node identifiers.
     pub fn nodes(&self) -> impl Iterator<Item = &str> {
         self.nodes.iter().map(String::as_str)
     }
