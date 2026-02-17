@@ -66,7 +66,7 @@
 use super::{Event, Events, Interest, Reactor, Source, Token};
 use parking_lot::Mutex;
 use polling::{Event as PollEvent, Events as PollingEvents, Poller};
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::io;
 use std::num::NonZeroUsize;
 use std::os::fd::BorrowedFd;
@@ -108,7 +108,7 @@ pub struct KqueueReactor {
     /// The polling instance (wraps kqueue on macOS/BSD).
     poller: Poller,
     /// Maps tokens to registration info for bookkeeping.
-    registrations: Mutex<BTreeMap<Token, RegistrationInfo>>,
+    registrations: Mutex<HashMap<Token, RegistrationInfo>>,
 }
 
 impl KqueueReactor {
@@ -132,7 +132,7 @@ impl KqueueReactor {
 
         Ok(Self {
             poller,
-            registrations: Mutex::new(BTreeMap::new()),
+            registrations: Mutex::new(HashMap::new()),
         })
     }
 

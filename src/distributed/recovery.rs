@@ -21,7 +21,7 @@ use crate::security::SecurityContext;
 use crate::types::symbol::{ObjectParams, Symbol};
 use crate::types::{RegionId, Time};
 use crate::RejectReason;
-use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::time::Duration;
 
 use super::snapshot::RegionSnapshot;
@@ -238,7 +238,7 @@ pub struct CollectionMetrics {
 pub struct RecoveryCollector {
     config: RecoveryConfig,
     collected: Vec<CollectedSymbol>,
-    seen_esi: BTreeSet<u32>,
+    seen_esi: HashSet<u32>,
     /// Object parameters from metadata (set once known).
     pub object_params: Option<ObjectParams>,
     progress: RecoveryProgress,
@@ -254,7 +254,7 @@ impl RecoveryCollector {
         Self {
             config,
             collected: Vec::new(),
-            seen_esi: BTreeSet::new(),
+            seen_esi: HashSet::new(),
             object_params: None,
             progress: RecoveryProgress {
                 started_at: Time::ZERO,
@@ -424,7 +424,7 @@ pub struct StateDecoder {
     config: RecoveryDecodingConfig,
     decoder_state: DecoderState,
     symbols: Vec<AuthenticatedSymbol>,
-    seen_esi: BTreeSet<u32>,
+    seen_esi: HashSet<u32>,
 }
 
 impl StateDecoder {
@@ -438,7 +438,7 @@ impl StateDecoder {
                 needed: 0,
             },
             symbols: Vec::new(),
-            seen_esi: BTreeSet::new(),
+            seen_esi: HashSet::new(),
         }
     }
 
@@ -718,7 +718,7 @@ impl RecoveryOrchestrator {
         let contributing: Vec<String> = symbols
             .iter()
             .map(|s| s.source_replica.clone())
-            .collect::<BTreeSet<_>>()
+            .collect::<HashSet<_>>()
             .into_iter()
             .collect();
 

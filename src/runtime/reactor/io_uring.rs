@@ -17,7 +17,7 @@ mod imp {
     use super::super::{Event, Events, Interest, Reactor, Source, Token};
     use io_uring::{opcode, types, IoUring};
     use parking_lot::Mutex;
-    use std::collections::BTreeMap;
+    use std::collections::HashMap;
     use std::io;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
     use std::time::Duration;
@@ -35,7 +35,7 @@ mod imp {
     /// io_uring-based reactor.
     pub struct IoUringReactor {
         ring: Mutex<IoUring>,
-        registrations: Mutex<BTreeMap<Token, RegistrationInfo>>,
+        registrations: Mutex<HashMap<Token, RegistrationInfo>>,
         wake_fd: OwnedFd,
     }
 
@@ -65,7 +65,7 @@ mod imp {
 
             Ok(Self {
                 ring: Mutex::new(ring),
-                registrations: Mutex::new(BTreeMap::new()),
+                registrations: Mutex::new(HashMap::new()),
                 wake_fd,
             })
         }

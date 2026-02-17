@@ -16,7 +16,7 @@
 //! - Idle connection timeout
 //! - Connection health checks
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::types::Time;
@@ -240,13 +240,13 @@ pub struct PoolStats {
 #[derive(Debug)]
 struct HostPool {
     /// Connections for this host (by connection ID).
-    connections: BTreeMap<u64, PooledConnectionMeta>,
+    connections: HashMap<u64, PooledConnectionMeta>,
 }
 
 impl HostPool {
     fn new() -> Self {
         Self {
-            connections: BTreeMap::new(),
+            connections: HashMap::new(),
         }
     }
 
@@ -285,7 +285,7 @@ pub struct Pool {
     /// Pool configuration.
     config: PoolConfig,
     /// Connections organized by host.
-    hosts: BTreeMap<PoolKey, HostPool>,
+    hosts: HashMap<PoolKey, HostPool>,
     /// Next connection ID.
     next_id: u64,
     /// Lifetime statistics.
@@ -306,7 +306,7 @@ impl Pool {
     pub fn with_config(config: PoolConfig) -> Self {
         Self {
             config,
-            hosts: BTreeMap::new(),
+            hosts: HashMap::new(),
             next_id: 1,
             stats: PoolStats::default(),
             last_cleanup: Time::ZERO,

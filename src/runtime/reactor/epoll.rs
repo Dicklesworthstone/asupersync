@@ -24,7 +24,7 @@
 //! │                       EpollReactor                               │
 //! │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
 //! │  │   Poller    │  │  notify()   │  │    registration map     │  │
-//! │  │  (polling)  │  │  (builtin)  │  │   BTreeMap<Token, info>  │  │
+//! │  │  (polling)  │  │  (builtin)  │  │   HashMap<Token, info>  │  │
 //! │  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
@@ -61,8 +61,8 @@ use super::{Event, Events, Interest, Reactor, Source, Token};
 use libc::{fcntl, F_GETFD};
 use parking_lot::Mutex;
 use polling::{Event as PollEvent, Events as PollEvents, PollMode, Poller};
-use std::collections::btree_map::Entry;
-use std::collections::BTreeMap;
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::io;
 use std::num::NonZeroUsize;
 use std::os::fd::BorrowedFd;
@@ -79,15 +79,15 @@ struct RegistrationInfo {
 
 #[derive(Debug)]
 struct ReactorState {
-    tokens: BTreeMap<Token, RegistrationInfo>,
-    fds: BTreeMap<i32, Token>,
+    tokens: HashMap<Token, RegistrationInfo>,
+    fds: HashMap<i32, Token>,
 }
 
 impl ReactorState {
     fn new() -> Self {
         Self {
-            tokens: BTreeMap::new(),
-            fds: BTreeMap::new(),
+            tokens: HashMap::new(),
+            fds: HashMap::new(),
         }
     }
 }
@@ -290,7 +290,7 @@ impl Reactor for EpollReactor {
         // Modify the epoll registration. If the kernel reports stale registration state,
         // clean stale bookkeeping so fd-number reuse does not get blocked indefinitely.
         // The entry is reused for both the success update and error removal, saving a
-        // second O(log n) BTreeMap lookup on the hot path.
+        // second HashMap lookup on the hot path.
         let result = match self.poller.modify_with_mode(borrowed_fd, event, mode) {
             Ok(()) => {
                 entry.into_mut().interest = interest;

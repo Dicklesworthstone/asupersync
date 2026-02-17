@@ -19,7 +19,7 @@ mod iocp_impl {
     use super::{Event, Events, Interest, Reactor, Source, Token};
     use parking_lot::Mutex;
     use polling::{Event as PollEvent, Events as PollEvents, Poller};
-    use std::collections::BTreeMap;
+    use std::collections::HashMap;
     use std::io;
     use std::num::NonZeroUsize;
     use std::os::windows::io::RawSocket;
@@ -35,7 +35,7 @@ mod iocp_impl {
     /// IOCP-based reactor (Windows).
     pub struct IocpReactor {
         poller: Poller,
-        registrations: Mutex<BTreeMap<Token, RegistrationInfo>>,
+        registrations: Mutex<HashMap<Token, RegistrationInfo>>,
     }
 
     impl IocpReactor {
@@ -44,7 +44,7 @@ mod iocp_impl {
             let poller = Poller::new()?;
             Ok(Self {
                 poller,
-                registrations: Mutex::new(BTreeMap::new()),
+                registrations: Mutex::new(HashMap::new()),
             })
         }
 

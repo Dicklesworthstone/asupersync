@@ -2,7 +2,7 @@
 //!
 //! Provides a thread-safe cache for DNS lookup results with TTL-based expiration.
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
@@ -62,7 +62,7 @@ impl<T> CacheEntry<T> {
 /// Thread-safe DNS cache.
 #[derive(Debug)]
 pub struct DnsCache {
-    ip_cache: RwLock<BTreeMap<String, CacheEntry<LookupIp>>>,
+    ip_cache: RwLock<HashMap<String, CacheEntry<LookupIp>>>,
     config: CacheConfig,
     stats: RwLock<CacheStats>,
 }
@@ -78,7 +78,7 @@ impl DnsCache {
     #[must_use]
     pub fn with_config(config: CacheConfig) -> Self {
         Self {
-            ip_cache: RwLock::new(BTreeMap::new()),
+            ip_cache: RwLock::new(HashMap::new()),
             config,
             stats: RwLock::new(CacheStats::default()),
         }
@@ -223,7 +223,7 @@ impl DnsCache {
         ttl.max(self.config.min_ttl).min(self.config.max_ttl)
     }
 
-    fn evict_expired_locked(&self, cache: &mut BTreeMap<String, CacheEntry<LookupIp>>) {
+    fn evict_expired_locked(&self, cache: &mut HashMap<String, CacheEntry<LookupIp>>) {
         let before = cache.len();
         cache.retain(|_, entry| !entry.is_expired());
         let evicted = before - cache.len();
@@ -234,7 +234,7 @@ impl DnsCache {
         }
     }
 
-    fn find_oldest_key(cache: &BTreeMap<String, CacheEntry<LookupIp>>) -> Option<String> {
+    fn find_oldest_key(cache: &HashMap<String, CacheEntry<LookupIp>>) -> Option<String> {
         cache
             .iter()
             .min_by_key(|(_, entry)| entry.inserted_at)

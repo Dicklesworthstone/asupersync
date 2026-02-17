@@ -35,7 +35,7 @@ use super::{Event, Interest, Reactor, Source, Token};
 use crate::lab::chaos::{ChaosConfig, ChaosRng, ChaosStats};
 use crate::tracing_compat::debug;
 use crate::types::Time;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -262,7 +262,7 @@ pub struct LabReactor {
 
 #[derive(Debug)]
 struct LabInner {
-    sockets: BTreeMap<Token, VirtualSocket>,
+    sockets: HashMap<Token, VirtualSocket>,
     pending: BinaryHeap<TimedEvent>,
     time: Time,
     /// Monotonic sequence counter for deterministic same-time event ordering.
@@ -276,7 +276,7 @@ impl LabReactor {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(LabInner {
-                sockets: BTreeMap::new(),
+                sockets: HashMap::new(),
                 pending: BinaryHeap::new(),
                 time: Time::ZERO,
                 next_sequence: 0,
@@ -291,7 +291,7 @@ impl LabReactor {
     pub fn with_chaos(config: ChaosConfig) -> Self {
         Self {
             inner: Mutex::new(LabInner {
-                sockets: BTreeMap::new(),
+                sockets: HashMap::new(),
                 pending: BinaryHeap::new(),
                 time: Time::ZERO,
                 next_sequence: 0,
