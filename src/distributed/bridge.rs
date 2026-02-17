@@ -713,7 +713,10 @@ impl RegionBridge {
             children: self.local.child_ids(),
             finalizer_count: self.local.finalizer_count() as u32,
             budget: self.local.budget().to_distributed(),
-            cancel_reason: self.local.cancel_reason().map(|r| r.kind.as_str().to_owned()),
+            cancel_reason: self
+                .local
+                .cancel_reason()
+                .map(|r| r.kind.as_str().to_owned()),
             parent: self.local.parent,
             metadata: vec![],
         }

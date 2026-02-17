@@ -771,14 +771,11 @@ impl CircuitBreaker {
         self.total_failure.fetch_add(1, Ordering::Relaxed);
 
         // Check sliding window if enabled
-        let window_triggered = self
-            .sliding_window
-            .as_ref()
-            .is_some_and(|window| {
-                let mut w = window.write();
-                w.record_failure(now_millis);
-                w.should_open()
-            });
+        let window_triggered = self.sliding_window.as_ref().is_some_and(|window| {
+            let mut w = window.write();
+            w.record_failure(now_millis);
+            w.should_open()
+        });
 
         let mut event = None;
 
