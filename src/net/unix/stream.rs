@@ -23,12 +23,13 @@ use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 use nix::errno::Errno;
 use nix::sys::socket::{self, ControlMessage, ControlMessageOwned, MsgFlags};
+use parking_lot::Mutex;
 use std::io::{self, IoSlice, IoSliceMut, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::{self, SocketAddr};
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 fn nix_to_io(err: nix::Error) -> io::Error {
@@ -244,7 +245,7 @@ impl UnixStream {
 
     /// Registers interest with the I/O driver.
     fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
-        let mut registration = self.registration.lock().expect("lock poisoned");
+        let mut registration = self.registration.lock();
 
         if let Some(existing) = registration.as_mut() {
             let merged = existing.interest() | interest;
@@ -485,7 +486,7 @@ impl UnixStream {
     /// [`reunite`]: OwnedReadHalf::reunite
     #[must_use]
     pub fn into_split(self) -> (OwnedReadHalf, OwnedWriteHalf) {
-        let registration = self.registration.lock().expect("lock poisoned").take();
+        let registration = self.registration.lock().take();
         OwnedReadHalf::new_pair(self.inner, registration)
     }
 }
