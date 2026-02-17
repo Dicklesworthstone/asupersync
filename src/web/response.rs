@@ -4,7 +4,7 @@
 //! into an HTTP response. Common types like `String`, `&str`, `Json<T>`, and
 //! tuples are supported out of the box.
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::fmt;
 
 use crate::bytes::Bytes;
@@ -123,7 +123,7 @@ pub struct Response {
     /// HTTP status code.
     pub status: StatusCode,
     /// Response headers.
-    pub headers: BTreeMap<String, String>,
+    pub headers: HashMap<String, String>,
     /// Response body.
     pub body: Bytes,
 }
@@ -134,7 +134,7 @@ impl Response {
     pub fn new(status: StatusCode, body: impl Into<Bytes>) -> Self {
         Self {
             status,
-            headers: BTreeMap::new(),
+            headers: HashMap::new(),
             body: body.into(),
         }
     }

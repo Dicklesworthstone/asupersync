@@ -13,7 +13,7 @@
 //! - [`State<T>`]: Shared application state
 //! - [`RawBody`]: Raw request body bytes
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::fmt;
 
 use crate::bytes::Bytes;
@@ -30,11 +30,11 @@ pub struct Request {
     /// Query string (everything after '?'), if present.
     pub query: Option<String>,
     /// Request headers.
-    pub headers: BTreeMap<String, String>,
+    pub headers: HashMap<String, String>,
     /// Request body bytes.
     pub body: Bytes,
     /// Path parameters extracted by the router (e.g., `{ "id": "42" }`).
-    pub path_params: BTreeMap<String, String>,
+    pub path_params: HashMap<String, String>,
     /// Extensions for middleware-injected state.
     pub extensions: Extensions,
 }
@@ -47,9 +47,9 @@ impl Request {
             method: method.into(),
             path: path.into(),
             query: None,
-            headers: BTreeMap::new(),
+            headers: HashMap::new(),
             body: Bytes::new(),
-            path_params: BTreeMap::new(),
+            path_params: HashMap::new(),
             extensions: Extensions::new(),
         }
     }
@@ -77,7 +77,7 @@ impl Request {
 
     /// Set path parameters (used internally by the router).
     #[must_use]
-    pub fn with_path_params(mut self, params: BTreeMap<String, String>) -> Self {
+    pub fn with_path_params(mut self, params: HashMap<String, String>) -> Self {
         self.path_params = params;
         self
     }
@@ -90,9 +90,9 @@ impl Request {
 /// Allows middleware to inject arbitrary typed state into requests.
 #[derive(Debug, Clone, Default)]
 pub struct Extensions {
-    // Simplified: use a BTreeMap<TypeId, Box<dyn Any>> in production.
+    // Simplified: use a HashMap<TypeId, Box<dyn Any>> in production.
     // For Phase 0, we use a string-keyed map.
-    data: BTreeMap<String, String>,
+    data: HashMap<String, String>,
 }
 
 impl Extensions {
@@ -193,7 +193,7 @@ impl<T: FromRequestParts> FromRequest for T {
 /// Extract path parameters.
 ///
 /// For a single parameter, `Path<String>` extracts the first path param.
-/// For named parameters, use `Path<BTreeMap<String, String>>`.
+/// For named parameters, use `Path<HashMap<String, String>>`.
 ///
 /// ```ignore
 /// async fn get_user(Path(id): Path<String>) -> String {
@@ -215,7 +215,7 @@ impl FromRequestParts for Path<String> {
 }
 
 #[allow(clippy::implicit_hasher)]
-impl FromRequestParts for Path<BTreeMap<String, String>> {
+impl FromRequestParts for Path<HashMap<String, String>> {
     fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
         Ok(Self(req.path_params.clone()))
     }
@@ -239,7 +239,7 @@ impl FromRequestParts for Path<BTreeMap<String, String>> {
 pub struct Query<T>(pub T);
 
 #[allow(clippy::implicit_hasher)]
-impl FromRequestParts for Query<BTreeMap<String, String>> {
+impl FromRequestParts for Query<HashMap<String, String>> {
     fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
         let qs = req.query.as_deref().unwrap_or("");
         Ok(Self(parse_urlencoded(qs)))
@@ -247,7 +247,7 @@ impl FromRequestParts for Query<BTreeMap<String, String>> {
 }
 
 /// Parse a URL-encoded string into key-value pairs.
-fn parse_urlencoded(input: &str) -> BTreeMap<String, String> {
+fn parse_urlencoded(input: &str) -> HashMap<String, String> {
     input
         .split('&')
         .filter(|s| !s.is_empty())
@@ -370,7 +370,7 @@ impl<T: serde::de::DeserializeOwned> FromRequest for Json<T> {
 pub struct Form<T>(pub T);
 
 #[allow(clippy::implicit_hasher)]
-impl FromRequest for Form<BTreeMap<String, String>> {
+impl FromRequest for Form<HashMap<String, String>> {
     fn from_request(req: Request) -> Result<Self, ExtractionError> {
         let content_type = req.headers.get("content-type").map(String::as_str);
         if let Some(ct) = content_type {
@@ -443,7 +443,7 @@ impl FromRequest for RawBody {
 // ─── HeaderMap Extractor ─────────────────────────────────────────────────────
 
 #[allow(clippy::implicit_hasher)]
-impl FromRequestParts for BTreeMap<String, String> {
+impl FromRequestParts for HashMap<String, String> {
     fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
         Ok(req.headers.clone())
     }
@@ -457,7 +457,7 @@ mod tests {
 
     #[test]
     fn path_extraction() {
-        let mut params = BTreeMap::new();
+        let mut params = HashMap::new();
         params.insert("id".to_string(), "42".to_string());
         let req = Request::new("GET", "/users/42").with_path_params(params);
 
@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn query_extraction() {
         let req = Request::new("GET", "/items").with_query("page=3&sort=name");
-        let Query(params) = Query::<BTreeMap<String, String>>::from_request_parts(&req).unwrap();
+        let Query(params) = Query::<HashMap<String, String>>::from_request_parts(&req).unwrap();
         assert_eq!(params.get("page").unwrap(), "3");
         assert_eq!(params.get("sort").unwrap(), "name");
     }
@@ -509,7 +509,7 @@ mod tests {
         let req =
             Request::new("POST", "/login").with_body(Bytes::from_static(b"user=alice&pass=secret"));
 
-        let Form(data) = Form::<BTreeMap<String, String>>::from_request(req).unwrap();
+        let Form(data) = Form::<HashMap<String, String>>::from_request(req).unwrap();
         assert_eq!(data.get("user").unwrap(), "alice");
         assert_eq!(data.get("pass").unwrap(), "secret");
     }
@@ -526,7 +526,7 @@ mod tests {
     fn headers_extraction() {
         let req = Request::new("GET", "/").with_header("x-request-id", "abc123");
 
-        let headers = BTreeMap::<String, String>::from_request_parts(&req).unwrap();
+        let headers = HashMap::<String, String>::from_request_parts(&req).unwrap();
         assert_eq!(headers.get("x-request-id").unwrap(), "abc123");
     }
 
