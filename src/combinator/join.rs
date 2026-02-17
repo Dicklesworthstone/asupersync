@@ -375,7 +375,7 @@ impl<E: fmt::Debug + fmt::Display> std::error::Error for JoinAllError<E> {}
 pub fn join_all_outcomes<T, E: Clone>(
     outcomes: Vec<Outcome<T, E>>,
 ) -> (AggregateDecision<E>, Vec<(usize, T)>) {
-    let mut successes = Vec::new();
+    let mut successes = Vec::with_capacity(outcomes.len());
     let mut first_error: Option<E> = None;
     let mut strongest_cancel: Option<CancelReason> = None;
     let mut panic_payload: Option<PanicPayload> = None;

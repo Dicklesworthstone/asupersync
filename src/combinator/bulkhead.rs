@@ -708,12 +708,14 @@ pub struct BulkheadRegistry {
     default_policy: BulkheadPolicy,
 }
 
+const DEFAULT_BULKHEAD_REGISTRY_CAPACITY: usize = 16;
+
 impl BulkheadRegistry {
     /// Create a new registry with a default policy.
     #[must_use]
     pub fn new(default_policy: BulkheadPolicy) -> Self {
         Self {
-            bulkheads: RwLock::new(HashMap::new()),
+            bulkheads: RwLock::new(HashMap::with_capacity(DEFAULT_BULKHEAD_REGISTRY_CAPACITY)),
             default_policy,
         }
     }
@@ -754,10 +756,12 @@ impl BulkheadRegistry {
     #[must_use]
     pub fn all_metrics(&self) -> HashMap<String, BulkheadMetrics> {
         let bulkheads = self.bulkheads.read().expect("lock poisoned");
-        bulkheads
-            .iter()
-            .map(|(name, b)| (name.clone(), b.metrics()))
-            .collect()
+        let mut metrics = HashMap::with_capacity(bulkheads.len());
+        for (name, bulkhead) in bulkheads.iter() {
+            metrics.insert(name.clone(), bulkhead.metrics());
+        }
+        drop(bulkheads);
+        metrics
     }
 
     /// Remove a named bulkhead.

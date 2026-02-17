@@ -166,7 +166,7 @@ impl<F: Future + Unpin> Future for SelectAllDrain<F> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let futures = self.futures.as_mut().expect("polled after completion");
         let mut first_ready: Option<(F::Output, usize)> = None;
-        let mut also_ready: Vec<usize> = Vec::new();
+        let mut also_ready: Vec<usize> = Vec::with_capacity(futures.len().saturating_sub(1));
 
         // Poll ALL futures to ensure initialization (same as SelectAll).
         for (i, f) in futures.iter_mut().enumerate() {
