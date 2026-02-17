@@ -406,7 +406,9 @@ impl ThreeLaneScheduler {
 
         // Get IO driver and timer driver from runtime state
         let (io_driver, timer_driver) = {
-            let guard = state.lock();
+            let guard = state
+                .lock()
+                .expect("lock poisoned");
             (guard.io_driver_handle(), guard.timer_driver_handle())
         };
 
@@ -570,10 +572,15 @@ impl ThreeLaneScheduler {
     /// RuntimeState's embedded table.
     fn with_task_table_ref<R, F: FnOnce(&TaskTable) -> R>(&self, f: F) -> R {
         if let Some(tt) = &self.task_table {
-            let guard = tt.lock();
+            let guard = tt
+                .lock()
+                .expect("lock poisoned");
             f(&guard)
         } else {
-            let state = self.state.lock();
+            let state = self
+                .state
+                .lock()
+                .expect("lock poisoned");
             f(&state.tasks)
         }
     }
@@ -990,10 +997,15 @@ impl ThreeLaneWorker {
     /// mutations.
     fn with_task_table<R, F: FnOnce(&mut TaskTable) -> R>(&self, f: F) -> R {
         if let Some(tt) = &self.task_table {
-            let mut guard = tt.lock();
+            let mut guard = tt
+                .lock()
+                .expect("lock poisoned");
             f(&mut guard)
         } else {
-            let mut state = self.state.lock();
+            let mut state = self
+                .state
+                .lock()
+                .expect("lock poisoned");
             f(&mut state.tasks)
         }
     }
@@ -1001,10 +1013,15 @@ impl ThreeLaneWorker {
     /// Read-only version of [`with_task_table`] for task record lookups.
     fn with_task_table_ref<R, F: FnOnce(&TaskTable) -> R>(&self, f: F) -> R {
         if let Some(tt) = &self.task_table {
-            let guard = tt.lock();
+            let guard = tt
+                .lock()
+                .expect("lock poisoned");
             f(&guard)
         } else {
-            let state = self.state.lock();
+            let state = self
+                .state
+                .lock()
+                .expect("lock poisoned");
             f(&state.tasks)
         }
     }
@@ -1339,7 +1356,10 @@ impl ThreeLaneWorker {
 
         // Take a snapshot under the state lock (bounded work, no allocs).
         let snapshot = {
-            let state = self.state.lock();
+            let state = self
+                .state
+                .lock()
+                .expect("lock poisoned");
             StateSnapshot::from_runtime_state(&state)
         };
 
@@ -1987,7 +2007,10 @@ impl ThreeLaneWorker {
                 // Map Outcome<(), ()> to Outcome<(), Error> for record.complete()
                 let task_outcome = outcome
                     .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
-                let mut state = self.state.lock();
+                let mut state = self
+                    .state
+                    .lock()
+                    .expect("lock poisoned");
                 // Deferred Cx clone: only set task context on completion path (skips 3
                 // Arc increments + decrements on the much more common Pending path).
                 let _cx_guard =
@@ -2157,7 +2180,10 @@ impl ThreeLaneWorker {
 
     fn schedule_ready_finalizers(&self) -> bool {
         let tasks = {
-            let mut state = self.state.lock();
+            let mut state = self
+                .state
+                .lock()
+                .expect("lock poisoned");
             state.drain_ready_async_finalizers()
         };
         if tasks.is_empty() {
@@ -2568,14 +2594,18 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock();
+            let mut guard = state
+                .lock()
+                .expect("lock poisoned");
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
             task_id
         };
         let waiter_id = {
-            let mut guard = state.lock();
+            let mut guard = state
+                .lock()
+                .expect("lock poisoned");
             let (waiter_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -2583,7 +2613,9 @@ mod tests {
         };
 
         {
-            let mut guard = state.lock();
+            let mut guard = state
+                .lock()
+                .expect("lock poisoned");
             if let Some(record) = guard.task_mut(task_id) {
                 record.add_waiter(waiter_id);
             }
@@ -2594,7 +2626,11 @@ mod tests {
 
         worker.execute(task_id);
 
-        let completed = state.lock().task(task_id).is_none();
+        let completed = state
+            .lock()
+            .expect("lock poisoned")
+            .task(task_id)
+            .is_none();
         assert!(completed, "task should be removed after completion");
 
         let scheduled_task = worker.global.pop_ready().map(|pt| pt.task);
@@ -2918,7 +2954,9 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock();
+            let mut guard = state
+                .lock()
+                .expect("lock poisoned");
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -2956,7 +2994,9 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock();
+            let mut guard = state
+                .lock()
+                .expect("lock poisoned");
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -2992,7 +3032,9 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock();
+            let mut guard = state
+                .lock()
+                .expect("lock poisoned");
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -3127,7 +3169,9 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock();
+            let mut guard = state
+                .lock()
+                .expect("lock poisoned");
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -3161,7 +3205,9 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock();
+            let mut guard = state
+                .lock()
+                .expect("lock poisoned");
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -3194,7 +3240,9 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock();
+            let mut guard = state
+                .lock()
+                .expect("lock poisoned");
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -3228,7 +3276,9 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock();
+            let mut guard = state
+                .lock()
+                .expect("lock poisoned");
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -3304,7 +3354,9 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock();
+            let mut guard = state
+                .lock()
+                .expect("lock poisoned");
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -3313,7 +3365,9 @@ mod tests {
 
         // Get the wake_state for direct manipulation
         let wake_state = {
-            let guard = state.lock();
+            let guard = state
+                .lock()
+                .expect("lock poisoned");
             guard
                 .task(task_id)
                 .map(|r| Arc::clone(&r.wake_state))
@@ -4657,14 +4711,18 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock();
+            let mut guard = state
+                .lock()
+                .expect("lock poisoned");
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
             id
         };
         let waiter_id = {
-            let mut guard = state.lock();
+            let mut guard = state
+                .lock()
+                .expect("lock poisoned");
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -4676,7 +4734,9 @@ mod tests {
         };
 
         {
-            let mut guard = state.lock();
+            let mut guard = state
+                .lock()
+                .expect("lock poisoned");
             if let Some(record) = guard.task_mut(task_id) {
                 record.add_waiter(waiter_id);
             }
@@ -4711,14 +4771,18 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock();
+            let mut guard = state
+                .lock()
+                .expect("lock poisoned");
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
             id
         };
         let waiter_id = {
-            let mut guard = state.lock();
+            let mut guard = state
+                .lock()
+                .expect("lock poisoned");
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -4730,7 +4794,9 @@ mod tests {
         };
 
         {
-            let mut guard = state.lock();
+            let mut guard = state
+                .lock()
+                .expect("lock poisoned");
             if let Some(record) = guard.task_mut(task_id) {
                 record.add_waiter(waiter_id);
             }
@@ -4768,14 +4834,18 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock();
+            let mut guard = state
+                .lock()
+                .expect("lock poisoned");
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
             id
         };
         let waiter_id = {
-            let mut guard = state.lock();
+            let mut guard = state
+                .lock()
+                .expect("lock poisoned");
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -4783,7 +4853,9 @@ mod tests {
         };
 
         {
-            let mut guard = state.lock();
+            let mut guard = state
+                .lock()
+                .expect("lock poisoned");
             if let Some(record) = guard.task_mut(task_id) {
                 record.add_waiter(waiter_id);
             }
@@ -4822,7 +4894,9 @@ mod tests {
 
         // 2. Create a task pinned to Worker 0
         let task_id = {
-            let mut guard = state.lock();
+            let mut guard = state
+                .lock()
+                .expect("lock poisoned");
             let region = guard.create_root_region(Budget::INFINITE);
             let (tid, _) = guard
                 .create_task(region, Budget::INFINITE, async { 1 })
@@ -5003,7 +5077,7 @@ mod tests {
 
         // Reset wake_state so we can inject again.
         {
-            let tt = task_table.lock();
+            let tt = task_table.lock().unwrap();
             if let Some(record) = tt.task(task_id) {
                 record.wake_state.clear();
             }
@@ -5031,7 +5105,7 @@ mod tests {
             Budget::INFINITE,
         )));
         {
-            let mut tt = task_table.lock();
+            let mut tt = task_table.lock().unwrap();
             if let Some(record) = tt.task_mut(task_id) {
                 record.cx_inner = Some(cx_inner.clone());
             }

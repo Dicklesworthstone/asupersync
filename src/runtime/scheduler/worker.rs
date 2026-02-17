@@ -603,7 +603,7 @@ impl Parker {
         self.inner
             .mutex
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("lock poisoned")
     }
 
     /// Creates a new parker.
@@ -630,7 +630,7 @@ impl Parker {
                 .inner
                 .cvar
                 .wait(guard)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                .expect("lock poisoned");
         }
         drop(guard);
     }
@@ -647,7 +647,7 @@ impl Parker {
             .wait_timeout_while(self.lock_unpoisoned(), duration, |()| {
                 !self.inner.notified.swap(false, Ordering::Acquire)
             })
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .expect("lock poisoned");
         drop(guard);
     }
 

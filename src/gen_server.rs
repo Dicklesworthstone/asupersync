@@ -2056,7 +2056,7 @@ mod tests {
 
         let (client_handle, client_stored) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
-                *client_cx_cell_for_task.lock() = Some(cx.clone());
+                *client_cx_cell_for_task.lock().unwrap() = Some(cx.clone());
                 server_ref.call(&cx, CounterCall::Get).await
             })
             .unwrap();
@@ -2176,7 +2176,7 @@ mod tests {
 
         let (client_handle, client_stored) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
-                *client_cx_cell_for_task.lock() = Some(cx.clone());
+                *client_cx_cell_for_task.lock().unwrap() = Some(cx.clone());
                 server_ref.cast(&cx, CounterCast::Reset).await
             })
             .unwrap();
@@ -2600,7 +2600,7 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
             let seen = Arc::clone(&self.seen);
             Box::pin(async move {
-                seen.lock().push(format!("{msg:?}"));
+                seen.lock().unwrap().push(format!("{msg:?}"));
             })
         }
     }
@@ -2858,7 +2858,7 @@ mod tests {
         runtime.scheduler.lock().schedule(server_task_id, 0);
         runtime.run_until_quiescent();
 
-        let seen = seen.lock();
+        let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 3);
         assert!(seen[0].contains("Down"));
         assert!(seen[1].contains("Exit"));
@@ -2935,7 +2935,7 @@ mod tests {
             runtime.scheduler.lock().schedule(server_task_id, 0);
             runtime.run_until_quiescent();
 
-            let out = events.lock().clone();
+            let out = events.lock().unwrap().clone();
             out
         }
 
@@ -3669,12 +3669,12 @@ mod tests {
             type Info = SystemMsg;
 
             fn on_start(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-                self.phases.lock().push("init");
+                self.phases.lock().unwrap().push("init");
                 Box::pin(async {})
             }
 
             fn on_stop(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-                self.phases.lock().push("stop");
+                self.phases.lock().unwrap().push("stop");
                 Box::pin(async {})
             }
 
@@ -3728,7 +3728,7 @@ mod tests {
         runtime.run_until_idle();
 
         {
-            let recorded = phases_clone.lock();
+            let recorded = phases_clone.lock().unwrap();
 
             // Stop must always run
             assert!(
@@ -3865,7 +3865,7 @@ mod tests {
         let (c1_handle, c1_stored) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
                 let r = server_ref_1.call(&cx, CounterCall::Add(10)).await;
-                *result_1_clone.lock() = Some(r);
+                *result_1_clone.lock().unwrap() = Some(r);
             })
             .unwrap();
         let c1_id = c1_handle.task_id();
@@ -3877,7 +3877,7 @@ mod tests {
         let (c2_handle, c2_stored) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
                 let r = server_ref_2.call(&cx, CounterCall::Add(20)).await;
-                *result_2_clone.lock() = Some(r);
+                *result_2_clone.lock().unwrap() = Some(r);
             })
             .unwrap();
         let c2_id = c2_handle.task_id();
@@ -3906,7 +3906,7 @@ mod tests {
         // because the server shut down. The first call may have succeeded before stop.
         // All outcomes are acceptable: Ok (processed before stop), ServerStopped,
         // Cancelled, or NoReply.
-        drop(result_2.lock());
+        drop(result_2.lock().unwrap());
 
         crate::test_complete!("conformance_cancel_propagation_to_queued_calls");
     }
@@ -3975,7 +3975,7 @@ mod tests {
         let (client, client_stored) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
                 let r = server_ref_for_call.call(&cx, CounterCall::Add(42)).await;
-                *call_result_clone.lock() = Some(r);
+                *call_result_clone.lock().unwrap() = Some(r);
             })
             .unwrap();
         let client_id = client.task_id();
@@ -3998,7 +3998,7 @@ mod tests {
         runtime.run_until_idle();
 
         // Phase 2: Verify the call result.
-        let call_r = call_result.lock();
+        let call_r = call_result.lock().unwrap();
         if let Some(ref r) = *call_r {
             match r {
                 Ok(value) => assert_eq!(*value, 42, "counter should be 42 after Add(42)"),
@@ -4051,7 +4051,7 @@ mod tests {
                 let (ch, cs) = scope
                     .spawn(&mut runtime.state, &cx, move |cx| async move {
                         if let Ok(val) = server_ref.call(&cx, CounterCall::Add(i * 10)).await {
-                            results_clone.lock().push(val);
+                            results_clone.lock().unwrap().push(val);
                         }
                     })
                     .unwrap();
@@ -4085,7 +4085,7 @@ mod tests {
             runtime.scheduler.lock().schedule(server_task_id, 0);
             runtime.run_until_quiescent();
 
-            let r = results.lock().clone();
+            let r = results.lock().unwrap().clone();
             r
         }
 
@@ -4179,7 +4179,7 @@ mod tests {
         let (ch, cs) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
                 if let Ok(val) = result_ref.call(&cx, CounterCall::Get).await {
-                    *result_clone.lock() = Some(val);
+                    *result_clone.lock().unwrap() = Some(val);
                 }
             })
             .unwrap();
@@ -4202,7 +4202,7 @@ mod tests {
         // The server should have processed Set(2), then Set(100).
         // Set(1) was evicted. Final count = 100.
         assert_eq!(
-            *result.lock(),
+            *result.lock().unwrap(),
             Some(100),
             "DropOldest should evict oldest, keeping newest"
         );
@@ -4263,7 +4263,7 @@ mod tests {
         let (ch, cs) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
                 let r = server_ref.call(&cx, ()).await;
-                *call_result_clone.lock() = Some(r);
+                *call_result_clone.lock().unwrap() = Some(r);
             })
             .unwrap();
         let client_id = ch.task_id();
@@ -4284,7 +4284,7 @@ mod tests {
         runtime.run_until_idle();
 
         // The client should have received an error since the server aborted.
-        if let Some(ref result) = *call_result.lock() {
+        if let Some(ref result) = *call_result.lock().unwrap() {
             assert!(result.is_err(), "aborted reply should result in call error");
         }
 
@@ -4356,7 +4356,7 @@ mod tests {
         let (ch, cs) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
                 let r = server_ref.call(&cx, 21).await;
-                *call_result_clone.lock() = Some(r);
+                *call_result_clone.lock().unwrap() = Some(r);
             })
             .unwrap();
         let client_id = ch.task_id();
@@ -4384,7 +4384,7 @@ mod tests {
 
         // Verify the caller received the correct value.
         {
-            let r = call_result.lock();
+            let r = call_result.lock().unwrap();
             match r.as_ref() {
                 Some(Ok(value)) => assert_eq!(*value, 42, "21 * 2 = 42"),
                 other => unreachable!("expected Ok(42), got {other:?}"),
@@ -4451,7 +4451,7 @@ mod tests {
         let (ch, cs) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
                 let r = server_ref.call(&cx, ()).await;
-                *call_err_clone.lock() = Some(r);
+                *call_err_clone.lock().unwrap() = Some(r);
             })
             .unwrap();
         let client_id = ch.task_id();
@@ -4479,7 +4479,7 @@ mod tests {
 
         // Caller should see an error, not Ok.
         {
-            let r = call_err.lock();
+            let r = call_err.lock().unwrap();
             match r.as_ref() {
                 Some(Err(_)) => { /* expected: aborted reply -> error */ }
                 other => unreachable!("expected call error after abort, got {other:?}"),
