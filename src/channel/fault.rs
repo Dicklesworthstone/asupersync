@@ -39,7 +39,8 @@
 //! ```
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use crate::channel::mpsc::{SendError, Sender};
 use crate::cx::Cx;
@@ -218,7 +219,7 @@ impl<T: Clone> FaultSender<T> {
         let should_reorder;
         let should_duplicate;
         {
-            let mut rng = self.rng.lock().expect("fault rng lock poisoned");
+            let mut rng = self.rng.lock();
             should_reorder = rng.should_inject(self.config.reorder_probability);
             should_duplicate = rng.should_inject(self.config.duplication_probability);
         }
@@ -226,7 +227,7 @@ impl<T: Clone> FaultSender<T> {
         if should_reorder {
             self.record_reorder();
             let needs_flush = {
-                let mut buffer = self.reorder_buffer.lock().expect("reorder buffer poisoned");
+                let mut buffer = self.reorder_buffer.lock();
                 buffer.push(value);
                 buffer.len() >= self.config.reorder_buffer_size
             };
@@ -270,7 +271,7 @@ impl<T: Clone> FaultSender<T> {
     #[allow(clippy::significant_drop_tightening)]
     pub async fn flush(&self, cx: &Cx) -> Result<(), SendError<()>> {
         let mut messages = {
-            let mut buffer = self.reorder_buffer.lock().expect("reorder buffer poisoned");
+            let mut buffer = self.reorder_buffer.lock();
             // Replace with a freshly pre-sized buffer so subsequent sends keep a
             // stable reorder allocation profile even after repeated flushes.
             std::mem::replace(
@@ -285,7 +286,7 @@ impl<T: Clone> FaultSender<T> {
 
         // Shuffle the buffer.
         {
-            let mut rng = self.rng.lock().expect("fault rng lock poisoned");
+            let mut rng = self.rng.lock();
             shuffle_vec(&mut messages, &mut rng);
         }
 
@@ -304,7 +305,7 @@ impl<T: Clone> FaultSender<T> {
                 Err(err) => {
                     // Preserve undelivered messages for eventual delivery after
                     // the caller resolves backpressure/disconnect conditions.
-                    let mut buffer = self.reorder_buffer.lock().expect("reorder buffer poisoned");
+                    let mut buffer = self.reorder_buffer.lock();
                     match err {
                         SendError::Disconnected(value) => {
                             buffer.push(value);
@@ -341,7 +342,7 @@ impl<T: Clone> FaultSender<T> {
 
     /// Returns the number of messages currently buffered for reordering.
     pub fn buffered_count(&self) -> usize {
-        self.reorder_buffer.lock().map_or(0, |b| b.len())
+        self.reorder_buffer.lock().len()
     }
 
     /// Returns a reference to the underlying sender.
@@ -623,7 +624,6 @@ mod tests {
         let cap = fault_tx
             .reorder_buffer
             .lock()
-            .expect("reorder buffer poisoned")
             .capacity();
         assert!(
             cap >= buffer_size,
