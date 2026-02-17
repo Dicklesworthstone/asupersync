@@ -53,6 +53,15 @@ fn request_with_many_headers(header_count: usize) -> Vec<u8> {
     request
 }
 
+/// Build a pipelined HTTP/1.1 request stream for keep-alive decode benchmarks.
+fn pipelined_requests(request_count: usize) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(SIMPLE_GET_REQUEST.len() * request_count);
+    for _ in 0..request_count {
+        buf.extend_from_slice(SIMPLE_GET_REQUEST);
+    }
+    buf
+}
+
 fn bench_http1_parsing(c: &mut Criterion) {
     let mut group = c.benchmark_group("http1/parse");
 
@@ -107,6 +116,34 @@ fn bench_http1_parsing(c: &mut Criterion) {
                     |(mut codec, mut buf)| {
                         let result = codec.decode(&mut buf);
                         black_box(result)
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    // Keep-alive/pipelined decode throughput: one connection, many in-buffer requests.
+    for &request_count in &[8usize, 32, 128] {
+        let stream = pipelined_requests(request_count);
+        group.throughput(Throughput::Elements(request_count as u64));
+        group.bench_with_input(
+            BenchmarkId::new("keepalive_pipeline", request_count),
+            &stream,
+            |b, stream| {
+                b.iter_batched(
+                    || {
+                        let codec = Http1Codec::new();
+                        let buf = BytesMut::from(&stream[..]);
+                        (codec, buf)
+                    },
+                    |(mut codec, mut buf)| {
+                        let mut decoded = 0usize;
+                        while let Some(req) = codec.decode(&mut buf).expect("decode succeeds") {
+                            black_box(req);
+                            decoded += 1;
+                        }
+                        black_box(decoded)
                     },
                     BatchSize::SmallInput,
                 )

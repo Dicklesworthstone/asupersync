@@ -524,6 +524,54 @@ fn bench_scheduler_throughput(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_scheduler_capacity_profiles(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scheduler/capacity_profiles");
+    group.sample_size(30);
+
+    const BURST_TASKS: usize = 10_000;
+    let profiles: [(&str, Option<usize>); 4] = [
+        ("default", None),
+        ("cap_256", Some(256)),
+        ("cap_512", Some(512)),
+        ("cap_1024", Some(1024)),
+    ];
+
+    for (profile, capacity) in profiles {
+        group.throughput(Throughput::Elements(BURST_TASKS as u64));
+        group.bench_with_input(
+            BenchmarkId::new("mixed_lane_burst", profile),
+            &capacity,
+            |b, &capacity| {
+                b.iter(|| {
+                    let mut scheduler =
+                        capacity.map_or_else(Scheduler::new, Scheduler::with_capacity);
+
+                    // Realistic burst profile:
+                    // - mostly ready tasks
+                    // - periodic cancel promotions
+                    // - periodic timed work
+                    for i in 0..BURST_TASKS as u32 {
+                        match i % 10 {
+                            0 => scheduler.schedule_cancel(task(i), 96),
+                            1 => scheduler
+                                .schedule_timed(task(i), Time::from_nanos(u64::from(i) * 1_000)),
+                            _ => scheduler.schedule(task(i), (i % 32) as u8),
+                        }
+                    }
+
+                    let mut popped = 0;
+                    while scheduler.pop().is_some() {
+                        popped += 1;
+                    }
+                    black_box(popped)
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
 // =============================================================================
 // PARKER BENCHMARKS
 // =============================================================================
@@ -1084,6 +1132,7 @@ criterion_group!(
     bench_lane_priority,
     bench_work_stealing,
     bench_scheduler_throughput,
+    bench_scheduler_capacity_profiles,
     bench_parker,
     bench_intrusive_ring,
     bench_intrusive_stack,
