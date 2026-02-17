@@ -1227,7 +1227,6 @@ impl<Caps> Cx<Caps> {
     pub fn checkpoint_state(&self) -> crate::types::CheckpointState {
         self.inner
             .read()
-            .expect("lock poisoned")
             .checkpoint_state
             .clone()
     }
@@ -1520,7 +1519,6 @@ impl<Caps> Cx<Caps> {
     pub fn diagnostic_context(&self) -> DiagnosticContext {
         self.observability
             .read()
-            .expect("lock poisoned")
             .context
             .clone()
     }
@@ -1542,7 +1540,6 @@ impl<Caps> Cx<Caps> {
     pub fn log_collector(&self) -> Option<LogCollector> {
         self.observability
             .read()
-            .expect("lock poisoned")
             .collector
             .clone()
     }
@@ -1558,7 +1555,6 @@ impl<Caps> Cx<Caps> {
     pub fn trace_buffer(&self) -> Option<TraceBufferHandle> {
         self.observability
             .read()
-            .expect("lock poisoned")
             .trace
             .clone()
     }
@@ -1865,7 +1861,6 @@ impl<Caps> Cx<Caps> {
         let cancel_reason = self
             .inner
             .read()
-            .expect("lock poisoned")
             .cancel_reason
             .clone();
         let chain: Vec<CancelReason> = cancel_reason

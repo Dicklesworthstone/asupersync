@@ -1731,8 +1731,7 @@ mod tests {
                 .cx_inner
                 .as_ref()
                 .expect("primary task must have shared Cx inner")
-                .read()
-                .expect("lock poisoned");
+                .read();
             (
                 inner.cancel_requested,
                 inner.cancel_reason.as_ref().map(|r| r.kind),
