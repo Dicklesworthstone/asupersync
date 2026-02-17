@@ -61,6 +61,7 @@ use crate::time::TimerDriverHandle;
 use crate::tracing_compat::{error, trace};
 use crate::types::{CxInner, TaskId, Time};
 use crate::util::DetRng;
+use parking_lot::Mutex as ParkingMutex;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -75,6 +76,8 @@ const DEFAULT_STEAL_BATCH_SIZE: usize = 4;
 const DEFAULT_ENABLE_PARKING: bool = true;
 const SPIN_LIMIT: u32 = 64;
 const YIELD_LIMIT: u32 = 16;
+
+type LocalReadyQueue = ParkingMutex<Vec<TaskId>>;
 
 /// Coordination for waking workers.
 #[derive(Debug)]
@@ -123,7 +126,7 @@ thread_local! {
     ///
     /// Local tasks must never be stolen across workers. This queue is only
     /// drained by the owner worker, never exposed to stealers.
-    static CURRENT_LOCAL_READY: RefCell<Option<Arc<Mutex<Vec<TaskId>>>>> =
+    static CURRENT_LOCAL_READY: RefCell<Option<Arc<LocalReadyQueue>>> =
         const { RefCell::new(None) };
     /// Thread-local worker id for routing local tasks.
     static CURRENT_WORKER_ID: RefCell<Option<WorkerId>> = const { RefCell::new(None) };
@@ -176,11 +179,11 @@ impl Drop for ScopedWorkerId {
 }
 
 pub(crate) struct ScopedLocalReady {
-    prev: Option<Arc<Mutex<Vec<TaskId>>>>,
+    prev: Option<Arc<LocalReadyQueue>>,
 }
 
 impl ScopedLocalReady {
-    pub(crate) fn new(queue: Arc<Mutex<Vec<TaskId>>>) -> Self {
+    pub(crate) fn new(queue: Arc<LocalReadyQueue>) -> Self {
         let prev = CURRENT_LOCAL_READY.with(|cell| cell.replace(Some(queue)));
         Self { prev }
     }
@@ -200,22 +203,20 @@ impl Drop for ScopedLocalReady {
 pub(crate) fn schedule_local_task(task: TaskId) -> bool {
     CURRENT_LOCAL_READY.with(|cell| {
         cell.borrow().as_ref().is_some_and(|queue| {
-            queue.lock().expect("local_ready lock poisoned").push(task);
+            queue.lock().push(task);
             true
         })
     })
 }
 
-fn remove_from_local_ready(queue: &Arc<Mutex<Vec<TaskId>>>, task: TaskId) -> bool {
-    if let Ok(mut queue) = queue.lock() {
-        let mut removed = false;
-        while let Some(pos) = queue.iter().position(|t| *t == task) {
-            queue.swap_remove(pos);
-            removed = true;
-        }
-        return removed;
+fn remove_from_local_ready(queue: &Arc<LocalReadyQueue>, task: TaskId) -> bool {
+    let mut local_ready = queue.lock();
+    let mut removed = false;
+    while let Some(pos) = local_ready.iter().position(|t| *t == task) {
+        local_ready.swap_remove(pos);
+        removed = true;
     }
-    false
+    removed
 }
 
 pub(crate) fn remove_from_current_local_ready(task: TaskId) -> bool {
@@ -288,7 +289,7 @@ pub struct ThreeLaneScheduler {
     /// Per-worker local schedulers for routing pinned local tasks.
     local_schedulers: Vec<Arc<Mutex<PriorityScheduler>>>,
     /// Per-worker non-stealable queues for local (`!Send`) tasks.
-    local_ready: Vec<Arc<Mutex<Vec<TaskId>>>>,
+    local_ready: Vec<Arc<LocalReadyQueue>>,
     /// Per-worker parkers for targeted wakeups.
     parkers: Vec<Parker>,
     /// Worker handles for thread spawning.
@@ -379,7 +380,7 @@ impl ThreeLaneScheduler {
         let mut parkers = Vec::with_capacity(worker_count);
         let mut local_schedulers: Vec<Arc<Mutex<PriorityScheduler>>> =
             Vec::with_capacity(worker_count);
-        let mut local_ready: Vec<Arc<Mutex<Vec<TaskId>>>> = Vec::with_capacity(worker_count);
+        let mut local_ready: Vec<Arc<LocalReadyQueue>> = Vec::with_capacity(worker_count);
 
         // Get IO driver and timer driver from runtime state
         let (io_driver, timer_driver) = {
@@ -393,7 +394,7 @@ impl ThreeLaneScheduler {
         }
         // Create non-stealable local queues for !Send tasks
         for _ in 0..worker_count {
-            local_ready.push(Arc::new(Mutex::new(Vec::new())));
+            local_ready.push(Arc::new(LocalReadyQueue::new(Vec::new())));
         }
 
         // Create parkers first
@@ -733,7 +734,7 @@ impl ThreeLaneScheduler {
             // 2. Try routing to pinned worker (cross-thread spawn)
             if let Some(worker_id) = pinned_worker {
                 if let Some(queue) = self.local_ready.get(worker_id) {
-                    queue.lock().expect("local_ready lock poisoned").push(task);
+                    queue.lock().push(task);
                     self.coordinator.wake_worker(worker_id);
                     return;
                 }
@@ -804,7 +805,7 @@ impl ThreeLaneScheduler {
             // 2. Try routing to pinned worker (cross-thread wake)
             if let Some(worker_id) = pinned_worker {
                 if let Some(queue) = self.local_ready.get(worker_id) {
-                    queue.lock().expect("local_ready lock poisoned").push(task);
+                    queue.lock().push(task);
                     self.coordinator.wake_worker(worker_id);
                     return;
                 }
@@ -880,12 +881,12 @@ pub struct ThreeLaneWorker {
     ///
     /// Local tasks are pinned to their owner worker and must never be stolen.
     /// This queue is only drained by the owner worker during `try_ready_work()`.
-    local_ready: Arc<Mutex<Vec<TaskId>>>,
+    local_ready: Arc<LocalReadyQueue>,
     /// References to all workers' non-stealable local queues.
     ///
     /// Used to route local waiters to their owner worker's queue when a task
     /// completes and needs to wake a pinned waiter on a different worker.
-    all_local_ready: Vec<Arc<Mutex<Vec<TaskId>>>>,
+    all_local_ready: Vec<Arc<LocalReadyQueue>>,
     /// Global injection queue.
     pub global: Arc<GlobalInjector>,
     /// Shared runtime state.
@@ -1074,7 +1075,7 @@ impl ThreeLaneWorker {
                     self.local.lock().map_or((false, None), |local| {
                         (local.has_runnable_work(now), local.next_deadline())
                     });
-                let local_ready_has_work = self.local_ready.lock().is_ok_and(|q| !q.is_empty());
+                let local_ready_has_work = !self.local_ready.lock().is_empty();
                 if self.global.has_runnable_work(now) || local_has_runnable || local_ready_has_work
                 {
                     break;
@@ -1225,7 +1226,7 @@ impl ThreeLaneWorker {
         }
 
         // ── PHASE 2: Fast ready paths (no PriorityScheduler lock) ────
-        if let Ok(mut queue) = self.local_ready.try_lock() {
+        if let Some(mut queue) = self.local_ready.try_lock() {
             if let Some(task) = queue.pop() {
                 self.cancel_streak = 0;
                 self.preemption_metrics.ready_dispatches += 1;
@@ -1454,7 +1455,7 @@ impl ThreeLaneWorker {
     pub(crate) fn try_ready_work(&mut self) -> Option<TaskId> {
         // Highest priority: drain non-stealable local (!Send) tasks first.
         // These tasks are pinned to this worker and cannot run elsewhere.
-        if let Ok(mut queue) = self.local_ready.try_lock() {
+        if let Some(mut queue) = self.local_ready.try_lock() {
             if let Some(task) = queue.pop() {
                 return Some(task);
             }
@@ -1715,10 +1716,7 @@ impl ThreeLaneWorker {
                     if record.is_local() {
                         if let Some(worker_id) = record.pinned_worker() {
                             if let Some(queue) = self.all_local_ready.get(worker_id) {
-                                queue
-                                    .lock()
-                                    .expect("local_ready lock poisoned")
-                                    .push(waiter);
+                                queue.lock().push(waiter);
                                 self.coordinator.wake_worker(worker_id);
                             } else {
                                 // SAFETY: Invalid worker id for a local waiter means
@@ -1737,10 +1735,7 @@ impl ThreeLaneWorker {
                         } else {
                             // Local task without a pinned worker yet.
                             // Schedule on the current worker's local queue.
-                            self.local_ready
-                                .lock()
-                                .expect("local_ready lock poisoned")
-                                .push(waiter);
+                            self.local_ready.lock().push(waiter);
                             self.parker.unpark();
                         }
                     } else {
@@ -2061,10 +2056,7 @@ impl ThreeLaneWorker {
                         } else {
                             // Push to non-stealable local_ready queue.
                             // Local (!Send) tasks must never enter stealable structures.
-                            self.local_ready
-                                .lock()
-                                .expect("local_ready lock poisoned")
-                                .push(task_id);
+                            self.local_ready.lock().push(task_id);
                         }
                         self.parker.unpark();
                     } else {
@@ -2169,7 +2161,7 @@ struct ThreeLaneLocalWaker {
     task_id: TaskId,
     wake_state: Arc<crate::record::task::TaskWakeState>,
     local: Arc<Mutex<PriorityScheduler>>,
-    local_ready: Arc<Mutex<Vec<TaskId>>>,
+    local_ready: Arc<LocalReadyQueue>,
     parker: Parker,
     cx_inner: Weak<RwLock<CxInner>>,
 }
@@ -2181,10 +2173,7 @@ impl ThreeLaneLocalWaker {
             if !schedule_local_task(self.task_id) {
                 // Cross-thread wake: push to the owner's non-stealable local_ready queue.
                 // Local tasks must never enter stealable structures.
-                self.local_ready
-                    .lock()
-                    .expect("local_ready lock poisoned")
-                    .push(self.task_id);
+                self.local_ready.lock().push(self.task_id);
             }
             self.parker.unpark();
         }
@@ -2257,7 +2246,7 @@ struct ThreeLaneLocalCancelWaker {
     default_priority: u8,
     wake_state: Arc<crate::record::task::TaskWakeState>,
     local: Arc<Mutex<PriorityScheduler>>,
-    local_ready: Arc<Mutex<Vec<TaskId>>>,
+    local_ready: Arc<LocalReadyQueue>,
     parker: Parker,
     cx_inner: Weak<RwLock<CxInner>>,
 }
@@ -2959,7 +2948,7 @@ mod tests {
 
         // Verify task is in worker 0's local_ready queue
         {
-            let queue = local_ready_0.lock().unwrap();
+            let queue = local_ready_0.lock();
             assert_eq!(queue.len(), 1);
             assert_eq!(queue[0], task_id);
             drop(queue);
@@ -2974,7 +2963,7 @@ mod tests {
     #[test]
     fn test_local_cancel_removes_from_local_ready() {
         let task_id = TaskId::new_for_test(1, 0);
-        let local_ready = Arc::new(Mutex::new(vec![task_id]));
+        let local_ready = Arc::new(LocalReadyQueue::new(vec![task_id]));
         let local = Arc::new(Mutex::new(PriorityScheduler::new()));
         let wake_state = Arc::new(TaskWakeState::new());
         let cx_inner = Arc::new(RwLock::new(CxInner::new(
@@ -3000,7 +2989,7 @@ mod tests {
 
         waker.schedule();
 
-        let queue = local_ready.lock().expect("local_ready lock poisoned");
+        let queue = local_ready.lock();
         assert!(
             !queue.contains(&task_id),
             "local_ready should not retain cancelled task"
@@ -3019,7 +3008,7 @@ mod tests {
     #[test]
     fn schedule_cancel_on_current_local_removes_local_ready() {
         let task_id = TaskId::new_for_test(1, 0);
-        let local_ready = Arc::new(Mutex::new(vec![task_id]));
+        let local_ready = Arc::new(LocalReadyQueue::new(vec![task_id]));
         let local = Arc::new(Mutex::new(PriorityScheduler::new()));
 
         let _local_ready_guard = ScopedLocalReady::new(Arc::clone(&local_ready));
@@ -3028,7 +3017,7 @@ mod tests {
         let scheduled = schedule_cancel_on_current_local(task_id, 7);
         assert!(scheduled, "should schedule via current local scheduler");
 
-        let queue = local_ready.lock().expect("local_ready lock poisoned");
+        let queue = local_ready.lock();
         assert!(
             !queue.contains(&task_id),
             "local_ready should not retain cancelled task"
@@ -3110,11 +3099,7 @@ mod tests {
             .pop_ready_only();
         assert!(popped.is_none(), "local task must not enter ready lane");
         assert!(
-            !worker
-                .local_ready
-                .lock()
-                .expect("local_ready lock poisoned")
-                .contains(&task_id),
+            !worker.local_ready.lock().contains(&task_id),
             "schedule_local must not route local tasks"
         );
     }
@@ -3151,11 +3136,7 @@ mod tests {
             .pop_timed_only(Time::from_nanos(100));
         assert!(popped.is_none(), "local task must not enter timed lane");
         assert!(
-            !worker
-                .local_ready
-                .lock()
-                .expect("local_ready lock poisoned")
-                .contains(&task_id),
+            !worker.local_ready.lock().contains(&task_id),
             "schedule_local_timed must not route local tasks"
         );
     }
@@ -4327,7 +4308,7 @@ mod tests {
         let priority_sched = Arc::new(Mutex::new(PriorityScheduler::new()));
         let parker = Parker::new();
 
-        let local_ready = Arc::new(Mutex::new(Vec::new()));
+        let local_ready = Arc::new(LocalReadyQueue::new(Vec::new()));
 
         let waker = Waker::from(Arc::new(ThreeLaneLocalWaker {
             task_id,
@@ -4345,7 +4326,7 @@ mod tests {
 
         // Task should be in local_ready, not PriorityScheduler.
         {
-            let queue = local_ready.lock().unwrap();
+            let queue = local_ready.lock();
             assert_eq!(queue.len(), 1, "local_ready should have 1 task");
             assert_eq!(queue[0], task_id);
             drop(queue);
@@ -4366,7 +4347,7 @@ mod tests {
         let priority_sched = Arc::new(Mutex::new(PriorityScheduler::new()));
         let parker = Parker::new();
 
-        let local_ready = Arc::new(Mutex::new(Vec::new()));
+        let local_ready = Arc::new(LocalReadyQueue::new(Vec::new()));
 
         let waker = Waker::from(Arc::new(ThreeLaneLocalWaker {
             task_id,
@@ -4381,7 +4362,7 @@ mod tests {
 
         // Task should be in local_ready (cross-thread fallback).
         {
-            let queue = local_ready.lock().unwrap();
+            let queue = local_ready.lock();
             assert_eq!(queue.len(), 1, "local_ready should have 1 task");
             assert_eq!(queue[0], task_id);
             drop(queue);
@@ -4441,7 +4422,7 @@ mod tests {
         let local_task = TaskId::new_for_test(1, 0);
         let fast_task = TaskId::new_for_test(2, 0);
 
-        worker.local_ready.lock().expect("lock").push(local_task);
+        worker.local_ready.lock().push(local_task);
         worker.fast_queue.push(fast_task);
 
         let first = worker.try_ready_work();
@@ -4464,11 +4445,7 @@ mod tests {
 
         let local_task = TaskId::new_for_test(1, 1);
 
-        workers[0]
-            .local_ready
-            .lock()
-            .expect("lock")
-            .push(local_task);
+        workers[0].local_ready.lock().push(local_task);
 
         let stolen = workers[1].try_steal();
         assert!(
@@ -4492,11 +4469,7 @@ mod tests {
 
         let local_task = TaskId::new_for_test(1, 1);
 
-        workers[0]
-            .local_ready
-            .lock()
-            .expect("lock")
-            .push(local_task);
+        workers[0].local_ready.lock().push(local_task);
 
         let stolen = workers[1].try_steal();
         assert!(
@@ -4514,7 +4487,7 @@ mod tests {
         let local_tasks: Vec<TaskId> = (1..=10).map(|i| TaskId::new_for_test(1, i)).collect();
 
         {
-            let mut queue = workers[0].local_ready.lock().expect("lock");
+            let mut queue = workers[0].local_ready.lock();
             for &task in &local_tasks {
                 queue.push(task);
             }
@@ -4577,7 +4550,7 @@ mod tests {
         let worker = &mut workers[0];
 
         let task = TaskId::new_for_test(1, 1);
-        worker.local_ready.lock().expect("lock").push(task);
+        worker.local_ready.lock().push(task);
 
         let found = worker.next_task();
         assert_eq!(found, Some(task), "next_task should find local_ready task");
@@ -4585,14 +4558,14 @@ mod tests {
 
     #[test]
     fn schedule_local_task_uses_tls() {
-        let queue = Arc::new(Mutex::new(Vec::new()));
+        let queue = Arc::new(LocalReadyQueue::new(Vec::new()));
         let _guard = ScopedLocalReady::new(Arc::clone(&queue));
 
         let task = TaskId::new_for_test(1, 1);
         let scheduled = schedule_local_task(task);
         assert!(scheduled, "should succeed when TLS is set");
 
-        let tasks = queue.lock().expect("lock");
+        let tasks = queue.lock();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0], task);
         drop(tasks);
@@ -4648,7 +4621,7 @@ mod tests {
 
         worker.execute(task_id);
 
-        let queued: Vec<TaskId> = local_ready.lock().unwrap().drain(..).collect();
+        let queued: Vec<TaskId> = local_ready.lock().drain(..).collect();
         assert!(
             queued.contains(&waiter_id),
             "local waiter should be routed to current worker's local_ready, got {queued:?}"
@@ -4702,17 +4675,13 @@ mod tests {
 
         primary_worker.execute(task_id);
 
-        let queued: Vec<TaskId> = worker1_local_ready.lock().unwrap().drain(..).collect();
+        let queued: Vec<TaskId> = worker1_local_ready.lock().drain(..).collect();
         assert!(
             queued.contains(&waiter_id),
             "local waiter should be routed to owner worker 1, got {queued:?}"
         );
         assert!(
-            !primary_worker
-                .local_ready
-                .lock()
-                .unwrap()
-                .contains(&waiter_id),
+            !primary_worker.local_ready.lock().contains(&waiter_id),
             "local waiter should NOT be in worker 0's local_ready"
         );
         assert!(
@@ -4765,7 +4734,7 @@ mod tests {
         );
         assert_eq!(popped.unwrap().task, waiter_id);
         assert!(
-            worker.local_ready.lock().unwrap().is_empty(),
+            worker.local_ready.lock().is_empty(),
             "global waiter should NOT be in local_ready"
         );
     }
@@ -4802,7 +4771,7 @@ mod tests {
         };
 
         // 3. Simulate being Worker 1
-        let worker_1_ready = Arc::new(Mutex::new(Vec::new()));
+        let worker_1_ready = Arc::new(LocalReadyQueue::new(Vec::new()));
         let _tls_guard = ScopedLocalReady::new(worker_1_ready.clone());
         let _worker_guard = ScopedWorkerId::new(1);
 
@@ -4811,11 +4780,11 @@ mod tests {
         scheduler.wake(task_id, 100);
 
         // 5. Verify where it went
-        let worker_1_has_it = worker_1_ready.lock().unwrap().contains(&task_id);
+        let worker_1_has_it = worker_1_ready.lock().contains(&task_id);
 
         // Check Worker 0's queue
         let worker_0_ready = scheduler.local_ready[0].clone();
-        let worker_0_has_it = worker_0_ready.lock().unwrap().contains(&task_id);
+        let worker_0_has_it = worker_0_ready.lock().contains(&task_id);
 
         assert!(!worker_1_has_it, "Task incorrectly scheduled on Worker 1");
         assert!(worker_0_has_it, "Task correctly routed to Worker 0");

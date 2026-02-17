@@ -1231,7 +1231,7 @@ mod tests {
     use crate::types::{CancelKind, Outcome};
     use crate::util::ArenaIndex;
     use futures_lite::future::block_on;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     fn test_cx() -> Cx {
         Cx::new(
@@ -1467,7 +1467,7 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let local_ready = Arc::new(Mutex::new(Vec::new()));
+        let local_ready = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let _local_ready_guard =
             crate::runtime::scheduler::three_lane::ScopedLocalReady::new(Arc::clone(&local_ready));
         let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(1);
@@ -1515,7 +1515,7 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let local_ready = Arc::new(Mutex::new(Vec::new()));
+        let local_ready = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let _local_ready_guard =
             crate::runtime::scheduler::three_lane::ScopedLocalReady::new(Arc::clone(&local_ready));
         let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(1);
@@ -1525,13 +1525,13 @@ mod tests {
             .unwrap();
 
         let queued = {
-            let queue = local_ready.lock().expect("local_ready lock poisoned");
+            let queue = local_ready.lock();
             queue.contains(&handle.task_id())
         };
         assert!(queued, "spawn_local should enqueue into local_ready");
 
         let task_id = {
-            let mut queue = local_ready.lock().expect("local_ready lock poisoned");
+            let mut queue = local_ready.lock();
             queue.remove(0)
         };
 

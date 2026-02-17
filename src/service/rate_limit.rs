@@ -8,7 +8,7 @@ use crate::time::{TimeSource, WallClock};
 use crate::types::Time;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::sync::OnceLock;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -123,7 +123,7 @@ struct RateLimitState {
 
 impl<S: Clone> Clone for RateLimit<S> {
     fn clone(&self) -> Self {
-        let state = self.state.lock().expect("rate limit lock poisoned");
+        let state = self.state.lock();
         Self {
             inner: self.inner.clone(),
             state: Mutex::new(RateLimitState {
@@ -200,7 +200,7 @@ impl<S> RateLimit<S> {
     /// Returns the current number of available tokens.
     #[must_use]
     pub fn available_tokens(&self) -> u64 {
-        self.state.lock().expect("rate limit lock poisoned").tokens
+        self.state.lock().tokens
     }
 
     /// Returns a reference to the inner service.
@@ -251,13 +251,13 @@ impl<S> RateLimit<S> {
 
     /// Refills tokens based on elapsed time.
     fn refill(&self, now: Time) {
-        let mut state = self.state.lock().expect("rate limit lock poisoned");
+        let mut state = self.state.lock();
         self.refill_state(&mut state, now);
     }
 
     /// Tries to acquire a token.
     fn try_acquire(&self) -> bool {
-        let mut state = self.state.lock().expect("rate limit lock poisoned");
+        let mut state = self.state.lock();
         if state.tokens > 0 {
             state.tokens -= 1;
             true
@@ -278,7 +278,7 @@ impl<S> RateLimit<S> {
         S: Service<()>,
     {
         let acquired = {
-            let mut state = self.state.lock().expect("rate limit lock poisoned");
+            let mut state = self.state.lock();
             self.refill_state(&mut state, now);
             if state.tokens > 0 {
                 state.tokens -= 1;
@@ -339,7 +339,7 @@ where
 
         // Single lock: refill + token check (was 2 separate locks).
         let has_tokens = {
-            let mut state = self.state.lock().expect("rate limit lock poisoned");
+            let mut state = self.state.lock();
             self.refill_state(&mut state, now);
             state.tokens > 0
         };
@@ -604,7 +604,7 @@ mod tests {
 
         // Drain all tokens
         {
-            let mut state = svc.state.lock().unwrap();
+            let mut state = svc.state.lock();
             state.tokens = 0;
             state.last_refill = Some(Time::from_secs(0));
         }
@@ -625,7 +625,7 @@ mod tests {
 
         // Start with some tokens
         {
-            let mut state = svc.state.lock().unwrap();
+            let mut state = svc.state.lock();
             state.tokens = 3;
             state.last_refill = Some(Time::from_secs(0));
         }
@@ -645,7 +645,7 @@ mod tests {
         let mut svc =
             RateLimit::with_time_getter(EchoService, 5, Duration::from_secs(1), test_time);
         {
-            let mut state = svc.state.lock().unwrap();
+            let mut state = svc.state.lock();
             state.tokens = 0;
             state.last_refill = Some(Time::from_secs(0));
         }
@@ -667,7 +667,7 @@ mod tests {
         init_test("zero_period_keeps_bucket_full");
         let mut svc = RateLimit::with_time_getter(EchoService, 2, Duration::ZERO, test_time);
         {
-            let mut state = svc.state.lock().unwrap();
+            let mut state = svc.state.lock();
             state.tokens = 0;
             state.last_refill = Some(Time::from_secs(0));
         }
