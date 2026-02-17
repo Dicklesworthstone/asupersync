@@ -1816,11 +1816,7 @@ impl ThreeLaneWorker {
 
                     // 2. Wake waiters and process finalizers (requires full RuntimeState lock)
                     // We expect success here; poisoning aborts the thread, which is acceptable during panic unwind.
-                    let mut state = self
-                        .worker
-                        .state
-                        .lock()
-                        .expect("runtime state lock poisoned");
+                    let mut state = self.worker.state.lock().expect("poisoned");
                     let waiters = state.task_completed(self.task_id);
                     let finalizers = state.drain_ready_async_finalizers();
 
@@ -2626,11 +2622,7 @@ mod tests {
 
         worker.execute(task_id);
 
-        let completed = state
-            .lock()
-            .expect("lock poisoned")
-            .task(task_id)
-            .is_none();
+        let completed = state.lock().expect("poisoned").task(task_id).is_none();
         assert!(completed, "task should be removed after completion");
 
         let scheduled_task = worker.global.pop_ready().map(|pt| pt.task);
