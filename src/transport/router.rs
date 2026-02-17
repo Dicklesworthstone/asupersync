@@ -14,6 +14,7 @@ use crate::sync::OwnedMutexGuard;
 use crate::transport::sink::{SymbolSink, SymbolSinkExt};
 use crate::types::symbol::{ObjectId, Symbol};
 use crate::types::{RegionId, Time};
+use smallvec::{smallvec, SmallVec};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -266,19 +267,23 @@ impl LoadBalancer {
         endpoints: &'a [Arc<Endpoint>],
         object_id: Option<ObjectId>,
     ) -> Option<&'a Arc<Endpoint>> {
-        let available: Vec<_> = endpoints.iter().filter(|e| e.state.can_receive()).collect();
-
-        if available.is_empty() {
-            return None;
-        }
-
         match self.strategy {
             LoadBalanceStrategy::RoundRobin => {
-                let idx = self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize;
-                Some(available[idx % available.len()])
+                let available_len = endpoints.iter().filter(|e| e.state.can_receive()).count();
+                if available_len == 0 {
+                    return None;
+                }
+                let idx =
+                    (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize) % available_len;
+                endpoints.iter().filter(|e| e.state.can_receive()).nth(idx)
             }
 
             LoadBalanceStrategy::WeightedRoundRobin => {
+                let available: SmallVec<[&Arc<Endpoint>; 8]> =
+                    endpoints.iter().filter(|e| e.state.can_receive()).collect();
+                if available.is_empty() {
+                    return None;
+                }
                 let total_weight: u32 = available.iter().map(|e| e.weight).sum();
                 if total_weight == 0 {
                     return available.first().copied();
@@ -297,43 +302,59 @@ impl LoadBalancer {
                 available.last().copied()
             }
 
-            LoadBalanceStrategy::LeastConnections => available
+            LoadBalanceStrategy::LeastConnections => endpoints
                 .iter()
-                .min_by_key(|e| e.connection_count())
-                .copied(),
+                .filter(|e| e.state.can_receive())
+                .min_by_key(|e| e.connection_count()),
 
-            LoadBalanceStrategy::WeightedLeastConnections => available
+            LoadBalanceStrategy::WeightedLeastConnections => endpoints
                 .iter()
+                .filter(|e| e.state.can_receive())
                 .min_by(|a, b| {
                     let a_score = f64::from(a.connection_count()) / f64::from(a.weight.max(1));
                     let b_score = f64::from(b.connection_count()) / f64::from(b.weight.max(1));
                     a_score
                         .partial_cmp(&b_score)
                         .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .copied(),
+                }),
 
             LoadBalanceStrategy::Random => {
+                let available_len = endpoints.iter().filter(|e| e.state.can_receive()).count();
+                if available_len == 0 {
+                    return None;
+                }
                 // Simple LCG random
                 let seed = self.random_seed.fetch_add(1, Ordering::Relaxed);
                 let random = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-                let idx = (random as usize) % available.len();
-                Some(available[idx])
+                let idx = (random as usize) % available_len;
+                endpoints.iter().filter(|e| e.state.can_receive()).nth(idx)
             }
 
             LoadBalanceStrategy::HashBased => object_id.map_or_else(
                 || {
                     // Fall back to round-robin
-                    let idx = self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize;
-                    Some(available[idx % available.len()])
+                    let available_len = endpoints.iter().filter(|e| e.state.can_receive()).count();
+                    if available_len == 0 {
+                        return None;
+                    }
+                    let idx =
+                        (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize) % available_len;
+                    endpoints.iter().filter(|e| e.state.can_receive()).nth(idx)
                 },
                 |oid| {
+                    let available_len = endpoints.iter().filter(|e| e.state.can_receive()).count();
+                    if available_len == 0 {
+                        return None;
+                    }
                     let hash = oid.as_u128() as usize;
-                    Some(available[hash % available.len()])
+                    endpoints
+                        .iter()
+                        .filter(|e| e.state.can_receive())
+                        .nth(hash % available_len)
                 },
             ),
 
-            LoadBalanceStrategy::FirstAvailable => available.first().copied(),
+            LoadBalanceStrategy::FirstAvailable => endpoints.iter().find(|e| e.state.can_receive()),
         }
     }
 }
@@ -559,6 +580,38 @@ impl RoutingTable {
         self.default_route.read().expect("lock poisoned").clone()
     }
 
+    /// Looks up a route without falling back to the default route.
+    ///
+    /// This preserves object/region fallback behavior for compound keys but
+    /// never consults `default_route`.
+    #[must_use]
+    pub fn lookup_without_default(&self, key: &RouteKey) -> Option<RoutingEntry> {
+        if let Some(entry) = self.routes.read().expect("lock poisoned").get(key) {
+            return Some(entry.clone());
+        }
+
+        if let RouteKey::ObjectAndRegion(oid, rid) = key {
+            if let Some(entry) = self
+                .routes
+                .read()
+                .expect("lock poisoned")
+                .get(&RouteKey::Object(*oid))
+            {
+                return Some(entry.clone());
+            }
+            if let Some(entry) = self
+                .routes
+                .read()
+                .expect("lock poisoned")
+                .get(&RouteKey::Region(*rid))
+            {
+                return Some(entry.clone());
+            }
+        }
+
+        None
+    }
+
     /// Prunes expired routes.
     pub fn prune_expired(&self, now: Time) -> usize {
         let mut routes = self.routes.write().expect("lock poisoned");
@@ -656,26 +709,35 @@ impl SymbolRouter {
     /// Routes a symbol to an endpoint.
     pub fn route(&self, symbol: &Symbol) -> Result<RouteResult, RoutingError> {
         let object_id = symbol.object_id();
+        let primary_key = RouteKey::Object(object_id);
 
-        // Build route keys to try, in order of specificity
-        let keys = vec![RouteKey::Object(object_id), RouteKey::Default];
-
-        for key in &keys {
-            if let Some(entry) = self.table.lookup(key) {
-                if let Some(endpoint) = entry.select_endpoint(Some(object_id)) {
-                    // Check local preference
-                    if self.prefer_local {
-                        if let Some(local) = self.local_region {
-                            if endpoint.region == Some(local) {
-                                // Prefer this endpoint
-                            }
+        if let Some(entry) = self.table.lookup_without_default(&primary_key) {
+            if let Some(endpoint) = entry.select_endpoint(Some(object_id)) {
+                // Check local preference
+                if self.prefer_local {
+                    if let Some(local) = self.local_region {
+                        if endpoint.region == Some(local) {
+                            // Prefer this endpoint
                         }
                     }
+                }
 
+                return Ok(RouteResult {
+                    endpoint,
+                    matched_key: primary_key,
+                    is_fallback: false,
+                });
+            }
+        }
+
+        if self.allow_fallback {
+            let fallback_key = RouteKey::Default;
+            if let Some(entry) = self.table.lookup(&fallback_key) {
+                if let Some(endpoint) = entry.select_endpoint(Some(object_id)) {
                     return Ok(RouteResult {
                         endpoint,
-                        matched_key: key.clone(),
-                        is_fallback: *key == RouteKey::Default,
+                        matched_key: fallback_key,
+                        is_fallback: true,
                     });
                 }
             }
@@ -695,16 +757,26 @@ impl SymbolRouter {
     ) -> Result<Vec<RouteResult>, RoutingError> {
         let object_id = symbol.object_id();
 
-        // Get the routing entry
         let key = RouteKey::Object(object_id);
-        let entry = self
-            .table
-            .lookup(&key)
-            .or_else(|| self.table.lookup(&RouteKey::Default))
-            .ok_or_else(|| RoutingError::NoRoute {
-                object_id,
-                reason: "No route for multicast".into(),
-            })?;
+        let (entry, matched_key, is_fallback) =
+            if let Some(entry) = self.table.lookup_without_default(&key) {
+                (entry, key, false)
+            } else if self.allow_fallback {
+                let fallback_key = RouteKey::Default;
+                let fallback =
+                    self.table
+                        .lookup(&fallback_key)
+                        .ok_or_else(|| RoutingError::NoRoute {
+                            object_id,
+                            reason: "No route for multicast".into(),
+                        })?;
+                (fallback, fallback_key, true)
+            } else {
+                return Err(RoutingError::NoRoute {
+                    object_id,
+                    reason: "No route for multicast".into(),
+                });
+            };
 
         // Select multiple endpoints
         let available: Vec<_> = entry
@@ -724,8 +796,8 @@ impl SymbolRouter {
             .take(selected_count)
             .map(|endpoint| RouteResult {
                 endpoint,
-                matched_key: key.clone(),
-                is_fallback: key == RouteKey::Default,
+                matched_key: matched_key.clone(),
+                is_fallback,
             })
             .collect();
 
@@ -776,10 +848,10 @@ pub struct DispatchResult {
     pub failures: usize,
 
     /// Endpoints that received the symbol.
-    pub sent_to: Vec<EndpointId>,
+    pub sent_to: SmallVec<[EndpointId; 4]>,
 
     /// Endpoints that failed.
-    pub failed_endpoints: Vec<(EndpointId, DispatchError)>,
+    pub failed_endpoints: SmallVec<[(EndpointId, DispatchError); 4]>,
 
     /// Total time for dispatch.
     pub duration: Time,
@@ -1008,8 +1080,8 @@ impl SymbolDispatcher {
                         Ok(DispatchResult {
                             successes: 1,
                             failures: 0,
-                            sent_to: vec![route.endpoint.id],
-                            failed_endpoints: vec![],
+                            sent_to: smallvec![route.endpoint.id],
+                            failed_endpoints: SmallVec::new(),
                             duration: Time::ZERO,
                         })
                     }
@@ -1024,8 +1096,8 @@ impl SymbolDispatcher {
                 Ok(DispatchResult {
                     successes: 1,
                     failures: 0,
-                    sent_to: vec![route.endpoint.id],
-                    failed_endpoints: vec![],
+                    sent_to: smallvec![route.endpoint.id],
+                    failed_endpoints: SmallVec::new(),
                     duration: Time::ZERO,
                 })
             };
@@ -1044,6 +1116,16 @@ impl SymbolDispatcher {
     ) -> Result<DispatchResult, DispatchError> {
         let object_id = symbol.symbol().object_id();
 
+        if count == 0 {
+            return Ok(DispatchResult {
+                successes: 0,
+                failures: 0,
+                sent_to: SmallVec::new(),
+                failed_endpoints: SmallVec::new(),
+                duration: Time::ZERO,
+            });
+        }
+
         // Get the routing entry
         let key = RouteKey::Object(object_id);
         let entry = self
@@ -1056,28 +1138,27 @@ impl SymbolDispatcher {
                 reason: "No route for multicast".into(),
             })?;
 
-        // Select multiple endpoints
-        let available: Vec<_> = entry
-            .endpoints
-            .iter()
-            .filter(|e| e.state.can_receive())
-            .cloned()
-            .collect();
+        let mut selected = SmallVec::<[Arc<Endpoint>; 8]>::new();
+        for endpoint in &entry.endpoints {
+            if endpoint.state.can_receive() {
+                selected.push(endpoint.clone());
+                if selected.len() >= count {
+                    break;
+                }
+            }
+        }
 
-        if available.is_empty() {
+        if selected.is_empty() {
             return Err(DispatchError::RoutingFailed(
                 RoutingError::NoHealthyEndpoints { object_id },
             ));
         }
 
-        let selected_count = count.min(available.len());
-        let selected: Vec<_> = available.into_iter().take(selected_count).collect();
-
         // Actually dispatch to selected endpoints
         let mut successes = 0;
         let mut failures = 0;
-        let mut sent_to = Vec::new();
-        let mut failed = Vec::new();
+        let mut sent_to = SmallVec::<[EndpointId; 4]>::new();
+        let mut failed = SmallVec::<[(EndpointId, DispatchError); 4]>::new();
 
         for endpoint in selected {
             let _guard = endpoint.acquire_connection_guard();
@@ -1142,8 +1223,8 @@ impl SymbolDispatcher {
 
         let mut successes = 0;
         let mut failures = 0;
-        let mut sent_to = Vec::new();
-        let mut failed = Vec::new();
+        let mut sent_to = SmallVec::<[EndpointId; 4]>::new();
+        let mut failed = SmallVec::<[(EndpointId, DispatchError); 4]>::new();
 
         for route in endpoints {
             let _guard = route.acquire_connection_guard();
@@ -1210,8 +1291,8 @@ impl SymbolDispatcher {
 
         let mut successes = 0;
         let mut failures = 0;
-        let mut sent_to = Vec::new();
-        let mut failed = Vec::new();
+        let mut sent_to = SmallVec::<[EndpointId; 4]>::new();
+        let mut failed = SmallVec::<[(EndpointId, DispatchError); 4]>::new();
 
         for route in endpoints {
             if successes >= required {
@@ -1609,6 +1690,27 @@ mod tests {
         assert_eq!(result.unwrap().endpoint.id, EndpointId(1));
     }
 
+    // Test 10.0: SymbolRouter respects `without_fallback`.
+    #[test]
+    fn test_symbol_router_without_fallback() {
+        let table = Arc::new(RoutingTable::new());
+        let e1 = table.register_endpoint(test_endpoint(1));
+
+        // Default route exists, but there is no object-specific route.
+        let entry = RoutingEntry::new(vec![e1], Time::ZERO);
+        table.add_route(RouteKey::Default, entry);
+
+        let router = SymbolRouter::new(table).without_fallback();
+
+        let symbol = Symbol::new_for_test(1, 0, 0, &[1, 2, 3]);
+        let result = router.route(&symbol);
+
+        assert!(
+            result.is_err(),
+            "without_fallback should reject default-only route"
+        );
+    }
+
     // Test 10.1: SymbolRouter failover to healthy endpoint
     #[test]
     fn test_symbol_router_failover() {
@@ -1659,8 +1761,8 @@ mod tests {
         let result = DispatchResult {
             successes: 3,
             failures: 1,
-            sent_to: vec![EndpointId(1), EndpointId(2), EndpointId(3)],
-            failed_endpoints: vec![],
+            sent_to: smallvec![EndpointId(1), EndpointId(2), EndpointId(3)],
+            failed_endpoints: SmallVec::new(),
             duration: Time::ZERO,
         };
 
@@ -1669,6 +1771,20 @@ mod tests {
         assert!(!result.quorum_reached(4));
         assert!(result.any_succeeded());
         assert!(!result.all_succeeded()); // Has failures
+    }
+
+    #[test]
+    fn dispatch_result_unicast_stays_inline() {
+        let result = DispatchResult {
+            successes: 1,
+            failures: 0,
+            sent_to: smallvec![EndpointId(7)],
+            failed_endpoints: SmallVec::new(),
+            duration: Time::ZERO,
+        };
+
+        assert!(!result.sent_to.spilled());
+        assert!(!result.failed_endpoints.spilled());
     }
 
     // Test 13: Endpoint connection tracking
