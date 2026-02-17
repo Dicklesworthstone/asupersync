@@ -38,6 +38,7 @@
 //! let fault_tx = FaultSender::new(tx, config, sink);
 //! ```
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::channel::mpsc::{SendError, Sender};
@@ -161,7 +162,11 @@ pub struct FaultSender<T: Clone> {
     config: FaultChannelConfig,
     rng: Mutex<ChaosRng>,
     reorder_buffer: Mutex<Vec<T>>,
-    stats: Mutex<FaultChannelStats>,
+    /// Atomic stats counters — avoids locking on every send.
+    stat_messages_sent: AtomicU64,
+    stat_messages_reordered: AtomicU64,
+    stat_messages_duplicated: AtomicU64,
+    stat_reorder_flushes: AtomicU64,
     evidence_sink: Arc<dyn EvidenceSink>,
 }
 
@@ -169,7 +174,7 @@ impl<T: Clone + std::fmt::Debug> std::fmt::Debug for FaultSender<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FaultSender")
             .field("config", &self.config)
-            .field("stats", &self.stats)
+            .field("stats", &self.stats())
             .finish_non_exhaustive()
     }
 }
@@ -183,12 +188,16 @@ impl<T: Clone> FaultSender<T> {
         evidence_sink: Arc<dyn EvidenceSink>,
     ) -> Self {
         let rng = ChaosRng::new(config.seed);
+        let buf_cap = config.reorder_buffer_size;
         Self {
             inner: sender,
             config,
             rng: Mutex::new(rng),
-            reorder_buffer: Mutex::new(Vec::new()),
-            stats: Mutex::new(FaultChannelStats::default()),
+            reorder_buffer: Mutex::new(Vec::with_capacity(buf_cap)),
+            stat_messages_sent: AtomicU64::new(0),
+            stat_messages_reordered: AtomicU64::new(0),
+            stat_messages_duplicated: AtomicU64::new(0),
+            stat_reorder_flushes: AtomicU64::new(0),
             evidence_sink,
         }
     }
@@ -281,9 +290,7 @@ impl<T: Clone> FaultSender<T> {
             &format!("buffer_size_{}", messages.len()),
         );
 
-        if let Ok(mut stats) = self.stats.lock() {
-            stats.reorder_flushes += 1;
-        }
+        self.stat_reorder_flushes.fetch_add(1, Ordering::Relaxed);
 
         let mut pending = messages.into_iter();
         while let Some(msg) = pending.next() {
@@ -319,7 +326,12 @@ impl<T: Clone> FaultSender<T> {
 
     /// Returns a snapshot of the fault injection statistics.
     pub fn stats(&self) -> FaultChannelStats {
-        self.stats.lock().map(|s| s.clone()).unwrap_or_default()
+        FaultChannelStats {
+            messages_sent: self.stat_messages_sent.load(Ordering::Relaxed),
+            messages_reordered: self.stat_messages_reordered.load(Ordering::Relaxed),
+            messages_duplicated: self.stat_messages_duplicated.load(Ordering::Relaxed),
+            reorder_flushes: self.stat_reorder_flushes.load(Ordering::Relaxed),
+        }
     }
 
     /// Returns the number of messages currently buffered for reordering.
@@ -333,22 +345,16 @@ impl<T: Clone> FaultSender<T> {
     }
 
     fn record_sent(&self) {
-        if let Ok(mut stats) = self.stats.lock() {
-            stats.messages_sent += 1;
-        }
+        self.stat_messages_sent.fetch_add(1, Ordering::Relaxed);
     }
 
     fn record_reorder(&self) {
-        if let Ok(mut stats) = self.stats.lock() {
-            stats.messages_reordered += 1;
-        }
+        self.stat_messages_reordered.fetch_add(1, Ordering::Relaxed);
         emit_fault_evidence(&*self.evidence_sink, "reorder_buffer", "channel_send");
     }
 
     fn record_duplication(&self) {
-        if let Ok(mut stats) = self.stats.lock() {
-            stats.messages_duplicated += 1;
-        }
+        self.stat_messages_duplicated.fetch_add(1, Ordering::Relaxed);
     }
 }
 
