@@ -10,7 +10,7 @@ use crate::signal::{ShutdownController, ShutdownReceiver};
 use crate::sync::Notify;
 use crate::time::wall_now;
 use crate::types::Time;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -72,8 +72,10 @@ struct SignalState {
     phase: AtomicU8,
     controller: ShutdownController,
     phase_notify: Notify,
-    drain_deadline: std::sync::Mutex<Option<Time>>,
-    drain_start: std::sync::Mutex<Option<Time>>,
+    /// Nanoseconds; 0 = None.
+    drain_deadline: AtomicU64,
+    /// Nanoseconds; 0 = None.
+    drain_start: AtomicU64,
 }
 
 /// Broadcast signal for server shutdown coordination.
@@ -123,8 +125,8 @@ impl ShutdownSignal {
                 phase: AtomicU8::new(ShutdownPhase::Running as u8),
                 controller: ShutdownController::new(),
                 phase_notify: Notify::new(),
-                drain_deadline: std::sync::Mutex::new(None),
-                drain_start: std::sync::Mutex::new(None),
+                drain_deadline: AtomicU64::new(0),
+                drain_start: AtomicU64::new(0),
             }),
         }
     }
@@ -156,12 +158,10 @@ impl ShutdownSignal {
     /// Returns the drain deadline, if one has been set.
     #[must_use]
     pub fn drain_deadline(&self) -> Option<Time> {
-        self.state
-            .drain_deadline
-            .lock()
-            .expect("drain_deadline lock poisoned")
-            .as_ref()
-            .copied()
+        match self.state.drain_deadline.load(Ordering::Acquire) {
+            0 => None,
+            nanos => Some(Time::from_nanos(nanos)),
+        }
     }
 
     /// Subscribes to the underlying shutdown controller for async waiting.
@@ -187,22 +187,12 @@ impl ShutdownSignal {
         if result.is_ok() {
             let now = Self::current_time();
             let deadline = now.saturating_add_nanos(Self::duration_to_nanos(timeout));
-            {
-                let mut deadline_guard = self
-                    .state
-                    .drain_deadline
-                    .lock()
-                    .expect("drain_deadline lock poisoned");
-                *deadline_guard = Some(deadline);
-            }
-            {
-                let mut start = self
-                    .state
-                    .drain_start
-                    .lock()
-                    .expect("drain_start lock poisoned");
-                *start = Some(now);
-            }
+            self.state
+                .drain_deadline
+                .store(deadline.as_nanos(), Ordering::Release);
+            self.state
+                .drain_start
+                .store(now.as_nanos(), Ordering::Release);
             self.state.controller.shutdown();
             self.state.phase_notify.notify_waiters();
             true
@@ -252,12 +242,10 @@ impl ShutdownSignal {
     /// Returns the time when drain began, if applicable.
     #[must_use]
     pub fn drain_start(&self) -> Option<Time> {
-        self.state
-            .drain_start
-            .lock()
-            .expect("drain_start lock poisoned")
-            .as_ref()
-            .copied()
+        match self.state.drain_start.load(Ordering::Acquire) {
+            0 => None,
+            nanos => Some(Time::from_nanos(nanos)),
+        }
     }
 
     /// Collects shutdown statistics.

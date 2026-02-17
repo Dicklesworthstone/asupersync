@@ -3,6 +3,7 @@
 //! Provides a thread-safe cache for DNS lookup results with TTL-based expiration.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
@@ -64,7 +65,9 @@ impl<T> CacheEntry<T> {
 pub struct DnsCache {
     ip_cache: RwLock<HashMap<String, CacheEntry<LookupIp>>>,
     config: CacheConfig,
-    stats: RwLock<CacheStats>,
+    stat_hits: AtomicU64,
+    stat_misses: AtomicU64,
+    stat_evictions: AtomicU64,
 }
 
 impl DnsCache {
@@ -80,7 +83,9 @@ impl DnsCache {
         Self {
             ip_cache: RwLock::new(HashMap::new()),
             config,
-            stats: RwLock::new(CacheStats::default()),
+            stat_hits: AtomicU64::new(0),
+            stat_misses: AtomicU64::new(0),
+            stat_evictions: AtomicU64::new(0),
         }
     }
 
@@ -93,10 +98,7 @@ impl DnsCache {
 
         match entry {
             Some(entry) if !entry.is_expired() => {
-                self.stats.write().expect("stats lock poisoned").hits += 1;
-
-                // Clone and return with original TTL for simplicity
-                // A more sophisticated implementation would adjust the TTL
+                self.stat_hits.fetch_add(1, Ordering::Relaxed);
                 Some(entry.data)
             }
             Some(_) => {
@@ -115,19 +117,18 @@ impl DnsCache {
                     drop(cache);
                 }
 
-                let mut stats = self.stats.write().expect("stats lock poisoned");
                 if let Some(data) = refreshed {
-                    stats.hits += 1;
+                    self.stat_hits.fetch_add(1, Ordering::Relaxed);
                     return Some(data);
                 }
-                stats.misses += 1;
+                self.stat_misses.fetch_add(1, Ordering::Relaxed);
                 if evicted {
-                    stats.evictions += 1;
+                    self.stat_evictions.fetch_add(1, Ordering::Relaxed);
                 }
                 None
             }
             None => {
-                self.stats.write().expect("stats lock poisoned").misses += 1;
+                self.stat_misses.fetch_add(1, Ordering::Relaxed);
                 None
             }
         }
@@ -147,8 +148,7 @@ impl DnsCache {
                 }
             };
             if evicted > 0 {
-                let mut stats = self.stats.write().expect("stats lock poisoned");
-                stats.evictions += evicted as u64;
+                self.stat_evictions.fetch_add(evicted as u64, Ordering::Relaxed);
             }
             return;
         }
@@ -165,8 +165,7 @@ impl DnsCache {
             if cache.len() >= self.config.max_entries {
                 if let Some(oldest_key) = Self::find_oldest_key(&cache) {
                     cache.remove(&oldest_key);
-                    let mut stats = self.stats.write().expect("stats lock poisoned");
-                    stats.evictions += 1;
+                    self.stat_evictions.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -182,15 +181,13 @@ impl DnsCache {
 
     /// Clears all entries from the cache.
     pub fn clear(&self) {
-        {
-            let mut cache = self.ip_cache.write().expect("cache lock poisoned");
-            cache.clear();
-        }
+        let mut cache = self.ip_cache.write().expect("cache lock poisoned");
+        cache.clear();
+        drop(cache);
 
-        {
-            let mut stats = self.stats.write().expect("stats lock poisoned");
-            *stats = CacheStats::default();
-        }
+        self.stat_hits.store(0, Ordering::Relaxed);
+        self.stat_misses.store(0, Ordering::Relaxed);
+        self.stat_evictions.store(0, Ordering::Relaxed);
     }
 
     /// Evicts expired entries from the cache.
@@ -204,15 +201,17 @@ impl DnsCache {
     #[allow(clippy::cast_precision_loss)]
     pub fn stats(&self) -> CacheStats {
         let cache = self.ip_cache.read().expect("cache lock poisoned");
-        let stats = self.stats.read().expect("stats lock poisoned");
+        let hits = self.stat_hits.load(Ordering::Relaxed);
+        let misses = self.stat_misses.load(Ordering::Relaxed);
+        let evictions = self.stat_evictions.load(Ordering::Relaxed);
 
         CacheStats {
             size: cache.len(),
-            hits: stats.hits,
-            misses: stats.misses,
-            evictions: stats.evictions,
-            hit_rate: if stats.hits + stats.misses > 0 {
-                stats.hits as f64 / (stats.hits + stats.misses) as f64
+            hits,
+            misses,
+            evictions,
+            hit_rate: if hits + misses > 0 {
+                hits as f64 / (hits + misses) as f64
             } else {
                 0.0
             },
@@ -229,8 +228,7 @@ impl DnsCache {
         let evicted = before - cache.len();
 
         if evicted > 0 {
-            let mut stats = self.stats.write().expect("stats lock poisoned");
-            stats.evictions += evicted as u64;
+            self.stat_evictions.fetch_add(evicted as u64, Ordering::Relaxed);
         }
     }
 
