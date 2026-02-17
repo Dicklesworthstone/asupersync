@@ -6,7 +6,7 @@ use super::span::{SymbolSpan, SymbolSpanKind, SymbolSpanStatus};
 use crate::types::symbol::ObjectId;
 use crate::types::Time;
 use std::collections::HashMap;
-use std::sync::RwLock;
+use parking_lot::RwLock;
 use std::time::Duration;
 
 /// Stored trace record for a single trace ID.
@@ -119,7 +119,7 @@ impl SymbolTraceCollector {
     /// Records a span.
     pub fn record_span(&self, span: &SymbolSpan, now: Time) {
         let trace_id = span.context().trace_id();
-        let mut traces = self.traces.write().expect("lock poisoned");
+        let mut traces = self.traces.write();
 
         let record = traces.entry(trace_id).or_insert_with(|| TraceRecord {
             trace_id,
@@ -161,7 +161,6 @@ impl SymbolTraceCollector {
     pub fn get_trace(&self, trace_id: TraceId) -> Option<TraceRecord> {
         self.traces
             .read()
-            .expect("lock poisoned")
             .get(&trace_id)
             .cloned()
     }
@@ -170,7 +169,7 @@ impl SymbolTraceCollector {
     #[must_use]
     pub fn get_summary(&self, trace_id: TraceId) -> Option<TraceSummary> {
         let record = {
-            let traces = self.traces.read().expect("lock poisoned");
+            let traces = self.traces.read();
             traces.get(&trace_id)?.clone()
         };
 
@@ -264,7 +263,6 @@ impl SymbolTraceCollector {
     pub fn active_traces(&self) -> Vec<TraceId> {
         self.traces
             .read()
-            .expect("lock poisoned")
             .iter()
             .filter(|(_, r)| !r.is_complete)
             .map(|(id, _)| *id)
@@ -276,7 +274,6 @@ impl SymbolTraceCollector {
     pub fn complete_traces(&self) -> Vec<TraceId> {
         self.traces
             .read()
-            .expect("lock poisoned")
             .iter()
             .filter(|(_, r)| r.is_complete)
             .map(|(id, _)| *id)

@@ -29,12 +29,13 @@
 //! to an [`EvidenceSink`].
 
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::channel::mpsc::{SendError, Sender};
 use crate::cx::Cx;
 use crate::evidence_sink::EvidenceSink;
 use franken_evidence::EvidenceLedger;
+use parking_lot::Mutex;
 
 // ---------------------------------------------------------------------------
 // ActorId
@@ -143,12 +144,13 @@ impl PartitionController {
     /// `dst` can still reach `src` (unless a reverse partition exists).
     pub fn partition(&self, src: ActorId, dst: ActorId) {
         let created = {
-            let mut partitions = self.partitions.lock().expect("partition lock poisoned");
+            let mut partitions = self.partitions.lock();
             partitions.insert((src.0, dst.0))
         };
 
         if created {
-            if let Ok(mut stats) = self.stats.lock() {
+            {
+                let mut stats = self.stats.lock();
                 stats.partitions_created += 1;
             }
             emit_partition_evidence(&self.evidence_sink, "create", src, dst);
@@ -166,12 +168,13 @@ impl PartitionController {
     /// Heal a directed partition from `src` to `dst`.
     pub fn heal(&self, src: ActorId, dst: ActorId) {
         let healed = {
-            let mut partitions = self.partitions.lock().expect("partition lock poisoned");
+            let mut partitions = self.partitions.lock();
             partitions.remove(&(src.0, dst.0))
         };
 
         if healed {
-            if let Ok(mut stats) = self.stats.lock() {
+            {
+                let mut stats = self.stats.lock();
                 stats.partitions_healed += 1;
             }
             emit_partition_evidence(&self.evidence_sink, "heal", src, dst);
@@ -188,7 +191,7 @@ impl PartitionController {
     #[allow(clippy::cast_possible_truncation)]
     pub fn heal_all(&self) {
         let healed_edges = {
-            let mut partitions = self.partitions.lock().expect("partition lock poisoned");
+            let mut partitions = self.partitions.lock();
             let mut healed_edges: Vec<(u64, u64)> =
                 std::mem::take(&mut *partitions).into_iter().collect();
             healed_edges.sort_unstable();
@@ -196,7 +199,8 @@ impl PartitionController {
             healed_edges
         };
         let count = healed_edges.len() as u64;
-        if let Ok(mut stats) = self.stats.lock() {
+        {
+            let mut stats = self.stats.lock();
             stats.partitions_healed += count;
         }
         for (src, dst) in healed_edges {
@@ -212,24 +216,18 @@ impl PartitionController {
     /// Returns `true` if there is an active partition from `src` to `dst`.
     #[must_use]
     pub fn is_partitioned(&self, src: ActorId, dst: ActorId) -> bool {
-        self.partitions
-            .lock()
-            .expect("partition lock poisoned")
-            .contains(&(src.0, dst.0))
+        self.partitions.lock().contains(&(src.0, dst.0))
     }
 
     /// Returns the number of active directed partitions.
     #[must_use]
     pub fn active_partition_count(&self) -> usize {
-        self.partitions
-            .lock()
-            .expect("partition lock poisoned")
-            .len()
+        self.partitions.lock().len()
     }
 
     /// Returns a snapshot of the partition statistics.
     pub fn stats(&self) -> PartitionStats {
-        self.stats.lock().map(|s| s.clone()).unwrap_or_default()
+        self.stats.lock().clone()
     }
 
     /// Returns the configured behavior for partitioned sends.
@@ -239,9 +237,8 @@ impl PartitionController {
     }
 
     fn record_drop(&self) {
-        if let Ok(mut stats) = self.stats.lock() {
-            stats.messages_dropped += 1;
-        }
+        let mut stats = self.stats.lock();
+        stats.messages_dropped += 1;
     }
 }
 

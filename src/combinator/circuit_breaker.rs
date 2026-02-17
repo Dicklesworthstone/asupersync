@@ -45,7 +45,8 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use parking_lot::RwLock;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::types::Time;
@@ -415,7 +416,7 @@ impl CircuitBreaker {
     /// guarded by the RwLock.
     #[must_use]
     pub fn metrics(&self) -> CircuitBreakerMetrics {
-        let mut m = self.metrics.read().expect("lock poisoned").clone();
+        let mut m = self.metrics.read().clone();
         m.total_success = self.total_success.load(Ordering::Relaxed);
         m.total_failure = self.total_failure.load(Ordering::Relaxed);
         m.total_rejected = self.total_rejected.load(Ordering::Relaxed);
@@ -586,7 +587,7 @@ impl CircuitBreaker {
                                     .is_ok()
                                 {
                                     self.current_failure_streak.store(0, Ordering::Relaxed);
-                                    let mut m = self.metrics.write().expect("lock poisoned");
+                                    let mut m = self.metrics.write();
                                     m.times_closed += 1;
                                     m.current_state = new_state;
                                     if self.policy.on_state_change.is_some() {
@@ -634,7 +635,7 @@ impl CircuitBreaker {
 
     /// Helper to update metrics on state change.
     fn update_state_metrics(&self, _old: State, new: State) -> CircuitBreakerMetrics {
-        let mut m = self.metrics.write().expect("lock poisoned");
+        let mut m = self.metrics.write();
         m.current_state = new;
         self.populate_metrics_snapshot(&mut m);
         m.clone()
@@ -651,7 +652,7 @@ impl CircuitBreaker {
 
     fn check_sliding_window_success(&self, now_millis: u64) {
         let window_triggered = self.sliding_window.as_ref().is_some_and(|window| {
-            let mut w = window.write().expect("lock poisoned");
+            let mut w = window.write();
             w.record_success(now_millis);
             w.should_open()
         });
@@ -686,11 +687,11 @@ impl CircuitBreaker {
                 .is_ok()
             {
                 {
-                    let mut m = self.metrics.write().expect("lock poisoned");
+                    let mut m = self.metrics.write();
                     m.times_opened += 1;
                     m.current_state = new_state;
                     if let Some(ref w) = self.sliding_window {
-                        w.write().expect("lock poisoned").reset();
+                        w.write().reset();
                     }
                     if self.policy.on_state_change.is_some() {
                         self.populate_metrics_snapshot(&mut m);
@@ -762,13 +763,13 @@ impl CircuitBreaker {
             self.sliding_window
                 .as_ref()
                 .map_or((false, None), |window| {
-                    let mut w = window.write().expect("lock poisoned");
+                    let mut w = window.write();
                     w.record_failure(now_millis);
                     (w.should_open(), Some(w.failure_rate()))
                 });
 
         if let Some(rate) = failure_rate {
-            let mut m = self.metrics.write().expect("lock poisoned");
+            let mut m = self.metrics.write();
             m.sliding_window_failure_rate = Some(rate);
         }
 
@@ -798,11 +799,11 @@ impl CircuitBreaker {
                                 )
                                 .is_ok()
                             {
-                                let mut m = self.metrics.write().expect("lock poisoned");
+                                let mut m = self.metrics.write();
                                 m.times_opened += 1;
                                 m.current_state = new_state;
                                 if let Some(ref w) = self.sliding_window {
-                                    w.write().expect("lock poisoned").reset();
+                                    w.write().reset();
                                 }
                                 if self.policy.on_state_change.is_some() {
                                     self.populate_metrics_snapshot(&mut m);
@@ -851,11 +852,11 @@ impl CircuitBreaker {
                                 )
                                 .is_ok()
                             {
-                                let mut m = self.metrics.write().expect("lock poisoned");
+                                let mut m = self.metrics.write();
                                 m.times_opened += 1;
                                 m.current_state = new_state;
                                 if let Some(ref w) = self.sliding_window {
-                                    w.write().expect("lock poisoned").reset();
+                                    w.write().reset();
                                 }
                                 if self.policy.on_state_change.is_some() {
                                     self.populate_metrics_snapshot(&mut m);
@@ -943,12 +944,12 @@ impl CircuitBreaker {
         self.state_bits.store(new_state.to_bits(), Ordering::SeqCst);
         self.current_failure_streak.store(0, Ordering::Relaxed);
         {
-            let mut metrics = self.metrics.write().expect("lock poisoned");
+            let mut metrics = self.metrics.write();
             metrics.current_state = new_state;
         }
 
         if let Some(ref window) = self.sliding_window {
-            window.write().expect("lock poisoned").reset();
+            window.write().reset();
         }
     }
 }

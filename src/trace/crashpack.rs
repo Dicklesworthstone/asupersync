@@ -1076,9 +1076,7 @@ impl CrashPackWriter for MemoryCrashPackWriter {
             .map_err(|e| CrashPackWriteError::Serialize(e.to_string()))?;
 
         let artifact_id = ArtifactId { path: filename };
-        self.packs
-            .lock()
-            .push((artifact_id.clone(), json));
+        self.packs.lock().push((artifact_id.clone(), json));
 
         Ok(artifact_id)
     }

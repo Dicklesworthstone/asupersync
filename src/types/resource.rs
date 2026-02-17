@@ -10,7 +10,8 @@
 
 use crate::types::DEFAULT_SYMBOL_SIZE;
 use core::fmt;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 /// Configuration for a symbol buffer pool.
 #[derive(Debug, Clone)]
@@ -427,7 +428,7 @@ impl ResourceTracker {
         }
     }
 
-    /// Creates a shared tracker wrapped in `Arc<Mutex<_>>`.
+    /// Creates a shared tracker wrapped in `Arc<parking_lot::Mutex<_>>`.
     #[must_use]
     pub fn shared(limits: ResourceLimits) -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self::new(limits)))
@@ -507,7 +508,7 @@ impl ResourceTracker {
         tracker: &Arc<Mutex<Self>>,
         request: ResourceRequest,
     ) -> Result<ResourceGuard, ResourceExhausted> {
-        let mut guard = tracker.lock().expect("resource tracker lock poisoned");
+        let mut guard = tracker.lock();
         guard.check_limits(&request)?;
         guard.current.symbol_memory = guard
             .current
@@ -670,7 +671,7 @@ pub struct ResourceGuard {
 
 impl Drop for ResourceGuard {
     fn drop(&mut self) {
-        let mut tracker = self.tracker.lock().expect("resource tracker lock poisoned");
+        let mut tracker = self.tracker.lock();
         tracker.release_locked(&self.acquired);
     }
 }
@@ -783,7 +784,7 @@ mod tests {
         let guard =
             ResourceTracker::try_acquire_encoding(&tracker, 50).expect("expected acquisition");
         drop(guard);
-        let usage = tracker.lock().expect("lock").usage().clone();
+        let usage = tracker.lock().usage().clone();
         assert_eq!(usage.symbol_memory, 0);
     }
 
@@ -815,7 +816,7 @@ mod tests {
         {
             let _guard = ResourceTracker::try_acquire_encoding(&tracker, 10).expect("acquire");
         }
-        let usage = tracker.lock().expect("lock").usage().clone();
+        let usage = tracker.lock().usage().clone();
         assert_eq!(usage.symbol_memory, 0);
         assert_eq!(usage.encoding_ops, 0);
     }
@@ -878,9 +879,37 @@ mod tests {
             Arc::clone(&pressure_calls),
             Arc::clone(&limit_calls),
         ));
-        tracker.lock().expect("lock").add_observer(observer);
+        tracker.lock().add_observer(observer);
         let _guard = ResourceTracker::try_acquire_encoding(&tracker, 9).expect("acquire");
         assert!(pressure_calls.load(Ordering::Relaxed) > 0);
         assert!(limit_calls.load(Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn resource_tracker_lock_survives_panicking_holder() {
+        let limits = ResourceLimits {
+            max_symbol_memory: 100,
+            max_encoding_ops: 1,
+            max_decoding_ops: 1,
+            max_symbols_in_flight: 1,
+            max_per_object_memory: 100,
+        };
+        let tracker = ResourceTracker::shared(limits);
+        let tracker_clone = Arc::clone(&tracker);
+
+        let panicked = std::thread::spawn(move || {
+            let _guard = tracker_clone.lock();
+            panic!("simulate panic while holding resource tracker lock");
+        })
+        .join();
+        assert!(panicked.is_err(), "panic thread should panic");
+
+        let guard =
+            ResourceTracker::try_acquire_encoding(&tracker, 10).expect("acquire after panic");
+        drop(guard);
+
+        let usage = tracker.lock().usage().clone();
+        assert_eq!(usage.symbol_memory, 0);
+        assert_eq!(usage.encoding_ops, 0);
     }
 }

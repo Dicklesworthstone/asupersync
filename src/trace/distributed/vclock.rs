@@ -32,10 +32,11 @@
 use crate::remote::NodeId;
 use crate::time::{TimeSource, TimerDriverHandle, WallClock};
 use crate::types::Time;
+use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Logical clock trait for causally ordering distributed events.
 ///
@@ -212,7 +213,7 @@ impl HybridClock {
     /// Returns the current hybrid time without ticking.
     #[must_use]
     pub fn now(&self) -> HybridTime {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         let physical = self.physical_now(&state);
         HybridTime::new(physical, state.logical)
     }
@@ -220,7 +221,7 @@ impl HybridClock {
     /// Records a local event and returns the updated time.
     #[must_use]
     pub fn tick(&self) -> HybridTime {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         let physical = self.physical_now(&state);
         if physical == state.last_physical {
             state.logical = state.logical.saturating_add(1);
@@ -234,7 +235,7 @@ impl HybridClock {
     /// Merges a received hybrid time and returns the updated time.
     #[must_use]
     pub fn receive(&self, sender: HybridTime) -> HybridTime {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         let physical_now = self.physical_now(&state);
         let max_physical = physical_now.max(state.last_physical).max(sender.physical);
 
@@ -266,7 +267,7 @@ impl HybridClock {
 
 impl fmt::Debug for HybridClock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         f.debug_struct("HybridClock")
             .field("last_physical", &state.last_physical)
             .field("logical", &state.logical)
@@ -311,7 +312,7 @@ impl VectorClockHandle {
     /// Returns the current vector clock snapshot.
     #[must_use]
     pub fn current(&self) -> VectorClock {
-        self.clock.lock().unwrap().clone()
+        self.clock.lock().clone()
     }
 }
 
@@ -319,7 +320,7 @@ impl fmt::Debug for VectorClockHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VectorClockHandle")
             .field("node", &self.node)
-            .field("clock", &self.clock.lock().unwrap())
+            .field("clock", &self.clock.lock())
             .finish()
     }
 }
@@ -328,19 +329,19 @@ impl LogicalClock for VectorClockHandle {
     type Time = VectorClock;
 
     fn tick(&self) -> Self::Time {
-        let mut clock = self.clock.lock().unwrap();
+        let mut clock = self.clock.lock();
         clock.increment(&self.node);
         clock.clone()
     }
 
     fn receive(&self, sender_time: &Self::Time) -> Self::Time {
-        let mut clock = self.clock.lock().unwrap();
+        let mut clock = self.clock.lock();
         clock.receive(&self.node, sender_time);
         clock.clone()
     }
 
     fn now(&self) -> Self::Time {
-        self.clock.lock().unwrap().clone()
+        self.clock.lock().clone()
     }
 }
 

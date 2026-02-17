@@ -6,8 +6,8 @@
 //! managing partial symbol set cleanup.
 
 use core::fmt;
-use std::collections::{HashMap, HashSet, VecDeque};
 use parking_lot::RwLock;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -689,14 +689,10 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         }
 
         let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
-        let token_id = self
-            .active_tokens
-            .read()
-            .get(&object_id)
-            .map_or_else(
-                || object_id.high() ^ object_id.low(),
-                SymbolCancelToken::token_id,
-            );
+        let token_id = self.active_tokens.read().get(&object_id).map_or_else(
+            || object_id.high() ^ object_id.low(),
+            SymbolCancelToken::token_id,
+        );
         let msg = CancelMessage::new(token_id, object_id, reason.kind(), now, sequence);
 
         self.mark_seen(object_id, msg.token_id(), sequence);

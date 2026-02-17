@@ -19,9 +19,9 @@ use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::net::tcp::stream::TcpStream;
 #[cfg(feature = "tls")]
 use crate::tls::{TlsConnectorBuilder, TlsStream};
+use parking_lot::Mutex;
 use std::io;
 use std::pin::Pin;
-use parking_lot::Mutex;
 use std::task::{Context, Poll};
 
 /// Errors that can occur during HTTP client operations.

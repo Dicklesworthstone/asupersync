@@ -258,6 +258,7 @@ impl std::fmt::Debug for Registration {
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
+    use parking_lot::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -265,8 +266,8 @@ mod tests {
     struct TestReactor {
         deregistered: AtomicBool,
         deregister_count: AtomicUsize,
-        last_token: std::sync::Mutex<Option<Token>>,
-        last_interest: std::sync::Mutex<Option<Interest>>,
+        last_token: Mutex<Option<Token>>,
+        last_interest: Mutex<Option<Interest>>,
     }
 
     impl TestReactor {
@@ -274,8 +275,8 @@ mod tests {
             Arc::new(Self {
                 deregistered: AtomicBool::new(false),
                 deregister_count: AtomicUsize::new(0),
-                last_token: std::sync::Mutex::new(None),
-                last_interest: std::sync::Mutex::new(None),
+                last_token: Mutex::new(None),
+                last_interest: Mutex::new(None),
             })
         }
 
@@ -292,13 +293,13 @@ mod tests {
         fn deregister_by_token(&self, token: Token) -> io::Result<()> {
             self.deregistered.store(true, Ordering::SeqCst);
             self.deregister_count.fetch_add(1, Ordering::SeqCst);
-            *self.last_token.lock().unwrap() = Some(token);
+            *self.last_token.lock() = Some(token);
             Ok(())
         }
 
         fn modify_interest(&self, token: Token, interest: Interest) -> io::Result<()> {
-            *self.last_token.lock().unwrap() = Some(token);
-            *self.last_interest.lock().unwrap() = Some(interest);
+            *self.last_token.lock() = Some(token);
+            *self.last_interest.lock() = Some(interest);
             Ok(())
         }
     }
@@ -411,7 +412,7 @@ mod tests {
 
         let was = reactor.was_deregistered();
         crate::assert_with_log!(was, "deregistered on drop", true, was);
-        let last_token = *reactor.last_token.lock().unwrap();
+        let last_token = *reactor.last_token.lock();
         crate::assert_with_log!(
             last_token == Some(token),
             "last token recorded",
@@ -448,7 +449,7 @@ mod tests {
             Interest::WRITABLE,
             reg.interest()
         );
-        let last_interest = *reactor.last_interest.lock().unwrap();
+        let last_interest = *reactor.last_interest.lock();
         crate::assert_with_log!(
             last_interest == Some(Interest::WRITABLE),
             "reactor saw interest update",

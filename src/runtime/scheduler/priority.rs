@@ -292,8 +292,12 @@ pub struct Scheduler {
     scratch_timed: Vec<TimedEntry>,
 }
 
+// Keep `Scheduler::new()` lightweight for tests and tiny local schedulers.
+// Production worker schedulers can opt into larger preallocation via
+// `Scheduler::with_capacity` at construction sites.
 const DEFAULT_SCHEDULER_CAPACITY: usize = 64;
 const DEFAULT_SCRATCH_CAPACITY: usize = 8;
+const MAX_SCRATCH_CAPACITY: usize = 64;
 
 impl Default for Scheduler {
     fn default() -> Self {
@@ -321,14 +325,15 @@ impl Scheduler {
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         let capacity = capacity.max(1);
+        let scratch_capacity = capacity.clamp(DEFAULT_SCRATCH_CAPACITY, MAX_SCRATCH_CAPACITY);
         Self {
             cancel_lane: BinaryHeap::with_capacity(capacity),
             timed_lane: BinaryHeap::with_capacity(capacity),
             ready_lane: BinaryHeap::with_capacity(capacity),
             scheduled: ScheduledSet::with_capacity(capacity),
             next_generation: 0,
-            scratch_entries: Vec::with_capacity(DEFAULT_SCRATCH_CAPACITY),
-            scratch_timed: Vec::with_capacity(DEFAULT_SCRATCH_CAPACITY),
+            scratch_entries: Vec::with_capacity(scratch_capacity),
+            scratch_timed: Vec::with_capacity(scratch_capacity),
         }
     }
 

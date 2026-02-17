@@ -16,11 +16,12 @@ use crate::observability::LogEntry;
 use crate::time::TimeSource;
 use crate::types::Time;
 use crate::util::det_hash::DetHashMap;
+use parking_lot::RwLock;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -657,13 +658,13 @@ impl EpochBarrier {
     /// Returns true if the barrier has been triggered.
     #[must_use]
     pub fn is_triggered(&self) -> bool {
-        self.triggered.read().expect("lock poisoned").is_some()
+        self.triggered.read().is_some()
     }
 
     /// Returns the barrier result if triggered.
     #[must_use]
     pub fn result(&self) -> Option<BarrierResult> {
-        self.triggered.read().expect("lock poisoned").clone()
+        self.triggered.read().clone()
     }
 
     /// Registers arrival at the barrier.
@@ -697,7 +698,7 @@ impl EpochBarrier {
                     expected: self.expected,
                     triggered_at: now,
                 };
-                let mut triggered = self.triggered.write().expect("lock poisoned");
+                let mut triggered = self.triggered.write();
                 if triggered.is_some() {
                     return Err(Box::new(
                         Error::new(ErrorKind::InvalidStateTransition)
@@ -712,7 +713,7 @@ impl EpochBarrier {
 
         // Record arrival
         {
-            let mut participants = self.participants.write().expect("lock poisoned");
+            let mut participants = self.participants.write();
             if participants.contains(&participant_id.to_string()) {
                 return Err(Box::new(
                     Error::new(ErrorKind::InvalidStateTransition)
@@ -732,7 +733,7 @@ impl EpochBarrier {
                 expected: self.expected,
                 triggered_at: now,
             };
-            let mut triggered = self.triggered.write().expect("lock poisoned");
+            let mut triggered = self.triggered.write();
             if triggered.is_some() {
                 return Err(Box::new(
                     Error::new(ErrorKind::InvalidStateTransition)
@@ -755,7 +756,7 @@ impl EpochBarrier {
             expected: self.expected,
             triggered_at: now,
         };
-        *self.triggered.write().expect("lock poisoned") = Some(result.clone());
+        *self.triggered.write() = Some(result.clone());
         result
     }
 
@@ -767,14 +768,14 @@ impl EpochBarrier {
             expected: self.expected,
             triggered_at: now,
         };
-        *self.triggered.write().expect("lock poisoned") = Some(result.clone());
+        *self.triggered.write() = Some(result.clone());
         result
     }
 
     /// Returns the list of arrived participants.
     #[must_use]
     pub fn participants(&self) -> Vec<String> {
-        self.participants.read().expect("lock poisoned").clone()
+        self.participants.read().clone()
     }
 
     // Logging integration
@@ -833,7 +834,7 @@ impl EpochClock {
     /// Initializes the clock with the genesis epoch.
     pub fn initialize(&self, started_at: Time) {
         let epoch = Epoch::new(EpochId::GENESIS, started_at, self.config.clone());
-        *self.active_epoch.write().expect("lock poisoned") = Some(epoch);
+        *self.active_epoch.write() = Some(epoch);
     }
 
     /// Returns the current epoch ID.
@@ -845,14 +846,14 @@ impl EpochClock {
     /// Returns the current active epoch, if any.
     #[must_use]
     pub fn active_epoch(&self) -> Option<Epoch> {
-        self.active_epoch.read().expect("lock poisoned").clone()
+        self.active_epoch.read().clone()
     }
 
     /// Advances to the next epoch.
     ///
     /// Returns the new epoch ID.
     pub fn advance(&self, now: Time) -> Result<EpochId, Box<Error>> {
-        let mut active = self.active_epoch.write().expect("lock poisoned");
+        let mut active = self.active_epoch.write();
 
         // Complete current epoch if exists
         if let Some(ref mut epoch) = *active {
@@ -865,7 +866,7 @@ impl EpochClock {
             epoch.complete(now)?;
 
             // Move to history
-            let mut history = self.history.write().expect("lock poisoned");
+            let mut history = self.history.write();
             history.push(epoch.clone());
 
             // Trim history if needed
@@ -889,26 +890,21 @@ impl EpochClock {
     /// Returns epochs in the historical range.
     #[must_use]
     pub fn history(&self) -> Vec<Epoch> {
-        self.history.read().expect("lock poisoned").clone()
+        self.history.read().clone()
     }
 
     /// Returns a specific historical epoch by ID.
     #[must_use]
     pub fn get_epoch(&self, id: EpochId) -> Option<Epoch> {
         // Check active epoch first
-        if let Some(ref active) = *self.active_epoch.read().expect("lock poisoned") {
+        if let Some(ref active) = *self.active_epoch.read() {
             if active.id == id {
                 return Some(active.clone());
             }
         }
 
         // Check history
-        self.history
-            .read()
-            .expect("lock poisoned")
-            .iter()
-            .find(|e| e.id == id)
-            .cloned()
+        self.history.read().iter().find(|e| e.id == id).cloned()
     }
 
     // Logging integration

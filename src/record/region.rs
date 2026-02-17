@@ -8,8 +8,8 @@ use crate::runtime::region_heap::{HeapIndex, RegionHeap};
 use crate::tracing_compat::{debug, info_span, Span};
 use crate::types::rref::{RRef, RRefAccessWitness, RRefError};
 use crate::types::{Budget, CancelReason, CurveBudget, RRefAccess, RegionId, TaskId, Time};
+use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::RwLock;
 
 /// The state of a region in its lifecycle.
 ///
@@ -353,47 +353,40 @@ impl RegionRecord {
     /// Returns the region budget.
     #[must_use]
     pub fn budget(&self) -> Budget {
-        self.inner.read().expect("lock poisoned").budget
+        self.inner.read().budget
     }
 
     /// Sets the region budget.
     pub fn set_budget(&self, budget: Budget) {
-        self.inner.write().expect("lock poisoned").budget = budget;
+        self.inner.write().budget = budget;
     }
 
     /// Returns the current admission limits for this region.
     #[must_use]
     pub fn limits(&self) -> RegionLimits {
-        self.inner.read().expect("lock poisoned").limits.clone()
+        self.inner.read().limits.clone()
     }
 
     /// Updates the admission limits for this region.
     pub fn set_limits(&self, limits: RegionLimits) {
-        self.inner.write().expect("lock poisoned").limits = limits;
+        self.inner.write().limits = limits;
     }
 
     /// Returns the number of pending obligations tracked for this region.
     #[must_use]
     pub fn pending_obligations(&self) -> usize {
-        self.inner
-            .read()
-            .expect("lock poisoned")
-            .pending_obligations
+        self.inner.read().pending_obligations
     }
 
     /// Returns the current cancel reason, if any.
     #[must_use]
     pub fn cancel_reason(&self) -> Option<CancelReason> {
-        self.inner
-            .read()
-            .expect("lock poisoned")
-            .cancel_reason
-            .clone()
+        self.inner.read().cancel_reason.clone()
     }
 
     /// Strengthens or sets the cancel reason.
     pub fn strengthen_cancel_reason(&self, reason: CancelReason) {
-        let mut inner = self.inner.write().expect("lock poisoned");
+        let mut inner = self.inner.write();
         if let Some(existing) = &mut inner.cancel_reason {
             existing.strengthen(&reason);
         } else {
@@ -404,19 +397,19 @@ impl RegionRecord {
     /// Returns a snapshot of child region IDs.
     #[must_use]
     pub fn child_ids(&self) -> Vec<RegionId> {
-        self.inner.read().expect("lock poisoned").children.clone()
+        self.inner.read().children.clone()
     }
 
     /// Returns a snapshot of task IDs.
     #[must_use]
     pub fn task_ids(&self) -> Vec<TaskId> {
-        self.inner.read().expect("lock poisoned").tasks.clone()
+        self.inner.read().tasks.clone()
     }
 
     /// Returns true if the region has any live children, tasks, or pending obligations.
     #[must_use]
     pub fn has_live_work(&self) -> bool {
-        let inner = self.inner.read().expect("lock poisoned");
+        let inner = self.inner.read();
         !inner.children.is_empty() || !inner.tasks.is_empty() || inner.pending_obligations > 0
     }
 
@@ -430,7 +423,7 @@ impl RegionRecord {
             return Err(AdmissionError::Closed);
         }
 
-        let mut inner = self.inner.write().expect("lock poisoned");
+        let mut inner = self.inner.write();
 
         // Double check under lock (though state is atomic, consistency matters)
         if !self.state.load().can_accept_work() {
@@ -458,7 +451,7 @@ impl RegionRecord {
 
     /// Removes a child region.
     pub fn remove_child(&self, child: RegionId) {
-        let mut inner = self.inner.write().expect("lock poisoned");
+        let mut inner = self.inner.write();
         inner.children.retain(|&c| c != child);
     }
 
@@ -472,7 +465,7 @@ impl RegionRecord {
             return Err(AdmissionError::Closed);
         }
 
-        let mut inner = self.inner.write().expect("lock poisoned");
+        let mut inner = self.inner.write();
 
         // Double check
         if !self.state.load().can_accept_work() {
@@ -500,7 +493,7 @@ impl RegionRecord {
 
     /// Removes a task from this region.
     pub fn remove_task(&self, task: TaskId) {
-        let mut inner = self.inner.write().expect("lock poisoned");
+        let mut inner = self.inner.write();
         inner.tasks.retain(|&t| t != task);
     }
 
@@ -510,7 +503,7 @@ impl RegionRecord {
             return Err(AdmissionError::Closed);
         }
 
-        let mut inner = self.inner.write().expect("lock poisoned");
+        let mut inner = self.inner.write();
         if !self.state.load().can_accept_work() {
             return Err(AdmissionError::Closed);
         }
@@ -532,7 +525,7 @@ impl RegionRecord {
 
     /// Marks an obligation slot as resolved for this region.
     pub fn resolve_obligation(&self) {
-        let mut inner = self.inner.write().expect("lock poisoned");
+        let mut inner = self.inner.write();
         inner.pending_obligations = inner.pending_obligations.saturating_sub(1);
     }
 
@@ -541,7 +534,7 @@ impl RegionRecord {
     /// Finalizers are stored in LIFO order and will be executed
     /// in reverse registration order during the Finalizing phase.
     pub fn add_finalizer(&self, finalizer: Finalizer) {
-        let mut inner = self.inner.write().expect("lock poisoned");
+        let mut inner = self.inner.write();
         inner.finalizers.push(finalizer);
     }
 
@@ -549,24 +542,20 @@ impl RegionRecord {
     ///
     /// Returns `None` when all finalizers have been executed.
     pub fn pop_finalizer(&self) -> Option<Finalizer> {
-        let mut inner = self.inner.write().expect("lock poisoned");
+        let mut inner = self.inner.write();
         inner.finalizers.pop()
     }
 
     /// Returns the number of pending finalizers.
     #[must_use]
     pub fn finalizer_count(&self) -> usize {
-        self.inner.read().expect("lock poisoned").finalizers.len()
+        self.inner.read().finalizers.len()
     }
 
     /// Returns true if there are no pending finalizers.
     #[must_use]
     pub fn finalizers_empty(&self) -> bool {
-        self.inner
-            .read()
-            .expect("lock poisoned")
-            .finalizers
-            .is_empty()
+        self.inner.read().finalizers.is_empty()
     }
 
     /// Allocates a value in the region's heap.
@@ -582,7 +571,7 @@ impl RegionRecord {
         value: T,
     ) -> Result<HeapIndex, AdmissionError> {
         let size_hint = std::mem::size_of::<T>();
-        let mut inner = self.inner.write().expect("lock poisoned");
+        let mut inner = self.inner.write();
         if let Some(limit) = inner.limits.max_heap_bytes {
             let live_bytes = inner.heap.stats().bytes_live;
             let requested = live_bytes.saturating_add(size_hint as u64);
@@ -606,7 +595,7 @@ impl RegionRecord {
     where
         T: Clone + 'static,
     {
-        let inner = self.inner.read().expect("lock poisoned");
+        let inner = self.inner.read();
         inner.heap.get::<T>(index).cloned()
     }
 
@@ -621,26 +610,26 @@ impl RegionRecord {
         index: HeapIndex,
         f: F,
     ) -> Option<R> {
-        let inner = self.inner.read().expect("lock poisoned");
+        let inner = self.inner.read();
         inner.heap.get::<T>(index).map(f)
     }
 
     /// Returns the number of heap allocations in this region.
     #[must_use]
     pub fn heap_len(&self) -> usize {
-        self.inner.read().expect("lock poisoned").heap.len()
+        self.inner.read().heap.len()
     }
 
     /// Returns heap stats for this region.
     #[must_use]
     pub fn heap_stats(&self) -> crate::runtime::region_heap::HeapStats {
-        self.inner.read().expect("lock poisoned").heap.stats()
+        self.inner.read().heap.stats()
     }
 
     /// Returns true if the region is quiescent (no tasks or children).
     #[must_use]
     pub fn is_quiescent(&self) -> bool {
-        let inner = self.inner.read().expect("lock poisoned");
+        let inner = self.inner.read();
         inner.children.is_empty()
             && inner.tasks.is_empty()
             && inner.pending_obligations == 0
@@ -651,7 +640,7 @@ impl RegionRecord {
     ///
     /// Returns true if the cancel request was newly applied.
     pub fn cancel_request(&self, reason: CancelReason) -> bool {
-        let mut inner = self.inner.write().expect("lock poisoned");
+        let mut inner = self.inner.write();
         if let Some(existing) = &mut inner.cancel_reason {
             existing.strengthen(&reason);
             false
@@ -751,7 +740,7 @@ impl RegionRecord {
 
     /// Clears the region heap after closing.
     fn clear_heap(&self) {
-        let mut inner = self.inner.write().expect("lock poisoned");
+        let mut inner = self.inner.write();
         inner.heap.reclaim_all();
     }
 
@@ -768,7 +757,7 @@ impl RegionRecord {
         if self.state().is_terminal() {
             return Err(RRefError::AllocationInvalid);
         }
-        let inner = self.inner.read().expect("lock poisoned");
+        let inner = self.inner.read();
         inner
             .heap
             .get::<T>(rref.heap_index())
@@ -791,7 +780,7 @@ impl RegionRecord {
         if self.state().is_terminal() {
             return Err(RRefError::AllocationInvalid);
         }
-        let inner = self.inner.read().expect("lock poisoned");
+        let inner = self.inner.read();
         inner
             .heap
             .get::<T>(rref.heap_index())
@@ -828,7 +817,7 @@ impl RegionRecord {
         if self.state().is_terminal() {
             return Err(RRefError::RegionClosed);
         }
-        let inner = self.inner.read().expect("lock poisoned");
+        let inner = self.inner.read();
         inner
             .heap
             .get::<T>(rref.heap_index())
@@ -850,7 +839,7 @@ impl RegionRecord {
         if self.state().is_terminal() {
             return Err(RRefError::RegionClosed);
         }
-        let inner = self.inner.read().expect("lock poisoned");
+        let inner = self.inner.read();
         inner
             .heap
             .get::<T>(rref.heap_index())
@@ -889,14 +878,14 @@ impl RegionRecord {
     /// Returns true if all children are closed.
     #[must_use]
     pub fn children_closed(&self, closed: &dyn Fn(RegionId) -> bool) -> bool {
-        let inner = self.inner.read().expect("lock poisoned");
+        let inner = self.inner.read();
         inner.children.iter().all(|child| closed(*child))
     }
 
     /// Returns true if all tasks are completed.
     #[must_use]
     pub fn tasks_completed(&self, completed: &dyn Fn(TaskId) -> bool) -> bool {
-        let inner = self.inner.read().expect("lock poisoned");
+        let inner = self.inner.read();
         inner.tasks.iter().all(|task| completed(*task))
     }
 
@@ -915,7 +904,7 @@ impl RegionRecord {
         // In the runtime, child regions are removed from the parent's `children`
         // list when they complete close. If a caller wants to treat "children are
         // all closed" as sufficient, they must supply that logic externally.
-        let inner = self.inner.read().expect("lock poisoned");
+        let inner = self.inner.read();
         inner.children.is_empty()
             && inner.tasks.iter().all(|task| completed(*task))
             && inner.pending_obligations == 0
@@ -942,7 +931,7 @@ impl RegionRecord {
         self.state.store(state);
 
         // Update inner protected state
-        let mut inner = self.inner.write().expect("lock poisoned");
+        let mut inner = self.inner.write();
         inner.budget = budget;
         inner.children = children;
         inner.tasks = tasks;
@@ -986,6 +975,7 @@ mod tests {
     use super::*;
     use crate::record::finalizer::Finalizer;
     use crate::util::ArenaIndex;
+    use parking_lot::Mutex;
 
     fn test_region_id() -> RegionId {
         RegionId::from_arena(ArenaIndex::new(1, 0))
@@ -1175,16 +1165,16 @@ mod tests {
     fn region_finalizer_stack() {
         let region = RegionRecord::new(test_region_id(), None, Budget::default());
 
-        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = std::sync::Arc::new(Mutex::new(Vec::new()));
 
         region.add_finalizer(Finalizer::Sync(Box::new({
             let log_ref = log.clone();
-            move || log_ref.lock().unwrap().push("first")
+            move || log_ref.lock().push("first")
         })));
 
         region.add_finalizer(Finalizer::Sync(Box::new({
             let log_ref = log.clone();
-            move || log_ref.lock().unwrap().push("second")
+            move || log_ref.lock().push("second")
         })));
 
         // Pop and run finalizers
@@ -1194,7 +1184,7 @@ mod tests {
             }
         }
 
-        let log = log.lock().unwrap().clone();
+        let log = log.lock().clone();
         assert_eq!(log, vec!["second", "first"]); // LIFO order
     }
 
@@ -1322,20 +1312,20 @@ mod tests {
     fn finalizer_lifo_order() {
         let region = RegionRecord::new(test_region_id(), None, Budget::default());
 
-        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let order = std::sync::Arc::new(Mutex::new(Vec::new()));
         let o1 = order.clone();
         let o2 = order.clone();
         let o3 = order.clone();
 
         // Add finalizers: 1, 2, 3
         region.add_finalizer(Finalizer::Sync(Box::new(move || {
-            o1.lock().unwrap().push(1);
+            o1.lock().push(1);
         })));
         region.add_finalizer(Finalizer::Sync(Box::new(move || {
-            o2.lock().unwrap().push(2);
+            o2.lock().push(2);
         })));
         region.add_finalizer(Finalizer::Sync(Box::new(move || {
-            o3.lock().unwrap().push(3);
+            o3.lock().push(3);
         })));
 
         // Pop and execute in LIFO order
@@ -1346,7 +1336,7 @@ mod tests {
         }
 
         // Should be 3, 2, 1 (LIFO)
-        assert_eq!(*order.lock().unwrap(), vec![3, 2, 1]);
+        assert_eq!(*order.lock(), vec![3, 2, 1]);
     }
 
     #[test]

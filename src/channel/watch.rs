@@ -38,11 +38,11 @@
 //! tx.send(new_config)?;
 //! ```
 
+use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use smallvec::SmallVec;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
@@ -1353,5 +1353,4 @@ mod tests {
         crate::assert_with_log!(count == 0, "count after drop", 0usize, count);
         crate::test_complete!("receiver_drop_decrements_count_atomically");
     }
-
 }

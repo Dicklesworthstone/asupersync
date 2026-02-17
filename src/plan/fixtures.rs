@@ -922,8 +922,7 @@ fn spawn_lab_race(
 
         // Cache winner result in SharedLabHandle so other DAG parents
         // that share this child (diamond patterns) see the value.
-        *child_handles[winner_idx].inner.state.lock() =
-            LabJoinState::Ready(winner_result.clone());
+        *child_handles[winner_idx].inner.state.lock() = LabJoinState::Ready(winner_result.clone());
 
         // Drain losers: wait for each non-winner to observe cancellation
         // and complete. Use SharedLabHandle::join to respect the

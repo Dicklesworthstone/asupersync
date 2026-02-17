@@ -5,8 +5,8 @@
 //! and virtual (lab) time.
 
 use crate::types::Time;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use parking_lot::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::Waker;
 use std::time::Duration;

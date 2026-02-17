@@ -10,9 +10,10 @@
 use crate::error::{Error, ErrorKind};
 use crate::types::symbol::{ObjectId, Symbol, SymbolId};
 use crate::types::Time;
+use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 // ============================================================================
 // Path Types
@@ -323,7 +324,7 @@ impl PathSet {
     pub fn register(&self, path: TransportPath) -> PathId {
         let id = path.id;
         let arc = Arc::new(path);
-        self.paths.write().expect("lock poisoned").insert(id, arc);
+        self.paths.write().insert(id, arc);
         id
     }
 
@@ -342,19 +343,19 @@ impl PathSet {
     /// Gets a path by ID.
     #[must_use]
     pub fn get(&self, id: PathId) -> Option<Arc<TransportPath>> {
-        self.paths.read().expect("lock poisoned").get(&id).cloned()
+        self.paths.read().get(&id).cloned()
     }
 
     /// Removes a path.
     pub fn remove(&self, id: PathId) -> Option<Arc<TransportPath>> {
-        self.paths.write().expect("lock poisoned").remove(&id)
+        self.paths.write().remove(&id)
     }
 
     /// Returns all usable paths based on the selection policy.
     #[must_use]
     pub fn select_paths(&self) -> Vec<Arc<TransportPath>> {
         let usable: Vec<_> = {
-            let paths = self.paths.read().expect("lock poisoned");
+            let paths = self.paths.read();
             paths
                 .values()
                 .filter(|p| p.state().is_usable())
@@ -399,20 +400,16 @@ impl PathSet {
 
     /// Updates path state.
     pub fn set_state(&self, id: PathId, state: PathState) -> bool {
-        self.paths
-            .read()
-            .expect("lock poisoned")
-            .get(&id)
-            .is_some_and(|path| {
-                path.set_state(state);
-                true
-            })
+        self.paths.read().get(&id).is_some_and(|path| {
+            path.set_state(state);
+            true
+        })
     }
 
     /// Returns the number of paths.
     #[must_use]
     pub fn count(&self) -> usize {
-        self.paths.read().expect("lock poisoned").len()
+        self.paths.read().len()
     }
 
     /// Returns the number of usable paths.
@@ -420,7 +417,6 @@ impl PathSet {
     pub fn usable_count(&self) -> usize {
         self.paths
             .read()
-            .expect("lock poisoned")
             .values()
             .filter(|p| p.state().is_usable())
             .count()
@@ -429,7 +425,7 @@ impl PathSet {
     /// Returns aggregate statistics.
     #[must_use]
     pub fn stats(&self) -> PathSetStats {
-        let paths = self.paths.read().expect("lock poisoned");
+        let paths = self.paths.read();
 
         let mut total_received = 0u64;
         let mut total_lost = 0u64;
@@ -572,7 +568,7 @@ impl SymbolDeduplicator {
         let object_id = symbol.object_id();
         let symbol_id = symbol.id();
 
-        let mut objects = self.objects.write().expect("lock poisoned");
+        let mut objects = self.objects.write();
 
         // Enforce max_objects: if at capacity and this is a new object,
         // treat the symbol as unique but skip recording to bound memory.
@@ -615,7 +611,7 @@ impl SymbolDeduplicator {
     /// Returns the path that first delivered a symbol.
     #[must_use]
     pub fn first_path(&self, object_id: ObjectId, symbol_id: SymbolId) -> Option<PathId> {
-        let objects = self.objects.read().expect("lock poisoned");
+        let objects = self.objects.read();
         objects
             .get(&object_id)
             .and_then(|state| state.first_path.get(&symbol_id).copied())
@@ -623,7 +619,7 @@ impl SymbolDeduplicator {
 
     /// Prunes old entries.
     pub fn prune(&self, now: Time) -> usize {
-        let mut objects = self.objects.write().expect("lock poisoned");
+        let mut objects = self.objects.write();
         let ttl_nanos = self.config.entry_ttl.as_nanos();
 
         let mut pruned = 0;
@@ -644,7 +640,7 @@ impl SymbolDeduplicator {
     /// Returns statistics.
     #[must_use]
     pub fn stats(&self) -> DeduplicatorStats {
-        let objects = self.objects.read().expect("lock poisoned");
+        let objects = self.objects.read();
         let total_tracked: usize = objects.values().map(|s| s.seen.len()).sum();
 
         DeduplicatorStats {
@@ -657,10 +653,7 @@ impl SymbolDeduplicator {
 
     /// Clears all state for an object (e.g., after decoding completes).
     pub fn clear_object(&self, object_id: ObjectId) {
-        self.objects
-            .write()
-            .expect("lock poisoned")
-            .remove(&object_id);
+        self.objects.write().remove(&object_id);
     }
 }
 
@@ -786,7 +779,7 @@ impl SymbolReorderer {
         let object_id = symbol.object_id();
         let seq = symbol.esi();
 
-        let mut objects = self.objects.write().expect("lock poisoned");
+        let mut objects = self.objects.write();
         let state = objects
             .entry(object_id)
             .or_insert_with(ObjectReorderState::new);
@@ -845,7 +838,7 @@ impl SymbolReorderer {
     ///
     /// Returns symbols that have waited too long.
     pub fn flush_timeouts(&self, now: Time) -> Vec<Symbol> {
-        let mut objects = self.objects.write().expect("lock poisoned");
+        let mut objects = self.objects.write();
         let max_wait_nanos = self.config.max_wait_time.as_nanos();
         let mut flushed = Vec::new();
 
@@ -894,7 +887,7 @@ impl SymbolReorderer {
     /// Returns statistics.
     #[must_use]
     pub fn stats(&self) -> ReordererStats {
-        let objects = self.objects.read().expect("lock poisoned");
+        let objects = self.objects.read();
         let total_buffered: usize = objects.values().map(|s| s.buffer.len()).sum();
 
         ReordererStats {
@@ -908,10 +901,7 @@ impl SymbolReorderer {
 
     /// Clears state for an object.
     pub fn clear_object(&self, object_id: ObjectId) {
-        self.objects
-            .write()
-            .expect("lock poisoned")
-            .remove(&object_id);
+        self.objects.write().remove(&object_id);
     }
 }
 

@@ -74,6 +74,9 @@ pub type WorkerId = usize;
 const DEFAULT_CANCEL_STREAK_LIMIT: usize = 16;
 const DEFAULT_STEAL_BATCH_SIZE: usize = 4;
 const DEFAULT_ENABLE_PARKING: bool = true;
+const LOCAL_SCHEDULER_BURST_BUDGET: usize = 2048;
+const LOCAL_SCHEDULER_MIN_CAPACITY: usize = 128;
+const LOCAL_SCHEDULER_MAX_CAPACITY: usize = 1024;
 const SPIN_LIMIT: u32 = 64;
 const YIELD_LIMIT: u32 = 16;
 
@@ -321,6 +324,13 @@ pub struct ThreeLaneScheduler {
 }
 
 impl ThreeLaneScheduler {
+    #[inline]
+    fn initial_local_scheduler_capacity(worker_count: usize) -> usize {
+        let workers = worker_count.max(1);
+        let per_worker = LOCAL_SCHEDULER_BURST_BUDGET.div_ceil(workers);
+        per_worker.clamp(LOCAL_SCHEDULER_MIN_CAPACITY, LOCAL_SCHEDULER_MAX_CAPACITY)
+    }
+
     /// Creates a new 3-lane scheduler with the given number of workers.
     pub fn new(worker_count: usize, state: &Arc<ContendedMutex<RuntimeState>>) -> Self {
         Self::new_with_options(worker_count, state, DEFAULT_CANCEL_STREAK_LIMIT, false, 32)
@@ -384,6 +394,7 @@ impl ThreeLaneScheduler {
         let mut local_schedulers: Vec<Arc<Mutex<PriorityScheduler>>> =
             Vec::with_capacity(worker_count);
         let mut local_ready: Vec<Arc<LocalReadyQueue>> = Vec::with_capacity(worker_count);
+        let local_scheduler_capacity = Self::initial_local_scheduler_capacity(worker_count);
 
         // Get IO driver and timer driver from runtime state
         let (io_driver, timer_driver) = {
@@ -393,7 +404,9 @@ impl ThreeLaneScheduler {
 
         // Create local schedulers first so we can share references for stealing
         for _ in 0..worker_count {
-            local_schedulers.push(Arc::new(Mutex::new(PriorityScheduler::new())));
+            local_schedulers.push(Arc::new(Mutex::new(PriorityScheduler::with_capacity(
+                local_scheduler_capacity,
+            ))));
         }
         // Create non-stealable local queues for !Send tasks
         for _ in 0..worker_count {
@@ -2315,6 +2328,28 @@ mod tests {
 
         assert!(!scheduler.is_shutdown());
         assert_eq!(scheduler.workers.len(), 2);
+    }
+
+    #[test]
+    fn test_initial_local_scheduler_capacity_scales_with_worker_count() {
+        assert_eq!(
+            ThreeLaneScheduler::initial_local_scheduler_capacity(0),
+            1024
+        );
+        assert_eq!(
+            ThreeLaneScheduler::initial_local_scheduler_capacity(1),
+            1024
+        );
+        assert_eq!(
+            ThreeLaneScheduler::initial_local_scheduler_capacity(2),
+            1024
+        );
+        assert_eq!(ThreeLaneScheduler::initial_local_scheduler_capacity(4), 512);
+        assert_eq!(ThreeLaneScheduler::initial_local_scheduler_capacity(8), 256);
+        assert_eq!(
+            ThreeLaneScheduler::initial_local_scheduler_capacity(64),
+            128
+        );
     }
 
     #[test]

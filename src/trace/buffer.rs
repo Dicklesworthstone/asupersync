@@ -4,8 +4,9 @@
 //! allowing efficient capture without unbounded memory growth.
 
 use super::event::TraceEvent;
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// A ring buffer for storing trace events.
 ///
@@ -138,33 +139,21 @@ impl TraceBufferHandle {
 
     /// Pushes a trace event into the buffer.
     pub fn push_event(&self, event: TraceEvent) {
-        let mut buffer = self
-            .inner
-            .buffer
-            .lock()
-            .expect("trace buffer lock poisoned");
+        let mut buffer = self.inner.buffer.lock();
         buffer.push(event);
     }
 
     /// Returns a snapshot of buffered events in order (oldest to newest).
     #[must_use]
     pub fn snapshot(&self) -> Vec<TraceEvent> {
-        let buffer = self
-            .inner
-            .buffer
-            .lock()
-            .expect("trace buffer lock poisoned");
+        let buffer = self.inner.buffer.lock();
         buffer.iter().cloned().collect()
     }
 
     /// Returns the current number of buffered events.
     #[must_use]
     pub fn len(&self) -> usize {
-        let buffer = self
-            .inner
-            .buffer
-            .lock()
-            .expect("trace buffer lock poisoned");
+        let buffer = self.inner.buffer.lock();
         buffer.len()
     }
 

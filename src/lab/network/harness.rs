@@ -47,9 +47,10 @@ use crate::remote::{
 };
 use crate::trace::distributed::{CausalTracker, LogicalTime, VectorClock};
 use crate::types::Time;
+use parking_lot::Mutex;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 type PendingResultsMap =
@@ -84,10 +85,7 @@ impl RemoteRuntime for VirtualNetworkRuntime {
             other => other,
         };
 
-        self.outbox
-            .lock()
-            .unwrap()
-            .push_back((destination.clone(), message));
+        self.outbox.lock().push_back((destination.clone(), message));
         Ok(())
     }
 
@@ -96,12 +94,12 @@ impl RemoteRuntime for VirtualNetworkRuntime {
         task_id: RemoteTaskId,
         tx: crate::channel::oneshot::Sender<Result<RemoteOutcome, RemoteError>>,
     ) {
-        let mut pending = self.pending_results.lock().unwrap();
+        let mut pending = self.pending_results.lock();
         pending.insert(task_id, tx);
     }
 
     fn unregister_task(&self, task_id: RemoteTaskId) {
-        let mut pending = self.pending_results.lock().unwrap();
+        let mut pending = self.pending_results.lock();
         pending.remove(&task_id);
     }
 }
@@ -358,7 +356,7 @@ impl SimNode {
 
     fn handle_result(&self, result: ResultDelivery) {
         // Deliver result to pending local task (application code)
-        let mut pending = self.pending_results.lock().unwrap();
+        let mut pending = self.pending_results.lock();
         if let Some(tx) = pending.remove(&result.remote_task_id) {
             let cx = Cx::for_testing();
             let _ = tx.send(&cx, Ok(result.outcome));
@@ -429,7 +427,7 @@ impl SimNode {
         self.running_tasks.clear();
         self.outbox.clear();
         {
-            let mut app = self.app_outbox.lock().unwrap();
+            let mut app = self.app_outbox.lock();
             app.clear();
         }
         self.event_log.push(NodeEvent::Crashed);
@@ -464,7 +462,7 @@ impl SimNode {
     pub fn drain_outbox(&mut self) -> Vec<(NodeId, RemoteMessage)> {
         let mut msgs: Vec<_> = self.outbox.drain(..).collect();
         {
-            let mut app = self.app_outbox.lock().unwrap();
+            let mut app = self.app_outbox.lock();
             msgs.extend(app.drain(..));
         }
         msgs

@@ -41,9 +41,9 @@
 use crate::runtime::reactor::{
     Event, Events, Interest, Reactor, SlabToken, Source, Token, TokenSlab,
 };
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::io;
-use parking_lot::Mutex;
 use std::sync::{Arc, Weak};
 use std::task::Waker;
 use std::time::Duration;
@@ -505,6 +505,7 @@ impl IoDriverHandle {
     }
 
     /// Attempts to acquire the lock for direct access to the driver.
+    #[must_use]
     pub fn try_lock(&self) -> Option<parking_lot::MutexGuard<'_, IoDriver>> {
         self.inner.try_lock()
     }

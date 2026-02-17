@@ -32,7 +32,8 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use parking_lot::RwLock;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::types::Time;
@@ -246,7 +247,7 @@ impl Bulkhead {
     #[must_use]
     #[allow(clippy::significant_drop_tightening, clippy::cast_precision_loss)]
     pub fn metrics(&self) -> BulkheadMetrics {
-        let queue = self.queue.read().expect("lock poisoned");
+        let queue = self.queue.read();
         let active = queue.iter().filter(|e| e.result.is_none()).count() as u32;
         let used_permits =
             self.policy.max_concurrent - self.available_permits.load(Ordering::Acquire);
@@ -314,7 +315,7 @@ impl Bulkhead {
     pub fn process_queue(&self, now: Time) -> Option<u64> {
         let now_millis = now.as_millis();
 
-        let mut queue = self.queue.write().expect("lock poisoned");
+        let mut queue = self.queue.write();
 
         // First, timeout expired entries — count timeouts locally and batch-update
         // the metrics lock once, instead of acquiring it per timed-out entry.
@@ -326,7 +327,8 @@ impl Bulkhead {
             }
         }
         if timeout_count > 0 {
-            self.total_timeout_atomic.fetch_add(timeout_count, Ordering::Relaxed);
+            self.total_timeout_atomic
+                .fetch_add(timeout_count, Ordering::Relaxed);
         }
 
         // Find first waiting entry that can be granted
@@ -362,7 +364,8 @@ impl Bulkhead {
                     .fetch_add(wait_ms, Ordering::Relaxed);
 
                 self.total_executed_atomic.fetch_add(1, Ordering::Relaxed);
-                self.max_queue_wait_ms_atomic.fetch_max(wait_ms, Ordering::Relaxed);
+                self.max_queue_wait_ms_atomic
+                    .fetch_max(wait_ms, Ordering::Relaxed);
 
                 return Some(entry.id);
             }
@@ -384,7 +387,7 @@ impl Bulkhead {
         let now_millis = now.as_millis();
         let deadline_millis = now_millis + self.policy.queue_timeout.as_millis() as u64;
 
-        let mut queue = self.queue.write().expect("lock poisoned");
+        let mut queue = self.queue.write();
 
         // Check queue capacity
         // We check total length (including completed-but-unclaimed entries) to
@@ -431,7 +434,7 @@ impl Bulkhead {
         // First process the queue to handle timeouts and grants
         let _ = self.process_queue(now);
 
-        let mut queue = self.queue.write().expect("lock poisoned");
+        let mut queue = self.queue.write();
         let entry_idx = queue.iter().position(|e| e.id == entry_id);
 
         if let Some(idx) = entry_idx {
@@ -469,7 +472,7 @@ impl Bulkhead {
 
     /// Cancel a queued entry.
     pub fn cancel_entry(&self, entry_id: u64) {
-        let mut queue = self.queue.write().expect("lock poisoned");
+        let mut queue = self.queue.write();
         if let Some(idx) = queue.iter().position(|e| e.id == entry_id) {
             let entry = &mut queue[idx];
 
@@ -554,7 +557,7 @@ impl Bulkhead {
         self.available_permits
             .store(self.policy.max_concurrent, Ordering::Release);
 
-        let mut queue = self.queue.write().expect("lock poisoned");
+        let mut queue = self.queue.write();
         for entry in queue.iter_mut() {
             if entry.result.is_none() {
                 entry.result = Some(Err(RejectionReason::Cancelled));
@@ -745,14 +748,14 @@ impl BulkheadRegistry {
     pub fn get_or_create(&self, name: &str) -> Arc<Bulkhead> {
         // Fast path: read lock
         {
-            let bulkheads = self.bulkheads.read().expect("lock poisoned");
+            let bulkheads = self.bulkheads.read();
             if let Some(b) = bulkheads.get(name) {
                 return b.clone();
             }
         }
 
         // Slow path: write lock
-        let mut bulkheads = self.bulkheads.write().expect("lock poisoned");
+        let mut bulkheads = self.bulkheads.write();
         bulkheads
             .entry(name.to_string())
             .or_insert_with(|| {
@@ -766,7 +769,7 @@ impl BulkheadRegistry {
 
     /// Get or create with custom policy.
     pub fn get_or_create_with(&self, name: &str, policy: BulkheadPolicy) -> Arc<Bulkhead> {
-        let mut bulkheads = self.bulkheads.write().expect("lock poisoned");
+        let mut bulkheads = self.bulkheads.write();
         bulkheads
             .entry(name.to_string())
             .or_insert_with(|| Arc::new(Bulkhead::new(policy)))
@@ -776,7 +779,7 @@ impl BulkheadRegistry {
     /// Get metrics for all bulkheads.
     #[must_use]
     pub fn all_metrics(&self) -> HashMap<String, BulkheadMetrics> {
-        let bulkheads = self.bulkheads.read().expect("lock poisoned");
+        let bulkheads = self.bulkheads.read();
         let mut metrics = HashMap::with_capacity(bulkheads.len());
         for (name, bulkhead) in bulkheads.iter() {
             metrics.insert(name.clone(), bulkhead.metrics());
@@ -787,14 +790,14 @@ impl BulkheadRegistry {
 
     /// Remove a named bulkhead.
     pub fn remove(&self, name: &str) -> Option<Arc<Bulkhead>> {
-        let mut bulkheads = self.bulkheads.write().expect("lock poisoned");
+        let mut bulkheads = self.bulkheads.write();
         bulkheads.remove(name)
     }
 }
 
 impl fmt::Debug for BulkheadRegistry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let bulkheads = self.bulkheads.read().expect("lock poisoned");
+        let bulkheads = self.bulkheads.read();
         f.debug_struct("BulkheadRegistry")
             .field("count", &bulkheads.len())
             .finish_non_exhaustive()

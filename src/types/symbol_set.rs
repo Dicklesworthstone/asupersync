@@ -5,7 +5,7 @@
 
 use crate::types::{Symbol, SymbolId, SymbolKind};
 use std::collections::HashMap;
-use std::sync::RwLock;
+use parking_lot::RwLock;
 
 /// Estimated overhead per symbol for bookkeeping.
 const SYMBOL_OVERHEAD_BYTES: usize = 32;
@@ -426,14 +426,13 @@ impl ConcurrentSymbolSet {
 
     /// Inserts a symbol into the set.
     pub fn insert(&self, symbol: Symbol) -> InsertResult {
-        self.inner.write().expect("lock poisoned").insert(symbol)
+        self.inner.write().insert(symbol)
     }
 
     /// Sets the block K value.
     pub fn set_block_k(&self, sbn: u8, k: u16) -> bool {
         self.inner
             .write()
-            .expect("lock poisoned")
             .set_block_k(sbn, k)
     }
 
@@ -442,7 +441,6 @@ impl ConcurrentSymbolSet {
     pub fn threshold_reached(&self, sbn: u8) -> bool {
         self.inner
             .read()
-            .expect("lock poisoned")
             .threshold_reached(sbn)
     }
 }

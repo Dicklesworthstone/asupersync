@@ -14,10 +14,11 @@ use crate::sync::OwnedMutexGuard;
 use crate::transport::sink::{SymbolSink, SymbolSinkExt};
 use crate::types::symbol::{ObjectId, Symbol};
 use crate::types::{RegionId, Time};
+use parking_lot::RwLock;
 use smallvec::{smallvec, SmallVec};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 type EndpointSinkMap = HashMap<EndpointId, Arc<Mutex<Box<dyn SymbolSink>>>>;
 
@@ -492,57 +493,39 @@ impl RoutingTable {
     pub fn register_endpoint(&self, endpoint: Endpoint) -> Arc<Endpoint> {
         let id = endpoint.id;
         let arc = Arc::new(endpoint);
-        self.endpoints
-            .write()
-            .expect("lock poisoned")
-            .insert(id, arc.clone());
+        self.endpoints.write().insert(id, arc.clone());
         arc
     }
 
     /// Gets an endpoint by ID.
     #[must_use]
     pub fn get_endpoint(&self, id: EndpointId) -> Option<Arc<Endpoint>> {
-        self.endpoints
-            .read()
-            .expect("lock poisoned")
-            .get(&id)
-            .cloned()
+        self.endpoints.read().get(&id).cloned()
     }
 
     /// Updates endpoint state.
     pub fn update_endpoint_state(&self, id: EndpointId, _state: EndpointState) -> bool {
-        self.endpoints
-            .read()
-            .expect("lock poisoned")
-            .get(&id)
-            .is_some_and(|_endpoint| true)
+        self.endpoints.read().get(&id).is_some_and(|_endpoint| true)
     }
 
     /// Adds a route.
     pub fn add_route(&self, key: RouteKey, entry: RoutingEntry) {
         if key == RouteKey::Default {
-            *self.default_route.write().expect("lock poisoned") = Some(entry);
+            *self.default_route.write() = Some(entry);
         } else {
-            self.routes
-                .write()
-                .expect("lock poisoned")
-                .insert(key, entry);
+            self.routes.write().insert(key, entry);
         }
     }
 
     /// Removes a route.
     pub fn remove_route(&self, key: &RouteKey) -> bool {
         if *key == RouteKey::Default {
-            let mut default = self.default_route.write().expect("lock poisoned");
+            let mut default = self.default_route.write();
             let had_route = default.is_some();
             *default = None;
             had_route
         } else {
-            self.routes
-                .write()
-                .expect("lock poisoned")
-                .remove(key)
-                .is_some()
+            self.routes.write().remove(key).is_some()
         }
     }
 
@@ -550,34 +533,24 @@ impl RoutingTable {
     #[must_use]
     pub fn lookup(&self, key: &RouteKey) -> Option<RoutingEntry> {
         // Try exact match first
-        if let Some(entry) = self.routes.read().expect("lock poisoned").get(key) {
+        if let Some(entry) = self.routes.read().get(key) {
             return Some(entry.clone());
         }
 
         // Try fallback strategies
         if let RouteKey::ObjectAndRegion(oid, rid) = key {
             // Try object-only
-            if let Some(entry) = self
-                .routes
-                .read()
-                .expect("lock poisoned")
-                .get(&RouteKey::Object(*oid))
-            {
+            if let Some(entry) = self.routes.read().get(&RouteKey::Object(*oid)) {
                 return Some(entry.clone());
             }
             // Try region-only
-            if let Some(entry) = self
-                .routes
-                .read()
-                .expect("lock poisoned")
-                .get(&RouteKey::Region(*rid))
-            {
+            if let Some(entry) = self.routes.read().get(&RouteKey::Region(*rid)) {
                 return Some(entry.clone());
             }
         }
 
         // Fall back to default
-        self.default_route.read().expect("lock poisoned").clone()
+        self.default_route.read().clone()
     }
 
     /// Looks up a route without falling back to the default route.
@@ -586,25 +559,15 @@ impl RoutingTable {
     /// never consults `default_route`.
     #[must_use]
     pub fn lookup_without_default(&self, key: &RouteKey) -> Option<RoutingEntry> {
-        if let Some(entry) = self.routes.read().expect("lock poisoned").get(key) {
+        if let Some(entry) = self.routes.read().get(key) {
             return Some(entry.clone());
         }
 
         if let RouteKey::ObjectAndRegion(oid, rid) = key {
-            if let Some(entry) = self
-                .routes
-                .read()
-                .expect("lock poisoned")
-                .get(&RouteKey::Object(*oid))
-            {
+            if let Some(entry) = self.routes.read().get(&RouteKey::Object(*oid)) {
                 return Some(entry.clone());
             }
-            if let Some(entry) = self
-                .routes
-                .read()
-                .expect("lock poisoned")
-                .get(&RouteKey::Region(*rid))
-            {
+            if let Some(entry) = self.routes.read().get(&RouteKey::Region(*rid)) {
                 return Some(entry.clone());
             }
         }
@@ -614,7 +577,7 @@ impl RoutingTable {
 
     /// Prunes expired routes.
     pub fn prune_expired(&self, now: Time) -> usize {
-        let mut routes = self.routes.write().expect("lock poisoned");
+        let mut routes = self.routes.write();
         let before = routes.len();
         routes.retain(|_, entry| !entry.is_expired(now));
         before - routes.len()
@@ -625,7 +588,6 @@ impl RoutingTable {
     pub fn healthy_endpoints(&self) -> Vec<Arc<Endpoint>> {
         self.endpoints
             .read()
-            .expect("lock poisoned")
             .values()
             .filter(|e| e.state == EndpointState::Healthy)
             .cloned()
@@ -635,8 +597,8 @@ impl RoutingTable {
     /// Returns route count.
     #[must_use]
     pub fn route_count(&self) -> usize {
-        let routes = self.routes.read().expect("lock poisoned").len();
-        let default = usize::from(self.default_route.read().expect("lock poisoned").is_some());
+        let routes = self.routes.read().len();
+        let default = usize::from(self.default_route.read().is_some());
         routes + default
     }
 }
@@ -947,7 +909,7 @@ impl std::fmt::Debug for SymbolDispatcher {
             .field("total_failures", &self.total_failures)
             .field(
                 "sinks",
-                &format_args!("<{} sinks>", self.sinks.read().map_or(0, |s| s.len())),
+                &format_args!("<{} sinks>", self.sinks.read().len()),
             )
             .finish()
     }
@@ -984,7 +946,6 @@ impl SymbolDispatcher {
     pub fn add_sink(&self, endpoint: EndpointId, sink: Box<dyn SymbolSink>) {
         self.sinks
             .write()
-            .expect("sinks lock poisoned")
             .insert(endpoint, Arc::new(Mutex::new(sink)));
     }
 
@@ -1055,7 +1016,7 @@ impl SymbolDispatcher {
 
         // Get sink
         let sink = {
-            let sinks = self.sinks.read().expect("sinks lock poisoned");
+            let sinks = self.sinks.read();
             sinks.get(&route.endpoint.id).cloned()
         };
 
@@ -1165,7 +1126,7 @@ impl SymbolDispatcher {
 
             // Attempt send
             let success = if let Some(sink) = {
-                let sinks = self.sinks.read().expect("sinks lock poisoned");
+                let sinks = self.sinks.read();
                 sinks.get(&endpoint.id).cloned()
             } {
                 match OwnedMutexGuard::lock(sink, cx).await {
@@ -1231,7 +1192,7 @@ impl SymbolDispatcher {
 
             // Attempt send
             let success = if let Some(sink) = {
-                let sinks = self.sinks.read().expect("sinks lock poisoned");
+                let sinks = self.sinks.read();
                 sinks.get(&route.id).cloned()
             } {
                 match OwnedMutexGuard::lock(sink, cx).await {
@@ -1302,7 +1263,7 @@ impl SymbolDispatcher {
             let _guard = route.acquire_connection_guard();
 
             let success = if let Some(sink) = {
-                let sinks = self.sinks.read().expect("sinks lock poisoned");
+                let sinks = self.sinks.read();
                 sinks.get(&route.id).cloned()
             } {
                 match OwnedMutexGuard::lock(sink, cx).await {

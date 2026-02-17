@@ -313,7 +313,7 @@ impl Drop for ChannelSink {
         };
 
         waiter.store(false, Ordering::Release);
-        let mut wakers = self.shared.send_wakers.lock().unwrap();
+        let mut wakers = self.shared.send_wakers.lock();
         wakers.retain(|entry| !Arc::ptr_eq(&entry.queued, waiter));
     }
 }
@@ -321,7 +321,7 @@ impl Drop for ChannelSink {
 impl SymbolSink for ChannelSink {
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
         let this = self.get_mut();
-        let queue = this.shared.queue.lock().unwrap();
+        let queue = this.shared.queue.lock();
 
         if this.shared.closed.load(Ordering::SeqCst) {
             return Poll::Ready(Err(SinkError::Closed));
@@ -345,7 +345,7 @@ impl SymbolSink for ChannelSink {
             let mut new_waiter = None;
             let mut closed = false;
             {
-                let mut wakers = this.shared.send_wakers.lock().unwrap();
+                let mut wakers = this.shared.send_wakers.lock();
                 if this.shared.closed.load(Ordering::SeqCst) {
                     closed = true;
                 } else {
@@ -395,7 +395,7 @@ impl SymbolSink for ChannelSink {
             // lost-wakeup race: a receiver may pop between our capacity check
             // and waiter registration, finding no send_waker to wake.
             {
-                let queue = this.shared.queue.lock().unwrap();
+                let queue = this.shared.queue.lock();
                 if queue.len() < this.shared.capacity || this.shared.closed.load(Ordering::SeqCst) {
                     drop(queue);
                     cx.waker().wake_by_ref();
@@ -413,7 +413,7 @@ impl SymbolSink for ChannelSink {
     ) -> Poll<Result<(), SinkError>> {
         let this = self.get_mut();
         {
-            let mut queue = this.shared.queue.lock().unwrap();
+            let mut queue = this.shared.queue.lock();
 
             if this.shared.closed.load(Ordering::SeqCst) {
                 return Poll::Ready(Err(SinkError::Closed));
@@ -429,7 +429,7 @@ impl SymbolSink for ChannelSink {
 
         // Wake receiver.
         let waiter = {
-            let mut wakers = this.shared.recv_wakers.lock().unwrap();
+            let mut wakers = this.shared.recv_wakers.lock();
             wakers.pop()
         };
         if let Some(w) = waiter {
@@ -903,7 +903,7 @@ mod tests {
         init_test("test_channel_sink_drop_removes_queued_waiter");
         let shared = Arc::new(SharedChannel::new(1));
         {
-            let mut queue = shared.queue.lock().unwrap();
+            let mut queue = shared.queue.lock();
             queue.push_back(create_symbol(1));
         }
 
@@ -917,7 +917,7 @@ mod tests {
             true,
             matches!(pending, Poll::Pending)
         );
-        let queued_before = shared.send_wakers.lock().unwrap().len();
+        let queued_before = shared.send_wakers.lock().len();
         crate::assert_with_log!(
             queued_before == 1,
             "one waiter registered",
@@ -927,7 +927,7 @@ mod tests {
 
         drop(sink);
 
-        let queued_after = shared.send_wakers.lock().unwrap().len();
+        let queued_after = shared.send_wakers.lock().len();
         crate::assert_with_log!(
             queued_after == 0,
             "queued waiter removed on drop",

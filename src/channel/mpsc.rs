@@ -18,11 +18,11 @@
 //! - `permit.abort()`: Aborts the obligation
 //! - `drop(permit)`: Equivalent to abort (RAII cleanup)
 
+use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use parking_lot::Mutex;
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Waker};
 
@@ -253,10 +253,7 @@ impl<T> Sender<T> {
     /// Returns true if the receiver has been dropped.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.shared
-            .inner
-            .lock()
-            .receiver_dropped
+        self.shared.inner.lock().receiver_dropped
     }
 
     /// Wakes the receiver if it is currently waiting in `recv()`.
@@ -275,10 +272,7 @@ impl<T> Sender<T> {
     /// Returns the channel's capacity.
     #[must_use]
     pub fn capacity(&self) -> usize {
-        self.shared
-            .inner
-            .lock()
-            .capacity
+        self.shared.inner.lock().capacity
     }
 
     /// Sends a value, evicting the oldest queued message if the channel is full.
@@ -347,11 +341,7 @@ impl<'a, T> Future for Reserve<'a, T> {
             return Poll::Ready(Err(SendError::Cancelled(())));
         }
 
-        let mut inner = self
-            .sender
-            .shared
-            .inner
-            .lock();
+        let mut inner = self.sender.shared.inner.lock();
 
         if inner.receiver_dropped {
             return Poll::Ready(Err(SendError::Disconnected(())));
@@ -529,11 +519,7 @@ impl<T> SendPermit<'_, T> {
     /// Commits the reserved slot, enqueuing the value.
     pub fn send(mut self, value: T) {
         self.sent = true;
-        let mut inner = self
-            .sender
-            .shared
-            .inner
-            .lock();
+        let mut inner = self.sender.shared.inner.lock();
 
         if inner.reserved == 0 {
             debug_assert!(false, "send permit without reservation");
@@ -574,11 +560,7 @@ impl<T> SendPermit<'_, T> {
     pub fn abort(mut self) {
         self.sent = true;
         let next_waker = {
-            let mut inner = self
-                .sender
-                .shared
-                .inner
-                .lock();
+            let mut inner = self.sender.shared.inner.lock();
             if inner.reserved == 0 {
                 debug_assert!(false, "abort permit without reservation");
             } else {
@@ -659,50 +641,31 @@ impl<T> Receiver<T> {
     /// Returns true if all senders have been dropped.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.shared
-            .inner
-            .lock()
-            .is_closed()
+        self.shared.inner.lock().is_closed()
     }
 
     /// Returns true if there are any queued messages.
     #[must_use]
     pub fn has_messages(&self) -> bool {
-        !self
-            .shared
-            .inner
-            .lock()
-            .queue
-            .is_empty()
+        !self.shared.inner.lock().queue.is_empty()
     }
 
     /// Returns the number of queued messages.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.shared
-            .inner
-            .lock()
-            .queue
-            .len()
+        self.shared.inner.lock().queue.len()
     }
 
     /// Returns true if the queue is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.shared
-            .inner
-            .lock()
-            .queue
-            .is_empty()
+        self.shared.inner.lock().queue.is_empty()
     }
 
     /// Returns the channel capacity.
     #[must_use]
     pub fn capacity(&self) -> usize {
-        self.shared
-            .inner
-            .lock()
-            .capacity
+        self.shared.inner.lock().capacity
     }
 }
 
@@ -721,11 +684,7 @@ impl<T> Future for Recv<'_, T> {
             return Poll::Ready(Err(RecvError::Cancelled));
         }
 
-        let mut inner = self
-            .receiver
-            .shared
-            .inner
-            .lock();
+        let mut inner = self.receiver.shared.inner.lock();
 
         if let Some(value) = inner.queue.pop_front() {
             let next_waker = inner.take_next_sender_waker();

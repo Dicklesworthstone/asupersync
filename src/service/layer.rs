@@ -60,8 +60,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use parking_lot::Mutex;
     use crate::service::{Service, ServiceBuilder, ServiceExt};
+    use parking_lot::Mutex;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Arc;

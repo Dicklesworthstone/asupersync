@@ -13,9 +13,10 @@
 //! - Dropping without resolution triggers leak detection
 
 use core::fmt;
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use crate::types::symbol::{ObjectId, ObjectParams, SymbolId};
 use crate::types::{ObligationId, RegionId, TaskId, Time};
@@ -381,7 +382,7 @@ impl SymbolicObligation {
     /// Returns the current state.
     #[must_use]
     pub fn state(&self) -> SymbolicObligationState {
-        *self.state.state.read().expect("lock poisoned")
+        *self.state.state.read()
     }
 
     /// Returns true if the obligation is pending (not yet resolved).
@@ -409,7 +410,7 @@ impl SymbolicObligation {
         self.state.progress.increment();
 
         // Transition to InProgress if still Reserved
-        let mut state = self.state.state.write().expect("lock poisoned");
+        let mut state = self.state.state.write();
         if *state == SymbolicObligationState::Reserved {
             *state = SymbolicObligationState::InProgress;
         }
@@ -419,7 +420,7 @@ impl SymbolicObligation {
     pub fn fulfill_many(&self, count: u32) {
         self.state.progress.add(count);
 
-        let mut state = self.state.state.write().expect("lock poisoned");
+        let mut state = self.state.state.write();
         if *state == SymbolicObligationState::Reserved {
             *state = SymbolicObligationState::InProgress;
         }
@@ -433,7 +434,7 @@ impl SymbolicObligation {
     pub fn commit(mut self) {
         assert!(self.is_pending(), "obligation already resolved");
 
-        *self.state.state.write().expect("lock poisoned") = SymbolicObligationState::Committed;
+        *self.state.state.write() = SymbolicObligationState::Committed;
         self.resolved = true;
     }
 
@@ -447,7 +448,7 @@ impl SymbolicObligation {
     pub fn abort(mut self) {
         assert!(self.is_pending(), "obligation already resolved");
 
-        *self.state.state.write().expect("lock poisoned") = SymbolicObligationState::Aborted;
+        *self.state.state.write() = SymbolicObligationState::Aborted;
         self.resolved = true;
     }
 
@@ -464,7 +465,7 @@ impl SymbolicObligation {
 
     /// Marks the obligation as leaked (internal use by runtime).
     pub(crate) fn mark_leaked(&self) {
-        *self.state.state.write().expect("lock poisoned") = SymbolicObligationState::Leaked;
+        *self.state.state.write() = SymbolicObligationState::Leaked;
     }
 
     /// Creates an obligation for testing.
@@ -675,7 +676,7 @@ impl SymbolicObligationRegistry {
 
     /// Updates the state of a registered obligation.
     pub fn update_state(&self, id: ObligationId, state: SymbolicObligationState) {
-        if let Some(entry) = self.by_id.write().expect("lock poisoned").get_mut(&id) {
+        if let Some(entry) = self.by_id.write().get_mut(&id) {
             entry.state = state;
         }
     }
@@ -685,7 +686,6 @@ impl SymbolicObligationRegistry {
     pub fn obligations_for_region(&self, region: RegionId) -> Vec<ObligationId> {
         self.by_region
             .read()
-            .expect("lock poisoned")
             .get(&region)
             .cloned()
             .unwrap_or_default()
@@ -696,7 +696,6 @@ impl SymbolicObligationRegistry {
     pub fn obligations_for_task(&self, task: TaskId) -> Vec<ObligationId> {
         self.by_holder
             .read()
-            .expect("lock poisoned")
             .get(&task)
             .cloned()
             .unwrap_or_default()
@@ -707,7 +706,6 @@ impl SymbolicObligationRegistry {
     pub fn obligations_for_object(&self, object_id: ObjectId) -> Vec<ObligationId> {
         self.by_object
             .read()
-            .expect("lock poisoned")
             .get(&object_id)
             .cloned()
             .unwrap_or_default()
@@ -717,7 +715,7 @@ impl SymbolicObligationRegistry {
     #[must_use]
     pub fn has_pending_in_region(&self, region: RegionId) -> bool {
         let ids = {
-            let by_region = self.by_region.read().expect("lock poisoned");
+            let by_region = self.by_region.read();
             by_region.get(&region).cloned()
         };
 
@@ -725,7 +723,7 @@ impl SymbolicObligationRegistry {
             return false;
         };
 
-        let by_id = self.by_id.read().expect("lock poisoned");
+        let by_id = self.by_id.read();
         for id in &ids {
             if let Some(entry) = by_id.get(id) {
                 if !entry.state.is_terminal() {
@@ -743,7 +741,7 @@ impl SymbolicObligationRegistry {
         let mut result = Vec::new();
 
         let ids = {
-            let by_region = self.by_region.read().expect("lock poisoned");
+            let by_region = self.by_region.read();
             by_region.get(&region).cloned()
         };
 
@@ -751,7 +749,7 @@ impl SymbolicObligationRegistry {
             return result;
         };
 
-        let by_id = self.by_id.read().expect("lock poisoned");
+        let by_id = self.by_id.read();
         for id in &ids {
             if let Some(entry) = by_id.get(id) {
                 if !entry.state.is_terminal() {
@@ -793,25 +791,14 @@ impl SymbolicObligationRegistry {
             state: SymbolicObligationState::Reserved,
         };
 
-        self.by_id.write().expect("lock poisoned").insert(id, entry);
+        self.by_id.write().insert(id, entry);
         self.by_object
             .write()
-            .expect("lock poisoned")
             .entry(object_id)
             .or_default()
             .push(id);
-        self.by_holder
-            .write()
-            .expect("lock poisoned")
-            .entry(holder)
-            .or_default()
-            .push(id);
-        self.by_region
-            .write()
-            .expect("lock poisoned")
-            .entry(region)
-            .or_default()
-            .push(id);
+        self.by_holder.write().entry(holder).or_default().push(id);
+        self.by_region.write().entry(region).or_default().push(id);
     }
 }
 

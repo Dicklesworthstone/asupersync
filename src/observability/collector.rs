@@ -4,8 +4,9 @@
 
 use super::entry::LogEntry;
 use super::level::LogLevel;
+use parking_lot::Mutex;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// A thread-safe collector for log entries.
 #[derive(Debug, Clone)]
@@ -46,7 +47,7 @@ impl LogCollector {
             return;
         }
 
-        let mut inner = self.inner.lock().expect("collector lock poisoned");
+        let mut inner = self.inner.lock();
         if inner.entries.len() >= inner.capacity {
             inner.entries.pop_front();
         }
@@ -56,27 +57,27 @@ impl LogCollector {
     /// Drains all entries from the collector.
     #[must_use]
     pub fn drain(&self) -> Vec<LogEntry> {
-        let mut inner = self.inner.lock().expect("collector lock poisoned");
+        let mut inner = self.inner.lock();
         inner.entries.drain(..).collect()
     }
 
     /// Returns a copy of the current entries without clearing them.
     #[must_use]
     pub fn peek(&self) -> Vec<LogEntry> {
-        let inner = self.inner.lock().expect("collector lock poisoned");
+        let inner = self.inner.lock();
         inner.entries.iter().cloned().collect()
     }
 
     /// Clears the collector.
     pub fn clear(&self) {
-        let mut inner = self.inner.lock().expect("collector lock poisoned");
+        let mut inner = self.inner.lock();
         inner.entries.clear();
     }
 
     /// Returns the number of entries currently stored.
     #[must_use]
     pub fn len(&self) -> usize {
-        let inner = self.inner.lock().expect("collector lock poisoned");
+        let inner = self.inner.lock();
         inner.entries.len()
     }
 
@@ -89,7 +90,7 @@ impl LogCollector {
     /// Returns the configured capacity.
     #[must_use]
     pub fn capacity(&self) -> usize {
-        let inner = self.inner.lock().expect("collector lock poisoned");
+        let inner = self.inner.lock();
         inner.capacity
     }
 

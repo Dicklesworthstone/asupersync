@@ -6,9 +6,9 @@
 use super::{Layer, Service};
 use crate::time::{TimeSource, WallClock};
 use crate::types::Time;
+use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
-use parking_lot::Mutex;
 use std::sync::OnceLock;
 use std::task::{Context, Poll};
 use std::time::Duration;

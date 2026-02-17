@@ -18,11 +18,11 @@
 
 use crate::cx::Cx;
 use crate::util::{Arena, ArenaIndex};
+use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use parking_lot::Mutex;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
@@ -200,10 +200,7 @@ impl<T: Clone> Sender<T> {
 
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        self.channel
-            .inner
-            .lock()
-            .sender_count += 1;
+        self.channel.inner.lock().sender_count += 1;
         Self {
             channel: Arc::clone(&self.channel),
         }
@@ -245,11 +242,7 @@ impl<T: Clone> SendPermit<'_, T> {
     /// If all receivers drop after reservation but before commit, this returns
     /// `0` and does not mutate channel state.
     pub fn send(self, msg: T) -> usize {
-        let mut inner = self
-            .sender
-            .channel
-            .inner
-            .lock();
+        let mut inner = self.sender.channel.inner.lock();
 
         // A reservation can outlive the last receiver dropping.
         // In that case, do not enqueue an unobservable message.
@@ -337,11 +330,7 @@ impl<T: Clone> Future for Recv<'_, T> {
             return Poll::Ready(Err(RecvError::Cancelled));
         }
 
-        let mut inner = this
-            .receiver
-            .channel
-            .inner
-            .lock();
+        let mut inner = this.receiver.channel.inner.lock();
 
         // 1. Check for lag
         let earliest = inner.buffer.front().map_or(inner.total_sent, |s| s.index);
@@ -421,10 +410,7 @@ impl<T> Drop for Recv<'_, T> {
 
 impl<T> Clone for Receiver<T> {
     fn clone(&self) -> Self {
-        self.channel
-            .inner
-            .lock()
-            .receiver_count += 1;
+        self.channel.inner.lock().receiver_count += 1;
         Self {
             channel: Arc::clone(&self.channel),
             next_index: self.next_index,

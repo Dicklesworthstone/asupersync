@@ -11,9 +11,9 @@
 //! - [`JsonlSink`]: Appends to a JSONL file via [`franken_evidence::export::JsonlExporter`].
 //! - [`CollectorSink`]: In-memory collection for testing.
 
+use parking_lot::Mutex;
 use std::fmt;
 use std::path::PathBuf;
-use parking_lot::Mutex;
 
 use franken_evidence::export::JsonlExporter;
 use franken_evidence::EvidenceLedger;

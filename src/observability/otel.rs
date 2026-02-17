@@ -56,7 +56,8 @@ use opentelemetry::KeyValue;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use parking_lot::{Mutex, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 // =============================================================================
@@ -188,7 +189,7 @@ impl CardinalityTracker {
     /// Check if recording this label combination would exceed the limit.
     fn would_exceed(&self, metric: &str, labels: &[KeyValue], max_cardinality: usize) -> bool {
         let hash = Self::hash_labels(labels);
-        let seen = self.seen.read().unwrap();
+        let seen = self.seen.read();
 
         if let Some(set) = seen.get(metric) {
             if set.contains(&hash) {
@@ -203,7 +204,7 @@ impl CardinalityTracker {
     /// Record a label combination.
     fn record(&self, metric: &str, labels: &[KeyValue]) {
         let hash = Self::hash_labels(labels);
-        let mut seen = self.seen.write().unwrap();
+        let mut seen = self.seen.write();
         seen.entry(metric.to_string()).or_default().insert(hash);
     }
 
@@ -233,7 +234,7 @@ impl CardinalityTracker {
     /// Get current cardinality for a metric.
     #[cfg(test)]
     fn cardinality(&self, metric: &str) -> usize {
-        self.seen.read().unwrap().get(metric).map_or(0, |s| s.len())
+        self.seen.read().get(metric).map_or(0, |s| s.len())
     }
 }
 
@@ -526,18 +527,18 @@ impl InMemoryExporter {
     /// Get all collected snapshots.
     #[must_use]
     pub fn snapshots(&self) -> Vec<MetricsSnapshot> {
-        self.snapshots.lock().unwrap().clone()
+        self.snapshots.lock().clone()
     }
 
     /// Clear collected snapshots.
     pub fn clear(&self) {
-        self.snapshots.lock().unwrap().clear();
+        self.snapshots.lock().clear();
     }
 
     /// Get total number of metrics recorded.
     #[must_use]
     pub fn total_metrics(&self) -> usize {
-        let snapshots = self.snapshots.lock().unwrap();
+        let snapshots = self.snapshots.lock();
         snapshots
             .iter()
             .map(|s| s.counters.len() + s.gauges.len() + s.histograms.len())
@@ -547,7 +548,7 @@ impl InMemoryExporter {
 
 impl MetricsExporter for InMemoryExporter {
     fn export(&self, metrics: &MetricsSnapshot) -> Result<(), ExportError> {
-        self.snapshots.lock().unwrap().push(metrics.clone());
+        self.snapshots.lock().push(metrics.clone());
         Ok(())
     }
 

@@ -155,6 +155,7 @@ impl FinalizerStack {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -165,14 +166,14 @@ mod tests {
     fn finalizer_stack_lifo_order() {
         init_test("finalizer_stack_lifo_order");
         let mut stack = FinalizerStack::new();
-        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let order = std::sync::Arc::new(Mutex::new(Vec::new()));
         let o1 = order.clone();
         let o2 = order.clone();
         let o3 = order.clone();
 
-        stack.push_sync(move || o1.lock().unwrap().push(1));
-        stack.push_sync(move || o2.lock().unwrap().push(2));
-        stack.push_sync(move || o3.lock().unwrap().push(3));
+        stack.push_sync(move || o1.lock().push(1));
+        stack.push_sync(move || o2.lock().push(2));
+        stack.push_sync(move || o3.lock().push(3));
 
         // Pop and execute in LIFO order
         while let Some(finalizer) = stack.pop() {
@@ -182,7 +183,7 @@ mod tests {
         }
 
         // Should be 3, 2, 1 (LIFO)
-        let order = order.lock().unwrap().clone();
+        let order = order.lock().clone();
         crate::assert_with_log!(order == vec![3, 2, 1], "order", vec![3, 2, 1], order);
         crate::test_complete!("finalizer_stack_lifo_order");
     }

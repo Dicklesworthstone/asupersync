@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 use super::lookup::LookupIp;
@@ -92,7 +92,7 @@ impl DnsCache {
     /// Looks up an IP address result from the cache.
     pub fn get_ip(&self, host: &str) -> Option<LookupIp> {
         let entry = {
-            let cache = self.ip_cache.read().expect("cache lock poisoned");
+            let cache = self.ip_cache.read();
             cache.get(host).cloned()
         };
 
@@ -105,7 +105,7 @@ impl DnsCache {
                 let mut refreshed: Option<LookupIp> = None;
                 let mut evicted = false;
                 {
-                    let mut cache = self.ip_cache.write().expect("cache lock poisoned");
+                    let mut cache = self.ip_cache.write();
                     if let Some(entry) = cache.get(host) {
                         if entry.is_expired() {
                             cache.remove(host);
@@ -138,7 +138,7 @@ impl DnsCache {
     pub fn put_ip(&self, host: &str, lookup: &LookupIp) {
         if self.config.max_entries == 0 {
             let evicted = {
-                let mut cache = self.ip_cache.write().expect("cache lock poisoned");
+                let mut cache = self.ip_cache.write();
                 if cache.is_empty() {
                     0
                 } else {
@@ -148,14 +148,15 @@ impl DnsCache {
                 }
             };
             if evicted > 0 {
-                self.stat_evictions.fetch_add(evicted as u64, Ordering::Relaxed);
+                self.stat_evictions
+                    .fetch_add(evicted as u64, Ordering::Relaxed);
             }
             return;
         }
 
         let ttl = self.clamp_ttl(lookup.ttl());
 
-        let mut cache = self.ip_cache.write().expect("cache lock poisoned");
+        let mut cache = self.ip_cache.write();
 
         // Evict if at capacity
         if cache.len() >= self.config.max_entries {
@@ -175,13 +176,13 @@ impl DnsCache {
 
     /// Removes an entry from the cache.
     pub fn remove(&self, host: &str) {
-        let mut cache = self.ip_cache.write().expect("cache lock poisoned");
+        let mut cache = self.ip_cache.write();
         cache.remove(host);
     }
 
     /// Clears all entries from the cache.
     pub fn clear(&self) {
-        let mut cache = self.ip_cache.write().expect("cache lock poisoned");
+        let mut cache = self.ip_cache.write();
         cache.clear();
         drop(cache);
 
@@ -192,7 +193,7 @@ impl DnsCache {
 
     /// Evicts expired entries from the cache.
     pub fn evict_expired(&self) {
-        let mut cache = self.ip_cache.write().expect("cache lock poisoned");
+        let mut cache = self.ip_cache.write();
         self.evict_expired_locked(&mut cache);
     }
 
@@ -200,7 +201,7 @@ impl DnsCache {
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn stats(&self) -> CacheStats {
-        let cache = self.ip_cache.read().expect("cache lock poisoned");
+        let cache = self.ip_cache.read();
         let hits = self.stat_hits.load(Ordering::Relaxed);
         let misses = self.stat_misses.load(Ordering::Relaxed);
         let evictions = self.stat_evictions.load(Ordering::Relaxed);
@@ -228,7 +229,8 @@ impl DnsCache {
         let evicted = before - cache.len();
 
         if evicted > 0 {
-            self.stat_evictions.fetch_add(evicted as u64, Ordering::Relaxed);
+            self.stat_evictions
+                .fetch_add(evicted as u64, Ordering::Relaxed);
         }
     }
 

@@ -2,9 +2,9 @@
 
 use crate::net::tcp::listener::TcpListener;
 use crate::net::tcp::stream::TcpStream;
+use parking_lot::Mutex;
 use std::io;
 use std::net::{self, SocketAddr};
-use parking_lot::Mutex;
 
 /// A TCP socket used for configuring options before connect/listen.
 #[derive(Debug)]

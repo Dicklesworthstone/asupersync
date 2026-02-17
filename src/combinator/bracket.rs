@@ -430,6 +430,7 @@ mod tests {
     use super::*;
     use crate::types::{Budget, RegionId, TaskId};
     use crate::util::ArenaIndex;
+    use parking_lot::Mutex;
     use std::cell::Cell;
     use std::future::Future;
     use std::rc::Rc;
@@ -549,7 +550,7 @@ mod tests {
 
     #[test]
     fn bracket_execution_order() {
-        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let order = Arc::new(Mutex::new(Vec::new()));
 
         let o1 = order.clone();
         let o2 = order.clone();
@@ -557,20 +558,20 @@ mod tests {
 
         let result = poll_ready(bracket(
             async move {
-                o1.lock().unwrap().push("acquire");
+                o1.lock().push("acquire");
                 Ok::<_, ()>("resource")
             },
             move |_| {
-                o2.lock().unwrap().push("use");
+                o2.lock().push("use");
                 async { Ok::<_, ()>("result") }
             },
             move |_| {
-                o3.lock().unwrap().push("release");
+                o3.lock().push("release");
                 async {}
             },
         ));
 
-        let executed: Vec<&str> = order.lock().unwrap().clone();
+        let executed: Vec<&str> = order.lock().clone();
         drop(order);
         assert_eq!(executed, vec!["acquire", "use", "release"]);
         assert_eq!(result, Ok("result"));
@@ -589,19 +590,19 @@ mod tests {
 
     #[test]
     fn bracket_resource_passed_to_release() {
-        let released_value = Arc::new(std::sync::Mutex::new(0i32));
+        let released_value = Arc::new(Mutex::new(0i32));
         let rv = released_value.clone();
 
         let _ = poll_ready(bracket(
             async { Ok::<_, ()>(42) },
             |x| async move { Ok::<_, ()>(x) },
             move |x| {
-                *rv.lock().unwrap() = x;
+                *rv.lock() = x;
                 async {}
             },
         ));
 
-        assert_eq!(*released_value.lock().unwrap(), 42);
+        assert_eq!(*released_value.lock(), 42);
     }
 
     // =========================================================================
@@ -639,36 +640,36 @@ mod tests {
 
     #[test]
     fn bracket_move_releases_leftover() {
-        let leftover_value = Arc::new(std::sync::Mutex::new(None::<i32>));
+        let leftover_value = Arc::new(Mutex::new(None::<i32>));
         let lv = leftover_value.clone();
 
         let _ = poll_ready(bracket_move(
             async { Ok::<_, ()>(42) },
             |x| (x * 2, Some(x)),
             move |leftover| {
-                *lv.lock().unwrap() = leftover;
+                *lv.lock() = leftover;
                 async {}
             },
         ));
 
-        assert_eq!(*leftover_value.lock().unwrap(), Some(42));
+        assert_eq!(*leftover_value.lock(), Some(42));
     }
 
     #[test]
     fn bracket_move_releases_none_when_consumed() {
-        let leftover_received = Arc::new(std::sync::Mutex::new(Some(999i32)));
+        let leftover_received = Arc::new(Mutex::new(Some(999i32)));
         let lr = leftover_received.clone();
 
         let _ = poll_ready(bracket_move(
             async { Ok::<_, ()>(42) },
             |_x| (100, None),
             move |leftover| {
-                *lr.lock().unwrap() = leftover;
+                *lr.lock() = leftover;
                 async {}
             },
         ));
 
-        assert_eq!(*leftover_received.lock().unwrap(), None);
+        assert_eq!(*leftover_received.lock(), None);
     }
 
     #[test]

@@ -7,10 +7,11 @@ use crate::combinator::select::{Either, Select};
 use crate::server::shutdown::{ShutdownPhase, ShutdownSignal};
 use crate::sync::Notify;
 use crate::time::sleep_until;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Unique identifier for a tracked connection.
@@ -101,10 +102,7 @@ impl ConnectionManager {
             return None;
         }
 
-        let mut connections = self
-            .state
-            .lock()
-            .expect("connection registry lock poisoned");
+        let mut connections = self.state.lock();
 
         // Check capacity
         if let Some(max) = self.max_connections {
@@ -131,10 +129,7 @@ impl ConnectionManager {
     /// Returns the number of active connections.
     #[must_use]
     pub fn active_count(&self) -> usize {
-        self.state
-            .lock()
-            .expect("connection registry lock poisoned")
-            .len()
+        self.state.lock().len()
     }
 
     /// Returns `true` if there are no active connections.
@@ -160,7 +155,6 @@ impl ConnectionManager {
     pub fn active_connections(&self) -> Vec<(ConnectionId, ConnectionInfo)> {
         self.state
             .lock()
-            .expect("connection registry lock poisoned")
             .iter()
             .map(|(id, info)| (*id, info.clone()))
             .collect()
@@ -298,10 +292,7 @@ impl ConnectionGuard {
 
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
-        let mut connections = self
-            .state
-            .lock()
-            .expect("connection registry lock poisoned");
+        let mut connections = self.state.lock();
         connections.remove(&self.id);
         // Notify on every removal so drain_with_stats can re-check deadlines.
         // wait_all_closed loops on is_empty(), so extra wakeups are harmless.

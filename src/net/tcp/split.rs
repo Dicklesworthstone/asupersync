@@ -10,10 +10,11 @@ use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
+use parking_lot::Mutex;
 use std::io::{self, Read, Write};
 use std::net::{self, Shutdown};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
 /// Borrowed read half of a split TCP stream.
@@ -193,7 +194,7 @@ impl std::fmt::Debug for TcpStreamInner {
 
 impl TcpStreamInner {
     fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = self.state.lock();
 
         // Store this direction's waker for combined dispatch.
         if interest.is_readable() {
@@ -269,7 +270,7 @@ impl TcpStreamInner {
     }
 
     fn clear_waiter_on_drop(&self, interest: Interest) {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = self.state.lock();
 
         if interest.is_readable() {
             guard.read_waker = None;
@@ -390,7 +391,7 @@ impl OwnedReadHalf {
             write.shutdown_on_drop = false;
 
             // Take the registration back
-            let registration = self.inner.state.lock().unwrap().registration.take();
+            let registration = self.inner.state.lock().registration.take();
 
             Ok(super::stream::TcpStream::from_parts(
                 self.inner.stream.clone(),
@@ -1024,7 +1025,7 @@ mod tests {
 
         drop(read_half);
 
-        let state = write_half.inner.state.lock().expect("lock poisoned");
+        let state = write_half.inner.state.lock();
         assert!(
             state.read_waker.is_none(),
             "read waiter must be cleared after read half drop"
@@ -1073,7 +1074,7 @@ mod tests {
 
         drop(write_half);
 
-        let state = read_half.inner.state.lock().expect("lock poisoned");
+        let state = read_half.inner.state.lock();
         assert!(
             state.write_waker.is_none(),
             "write waiter must be cleared after write half drop"
@@ -1154,7 +1155,7 @@ mod tests {
 
         drop(write_half);
 
-        let state = read_half.inner.state.lock().expect("lock poisoned");
+        let state = read_half.inner.state.lock();
         assert!(
             state.registration.is_none(),
             "registration should be dropped after injected re-arm failure"
@@ -1228,7 +1229,7 @@ mod tests {
             .register_interest(&write_task_cx, Interest::WRITABLE)
             .expect("register writable with injected not-connected");
 
-        let state = read_half.inner.state.lock().expect("lock poisoned");
+        let state = read_half.inner.state.lock();
         assert!(
             state.registration.is_none(),
             "registration should be dropped after not-connected modify"

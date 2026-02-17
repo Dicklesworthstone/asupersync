@@ -34,7 +34,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use parking_lot::{Mutex, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::types::Time;
@@ -299,11 +300,11 @@ impl RateLimiter {
         // Avoid lock-order inversion with process_queue() by not holding
         // metrics and state locks at the same time.
         let available_tokens = {
-            let state = self.state.lock().expect("lock poisoned");
+            let state = self.state.lock();
             state.tokens_fixed as f64 / FIXED_POINT_SCALE as f64
         };
 
-        let mut m = self.metrics.read().expect("lock poisoned").clone();
+        let mut m = self.metrics.read().clone();
         m.available_tokens = available_tokens;
 
         // Use atomic values
@@ -337,7 +338,7 @@ impl RateLimiter {
 
     /// Refill tokens based on elapsed time from the provided deterministic clock.
     pub fn refill(&self, now: Time) {
-        let mut state = self.state.lock().expect("lock poisoned");
+        let mut state = self.state.lock();
         self.refill_inner(&mut state, now.as_millis());
     }
 
@@ -346,7 +347,7 @@ impl RateLimiter {
     /// Returns `true` if tokens were acquired, `false` if insufficient tokens.
     #[must_use]
     pub fn try_acquire(&self, cost: u32, now: Time) -> bool {
-        let mut state = self.state.lock().expect("lock poisoned");
+        let mut state = self.state.lock();
         let now_millis = now.as_millis();
 
         self.refill_inner(&mut state, now_millis);
@@ -411,7 +412,7 @@ impl RateLimiter {
     )]
     pub fn time_until_available(&self, cost: u32, now: Time) -> Duration {
         let current_fixed = {
-            let mut state = self.state.lock().expect("lock poisoned");
+            let mut state = self.state.lock();
             self.refill_inner(&mut state, now.as_millis());
             state.tokens_fixed
         };
@@ -451,7 +452,7 @@ impl RateLimiter {
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn available_tokens(&self) -> f64 {
-        let state = self.state.lock().expect("lock poisoned");
+        let state = self.state.lock();
         state.tokens_fixed as f64 / FIXED_POINT_SCALE as f64
     }
 
@@ -491,7 +492,7 @@ impl RateLimiter {
             _ => u64::MAX,
         };
 
-        let mut queue = self.wait_queue.write().expect("lock poisoned");
+        let mut queue = self.wait_queue.write();
         let entry_id = self.next_id.fetch_add(1, Ordering::SeqCst);
 
         queue.push_back(QueueEntry {
@@ -515,7 +516,7 @@ impl RateLimiter {
     pub fn process_queue(&self, now: Time) -> Option<u64> {
         let now_millis = now.as_millis();
 
-        let mut queue = self.wait_queue.write().expect("lock poisoned");
+        let mut queue = self.wait_queue.write();
 
         // First, timeout expired entries
         for entry in queue.iter_mut() {
@@ -526,7 +527,7 @@ impl RateLimiter {
 
         // Try to grant awaiting entries
         let mut first_granted = None;
-        let mut state = self.state.lock().expect("lock poisoned");
+        let mut state = self.state.lock();
         self.refill_inner(&mut state, now_millis);
 
         // Accumulate metrics on the stack, then flush once outside the loop.
@@ -565,9 +566,10 @@ impl RateLimiter {
 
         // Flush accumulated metrics in a single write lock acquisition.
         if granted_count > 0 {
-            self.total_allowed.fetch_add(granted_count, Ordering::Relaxed);
+            self.total_allowed
+                .fetch_add(granted_count, Ordering::Relaxed);
 
-            let mut metrics = self.metrics.write().expect("lock poisoned");
+            let mut metrics = self.metrics.write();
             metrics.total_wait_time += acc_wait_time;
             if max_wait_time > metrics.max_wait_time {
                 metrics.max_wait_time = max_wait_time;
@@ -601,7 +603,7 @@ impl RateLimiter {
         // Process queue to handle timeouts and grants
         let _ = self.process_queue(now);
 
-        let mut queue = self.wait_queue.write().expect("lock poisoned");
+        let mut queue = self.wait_queue.write();
         let entry_idx = queue.iter().position(|e| e.id == entry_id);
 
         if let Some(idx) = entry_idx {
@@ -637,7 +639,7 @@ impl RateLimiter {
             return; // Special sentinel, nothing to cancel
         }
 
-        let mut queue = self.wait_queue.write().expect("lock poisoned");
+        let mut queue = self.wait_queue.write();
         if let Some(entry) = queue.iter_mut().find(|e| e.id == entry_id) {
             if entry.result.is_none() {
                 entry.result = Some(Err(RejectionReason::Cancelled));
@@ -650,12 +652,12 @@ impl RateLimiter {
         let initial_tokens = u64::from(self.policy.burst) * FIXED_POINT_SCALE;
 
         {
-            let mut state = self.state.lock().expect("lock poisoned");
+            let mut state = self.state.lock();
             state.tokens_fixed = initial_tokens;
             state.last_refill = 0;
         }
 
-        let mut queue = self.wait_queue.write().expect("lock poisoned");
+        let mut queue = self.wait_queue.write();
         for entry in queue.iter_mut() {
             if entry.result.is_none() {
                 entry.result = Some(Err(RejectionReason::Cancelled));
@@ -720,7 +722,7 @@ impl SlidingWindowRateLimiter {
         let now_millis = now.as_millis();
         let period_millis = duration_to_millis_saturating(self.policy.period);
 
-        let window = self.window.read().expect("lock poisoned");
+        let window = self.window.read();
         window
             .iter()
             // Include entries where (now - t) < period, i.e., entry is within the window
@@ -734,7 +736,7 @@ impl SlidingWindowRateLimiter {
     fn cleanup_old(&self, now: Time) {
         let now_millis = now.as_millis();
         let period_millis = duration_to_millis_saturating(self.policy.period);
-        let mut window = self.window.write().expect("lock poisoned");
+        let mut window = self.window.write();
 
         while let Some((t, _)) = window.front() {
             // Remove entries where (now - t) >= period, i.e., entry is outside the window
@@ -754,7 +756,7 @@ impl SlidingWindowRateLimiter {
         let period_millis = duration_to_millis_saturating(self.policy.period);
 
         // Single lock acquisition: cleanup expired + check usage + add entry
-        let mut window = self.window.write().expect("lock poisoned");
+        let mut window = self.window.write();
 
         // Cleanup expired entries inline (avoids separate cleanup_old lock)
         while let Some((t, _)) = window.front() {
@@ -799,7 +801,7 @@ impl SlidingWindowRateLimiter {
 
         // Find when enough capacity frees up
         let needed = (usage + cost) - self.policy.rate;
-        let window = self.window.read().expect("lock poisoned");
+        let window = self.window.read();
         let period_millis = duration_to_millis_saturating(self.policy.period);
         let now_millis = now.as_millis();
 
@@ -826,7 +828,7 @@ impl SlidingWindowRateLimiter {
     /// Get metrics.
     #[must_use]
     pub fn metrics(&self) -> RateLimitMetrics {
-        let mut m = self.metrics.read().expect("lock poisoned").clone();
+        let mut m = self.metrics.read().clone();
         m.total_allowed = self.total_allowed.load(Ordering::Relaxed);
         m.total_rejected = self.total_rejected.load(Ordering::Relaxed);
         m
@@ -834,7 +836,7 @@ impl SlidingWindowRateLimiter {
 
     /// Reset the sliding window.
     pub fn reset(&self) {
-        let mut window = self.window.write().expect("lock poisoned");
+        let mut window = self.window.write();
         window.clear();
     }
 }
@@ -982,14 +984,14 @@ impl RateLimiterRegistry {
     pub fn get_or_create(&self, name: &str) -> Arc<RateLimiter> {
         // Fast path: read lock
         {
-            let limiters = self.limiters.read().expect("lock poisoned");
+            let limiters = self.limiters.read();
             if let Some(l) = limiters.get(name) {
                 return l.clone();
             }
         }
 
         // Slow path: write lock
-        let mut limiters = self.limiters.write().expect("lock poisoned");
+        let mut limiters = self.limiters.write();
         limiters
             .entry(name.to_string())
             .or_insert_with(|| {
@@ -1003,7 +1005,7 @@ impl RateLimiterRegistry {
 
     /// Get or create with custom policy.
     pub fn get_or_create_with(&self, name: &str, policy: RateLimitPolicy) -> Arc<RateLimiter> {
-        let mut limiters = self.limiters.write().expect("lock poisoned");
+        let mut limiters = self.limiters.write();
         limiters
             .entry(name.to_string())
             .or_insert_with(|| Arc::new(RateLimiter::new(policy)))
@@ -1013,7 +1015,7 @@ impl RateLimiterRegistry {
     /// Get metrics for all limiters.
     #[must_use]
     pub fn all_metrics(&self) -> HashMap<String, RateLimitMetrics> {
-        let limiters = self.limiters.read().expect("lock poisoned");
+        let limiters = self.limiters.read();
         limiters
             .iter()
             .map(|(name, l)| (name.clone(), l.metrics()))
@@ -1022,14 +1024,14 @@ impl RateLimiterRegistry {
 
     /// Remove a named limiter.
     pub fn remove(&self, name: &str) -> Option<Arc<RateLimiter>> {
-        let mut limiters = self.limiters.write().expect("lock poisoned");
+        let mut limiters = self.limiters.write();
         limiters.remove(name)
     }
 }
 
 impl fmt::Debug for RateLimiterRegistry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let limiters = self.limiters.read().expect("lock poisoned");
+        let limiters = self.limiters.read();
         f.debug_struct("RateLimiterRegistry")
             .field("count", &limiters.len())
             .finish_non_exhaustive()
@@ -1755,7 +1757,6 @@ mod tests {
         let deadline_millis = rl
             .wait_queue
             .read()
-            .expect("lock poisoned")
             .iter()
             .find(|entry| entry.id == entry_id)
             .map(|entry| entry.deadline_millis)
@@ -1780,7 +1781,7 @@ mod tests {
             ..Default::default()
         }));
 
-        let state_guard = rl.state.lock().expect("lock poisoned");
+        let state_guard = rl.state.lock();
         let rendezvous = Arc::new(Barrier::new(2));
         let rl_clone = Arc::clone(&rl);
         let rendezvous_clone = Arc::clone(&rendezvous);
@@ -1796,7 +1797,7 @@ mod tests {
 
         let metrics_write_guard = rl.metrics.try_write();
         assert!(
-            metrics_write_guard.is_ok(),
+            metrics_write_guard.is_some(),
             "metrics() must not hold metrics read-lock while blocked on state lock"
         );
         drop(metrics_write_guard);

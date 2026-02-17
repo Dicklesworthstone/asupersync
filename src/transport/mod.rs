@@ -32,9 +32,10 @@ pub use stream::{SymbolStream, SymbolStreamExt};
 
 use crate::security::authenticated::AuthenticatedSymbol;
 use crate::types::Symbol;
+use parking_lot::Mutex;
 use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::Waker;
 
 /// A set of unique symbols.
@@ -74,11 +75,11 @@ impl SharedChannel {
         self.closed.store(true, Ordering::SeqCst);
         // Wake everyone (drop locks before waking to avoid deadlocks).
         let send_wakers = {
-            let mut wakers = self.send_wakers.lock().unwrap();
+            let mut wakers = self.send_wakers.lock();
             std::mem::take(&mut *wakers)
         };
         let recv_wakers = {
-            let mut wakers = self.recv_wakers.lock().unwrap();
+            let mut wakers = self.recv_wakers.lock();
             std::mem::take(&mut *wakers)
         };
 
@@ -179,7 +180,7 @@ mod inline_tests {
         let recv_queued = Arc::new(AtomicBool::new(true));
 
         {
-            let mut send_wakers = shared.send_wakers.lock().unwrap();
+            let mut send_wakers = shared.send_wakers.lock();
             send_wakers.push(ChannelWaiter {
                 waker: flagged_waker(Arc::clone(&send_flag)),
                 queued: Arc::clone(&send_queued),
@@ -187,7 +188,7 @@ mod inline_tests {
         }
 
         {
-            let mut recv_wakers = shared.recv_wakers.lock().unwrap();
+            let mut recv_wakers = shared.recv_wakers.lock();
             recv_wakers.push(ChannelWaiter {
                 waker: flagged_waker(Arc::clone(&recv_flag)),
                 queued: Arc::clone(&recv_queued),

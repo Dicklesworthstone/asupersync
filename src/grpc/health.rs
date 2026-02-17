@@ -23,7 +23,8 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use parking_lot::RwLock;
+use std::sync::Arc;
 
 use super::service::{NamedService, ServiceDescriptor, ServiceHandler};
 use super::status::Status;
@@ -150,7 +151,7 @@ impl HealthService {
     ///
     /// Use an empty string for the overall server status.
     pub fn set_status(&self, service: impl Into<String>, status: ServingStatus) {
-        let mut statuses = self.statuses.write().expect("lock poisoned");
+        let mut statuses = self.statuses.write();
         statuses.insert(service.into(), status);
     }
 
@@ -164,7 +165,7 @@ impl HealthService {
     /// Returns `None` if the service is not registered.
     #[must_use]
     pub fn get_status(&self, service: &str) -> Option<ServingStatus> {
-        let statuses = self.statuses.read().expect("lock poisoned");
+        let statuses = self.statuses.read();
         statuses.get(service).copied()
     }
 
@@ -176,26 +177,26 @@ impl HealthService {
 
     /// Clear all service statuses.
     pub fn clear(&self) {
-        let mut statuses = self.statuses.write().expect("lock poisoned");
+        let mut statuses = self.statuses.write();
         statuses.clear();
     }
 
     /// Remove a service from health tracking.
     pub fn clear_status(&self, service: &str) {
-        let mut statuses = self.statuses.write().expect("lock poisoned");
+        let mut statuses = self.statuses.write();
         statuses.remove(service);
     }
 
     /// Get all registered services.
     #[must_use]
     pub fn services(&self) -> Vec<String> {
-        let statuses = self.statuses.read().expect("lock poisoned");
+        let statuses = self.statuses.read();
         statuses.keys().cloned().collect()
     }
 
     /// Handle a health check request.
     pub fn check(&self, request: &HealthCheckRequest) -> Result<HealthCheckResponse, Status> {
-        let statuses = self.statuses.read().expect("lock poisoned");
+        let statuses = self.statuses.read();
 
         if let Some(&status) = statuses.get(&request.service) {
             drop(statuses);

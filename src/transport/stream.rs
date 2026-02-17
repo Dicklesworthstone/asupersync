@@ -355,7 +355,7 @@ impl Drop for ChannelStream {
         };
 
         waiter.store(false, Ordering::Release);
-        let mut wakers = self.shared.recv_wakers.lock().unwrap();
+        let mut wakers = self.shared.recv_wakers.lock();
         wakers.retain(|entry| !Arc::ptr_eq(&entry.queued, waiter));
     }
 }
@@ -369,7 +369,7 @@ impl SymbolStream for ChannelStream {
         let mut symbol = None;
         let mut closed = false;
         {
-            let mut queue = this.shared.queue.lock().unwrap();
+            let mut queue = this.shared.queue.lock();
             if let Some(entry) = queue.pop_front() {
                 symbol = Some(entry);
             } else if this.shared.closed.load(Ordering::SeqCst) {
@@ -384,7 +384,7 @@ impl SymbolStream for ChannelStream {
             }
             // Wake sender if we freed space.
             let waiter = {
-                let mut wakers = this.shared.send_wakers.lock().unwrap();
+                let mut wakers = this.shared.send_wakers.lock();
                 wakers.pop()
             };
             if let Some(w) = waiter {
@@ -404,7 +404,7 @@ impl SymbolStream for ChannelStream {
         let mut new_waiter = None;
         let mut closed = false;
         {
-            let mut wakers = this.shared.recv_wakers.lock().unwrap();
+            let mut wakers = this.shared.recv_wakers.lock();
             if this.shared.closed.load(Ordering::SeqCst) {
                 closed = true;
             } else {
@@ -454,7 +454,7 @@ impl SymbolStream for ChannelStream {
         // race: a sender may push between our queue check and waiter
         // registration, finding no recv_waker to wake.
         {
-            let queue = this.shared.queue.lock().unwrap();
+            let queue = this.shared.queue.lock();
             if !queue.is_empty() || this.shared.closed.load(Ordering::SeqCst) {
                 drop(queue);
                 cx.waker().wake_by_ref();
@@ -934,7 +934,7 @@ mod tests {
             true,
             matches!(pending, Poll::Pending)
         );
-        let queued_before = shared.recv_wakers.lock().unwrap().len();
+        let queued_before = shared.recv_wakers.lock().len();
         crate::assert_with_log!(
             queued_before == 1,
             "one waiter registered",
@@ -944,7 +944,7 @@ mod tests {
 
         drop(stream);
 
-        let queued_after = shared.recv_wakers.lock().unwrap().len();
+        let queued_after = shared.recv_wakers.lock().len();
         crate::assert_with_log!(
             queued_after == 0,
             "queued waiter removed on drop",
