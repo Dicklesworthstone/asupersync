@@ -8,7 +8,8 @@
 use crate::tracing_compat::trace;
 use crate::types::TaskId;
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::task::{Wake, Waker};
 
 /// Source attribution for wake events.
@@ -65,19 +66,19 @@ impl WakerState {
 
     /// Drains all woken tasks.
     pub fn drain_woken(&self) -> Vec<TaskId> {
-        let mut woken = self.woken.lock().expect("lock poisoned");
+        let mut woken = self.woken.lock();
         woken.drain().collect()
     }
 
     /// Returns true if any tasks have been woken.
     #[must_use]
     pub fn has_woken(&self) -> bool {
-        let woken = self.woken.lock().expect("lock poisoned");
+        let woken = self.woken.lock();
         !woken.is_empty()
     }
 
     fn wake(&self, task: TaskId, source: WakeSource) {
-        let mut woken = self.woken.lock().expect("lock poisoned");
+        let mut woken = self.woken.lock();
         if woken.insert(task) {
             let _source_label = match source {
                 WakeSource::Timer => "timer",
