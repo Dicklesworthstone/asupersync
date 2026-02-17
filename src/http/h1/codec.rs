@@ -187,22 +187,70 @@ impl Default for Http1Codec {
 /// Find the position of `\r\n\r\n` in `buf`, returning the index of the
 /// first byte after the delimiter.
 fn find_headers_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
+    if buf.len() < 4 {
+        return None;
+    }
+
+    let mut i = 3;
+    while i < buf.len() {
+        if buf[i - 3] == b'\r' && buf[i - 2] == b'\n' && buf[i - 1] == b'\r' && buf[i] == b'\n' {
+            return Some(i + 1);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Find the position of the first CRLF (`\r\n`) in `buf`.
+///
+/// Returns the index of `\r` when found.
+#[inline]
+fn find_crlf(buf: &[u8]) -> Option<usize> {
+    if buf.len() < 2 {
+        return None;
+    }
+
+    let mut i = 1;
+    while i < buf.len() {
+        if buf[i - 1] == b'\r' && buf[i] == b'\n' {
+            return Some(i - 1);
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Parse the request line: `METHOD SP URI SP VERSION CRLF`.
 fn parse_request_line(line: &str) -> Result<(Method, String, Version), HttpError> {
-    let mut parts = line.split_ascii_whitespace();
-    let method_str = parts.next().ok_or(HttpError::BadRequestLine)?;
-    let uri = parts.next().ok_or(HttpError::BadRequestLine)?;
-    let version_str = parts.next().ok_or(HttpError::BadRequestLine)?;
-    if parts.next().is_some() {
+    parse_request_line_bytes(line.as_bytes())
+}
+
+fn parse_request_line_bytes(line: &[u8]) -> Result<(Method, String, Version), HttpError> {
+    fn next_token_bounds(bytes: &[u8], cursor: &mut usize) -> Option<(usize, usize)> {
+        while *cursor < bytes.len() && bytes[*cursor].is_ascii_whitespace() {
+            *cursor += 1;
+        }
+        let start = *cursor;
+        while *cursor < bytes.len() && !bytes[*cursor].is_ascii_whitespace() {
+            *cursor += 1;
+        }
+        (start < *cursor).then_some((start, *cursor))
+    }
+
+    let mut cursor = 0usize;
+    let method_bounds = next_token_bounds(line, &mut cursor).ok_or(HttpError::BadRequestLine)?;
+    let uri_bounds = next_token_bounds(line, &mut cursor).ok_or(HttpError::BadRequestLine)?;
+    let version_bounds = next_token_bounds(line, &mut cursor).ok_or(HttpError::BadRequestLine)?;
+    if next_token_bounds(line, &mut cursor).is_some() {
         return Err(HttpError::BadRequestLine);
     }
 
-    let method = Method::from_bytes(method_str.as_bytes()).ok_or(HttpError::BadMethod)?;
-    let version =
-        Version::from_bytes(version_str.as_bytes()).ok_or(HttpError::UnsupportedVersion)?;
+    let method =
+        Method::from_bytes(&line[method_bounds.0..method_bounds.1]).ok_or(HttpError::BadMethod)?;
+    let version = Version::from_bytes(&line[version_bounds.0..version_bounds.1])
+        .ok_or(HttpError::UnsupportedVersion)?;
+    let uri = std::str::from_utf8(&line[uri_bounds.0..uri_bounds.1])
+        .map_err(|_| HttpError::BadRequestLine)?;
 
     Ok((method, uri.to_owned(), version))
 }
@@ -382,8 +430,7 @@ fn append_chunk_size_line(dst: &mut BytesMut, mut size: usize) {
 /// Per RFC 7230 Section 3.3.3, having both Transfer-Encoding and Content-Length
 /// is an error that could indicate a request smuggling attempt.
 fn body_kind(version: Version, headers: &[(String, String)]) -> Result<BodyKind, HttpError> {
-    let te = unique_header_value(headers, "Transfer-Encoding")?;
-    let cl = unique_header_value(headers, "Content-Length")?;
+    let (te, cl) = transfer_and_content_length(headers)?;
 
     // RFC 7230 3.3.3: Reject requests with both Transfer-Encoding and Content-Length
     // to prevent request smuggling attacks.
@@ -404,6 +451,32 @@ fn body_kind(version: Version, headers: &[(String, String)]) -> Result<BodyKind,
         return Ok(BodyKind::ContentLength(len));
     }
     Ok(BodyKind::ContentLength(0))
+}
+
+/// Return `(Transfer-Encoding, Content-Length)` while enforcing duplicate rules.
+fn transfer_and_content_length(
+    headers: &[(String, String)],
+) -> Result<(Option<&str>, Option<&str>), HttpError> {
+    let mut transfer_encoding = None;
+    let mut content_length = None;
+
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            if transfer_encoding.is_some() {
+                return Err(HttpError::DuplicateTransferEncoding);
+            }
+            transfer_encoding = Some(value.as_str());
+            continue;
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            if content_length.is_some() {
+                return Err(HttpError::DuplicateContentLength);
+            }
+            content_length = Some(value.as_str());
+        }
+    }
+
+    Ok((transfer_encoding, content_length))
 }
 
 enum BodyKind {
@@ -523,7 +596,7 @@ impl ChunkedBodyDecoder {
 }
 
 fn split_line_crlf(src: &mut BytesMut, max_len: usize) -> Result<Option<BytesMut>, HttpError> {
-    let Some(line_end) = src.as_ref().windows(2).position(|w| w == b"\r\n") else {
+    let Some(line_end) = find_crlf(src.as_ref()) else {
         if src.len() > max_len {
             return Err(HttpError::BadChunkedEncoding);
         }
@@ -556,11 +629,12 @@ fn decode_head(
     max_headers_size: usize,
 ) -> Result<Option<(Method, String, Version, Vec<(String, String)>, BodyKind)>, HttpError> {
     // Check request-line length limit
-    if let Some(line_end) = src.as_ref().windows(2).position(|w| w == b"\r\n") {
-        if line_end > MAX_REQUEST_LINE {
+    let request_line_end_hint = match find_crlf(src.as_ref()) {
+        Some(line_end) if line_end > MAX_REQUEST_LINE => {
             return Err(HttpError::RequestLineTooLong);
         }
-    }
+        other => other,
+    };
 
     let Some(end) = find_headers_end(src.as_ref()) else {
         if src.len() > max_headers_size {
@@ -575,28 +649,23 @@ fn decode_head(
 
     let head_bytes = src.split_to(end);
     let head = head_bytes.as_ref();
-    let head_str = std::str::from_utf8(head).map_err(|_| HttpError::BadRequestLine)?;
-    let head = head_str.as_bytes();
-    let request_line_end = head
-        .windows(2)
-        .position(|w| w == b"\r\n")
+    let request_line_end = request_line_end_hint
+        .filter(|&line_end| line_end < head.len())
+        .or_else(|| find_crlf(head))
         .ok_or(HttpError::BadRequestLine)?;
-    let request_line = &head_str[..request_line_end];
-    let (method, uri, version) = parse_request_line(request_line)?;
+    let request_line = &head[..request_line_end];
+    let (method, uri, version) = parse_request_line_bytes(request_line)?;
 
     let mut headers = Vec::with_capacity(8);
     let mut cursor = request_line_end + 2;
     while cursor < head.len() {
-        let line_end = head[cursor..]
-            .windows(2)
-            .position(|w| w == b"\r\n")
-            .ok_or(HttpError::BadHeader)?;
+        let line_end = find_crlf(&head[cursor..]).ok_or(HttpError::BadHeader)?;
         if line_end == 0 {
             break;
         }
         let line_start = cursor;
         let line_end = cursor + line_end;
-        headers.push(parse_header_line(&head_str[line_start..line_end])?);
+        headers.push(parse_header_line_bytes(&head[line_start..line_end])?);
         if headers.len() > MAX_HEADERS {
             return Err(HttpError::TooManyHeaders);
         }
@@ -741,8 +810,7 @@ impl Encoder<Response> for Http1Codec {
             return Err(HttpError::BadHeader);
         }
 
-        let te = unique_header_value(&resp.headers, "Transfer-Encoding")?;
-        let cl = unique_header_value(&resp.headers, "Content-Length")?;
+        let (te, cl) = transfer_and_content_length(&resp.headers)?;
 
         let chunked = match te {
             Some(value) => {
