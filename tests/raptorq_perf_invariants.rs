@@ -693,6 +693,7 @@ fn overhead_with_extra_repair() {
 /// Parameterized roundtrip across 50 seeds with structured output.
 /// Logs seed, k, loss, peeling/inactivation stats for regression triage.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn seed_sweep_structured_logging() {
     let k = 16;
     let symbol_size = 32;
