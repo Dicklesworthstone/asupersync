@@ -17,7 +17,8 @@ use std::cell::Cell;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use parking_lot::Mutex;
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
@@ -253,7 +254,7 @@ impl Sleep {
         self.deadline = deadline;
         self.polled.set(false);
         let (handle, driver, fallback_handle) = {
-            let mut state = self.state.lock().expect("sleep state lock poisoned");
+            let mut state = self.state.lock();
             let fallback_handle = state.fallback.take().map(|fallback| {
                 request_stop_fallback(&fallback);
                 fallback.join
@@ -288,7 +289,7 @@ impl Sleep {
         self.deadline = now.saturating_add_nanos(duration_to_nanos(duration));
         self.polled.set(false);
         let (handle, driver, fallback_handle) = {
-            let mut state = self.state.lock().expect("sleep state lock poisoned");
+            let mut state = self.state.lock();
             let fallback_handle = state.fallback.take().map(|fallback| {
                 request_stop_fallback(&fallback);
                 fallback.join
@@ -361,7 +362,7 @@ impl Future for Sleep {
             Poll::Ready(()) => {
                 // Cancel any registered timer on completion
                 let (handle, driver) = {
-                    let mut state = self.state.lock().expect("sleep state lock poisoned");
+                    let mut state = self.state.lock();
                     (state.timer_handle.take(), state.timer_driver.clone())
                 };
                 if let Some(handle) = handle {
@@ -382,7 +383,7 @@ impl Future for Sleep {
                     return Poll::Pending;
                 }
 
-                let mut state = self.state.lock().expect("sleep state lock poisoned");
+                let mut state = self.state.lock();
                 let finished_handle = take_finished_fallback(&mut state);
                 state.waker = Some(cx.waker().clone());
 
@@ -496,7 +497,7 @@ impl Future for Sleep {
                                 remaining = duration.saturating_sub(elapsed);
                             }
 
-                            let mut state = state_clone.lock().expect("sleep state lock poisoned");
+                            let mut state = state_clone.lock();
                             if let Some(waker) = state.waker.take() {
                                 waker.wake();
                             }
@@ -524,7 +525,7 @@ impl Future for Sleep {
 impl Drop for Sleep {
     fn drop(&mut self) {
         let (handle, driver, fallback_handle) = {
-            let mut state = self.state.lock().expect("sleep state lock poisoned");
+            let mut state = self.state.lock();
             // Clear waker to release task reference immediately, preventing
             // unbounded lifetime extension if background thread is running.
             state.waker = None;

@@ -6,7 +6,8 @@
 
 use crate::types::Time;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::task::Waker;
 use std::time::Duration;
 
@@ -240,7 +241,7 @@ impl<T: TimeSource> TimerDriver<T> {
     /// The waker will be called when `process_timers` is called
     /// and the deadline has passed.
     pub fn register(&self, deadline: Time, waker: Waker) -> TimerHandle {
-        self.wheel.lock().unwrap().register(deadline, waker)
+        self.wheel.lock().register(deadline, waker)
     }
 
     /// Updates an existing timer registration with a new deadline and waker.
@@ -248,7 +249,7 @@ impl<T: TimeSource> TimerDriver<T> {
     /// This doesn't actually remove the old entry (to avoid O(n) removal),
     /// but registers a new one. Stale entries are cleaned up on pop.
     pub fn update(&self, handle: &TimerHandle, deadline: Time, waker: Waker) -> TimerHandle {
-        let mut wheel = self.wheel.lock().unwrap();
+        let mut wheel = self.wheel.lock();
         wheel.cancel(handle);
         wheel.register(deadline, waker)
     }
@@ -257,13 +258,13 @@ impl<T: TimeSource> TimerDriver<T> {
     ///
     /// Returns true if the timer was active and is now cancelled.
     pub fn cancel(&self, handle: &TimerHandle) -> bool {
-        self.wheel.lock().unwrap().cancel(handle)
+        self.wheel.lock().cancel(handle)
     }
 
     /// Returns the next deadline that will fire, if any.
     #[must_use]
     pub fn next_deadline(&self) -> Option<Time> {
-        self.wheel.lock().unwrap().next_deadline()
+        self.wheel.lock().next_deadline()
     }
 
     /// Processes all expired timers, calling their wakers.
@@ -289,24 +290,24 @@ impl<T: TimeSource> TimerDriver<T> {
     /// Helper to collect expired wakers while holding the lock.
     #[allow(clippy::significant_drop_tightening)]
     fn collect_expired(&self, now: Time) -> Vec<Waker> {
-        self.wheel.lock().unwrap().collect_expired(now)
+        self.wheel.lock().collect_expired(now)
     }
 
     /// Returns the number of pending timers.
     #[must_use]
     pub fn pending_count(&self) -> usize {
-        self.wheel.lock().unwrap().len()
+        self.wheel.lock().len()
     }
 
     /// Returns true if there are no pending timers.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.wheel.lock().unwrap().is_empty()
+        self.wheel.lock().is_empty()
     }
 
     /// Clears all pending timers without firing them.
     pub fn clear(&self) {
-        self.wheel.lock().unwrap().clear();
+        self.wheel.lock().clear();
     }
 }
 
