@@ -53,7 +53,11 @@ pub enum DecodeError {
     },
     /// Matrix became singular during Gaussian elimination.
     SingularMatrix {
-        /// Row that couldn't find a pivot.
+        /// Deterministic witness row for elimination failure.
+        ///
+        /// This may be either:
+        /// - the original unsolved column id where no pivot was found, or
+        /// - an equation row index that reduced to `0 = b` (inconsistent system).
         row: usize,
     },
     /// Symbol size mismatch.
@@ -190,6 +194,28 @@ fn singular_matrix_error(unsolved: &[usize], dense_col: usize) -> DecodeError {
     DecodeError::SingularMatrix {
         row: original_col_for_dense(unsolved, dense_col),
     }
+}
+
+#[inline]
+fn inconsistent_matrix_error(unused_eqs: &[usize], dense_row: usize) -> DecodeError {
+    DecodeError::SingularMatrix {
+        row: unused_eqs.get(dense_row).copied().unwrap_or(dense_row),
+    }
+}
+
+fn first_inconsistent_dense_row(
+    a: &[Gf256],
+    n_rows: usize,
+    n_cols: usize,
+    b: &[Vec<u8>],
+) -> Option<usize> {
+    (0..n_rows).find(|&row| {
+        let row_off = row * n_cols;
+        a[row_off..row_off + n_cols]
+            .iter()
+            .all(|coef| coef.is_zero())
+            && b[row].iter().any(|&byte| byte != 0)
+    })
 }
 
 fn failure_reason_with_trace(err: &DecodeError, elimination: &EliminationTrace) -> FailureReason {
@@ -692,6 +718,10 @@ impl InactivationDecoder {
             }
         }
 
+        if let Some(row) = first_inconsistent_dense_row(&a, n_rows, n_cols, &b) {
+            return Err(inconsistent_matrix_error(&unused_eqs, row));
+        }
+
         // Extract solutions: move RHS vectors instead of cloning
         for (dense_col, &col) in unsolved.iter().enumerate() {
             let prow = pivot_row[dense_col];
@@ -828,6 +858,10 @@ impl InactivationDecoder {
                 // Record row operation in proof trace
                 trace.record_row_op();
             }
+        }
+
+        if let Some(row) = first_inconsistent_dense_row(&a, n_rows, n_cols, &b) {
+            return Err(inconsistent_matrix_error(&unused_eqs, row));
         }
 
         // Extract solutions: move RHS vectors instead of cloning
@@ -1486,6 +1520,31 @@ mod tests {
         }
     }
 
+    fn make_inconsistent_overdetermined_state(
+        params: &SystematicParams,
+        symbol_size: usize,
+        left_col: usize,
+        right_col: usize,
+    ) -> DecoderState {
+        let eq_left = Equation::new(vec![left_col], vec![Gf256::ONE]);
+        let eq_right = Equation::new(vec![right_col], vec![Gf256::ONE]);
+        let eq_mix = Equation::new(vec![left_col, right_col], vec![Gf256::ONE, Gf256::ONE]);
+        let active_cols = [left_col, right_col].into_iter().collect();
+        DecoderState {
+            params: params.clone(),
+            equations: vec![eq_left, eq_right, eq_mix],
+            rhs: vec![
+                vec![0x10; symbol_size],
+                vec![0x20; symbol_size],
+                vec![0x31; symbol_size], // 0x10 ^ 0x20 = 0x30 => contradiction
+            ],
+            solved: vec![None; params.l],
+            active_cols,
+            inactive_cols: BTreeSet::new(),
+            stats: DecodeStats::default(),
+        }
+    }
+
     #[test]
     fn singular_matrix_reports_original_column_id() {
         let decoder = InactivationDecoder::new(8, 16, 123);
@@ -1571,6 +1630,42 @@ mod tests {
         assert_eq!(
             trace_one.pivot_events, trace_two.pivot_events,
             "pivot trace should be stable across repeated runs"
+        );
+    }
+
+    #[test]
+    fn inconsistent_overdetermined_system_reports_singular_error() {
+        let decoder = InactivationDecoder::new(8, 16, 111);
+        let params = decoder.params().clone();
+        let mut state = make_inconsistent_overdetermined_state(&params, 16, 3, 7);
+
+        let err = decoder.inactivate_and_solve(&mut state).unwrap_err();
+        assert_eq!(
+            err,
+            DecodeError::SingularMatrix { row: 2 },
+            "contradictory overdetermined system should fail deterministically at witness row"
+        );
+    }
+
+    #[test]
+    fn inconsistent_overdetermined_with_proof_preserves_attempt_history() {
+        let decoder = InactivationDecoder::new(8, 16, 222);
+        let params = decoder.params().clone();
+        let mut state = make_inconsistent_overdetermined_state(&params, 16, 3, 7);
+        let mut trace = EliminationTrace::default();
+
+        let err = decoder
+            .inactivate_and_solve_with_proof(&mut state, &mut trace)
+            .unwrap_err();
+        assert_eq!(err, DecodeError::SingularMatrix { row: 2 });
+        assert_eq!(
+            trace
+                .pivot_events
+                .iter()
+                .map(|ev| ev.col)
+                .collect::<Vec<_>>(),
+            vec![3, 7],
+            "inconsistent-system witness should preserve full pivot-attempt history"
         );
     }
 }

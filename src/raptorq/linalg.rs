@@ -583,6 +583,14 @@ pub enum GaussianResult {
         /// The row index where elimination failed to find a pivot.
         row: usize,
     },
+    /// Matrix coefficients reduced to zero row but RHS remained nonzero.
+    ///
+    /// This indicates an inconsistent system (`0 = b`, `b != 0`) and must
+    /// never be treated as a successful decode.
+    Inconsistent {
+        /// The transformed row index witnessing inconsistency.
+        row: usize,
+    },
 }
 
 /// Statistics from Gaussian elimination.
@@ -661,7 +669,8 @@ impl GaussianSolver {
     /// Solve the system using Gaussian elimination with partial pivoting.
     ///
     /// Returns `GaussianResult::Solved` with the solution if successful,
-    /// or `GaussianResult::Singular` if the matrix is singular.
+    /// `GaussianResult::Singular` if no pivot exists, or
+    /// `GaussianResult::Inconsistent` for contradictory overdetermined systems.
     pub fn solve(&mut self) -> GaussianResult {
         let n = self.rows.min(self.cols);
 
@@ -707,6 +716,10 @@ impl GaussianSolver {
                     self.eliminate_row(row, pivot_col, factor);
                 }
             }
+        }
+
+        if let Some(row) = self.first_inconsistent_row() {
+            return GaussianResult::Inconsistent { row };
         }
 
         // Extract solution (RHS values after elimination)
@@ -759,6 +772,10 @@ impl GaussianSolver {
             }
         }
 
+        if let Some(row) = self.first_inconsistent_row() {
+            return GaussianResult::Inconsistent { row };
+        }
+
         GaussianResult::Solved(self.rhs.clone())
     }
 
@@ -787,6 +804,15 @@ impl GaussianSolver {
         }
 
         best
+    }
+
+    /// Returns the first transformed row that is all-zero in coefficients but
+    /// has a non-zero RHS, indicating an inconsistent system.
+    fn first_inconsistent_row(&self) -> Option<usize> {
+        (0..self.rows).find(|&row| {
+            self.matrix[row].iter().all(|&coef| coef == 0)
+                && self.rhs[row].as_slice().iter().any(|&byte| byte != 0)
+        })
     }
 
     /// Swap two rows.
@@ -1088,6 +1114,9 @@ mod tests {
                 assert_eq!(solution[1].as_slice(), &[7]);
             }
             GaussianResult::Singular { row } => panic!("unexpected singular at row {row}"),
+            GaussianResult::Inconsistent { row } => {
+                panic!("unexpected inconsistent system at row {row}")
+            }
         }
     }
 
@@ -1110,6 +1139,9 @@ mod tests {
                 assert_eq!(r1.raw(), 5, "row 1 check");
             }
             GaussianResult::Singular { row } => panic!("unexpected singular at row {row}"),
+            GaussianResult::Inconsistent { row } => {
+                panic!("unexpected inconsistent system at row {row}")
+            }
         }
     }
 
@@ -1123,6 +1155,9 @@ mod tests {
         match solver.solve() {
             GaussianResult::Singular { row } => {
                 assert_eq!(row, 1, "singular detected at row 1");
+            }
+            GaussianResult::Inconsistent { row } => {
+                panic!("expected singular matrix, got inconsistent at row {row}")
             }
             GaussianResult::Solved(_) => panic!("expected singular matrix"),
         }
@@ -1149,6 +1184,9 @@ mod tests {
                 assert_eq!(Gf256::new(5) * x2, Gf256::new(25));
             }
             GaussianResult::Singular { row } => panic!("unexpected singular at row {row}"),
+            GaussianResult::Inconsistent { row } => {
+                panic!("unexpected inconsistent system at row {row}")
+            }
         }
     }
 
@@ -1178,6 +1216,12 @@ mod tests {
             }
             (GaussianResult::Singular { row: r1 }, GaussianResult::Singular { row: r2 }) => {
                 assert_eq!(r1, r2, "singular at different rows");
+            }
+            (
+                GaussianResult::Inconsistent { row: r1 },
+                GaussianResult::Inconsistent { row: r2 },
+            ) => {
+                assert_eq!(r1, r2, "inconsistent at different rows");
             }
             _ => panic!("different result types"),
         }
@@ -1239,6 +1283,34 @@ mod tests {
                 assert_eq!(solution[1].len(), 0);
             }
             GaussianResult::Singular { row } => panic!("unexpected singular at row {row}"),
+            GaussianResult::Inconsistent { row } => {
+                panic!("unexpected inconsistent system at row {row}")
+            }
         }
+    }
+
+    #[test]
+    fn gaussian_inconsistent_overdetermined_matrix_detected() {
+        // x = 0x10, y = 0x20, and x + y = 0x31 (contradiction since 0x10 ^ 0x20 = 0x30).
+        let mut basic = GaussianSolver::new(3, 2);
+        basic.set_row(0, &[1, 0], DenseRow::new(vec![0x10]));
+        basic.set_row(1, &[0, 1], DenseRow::new(vec![0x20]));
+        basic.set_row(2, &[1, 1], DenseRow::new(vec![0x31]));
+
+        let mut markowitz = GaussianSolver::new(3, 2);
+        markowitz.set_row(0, &[1, 0], DenseRow::new(vec![0x10]));
+        markowitz.set_row(1, &[0, 1], DenseRow::new(vec![0x20]));
+        markowitz.set_row(2, &[1, 1], DenseRow::new(vec![0x31]));
+
+        assert_eq!(
+            basic.solve(),
+            GaussianResult::Inconsistent { row: 2 },
+            "basic solver should report transformed inconsistent row"
+        );
+        assert_eq!(
+            markowitz.solve_markowitz(),
+            GaussianResult::Inconsistent { row: 2 },
+            "markowitz solver should report the same inconsistent row"
+        );
     }
 }

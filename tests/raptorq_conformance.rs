@@ -1590,7 +1590,9 @@ mod differential_harness {
                     source,
                 })
             }
-            GaussianResult::Singular { .. } => Err(ReferenceDecodeError::SingularMatrix),
+            GaussianResult::Singular { .. } | GaussianResult::Inconsistent { .. } => {
+                Err(ReferenceDecodeError::SingularMatrix)
+            }
         }
     }
 
@@ -2539,7 +2541,7 @@ mod stress_soak_e2e {
         artifact_path: &'static str,
     }
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone)]
     struct PeriodicSummaryInput {
         seed: u64,
         k: usize,
