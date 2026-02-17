@@ -220,10 +220,8 @@ impl<S> RateLimit<S> {
         self.inner
     }
 
-    /// Refills tokens based on elapsed time.
-    fn refill(&self, now: Time) {
-        let mut state = self.state.lock().expect("rate limit lock poisoned");
-
+    /// Refills tokens based on elapsed time (no locking — caller holds the lock).
+    fn refill_state(&self, state: &mut RateLimitState, now: Time) {
         let last_refill = state.last_refill.unwrap_or(now);
         let elapsed_nanos = now.as_nanos().saturating_sub(last_refill.as_nanos());
         let period_nanos = self.period.as_nanos().min(u128::from(u64::MAX)) as u64;
@@ -251,6 +249,12 @@ impl<S> RateLimit<S> {
         }
     }
 
+    /// Refills tokens based on elapsed time.
+    fn refill(&self, now: Time) {
+        let mut state = self.state.lock().expect("rate limit lock poisoned");
+        self.refill_state(&mut state, now);
+    }
+
     /// Tries to acquire a token.
     fn try_acquire(&self) -> bool {
         let mut state = self.state.lock().expect("rate limit lock poisoned");
@@ -263,6 +267,8 @@ impl<S> RateLimit<S> {
     }
 
     /// Polls readiness with an explicit time value.
+    ///
+    /// Single lock acquisition: refill + acquire in one critical section.
     pub fn poll_ready_with_time(
         &mut self,
         now: Time,
@@ -271,9 +277,18 @@ impl<S> RateLimit<S> {
     where
         S: Service<()>,
     {
-        self.refill(now);
+        let acquired = {
+            let mut state = self.state.lock().expect("rate limit lock poisoned");
+            self.refill_state(&mut state, now);
+            if state.tokens > 0 {
+                state.tokens -= 1;
+                true
+            } else {
+                false
+            }
+        };
 
-        if self.try_acquire() {
+        if acquired {
             Poll::Ready(Ok(()))
         } else {
             // Wake up caller to retry later
@@ -321,11 +336,15 @@ where
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let now = (self.time_getter)();
-        self.refill(now);
 
-        let has_tokens = self.state.lock().expect("rate limit lock poisoned").tokens > 0;
+        // Single lock: refill + token check (was 2 separate locks).
+        let has_tokens = {
+            let mut state = self.state.lock().expect("rate limit lock poisoned");
+            self.refill_state(&mut state, now);
+            state.tokens > 0
+        };
+
         if !has_tokens {
-            // No tokens available.
             cx.waker().wake_by_ref();
             return Poll::Pending;
         }

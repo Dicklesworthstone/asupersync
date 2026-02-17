@@ -209,20 +209,20 @@ impl UnixStreamInner {
             } = &mut *guard;
             if let Some(reg) = registration.as_mut() {
                 let combined_interest = reg.interest() | interest;
-                // Oneshot registration: always re-arm.
-                if let Err(err) = reg.set_interest(combined_interest) {
-                    if err.kind() == io::ErrorKind::NotConnected {
+                let waker = combined_waker(read_waker.as_ref(), write_waker.as_ref());
+                // Single lock in io_driver: re-arm interest + refresh waker.
+                match reg.rearm(combined_interest, &waker) {
+                    Ok(true) => return Ok(()),
+                    Ok(false) => {
+                        *registration = None;
+                    }
+                    Err(err) if err.kind() == io::ErrorKind::NotConnected => {
                         *registration = None;
                         cx.waker().wake_by_ref();
                         return Ok(());
                     }
-                    return Err(err);
+                    Err(err) => return Err(err),
                 }
-                let waker = combined_waker(read_waker.as_ref(), write_waker.as_ref());
-                if reg.update_waker(waker) {
-                    return Ok(());
-                }
-                *registration = None;
             }
         }
 

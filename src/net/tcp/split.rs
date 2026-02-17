@@ -211,11 +211,14 @@ impl TcpStreamInner {
             } = &mut *guard;
             if let Some(reg) = registration.as_mut() {
                 let combined_interest = reg.interest() | interest;
-                // Always call set_interest to re-arm the reactor registration.
-                // The polling crate uses oneshot-style notifications: after an event
-                // fires, the registration is disarmed and must be re-armed via modify().
-                if let Err(err) = reg.set_interest(combined_interest) {
-                    if err.kind() == io::ErrorKind::NotConnected {
+                let waker = combined_waker(read_waker.as_ref(), write_waker.as_ref());
+                // Single lock in io_driver: re-arm interest + refresh waker.
+                match reg.rearm(combined_interest, &waker) {
+                    Ok(true) => return Ok(()),
+                    Ok(false) => {
+                        *registration = None;
+                    }
+                    Err(err) if err.kind() == io::ErrorKind::NotConnected => {
                         *registration = None;
                         if let Some(w) = read_waker.as_ref() {
                             w.wake_by_ref();
@@ -225,13 +228,8 @@ impl TcpStreamInner {
                         }
                         return Ok(());
                     }
-                    return Err(err);
+                    Err(err) => return Err(err),
                 }
-                let waker = combined_waker(read_waker.as_ref(), write_waker.as_ref());
-                if reg.update_waker(waker) {
-                    return Ok(());
-                }
-                *registration = None;
             }
         }
 
@@ -290,10 +288,8 @@ impl TcpStreamInner {
         if !clear_registration {
             let combined = combined_waker(guard.read_waker.as_ref(), guard.write_waker.as_ref());
             if let Some(reg) = guard.registration.as_mut() {
-                // Always re-arm readiness interest. Backends can use oneshot
-                // semantics where skipping modify() leaves a surviving waiter
-                // stranded after sibling drop.
-                if reg.set_interest(desired_interest).is_err() || !reg.update_waker(combined) {
+                // Single lock in io_driver: re-arm + waker refresh.
+                if !matches!(reg.rearm(desired_interest, &combined), Ok(true)) {
                     clear_registration = true;
                     if let Some(w) = guard.read_waker.as_ref() {
                         w.wake_by_ref();
