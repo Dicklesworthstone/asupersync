@@ -279,9 +279,7 @@ impl StateSnapshot {
             let Some(cx_inner) = task.cx_inner.as_ref() else {
                 continue;
             };
-            let Ok(inner) = cx_inner.read() else {
-                continue;
-            };
+            let inner = cx_inner.read();
             let Some(deadline) = inner.budget.deadline else {
                 continue;
             };
