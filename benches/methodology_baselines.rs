@@ -246,6 +246,17 @@ fn bench_channel_send_recv(c: &mut Criterion) {
         b.iter(|| black_box(tx.clone()))
     });
 
+    // Weak sender upgrade/drop models dynamic handle lifecycles in
+    // multi-producer topologies (e.g., registries/routers holding weak handles).
+    group.bench_function("mpsc_weak_sender_upgrade", |b| {
+        let (tx, _rx) = mpsc::channel::<u64>(16);
+        let weak = tx.downgrade();
+        b.iter(|| {
+            let upgraded = weak.upgrade().expect("upgrade should succeed");
+            black_box(upgraded);
+        })
+    });
+
     group.finish();
 }
 
