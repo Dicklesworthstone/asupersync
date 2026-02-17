@@ -209,6 +209,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
+use parking_lot::Mutex as PoolMutex;
 use smallvec::SmallVec;
 
 use crate::cx::Cx;
@@ -401,7 +402,7 @@ pub struct PooledResource<R> {
     /// implementations that use only the public `new()` constructor get
     /// `None`, which is harmless — it just means notification relies on
     /// the next `process_returns` call instead of being immediate.
-    return_wakers: Option<Arc<std::sync::Mutex<Vec<Waker>>>>,
+    return_wakers: Option<Arc<PoolMutex<Vec<Waker>>>>,
 }
 
 impl<R> PooledResource<R> {
@@ -438,7 +439,7 @@ impl<R> PooledResource<R> {
     /// [`GenericPool`].  Called internally after construction so that
     /// returning/discarding the resource immediately wakes waiting
     /// acquirers.
-    fn with_return_notify(mut self, wakers: Arc<std::sync::Mutex<Vec<Waker>>>) -> Self {
+    fn with_return_notify(mut self, wakers: Arc<PoolMutex<Vec<Waker>>>) -> Self {
         self.return_wakers = Some(wakers);
         self
     }
@@ -513,14 +514,7 @@ impl<R> PooledResource<R> {
     /// discover the newly available resource/slot.
     fn notify_return_wakers(&self) {
         if let Some(ref wakers) = self.return_wakers {
-            let drained = {
-                let Ok(mut wakers) = wakers.lock() else {
-                    // Mutex poisoned — bail out to avoid a double-panic
-                    // abort (this method is called from Drop).
-                    return;
-                };
-                std::mem::take(&mut *wakers)
-            };
+            let drained = std::mem::take(&mut *wakers.lock());
             for waker in drained {
                 waker.wake();
             }
@@ -803,7 +797,7 @@ where
         // and the waiter would remain Pending even though a slot freed.
         self.pool.process_returns();
 
-        let mut state = self.pool.state.lock().expect("pool state lock poisoned");
+        let mut state = self.pool.state.lock();
 
         if state.closed {
             return Poll::Ready(());
@@ -849,7 +843,7 @@ where
         // directly.  Without this, a return that arrives while no other
         // code calls process_returns would leave us stuck until timeout.
         {
-            let mut wakers = self.pool.return_wakers.lock().expect("return_wakers lock");
+            let mut wakers = self.pool.return_wakers.lock();
             if !wakers.iter().any(|w| w.will_wake(cx.waker())) {
                 wakers.push(cx.waker().clone());
             }
@@ -867,9 +861,7 @@ where
 {
     fn drop(&mut self) {
         if let Some(id) = self.waiter_id {
-            if let Ok(mut state) = self.pool.state.lock() {
-                state.waiters.retain(|w| w.id != id);
-            }
+            self.pool.state.lock().waiters.retain(|w| w.id != id);
         }
     }
 }
@@ -965,11 +957,11 @@ where
     /// Configuration.
     config: PoolConfig,
     /// Internal state.
-    state: std::sync::Mutex<GenericPoolState<R>>,
+    state: PoolMutex<GenericPoolState<R>>,
     /// Channel for returning resources.
     return_tx: PoolReturnSender<R>,
     /// Channel receiver for returned resources.
-    return_rx: std::sync::Mutex<PoolReturnReceiver<R>>,
+    return_rx: PoolMutex<PoolReturnReceiver<R>>,
     /// Optional synchronous health check function.
     ///
     /// When set and `config.health_check_on_acquire` is true, idle resources
@@ -980,7 +972,7 @@ where
     /// return/discard so that [`WaitForNotification`] futures are
     /// re-polled immediately instead of waiting for the next
     /// `process_returns` call.
-    return_wakers: Arc<std::sync::Mutex<Vec<Waker>>>,
+    return_wakers: Arc<PoolMutex<Vec<Waker>>>,
     /// Optional metrics handle for observability.
     #[cfg(feature = "metrics")]
     metrics: Option<PoolMetricsHandle>,
@@ -997,7 +989,7 @@ where
         Self {
             factory,
             config,
-            state: std::sync::Mutex::new(GenericPoolState {
+            state: PoolMutex::new(GenericPoolState {
                 idle: std::collections::VecDeque::new(),
                 active: 0,
                 creating: 0,
@@ -1009,9 +1001,9 @@ where
                 next_waiter_id: 0,
             }),
             return_tx,
-            return_rx: std::sync::Mutex::new(return_rx),
+            return_rx: PoolMutex::new(return_rx),
             health_check_fn: None,
-            return_wakers: Arc::new(std::sync::Mutex::new(Vec::new())),
+            return_wakers: Arc::new(PoolMutex::new(Vec::new())),
             #[cfg(feature = "metrics")]
             metrics: None,
         }
@@ -1142,7 +1134,7 @@ where
     /// those counters, and (when metrics are enabled) record a destroy event.
     fn reject_unhealthy_idle_resource(&self) {
         let waiter = {
-            let mut state = self.state.lock().expect("pool state lock poisoned");
+            let mut state = self.state.lock();
             state.active = state.active.saturating_sub(1);
             state.total_acquisitions = state.total_acquisitions.saturating_sub(1);
             // A slot just freed up — wake one blocked acquirer so it can
@@ -1163,7 +1155,7 @@ where
     /// Process returned resources from the return channel.
     #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
     fn process_returns(&self) {
-        let rx = self.return_rx.lock().expect("return_rx lock poisoned");
+        let rx = self.return_rx.lock();
         let mut waiters_to_wake: SmallVec<[Waker; 4]> = SmallVec::new();
         while let Ok(ret) = rx.try_recv() {
             match ret {
@@ -1179,7 +1171,7 @@ where
                     }
 
                     let waiter = {
-                        let mut state = self.state.lock().expect("pool state lock poisoned");
+                        let mut state = self.state.lock();
                         state.active = state.active.saturating_sub(1);
 
                         if state.closed {
@@ -1207,7 +1199,7 @@ where
                     }
 
                     let waiter = {
-                        let mut state = self.state.lock().expect("pool state lock poisoned");
+                        let mut state = self.state.lock();
                         state.active = state.active.saturating_sub(1);
                         state.waiters.pop_front()
                     };
@@ -1225,7 +1217,7 @@ where
 
     /// Try to get an idle resource, returning its original creation time.
     fn try_get_idle(&self) -> Option<(R, Instant)> {
-        let mut state = self.state.lock().expect("pool state lock poisoned");
+        let mut state = self.state.lock();
 
         // Evict expired resources first and track eviction reasons for metrics
         let now = Instant::now();
@@ -1274,13 +1266,13 @@ where
 
     /// Get current total count (active + idle + in-flight creates).
     fn total_count(&self) -> usize {
-        let state = self.state.lock().expect("pool state lock poisoned");
+        let state = self.state.lock();
         state.active + state.idle.len() + state.creating
     }
 
     /// Reserve a creation slot under max-size accounting.
     fn reserve_create_slot(&self) -> bool {
-        let mut state = self.state.lock().expect("pool state lock poisoned");
+        let mut state = self.state.lock();
         let total = state.active + state.idle.len() + state.creating;
         if state.closed || total >= self.config.max_size {
             return false;
@@ -1292,7 +1284,7 @@ where
     /// Release an uncommitted creation slot and notify one waiter.
     fn release_create_slot(&self) {
         let waiter = {
-            let mut state = self.state.lock().expect("pool state lock poisoned");
+            let mut state = self.state.lock();
             state.creating = state.creating.saturating_sub(1);
             state.waiters.pop_front()
         };
@@ -1303,7 +1295,7 @@ where
 
     /// Commit a completed creation slot into active accounting.
     fn commit_create_slot(&self) {
-        let mut state = self.state.lock().expect("pool state lock poisoned");
+        let mut state = self.state.lock();
         state.creating = state.creating.saturating_sub(1);
         state.active += 1;
         state.total_acquisitions += 1;
@@ -1315,7 +1307,7 @@ where
     /// `total_acquisitions` — the resource goes straight to the idle queue.
     fn commit_create_slot_as_idle(&self, resource: R) {
         let waiter = {
-            let mut state = self.state.lock().expect("pool state lock poisoned");
+            let mut state = self.state.lock();
             state.creating = state.creating.saturating_sub(1);
             state.idle.push_back(IdleResource {
                 resource,
@@ -1339,7 +1331,7 @@ where
 
     /// Register as a waiter.
     fn register_waiter(&self, waker: std::task::Waker) -> u64 {
-        let mut state = self.state.lock().expect("pool state lock poisoned");
+        let mut state = self.state.lock();
         let id = state.next_waiter_id;
         state.next_waiter_id += 1;
         state.waiters.push_back(PoolWaiter { id, waker });
@@ -1348,7 +1340,7 @@ where
 
     /// Remove a waiter by ID.
     fn remove_waiter(&self, id: u64) {
-        let mut state = self.state.lock().expect("pool state lock poisoned");
+        let mut state = self.state.lock();
         state.waiters.retain(|w| w.id != id);
     }
 
@@ -1359,7 +1351,7 @@ where
             return;
         }
 
-        let mut state = self.state.lock().expect("pool state lock poisoned");
+        let mut state = self.state.lock();
         state.total_wait_time = state
             .total_wait_time
             .checked_add(wait_duration)
@@ -1377,7 +1369,7 @@ where
     fn update_metrics_gauges(&self) {
         if let Some(ref metrics) = self.metrics {
             let stats = {
-                let state = self.state.lock().expect("pool state lock poisoned");
+                let state = self.state.lock();
                 PoolStats {
                     active: state.active,
                     idle: state.idle.len(),
@@ -1415,7 +1407,7 @@ where
 
                 // Check if closed
                 {
-                    let state = self.state.lock().expect("pool state lock poisoned");
+                    let state = self.state.lock();
                     if state.closed {
                         return Err(PoolError::Closed);
                     }
@@ -1497,7 +1489,7 @@ where
         self.process_returns();
 
         {
-            let state = self.state.lock().expect("pool state lock poisoned");
+            let state = self.state.lock();
             if state.closed {
                 return None;
             }
@@ -1529,7 +1521,7 @@ where
         self.process_returns();
 
         let pool_stats = {
-            let state = self.state.lock().expect("pool state lock poisoned");
+            let state = self.state.lock();
             PoolStats {
                 active: state.active,
                 idle: state.idle.len(),
@@ -1556,7 +1548,7 @@ where
             let idle_count: usize;
 
             let waiters = {
-                let mut state = self.state.lock().expect("pool state lock poisoned");
+                let mut state = self.state.lock();
                 state.closed = true;
 
                 // Drain waiters, then wake after releasing the state lock.
@@ -1963,7 +1955,7 @@ mod tests {
     }
 
     struct ReentrantReturnWaker {
-        return_wakers: Arc<std::sync::Mutex<Vec<Waker>>>,
+        return_wakers: Arc<PoolMutex<Vec<Waker>>>,
         tx: mpsc::Sender<bool>,
     }
 
@@ -1973,7 +1965,7 @@ mod tests {
         }
 
         fn wake_by_ref(self: &Arc<Self>) {
-            let lock_was_free = self.return_wakers.try_lock().is_ok();
+            let lock_was_free = self.return_wakers.try_lock().is_some();
             let _ = self.tx.send(lock_was_free);
         }
     }
@@ -2024,7 +2016,7 @@ mod tests {
     fn pooled_resource_notifies_wakers_outside_return_waker_lock() {
         init_test("pooled_resource_notifies_wakers_outside_return_waker_lock");
         let (return_tx, _return_rx) = mpsc::channel();
-        let return_wakers = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let return_wakers = Arc::new(PoolMutex::new(Vec::new()));
         let (probe_tx, probe_rx) = mpsc::channel();
 
         {
@@ -2032,7 +2024,7 @@ mod tests {
                 return_wakers: Arc::clone(&return_wakers),
                 tx: probe_tx,
             });
-            let mut wakers = return_wakers.lock().expect("return_wakers lock");
+            let mut wakers = return_wakers.lock();
             wakers.push(Waker::from(probe));
         }
 

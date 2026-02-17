@@ -4,7 +4,7 @@ use crate::net::tcp::listener::TcpListener;
 use crate::net::tcp::stream::TcpStream;
 use std::io;
 use std::net::{self, SocketAddr};
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 /// A TCP socket used for configuring options before connect/listen.
 #[derive(Debug)]
@@ -53,27 +53,21 @@ impl TcpSocket {
 
     /// Sets the SO_REUSEADDR option on this socket.
     pub fn set_reuseaddr(&self, reuseaddr: bool) -> io::Result<()> {
-        self.state
-            .lock()
-            .expect("tcp socket lock poisoned")
-            .reuseaddr = reuseaddr;
+        self.state.lock().reuseaddr = reuseaddr;
         Ok(())
     }
 
     /// Sets the SO_REUSEPORT option on this socket (Unix only).
     #[cfg(unix)]
     pub fn set_reuseport(&self, reuseport: bool) -> io::Result<()> {
-        self.state
-            .lock()
-            .expect("tcp socket lock poisoned")
-            .reuseport = reuseport;
+        self.state.lock().reuseport = reuseport;
         Ok(())
     }
 
     /// Binds this socket to the given local address.
     pub fn bind(&self, addr: SocketAddr) -> io::Result<()> {
         {
-            let mut state = self.state.lock().expect("tcp socket lock poisoned");
+            let mut state = self.state.lock();
             if !family_matches(state.family, addr) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -87,10 +81,7 @@ impl TcpSocket {
 
     /// Starts listening, returning a TCP listener.
     pub fn listen(self, _backlog: u32) -> io::Result<TcpListener> {
-        let state = self
-            .state
-            .into_inner()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = self.state.into_inner();
         if state.reuseaddr || state.reuseport {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -124,10 +115,7 @@ impl TcpSocket {
 
     /// Connects this socket, returning a TCP stream.
     pub async fn connect(self, addr: SocketAddr) -> io::Result<TcpStream> {
-        let state = self
-            .state
-            .into_inner()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = self.state.into_inner();
 
         if !family_matches(state.family, addr) {
             return Err(io::Error::new(
