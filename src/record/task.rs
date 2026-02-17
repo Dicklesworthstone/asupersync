@@ -10,7 +10,8 @@ use crate::types::{
 };
 use smallvec::SmallVec;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, RwLock};
+use parking_lot::RwLock;
+use std::sync::Arc;
 use std::task::Waker;
 #[cfg(feature = "tracing-integration")]
 use std::time::Instant;
@@ -441,11 +442,10 @@ impl TaskRecord {
 
         // Update shared state first
         if let Some(inner) = &self.cx_inner {
-            if let Ok(mut guard) = inner.write() {
-                guard.cancel_requested = true;
-                // Budget update is deferred to acknowledge_cancel to prevent
-                // pre-empting the cancellation check with a budget exhaustion error.
-            }
+            let mut guard = inner.write();
+            guard.cancel_requested = true;
+            // Budget update is deferred to acknowledge_cancel to prevent
+            // pre-empting the cancellation check with a budget exhaustion error.
         }
 
         let mut updated_reason_for_inner = None;
@@ -485,10 +485,9 @@ impl TaskRecord {
 
                 // Update shared state so user code sees tighter budget immediately
                 if let Some(inner) = &self.cx_inner {
-                    if let Ok(mut guard) = inner.write() {
-                        guard.budget = new_budget;
-                        guard.budget_baseline = new_budget;
-                    }
+                    let mut guard = inner.write();
+                    guard.budget = new_budget;
+                    guard.budget_baseline = new_budget;
                 }
                 // Also update polls_remaining to respect tighter quota
                 self.polls_remaining = self.polls_remaining.min(new_budget.poll_quota);
@@ -513,10 +512,9 @@ impl TaskRecord {
 
                 // Update shared state so user code sees tighter budget immediately
                 if let Some(inner) = &self.cx_inner {
-                    if let Ok(mut guard) = inner.write() {
-                        guard.budget = new_budget;
-                        guard.budget_baseline = new_budget;
-                    }
+                    let mut guard = inner.write();
+                    guard.budget = new_budget;
+                    guard.budget_baseline = new_budget;
                 }
                 // Also update polls_remaining to respect tighter quota
                 self.polls_remaining = self.polls_remaining.min(new_budget.poll_quota);
@@ -552,17 +550,15 @@ impl TaskRecord {
         };
         if let Some(reason) = updated_reason_for_inner {
             if let Some(inner) = &self.cx_inner {
-                if let Ok(mut guard) = inner.write() {
-                    guard.cancel_reason = Some(reason);
-                }
+                let mut guard = inner.write();
+                guard.cancel_reason = Some(reason);
             }
         }
         if let Some(inner) = &self.cx_inner {
-            if let Ok(guard) = inner.read() {
-                if guard.cancel_requested {
-                    if let Some(waker) = guard.cancel_waker.clone() {
-                        waker.wake_by_ref();
-                    }
+            let guard = inner.read();
+            if guard.cancel_requested {
+                if let Some(waker) = guard.cancel_waker.clone() {
+                    waker.wake_by_ref();
                 }
             }
         }
@@ -687,10 +683,9 @@ impl TaskRecord {
 
                 // Apply cleanup budget now that we are entering cleanup phase
                 if let Some(inner) = &self.cx_inner {
-                    if let Ok(mut guard) = inner.write() {
-                        guard.budget = budget;
-                        guard.budget_baseline = budget;
-                    }
+                    let mut guard = inner.write();
+                    guard.budget = budget;
+                    guard.budget_baseline = budget;
                 }
                 self.polls_remaining = budget.poll_quota;
 
@@ -889,11 +884,10 @@ impl TaskRecord {
     /// This now accesses the shared `CxInner`.
     pub fn decrement_mask(&mut self) -> Option<u32> {
         if let Some(inner) = &self.cx_inner {
-            if let Ok(mut guard) = inner.write() {
-                if guard.mask_depth > 0 {
-                    guard.mask_depth -= 1;
-                    return Some(guard.mask_depth);
-                }
+            let mut guard = inner.write();
+            if guard.mask_depth > 0 {
+                guard.mask_depth -= 1;
+                return Some(guard.mask_depth);
             }
         }
         None
@@ -1420,14 +1414,14 @@ mod tests {
         )));
         t.set_cx_inner(inner.clone());
 
-        let cancel_requested = inner.read().unwrap().cancel_requested;
+        let cancel_requested = inner.read().cancel_requested;
         crate::assert_with_log!(
             !cancel_requested,
             "cancel_requested false",
             false,
             cancel_requested
         );
-        let cancel_reason_none = inner.read().unwrap().cancel_reason.is_none();
+        let cancel_reason_none = inner.read().cancel_reason.is_none();
         crate::assert_with_log!(
             cancel_reason_none,
             "cancel_reason none",
@@ -1437,14 +1431,14 @@ mod tests {
 
         t.request_cancel(CancelReason::timeout());
 
-        let cancel_requested = inner.read().unwrap().cancel_requested;
+        let cancel_requested = inner.read().cancel_requested;
         crate::assert_with_log!(
             cancel_requested,
             "cancel_requested true",
             true,
             cancel_requested
         );
-        let cancel_reason = inner.read().unwrap().cancel_reason.clone();
+        let cancel_reason = inner.read().cancel_reason.clone();
         crate::assert_with_log!(
             cancel_reason == Some(CancelReason::timeout()),
             "cancel_reason",

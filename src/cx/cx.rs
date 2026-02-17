@@ -139,8 +139,8 @@ struct CxHandles {
 /// to all clones.
 #[derive(Debug)]
 pub struct Cx<Caps = cap::All> {
-    pub(crate) inner: Arc<std::sync::RwLock<CxInner>>,
-    observability: Arc<std::sync::RwLock<ObservabilityState>>,
+    pub(crate) inner: Arc<parking_lot::RwLock<CxInner>>,
+    observability: Arc<parking_lot::RwLock<ObservabilityState>>,
     handles: Arc<CxHandles>,
     // Use fn() -> Caps instead of just Caps to ensure Send+Sync regardless of Caps
     _caps: PhantomData<fn() -> Caps>,
@@ -216,12 +216,12 @@ impl ObservabilityState {
 
 /// Guard that restores the cancellation mask on drop.
 struct MaskGuard<'a> {
-    inner: &'a Arc<std::sync::RwLock<CxInner>>,
+    inner: &'a Arc<parking_lot::RwLock<CxInner>>,
 }
 
 impl Drop for MaskGuard<'_> {
     fn drop(&mut self) {
-        let mut inner = self.inner.write().expect("lock poisoned");
+        let mut inner = self.inner.write();
         inner.mask_depth = inner.mask_depth.saturating_sub(1);
     }
 }
@@ -281,14 +281,14 @@ impl<Caps> Cx<Caps> {
     }
 
     /// Creates a new capability context from shared state (internal use).
-    pub(crate) fn from_inner(inner: Arc<std::sync::RwLock<CxInner>>) -> Self {
+    pub(crate) fn from_inner(inner: Arc<parking_lot::RwLock<CxInner>>) -> Self {
         let (region, task) = {
-            let guard = inner.read().expect("lock poisoned");
+            let guard = inner.read();
             (guard.region, guard.task)
         };
         Self {
             inner,
-            observability: Arc::new(std::sync::RwLock::new(ObservabilityState::new(
+            observability: Arc::new(parking_lot::RwLock::new(ObservabilityState::new(
                 region, task,
             ))),
             handles: Arc::new(CxHandles {
@@ -368,10 +368,10 @@ impl<Caps> Cx<Caps> {
         timer_driver: Option<TimerDriverHandle>,
         entropy: Option<Arc<dyn EntropySource>>,
     ) -> Self {
-        let inner = Arc::new(std::sync::RwLock::new(CxInner::new(region, task, budget)));
+        let inner = Arc::new(parking_lot::RwLock::new(CxInner::new(region, task, budget)));
         let observability_state =
             observability.unwrap_or_else(|| ObservabilityState::new(region, task));
-        let observability = Arc::new(std::sync::RwLock::new(observability_state));
+        let observability = Arc::new(parking_lot::RwLock::new(observability_state));
         let entropy = entropy.unwrap_or_else(|| Arc::new(OsEntropy));
 
         debug!(
@@ -956,7 +956,7 @@ impl<Caps> Cx<Caps> {
     /// ```
     #[must_use]
     pub fn region_id(&self) -> RegionId {
-        self.inner.read().expect("lock poisoned").region
+        self.inner.read().region
     }
 
     /// Returns the current task ID.
@@ -973,7 +973,7 @@ impl<Caps> Cx<Caps> {
     /// ```
     #[must_use]
     pub fn task_id(&self) -> TaskId {
-        self.inner.read().expect("lock poisoned").task
+        self.inner.read().task
     }
 
     /// Returns the task type label, if one has been set.
@@ -982,7 +982,7 @@ impl<Caps> Cx<Caps> {
     /// and metrics to group similar work.
     #[must_use]
     pub fn task_type(&self) -> Option<String> {
-        self.inner.read().expect("lock poisoned").task_type.clone()
+        self.inner.read().task_type.clone()
     }
 
     /// Sets a task type label for adaptive monitoring and metrics.
@@ -990,7 +990,7 @@ impl<Caps> Cx<Caps> {
     /// This is intended to be called early in task execution to associate
     /// a stable label with the task's behavior profile.
     pub fn set_task_type(&self, task_type: impl Into<String>) {
-        let mut inner = self.inner.write().expect("lock poisoned");
+        let mut inner = self.inner.write();
         inner.task_type = Some(task_type.into());
     }
 
@@ -1017,7 +1017,7 @@ impl<Caps> Cx<Caps> {
     /// ```
     #[must_use]
     pub fn budget(&self) -> Budget {
-        self.inner.read().expect("lock poisoned").budget
+        self.inner.read().budget
     }
 
     /// Returns true if cancellation has been requested.
@@ -1045,7 +1045,7 @@ impl<Caps> Cx<Caps> {
     /// ```
     #[must_use]
     pub fn is_cancel_requested(&self) -> bool {
-        self.inner.read().expect("lock poisoned").cancel_requested
+        self.inner.read().cancel_requested
     }
 
     /// Checks for cancellation and returns an error if cancelled.
@@ -1089,7 +1089,7 @@ impl<Caps> Cx<Caps> {
     pub fn checkpoint(&self) -> Result<(), crate::error::Error> {
         // Record progress checkpoint and check cancellation under a single lock
         let (cancel_requested, mask_depth, task, region, budget, budget_baseline, cancel_reason) = {
-            let mut inner = self.inner.write().expect("lock poisoned");
+            let mut inner = self.inner.write();
             inner.checkpoint_state.record();
             if inner.cancel_requested && inner.mask_depth == 0 {
                 inner.cancel_acknowledged = true;
@@ -1158,7 +1158,7 @@ impl<Caps> Cx<Caps> {
     pub fn checkpoint_with(&self, msg: impl Into<String>) -> Result<(), crate::error::Error> {
         // Record progress checkpoint and check cancellation under a single lock
         let (cancel_requested, mask_depth, task, region, budget, budget_baseline, cancel_reason) = {
-            let mut inner = self.inner.write().expect("lock poisoned");
+            let mut inner = self.inner.write();
             inner.checkpoint_state.record_with_message(msg.into());
             if inner.cancel_requested && inner.mask_depth == 0 {
                 inner.cancel_acknowledged = true;
@@ -1364,7 +1364,7 @@ impl<Caps> Cx<Caps> {
         F: FnOnce() -> R,
     {
         {
-            let mut inner = self.inner.write().expect("lock poisoned");
+            let mut inner = self.inner.write();
             assert!(
                 inner.mask_depth < crate::types::task_context::MAX_MASK_DEPTH,
                 "mask depth exceeded MAX_MASK_DEPTH ({}): this violates INV-MASK-BOUNDED \
@@ -1482,7 +1482,7 @@ impl<Caps> Cx<Caps> {
     /// The ID propagates to all log entries and child spans created
     /// from this context, enabling end-to-end request tracing.
     pub fn set_request_id(&self, id: impl Into<String>) {
-        let mut obs = self.observability.write().expect("lock poisoned");
+        let mut obs = self.observability.write();
         obs.context = obs.context.clone().with_custom("request_id", id);
     }
 
@@ -1496,7 +1496,7 @@ impl<Caps> Cx<Caps> {
 
     /// Logs a structured entry to the attached collector, if present.
     pub fn log(&self, entry: LogEntry) {
-        let obs = self.observability.read().expect("lock poisoned");
+        let obs = self.observability.read();
         let Some(collector) = obs.collector.clone() else {
             return;
         };
@@ -1527,13 +1527,13 @@ impl<Caps> Cx<Caps> {
 
     /// Replaces the current diagnostic context.
     pub fn set_diagnostic_context(&self, ctx: DiagnosticContext) {
-        let mut obs = self.observability.write().expect("lock poisoned");
+        let mut obs = self.observability.write();
         obs.context = ctx;
     }
 
     /// Attaches a log collector to this context.
     pub fn set_log_collector(&self, collector: LogCollector) {
-        let mut obs = self.observability.write().expect("lock poisoned");
+        let mut obs = self.observability.write();
         obs.collector = Some(collector);
     }
 
@@ -1549,7 +1549,7 @@ impl<Caps> Cx<Caps> {
 
     /// Attaches a trace buffer to this context.
     pub fn set_trace_buffer(&self, trace: TraceBufferHandle) {
-        let mut obs = self.observability.write().expect("lock poisoned");
+        let mut obs = self.observability.write();
         obs.trace = Some(trace);
     }
 
@@ -1565,7 +1565,7 @@ impl<Caps> Cx<Caps> {
 
     /// Derives an observability state for a child task.
     pub(crate) fn child_observability(&self, region: RegionId, task: TaskId) -> ObservabilityState {
-        let obs = self.observability.read().expect("lock poisoned");
+        let obs = self.observability.read();
         obs.derive_child(region, task)
     }
 
@@ -1663,7 +1663,7 @@ impl<Caps> Cx<Caps> {
     /// Sets the cancellation flag (internal use).
     #[allow(dead_code)]
     pub(crate) fn set_cancel_internal(&self, value: bool) {
-        let mut inner = self.inner.write().expect("lock poisoned");
+        let mut inner = self.inner.write();
         inner.cancel_requested = value;
         if !value {
             inner.cancel_reason = None;
@@ -1693,7 +1693,7 @@ impl<Caps> Cx<Caps> {
     /// This API is intended for testing only. In production, cancellation signals
     /// are propagated by the runtime through the task tree.
     pub fn set_cancel_requested(&self, value: bool) {
-        let mut inner = self.inner.write().expect("lock poisoned");
+        let mut inner = self.inner.write();
         inner.cancel_requested = value;
         if !value {
             inner.cancel_reason = None;
@@ -1737,7 +1737,7 @@ impl<Caps> Cx<Caps> {
     /// cancellation propagates through the region tree via `cancel_request()`.
     pub fn cancel_with(&self, kind: CancelKind, message: Option<&'static str>) {
         let (region, task) = {
-            let mut inner = self.inner.write().expect("lock poisoned");
+            let mut inner = self.inner.write();
             let region = inner.region;
             let task = inner.task;
 
@@ -1789,7 +1789,7 @@ impl<Caps> Cx<Caps> {
     /// ```
     pub fn cancel_fast(&self, kind: CancelKind) {
         let region = {
-            let mut inner = self.inner.write().expect("lock poisoned");
+            let mut inner = self.inner.write();
             let region = inner.region;
 
             // Minimal attribution: just kind and region
@@ -1830,7 +1830,7 @@ impl<Caps> Cx<Caps> {
     /// ```
     #[must_use]
     pub fn cancel_reason(&self) -> Option<CancelReason> {
-        let inner = self.inner.read().expect("lock poisoned");
+        let inner = self.inner.read();
         inner.cancel_reason.clone()
     }
 
@@ -1905,7 +1905,7 @@ impl<Caps> Cx<Caps> {
     /// ```
     #[must_use]
     pub fn root_cancel_cause(&self) -> Option<CancelReason> {
-        let inner = self.inner.read().expect("lock poisoned");
+        let inner = self.inner.read();
         inner.cancel_reason.as_ref().map(|r| r.root_cause().clone())
     }
 
@@ -1931,7 +1931,7 @@ impl<Caps> Cx<Caps> {
     /// ```
     #[must_use]
     pub fn cancelled_by(&self, kind: CancelKind) -> bool {
-        let inner = self.inner.read().expect("lock poisoned");
+        let inner = self.inner.read();
         inner.cancel_reason.as_ref().is_some_and(|r| r.kind == kind)
     }
 
@@ -1962,7 +1962,7 @@ impl<Caps> Cx<Caps> {
     /// ```
     #[must_use]
     pub fn any_cause_is(&self, kind: CancelKind) -> bool {
-        let inner = self.inner.read().expect("lock poisoned");
+        let inner = self.inner.read();
         inner
             .cancel_reason
             .as_ref()
@@ -1992,7 +1992,7 @@ impl<Caps> Cx<Caps> {
     /// assert_eq!(cx.cancel_reason().unwrap().kind, CancelKind::ParentCancelled);
     /// ```
     pub fn set_cancel_reason(&self, reason: CancelReason) {
-        let mut inner = self.inner.write().expect("lock poisoned");
+        let mut inner = self.inner.write();
         inner.cancel_requested = true;
         inner.cancel_reason = Some(reason);
     }
@@ -2443,7 +2443,7 @@ mod tests {
         // to trigger the bound check. This avoids deep nesting which
         // would cause double-panic in MaskGuard drops during unwind.
         {
-            let mut inner = cx.inner.write().expect("lock");
+            let mut inner = cx.inner.write();
             inner.mask_depth = crate::types::task_context::MAX_MASK_DEPTH;
         }
         // This call should panic because mask_depth is already at the limit.

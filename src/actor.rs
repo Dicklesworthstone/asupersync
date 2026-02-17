@@ -205,7 +205,7 @@ pub struct ActorHandle<A: Actor> {
     state: Arc<ActorStateCell>,
     task_id: TaskId,
     receiver: crate::channel::oneshot::Receiver<Result<A, JoinError>>,
-    inner: std::sync::Weak<std::sync::RwLock<CxInner>>,
+    inner: std::sync::Weak<parking_lot::RwLock<CxInner>>,
 }
 
 impl<A: Actor> ActorHandle<A> {
@@ -258,9 +258,8 @@ impl<A: Actor> ActorHandle<A> {
     pub fn stop(&self) {
         self.state.store(ActorState::Stopping);
         if let Some(inner) = self.inner.upgrade() {
-            if let Ok(mut guard) = inner.write() {
-                guard.cancel_requested = true;
-            }
+            let mut guard = inner.write();
+            guard.cancel_requested = true;
         }
     }
 
@@ -299,9 +298,8 @@ impl<A: Actor> ActorHandle<A> {
     pub fn abort(&self) {
         self.state.store(ActorState::Stopping);
         if let Some(inner) = self.inner.upgrade() {
-            if let Ok(mut guard) = inner.write() {
-                guard.cancel_requested = true;
-            }
+            let mut guard = inner.write();
+            guard.cancel_requested = true;
         }
     }
 }

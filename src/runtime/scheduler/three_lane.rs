@@ -64,7 +64,8 @@ use crate::util::DetRng;
 use parking_lot::Mutex as ParkingMutex;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use parking_lot::RwLock;
+use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 

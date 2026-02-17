@@ -80,7 +80,7 @@ use crate::types::{Budget, CancelReason, CxInner, Outcome, TaskId, Time};
 /// we restore the original budget minus any consumption that occurred while the
 /// phase budget was active.
 struct PhaseBudgetGuard {
-    inner: Arc<std::sync::RwLock<CxInner>>,
+    inner: Arc<parking_lot::RwLock<CxInner>>,
     original_budget: Budget,
     original_baseline: Budget,
     phase_baseline: Budget,
@@ -91,7 +91,7 @@ impl PhaseBudgetGuard {
     fn enter(cx: &Cx, phase_budget: Budget, restore_original: bool) -> Self {
         let inner = Arc::clone(&cx.inner);
         let (original_budget, original_baseline, phase_baseline) = {
-            let mut guard = inner.write().expect("lock poisoned");
+            let mut guard = inner.write();
             let original_budget = guard.budget;
             let original_baseline = guard.budget_baseline;
             let phase_baseline = original_budget.meet(phase_budget);
@@ -116,9 +116,7 @@ impl Drop for PhaseBudgetGuard {
             return;
         }
 
-        let Ok(mut guard) = self.inner.write() else {
-            return;
-        };
+        let mut guard = self.inner.write();
 
         let phase_remaining = guard.budget;
         let polls_used = self
@@ -150,14 +148,14 @@ impl Drop for PhaseBudgetGuard {
 ///
 /// `Cx::masked(..)` is synchronous-only; GenServer lifecycle hooks are async.
 struct AsyncMaskGuard {
-    inner: Arc<std::sync::RwLock<CxInner>>,
+    inner: Arc<parking_lot::RwLock<CxInner>>,
 }
 
 impl AsyncMaskGuard {
     fn enter(cx: &Cx) -> Self {
         let inner = Arc::clone(&cx.inner);
         {
-            let mut guard = inner.write().expect("lock poisoned");
+            let mut guard = inner.write();
             assert!(
                 guard.mask_depth < crate::types::task_context::MAX_MASK_DEPTH,
                 "mask depth exceeded MAX_MASK_DEPTH ({}) in AsyncMaskGuard::enter: \
@@ -173,9 +171,8 @@ impl AsyncMaskGuard {
 
 impl Drop for AsyncMaskGuard {
     fn drop(&mut self) {
-        if let Ok(mut guard) = self.inner.write() {
-            guard.mask_depth = guard.mask_depth.saturating_sub(1);
-        }
+        let mut guard = self.inner.write();
+        guard.mask_depth = guard.mask_depth.saturating_sub(1);
     }
 }
 
@@ -762,7 +759,7 @@ pub struct GenServerHandle<S: GenServer> {
     state: Arc<GenServerStateCell>,
     task_id: TaskId,
     receiver: oneshot::Receiver<Result<S, JoinError>>,
-    inner: std::sync::Weak<std::sync::RwLock<CxInner>>,
+    inner: std::sync::Weak<parking_lot::RwLock<CxInner>>,
     overflow_policy: CastOverflowPolicy,
 }
 
@@ -1058,9 +1055,8 @@ impl<S: GenServer> GenServerHandle<S> {
     pub fn stop(&self) {
         self.state.store(ActorState::Stopping);
         if let Some(inner) = self.inner.upgrade() {
-            if let Ok(mut guard) = inner.write() {
-                guard.cancel_requested = true;
-            }
+            let mut guard = inner.write();
+            guard.cancel_requested = true;
         }
         // Ensure a server blocked in `mailbox.recv()` is woken so it can observe
         // the cancellation request and run drain/on_stop deterministically.

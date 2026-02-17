@@ -131,14 +131,14 @@ impl TaskCompletionKind {
 
 struct MaskedFinalizer {
     inner: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
-    cx_inner: Arc<std::sync::RwLock<CxInner>>,
+    cx_inner: Arc<parking_lot::RwLock<CxInner>>,
     entered: bool,
 }
 
 impl MaskedFinalizer {
     fn new(
         inner: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
-        cx_inner: Arc<std::sync::RwLock<CxInner>>,
+        cx_inner: Arc<parking_lot::RwLock<CxInner>>,
     ) -> Self {
         Self {
             inner,
@@ -151,7 +151,7 @@ impl MaskedFinalizer {
         if self.entered {
             return;
         }
-        let mut guard = self.cx_inner.write().expect("lock poisoned");
+        let mut guard = self.cx_inner.write();
         debug_assert!(
             guard.mask_depth < MAX_MASK_DEPTH,
             "mask depth exceeded MAX_MASK_DEPTH ({MAX_MASK_DEPTH}): this violates INV-MASK-BOUNDED \
@@ -175,9 +175,8 @@ impl MaskedFinalizer {
         if !self.entered {
             return;
         }
-        if let Ok(mut guard) = self.cx_inner.write() {
-            guard.mask_depth = guard.mask_depth.saturating_sub(1);
-        }
+        let mut guard = self.cx_inner.write();
+        guard.mask_depth = guard.mask_depth.saturating_sub(1);
         self.entered = false;
     }
 }
@@ -1832,9 +1831,8 @@ impl RuntimeState {
                 return SmallVec::new();
             };
             if let Some(inner) = task.cx_inner.as_ref() {
-                if let Ok(mut guard) = inner.write() {
-                    guard.cancel_waker = None;
-                }
+                let mut guard = inner.write();
+                guard.cancel_waker = None;
             }
 
             self.record_task_complete(task);

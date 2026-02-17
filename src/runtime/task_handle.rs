@@ -6,7 +6,8 @@
 use crate::channel::oneshot;
 use crate::cx::Cx;
 use crate::types::{CancelReason, CxInner, PanicPayload, TaskId};
-use std::sync::{RwLock, Weak};
+use parking_lot::RwLock;
+use std::sync::Weak;
 
 /// Error returned when joining a spawned task fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -377,7 +378,7 @@ mod tests {
         let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
 
         {
-            let mut lock = cx.inner.write().expect("lock poisoned");
+            let mut lock = cx.inner.write();
             lock.cancel_requested = true;
             lock.cancel_reason = Some(CancelReason::timeout());
         }
@@ -482,7 +483,7 @@ mod tests {
         drop(handle.join(&cx));
 
         let (cancel_requested, cancel_reason_is_none) = {
-            let guard = cx.inner.read().expect("lock poisoned");
+            let guard = cx.inner.read();
             (guard.cancel_requested, guard.cancel_reason.is_none())
         };
         crate::assert_with_log!(
@@ -512,7 +513,7 @@ mod tests {
         drop(handle.join(&cx));
 
         let (cancel_requested, cancel_reason_is_none) = {
-            let guard = cx.inner.read().expect("lock poisoned");
+            let guard = cx.inner.read();
             (guard.cancel_requested, guard.cancel_reason.is_none())
         };
         crate::assert_with_log!(
