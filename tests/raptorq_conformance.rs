@@ -1670,8 +1670,8 @@ mod differential_harness {
 
             let loss_pct = (drop_indices.len() * 100).checked_div(case.k).unwrap_or(0);
 
-            let decode_stats = decoder_result.as_ref().map_or(
-                UnitDecodeStats {
+            let decode_stats = decoder_result.as_ref().map_or_else(
+                |_| UnitDecodeStats {
                     k: case.k,
                     loss_pct,
                     dropped: drop_indices.len(),
