@@ -61,6 +61,7 @@ use super::{Event, Events, Interest, Reactor, Source, Token};
 use libc::{fcntl, F_GETFD};
 use parking_lot::Mutex;
 use polling::{Event as PollEvent, Events as PollEvents, PollMode, Poller};
+use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::io;
 use std::num::NonZeroUsize;
@@ -262,11 +263,21 @@ impl Reactor for EpollReactor {
 
     fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
         let mut state = self.state.lock();
-        let raw_fd = state
-            .tokens
-            .get(&token)
-            .map(|info| info.raw_fd)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "token not registered"))?;
+        // Destructure for split borrows so the entry on `tokens` doesn't
+        // block access to `fds` in error-cleanup paths.
+        let ReactorState { tokens, fds } = &mut *state;
+
+        let entry = match tokens.entry(token) {
+            Entry::Occupied(entry) => entry,
+            Entry::Vacant(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "token not registered",
+                ));
+            }
+        };
+
+        let raw_fd = entry.get().raw_fd;
 
         // Create the new polling event
         let event = Self::interest_to_poll_event(token, interest);
@@ -278,18 +289,17 @@ impl Reactor for EpollReactor {
 
         // Modify the epoll registration. If the kernel reports stale registration state,
         // clean stale bookkeeping so fd-number reuse does not get blocked indefinitely.
+        // The entry is reused for both the success update and error removal, saving a
+        // second O(log n) BTreeMap lookup on the hot path.
         let result = match self.poller.modify_with_mode(borrowed_fd, event, mode) {
             Ok(()) => {
-                if let Some(info) = state.tokens.get_mut(&token) {
-                    info.interest = interest;
-                }
+                entry.into_mut().interest = interest;
                 Ok(())
             }
             Err(err) => match err.raw_os_error() {
                 Some(libc::ENOENT) => {
-                    if let Some(info) = state.tokens.remove(&token) {
-                        state.fds.remove(&info.raw_fd);
-                    }
+                    let info = entry.remove();
+                    fds.remove(&info.raw_fd);
                     Err(io::Error::new(
                         io::ErrorKind::NotFound,
                         "token not registered",
@@ -300,9 +310,8 @@ impl Reactor for EpollReactor {
                     if fd_still_valid {
                         Err(err)
                     } else {
-                        if let Some(info) = state.tokens.remove(&token) {
-                            state.fds.remove(&info.raw_fd);
-                        }
+                        let info = entry.remove();
+                        fds.remove(&info.raw_fd);
                         Err(io::Error::new(
                             io::ErrorKind::NotFound,
                             "token not registered",

@@ -326,6 +326,16 @@ impl IoDriver {
         self.events = events;
     }
 
+    /// Restores the events buffer without dispatching wakers.
+    ///
+    /// Used when reactor polling fails: no readiness notifications should be
+    /// emitted on an error path even if the backend left stale events in the
+    /// scratch buffer.
+    pub(crate) fn restore_events_only(&mut self, mut events: Events) {
+        events.clear();
+        self.events = events;
+    }
+
     /// Wakes the driver from a blocking poll.
     ///
     /// This is safe to call from any thread. Use it when:
@@ -480,8 +490,8 @@ impl IoDriverHandle {
             driver.restore_and_dispatch(events, on_event);
             Ok(n)
         } else {
-            // Restore buffer even on error (cleared inside)
-            driver.restore_and_dispatch(events, |_e, _i| {});
+            // Restore buffer even on error, but do not dispatch readiness.
+            driver.restore_events_only(events);
             poll_result
         }
     }
@@ -674,7 +684,7 @@ mod tests {
     use crate::runtime::reactor::{Event, Interest, LabReactor, Token};
     use crate::test_utils::init_test_logging;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::task::Wake;
 
     /// A simple waker that sets a flag and counts wakes.
@@ -834,6 +844,61 @@ mod tests {
 
         fn poll(&self, _events: &mut Events, _timeout: Option<Duration>) -> io::Result<usize> {
             Ok(0)
+        }
+
+        fn wake(&self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn registration_count(&self) -> usize {
+            0
+        }
+    }
+
+    struct PollErrorWithEventReactor {
+        emit_token: Mutex<Option<Token>>,
+    }
+
+    impl PollErrorWithEventReactor {
+        fn new() -> Self {
+            Self {
+                emit_token: Mutex::new(None),
+            }
+        }
+
+        fn set_emit_token(&self, token: Token) {
+            let mut slot = self.emit_token.lock().expect("emit token lock poisoned");
+            *slot = Some(token);
+        }
+    }
+
+    impl Reactor for PollErrorWithEventReactor {
+        fn register(
+            &self,
+            _source: &dyn Source,
+            _token: Token,
+            _interest: Interest,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn modify(&self, _token: Token, _interest: Interest) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn deregister(&self, _token: Token) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn poll(&self, events: &mut Events, _timeout: Option<Duration>) -> io::Result<usize> {
+            let emit_token = {
+                let guard = self.emit_token.lock().expect("emit token lock poisoned");
+                *guard
+            };
+            if let Some(token) = emit_token {
+                events.push(Event::readable(token));
+            }
+            Err(io::Error::other("injected poll failure"))
         }
 
         fn wake(&self) -> io::Result<()> {
@@ -1290,6 +1355,62 @@ mod tests {
             driver.stats().wakers_dispatched
         );
         crate::test_complete!("io_driver_multiple_wakers");
+    }
+
+    #[test]
+    fn io_driver_handle_turn_with_poll_error_does_not_dispatch() {
+        init_test("io_driver_handle_turn_with_poll_error_does_not_dispatch");
+        let reactor = Arc::new(PollErrorWithEventReactor::new());
+        let reactor_handle: Arc<dyn Reactor> = reactor.clone();
+        let driver = IoDriverHandle::new(reactor_handle);
+
+        let (waker, waker_state) = create_test_waker();
+        let token = {
+            let mut guard = driver.lock();
+            guard.register_waker(waker)
+        };
+        reactor.set_emit_token(token);
+
+        let result = driver.turn_with(Some(Duration::ZERO), |_event, _interest| {});
+        crate::assert_with_log!(
+            result.is_err(),
+            "turn_with propagates poll error",
+            true,
+            result.is_err()
+        );
+
+        let fired = waker_state.flag.load(Ordering::SeqCst);
+        crate::assert_with_log!(!fired, "waker not fired", false, fired);
+        let wake_count = waker_state.count.load(Ordering::SeqCst);
+        crate::assert_with_log!(wake_count == 0, "wake count", 0usize, wake_count);
+
+        let stats = driver.stats();
+        crate::assert_with_log!(stats.polls == 0, "polls", 0usize, stats.polls);
+        crate::assert_with_log!(
+            stats.events_received == 0,
+            "events received",
+            0usize,
+            stats.events_received
+        );
+        crate::assert_with_log!(
+            stats.wakers_dispatched == 0,
+            "wakers dispatched",
+            0usize,
+            stats.wakers_dispatched
+        );
+        crate::assert_with_log!(
+            stats.unknown_tokens == 0,
+            "unknown tokens",
+            0usize,
+            stats.unknown_tokens
+        );
+        crate::assert_with_log!(
+            driver.waker_count() == 1,
+            "waker remains registered",
+            1usize,
+            driver.waker_count()
+        );
+        crate::test_complete!("io_driver_handle_turn_with_poll_error_does_not_dispatch");
     }
 
     #[test]
