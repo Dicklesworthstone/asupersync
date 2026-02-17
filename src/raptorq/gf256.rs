@@ -678,16 +678,32 @@ fn mul_table_for(c: Gf256) -> &'static [u8; 256] {
 }
 
 #[cfg(feature = "simd-intrinsics")]
-fn mul_nibble_tables(c: Gf256) -> ([u8; 16], [u8; 16]) {
-    let mut low = [0u8; 16];
-    let mut high = [0u8; 16];
-    let mut i = 0usize;
-    while i < 16 {
-        low[i] = gf256_mul_const(i as u8, c.0);
-        high[i] = gf256_mul_const((i as u8) << 4, c.0);
-        i += 1;
+const fn build_mul_nibble_tables() -> ([[u8; 16]; 256], [[u8; 16]; 256]) {
+    let mut low = [[0u8; 16]; 256];
+    let mut high = [[0u8; 16]; 256];
+    let mut c = 0usize;
+    while c < 256 {
+        let mut i = 0usize;
+        while i < 16 {
+            low[c][i] = gf256_mul_const(i as u8, c as u8);
+            high[c][i] = gf256_mul_const((i as u8) << 4, c as u8);
+            i += 1;
+        }
+        c += 1;
     }
     (low, high)
+}
+
+#[cfg(feature = "simd-intrinsics")]
+static MUL_NIBBLE_TABLES: ([[u8; 16]; 256], [[u8; 16]; 256]) = build_mul_nibble_tables();
+
+#[cfg(feature = "simd-intrinsics")]
+#[inline]
+fn mul_nibble_tables(c: Gf256) -> (&'static [u8; 16], &'static [u8; 16]) {
+    (
+        &MUL_NIBBLE_TABLES.0[c.0 as usize],
+        &MUL_NIBBLE_TABLES.1[c.0 as usize],
+    )
 }
 
 /// Multiply every element of `dst` by scalar `c` in GF(256).
@@ -733,8 +749,8 @@ pub fn gf256_mul_slices2(dst_a: &mut [u8], dst_b: &mut [u8], c: Gf256) {
         // SAFETY: AVX2 support is checked above and pointers remain within
         // bounds of the provided slices.
         unsafe {
-            gf256_mul_slice_x86_avx2_impl_tables(dst_a, &low_tbl_arr, &high_tbl_arr, table);
-            gf256_mul_slice_x86_avx2_impl_tables(dst_b, &low_tbl_arr, &high_tbl_arr, table);
+            gf256_mul_slice_x86_avx2_impl_tables(dst_a, low_tbl_arr, high_tbl_arr, table);
+            gf256_mul_slice_x86_avx2_impl_tables(dst_b, low_tbl_arr, high_tbl_arr, table);
         }
         return;
     }
@@ -746,8 +762,8 @@ pub fn gf256_mul_slices2(dst_a: &mut [u8], dst_b: &mut [u8], c: Gf256) {
         // SAFETY: NEON support is checked above and pointers remain within
         // bounds of the provided slices.
         unsafe {
-            gf256_mul_slice_aarch64_neon_impl_tables(dst_a, &low_tbl_arr, &high_tbl_arr, table);
-            gf256_mul_slice_aarch64_neon_impl_tables(dst_b, &low_tbl_arr, &high_tbl_arr, table);
+            gf256_mul_slice_aarch64_neon_impl_tables(dst_a, low_tbl_arr, high_tbl_arr, table);
+            gf256_mul_slice_aarch64_neon_impl_tables(dst_b, low_tbl_arr, high_tbl_arr, table);
         }
         return;
     }
@@ -996,20 +1012,8 @@ pub fn gf256_addmul_slices2(
     if matches!(dispatch().kind, Gf256Kernel::X86Avx2) && std::is_x86_feature_detected!("avx2") {
         // SAFETY: AVX2 support is checked above and both pairs are length-checked.
         unsafe {
-            gf256_addmul_slice_x86_avx2_impl_tables(
-                dst_a,
-                src_a,
-                &low_tbl_arr,
-                &high_tbl_arr,
-                table,
-            );
-            gf256_addmul_slice_x86_avx2_impl_tables(
-                dst_b,
-                src_b,
-                &low_tbl_arr,
-                &high_tbl_arr,
-                table,
-            );
+            gf256_addmul_slice_x86_avx2_impl_tables(dst_a, src_a, low_tbl_arr, high_tbl_arr, table);
+            gf256_addmul_slice_x86_avx2_impl_tables(dst_b, src_b, low_tbl_arr, high_tbl_arr, table);
         }
         return;
     }
@@ -1023,15 +1027,15 @@ pub fn gf256_addmul_slices2(
             gf256_addmul_slice_aarch64_neon_impl_tables(
                 dst_a,
                 src_a,
-                &low_tbl_arr,
-                &high_tbl_arr,
+                low_tbl_arr,
+                high_tbl_arr,
                 table,
             );
             gf256_addmul_slice_aarch64_neon_impl_tables(
                 dst_b,
                 src_b,
-                &low_tbl_arr,
-                &high_tbl_arr,
+                low_tbl_arr,
+                high_tbl_arr,
                 table,
             );
         }
@@ -1128,7 +1132,7 @@ fn gf256_addmul_slice_aarch64_neon(dst: &mut [u8], src: &[u8], c: Gf256) {
 #[target_feature(enable = "avx2")]
 unsafe fn gf256_mul_slice_x86_avx2_impl(dst: &mut [u8], c: Gf256) {
     let (low_tbl_arr, high_tbl_arr) = mul_nibble_tables(c);
-    gf256_mul_slice_x86_avx2_impl_tables(dst, &low_tbl_arr, &high_tbl_arr, mul_table_for(c));
+    gf256_mul_slice_x86_avx2_impl_tables(dst, low_tbl_arr, high_tbl_arr, mul_table_for(c));
 }
 
 #[cfg(all(
@@ -1175,13 +1179,7 @@ unsafe fn gf256_mul_slice_x86_avx2_impl_tables(
 #[target_feature(enable = "avx2")]
 unsafe fn gf256_addmul_slice_x86_avx2_impl(dst: &mut [u8], src: &[u8], c: Gf256) {
     let (low_tbl_arr, high_tbl_arr) = mul_nibble_tables(c);
-    gf256_addmul_slice_x86_avx2_impl_tables(
-        dst,
-        src,
-        &low_tbl_arr,
-        &high_tbl_arr,
-        mul_table_for(c),
-    );
+    gf256_addmul_slice_x86_avx2_impl_tables(dst, src, low_tbl_arr, high_tbl_arr, mul_table_for(c));
 }
 
 #[cfg(all(
@@ -1228,7 +1226,7 @@ unsafe fn gf256_addmul_slice_x86_avx2_impl_tables(
 #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
 unsafe fn gf256_mul_slice_aarch64_neon_impl(dst: &mut [u8], c: Gf256) {
     let (low_tbl_arr, high_tbl_arr) = mul_nibble_tables(c);
-    gf256_mul_slice_aarch64_neon_impl_tables(dst, &low_tbl_arr, &high_tbl_arr, mul_table_for(c));
+    gf256_mul_slice_aarch64_neon_impl_tables(dst, low_tbl_arr, high_tbl_arr, mul_table_for(c));
 }
 
 #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
@@ -1267,8 +1265,8 @@ unsafe fn gf256_addmul_slice_aarch64_neon_impl(dst: &mut [u8], src: &[u8], c: Gf
     gf256_addmul_slice_aarch64_neon_impl_tables(
         dst,
         src,
-        &low_tbl_arr,
-        &high_tbl_arr,
+        low_tbl_arr,
+        high_tbl_arr,
         mul_table_for(c),
     );
 }

@@ -104,8 +104,11 @@ impl<T: SymbolSink + Unpin> RaptorQSender<T> {
         let source_count = data
             .len()
             .div_ceil(self.config.encoding.symbol_size as usize);
-        let (pool_initial, pool_max) =
-            sender_pool_bounds(self.config.resources.symbol_pool_size, source_count, repair_count);
+        let (pool_initial, pool_max) = sender_pool_bounds(
+            self.config.resources.symbol_pool_size,
+            source_count,
+            repair_count,
+        );
         let pool = SymbolPool::new(PoolConfig {
             symbol_size: self.config.encoding.symbol_size,
             initial_size: pool_initial,
