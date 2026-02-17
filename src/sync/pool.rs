@@ -815,9 +815,9 @@ where
         }
 
         // Single-pass: check if already queued and update waker, or register.
-        let found = self.waiter_id.and_then(|id| {
-            state.waiters.iter_mut().find(|w| w.id == id)
-        });
+        let found = self
+            .waiter_id
+            .and_then(|id| state.waiters.iter_mut().find(|w| w.id == id));
         if let Some(w) = found {
             if !w.waker.will_wake(cx.waker()) {
                 w.waker.clone_from(cx.waker());

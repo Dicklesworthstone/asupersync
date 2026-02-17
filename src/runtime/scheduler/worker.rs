@@ -600,10 +600,7 @@ pub struct Parker {
 impl Parker {
     #[inline]
     fn lock_unpoisoned(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.inner
-            .mutex
-            .lock()
-            .expect("lock poisoned")
+        self.inner.mutex.lock().expect("lock poisoned")
     }
 
     /// Creates a new parker.
@@ -626,11 +623,7 @@ impl Parker {
 
         let mut guard = self.lock_unpoisoned();
         while !self.inner.notified.swap(false, Ordering::Acquire) {
-            guard = self
-                .inner
-                .cvar
-                .wait(guard)
-                .expect("lock poisoned");
+            guard = self.inner.cvar.wait(guard).expect("lock poisoned");
         }
         drop(guard);
     }
