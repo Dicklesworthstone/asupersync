@@ -7,8 +7,9 @@
 
 use core::fmt;
 use std::collections::{HashMap, HashSet, VecDeque};
+use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use crate::types::symbol::{ObjectId, Symbol};
 use crate::types::{Budget, CancelKind, CancelReason, Time};
@@ -163,7 +164,7 @@ impl SymbolCancelToken {
     /// Returns the cancellation reason, if cancelled.
     #[must_use]
     pub fn reason(&self) -> Option<CancelReason> {
-        self.state.reason.read().expect("lock poisoned").clone()
+        self.state.reason.read().clone()
     }
 
     /// Returns when cancellation was requested, if cancelled.
@@ -202,10 +203,10 @@ impl SymbolCancelToken {
             self.state
                 .cancelled_at
                 .store(now.as_nanos(), Ordering::Release);
-            *self.state.reason.write().expect("lock poisoned") = Some(reason.clone());
+            *self.state.reason.write() = Some(reason.clone());
 
             let listeners = {
-                let mut listeners = self.state.listeners.write().expect("lock poisoned");
+                let mut listeners = self.state.listeners.write();
                 std::mem::take(&mut *listeners)
             };
 
@@ -216,7 +217,7 @@ impl SymbolCancelToken {
 
             // Cancel children without holding the lock.
             let children = {
-                let children = self.state.children.read().expect("lock poisoned");
+                let children = self.state.children.read();
                 children.clone()
             };
             let parent_reason = CancelReason::parent_cancelled();
@@ -229,7 +230,7 @@ impl SymbolCancelToken {
             // Already cancelled. Strengthen the stored reason if the new
             // one is more severe, preserving the monotone-severity
             // invariant required by the cancellation protocol.
-            let mut reason_guard = self.state.reason.write().expect("lock poisoned");
+            let mut reason_guard = self.state.reason.write();
             match *reason_guard {
                 Some(ref mut stored) => {
                     stored.strengthen(reason);
@@ -253,7 +254,7 @@ impl SymbolCancelToken {
         // race: cancel() sets the `cancelled` flag (Release) *before* reading
         // children, so if we observe !cancelled (Acquire) under the write lock
         // the subsequent cancel() will see our child when it reads the list.
-        let mut children = self.state.children.write().expect("lock poisoned");
+        let mut children = self.state.children.write();
         if self.is_cancelled() {
             drop(children);
             if let Some(at) = self.cancelled_at() {
@@ -273,7 +274,7 @@ impl SymbolCancelToken {
         // race: cancel() sets the `cancelled` flag (Release) *before* draining
         // listeners, so if we observe !cancelled (Acquire) under the write lock
         // the subsequent cancel() will find our listener when it drains.
-        let mut listeners = self.state.listeners.write().expect("lock poisoned");
+        let mut listeners = self.state.listeners.write();
         if self.is_cancelled() {
             drop(listeners);
             let reason = self
@@ -651,7 +652,7 @@ impl<S: CancelSink> CancelBroadcaster<S> {
 
     /// Registers a peer.
     pub fn add_peer(&self, peer: PeerId) {
-        let mut peers = self.peers.write().expect("lock poisoned");
+        let mut peers = self.peers.write();
         if !peers.contains(&peer) {
             peers.push(peer);
         }
@@ -659,26 +660,17 @@ impl<S: CancelSink> CancelBroadcaster<S> {
 
     /// Removes a peer.
     pub fn remove_peer(&self, peer: &PeerId) {
-        self.peers
-            .write()
-            .expect("lock poisoned")
-            .retain(|p| p != peer);
+        self.peers.write().retain(|p| p != peer);
     }
 
     /// Registers a cancellation token for an object.
     pub fn register_token(&self, token: SymbolCancelToken) {
-        self.active_tokens
-            .write()
-            .expect("lock poisoned")
-            .insert(token.object_id(), token);
+        self.active_tokens.write().insert(token.object_id(), token);
     }
 
     /// Unregisters a token.
     pub fn unregister_token(&self, object_id: &ObjectId) {
-        self.active_tokens
-            .write()
-            .expect("lock poisoned")
-            .remove(object_id);
+        self.active_tokens.write().remove(object_id);
     }
 
     /// Cancels a local token and creates a broadcast message.
@@ -692,12 +684,7 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         now: Time,
     ) -> CancelMessage {
         // Cancel local token
-        if let Some(token) = self
-            .active_tokens
-            .read()
-            .expect("lock poisoned")
-            .get(&object_id)
-        {
+        if let Some(token) = self.active_tokens.read().get(&object_id) {
             token.cancel(reason, now);
         }
 
@@ -705,7 +692,6 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         let token_id = self
             .active_tokens
             .read()
-            .expect("lock poisoned")
             .get(&object_id)
             .map_or_else(
                 || object_id.high() ^ object_id.low(),
@@ -714,7 +700,7 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         let msg = CancelMessage::new(token_id, object_id, reason.kind(), now, sequence);
 
         self.mark_seen(object_id, msg.token_id(), sequence);
-        self.metrics.write().expect("lock poisoned").initiated += 1;
+        self.metrics.write().initiated += 1;
 
         msg
     }
@@ -727,20 +713,15 @@ impl<S: CancelSink> CancelBroadcaster<S> {
     pub fn receive_message(&self, msg: &CancelMessage, now: Time) -> Option<CancelMessage> {
         // Check for duplicate
         if self.is_seen(msg.object_id(), msg.token_id(), msg.sequence()) {
-            self.metrics.write().expect("lock poisoned").duplicates += 1;
+            self.metrics.write().duplicates += 1;
             return None;
         }
 
         self.mark_seen(msg.object_id(), msg.token_id(), msg.sequence());
-        self.metrics.write().expect("lock poisoned").received += 1;
+        self.metrics.write().received += 1;
 
         // Cancel local token if present
-        if let Some(token) = self
-            .active_tokens
-            .read()
-            .expect("lock poisoned")
-            .get(&msg.object_id())
-        {
+        if let Some(token) = self.active_tokens.read().get(&msg.object_id()) {
             let reason = CancelReason::new(msg.kind());
             token.cancel(&reason, now);
         }
@@ -748,14 +729,11 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         // Forward if allowed
         msg.forwarded().map_or_else(
             || {
-                self.metrics
-                    .write()
-                    .expect("lock poisoned")
-                    .max_hops_reached += 1;
+                self.metrics.write().max_hops_reached += 1;
                 None
             },
             |forwarded| {
-                self.metrics.write().expect("lock poisoned").forwarded += 1;
+                self.metrics.write().forwarded += 1;
                 Some(forwarded)
             },
         )
@@ -783,19 +761,18 @@ impl<S: CancelSink> CancelBroadcaster<S> {
     /// Returns a snapshot of current metrics.
     #[must_use]
     pub fn metrics(&self) -> CancelBroadcastMetrics {
-        self.metrics.read().expect("lock poisoned").clone()
+        self.metrics.read().clone()
     }
 
     fn is_seen(&self, object_id: ObjectId, token_id: u64, sequence: u64) -> bool {
         self.seen_sequences
             .read()
-            .expect("lock poisoned")
             .set
             .contains(&(object_id, token_id, sequence))
     }
 
     fn mark_seen(&self, object_id: ObjectId, token_id: u64, sequence: u64) {
-        let mut seen = self.seen_sequences.write().expect("lock poisoned");
+        let mut seen = self.seen_sequences.write();
         let inserted = seen.insert((object_id, token_id, sequence));
         if !inserted {
             return;
@@ -895,7 +872,7 @@ impl CleanupCoordinator {
     /// Registers symbols as pending for an object.
     #[allow(clippy::significant_drop_tightening)]
     pub fn register_pending(&self, object_id: ObjectId, symbol: Symbol, now: Time) {
-        let mut pending = self.pending.write().expect("lock poisoned");
+        let mut pending = self.pending.write();
         let set = pending
             .entry(object_id)
             .or_insert_with(|| PendingSymbolSet {
@@ -911,17 +888,13 @@ impl CleanupCoordinator {
 
     /// Registers a cleanup handler for an object.
     pub fn register_handler(&self, object_id: ObjectId, handler: impl CleanupHandler + 'static) {
-        self.handlers
-            .write()
-            .expect("lock poisoned")
-            .insert(object_id, Box::new(handler));
+        self.handlers.write().insert(object_id, Box::new(handler));
     }
 
     /// Clears pending symbols for an object (e.g., after successful decode).
     pub fn clear_pending(&self, object_id: &ObjectId) -> Option<usize> {
         self.pending
             .write()
-            .expect("lock poisoned")
             .remove(object_id)
             .map(|set| set.symbols.len())
     }
@@ -937,18 +910,10 @@ impl CleanupCoordinator {
         let mut within_budget = true;
         // Remove the handler up front so callback execution never happens
         // while holding the handlers lock (avoids re-entrant deadlocks).
-        let handler = self
-            .handlers
-            .write()
-            .expect("lock poisoned")
-            .remove(&object_id);
+        let handler = self.handlers.write().remove(&object_id);
 
         // Get pending symbols
-        let pending_set = self
-            .pending
-            .write()
-            .expect("lock poisoned")
-            .remove(&object_id);
+        let pending_set = self.pending.write().remove(&object_id);
 
         if let Some(set) = pending_set {
             symbols_cleaned = set.symbols.len();
@@ -978,7 +943,7 @@ impl CleanupCoordinator {
     /// Returns statistics about pending cleanups.
     #[must_use]
     pub fn stats(&self) -> CleanupStats {
-        let pending = self.pending.read().expect("lock poisoned");
+        let pending = self.pending.read();
 
         let mut total_symbols = 0;
         let mut total_bytes = 0;
@@ -1287,7 +1252,7 @@ mod tests {
         }
 
         let (len, has_10, has_11, front) = {
-            let seen = broadcaster.seen_sequences.read().expect("lock poisoned");
+            let seen = broadcaster.seen_sequences.read();
             let len = seen.set.len();
             let has_10 = seen.set.contains(&(object_id, 1, 0));
             let has_11 = seen.set.contains(&(object_id, 1, 1));
@@ -1402,7 +1367,7 @@ mod tests {
                 _object_id: ObjectId,
                 _symbols: Vec<Symbol>,
             ) -> crate::error::Result<usize> {
-                let can_acquire_write = self.coordinator.handlers.try_write().is_ok();
+                let can_acquire_write = self.coordinator.handlers.try_write().is_some();
                 self.write_lock_available
                     .store(can_acquire_write, Ordering::SeqCst);
                 Ok(0)
