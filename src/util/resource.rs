@@ -4,7 +4,8 @@
 //! - `SymbolPool` for bounded, reusable symbol buffers
 //! - `ResourceTracker` for enforcing global resource limits
 
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 /// Configuration for a symbol buffer pool.
 #[derive(Debug, Clone)]
@@ -390,35 +391,31 @@ impl ResourceTracker {
     /// Returns the current usage snapshot.
     #[must_use]
     pub fn usage(&self) -> ResourceUsage {
-        self.inner.lock().expect("lock poisoned").current
+        self.inner.lock().current
     }
 
     /// Returns the configured limits.
     #[must_use]
     pub fn limits(&self) -> ResourceLimits {
-        self.inner.lock().expect("lock poisoned").limits.clone()
+        self.inner.lock().limits.clone()
     }
 
     /// Adds a resource observer.
     pub fn add_observer(&self, observer: Box<dyn ResourceObserver>) {
-        self.inner
-            .lock()
-            .expect("lock poisoned")
-            .observers
-            .push(Arc::from(observer));
+        self.inner.lock().observers.push(Arc::from(observer));
     }
 
     /// Returns the current pressure level (0.0 - 1.0).
     #[must_use]
     pub fn pressure(&self) -> f64 {
-        let inner = self.inner.lock().expect("lock poisoned");
+        let inner = self.inner.lock();
         compute_pressure(&inner.current, &inner.limits)
     }
 
     /// Returns whether a request can be satisfied.
     #[must_use]
     pub fn can_acquire(&self, request: &ResourceRequest) -> bool {
-        let inner = self.inner.lock().expect("lock poisoned");
+        let inner = self.inner.lock();
         let mut projected = inner.current;
         projected.add(request.usage);
         within_limits(&projected, &inner.limits)
@@ -454,7 +451,7 @@ impl ResourceTracker {
     #[allow(clippy::significant_drop_tightening)] // false positive: inner still borrowed by prepare_pressure_notifications
     pub fn try_acquire(&self, usage: ResourceUsage) -> Result<ResourceGuard, ResourceExhausted> {
         let batch = {
-            let mut inner = self.inner.lock().expect("lock poisoned");
+            let mut inner = self.inner.lock();
             let mut projected = inner.current;
             projected.add(usage);
 
@@ -488,7 +485,7 @@ impl Drop for ResourceGuard {
     #[allow(clippy::significant_drop_tightening)] // false positive: inner still borrowed by prepare_pressure_notifications
     fn drop(&mut self) {
         let batch = {
-            let mut inner = self.inner.lock().expect("lock poisoned");
+            let mut inner = self.inner.lock();
             inner.current.sub(self.acquired);
             prepare_pressure_notifications(&mut inner)
         };

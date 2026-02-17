@@ -24,7 +24,8 @@ use std::fmt;
 use std::io;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -422,7 +423,7 @@ impl NatsClient {
 
         // Read initial INFO from server
         let info = client.read_info(cx).await?;
-        *client.state.server_info.lock().unwrap() = Some(info.clone());
+        *client.state.server_info.lock() = Some(info.clone());
 
         // Send CONNECT command
         client.send_connect(cx).await?;
@@ -856,7 +857,7 @@ impl NatsClient {
 
         // Register subscription
         {
-            let mut subs = self.state.subscriptions.lock().unwrap();
+            let mut subs = self.state.subscriptions.lock();
             subs.insert(
                 sid,
                 SubscriptionState {
@@ -898,7 +899,7 @@ impl NatsClient {
         let (tx, rx) = mpsc::channel(256);
 
         {
-            let mut subs = self.state.subscriptions.lock().unwrap();
+            let mut subs = self.state.subscriptions.lock();
             subs.insert(
                 sid,
                 SubscriptionState {
@@ -926,7 +927,7 @@ impl NatsClient {
 
         // Remove from local state
         {
-            let mut subs = self.state.subscriptions.lock().unwrap();
+            let mut subs = self.state.subscriptions.lock();
             subs.remove(&sid);
         }
 
@@ -993,7 +994,7 @@ impl NatsClient {
 
     /// Dispatch a message to the appropriate subscription.
     fn dispatch_message(&self, msg: Message) {
-        let subs = self.state.subscriptions.lock().unwrap();
+        let subs = self.state.subscriptions.lock();
         if let Some(sub) = subs.get(&msg.sid) {
             // Try to send; warn if channel is full (backpressure)
             if sub.sender.try_send(msg).is_err() {
@@ -1043,7 +1044,7 @@ impl NatsClient {
 
         // Clear all subscriptions
         {
-            let mut subs = self.state.subscriptions.lock().unwrap();
+            let mut subs = self.state.subscriptions.lock();
             subs.clear();
         }
 
@@ -1053,7 +1054,7 @@ impl NatsClient {
 
     /// Get server info.
     pub fn server_info(&self) -> Option<ServerInfo> {
-        self.state.server_info.lock().unwrap().clone()
+        self.state.server_info.lock().clone()
     }
 }
 
@@ -1111,7 +1112,7 @@ impl Subscription {
 impl Drop for Subscription {
     fn drop(&mut self) {
         // Remove from shared state
-        let mut subs = self.state.subscriptions.lock().unwrap();
+        let mut subs = self.state.subscriptions.lock();
         subs.remove(&self.sid);
     }
 }

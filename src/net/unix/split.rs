@@ -11,7 +11,8 @@ use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
 /// Borrowed read half of a [`UnixStream`](super::UnixStream).
@@ -191,7 +192,7 @@ impl std::fmt::Debug for UnixStreamInner {
 
 impl UnixStreamInner {
     fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
-        let mut guard = self.state.lock().expect("lock poisoned");
+        let mut guard = self.state.lock();
 
         // Store this direction's waker for combined dispatch.
         if interest.is_readable() {
@@ -310,7 +311,6 @@ impl OwnedReadHalf {
                 .inner
                 .state
                 .lock()
-                .expect("lock poisoned")
                 .registration
                 .take();
             Ok(super::UnixStream::from_parts(

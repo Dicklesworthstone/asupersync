@@ -14,7 +14,8 @@ use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
@@ -441,7 +442,7 @@ impl SimQueue {
     }
 
     fn close(&self) {
-        let mut state = self.state.lock().expect("sim queue lock poisoned");
+        let mut state = self.state.lock();
         state.closed = true;
         let send_wakers = std::mem::take(&mut state.send_wakers);
         let recv_wakers = std::mem::take(&mut state.recv_wakers);
@@ -491,20 +492,20 @@ impl SimSymbolSink {
     /// Get all symbols that were successfully "sent" (post-loss/dup/corrupt).
     #[must_use]
     pub fn sent_symbols(&self) -> Vec<AuthenticatedSymbol> {
-        let state = self.inner.state.lock().expect("sim queue lock poisoned");
+        let state = self.inner.state.lock();
         state.sent_symbols.clone()
     }
 
     /// Get count of sent symbols.
     #[must_use]
     pub fn sent_count(&self) -> usize {
-        let state = self.inner.state.lock().expect("sim queue lock poisoned");
+        let state = self.inner.state.lock();
         state.sent_symbols.len()
     }
 
     /// Clear the sent symbols buffer.
     pub fn clear(&self) {
-        let mut state = self.inner.state.lock().expect("sim queue lock poisoned");
+        let mut state = self.inner.state.lock();
         state.sent_symbols.clear();
     }
 
@@ -535,7 +536,7 @@ impl SimSymbolStream {
     pub fn from_symbols(symbols: Vec<AuthenticatedSymbol>, config: SimTransportConfig) -> Self {
         let shared = Arc::new(SimQueue::new(config));
         {
-            let mut state = shared.state.lock().expect("sim queue lock poisoned");
+            let mut state = shared.state.lock();
             state.queue.extend(symbols);
         }
         Self::from_shared(shared)
@@ -552,7 +553,7 @@ impl SimSymbolStream {
 
     /// Add a symbol to the stream dynamically.
     pub fn push(&self, symbol: AuthenticatedSymbol) -> Result<(), StreamError> {
-        let mut state = self.inner.state.lock().expect("sim queue lock poisoned");
+        let mut state = self.inner.state.lock();
         if state.closed {
             return Err(StreamError::Closed);
         }
@@ -585,7 +586,7 @@ impl SimSymbolStream {
     /// Check if all symbols have been consumed.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        let state = self.inner.state.lock().expect("sim queue lock poisoned");
+        let state = self.inner.state.lock();
         state.queue.is_empty()
     }
 
@@ -624,7 +625,7 @@ fn closed_channel(config: SimTransportConfig) -> (SimChannelSink, SimChannelStre
 impl SymbolSink for SimSymbolSink {
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), SinkError>> {
         let this = self.get_mut();
-        let mut state = this.inner.state.lock().expect("sim queue lock poisoned");
+        let mut state = this.inner.state.lock();
         if state.closed {
             return Poll::Ready(Err(SinkError::Closed));
         }
@@ -687,7 +688,7 @@ impl SymbolSink for SimSymbolSink {
         let op_count = &mut this.operation_count;
 
         if !delay_ready {
-            let mut state = inner.state.lock().expect("sim queue lock poisoned");
+            let mut state = inner.state.lock();
             if state.closed {
                 return Poll::Ready(Err(SinkError::Closed));
             }
@@ -717,7 +718,7 @@ impl SymbolSink for SimSymbolSink {
             }
         }
 
-        let mut state = inner.state.lock().expect("sim queue lock poisoned");
+        let mut state = inner.state.lock();
         if state.closed {
             return Poll::Ready(Err(SinkError::Closed));
         }
@@ -800,7 +801,7 @@ impl SymbolStream for SimSymbolStream {
             }
         }
 
-        let mut state = this.inner.state.lock().expect("sim queue lock poisoned");
+        let mut state = this.inner.state.lock();
         let symbol = if state.queue.is_empty() {
             None
         } else if this.inner.config.preserve_order {
@@ -887,13 +888,13 @@ impl SymbolStream for SimSymbolStream {
 
     #[allow(clippy::significant_drop_tightening)] // Lock release timing is fine
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let state = self.inner.state.lock().expect("sim queue lock poisoned");
+        let state = self.inner.state.lock();
         let len = state.queue.len() + usize::from(self.pending.is_some());
         (len, Some(len))
     }
 
     fn is_exhausted(&self) -> bool {
-        let state = self.inner.state.lock().expect("sim queue lock poisoned");
+        let state = self.inner.state.lock();
         self.pending.is_none() && state.closed && state.queue.is_empty()
     }
 }
