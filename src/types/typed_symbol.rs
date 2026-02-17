@@ -168,8 +168,14 @@ impl TypeRegistry {
     /// Creates a new registry.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_capacity(DEFAULT_TYPE_REGISTRY_CAPACITY)
+    }
+
+    /// Creates a new registry with a caller-specified initial capacity.
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            types: HashMap::with_capacity(DEFAULT_TYPE_REGISTRY_CAPACITY),
+            types: HashMap::with_capacity(capacity),
         }
     }
 
@@ -1135,6 +1141,16 @@ mod tests {
         let desc = registry.get::<Demo>().unwrap();
         assert_eq!(desc.name, "Demo");
         assert_eq!(desc.version, 1);
+    }
+
+    #[test]
+    fn test_type_registry_with_capacity_registration() {
+        let mut registry = TypeRegistry::with_capacity(1);
+        registry.register::<Demo>("Demo", 2);
+
+        let desc = registry.get::<Demo>().unwrap();
+        assert_eq!(desc.name, "Demo");
+        assert_eq!(desc.version, 2);
     }
 
     #[test]
