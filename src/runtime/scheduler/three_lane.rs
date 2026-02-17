@@ -60,7 +60,7 @@ use crate::sync::ContendedMutex;
 use crate::time::TimerDriverHandle;
 use crate::tracing_compat::{error, trace};
 use crate::types::{CxInner, TaskId, Time};
-use crate::util::DetRng;
+use crate::util::{CachePadded, DetRng};
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 use std::cell::RefCell;
@@ -87,7 +87,7 @@ type LocalReadyQueue = Mutex<Vec<TaskId>>;
 #[derive(Debug)]
 pub(crate) struct WorkerCoordinator {
     parkers: Vec<Parker>,
-    next_wake: AtomicUsize,
+    next_wake: CachePadded<AtomicUsize>,
     /// Bitmask for power-of-two worker counts (replaces IDIV with AND).
     /// `None` when the count is zero or non-power-of-two.
     mask: Option<usize>,
@@ -103,7 +103,7 @@ impl WorkerCoordinator {
         };
         Self {
             parkers,
-            next_wake: AtomicUsize::new(0),
+            next_wake: CachePadded::new(AtomicUsize::new(0)),
             mask,
         }
     }
@@ -1063,7 +1063,7 @@ impl ThreeLaneWorker {
         // Set thread-local worker id for routing pinned local tasks.
         let _worker_guard = ScopedWorkerId::new(self.id);
 
-        while !self.shutdown.load(Ordering::Acquire) {
+        while !self.shutdown.load(Ordering::Relaxed) {
             if let Some(task) = self.next_task() {
                 self.execute(task);
                 continue;
@@ -1447,7 +1447,7 @@ impl ThreeLaneWorker {
     ///
     /// Returns `true` if a task was executed.
     pub fn run_once(&mut self) -> bool {
-        if self.shutdown.load(Ordering::Acquire) {
+        if self.shutdown.load(Ordering::Relaxed) {
             return false;
         }
 

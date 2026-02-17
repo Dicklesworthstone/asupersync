@@ -359,6 +359,8 @@ pub struct IntrusiveStack {
     bottom: Option<TaskId>,
     /// Number of tasks in the stack.
     len: usize,
+    /// Number of local (`!Send`) tasks currently in the stack.
+    local_count: usize,
     /// Queue tag for membership detection.
     tag: u8,
 }
@@ -372,6 +374,7 @@ impl IntrusiveStack {
             top: None,
             bottom: None,
             len: 0,
+            local_count: 0,
             tag,
         }
     }
@@ -390,6 +393,13 @@ impl IntrusiveStack {
         self.len == 0
     }
 
+    /// Returns true if the stack currently holds any local (`!Send`) tasks.
+    #[must_use]
+    #[inline]
+    pub const fn has_local_tasks(&self) -> bool {
+        self.local_count != 0
+    }
+
     /// Pushes a task onto the top of the stack.
     ///
     /// # Complexity
@@ -404,6 +414,51 @@ impl IntrusiveStack {
         if record.is_in_queue() {
             return;
         }
+        let is_local = record.is_local();
+
+        match self.top {
+            None => {
+                // Empty stack
+                record.set_queue_links(None, None, self.tag);
+                self.top = Some(task_id);
+                self.bottom = Some(task_id);
+            }
+            Some(old_top) => {
+                // Link new task as new top, pointing down to old top
+                record.set_queue_links(None, Some(old_top), self.tag);
+
+                // Update old top's prev pointer (points up to new top)
+                if let Some(old_top_record) = arena.get_mut(old_top.arena_index()) {
+                    old_top_record.prev_in_queue = Some(task_id);
+                }
+
+                self.top = Some(task_id);
+            }
+        }
+
+        self.len += 1;
+        if is_local {
+            self.local_count += 1;
+        }
+    }
+
+    /// Pushes a known non-local task onto the top of the stack.
+    ///
+    /// This avoids per-item locality bookkeeping in hot steal-batch paths that
+    /// have already proven the source queue contains no local tasks.
+    #[inline]
+    pub(crate) fn push_assume_non_local(&mut self, task_id: TaskId, arena: &mut Arena<TaskRecord>) {
+        let Some(record) = arena.get_mut(task_id.arena_index()) else {
+            return;
+        };
+
+        if record.is_in_queue() {
+            return;
+        }
+        debug_assert!(
+            !record.is_local(),
+            "push_assume_non_local received local task {task_id:?}"
+        );
 
         match self.top {
             None => {
@@ -442,6 +497,7 @@ impl IntrusiveStack {
         if record.is_in_queue() {
             return;
         }
+        let is_local = record.is_local();
 
         match self.bottom {
             None => {
@@ -463,6 +519,9 @@ impl IntrusiveStack {
         }
 
         self.len += 1;
+        if is_local {
+            self.local_count += 1;
+        }
     }
 
     /// Pops a task from the top of the stack (LIFO).
@@ -475,11 +534,12 @@ impl IntrusiveStack {
     pub fn pop(&mut self, arena: &mut Arena<TaskRecord>) -> Option<TaskId> {
         let top_id = self.top?;
 
-        let next_down = {
+        let (next_down, is_local) = {
             let record = arena.get_mut(top_id.arena_index())?;
+            let is_local = record.is_local();
             let next_down = record.next_in_queue; // Points down to older task
             record.clear_queue_links();
-            next_down
+            (next_down, is_local)
         };
 
         self.top = next_down;
@@ -498,6 +558,10 @@ impl IntrusiveStack {
         }
 
         self.len -= 1;
+        if is_local {
+            debug_assert!(self.local_count > 0);
+            self.local_count -= 1;
+        }
         Some(top_id)
     }
 
@@ -557,6 +621,83 @@ impl IntrusiveStack {
         stolen
     }
 
+    /// Steals up to `max_steal` known non-local tasks into `dest`.
+    ///
+    /// Caller must ensure `self.has_local_tasks() == false`.
+    #[inline]
+    pub(crate) fn steal_batch_into_non_local(
+        &mut self,
+        max_steal: usize,
+        arena: &mut Arena<TaskRecord>,
+        dest: &mut Self,
+    ) -> usize {
+        debug_assert!(
+            !self.has_local_tasks(),
+            "steal_batch_into_non_local called on stack with local tasks"
+        );
+        if self.is_empty() {
+            return 0;
+        }
+        let steal_count = (self.len / 2).max(1).min(max_steal);
+        let mut stolen = 0;
+
+        for _ in 0..steal_count {
+            let Some(bottom_id) = self.bottom else {
+                break;
+            };
+
+            // Detach oldest task from source stack.
+            let prev_up = {
+                let Some(record) = arena.get_mut(bottom_id.arena_index()) else {
+                    break;
+                };
+                debug_assert!(
+                    !record.is_local(),
+                    "steal_batch_into_non_local encountered local task {bottom_id:?}"
+                );
+                record.prev_in_queue
+            };
+
+            self.bottom = prev_up;
+            match prev_up {
+                None => {
+                    // Source stack is now empty.
+                    self.top = None;
+                }
+                Some(new_bottom) => {
+                    if let Some(new_bottom_record) = arena.get_mut(new_bottom.arena_index()) {
+                        new_bottom_record.next_in_queue = None;
+                    }
+                }
+            }
+            self.len -= 1;
+
+            // Attach directly to destination top.
+            let Some(record) = arena.get_mut(bottom_id.arena_index()) else {
+                break;
+            };
+            match dest.top {
+                None => {
+                    record.set_queue_links(None, None, dest.tag);
+                    dest.top = Some(bottom_id);
+                    dest.bottom = Some(bottom_id);
+                }
+                Some(old_top) => {
+                    record.set_queue_links(None, Some(old_top), dest.tag);
+                    if let Some(old_top_record) = arena.get_mut(old_top.arena_index()) {
+                        old_top_record.prev_in_queue = Some(bottom_id);
+                    }
+                    dest.top = Some(bottom_id);
+                }
+            }
+
+            dest.len += 1;
+            stolen += 1;
+        }
+
+        stolen
+    }
+
     /// Steals one task from the bottom of the stack.
     ///
     /// Returns the stolen task and whether it is local (`!Send`), allowing
@@ -593,7 +734,56 @@ impl IntrusiveStack {
         }
 
         self.len -= 1;
+        if is_local {
+            debug_assert!(self.local_count > 0);
+            self.local_count -= 1;
+        }
         Some((bottom_id, is_local))
+    }
+
+    /// Steals one task from the bottom when the stack contains no local tasks.
+    ///
+    /// Caller must ensure `self.has_local_tasks() == false`.
+    #[inline]
+    #[must_use]
+    pub(crate) fn steal_one_assume_non_local(
+        &mut self,
+        arena: &mut Arena<TaskRecord>,
+    ) -> Option<TaskId> {
+        debug_assert!(
+            !self.has_local_tasks(),
+            "steal_one_assume_non_local called on stack with local tasks"
+        );
+        let bottom_id = self.bottom?;
+
+        let prev_up = {
+            let record = arena.get_mut(bottom_id.arena_index())?;
+            debug_assert!(
+                !record.is_local(),
+                "steal_one_assume_non_local encountered local task {bottom_id:?}"
+            );
+            let prev_up = record.prev_in_queue; // Points up to newer task
+            record.clear_queue_links();
+            prev_up
+        };
+
+        self.bottom = prev_up;
+
+        match prev_up {
+            None => {
+                // Stack is now empty
+                self.top = None;
+            }
+            Some(new_bottom) => {
+                // Update new bottom's next pointer
+                if let Some(new_bottom_record) = arena.get_mut(new_bottom.arena_index()) {
+                    new_bottom_record.next_in_queue = None;
+                }
+            }
+        }
+
+        self.len -= 1;
+        Some(bottom_id)
     }
 
     /// Steals one task from the bottom of the stack.
@@ -952,6 +1142,32 @@ mod tests {
     }
 
     #[test]
+    fn stack_tracks_local_task_presence() {
+        let mut arena = setup_arena(2);
+        let mut stack = IntrusiveStack::new(QUEUE_TAG_READY);
+
+        arena
+            .get_mut(task(0).arena_index())
+            .expect("task record missing")
+            .mark_local();
+
+        assert!(!stack.has_local_tasks());
+        stack.push(task(0), &mut arena);
+        stack.push(task(1), &mut arena);
+        assert!(stack.has_local_tasks());
+
+        let (stolen_id, is_local) = stack
+            .steal_one_with_locality(&mut arena)
+            .expect("oldest task missing");
+        assert_eq!(stolen_id, task(0));
+        assert!(is_local);
+        assert!(!stack.has_local_tasks());
+
+        assert_eq!(stack.pop(&mut arena), Some(task(1)));
+        assert!(!stack.has_local_tasks());
+    }
+
+    #[test]
     fn stack_lifo_ordering() {
         let mut arena = setup_arena(5);
         let mut stack = IntrusiveStack::new(QUEUE_TAG_READY);
@@ -1015,6 +1231,37 @@ mod tests {
         assert_eq!(stack.pop(&mut arena), Some(task(6)));
         assert_eq!(stack.pop(&mut arena), Some(task(5)));
         assert_eq!(stack.pop(&mut arena), Some(task(4)));
+    }
+
+    #[test]
+    fn stack_steal_batch_into_non_local_preserves_ordering() {
+        let mut arena = setup_arena(8);
+        let mut src = IntrusiveStack::new(QUEUE_TAG_READY);
+        let mut dest = IntrusiveStack::new(QUEUE_TAG_CANCEL);
+
+        for i in 0..8 {
+            src.push(task(i), &mut arena);
+        }
+
+        let stolen = src.steal_batch_into_non_local(4, &mut arena, &mut dest);
+        assert_eq!(stolen, 4);
+        assert!(!src.has_local_tasks());
+        assert!(!dest.has_local_tasks());
+
+        // Destination receives oldest tasks (0..3), but push-to-top means
+        // owner pop order is reverse in destination.
+        assert_eq!(dest.pop(&mut arena), Some(task(3)));
+        assert_eq!(dest.pop(&mut arena), Some(task(2)));
+        assert_eq!(dest.pop(&mut arena), Some(task(1)));
+        assert_eq!(dest.pop(&mut arena), Some(task(0)));
+        assert_eq!(dest.pop(&mut arena), None);
+
+        // Source retains newest half.
+        assert_eq!(src.pop(&mut arena), Some(task(7)));
+        assert_eq!(src.pop(&mut arena), Some(task(6)));
+        assert_eq!(src.pop(&mut arena), Some(task(5)));
+        assert_eq!(src.pop(&mut arena), Some(task(4)));
+        assert_eq!(src.pop(&mut arena), None);
     }
 
     #[test]

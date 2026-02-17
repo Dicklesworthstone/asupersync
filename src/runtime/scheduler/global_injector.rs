@@ -4,6 +4,7 @@
 //! Tasks are routed to the appropriate priority lane: cancel > timed > ready.
 
 use crate::types::{TaskId, Time};
+use crate::util::CachePadded;
 use crossbeam_queue::SegQueue;
 use parking_lot::Mutex;
 use std::cmp::Ordering as CmpOrdering;
@@ -76,10 +77,10 @@ pub struct GlobalInjector {
     /// Ready lane: general ready tasks.
     ready_queue: SegQueue<PriorityTask>,
     /// Approximate count of ready-lane tasks only.
-    ready_count: AtomicUsize,
+    ready_count: CachePadded<AtomicUsize>,
     /// Approximate count of timed-lane tasks, allowing callers to skip
     /// acquiring the timed_queue mutex when the lane is empty.
-    timed_count: AtomicUsize,
+    timed_count: CachePadded<AtomicUsize>,
 }
 
 /// Thread-safe EDF queue for timed tasks.
@@ -97,8 +98,8 @@ impl Default for GlobalInjector {
             cancel_queue: SegQueue::new(),
             timed_queue: Mutex::new(TimedQueue::default()),
             ready_queue: SegQueue::new(),
-            ready_count: AtomicUsize::new(0),
-            timed_count: AtomicUsize::new(0),
+            ready_count: CachePadded::new(AtomicUsize::new(0)),
+            timed_count: CachePadded::new(AtomicUsize::new(0)),
         }
     }
 }

@@ -270,6 +270,13 @@ impl Stealer {
             return false;
         }
         let steal_limit = (initial_len / 2).max(1);
+
+        // Common case: queue has only stealable tasks. Skip per-task locality
+        // branching and temporary local-task buffering entirely.
+        if !src.has_local_tasks() {
+            return src.steal_batch_into_non_local(steal_limit, arena, dest) > 0;
+        }
+
         let mut remaining_attempts = initial_len;
 
         while stolen < steal_limit && remaining_attempts > 0 {
