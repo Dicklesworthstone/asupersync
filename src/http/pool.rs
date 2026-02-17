@@ -16,6 +16,7 @@
 //! - Idle connection timeout
 //! - Connection health checks
 
+use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -456,10 +457,10 @@ impl Pool {
     pub fn cleanup_expired(&mut self, now: Time) -> usize {
         let idle_timeout = self.config.idle_timeout;
         let mut removed = 0;
-        let mut empty_keys = Vec::new();
+        let mut empty_keys: SmallVec<[PoolKey; 4]> = SmallVec::new();
 
         for (key, host_pool) in &mut self.hosts {
-            let expired_ids: Vec<u64> = host_pool
+            let expired_ids: SmallVec<[u64; 8]> = host_pool
                 .connections
                 .iter()
                 .filter(|(_, conn)| conn.is_expired(now, idle_timeout))
