@@ -21,7 +21,7 @@ use crate::net::tcp::stream::TcpStream;
 use crate::tls::{TlsConnectorBuilder, TlsStream};
 use std::io;
 use std::pin::Pin;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::task::{Context, Poll};
 
 /// Errors that can occur during HTTP client operations.
@@ -622,7 +622,7 @@ impl HttpClient {
 
     /// Returns current pool statistics.
     pub fn pool_stats(&self) -> crate::http::pool::PoolStats {
-        self.pool.lock().expect("pool lock").stats()
+        self.pool.lock().stats()
     }
 }
 

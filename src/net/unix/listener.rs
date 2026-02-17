@@ -32,13 +32,13 @@ use crate::net::unix::stream::UnixStream;
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 use crate::stream::Stream;
+use parking_lot::Mutex;
 use std::future::poll_fn;
 use std::io;
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::{self, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Mutex;
 use std::task::{Context, Poll};
 
 pub(crate) fn remove_stale_socket_file(path: &Path) -> io::Result<()> {
@@ -197,10 +197,7 @@ impl UnixListener {
 
     /// Registers interest with the I/O driver for READABLE events.
     fn register_interest(&self, cx: &Context<'_>) -> io::Result<()> {
-        let mut registration = self
-            .registration
-            .lock()
-            .map_err(|_| io::Error::other("unix listener registration lock poisoned"))?;
+        let mut registration = self.registration.lock();
 
         if let Some(existing) = registration.as_mut() {
             // Re-arm reactor interest and conditionally update the waker in a
@@ -529,20 +526,13 @@ mod tests {
         let poll = Pin::new(&mut incoming).poll_next(&mut cx);
         assert!(matches!(poll, Poll::Pending));
 
-        assert!(
-            listener
-                .registration
-                .lock()
-                .expect("lock poisoned")
-                .is_some(),
-            "incoming should register interest"
-        );
+        assert!(listener.registration.lock().is_some(), "incoming should register interest");
         crate::test_complete!("incoming_registers_on_wouldblock");
     }
 
     #[test]
-    fn incoming_handles_poisoned_registration_lock() {
-        init_test("incoming_handles_poisoned_registration_lock");
+    fn incoming_recovers_after_registration_lock_panic() {
+        init_test("incoming_recovers_after_registration_lock_panic");
         let dir = tempdir().expect("create temp dir");
         let path = dir.path().join("incoming_poisoned_lock.sock");
 
@@ -565,8 +555,8 @@ mod tests {
 
         let listener = UnixListener::from_std(std_listener).expect("from_std failed");
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = listener.registration.lock().expect("lock acquired");
-            panic!("poison registration lock");
+            let _guard = listener.registration.lock();
+            panic!("panic while holding registration lock");
         }));
 
         let mut incoming = listener.incoming();
@@ -578,22 +568,17 @@ mod tests {
         }));
         assert!(
             poll_result.is_ok(),
-            "poll_next should not panic on poisoned registration lock"
+            "poll_next should not panic after a registration-lock panic"
         );
 
         match poll_result.expect("poll result available") {
-            Poll::Ready(Some(Err(err))) => {
-                crate::assert_with_log!(
-                    err.kind() == io::ErrorKind::Other,
-                    "error kind",
-                    io::ErrorKind::Other,
-                    err.kind()
-                );
+            Poll::Pending => {}
+            other @ Poll::Ready(_) => {
+                panic!("expected Poll::Pending after re-registration path, got {other:?}")
             }
-            other => panic!("expected Poll::Ready(Some(Err(_))), got {other:?}"),
         }
 
-        crate::test_complete!("incoming_handles_poisoned_registration_lock");
+        crate::test_complete!("incoming_recovers_after_registration_lock_panic");
     }
 
     #[test]

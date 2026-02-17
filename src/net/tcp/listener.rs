@@ -14,7 +14,7 @@ use std::future::poll_fn;
 use std::io;
 use std::net::{self, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::task::{Context, Poll};
 
 /// A TCP listener.
@@ -97,7 +97,7 @@ impl TcpListener {
     }
 
     fn register_interest(&self, cx: &Context<'_>) -> io::Result<()> {
-        let mut registration = self.registration.lock().expect("lock poisoned");
+        let mut registration = self.registration.lock();
 
         if let Some(existing) = registration.as_mut() {
             // Re-arm reactor interest and conditionally update the waker in a
