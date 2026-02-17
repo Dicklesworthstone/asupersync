@@ -42,7 +42,8 @@ use smallvec::SmallVec;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
+use parking_lot::{Mutex, RwLock, RwLockReadGuard};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use crate::cx::Cx;
@@ -146,15 +147,12 @@ impl<T> WatchInner<T> {
     }
 
     fn current_version(&self) -> u64 {
-        self.value.read().expect("watch lock poisoned").1
+        self.value.read().1
     }
 
     fn wake_all_waiters(&self) {
         let waiters: SmallVec<[WatchWaiter; 4]> = {
-            let Ok(mut w) = self.waiters.lock() else {
-                // Poisoned during unwinding — bail out instead of panicking.
-                return;
-            };
+            let mut w = self.waiters.lock();
             std::mem::take(&mut *w)
         };
         for w in waiters {
@@ -164,7 +162,7 @@ impl<T> WatchInner<T> {
     }
 
     fn register_waker(&self, waiter: WatchWaiter) {
-        let mut waiters = self.waiters.lock().expect("watch lock poisoned");
+        let mut waiters = self.waiters.lock();
         // Stale entries can remain after cancelled/dropped wait futures.
         // They have no owner `Receiver` reference, so only the waiters vec
         // holds their flag (`strong_count == 1`). Prune before inserting.
@@ -185,7 +183,7 @@ impl<T> WatchInner<T> {
     /// Returns `true` if the waiter was found and refreshed, `false` if not found
     /// (caller should fall back to `register_waker` with a new `WatchWaiter`).
     fn refresh_waker(&self, queued: &Arc<AtomicBool>, new_waker: &Waker) -> bool {
-        let mut waiters = self.waiters.lock().expect("watch lock poisoned");
+        let mut waiters = self.waiters.lock();
         waiters.retain(|entry| Arc::strong_count(&entry.queued) > 1);
         if let Some(existing) = waiters
             .iter_mut()
@@ -253,7 +251,7 @@ impl<T> Sender<T> {
         }
 
         {
-            let mut guard = self.inner.value.write().expect("watch lock poisoned");
+            let mut guard = self.inner.value.write();
             guard.0 = value;
             guard.1 = guard.1.wrapping_add(1);
         }
@@ -282,7 +280,7 @@ impl<T> Sender<T> {
         }
 
         {
-            let mut guard = self.inner.value.write().expect("watch lock poisoned");
+            let mut guard = self.inner.value.write();
             f(&mut guard.0);
             guard.1 = guard.1.wrapping_add(1);
         }
@@ -299,7 +297,7 @@ impl<T> Sender<T> {
     #[must_use]
     pub fn borrow(&self) -> Ref<'_, T> {
         Ref {
-            guard: self.inner.value.read().expect("watch lock poisoned"),
+            guard: self.inner.value.read(),
         }
     }
 
@@ -338,9 +336,7 @@ impl<T> Drop for Sender<T> {
         // Wake all waiting receivers so they see Closed.
         // Collect wakers under lock, wake outside.
         let waiters: SmallVec<[WatchWaiter; 4]> = {
-            let Ok(mut w) = self.inner.waiters.lock() else {
-                return;
-            };
+            let mut w = self.inner.waiters.lock();
             std::mem::take(&mut *w)
         };
         for w in waiters {
@@ -394,7 +390,7 @@ impl<T> Receiver<T> {
     #[must_use]
     pub fn borrow(&self) -> Ref<'_, T> {
         Ref {
-            guard: self.inner.value.read().expect("watch lock poisoned"),
+            guard: self.inner.value.read(),
         }
     }
 
@@ -552,11 +548,10 @@ impl<T> Drop for Receiver<T> {
         // Eagerly remove this receiver's waiter entry so dropped receivers do not
         // leave stale wakers behind until a later send/re-registration.
         if let Some(waiter) = self.waiter.take() {
-            if let Ok(mut waiters) = self.inner.waiters.lock() {
-                waiters.retain(|entry| {
-                    !Arc::ptr_eq(&entry.queued, &waiter) && Arc::strong_count(&entry.queued) > 1
-                });
-            }
+            let mut waiters = self.inner.waiters.lock();
+            waiters.retain(|entry| {
+                !Arc::ptr_eq(&entry.queued, &waiter) && Arc::strong_count(&entry.queued) > 1
+            });
         }
     }
 }
@@ -870,7 +865,7 @@ mod tests {
         let (tx, mut rx) = channel(0_u8);
 
         {
-            let mut guard = tx.inner.value.write().expect("watch lock poisoned");
+            let mut guard = tx.inner.value.write();
             guard.1 = u64::MAX - 1;
         }
         rx.seen_version = u64::MAX - 1;
@@ -1359,69 +1354,4 @@ mod tests {
         crate::test_complete!("receiver_drop_decrements_count_atomically");
     }
 
-    #[test]
-    fn send_and_modify_on_poisoned_waiters_mutex_do_not_panic() {
-        init_test("send_and_modify_on_poisoned_waiters_mutex_do_not_panic");
-        let (tx, mut rx) = channel::<i32>(0);
-
-        // Ensure at least one waiter exists so wake_all_waiters takes the lock.
-        let cx = test_cx();
-        let waker = Waker::noop();
-        let mut task_cx = Context::from_waker(waker);
-        {
-            let mut future = rx.changed(&cx);
-            let result = Pin::new(&mut future).poll(&mut task_cx);
-            assert!(result.is_pending());
-        }
-
-        // Poison the waiters mutex.
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = tx.inner.waiters.lock().expect("lock");
-            panic!("intentional poison");
-        }));
-
-        // send() should not panic even if waiters lock is poisoned.
-        let send_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tx.send(1)));
-        crate::assert_with_log!(
-            send_result.is_ok(),
-            "send does not panic on poisoned waiters",
-            true,
-            send_result.is_ok()
-        );
-        let send_outcome = send_result.expect("send should not panic");
-        crate::assert_with_log!(
-            send_outcome.is_ok(),
-            "send still returns Ok",
-            true,
-            send_outcome.is_ok()
-        );
-        let after_send = *tx.borrow();
-        crate::assert_with_log!(after_send == 1, "send updates value", 1, after_send);
-
-        // send_modify() should also not panic.
-        let modify_result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tx.send_modify(|v| *v = 2)));
-        crate::assert_with_log!(
-            modify_result.is_ok(),
-            "send_modify does not panic on poisoned waiters",
-            true,
-            modify_result.is_ok()
-        );
-        let modify_outcome = modify_result.expect("send_modify should not panic");
-        crate::assert_with_log!(
-            modify_outcome.is_ok(),
-            "send_modify still returns Ok",
-            true,
-            modify_outcome.is_ok()
-        );
-        let after_modify = *tx.borrow();
-        crate::assert_with_log!(
-            after_modify == 2,
-            "send_modify updates value",
-            2,
-            after_modify
-        );
-
-        crate::test_complete!("send_and_modify_on_poisoned_waiters_mutex_do_not_panic");
-    }
 }

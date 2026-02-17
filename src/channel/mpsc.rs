@@ -22,18 +22,11 @@ use smallvec::SmallVec;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, Weak};
+use parking_lot::Mutex;
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Waker};
 
 use crate::cx::Cx;
-
-#[inline]
-fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
 
 /// Error returned when sending fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,7 +215,7 @@ impl<T> Sender<T> {
     ///
     /// Returns `Full` when waiting senders exist, to preserve FIFO ordering.
     pub fn try_reserve(&self) -> Result<SendPermit<'_, T>, SendError<()>> {
-        let mut inner = self.shared.inner.lock().expect("channel lock poisoned");
+        let mut inner = self.shared.inner.lock();
 
         if inner.receiver_dropped {
             return Err(SendError::Disconnected(()));
@@ -263,7 +256,6 @@ impl<T> Sender<T> {
         self.shared
             .inner
             .lock()
-            .expect("channel lock poisoned")
             .receiver_dropped
     }
 
@@ -272,7 +264,7 @@ impl<T> Sender<T> {
     /// This does not enqueue a message. It's intended for out-of-band protocols
     /// (like cancellation) that need to interrupt a blocked receiver.
     pub fn wake_receiver(&self) {
-        let mut inner = self.shared.inner.lock().expect("channel lock poisoned");
+        let mut inner = self.shared.inner.lock();
         let waker = inner.recv_waker.take();
         drop(inner);
         if let Some(waker) = waker {
@@ -286,7 +278,6 @@ impl<T> Sender<T> {
         self.shared
             .inner
             .lock()
-            .expect("channel lock poisoned")
             .capacity
     }
 
@@ -301,7 +292,7 @@ impl<T> Sender<T> {
     /// This is used by the `DropOldest` backpressure policy. The evicted
     /// message is returned so callers can trace or log the drop.
     pub fn send_evict_oldest(&self, value: T) -> Result<Option<T>, SendError<T>> {
-        let mut inner = self.shared.inner.lock().expect("channel lock poisoned");
+        let mut inner = self.shared.inner.lock();
 
         if inner.receiver_dropped {
             return Err(SendError::Disconnected(value));
@@ -360,8 +351,7 @@ impl<'a, T> Future for Reserve<'a, T> {
             .sender
             .shared
             .inner
-            .lock()
-            .expect("channel lock poisoned");
+            .lock();
 
         if inner.receiver_dropped {
             return Poll::Ready(Err(SendError::Disconnected(())));
@@ -429,7 +419,7 @@ impl<T> Drop for Reserve<'_, T> {
         // If we have a waiter, we need to remove it from the sender's queue.
         if let Some(id) = self.waiter_id {
             let next_waker = {
-                let mut inner = lock_recover(&self.sender.shared.inner);
+                let mut inner = self.sender.shared.inner.lock();
 
                 // Remove ourselves by id.
                 let is_head = inner.send_wakers.front().is_some_and(|w| w.id == id);
@@ -458,7 +448,7 @@ impl<T> Drop for Reserve<'_, T> {
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
         {
-            let mut inner = self.shared.inner.lock().expect("channel lock poisoned");
+            let mut inner = self.shared.inner.lock();
             inner.sender_count += 1;
         }
         Self {
@@ -470,7 +460,7 @@ impl<T> Clone for Sender<T> {
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         let recv_waker = {
-            let mut inner = lock_recover(&self.shared.inner);
+            let mut inner = self.shared.inner.lock();
             if inner.sender_count == 0 {
                 debug_assert!(false, "sender_count underflow in Sender::drop");
             } else {
@@ -508,7 +498,7 @@ impl<T> WeakSender<T> {
     pub fn upgrade(&self) -> Option<Sender<T>> {
         self.shared.upgrade().and_then(|shared| {
             {
-                let mut guard = shared.inner.lock().expect("channel lock poisoned");
+                let mut guard = shared.inner.lock();
                 if guard.sender_count == 0 {
                     return None;
                 }
@@ -543,8 +533,7 @@ impl<T> SendPermit<'_, T> {
             .sender
             .shared
             .inner
-            .lock()
-            .expect("channel lock poisoned");
+            .lock();
 
         if inner.reserved == 0 {
             debug_assert!(false, "send permit without reservation");
@@ -589,8 +578,7 @@ impl<T> SendPermit<'_, T> {
                 .sender
                 .shared
                 .inner
-                .lock()
-                .expect("channel lock poisoned");
+                .lock();
             if inner.reserved == 0 {
                 debug_assert!(false, "abort permit without reservation");
             } else {
@@ -609,7 +597,7 @@ impl<T> Drop for SendPermit<'_, T> {
     fn drop(&mut self) {
         if !self.sent {
             let next_waker = {
-                let mut inner = lock_recover(&self.sender.shared.inner);
+                let mut inner = self.sender.shared.inner.lock();
                 if inner.reserved == 0 {
                     debug_assert!(false, "dropped permit without reservation");
                 } else {
@@ -647,7 +635,7 @@ impl<T> Receiver<T> {
 
     /// Attempts to receive a value without blocking.
     pub fn try_recv(&self) -> Result<T, RecvError> {
-        let mut inner = self.shared.inner.lock().expect("channel lock poisoned");
+        let mut inner = self.shared.inner.lock();
 
         match inner.queue.pop_front() {
             Some(value) => {
@@ -674,7 +662,6 @@ impl<T> Receiver<T> {
         self.shared
             .inner
             .lock()
-            .expect("channel lock poisoned")
             .is_closed()
     }
 
@@ -685,7 +672,6 @@ impl<T> Receiver<T> {
             .shared
             .inner
             .lock()
-            .expect("channel lock poisoned")
             .queue
             .is_empty()
     }
@@ -696,7 +682,6 @@ impl<T> Receiver<T> {
         self.shared
             .inner
             .lock()
-            .expect("channel lock poisoned")
             .queue
             .len()
     }
@@ -707,7 +692,6 @@ impl<T> Receiver<T> {
         self.shared
             .inner
             .lock()
-            .expect("channel lock poisoned")
             .queue
             .is_empty()
     }
@@ -718,7 +702,6 @@ impl<T> Receiver<T> {
         self.shared
             .inner
             .lock()
-            .expect("channel lock poisoned")
             .capacity
     }
 }
@@ -742,8 +725,7 @@ impl<T> Future for Recv<'_, T> {
             .receiver
             .shared
             .inner
-            .lock()
-            .expect("channel lock poisoned");
+            .lock();
 
         if let Some(value) = inner.queue.pop_front() {
             let next_waker = inner.take_next_sender_waker();
@@ -770,7 +752,7 @@ impl<T> Future for Recv<'_, T> {
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         let wakers: SmallVec<[Waker; 4]> = {
-            let mut inner = lock_recover(&self.shared.inner);
+            let mut inner = self.shared.inner.lock();
             inner.receiver_dropped = true;
             // Drain queued items to prevent memory leaks when senders are
             // long-lived (they hold Arc refs that keep the queue alive).
@@ -1081,13 +1063,6 @@ mod tests {
         Waker::from(std::sync::Arc::new(NoopWaker))
     }
 
-    fn recover_lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-        match mutex.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
-    }
-
     #[test]
     fn reserve_cancelled_returns_error() {
         init_test("reserve_cancelled_returns_error");
@@ -1232,7 +1207,7 @@ mod tests {
         permit.send(5);
 
         let (queue_empty, reserved) = {
-            let inner = tx.shared.inner.lock().expect("channel lock poisoned");
+            let inner = tx.shared.inner.lock();
             let queue_empty = inner.queue.is_empty();
             let reserved = inner.reserved;
             drop(inner);
@@ -1277,7 +1252,7 @@ mod tests {
 
         // Verify capacity invariant: used_slots <= capacity.
         {
-            let inner = tx.shared.inner.lock().expect("lock");
+            let inner = tx.shared.inner.lock();
             let used = inner.used_slots();
             let cap = inner.capacity;
             drop(inner);
@@ -1313,7 +1288,7 @@ mod tests {
 
         // Verify: queue=[20], reserved=1, used=2, capacity=2.
         {
-            let inner = tx.shared.inner.lock().expect("lock");
+            let inner = tx.shared.inner.lock();
             let used = inner.used_slots();
             let cap = inner.capacity;
             let qlen = inner.queue.len();
@@ -1341,218 +1316,13 @@ mod tests {
         );
 
         let qlen = {
-            let inner = tx.shared.inner.lock().expect("lock");
+            let inner = tx.shared.inner.lock();
             let qlen = inner.queue.len();
             drop(inner);
             qlen
         };
         crate::assert_with_log!(qlen == 1, "queue len", 1, qlen);
         crate::test_complete!("send_evict_oldest_no_eviction_with_capacity");
-    }
-
-    #[test]
-    fn sender_drop_on_poisoned_mutex_does_not_panic() {
-        // Regression: Sender::Drop must not double-panic if the channel mutex
-        // is poisoned (e.g., during stack unwinding from another panic).
-        init_test("sender_drop_on_poisoned_mutex_does_not_panic");
-        let (tx, _rx) = channel::<i32>(1);
-
-        // Poison the mutex by panicking while holding it.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = tx.shared.inner.lock().expect("lock");
-            panic!("intentional poison");
-        }));
-        assert!(result.is_err());
-
-        // Sender::Drop must not panic even though the mutex is poisoned.
-        drop(tx);
-        crate::test_complete!("sender_drop_on_poisoned_mutex_does_not_panic");
-    }
-
-    #[test]
-    fn sender_drop_on_poisoned_mutex_still_updates_sender_count() {
-        init_test("sender_drop_on_poisoned_mutex_still_updates_sender_count");
-        let (tx, rx) = channel::<i32>(1);
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = tx.shared.inner.lock().expect("lock");
-            panic!("intentional poison");
-        }));
-        assert!(result.is_err());
-
-        drop(tx);
-
-        let sender_count = {
-            let inner = recover_lock(&rx.shared.inner);
-            inner.sender_count
-        };
-        crate::assert_with_log!(sender_count == 0, "sender count cleared", 0, sender_count);
-        crate::test_complete!("sender_drop_on_poisoned_mutex_still_updates_sender_count");
-    }
-
-    #[test]
-    fn receiver_drop_on_poisoned_mutex_does_not_panic() {
-        // Regression: Receiver::Drop must not double-panic if the channel mutex
-        // is poisoned.
-        init_test("receiver_drop_on_poisoned_mutex_does_not_panic");
-        let (_tx, rx) = channel::<i32>(1);
-
-        // Poison the mutex.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = rx.shared.inner.lock().expect("lock");
-            panic!("intentional poison");
-        }));
-        assert!(result.is_err());
-
-        drop(rx);
-        crate::test_complete!("receiver_drop_on_poisoned_mutex_does_not_panic");
-    }
-
-    #[test]
-    fn receiver_drop_on_poisoned_mutex_still_marks_closed() {
-        init_test("receiver_drop_on_poisoned_mutex_still_marks_closed");
-        let (tx, rx) = channel::<i32>(2);
-        let cx = test_cx();
-        block_on(tx.send(&cx, 1)).expect("send");
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = rx.shared.inner.lock().expect("lock");
-            panic!("intentional poison");
-        }));
-        assert!(result.is_err());
-
-        drop(rx);
-
-        let (receiver_dropped, queue_len) = {
-            let inner = recover_lock(&tx.shared.inner);
-            (inner.receiver_dropped, inner.queue.len())
-        };
-        crate::assert_with_log!(
-            receiver_dropped,
-            "receiver dropped flag set",
-            true,
-            receiver_dropped
-        );
-        crate::assert_with_log!(queue_len == 0, "queue cleared", 0, queue_len);
-        crate::test_complete!("receiver_drop_on_poisoned_mutex_still_marks_closed");
-    }
-
-    #[test]
-    fn reserve_future_drop_on_poisoned_mutex_does_not_panic() {
-        // Regression: Reserve future's Drop must not double-panic if the
-        // channel mutex is poisoned while the future is pending.
-        init_test("reserve_future_drop_on_poisoned_mutex_does_not_panic");
-        let (tx, _rx) = channel::<i32>(1);
-        let cx = test_cx();
-
-        // Fill the channel so reserve will pend and register a waiter.
-        let _permit = block_on(tx.reserve(&cx)).expect("reserve");
-
-        let mut reserve_fut = Box::pin(tx.reserve(&cx));
-        let waker = noop_waker();
-        let mut cx_task = Context::from_waker(&waker);
-        let poll = reserve_fut.as_mut().poll(&mut cx_task);
-        assert!(matches!(poll, Poll::Pending));
-
-        // Poison the mutex.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = tx.shared.inner.lock().expect("lock");
-            panic!("intentional poison");
-        }));
-        assert!(result.is_err());
-
-        // Dropping the pending Reserve future must not panic.
-        drop(reserve_fut);
-        crate::test_complete!("reserve_future_drop_on_poisoned_mutex_does_not_panic");
-    }
-
-    #[test]
-    fn reserve_future_drop_on_poisoned_mutex_still_removes_waiter() {
-        init_test("reserve_future_drop_on_poisoned_mutex_still_removes_waiter");
-        let (tx, _rx) = channel::<i32>(1);
-        let cx = test_cx();
-
-        let permit = block_on(tx.reserve(&cx)).expect("reserve");
-
-        let mut reserve_fut = Box::pin(tx.reserve(&cx));
-        let waker = noop_waker();
-        let mut cx_task = Context::from_waker(&waker);
-        let poll = reserve_fut.as_mut().poll(&mut cx_task);
-        assert!(matches!(poll, Poll::Pending));
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = tx.shared.inner.lock().expect("lock");
-            panic!("intentional poison");
-        }));
-        assert!(result.is_err());
-
-        drop(reserve_fut);
-
-        let queued_waiters = {
-            let inner = recover_lock(&tx.shared.inner);
-            inner.send_wakers.len()
-        };
-        crate::assert_with_log!(
-            queued_waiters == 0,
-            "poisoned reserve drop removes waiter",
-            0,
-            queued_waiters
-        );
-
-        drop(permit);
-        crate::test_complete!("reserve_future_drop_on_poisoned_mutex_still_removes_waiter");
-    }
-
-    #[test]
-    fn send_permit_drop_on_poisoned_mutex_does_not_panic() {
-        // Regression: SendPermit::Drop must not double-panic if the channel
-        // mutex is poisoned while the permit is outstanding.
-        init_test("send_permit_drop_on_poisoned_mutex_does_not_panic");
-        let (tx, _rx) = channel::<i32>(1);
-        let cx = test_cx();
-
-        let permit = block_on(tx.reserve(&cx)).expect("reserve");
-
-        // Poison the mutex.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = tx.shared.inner.lock().expect("lock");
-            panic!("intentional poison");
-        }));
-        assert!(result.is_err());
-
-        // Dropping the permit must not panic.
-        drop(permit);
-        crate::test_complete!("send_permit_drop_on_poisoned_mutex_does_not_panic");
-    }
-
-    #[test]
-    fn send_permit_drop_on_poisoned_mutex_still_releases_capacity() {
-        init_test("send_permit_drop_on_poisoned_mutex_still_releases_capacity");
-        let (tx, _rx) = channel::<i32>(1);
-        let cx = test_cx();
-
-        let permit = block_on(tx.reserve(&cx)).expect("reserve");
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = tx.shared.inner.lock().expect("lock");
-            panic!("intentional poison");
-        }));
-        assert!(result.is_err());
-
-        drop(permit);
-
-        let reserved = {
-            let inner = recover_lock(&tx.shared.inner);
-            inner.reserved
-        };
-        crate::assert_with_log!(
-            reserved == 0,
-            "poisoned permit drop clears reservation",
-            0,
-            reserved
-        );
-
-        crate::test_complete!("send_permit_drop_on_poisoned_mutex_still_releases_capacity");
     }
 
     // --- Audit tests (SapphireHill, 2026-02-15) ---
@@ -1613,7 +1383,7 @@ mod tests {
 
         // Check: reserved=2, queue=0, used=2
         let used = {
-            let inner = tx.shared.inner.lock().expect("lock");
+            let inner = tx.shared.inner.lock();
             inner.used_slots()
         };
         crate::assert_with_log!(used == 2, "used after 2 reserves", 2, used);
@@ -1624,7 +1394,7 @@ mod tests {
 
         // Check: reserved=0, queue=1, used=1
         let (used, reserved) = {
-            let inner = tx.shared.inner.lock().expect("lock");
+            let inner = tx.shared.inner.lock();
             (inner.used_slots(), inner.reserved)
         };
         crate::assert_with_log!(used == 1, "used after send+abort", 1, used);

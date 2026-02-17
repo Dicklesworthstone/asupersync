@@ -22,16 +22,9 @@ use smallvec::SmallVec;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
-
-#[inline]
-fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
 
 /// Error returned when sending fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,7 +157,7 @@ impl<T: Clone> Sender<T> {
         }
 
         {
-            let inner = self.channel.inner.lock().expect("broadcast lock poisoned");
+            let inner = self.channel.inner.lock();
             if inner.receiver_count == 0 {
                 return Err(SendError::Closed(()));
             }
@@ -193,7 +186,7 @@ impl<T: Clone> Sender<T> {
     #[must_use]
     pub fn subscribe(&self) -> Receiver<T> {
         let total_sent = {
-            let mut inner = self.channel.inner.lock().expect("broadcast lock poisoned");
+            let mut inner = self.channel.inner.lock();
             inner.receiver_count += 1;
             inner.total_sent
         };
@@ -210,7 +203,6 @@ impl<T> Clone for Sender<T> {
         self.channel
             .inner
             .lock()
-            .expect("broadcast lock poisoned")
             .sender_count += 1;
         Self {
             channel: Arc::clone(&self.channel),
@@ -222,7 +214,7 @@ impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         let mut wakers_to_wake: SmallVec<[Waker; 4]> = SmallVec::new();
         {
-            let mut inner = lock_recover(&self.channel.inner);
+            let mut inner = self.channel.inner.lock();
             inner.sender_count -= 1;
             if inner.sender_count == 0 {
                 inner.wakers.retain(|waker| {
@@ -257,8 +249,7 @@ impl<T: Clone> SendPermit<'_, T> {
             .sender
             .channel
             .inner
-            .lock()
-            .expect("broadcast lock poisoned");
+            .lock();
 
         // A reservation can outlive the last receiver dropping.
         // In that case, do not enqueue an unobservable message.
@@ -328,7 +319,7 @@ pub struct Recv<'a, T> {
 impl<T> Recv<'_, T> {
     fn clear_waiter_registration(&mut self) {
         if let Some(token) = self.waiter.take() {
-            let mut inner = lock_recover(&self.receiver.channel.inner);
+            let mut inner = self.receiver.channel.inner.lock();
             inner.wakers.remove(token);
         }
     }
@@ -350,8 +341,7 @@ impl<T: Clone> Future for Recv<'_, T> {
             .receiver
             .channel
             .inner
-            .lock()
-            .expect("broadcast lock poisoned");
+            .lock();
 
         // 1. Check for lag
         let earliest = inner.buffer.front().map_or(inner.total_sent, |s| s.index);
@@ -434,7 +424,6 @@ impl<T> Clone for Receiver<T> {
         self.channel
             .inner
             .lock()
-            .expect("broadcast lock poisoned")
             .receiver_count += 1;
         Self {
             channel: Arc::clone(&self.channel),
@@ -445,7 +434,7 @@ impl<T> Clone for Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        let mut inner = lock_recover(&self.channel.inner);
+        let mut inner = self.channel.inner.lock();
         inner.receiver_count -= 1;
     }
 }
@@ -487,13 +476,6 @@ mod tests {
                 Poll::Ready(v) => return v,
                 Poll::Pending => std::thread::yield_now(),
             }
-        }
-    }
-
-    fn recover_lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-        match mutex.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
         }
     }
 
@@ -770,7 +752,7 @@ mod tests {
             true
         );
         let wakers_len = {
-            let inner = tx.channel.inner.lock().expect("broadcast lock poisoned");
+            let inner = tx.channel.inner.lock();
             inner.wakers.len()
         };
         crate::assert_with_log!(wakers_len == 1, "one waiter registered", 1usize, wakers_len);
@@ -785,7 +767,7 @@ mod tests {
             format!("{res:?}")
         );
         let cleared = {
-            let inner = tx.channel.inner.lock().expect("broadcast lock poisoned");
+            let inner = tx.channel.inner.lock();
             inner.wakers.is_empty()
         };
         crate::assert_with_log!(cleared, "waiter cleared", true, cleared);
@@ -823,14 +805,14 @@ mod tests {
             );
 
             let wakers_len = {
-                let inner = tx.channel.inner.lock().expect("broadcast lock poisoned");
+                let inner = tx.channel.inner.lock();
                 inner.wakers.len()
             };
             crate::assert_with_log!(wakers_len == 1, "one waiter registered", 1usize, wakers_len);
         } // drop fut
 
         let cleared = {
-            let inner = tx.channel.inner.lock().expect("broadcast lock poisoned");
+            let inner = tx.channel.inner.lock();
             inner.wakers.is_empty()
         };
         crate::assert_with_log!(cleared, "waiter cleared on drop", true, cleared);
@@ -974,7 +956,7 @@ mod tests {
             true
         );
         let wakers_len = {
-            let inner = tx.channel.inner.lock().expect("broadcast lock poisoned");
+            let inner = tx.channel.inner.lock();
             inner.wakers.len()
         };
         crate::assert_with_log!(wakers_len == 1, "one waiter registered", 1usize, wakers_len);
@@ -1010,7 +992,7 @@ mod tests {
         let delivered = permit.send(42);
         crate::assert_with_log!(delivered == 0, "delivered count", 0usize, delivered);
 
-        let inner = tx.channel.inner.lock().expect("broadcast lock poisoned");
+        let inner = tx.channel.inner.lock();
         crate::assert_with_log!(
             inner.total_sent == 0,
             "total_sent unchanged",
@@ -1036,129 +1018,6 @@ mod tests {
         crate::test_complete!("permit_send_after_last_receiver_drop_is_noop");
     }
 
-    #[test]
-    fn sender_drop_on_poisoned_mutex_does_not_panic() {
-        init_test("sender_drop_on_poisoned_mutex_does_not_panic");
-        let (tx, _rx) = channel::<i32>(4);
-
-        // Poison the mutex by panicking inside a lock scope.
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = tx.channel.inner.lock().expect("lock");
-            panic!("intentional poison");
-        }));
-
-        // Dropping tx should NOT panic (it should bail gracefully).
-        drop(tx);
-        crate::test_complete!("sender_drop_on_poisoned_mutex_does_not_panic");
-    }
-
-    #[test]
-    fn sender_drop_on_poisoned_mutex_still_updates_sender_count() {
-        init_test("sender_drop_on_poisoned_mutex_still_updates_sender_count");
-        let (tx, rx) = channel::<i32>(4);
-
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = tx.channel.inner.lock().expect("lock");
-            panic!("intentional poison");
-        }));
-
-        drop(tx);
-
-        let sender_count = {
-            let inner = recover_lock(&rx.channel.inner);
-            inner.sender_count
-        };
-        crate::assert_with_log!(sender_count == 0, "sender count cleared", 0, sender_count);
-        crate::test_complete!("sender_drop_on_poisoned_mutex_still_updates_sender_count");
-    }
-
-    #[test]
-    fn receiver_drop_on_poisoned_mutex_does_not_panic() {
-        init_test("receiver_drop_on_poisoned_mutex_does_not_panic");
-        let (tx, rx) = channel::<i32>(4);
-
-        // Poison the mutex.
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = tx.channel.inner.lock().expect("lock");
-            panic!("intentional poison");
-        }));
-
-        // Dropping rx should NOT panic.
-        drop(rx);
-        // tx drop also should not panic.
-        drop(tx);
-        crate::test_complete!("receiver_drop_on_poisoned_mutex_does_not_panic");
-    }
-
-    #[test]
-    fn receiver_drop_on_poisoned_mutex_still_updates_receiver_count() {
-        init_test("receiver_drop_on_poisoned_mutex_still_updates_receiver_count");
-        let (tx, rx) = channel::<i32>(4);
-
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = tx.channel.inner.lock().expect("lock");
-            panic!("intentional poison");
-        }));
-
-        drop(rx);
-
-        let receiver_count = {
-            let inner = recover_lock(&tx.channel.inner);
-            inner.receiver_count
-        };
-        crate::assert_with_log!(
-            receiver_count == 0,
-            "receiver count decremented",
-            0,
-            receiver_count
-        );
-        drop(tx);
-        crate::test_complete!("receiver_drop_on_poisoned_mutex_still_updates_receiver_count");
-    }
-
-    #[test]
-    fn recv_drop_on_poisoned_mutex_does_not_panic() {
-        // Regression: clear_waiter_registration used expect() which would
-        // panic-in-Drop if the mutex was poisoned, causing an abort.
-        init_test("recv_drop_on_poisoned_mutex_does_not_panic");
-        let cx = test_cx();
-        let (tx, mut rx) = channel::<i32>(4);
-
-        let wake_state = CountingWaker::new();
-        let waker = Waker::from(Arc::clone(&wake_state));
-        let mut ctx = Context::from_waker(&waker);
-
-        // Create a Recv future and poll it to register a waiter.
-        let mut fut = Box::pin(rx.recv(&cx));
-        assert!(matches!(fut.as_mut().poll(&mut ctx), Poll::Pending));
-
-        // Poison the mutex.
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = tx.channel.inner.lock().expect("lock");
-            panic!("intentional poison");
-        }));
-
-        // Dropping the Recv future (which has a registered waiter) must NOT
-        // panic even though the mutex is poisoned.
-        drop(fut);
-
-        let waiter_count = {
-            let inner = recover_lock(&tx.channel.inner);
-            inner.wakers.len()
-        };
-        crate::assert_with_log!(
-            waiter_count == 0,
-            "poisoned recv drop clears waiter",
-            0,
-            waiter_count
-        );
-
-        // Clean up — these drops should also be graceful.
-        drop(rx);
-        drop(tx);
-        crate::test_complete!("recv_drop_on_poisoned_mutex_does_not_panic");
-    }
-
     // --- Audit tests (SapphireHill, 2026-02-15) ---
 
     #[test]
@@ -1173,7 +1032,7 @@ mod tests {
         }
 
         let (total_sent, buffer_len, first_idx) = {
-            let inner = tx.channel.inner.lock().expect("lock");
+            let inner = tx.channel.inner.lock();
             (
                 inner.total_sent,
                 inner.buffer.len(),
@@ -1251,7 +1110,7 @@ mod tests {
 
         // total_sent and buffer should be untouched.
         let (total_sent, buffer_empty) = {
-            let inner = tx.channel.inner.lock().expect("lock");
+            let inner = tx.channel.inner.lock();
             (inner.total_sent, inner.buffer.is_empty())
         };
         crate::assert_with_log!(total_sent == 0, "total_sent", 0u64, total_sent);
