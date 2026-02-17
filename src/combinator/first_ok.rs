@@ -271,7 +271,7 @@ pub fn first_ok_outcomes<T, E: Clone>(outcomes: Vec<Outcome<T, E>>) -> FirstOkRe
         return FirstOkResult::failure(Vec::new(), 0);
     }
 
-    let mut failures = Vec::new();
+    let mut failures = Vec::with_capacity(total);
 
     for (i, outcome) in outcomes.into_iter().enumerate() {
         match outcome {

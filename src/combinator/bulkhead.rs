@@ -29,7 +29,7 @@
 //! }
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -193,10 +193,11 @@ impl Bulkhead {
     #[must_use]
     pub fn new(policy: BulkheadPolicy) -> Self {
         let available = policy.max_concurrent;
+        let max_queue = policy.max_queue as usize;
         Self {
             policy,
             available_permits: AtomicU32::new(available),
-            queue: RwLock::new(Vec::new()),
+            queue: RwLock::new(Vec::with_capacity(max_queue)),
             next_id: AtomicU64::new(0),
             metrics: RwLock::new(BulkheadMetrics::default()),
             total_wait_time_ms: AtomicU64::new(0),
@@ -703,7 +704,7 @@ impl BulkheadPolicyBuilder {
 
 /// Registry for managing multiple named bulkheads.
 pub struct BulkheadRegistry {
-    bulkheads: RwLock<BTreeMap<String, Arc<Bulkhead>>>,
+    bulkheads: RwLock<HashMap<String, Arc<Bulkhead>>>,
     default_policy: BulkheadPolicy,
 }
 
@@ -712,7 +713,7 @@ impl BulkheadRegistry {
     #[must_use]
     pub fn new(default_policy: BulkheadPolicy) -> Self {
         Self {
-            bulkheads: RwLock::new(BTreeMap::new()),
+            bulkheads: RwLock::new(HashMap::new()),
             default_policy,
         }
     }
@@ -751,7 +752,7 @@ impl BulkheadRegistry {
 
     /// Get metrics for all bulkheads.
     #[must_use]
-    pub fn all_metrics(&self) -> BTreeMap<String, BulkheadMetrics> {
+    pub fn all_metrics(&self) -> HashMap<String, BulkheadMetrics> {
         let bulkheads = self.bulkheads.read().expect("lock poisoned");
         bulkheads
             .iter()

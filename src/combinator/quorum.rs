@@ -278,8 +278,9 @@ pub fn quorum_outcomes<T, E>(required: usize, outcomes: Vec<Outcome<T, E>>) -> Q
         return QuorumResult::new(true, required, Vec::new(), failures);
     }
 
-    let mut successes = Vec::new();
-    let mut failures = Vec::new();
+    let total = outcomes.len();
+    let mut successes = Vec::with_capacity(total);
+    let mut failures = Vec::with_capacity(total);
 
     // Process outcomes
     for (i, outcome) in outcomes.into_iter().enumerate() {

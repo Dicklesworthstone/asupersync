@@ -302,7 +302,8 @@ where
     F: Fn(T, T) -> T,
     T: Clone,
 {
-    let mut successes: Vec<(usize, T)> = Vec::new();
+    let total = outcomes.len();
+    let mut successes: Vec<(usize, T)> = Vec::with_capacity(total);
     let mut first_error: Option<E> = None;
     let mut strongest_cancel: Option<CancelReason> = None;
 
@@ -444,7 +445,7 @@ pub fn map_reduce_to_result<T, E: Clone>(
         }
         AggregateDecision::FirstError(e) => {
             // Find the first error index (any index not in successes)
-            let success_indices: std::collections::BTreeSet<usize> =
+            let success_indices: std::collections::HashSet<usize> =
                 result.successes.iter().map(|(i, _)| *i).collect();
             let first_error_index = (0..result.total_count)
                 .find(|i| !success_indices.contains(i))
