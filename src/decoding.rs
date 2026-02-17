@@ -15,7 +15,7 @@ use crate::raptorq::systematic::{ConstraintMatrix, SystematicParams};
 use crate::security::{AuthenticatedSymbol, SecurityContext};
 use crate::types::symbol_set::{InsertResult, SymbolSet, ThresholdConfig};
 use crate::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 /// Errors produced by the decoding pipeline.
@@ -223,7 +223,7 @@ pub struct DecodingPipeline {
     config: DecodingConfig,
     symbols: SymbolSet,
     blocks: HashMap<u8, BlockDecoder>,
-    completed_blocks: BTreeSet<u8>,
+    completed_blocks: HashSet<u8>,
     object_id: Option<ObjectId>,
     object_size: Option<u64>,
     block_plans: Option<Vec<BlockPlan>>,
@@ -243,7 +243,7 @@ impl DecodingPipeline {
             config,
             symbols: SymbolSet::with_config(threshold),
             blocks: HashMap::new(),
-            completed_blocks: BTreeSet::new(),
+            completed_blocks: HashSet::new(),
             object_id: None,
             object_size: None,
             block_plans: None,
@@ -767,6 +767,26 @@ fn decode_block(
                     sbn: plan.sbn,
                     details: format!(
                         "symbol {esi} has mismatched equation vectors: columns={columns}, coefficients={coefficients}"
+                    ),
+                },
+                RaptorDecodeError::ColumnIndexOutOfRange {
+                    esi,
+                    column,
+                    max_valid,
+                } => DecodingError::InconsistentMetadata {
+                    sbn: plan.sbn,
+                    details: format!(
+                        "symbol {esi} references out-of-range column {column} (valid < {max_valid})"
+                    ),
+                },
+                RaptorDecodeError::CorruptDecodedOutput {
+                    esi,
+                    byte_index,
+                    expected,
+                    actual,
+                } => DecodingError::MatrixInversionFailed {
+                    reason: format!(
+                        "decoded output verification failed at symbol {esi}, byte {byte_index}: expected 0x{expected:02x}, actual 0x{actual:02x}"
                     ),
                 },
             };

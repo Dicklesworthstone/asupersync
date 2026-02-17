@@ -735,6 +735,17 @@ fn seed_sweep_structured_logging() {
                     inactivated: result.stats.inactivated,
                     gauss_ops: result.stats.gauss_ops,
                     pivots: result.stats.pivots_selected,
+                    peel_queue_pushes: result.stats.peel_queue_pushes,
+                    peel_queue_pops: result.stats.peel_queue_pops,
+                    peel_frontier_peak: result.stats.peel_frontier_peak,
+                    dense_core_rows: result.stats.dense_core_rows,
+                    dense_core_cols: result.stats.dense_core_cols,
+                    dense_core_dropped_rows: result.stats.dense_core_dropped_rows,
+                    fallback_reason: result
+                        .stats
+                        .peeling_fallback_reason
+                        .unwrap_or("none")
+                        .to_string(),
                 });
                 eprintln!(
                     "{}",
@@ -777,6 +788,13 @@ fn seed_sweep_structured_logging() {
                     inactivated: 0,
                     gauss_ops: 0,
                     pivots: 0,
+                    peel_queue_pushes: 0,
+                    peel_queue_pops: 0,
+                    peel_frontier_peak: 0,
+                    dense_core_rows: 0,
+                    dense_core_cols: 0,
+                    dense_core_dropped_rows: 0,
+                    fallback_reason: "decode_failed_before_stats".to_string(),
                 });
                 eprintln!(
                     "{} FAIL: {e:?}",
@@ -1508,6 +1526,13 @@ fn unit_log_schema_contract() {
         inactivated: 2,
         gauss_ops: 8,
         pivots: 2,
+        peel_queue_pushes: 12,
+        peel_queue_pops: 10,
+        peel_frontier_peak: 4,
+        dense_core_rows: 5,
+        dense_core_cols: 3,
+        dense_core_dropped_rows: 1,
+        fallback_reason: "peeling_exhausted_to_dense_core".to_string(),
     });
 
     let json = entry.to_json().expect("serialize unit log entry");

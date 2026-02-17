@@ -1053,11 +1053,11 @@ mod pipeline_e2e {
     fn reject_reason_from_failure(reason: &FailureReason) -> RejectReason {
         match reason {
             FailureReason::InsufficientSymbols { .. } => RejectReason::InsufficientRank,
-            FailureReason::SingularMatrix { .. } => RejectReason::InconsistentEquations,
             FailureReason::SymbolSizeMismatch { .. } => RejectReason::SymbolSizeMismatch,
-            FailureReason::SymbolEquationArityMismatch { .. } => {
-                RejectReason::InconsistentEquations
-            }
+            FailureReason::SingularMatrix { .. }
+            | FailureReason::SymbolEquationArityMismatch { .. }
+            | FailureReason::ColumnIndexOutOfRange { .. }
+            | FailureReason::CorruptDecodedOutput { .. } => RejectReason::InconsistentEquations,
         }
     }
 
@@ -1194,7 +1194,9 @@ mod pipeline_e2e {
                     DecodeError::InsufficientSymbols { .. } => {}
                     DecodeError::SingularMatrix { .. }
                     | DecodeError::SymbolSizeMismatch { .. }
-                    | DecodeError::SymbolEquationArityMismatch { .. } => {
+                    | DecodeError::SymbolEquationArityMismatch { .. }
+                    | DecodeError::ColumnIndexOutOfRange { .. }
+                    | DecodeError::CorruptDecodedOutput { .. } => {
                         panic!("unexpected decode error {err:?}");
                     }
                 }
@@ -1478,6 +1480,8 @@ mod differential_harness {
             DecodeError::SingularMatrix { .. } => "singular_matrix",
             DecodeError::SymbolSizeMismatch { .. } => "symbol_size_mismatch",
             DecodeError::SymbolEquationArityMismatch { .. } => "symbol_equation_arity_mismatch",
+            DecodeError::ColumnIndexOutOfRange { .. } => "column_out_of_range",
+            DecodeError::CorruptDecodedOutput { .. } => "corrupt_decoded_output",
         }
     }
 
@@ -1675,6 +1679,13 @@ mod differential_harness {
                     inactivated: 0,
                     gauss_ops: 0,
                     pivots: 0,
+                    peel_queue_pushes: 0,
+                    peel_queue_pops: 0,
+                    peel_frontier_peak: 0,
+                    dense_core_rows: 0,
+                    dense_core_cols: 0,
+                    dense_core_dropped_rows: 0,
+                    fallback_reason: "none".to_string(),
                 },
                 |result| UnitDecodeStats {
                     k: case.k,
@@ -1684,6 +1695,17 @@ mod differential_harness {
                     inactivated: result.stats.inactivated,
                     gauss_ops: result.stats.gauss_ops,
                     pivots: result.stats.pivots_selected,
+                    peel_queue_pushes: result.stats.peel_queue_pushes,
+                    peel_queue_pops: result.stats.peel_queue_pops,
+                    peel_frontier_peak: result.stats.peel_frontier_peak,
+                    dense_core_rows: result.stats.dense_core_rows,
+                    dense_core_cols: result.stats.dense_core_cols,
+                    dense_core_dropped_rows: result.stats.dense_core_dropped_rows,
+                    fallback_reason: result
+                        .stats
+                        .peeling_fallback_reason
+                        .unwrap_or("none")
+                        .to_string(),
                 },
             );
 
@@ -1796,6 +1818,7 @@ mod metamorphic_property {
     const D4_ARTIFACT_PATH: &str = "artifacts/raptorq_d4_decode_failure_policy_v1.json";
     const D4_REPLAY_REF: &str = "replay:rq-d4-decode-failure-policy-v1";
     const D4_REPRO_INSUFFICIENT: &str = "rch exec -- cargo test --test raptorq_conformance insufficient_symbols_returns_error -- --nocapture";
+    const D4_REPRO_COLUMN_RANGE: &str = "rch exec -- cargo test --test raptorq_conformance invalid_column_index_returns_unrecoverable_error -- --nocapture";
     const D4_REPRO_MULTI_SEED: &str =
         "rch exec -- cargo test --test raptorq_conformance multi_seed_erasure_stress -- --nocapture";
 
@@ -2206,6 +2229,13 @@ mod metamorphic_property {
                 inactivated: 0,
                 gauss_ops: 0,
                 pivots: 0,
+                peel_queue_pushes: 0,
+                peel_queue_pops: 0,
+                peel_frontier_peak: 0,
+                dense_core_rows: 0,
+                dense_core_cols: 0,
+                dense_core_dropped_rows: 0,
+                fallback_reason: "insufficient_symbols_precheck".to_string(),
             }),
         );
 
@@ -2216,6 +2246,55 @@ mod metamorphic_property {
             ),
             Ok(_) => panic!(
                 "{context}: decoder unexpectedly succeeded in in-scope insufficient-symbol case"
+            ),
+        }
+    }
+
+    #[test]
+    fn invalid_column_index_returns_unrecoverable_error() {
+        let k = 10;
+        let symbol_size = 32;
+        let seed = 2026u64;
+
+        let source = make_source_data(k, symbol_size, seed);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        let mut received =
+            build_received_symbols(&encoder, &decoder, &source, &[], l as u32 + 2, seed);
+        let bad_esi = received[0].esi;
+        let bad_column = l + 1;
+        received[0].columns[0] = bad_column;
+
+        let context = emit_d4_unit_log(
+            "RQ-D4-COLUMN-RANGE-REJECT",
+            seed,
+            &format!(
+                "k={k},symbol_size={symbol_size},received={},required_l={},bad_esi={bad_esi},bad_column={bad_column}",
+                received.len(),
+                l
+            ),
+            "decode_failure",
+            D4_REPRO_COLUMN_RANGE,
+            None,
+        );
+
+        match decoder.decode(&received) {
+            Err(DecodeError::ColumnIndexOutOfRange {
+                esi,
+                column,
+                max_valid,
+            }) => {
+                assert_eq!(esi, bad_esi, "{context}: wrong ESI witness");
+                assert_eq!(column, bad_column, "{context}: wrong column witness");
+                assert_eq!(max_valid, l, "{context}: wrong upper bound witness");
+            }
+            Err(err) => panic!(
+                "{context}: expected ColumnIndexOutOfRange for malformed equation, got {err:?}"
+            ),
+            Ok(_) => panic!(
+                "{context}: decoder unexpectedly succeeded with out-of-range equation column"
             ),
         }
     }
@@ -2338,6 +2417,13 @@ mod metamorphic_property {
                             inactivated: 0,
                             gauss_ops: 0,
                             pivots: 0,
+                            peel_queue_pushes: 0,
+                            peel_queue_pops: 0,
+                            peel_frontier_peak: 0,
+                            dense_core_rows: 0,
+                            dense_core_cols: 0,
+                            dense_core_dropped_rows: 0,
+                            fallback_reason: "decode_failure".to_string(),
                         }),
                     );
                     panic!("{context}: decode failed for in-scope seed={seed}: {err}");
@@ -2359,6 +2445,13 @@ mod metamorphic_property {
                     inactivated: 0,
                     gauss_ops: 0,
                     pivots: 0,
+                    peel_queue_pushes: 0,
+                    peel_queue_pops: 0,
+                    peel_frontier_peak: 0,
+                    dense_core_rows: 0,
+                    dense_core_cols: 0,
+                    dense_core_dropped_rows: 0,
+                    fallback_reason: "none".to_string(),
                 }),
             );
 
@@ -2763,6 +2856,17 @@ mod stress_soak_e2e {
                             inactivated: result.stats.inactivated,
                             gauss_ops: result.stats.gauss_ops,
                             pivots: result.stats.pivots_selected,
+                            peel_queue_pushes: result.stats.peel_queue_pushes,
+                            peel_queue_pops: result.stats.peel_queue_pops,
+                            peel_frontier_peak: result.stats.peel_frontier_peak,
+                            dense_core_rows: result.stats.dense_core_rows,
+                            dense_core_cols: result.stats.dense_core_cols,
+                            dense_core_dropped_rows: result.stats.dense_core_dropped_rows,
+                            fallback_reason: result
+                                .stats
+                                .peeling_fallback_reason
+                                .unwrap_or("none")
+                                .to_string(),
                         });
                     }
                     Err(err) => {

@@ -13,12 +13,13 @@
 
 use crate::raptorq::gf256::{gf256_addmul_slice, Gf256};
 use crate::raptorq::proof::{
-    DecodeConfig, DecodeProof, EliminationTrace, FailureReason, PeelingTrace, ReceivedSummary,
+    DecodeConfig, DecodeProof, EliminationTrace, FailureReason, InactivationStrategy, PeelingTrace,
+    ReceivedSummary,
 };
 use crate::raptorq::systematic::{ConstraintMatrix, SystematicParams};
 use crate::types::ObjectId;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 
 // ============================================================================
 // Decoder types
@@ -76,6 +77,65 @@ pub enum DecodeError {
         /// Number of coefficients provided.
         coefficients: usize,
     },
+    /// Received symbol references a column outside the decode domain [0, L).
+    ColumnIndexOutOfRange {
+        /// ESI of the malformed symbol.
+        esi: u32,
+        /// Offending column index.
+        column: usize,
+        /// Exclusive upper bound for valid columns.
+        max_valid: usize,
+    },
+    /// Internal corruption guard: reconstructed output does not satisfy an
+    /// input equation and is therefore unsafe to return as success.
+    CorruptDecodedOutput {
+        /// ESI of the mismatched equation row.
+        esi: u32,
+        /// First byte index where mismatch was detected.
+        byte_index: usize,
+        /// Reconstructed byte from decoded intermediate symbols.
+        expected: u8,
+        /// Received RHS byte from the input symbol.
+        actual: u8,
+    },
+}
+
+/// Decode failure classification used to separate retryable failures from
+/// malformed/corruption failures at the API boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodeFailureClass {
+    /// Retry may succeed with additional symbols/redundancy.
+    Recoverable,
+    /// Input is malformed or decode invariants were violated.
+    Unrecoverable,
+}
+
+impl DecodeError {
+    /// Classify this decode failure as recoverable or unrecoverable.
+    #[must_use]
+    pub const fn failure_class(&self) -> DecodeFailureClass {
+        match self {
+            Self::InsufficientSymbols { .. } | Self::SingularMatrix { .. } => {
+                DecodeFailureClass::Recoverable
+            }
+            Self::SymbolSizeMismatch { .. }
+            | Self::SymbolEquationArityMismatch { .. }
+            | Self::ColumnIndexOutOfRange { .. }
+            | Self::CorruptDecodedOutput { .. } => DecodeFailureClass::Unrecoverable,
+        }
+    }
+
+    /// True when this failure can be retried by supplying additional symbols.
+    #[must_use]
+    pub const fn is_recoverable(&self) -> bool {
+        matches!(self.failure_class(), DecodeFailureClass::Recoverable)
+    }
+
+    /// True when this failure indicates malformed input or corruption.
+    #[must_use]
+    pub const fn is_unrecoverable(&self) -> bool {
+        matches!(self.failure_class(), DecodeFailureClass::Unrecoverable)
+    }
 }
 
 /// Decode statistics for observability.
@@ -89,6 +149,29 @@ pub struct DecodeStats {
     pub gauss_ops: usize,
     /// Total pivot selections made.
     pub pivots_selected: usize,
+    /// True when the decoder entered hard-regime inactivation mode.
+    ///
+    /// Hard regime is a deterministic fallback for dense/near-square decode
+    /// systems where naive pivoting is more likely to encounter fragile paths.
+    pub hard_regime_activated: bool,
+    /// Number of pivots selected by the hard-regime Markowitz-style strategy.
+    pub markowitz_pivots: usize,
+    /// Number of times baseline elimination deterministically retried in hard regime.
+    pub hard_regime_fallbacks: usize,
+    /// Number of equation indices pushed into the deterministic peel queue.
+    pub peel_queue_pushes: usize,
+    /// Number of equation indices popped from the deterministic peel queue.
+    pub peel_queue_pops: usize,
+    /// Maximum queue depth observed during peeling.
+    pub peel_frontier_peak: usize,
+    /// Number of rows in the extracted dense core presented to elimination.
+    pub dense_core_rows: usize,
+    /// Number of columns in the extracted dense core presented to elimination.
+    pub dense_core_cols: usize,
+    /// Number of zero-information rows dropped while extracting the dense core.
+    pub dense_core_dropped_rows: usize,
+    /// Deterministic reason we fell back from peeling into dense elimination.
+    pub peeling_fallback_reason: Option<&'static str>,
 }
 
 /// Result of successful decoding.
@@ -218,6 +301,51 @@ fn first_inconsistent_dense_row(
     })
 }
 
+#[inline]
+fn active_degree_one_col(state: &DecoderState, eq: &Equation) -> Option<usize> {
+    if eq.used || eq.degree() != 1 {
+        return None;
+    }
+    let col = eq.terms[0].0;
+    if state.active_cols.contains(&col) && state.solved[col].is_none() {
+        Some(col)
+    } else {
+        None
+    }
+}
+
+fn build_dense_core_rows(
+    state: &DecoderState,
+    unused_eqs: &[usize],
+    unsolved: &[usize],
+) -> Result<(Vec<usize>, usize), DecodeError> {
+    let mut unsolved_mask = vec![false; state.params.l];
+    for &col in unsolved {
+        unsolved_mask[col] = true;
+    }
+
+    let mut dense_rows = Vec::with_capacity(unused_eqs.len());
+    let mut dropped_zero_rows = 0usize;
+
+    for &eq_idx in unused_eqs {
+        let has_unsolved_term = state.equations[eq_idx]
+            .terms
+            .iter()
+            .any(|(col, coef)| unsolved_mask[*col] && !coef.is_zero());
+        if has_unsolved_term {
+            dense_rows.push(eq_idx);
+            continue;
+        }
+
+        if state.rhs[eq_idx].iter().any(|&byte| byte != 0) {
+            return Err(DecodeError::SingularMatrix { row: eq_idx });
+        }
+        dropped_zero_rows += 1;
+    }
+
+    Ok((dense_rows, dropped_zero_rows))
+}
+
 fn failure_reason_with_trace(err: &DecodeError, elimination: &EliminationTrace) -> FailureReason {
     match err {
         DecodeError::SingularMatrix { row } => FailureReason::SingularMatrix {
@@ -226,6 +354,73 @@ fn failure_reason_with_trace(err: &DecodeError, elimination: &EliminationTrace) 
         },
         _ => FailureReason::from(err),
     }
+}
+
+const HARD_REGIME_MIN_COLS: usize = 8;
+const HARD_REGIME_DENSITY_PERCENT: usize = 35;
+const HARD_REGIME_NEAR_SQUARE_EXTRA_ROWS: usize = 2;
+
+fn matrix_nonzero_count(a: &[Gf256]) -> usize {
+    a.iter().filter(|coef| !coef.is_zero()).count()
+}
+
+fn row_nonzero_count(a: &[Gf256], n_cols: usize, row: usize) -> usize {
+    let row_off = row * n_cols;
+    a[row_off..row_off + n_cols]
+        .iter()
+        .filter(|coef| !coef.is_zero())
+        .count()
+}
+
+fn should_activate_hard_regime(n_rows: usize, n_cols: usize, a: &[Gf256]) -> bool {
+    if n_cols < HARD_REGIME_MIN_COLS {
+        return false;
+    }
+
+    let total_cells = n_rows.saturating_mul(n_cols);
+    if total_cells == 0 {
+        return false;
+    }
+
+    let nonzeros = matrix_nonzero_count(a);
+    let dense =
+        nonzeros.saturating_mul(100) >= total_cells.saturating_mul(HARD_REGIME_DENSITY_PERCENT);
+    let near_square = n_rows <= n_cols.saturating_add(HARD_REGIME_NEAR_SQUARE_EXTRA_ROWS);
+
+    dense || near_square
+}
+
+fn select_pivot_row(
+    a: &[Gf256],
+    n_rows: usize,
+    n_cols: usize,
+    col: usize,
+    row_used: &[bool],
+    hard_regime: bool,
+) -> Option<usize> {
+    if !hard_regime {
+        return (0..n_rows).find(|&row| !row_used[row] && !a[row * n_cols + col].is_zero());
+    }
+
+    // Deterministic Markowitz-style selector:
+    // prefer sparser rows; break ties by lowest row index.
+    let mut best: Option<(usize, usize)> = None;
+    for row in 0..n_rows {
+        if row_used[row] || a[row * n_cols + col].is_zero() {
+            continue;
+        }
+        let nnz = row_nonzero_count(a, n_cols, row);
+        match best {
+            None => best = Some((row, nnz)),
+            Some((_best_row, best_nnz)) if nnz < best_nnz => best = Some((row, nnz)),
+            Some((best_row, best_nnz)) if nnz == best_nnz && row < best_row => {
+                best = Some((row, nnz));
+            }
+            _ => {}
+        }
+    }
+
+    best.map(|(row, _)| row)
 }
 
 // ============================================================================
@@ -281,6 +476,49 @@ impl InactivationDecoder {
                     coefficients: sym.coefficients.len(),
                 });
             }
+
+            for &column in &sym.columns {
+                if column >= l {
+                    return Err(DecodeError::ColumnIndexOutOfRange {
+                        esi: sym.esi,
+                        column,
+                        max_valid: l,
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn verify_decoded_output(
+        &self,
+        symbols: &[ReceivedSymbol],
+        intermediate: &[Vec<u8>],
+    ) -> Result<(), DecodeError> {
+        let symbol_size = self.params.symbol_size;
+
+        for sym in symbols {
+            let mut reconstructed = vec![0u8; symbol_size];
+            for (&column, &coefficient) in sym.columns.iter().zip(sym.coefficients.iter()) {
+                if coefficient.is_zero() {
+                    continue;
+                }
+                gf256_addmul_slice(&mut reconstructed, &intermediate[column], coefficient);
+            }
+            if reconstructed != sym.data {
+                let byte_index = reconstructed
+                    .iter()
+                    .zip(sym.data.iter())
+                    .position(|(expected, actual)| expected != actual)
+                    .unwrap_or(0);
+                return Err(DecodeError::CorruptDecodedOutput {
+                    esi: sym.esi,
+                    byte_index,
+                    expected: reconstructed[byte_index],
+                    actual: sym.data[byte_index],
+                });
+            }
         }
 
         Ok(())
@@ -311,6 +549,7 @@ impl InactivationDecoder {
             .into_iter()
             .map(|opt| opt.unwrap_or_else(|| vec![0u8; symbol_size]))
             .collect();
+        self.verify_decoded_output(symbols, &intermediate)?;
 
         let source: Vec<Vec<u8>> = intermediate[..k].to_vec();
 
@@ -385,6 +624,10 @@ impl InactivationDecoder {
             .into_iter()
             .map(|opt| opt.unwrap_or_else(|| vec![0u8; symbol_size]))
             .collect();
+        if let Err(err) = self.verify_decoded_output(symbols, &intermediate) {
+            proof_builder.set_failure(FailureReason::from(&err));
+            return Err((err, proof_builder.build()));
+        }
 
         let source: Vec<Vec<u8>> = intermediate[..k].to_vec();
 
@@ -487,85 +730,43 @@ impl InactivationDecoder {
     /// Find degree-1 equations and solve them, propagating the solution
     /// to other equations.
     fn peel(state: &mut DecoderState) {
-        loop {
-            // Find an unused degree-1 equation with an active column
-            let deg1_idx = state.equations.iter().enumerate().find_map(|(idx, eq)| {
-                if eq.used || eq.degree() != 1 {
-                    return None;
-                }
-                let col = eq.terms[0].0;
-                if state.active_cols.contains(&col) && state.solved[col].is_none() {
-                    Some(idx)
-                } else {
-                    None
-                }
-            });
-
-            let Some(eq_idx) = deg1_idx else {
-                break;
-            };
-
-            // Solve this equation
-            let (col, coef) = state.equations[eq_idx].terms[0];
-            state.equations[eq_idx].used = true;
-
-            // Compute the solution: intermediate[col] = rhs[eq_idx] / coef
-            let mut solution = std::mem::take(&mut state.rhs[eq_idx]);
-            if coef != Gf256::ONE {
-                let inv = coef.inv();
-                crate::raptorq::gf256::gf256_mul_slice(&mut solution, inv);
-            }
-
-            state.active_cols.remove(&col);
-            state.stats.peeled += 1;
-
-            // Propagate to other equations: subtract col's contribution
-            for (i, eq) in state.equations.iter_mut().enumerate() {
-                if eq.used {
-                    continue;
-                }
-                let eq_coef = eq.coef(col);
-                if eq_coef.is_zero() {
-                    continue;
-                }
-                // rhs[i] -= eq_coef * solution
-                gf256_addmul_slice(&mut state.rhs[i], &solution, eq_coef);
-                // Remove the term from the equation.
-                // Binary search is efficient since terms are sorted by column index.
-                if let Ok(pos) = eq.terms.binary_search_by_key(&col, |(c, _)| *c) {
-                    eq.terms.remove(pos);
-                }
-            }
-
-            // Move solution instead of cloning (avoids allocation)
-            state.solved[col] = Some(solution);
-        }
+        Self::peel_impl(state, |_| {});
     }
 
     /// Phase 1: Peeling with proof trace capture.
     ///
     /// Like `peel`, but also records solved symbols to the proof trace.
     fn peel_with_proof(state: &mut DecoderState, trace: &mut PeelingTrace) {
-        loop {
-            // Find an unused degree-1 equation with an active column
-            let deg1_idx = state.equations.iter().enumerate().find_map(|(idx, eq)| {
-                if eq.used || eq.degree() != 1 {
-                    return None;
-                }
-                let col = eq.terms[0].0;
-                if state.active_cols.contains(&col) && state.solved[col].is_none() {
-                    Some(idx)
-                } else {
-                    None
-                }
-            });
+        Self::peel_impl(state, |col| {
+            trace.record_solved(col);
+        });
+    }
 
-            let Some(eq_idx) = deg1_idx else {
-                break;
+    fn peel_impl<F>(state: &mut DecoderState, mut on_solved: F)
+    where
+        F: FnMut(usize),
+    {
+        let mut queue = VecDeque::new();
+        let mut queued = vec![false; state.equations.len()];
+        for (idx, eq) in state.equations.iter().enumerate() {
+            if active_degree_one_col(state, eq).is_some() {
+                queue.push_back(idx);
+                queued[idx] = true;
+                state.stats.peel_queue_pushes += 1;
+            }
+        }
+        state.stats.peel_frontier_peak = state.stats.peel_frontier_peak.max(queue.len());
+
+        while let Some(eq_idx) = queue.pop_front() {
+            state.stats.peel_queue_pops += 1;
+            queued[eq_idx] = false;
+
+            let Some(col) = active_degree_one_col(state, &state.equations[eq_idx]) else {
+                continue;
             };
 
             // Solve this equation
-            let (col, coef) = state.equations[eq_idx].terms[0];
+            let (_col, coef) = state.equations[eq_idx].terms[0];
             state.equations[eq_idx].used = true;
 
             // Compute the solution: intermediate[col] = rhs[eq_idx] / coef
@@ -577,11 +778,11 @@ impl InactivationDecoder {
 
             state.active_cols.remove(&col);
             state.stats.peeled += 1;
-
-            // Record in proof trace
-            trace.record_solved(col);
+            on_solved(col);
 
             // Propagate to other equations: subtract col's contribution
+            let active_cols = &state.active_cols;
+            let solved = &state.solved;
             for (i, eq) in state.equations.iter_mut().enumerate() {
                 if eq.used {
                     continue;
@@ -597,7 +798,18 @@ impl InactivationDecoder {
                 if let Ok(pos) = eq.terms.binary_search_by_key(&col, |(c, _)| *c) {
                     eq.terms.remove(pos);
                 }
+
+                if !queued[i] && !eq.used && eq.degree() == 1 {
+                    let next_col = eq.terms[0].0;
+                    if active_cols.contains(&next_col) && solved[next_col].is_none() {
+                        queue.push_back(i);
+                        queued[i] = true;
+                        state.stats.peel_queue_pushes += 1;
+                    }
+                }
             }
+
+            state.stats.peel_frontier_peak = state.stats.peel_frontier_peak.max(queue.len());
 
             // Move solution instead of cloning (avoids allocation)
             state.solved[col] = Some(solution);
@@ -605,6 +817,7 @@ impl InactivationDecoder {
     }
 
     /// Phase 2: Inactivation + Gaussian elimination.
+    #[allow(clippy::too_many_lines)]
     fn inactivate_and_solve(&self, state: &mut DecoderState) -> Result<(), DecodeError> {
         let symbol_size = self.params.symbol_size;
 
@@ -619,6 +832,7 @@ impl InactivationDecoder {
         if unsolved.is_empty() {
             return Ok(());
         }
+        state.stats.peeling_fallback_reason = Some("peeling_exhausted_to_dense_core");
 
         // Collect unused equations
         let unused_eqs: Vec<usize> = state
@@ -627,6 +841,8 @@ impl InactivationDecoder {
             .enumerate()
             .filter_map(|(i, eq)| if eq.used { None } else { Some(i) })
             .collect();
+        let (dense_rows, dropped_zero_rows) = build_dense_core_rows(state, &unused_eqs, &unsolved)?;
+        state.stats.dense_core_dropped_rows += dropped_zero_rows;
 
         // Mark all remaining unsolved columns as inactive
         for &col in &unsolved {
@@ -637,8 +853,10 @@ impl InactivationDecoder {
 
         // Build dense submatrix for Gaussian elimination
         // Rows = unused equations, Columns = unsolved columns
-        let n_rows = unused_eqs.len();
+        let n_rows = dense_rows.len();
         let n_cols = unsolved.len();
+        state.stats.dense_core_rows = n_rows;
+        state.stats.dense_core_cols = n_cols;
 
         if n_rows < n_cols {
             return Err(DecodeError::InsufficientSymbols {
@@ -658,7 +876,7 @@ impl InactivationDecoder {
         let mut a = vec![Gf256::ZERO; n_rows * n_cols];
         let mut b: Vec<Vec<u8>> = Vec::with_capacity(n_rows);
 
-        for (row, &eq_idx) in unused_eqs.iter().enumerate() {
+        for (row, &eq_idx) in dense_rows.iter().enumerate() {
             let row_off = row * n_cols;
             for &(col, coef) in &state.equations[eq_idx].terms {
                 if let Some(&dense_col) = col_to_dense.get(&col) {
@@ -668,59 +886,95 @@ impl InactivationDecoder {
             b.push(std::mem::take(&mut state.rhs[eq_idx]));
         }
 
-        // Gaussian elimination with partial pivoting.
-        // Pre-allocate a single pivot buffer to avoid per-column clones.
+        let base_a = a;
+        let base_b = b;
+        let mut hard_regime = should_activate_hard_regime(n_rows, n_cols, &base_a);
+        if hard_regime {
+            state.stats.hard_regime_activated = true;
+        }
+
         let mut pivot_row = vec![usize::MAX; n_cols];
-        let mut row_used = vec![false; n_rows];
-        let mut pivot_buf = vec![Gf256::ZERO; n_cols];
-        let mut pivot_rhs = vec![0u8; symbol_size];
+        let mut b = loop {
+            let mut a = base_a.clone();
+            let mut b = base_b.clone();
 
-        for col in 0..n_cols {
-            // Find pivot: first nonzero in column `col` among unassigned rows
-            let pivot = (0..n_rows).find(|&row| !row_used[row] && !a[row * n_cols + col].is_zero());
+            // Gaussian elimination with partial pivoting.
+            // Pre-allocate a single pivot buffer to avoid per-column clones.
+            let mut row_used = vec![false; n_rows];
+            let mut pivot_buf = vec![Gf256::ZERO; n_cols];
+            let mut pivot_rhs = vec![0u8; symbol_size];
+            let mut gauss_ops = 0usize;
+            let mut pivots_selected = 0usize;
+            let mut markowitz_pivots = 0usize;
+            let mut elimination_error = None;
 
-            let Some(prow) = pivot else {
-                return Err(singular_matrix_error(&unsolved, col));
-            };
+            for col in 0..n_cols {
+                let pivot = select_pivot_row(&a, n_rows, n_cols, col, &row_used, hard_regime);
+                let Some(prow) = pivot else {
+                    elimination_error = Some(singular_matrix_error(&unsolved, col));
+                    break;
+                };
 
-            pivot_row[col] = prow;
-            row_used[prow] = true;
-            state.stats.pivots_selected += 1;
+                pivot_row[col] = prow;
+                row_used[prow] = true;
+                pivots_selected += 1;
+                if hard_regime {
+                    markowitz_pivots += 1;
+                }
 
-            // Scale pivot row so a[prow][col] = 1
-            let prow_off = prow * n_cols;
-            let pivot_coef = a[prow_off + col];
-            let inv = pivot_coef.inv();
-            for value in &mut a[prow_off..prow_off + n_cols] {
-                *value *= inv;
+                // Scale pivot row so a[prow][col] = 1
+                let prow_off = prow * n_cols;
+                let pivot_coef = a[prow_off + col];
+                let inv = pivot_coef.inv();
+                for value in &mut a[prow_off..prow_off + n_cols] {
+                    *value *= inv;
+                }
+                crate::raptorq::gf256::gf256_mul_slice(&mut b[prow], inv);
+
+                // Copy pivot row into reusable buffers (no heap allocation)
+                pivot_buf[..n_cols].copy_from_slice(&a[prow_off..prow_off + n_cols]);
+                pivot_rhs[..symbol_size].copy_from_slice(&b[prow]);
+
+                // Eliminate column in all other rows.
+                for (row, rhs) in b.iter_mut().enumerate().take(n_rows) {
+                    if row == prow {
+                        continue;
+                    }
+                    let row_off = row * n_cols;
+                    let factor = a[row_off + col];
+                    if factor.is_zero() {
+                        continue;
+                    }
+                    for c in 0..n_cols {
+                        a[row_off + c] += factor * pivot_buf[c];
+                    }
+                    gf256_addmul_slice(rhs, &pivot_rhs[..symbol_size], factor);
+                    gauss_ops += 1;
+                }
             }
-            crate::raptorq::gf256::gf256_mul_slice(&mut b[prow], inv);
 
-            // Copy pivot row into reusable buffers (no heap allocation)
-            pivot_buf[..n_cols].copy_from_slice(&a[prow_off..prow_off + n_cols]);
-            pivot_rhs[..symbol_size].copy_from_slice(&b[prow]);
+            if elimination_error.is_none() {
+                if let Some(row) = first_inconsistent_dense_row(&a, n_rows, n_cols, &b) {
+                    elimination_error = Some(inconsistent_matrix_error(&dense_rows, row));
+                }
+            }
 
-            // Eliminate column in all other rows.
-            for (row, rhs) in b.iter_mut().enumerate().take(n_rows) {
-                if row == prow {
+            // Record work performed in this attempt, even if we fallback or fail.
+            state.stats.pivots_selected += pivots_selected;
+            state.stats.markowitz_pivots += markowitz_pivots;
+            state.stats.gauss_ops += gauss_ops;
+
+            if let Some(err) = elimination_error {
+                if !hard_regime {
+                    hard_regime = true;
+                    state.stats.hard_regime_activated = true;
+                    state.stats.hard_regime_fallbacks += 1;
                     continue;
                 }
-                let row_off = row * n_cols;
-                let factor = a[row_off + col];
-                if factor.is_zero() {
-                    continue;
-                }
-                for c in 0..n_cols {
-                    a[row_off + c] += factor * pivot_buf[c];
-                }
-                gf256_addmul_slice(rhs, &pivot_rhs[..symbol_size], factor);
-                state.stats.gauss_ops += 1;
+                return Err(err);
             }
-        }
-
-        if let Some(row) = first_inconsistent_dense_row(&a, n_rows, n_cols, &b) {
-            return Err(inconsistent_matrix_error(&unused_eqs, row));
-        }
+            break b;
+        };
 
         // Extract solutions: move RHS vectors instead of cloning
         for (dense_col, &col) in unsolved.iter().enumerate() {
@@ -739,6 +993,7 @@ impl InactivationDecoder {
     ///
     /// Like `inactivate_and_solve`, but also records inactivations, pivots,
     /// and row operations to the proof trace.
+    #[allow(clippy::too_many_lines)]
     fn inactivate_and_solve_with_proof(
         &self,
         state: &mut DecoderState,
@@ -765,6 +1020,8 @@ impl InactivationDecoder {
             .enumerate()
             .filter_map(|(i, eq)| if eq.used { None } else { Some(i) })
             .collect();
+        let (dense_rows, dropped_zero_rows) = build_dense_core_rows(state, &unused_eqs, &unsolved)?;
+        state.stats.dense_core_dropped_rows += dropped_zero_rows;
 
         // Mark all remaining unsolved columns as inactive
         for &col in &unsolved {
@@ -777,8 +1034,10 @@ impl InactivationDecoder {
 
         // Build dense submatrix for Gaussian elimination
         // Rows = unused equations, Columns = unsolved columns
-        let n_rows = unused_eqs.len();
+        let n_rows = dense_rows.len();
         let n_cols = unsolved.len();
+        state.stats.dense_core_rows = n_rows;
+        state.stats.dense_core_cols = n_cols;
 
         if n_rows < n_cols {
             return Err(DecodeError::InsufficientSymbols {
@@ -797,7 +1056,7 @@ impl InactivationDecoder {
         let mut a = vec![Gf256::ZERO; n_rows * n_cols];
         let mut b: Vec<Vec<u8>> = Vec::with_capacity(n_rows);
 
-        for (row, &eq_idx) in unused_eqs.iter().enumerate() {
+        for (row, &eq_idx) in dense_rows.iter().enumerate() {
             let row_off = row * n_cols;
             for &(col, coef) in &state.equations[eq_idx].terms {
                 if let Some(&dense_col) = col_to_dense.get(&col) {
@@ -807,62 +1066,112 @@ impl InactivationDecoder {
             b.push(std::mem::take(&mut state.rhs[eq_idx]));
         }
 
-        // Gaussian elimination with partial pivoting.
+        let base_a = a;
+        let base_b = b;
+
+        trace.set_strategy(InactivationStrategy::AllAtOnce);
+        let mut hard_regime = should_activate_hard_regime(n_rows, n_cols, &base_a);
+        if hard_regime {
+            state.stats.hard_regime_activated = true;
+            trace.record_strategy_transition(
+                InactivationStrategy::AllAtOnce,
+                InactivationStrategy::HighSupportFirst,
+                "dense_or_near_square",
+            );
+        }
+
         let mut pivot_row = vec![usize::MAX; n_cols];
-        let mut row_used = vec![false; n_rows];
-        let mut pivot_buf = vec![Gf256::ZERO; n_cols];
-        let mut pivot_rhs = vec![0u8; symbol_size];
+        let mut b = loop {
+            let mut a = base_a.clone();
+            let mut b = base_b.clone();
+            let mut row_used = vec![false; n_rows];
+            let mut pivot_buf = vec![Gf256::ZERO; n_cols];
+            let mut pivot_rhs = vec![0u8; symbol_size];
+            let mut gauss_ops = 0usize;
+            let mut pivots_selected = 0usize;
+            let mut markowitz_pivots = 0usize;
+            let mut elimination_error = None;
 
-        for col in 0..n_cols {
-            // Find pivot: first nonzero in column `col` among unassigned rows
-            let pivot = (0..n_rows).find(|&row| !row_used[row] && !a[row * n_cols + col].is_zero());
+            for col in 0..n_cols {
+                let pivot = select_pivot_row(&a, n_rows, n_cols, col, &row_used, hard_regime);
+                let Some(prow) = pivot else {
+                    elimination_error = Some(singular_matrix_error(&unsolved, col));
+                    break;
+                };
 
-            let Some(prow) = pivot else {
-                return Err(singular_matrix_error(&unsolved, col));
-            };
+                pivot_row[col] = prow;
+                row_used[prow] = true;
+                pivots_selected += 1;
+                if hard_regime {
+                    markowitz_pivots += 1;
+                }
+                // Record pivot in proof trace (use original column index)
+                trace.record_pivot(unsolved[col], prow);
 
-            pivot_row[col] = prow;
-            row_used[prow] = true;
-            state.stats.pivots_selected += 1;
-            // Record pivot in proof trace (use original column index)
-            trace.record_pivot(unsolved[col], prow);
+                // Scale pivot row so a[prow][col] = 1
+                let prow_off = prow * n_cols;
+                let pivot_coef = a[prow_off + col];
+                let inv = pivot_coef.inv();
+                for value in &mut a[prow_off..prow_off + n_cols] {
+                    *value *= inv;
+                }
+                crate::raptorq::gf256::gf256_mul_slice(&mut b[prow], inv);
 
-            // Scale pivot row so a[prow][col] = 1
-            let prow_off = prow * n_cols;
-            let pivot_coef = a[prow_off + col];
-            let inv = pivot_coef.inv();
-            for value in &mut a[prow_off..prow_off + n_cols] {
-                *value *= inv;
+                // Copy pivot row into reusable buffers
+                pivot_buf[..n_cols].copy_from_slice(&a[prow_off..prow_off + n_cols]);
+                pivot_rhs[..symbol_size].copy_from_slice(&b[prow]);
+
+                // Eliminate column in all other rows.
+                for (row, rhs) in b.iter_mut().enumerate().take(n_rows) {
+                    if row == prow {
+                        continue;
+                    }
+                    let row_off = row * n_cols;
+                    let factor = a[row_off + col];
+                    if factor.is_zero() {
+                        continue;
+                    }
+                    for c in 0..n_cols {
+                        a[row_off + c] += factor * pivot_buf[c];
+                    }
+                    gf256_addmul_slice(rhs, &pivot_rhs[..symbol_size], factor);
+                    gauss_ops += 1;
+                    // Record row operation in proof trace
+                    trace.record_row_op();
+                }
             }
-            crate::raptorq::gf256::gf256_mul_slice(&mut b[prow], inv);
 
-            // Copy pivot row into reusable buffers
-            pivot_buf[..n_cols].copy_from_slice(&a[prow_off..prow_off + n_cols]);
-            pivot_rhs[..symbol_size].copy_from_slice(&b[prow]);
+            if elimination_error.is_none() {
+                if let Some(row) = first_inconsistent_dense_row(&a, n_rows, n_cols, &b) {
+                    elimination_error = Some(inconsistent_matrix_error(&dense_rows, row));
+                }
+            }
 
-            // Eliminate column in all other rows.
-            for (row, rhs) in b.iter_mut().enumerate().take(n_rows) {
-                if row == prow {
+            // Record work performed in this attempt, even if we fallback or fail.
+            state.stats.pivots_selected += pivots_selected;
+            state.stats.markowitz_pivots += markowitz_pivots;
+            state.stats.gauss_ops += gauss_ops;
+
+            if let Some(err) = elimination_error {
+                if !hard_regime {
+                    hard_regime = true;
+                    state.stats.hard_regime_activated = true;
+                    state.stats.hard_regime_fallbacks += 1;
+                    trace.record_strategy_transition(
+                        InactivationStrategy::AllAtOnce,
+                        InactivationStrategy::HighSupportFirst,
+                        "fallback_after_baseline_failure",
+                    );
+                    trace.pivots = 0;
+                    trace.pivot_events.clear();
+                    trace.row_ops = 0;
+                    trace.truncated = false;
                     continue;
                 }
-                let row_off = row * n_cols;
-                let factor = a[row_off + col];
-                if factor.is_zero() {
-                    continue;
-                }
-                for c in 0..n_cols {
-                    a[row_off + c] += factor * pivot_buf[c];
-                }
-                gf256_addmul_slice(rhs, &pivot_rhs[..symbol_size], factor);
-                state.stats.gauss_ops += 1;
-                // Record row operation in proof trace
-                trace.record_row_op();
+                return Err(err);
             }
-        }
-
-        if let Some(row) = first_inconsistent_dense_row(&a, n_rows, n_cols, &b) {
-            return Err(inconsistent_matrix_error(&unused_eqs, row));
-        }
+            break b;
+        };
 
         // Extract solutions: move RHS vectors instead of cloning
         for (dense_col, &col) in unsolved.iter().enumerate() {
@@ -1245,6 +1554,88 @@ mod tests {
     }
 
     #[test]
+    fn decode_column_index_out_of_range_fails_unrecoverably() {
+        let k = 8;
+        let symbol_size = 32;
+        let seed = 44u64;
+
+        let source = make_source_data(k, symbol_size);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        let mut received = decoder.constraint_symbols();
+        received.extend(make_received_source(&decoder, &source));
+        for esi in (k as u32)..(l as u32) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        let esi = received[0].esi;
+        let invalid_column = l;
+        received[0].columns[0] = invalid_column;
+
+        let err = decoder.decode(&received).unwrap_err();
+        assert_eq!(
+            err,
+            DecodeError::ColumnIndexOutOfRange {
+                esi,
+                column: invalid_column,
+                max_valid: l
+            }
+        );
+        assert!(err.is_unrecoverable());
+        assert!(!err.is_recoverable());
+    }
+
+    #[test]
+    fn decode_with_proof_column_index_out_of_range_reports_failure_reason() {
+        let k = 8;
+        let symbol_size = 32;
+        let seed = 45u64;
+
+        let source = make_source_data(k, symbol_size);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        let mut received = decoder.constraint_symbols();
+        received.extend(make_received_source(&decoder, &source));
+        for esi in (k as u32)..(l as u32) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        let esi = received[1].esi;
+        let invalid_column = l + 2;
+        received[1].columns[0] = invalid_column;
+
+        let (err, proof) = decoder
+            .decode_with_proof(&received, ObjectId::new_for_test(5252), 0)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            DecodeError::ColumnIndexOutOfRange {
+                esi,
+                column: invalid_column,
+                max_valid: l
+            }
+        );
+        assert!(matches!(
+            proof.outcome,
+            crate::raptorq::proof::ProofOutcome::Failure {
+                reason: FailureReason::ColumnIndexOutOfRange {
+                    esi: e,
+                    column,
+                    max_valid
+                }
+            } if e == esi && column == invalid_column && max_valid == l
+        ));
+    }
+
+    #[test]
     fn decode_deterministic() {
         let k = 6;
         let symbol_size = 24;
@@ -1273,6 +1664,22 @@ mod tests {
         assert_eq!(result1.source, result2.source);
         assert_eq!(result1.stats.peeled, result2.stats.peeled);
         assert_eq!(result1.stats.inactivated, result2.stats.inactivated);
+        assert_eq!(
+            result1.stats.peel_queue_pushes, result2.stats.peel_queue_pushes,
+            "peel queue push accounting must be deterministic"
+        );
+        assert_eq!(
+            result1.stats.peel_queue_pops, result2.stats.peel_queue_pops,
+            "peel queue pop accounting must be deterministic"
+        );
+        assert_eq!(
+            result1.stats.dense_core_rows, result2.stats.dense_core_rows,
+            "dense-core row extraction must be deterministic"
+        );
+        assert_eq!(
+            result1.stats.dense_core_cols, result2.stats.dense_core_cols,
+            "dense-core column extraction must be deterministic"
+        );
     }
 
     #[test]
@@ -1309,6 +1716,25 @@ mod tests {
             result.stats.peeled > 0 || result.stats.inactivated > 0,
             "expected some peeling or inactivation"
         );
+        assert!(
+            result.stats.peel_queue_pushes >= result.stats.peel_queue_pops,
+            "queue pushes should dominate or equal pops"
+        );
+        assert!(
+            result.stats.peel_frontier_peak > 0,
+            "peeling queue should observe non-zero frontier depth"
+        );
+        if result.stats.inactivated > 0 {
+            assert!(
+                result.stats.dense_core_cols > 0,
+                "dense core should contain unsolved columns when inactivation occurs"
+            );
+            assert_eq!(
+                result.stats.peeling_fallback_reason,
+                Some("peeling_exhausted_to_dense_core"),
+                "fallback reason should be explicit when we transition to dense core"
+            );
+        }
     }
 
     #[test]
@@ -1476,6 +1902,63 @@ mod tests {
         }
     }
 
+    #[test]
+    fn verify_decoded_output_detects_corruption_witness() {
+        let k = 6;
+        let symbol_size = 16;
+        let seed = 46u64;
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let source = make_source_data(k, symbol_size);
+        let received = make_received_source(&decoder, &source);
+
+        let mut intermediate = vec![vec![0u8; symbol_size]; decoder.params().l];
+        for (idx, src) in source.iter().enumerate() {
+            intermediate[idx] = src.clone();
+        }
+        intermediate[0][0] ^= 0xA5;
+
+        let err = decoder
+            .verify_decoded_output(&received, &intermediate)
+            .expect_err("corruption guard should reject inconsistent reconstruction");
+        assert!(matches!(
+            err,
+            DecodeError::CorruptDecodedOutput {
+                esi: 0,
+                byte_index: 0,
+                ..
+            }
+        ));
+        assert!(err.is_unrecoverable());
+    }
+
+    #[test]
+    fn failure_classification_is_explicit() {
+        assert!(DecodeError::InsufficientSymbols {
+            received: 1,
+            required: 2
+        }
+        .is_recoverable());
+        assert!(DecodeError::SingularMatrix { row: 3 }.is_recoverable());
+        assert!(DecodeError::SymbolSizeMismatch {
+            expected: 8,
+            actual: 7
+        }
+        .is_unrecoverable());
+        assert!(DecodeError::ColumnIndexOutOfRange {
+            esi: 1,
+            column: 99,
+            max_valid: 12
+        }
+        .is_unrecoverable());
+        assert!(DecodeError::CorruptDecodedOutput {
+            esi: 1,
+            byte_index: 0,
+            expected: 1,
+            actual: 2
+        }
+        .is_unrecoverable());
+    }
+
     fn make_rank_deficient_state(
         params: &SystematicParams,
         symbol_size: usize,
@@ -1540,6 +2023,65 @@ mod tests {
             ],
             solved: vec![None; params.l],
             active_cols,
+            inactive_cols: BTreeSet::new(),
+            stats: DecodeStats::default(),
+        }
+    }
+
+    fn make_dense_core_prunable_state(
+        params: &SystematicParams,
+        symbol_size: usize,
+        left_col: usize,
+        right_col: usize,
+        empty_rhs_byte: u8,
+    ) -> DecoderState {
+        let eq_left = Equation::new(vec![left_col], vec![Gf256::ONE]);
+        let eq_right = Equation::new(vec![right_col], vec![Gf256::ONE]);
+        let eq_empty = Equation {
+            terms: Vec::new(),
+            used: false,
+        };
+        let active_cols = [left_col, right_col].into_iter().collect();
+        DecoderState {
+            params: params.clone(),
+            equations: vec![eq_left, eq_right, eq_empty],
+            rhs: vec![
+                vec![0x10; symbol_size],
+                vec![0x20; symbol_size],
+                vec![empty_rhs_byte; symbol_size],
+            ],
+            solved: vec![None; params.l],
+            active_cols,
+            inactive_cols: BTreeSet::new(),
+            stats: DecodeStats::default(),
+        }
+    }
+
+    fn make_hard_regime_dense_state(
+        params: &SystematicParams,
+        symbol_size: usize,
+        start_col: usize,
+        width: usize,
+    ) -> DecoderState {
+        let cols: Vec<usize> = (start_col..start_col + width).collect();
+        let mut equations = Vec::with_capacity(width);
+        let mut rhs = Vec::with_capacity(width);
+
+        // Upper-triangular dense system:
+        // row i references cols[i..], so the matrix is full-rank while still dense.
+        for i in 0..width {
+            let row_cols = cols[i..].to_vec();
+            let row_coefs = vec![Gf256::ONE; row_cols.len()];
+            equations.push(Equation::new(row_cols, row_coefs));
+            rhs.push(vec![(i as u8) + 1; symbol_size]);
+        }
+
+        DecoderState {
+            params: params.clone(),
+            equations,
+            rhs,
+            solved: vec![None; params.l],
+            active_cols: cols.into_iter().collect(),
             inactive_cols: BTreeSet::new(),
             stats: DecodeStats::default(),
         }
@@ -1666,6 +2208,197 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![3, 7],
             "inconsistent-system witness should preserve full pivot-attempt history"
+        );
+    }
+
+    #[test]
+    fn dense_core_extraction_drops_redundant_zero_rows() {
+        let decoder = InactivationDecoder::new(8, 16, 6060);
+        let params = decoder.params().clone();
+        let mut state = make_dense_core_prunable_state(&params, 16, 3, 7, 0x00);
+
+        decoder
+            .inactivate_and_solve(&mut state)
+            .expect("state with redundant zero row should be solvable");
+        assert_eq!(
+            state.stats.dense_core_rows, 2,
+            "dense core should only include rows with unsolved-column signal"
+        );
+        assert_eq!(
+            state.stats.dense_core_cols, 2,
+            "dense core should preserve unsolved column width"
+        );
+        assert_eq!(
+            state.stats.dense_core_dropped_rows, 1,
+            "one redundant zero-information row should be dropped"
+        );
+    }
+
+    #[test]
+    fn dense_core_inconsistent_constant_row_reports_equation_witness() {
+        let decoder = InactivationDecoder::new(8, 16, 6161);
+        let params = decoder.params().clone();
+        let mut state = make_dense_core_prunable_state(&params, 16, 3, 7, 0x01);
+
+        let err = decoder.inactivate_and_solve(&mut state).unwrap_err();
+        assert_eq!(
+            err,
+            DecodeError::SingularMatrix { row: 2 },
+            "inconsistent constant row should report deterministic original equation index"
+        );
+    }
+
+    #[test]
+    fn baseline_failure_triggers_deterministic_hard_regime_fallback() {
+        let decoder = InactivationDecoder::new(8, 1, 4242);
+        let params = decoder.params().clone();
+        let mut state = make_rank_deficient_state(&params, 1, 3, 7);
+
+        let err = decoder.inactivate_and_solve(&mut state).unwrap_err();
+        assert_eq!(err, DecodeError::SingularMatrix { row: 7 });
+        assert!(
+            state.stats.hard_regime_activated,
+            "fallback should activate hard regime deterministically"
+        );
+        assert_eq!(
+            state.stats.hard_regime_fallbacks, 1,
+            "exactly one fallback transition is expected"
+        );
+        assert!(
+            state.stats.markowitz_pivots <= state.stats.pivots_selected,
+            "hard-regime pivot accounting should remain internally consistent"
+        );
+    }
+
+    #[test]
+    fn proof_trace_records_fallback_transition_reason() {
+        let decoder = InactivationDecoder::new(8, 1, 4343);
+        let params = decoder.params().clone();
+        let mut state = make_rank_deficient_state(&params, 1, 3, 7);
+        let mut trace = EliminationTrace::default();
+
+        let err = decoder
+            .inactivate_and_solve_with_proof(&mut state, &mut trace)
+            .unwrap_err();
+        assert_eq!(err, DecodeError::SingularMatrix { row: 7 });
+        assert_eq!(
+            trace.strategy,
+            InactivationStrategy::HighSupportFirst,
+            "proof trace should expose fallback strategy"
+        );
+        assert_eq!(
+            trace.strategy_transitions.len(),
+            1,
+            "fallback should record one strategy transition"
+        );
+        assert_eq!(
+            trace.strategy_transitions[0].reason, "fallback_after_baseline_failure",
+            "transition reason should be deterministic and triage-friendly"
+        );
+        assert_eq!(
+            trace
+                .pivot_events
+                .iter()
+                .map(|ev| ev.col)
+                .collect::<Vec<_>>(),
+            vec![3],
+            "fallback proof should preserve the deterministic pivot-attempt witness"
+        );
+    }
+
+    #[test]
+    fn hard_regime_activation_is_deterministic_and_observable() {
+        let decoder = InactivationDecoder::new(32, 1, 77);
+        let params = decoder.params().clone();
+
+        let mut state_one = make_hard_regime_dense_state(&params, 1, 4, 8);
+        let mut trace_one = EliminationTrace::default();
+        decoder
+            .inactivate_and_solve_with_proof(&mut state_one, &mut trace_one)
+            .expect("hard regime state should be solvable");
+
+        assert!(
+            state_one.stats.hard_regime_activated,
+            "hard-regime transition should be observable in decode stats"
+        );
+        assert_eq!(
+            state_one.stats.markowitz_pivots, 8,
+            "all hard-regime pivots should use deterministic Markowitz selector"
+        );
+        assert_eq!(
+            trace_one.strategy,
+            InactivationStrategy::HighSupportFirst,
+            "proof trace must expose hard-regime strategy"
+        );
+        assert_eq!(
+            trace_one.strategy_transitions.len(),
+            1,
+            "hard regime should record a single strategy transition"
+        );
+        assert_eq!(
+            trace_one.strategy_transitions[0].reason, "dense_or_near_square",
+            "transition reason should be deterministic and triage-friendly"
+        );
+
+        let mut state_two = make_hard_regime_dense_state(&params, 1, 4, 8);
+        let mut trace_two = EliminationTrace::default();
+        decoder
+            .inactivate_and_solve_with_proof(&mut state_two, &mut trace_two)
+            .expect("repeated hard regime solve should succeed");
+
+        assert_eq!(
+            state_one.stats.markowitz_pivots, state_two.stats.markowitz_pivots,
+            "hard-regime pivot counts should be stable across runs"
+        );
+        assert_eq!(
+            trace_one.pivot_events, trace_two.pivot_events,
+            "hard-regime pivot event ordering must be deterministic"
+        );
+        assert_eq!(
+            trace_one.strategy_transitions, trace_two.strategy_transitions,
+            "hard-regime strategy transition history must be deterministic"
+        );
+    }
+
+    #[test]
+    fn normal_regime_keeps_basic_pivot_strategy() {
+        let decoder = InactivationDecoder::new(8, 1, 99);
+        let params = decoder.params().clone();
+        let mut state = make_pivot_tie_break_state(&params, 1, 3, 7);
+
+        decoder
+            .inactivate_and_solve(&mut state)
+            .expect("normal regime test state should solve");
+
+        assert!(
+            !state.stats.hard_regime_activated,
+            "small systems should stay on the baseline inactivation strategy"
+        );
+        assert_eq!(
+            state.stats.markowitz_pivots, 0,
+            "baseline strategy should not report Markowitz pivots"
+        );
+    }
+
+    #[test]
+    fn normal_regime_proof_trace_keeps_all_at_once_strategy() {
+        let decoder = InactivationDecoder::new(8, 1, 100);
+        let params = decoder.params().clone();
+        let mut state = make_pivot_tie_break_state(&params, 1, 3, 7);
+        let mut trace = EliminationTrace::default();
+
+        decoder
+            .inactivate_and_solve_with_proof(&mut state, &mut trace)
+            .expect("normal regime proof solve should succeed");
+
+        assert_eq!(
+            trace.strategy,
+            InactivationStrategy::AllAtOnce,
+            "normal regime should stay on baseline strategy"
+        );
+        assert!(
+            trace.strategy_transitions.is_empty(),
+            "normal regime must not emit strategy transitions"
         );
     }
 }

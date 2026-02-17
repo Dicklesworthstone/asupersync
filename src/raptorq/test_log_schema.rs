@@ -243,6 +243,20 @@ pub struct UnitDecodeStats {
     pub gauss_ops: usize,
     /// Pivots selected during elimination.
     pub pivots: usize,
+    /// Number of equation indices pushed into peel queue.
+    pub peel_queue_pushes: usize,
+    /// Number of equation indices popped from peel queue.
+    pub peel_queue_pops: usize,
+    /// Maximum queue depth seen during peel propagation.
+    pub peel_frontier_peak: usize,
+    /// Dense-core row count sent to elimination.
+    pub dense_core_rows: usize,
+    /// Dense-core column count sent to elimination.
+    pub dense_core_cols: usize,
+    /// Zero-information rows dropped before elimination.
+    pub dense_core_dropped_rows: usize,
+    /// Deterministic fallback reason recorded by decode pipeline.
+    pub fallback_reason: String,
 }
 
 // ============================================================================
@@ -764,6 +778,13 @@ mod tests {
             inactivated: 2,
             gauss_ops: 8,
             pivots: 2,
+            peel_queue_pushes: 12,
+            peel_queue_pops: 10,
+            peel_frontier_peak: 4,
+            dense_core_rows: 5,
+            dense_core_cols: 3,
+            dense_core_dropped_rows: 1,
+            fallback_reason: "peeling_exhausted_to_dense_core".to_string(),
         });
 
         let json = entry.to_json().expect("serialize");

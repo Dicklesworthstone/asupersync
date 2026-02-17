@@ -286,6 +286,13 @@ fn compare_proofs(expected: &DecodeProof, actual: &DecodeProof) -> Result<(), Re
             act_elim.truncated,
         ));
     }
+    if exp_elim.strategy != act_elim.strategy {
+        return Err(mismatch(
+            "elimination.strategy",
+            exp_elim.strategy,
+            act_elim.strategy,
+        ));
+    }
     compare_prefix(
         "elimination.inactive_cols",
         &exp_elim.inactive_cols,
@@ -297,6 +304,12 @@ fn compare_proofs(expected: &DecodeProof, actual: &DecodeProof) -> Result<(), Re
         &exp_elim.pivot_events,
         &act_elim.pivot_events,
         exp_elim.truncated,
+    )?;
+    compare_prefix(
+        "elimination.strategy_transitions",
+        &exp_elim.strategy_transitions,
+        &act_elim.strategy_transitions,
+        false,
     )?;
 
     if expected.outcome != actual.outcome {
@@ -412,6 +425,8 @@ impl PeelingTrace {
 /// Trace of inactivation and Gaussian elimination phase.
 #[derive(Debug, Clone, Default, Hash, PartialEq, Eq)]
 pub struct EliminationTrace {
+    /// Inactivation strategy selected for this decode.
+    pub strategy: InactivationStrategy,
     /// Number of columns marked as inactive.
     pub inactivated: usize,
     /// Column indices that were inactivated.
@@ -422,11 +437,38 @@ pub struct EliminationTrace {
     pub pivot_events: Vec<PivotEvent>,
     /// Number of row operations performed.
     pub row_ops: usize,
+    /// Strategy transitions recorded during decode.
+    pub strategy_transitions: Vec<StrategyTransition>,
     /// True if pivot_events was truncated.
     pub truncated: bool,
 }
 
 impl EliminationTrace {
+    /// Set the strategy used by the decoder.
+    pub fn set_strategy(&mut self, strategy: InactivationStrategy) {
+        self.strategy = strategy;
+    }
+
+    /// Record a strategy transition.
+    pub fn record_strategy_transition(
+        &mut self,
+        from: InactivationStrategy,
+        to: InactivationStrategy,
+        reason: &'static str,
+    ) {
+        if from == to {
+            self.strategy = to;
+            return;
+        }
+        if self.strategy_transitions.len() < MAX_PIVOT_EVENTS {
+            self.strategy_transitions
+                .push(StrategyTransition { from, to, reason });
+        } else {
+            self.truncated = true;
+        }
+        self.strategy = to;
+    }
+
     /// Record an inactivated column.
     pub fn record_inactivation(&mut self, col: usize) {
         self.inactivated += 1;
@@ -449,6 +491,27 @@ impl EliminationTrace {
     pub fn record_row_op(&mut self) {
         self.row_ops += 1;
     }
+}
+
+/// Inactivation strategy used by the decoder.
+#[derive(Debug, Clone, Copy, Default, Hash, PartialEq, Eq)]
+pub enum InactivationStrategy {
+    /// Legacy behavior: inactivate all remaining unsolved columns in their natural order.
+    #[default]
+    AllAtOnce,
+    /// Hard-regime behavior: inactivate columns ordered by descending equation support.
+    HighSupportFirst,
+}
+
+/// A single strategy transition event.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct StrategyTransition {
+    /// Previous strategy.
+    pub from: InactivationStrategy,
+    /// New strategy.
+    pub to: InactivationStrategy,
+    /// Deterministic reason for the transition.
+    pub reason: &'static str,
 }
 
 /// A single pivot selection event.
@@ -508,6 +571,26 @@ pub enum FailureReason {
         /// Number of coefficients.
         coefficients: usize,
     },
+    /// Received symbol references an invalid column outside [0, L).
+    ColumnIndexOutOfRange {
+        /// ESI of malformed symbol.
+        esi: u32,
+        /// Offending column index.
+        column: usize,
+        /// Exclusive upper bound for valid columns.
+        max_valid: usize,
+    },
+    /// Decoder produced output that failed equation verification.
+    CorruptDecodedOutput {
+        /// ESI of mismatched equation row.
+        esi: u32,
+        /// First mismatching byte index.
+        byte_index: usize,
+        /// Reconstructed byte from decoded intermediate symbols.
+        expected: u8,
+        /// Received RHS byte from input symbol.
+        actual: u8,
+    },
 }
 
 impl From<&DecodeError> for FailureReason {
@@ -533,6 +616,26 @@ impl From<&DecodeError> for FailureReason {
                 esi: *esi,
                 columns: *columns,
                 coefficients: *coefficients,
+            },
+            DecodeError::ColumnIndexOutOfRange {
+                esi,
+                column,
+                max_valid,
+            } => Self::ColumnIndexOutOfRange {
+                esi: *esi,
+                column: *column,
+                max_valid: *max_valid,
+            },
+            DecodeError::CorruptDecodedOutput {
+                esi,
+                byte_index,
+                expected,
+                actual,
+            } => Self::CorruptDecodedOutput {
+                esi: *esi,
+                byte_index: *byte_index,
+                expected: *expected,
+                actual: *actual,
             },
         }
     }
