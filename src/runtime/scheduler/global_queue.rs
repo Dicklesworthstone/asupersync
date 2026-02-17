@@ -34,13 +34,19 @@ impl GlobalQueue {
         self.inner.pop()
     }
 
-    /// Returns the number of tasks in the queue.
+    /// Returns a best-effort task count snapshot.
+    ///
+    /// Under concurrent producers/consumers this value may change immediately
+    /// after it is observed.
     #[inline]
     pub fn len(&self) -> usize {
         self.inner.len()
     }
 
-    /// Returns true if the queue is empty.
+    /// Returns a best-effort emptiness snapshot.
+    ///
+    /// Under concurrent producers/consumers this hint may become stale
+    /// immediately after it is observed.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()

@@ -10,7 +10,7 @@ use crate::types::{ObligationId, RegionId, TaskId, Time};
 use crate::util::{Arena, ArenaIndex};
 use smallvec::SmallVec;
 use std::backtrace::Backtrace;
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Information returned when an obligation is committed.
@@ -101,7 +101,7 @@ pub struct ObligationCreateArgs {
 pub struct ObligationTable {
     obligations: Arena<ObligationRecord>,
     /// Secondary index: task → obligation IDs held by that task.
-    by_holder: BTreeMap<TaskId, SmallVec<[ObligationId; 4]>>,
+    by_holder: HashMap<TaskId, SmallVec<[ObligationId; 4]>>,
 }
 
 impl ObligationTable {
@@ -110,7 +110,7 @@ impl ObligationTable {
     pub fn new() -> Self {
         Self {
             obligations: Arena::new(),
-            by_holder: BTreeMap::new(),
+            by_holder: HashMap::new(),
         }
     }
 

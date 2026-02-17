@@ -41,7 +41,7 @@
 use crate::runtime::reactor::{
     Event, Events, Interest, Reactor, SlabToken, Source, Token, TokenSlab,
 };
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::io;
 use std::sync::{Arc, Mutex, Weak};
 use std::task::Waker;
@@ -84,7 +84,7 @@ pub struct IoDriver {
     /// Slab mapping tokens to wakers.
     wakers: TokenSlab,
     /// Interest sets for registered tokens.
-    interests: BTreeMap<Token, Interest>,
+    interests: HashMap<Token, Interest>,
     /// Pre-allocated events buffer to avoid allocation per turn.
     events: Events,
     /// Statistics for diagnostics.
@@ -102,7 +102,7 @@ impl IoDriver {
         Self {
             reactor,
             wakers: TokenSlab::new(),
-            interests: BTreeMap::new(),
+            interests: HashMap::new(),
             events: Events::with_capacity(DEFAULT_EVENTS_CAPACITY),
             stats: IoStats::default(),
         }
@@ -116,7 +116,7 @@ impl IoDriver {
         Self {
             reactor,
             wakers: TokenSlab::new(),
-            interests: BTreeMap::new(),
+            interests: HashMap::new(),
             events: Events::with_capacity(events_capacity),
             stats: IoStats::default(),
         }
@@ -193,7 +193,9 @@ impl IoDriver {
     pub fn update_waker(&mut self, token: Token, waker: Waker) -> bool {
         let slab_token = SlabToken::from_usize(token.0);
         self.wakers.get_mut(slab_token).is_some_and(|slot| {
-            *slot = waker;
+            if !slot.will_wake(&waker) {
+                *slot = waker;
+            }
             true
         })
     }

@@ -75,7 +75,7 @@ impl TimerHeap {
 
     /// Pops all tasks whose deadline is `<= now`.
     pub fn pop_expired(&mut self, now: Time) -> Vec<TaskId> {
-        let mut expired = Vec::new();
+        let mut expired = Vec::with_capacity(4);
         while let Some(entry) = self.heap.peek() {
             if entry.deadline <= now {
                 if let Some(entry) = self.heap.pop() {

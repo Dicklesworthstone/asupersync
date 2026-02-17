@@ -180,8 +180,11 @@ impl Worker {
                     break;
                 }
 
-                // Check queues again (abbreviated check)
-                if !self.local.is_empty() || !self.global.is_empty() {
+                // Probe queues directly instead of relying on `is_empty()` snapshots.
+                // This avoids missing immediately-available global work due to
+                // racing emptiness hints right before a park timeout.
+                if let Some(task) = self.pop_backoff_work() {
+                    self.execute(task);
                     break;
                 }
 
@@ -199,6 +202,11 @@ impl Worker {
                 }
             }
         }
+    }
+
+    #[inline]
+    fn pop_backoff_work(&self) -> Option<TaskId> {
+        self.local.pop().or_else(|| self.global.pop())
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1050,6 +1058,30 @@ mod tests {
             total, 80,
             "backoff should be 64 spins + 16 yields before park"
         );
+    }
+
+    #[test]
+    fn test_backoff_probe_pops_global_work() {
+        use crate::runtime::RuntimeState;
+        use crate::sync::ContendedMutex;
+
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let global = Arc::new(GlobalQueue::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let worker = Worker::new(
+            0,
+            Vec::new(),
+            Arc::clone(&global),
+            Arc::clone(&state),
+            Arc::clone(&shutdown),
+        );
+
+        let global_task = TaskId::new_for_test(222, 0);
+        global.push(global_task);
+
+        assert_eq!(worker.pop_backoff_work(), Some(global_task));
+        assert_eq!(worker.pop_backoff_work(), None);
     }
 
     #[test]

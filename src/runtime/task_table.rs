@@ -7,7 +7,7 @@ use crate::record::TaskRecord;
 use crate::runtime::stored_task::StoredTask;
 use crate::types::TaskId;
 use crate::util::{Arena, ArenaIndex};
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 /// Encapsulates task arena and stored futures for hot-path isolation.
 ///
@@ -25,7 +25,7 @@ pub struct TaskTable {
     ///
     /// Maps task IDs to their pollable futures. When a task is created via
     /// `spawn()`, its wrapped future is stored here for the executor to poll.
-    pub(crate) stored_futures: BTreeMap<TaskId, StoredTask>,
+    pub(crate) stored_futures: HashMap<TaskId, StoredTask>,
 }
 
 impl TaskTable {
@@ -34,7 +34,7 @@ impl TaskTable {
     pub fn new() -> Self {
         Self {
             tasks: Arena::new(),
-            stored_futures: BTreeMap::new(),
+            stored_futures: HashMap::new(),
         }
     }
 

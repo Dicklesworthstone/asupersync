@@ -7,6 +7,7 @@
 
 use crate::tracing_compat::trace;
 use crate::types::TaskId;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::task::{Wake, Waker};
 
@@ -32,8 +33,8 @@ pub enum WakeSource {
 /// Shared state for the waker system.
 #[derive(Debug, Default)]
 pub struct WakerState {
-    /// Tasks that have been woken.
-    woken: Mutex<Vec<TaskId>>,
+    /// Tasks that have been woken (HashSet for O(1) dedup on the wake hot path).
+    woken: Mutex<HashSet<TaskId>>,
 }
 
 impl WakerState {
@@ -65,7 +66,7 @@ impl WakerState {
     /// Drains all woken tasks.
     pub fn drain_woken(&self) -> Vec<TaskId> {
         let mut woken = self.woken.lock().expect("lock poisoned");
-        std::mem::take(&mut *woken)
+        woken.drain().collect()
     }
 
     /// Returns true if any tasks have been woken.
@@ -77,7 +78,7 @@ impl WakerState {
 
     fn wake(&self, task: TaskId, source: WakeSource) {
         let mut woken = self.woken.lock().expect("lock poisoned");
-        if !woken.contains(&task) {
+        if woken.insert(task) {
             let _source_label = match source {
                 WakeSource::Timer => "timer",
                 WakeSource::Io { .. } => "io",
@@ -89,7 +90,6 @@ impl WakerState {
                 wake_source = _source_label,
                 "task woken"
             );
-            woken.push(task);
         }
     }
 }
