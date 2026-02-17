@@ -30,7 +30,7 @@ fn create_item(
     (StatusCode::CREATED, Json(resp))
 }
 
-fn search_items(Query(params): Query<std::collections::BTreeMap<String, String>>) -> String {
+fn search_items(Query(params): Query<std::collections::HashMap<String, String>>) -> String {
     let q = params.get("q").cloned().unwrap_or_default();
     format!("results for: {q}")
 }
@@ -217,7 +217,7 @@ fn e2e_query_string_extraction() {
         "/search",
         get(FnHandler1::<
             _,
-            Query<std::collections::BTreeMap<String, String>>,
+            Query<std::collections::HashMap<String, String>>,
         >::new(search_items)),
     );
 

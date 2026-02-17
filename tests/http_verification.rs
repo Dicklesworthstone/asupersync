@@ -16,7 +16,7 @@ use asupersync::web::extract::{FromRequest, FromRequestParts, Path, Query, Reque
 use asupersync::web::handler::{FnHandler, FnHandler1};
 use asupersync::web::response::{Html, IntoResponse, Json, Redirect, StatusCode};
 use asupersync::web::router::{get, post, put, Router};
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 // ===========================================================================
 // Section 1: HTTP Body trait compliance
@@ -237,7 +237,7 @@ fn extractor_path_single_param() {
     init_test_logging();
     test_phase!("extractor_path_single_param");
 
-    let mut params = BTreeMap::new();
+    let mut params = HashMap::new();
     params.insert("id".to_string(), "42".to_string());
     let req = Request::new("GET", "/users/42").with_path_params(params);
 
@@ -252,12 +252,12 @@ fn extractor_path_multiple_params() {
     init_test_logging();
     test_phase!("extractor_path_multiple_params");
 
-    let mut params = BTreeMap::new();
+    let mut params = HashMap::new();
     params.insert("user_id".to_string(), "1".to_string());
     params.insert("post_id".to_string(), "99".to_string());
     let req = Request::new("GET", "/users/1/posts/99").with_path_params(params);
 
-    let Path(all) = Path::<BTreeMap<String, String>>::from_request_parts(&req).unwrap();
+    let Path(all) = Path::<HashMap<String, String>>::from_request_parts(&req).unwrap();
     assert_eq!(all.get("user_id").unwrap(), "1");
     assert_eq!(all.get("post_id").unwrap(), "99");
 
@@ -271,7 +271,7 @@ fn extractor_query_params() {
 
     let req = Request::new("GET", "/search").with_query("q=rust+async&page=2&limit=10");
 
-    let Query(params) = Query::<BTreeMap<String, String>>::from_request_parts(&req).unwrap();
+    let Query(params) = Query::<HashMap<String, String>>::from_request_parts(&req).unwrap();
     assert_eq!(params.get("q").unwrap(), "rust async");
     assert_eq!(params.get("page").unwrap(), "2");
     assert_eq!(params.get("limit").unwrap(), "10");
@@ -286,7 +286,7 @@ fn extractor_query_percent_encoded() {
 
     let req = Request::new("GET", "/search").with_query("q=hello%20world&tag=%23rust");
 
-    let Query(params) = Query::<BTreeMap<String, String>>::from_request_parts(&req).unwrap();
+    let Query(params) = Query::<HashMap<String, String>>::from_request_parts(&req).unwrap();
     assert_eq!(params.get("q").unwrap(), "hello world");
     assert_eq!(params.get("tag").unwrap(), "#rust");
 

@@ -1,6 +1,6 @@
 //! Virtual HTTP client for lab runtime testing.
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use crate::bytes::Bytes;
 use crate::util::DetRng;
@@ -105,7 +105,7 @@ impl<'a> VirtualClient<'a> {
             client: self,
             method: method.to_string(),
             path: path.to_string(),
-            headers: BTreeMap::new(),
+            headers: HashMap::new(),
             body: Bytes::new(),
         }
     }
@@ -116,7 +116,7 @@ pub struct RequestBuilder<'a> {
     client: &'a VirtualClient<'a>,
     method: String,
     path: String,
-    headers: BTreeMap<String, String>,
+    headers: HashMap<String, String>,
     body: Bytes,
 }
 
