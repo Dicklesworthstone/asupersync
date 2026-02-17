@@ -730,7 +730,7 @@ where
 /// ```
 #[cfg(feature = "tower")]
 pub struct AsupersyncAdapter<S> {
-    inner: std::sync::Mutex<S>,
+    inner: parking_lot::Mutex<S>,
     config: AdapterConfig,
 }
 
@@ -739,7 +739,7 @@ impl<S> AsupersyncAdapter<S> {
     /// Create a new adapter with default configuration.
     pub fn new(service: S) -> Self {
         Self {
-            inner: std::sync::Mutex::new(service),
+            inner: parking_lot::Mutex::new(service),
             config: AdapterConfig::default(),
         }
     }
@@ -747,7 +747,7 @@ impl<S> AsupersyncAdapter<S> {
     /// Create a new adapter with the specified configuration.
     pub fn with_config(service: S, config: AdapterConfig) -> Self {
         Self {
-            inner: std::sync::Mutex::new(service),
+            inner: parking_lot::Mutex::new(service),
             config,
         }
     }
@@ -788,7 +788,7 @@ where
         }
 
         // Get the inner service
-        let mut service = self.inner.lock().expect("lock poisoned");
+        let mut service = self.inner.lock();
 
         // Poll for readiness
         let ready_result = poll_fn(|poll_cx| service.poll_ready(poll_cx)).await;

@@ -1047,7 +1047,7 @@ impl CrashPackWriter for FileCrashPackWriter {
 /// Collects written packs in a `Vec` behind a mutex. Not persistent.
 #[derive(Debug, Default)]
 pub struct MemoryCrashPackWriter {
-    packs: std::sync::Mutex<Vec<(ArtifactId, String)>>,
+    packs: parking_lot::Mutex<Vec<(ArtifactId, String)>>,
 }
 
 impl MemoryCrashPackWriter {
@@ -1059,13 +1059,13 @@ impl MemoryCrashPackWriter {
 
     /// Returns all written packs as `(artifact_id, json)` pairs.
     pub fn written(&self) -> Vec<(ArtifactId, String)> {
-        self.packs.lock().expect("lock poisoned").clone()
+        self.packs.lock().clone()
     }
 
     /// Returns the number of packs written.
     #[must_use]
     pub fn count(&self) -> usize {
-        self.packs.lock().expect("lock poisoned").len()
+        self.packs.lock().len()
     }
 }
 
@@ -1078,7 +1078,6 @@ impl CrashPackWriter for MemoryCrashPackWriter {
         let artifact_id = ArtifactId { path: filename };
         self.packs
             .lock()
-            .expect("lock poisoned")
             .push((artifact_id.clone(), json));
 
         Ok(artifact_id)

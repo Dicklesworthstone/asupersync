@@ -13,7 +13,7 @@
 
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 use franken_evidence::export::JsonlExporter;
 use franken_evidence::EvidenceLedger;
@@ -79,23 +79,19 @@ impl JsonlSink {
 
     /// Path to the current output file.
     pub fn path(&self) -> PathBuf {
-        self.inner
-            .lock()
-            .map(|g| g.path().to_path_buf())
-            .unwrap_or_default()
+        self.inner.lock().path().to_path_buf()
     }
 }
 
 impl EvidenceSink for JsonlSink {
     fn emit(&self, entry: &EvidenceLedger) {
-        if let Ok(mut exporter) = self.inner.lock() {
-            if let Err(e) = exporter.append(entry).and_then(|_| exporter.flush()) {
-                // Best-effort: log and continue. Evidence loss is acceptable;
-                // runtime correctness must not depend on evidence collection.
-                #[cfg(feature = "tracing-integration")]
-                crate::tracing_compat::warn!(error = %e, "evidence sink write failed");
-                let _ = e;
-            }
+        let mut exporter = self.inner.lock();
+        if let Err(e) = exporter.append(entry).and_then(|_| exporter.flush()) {
+            // Best-effort: log and continue. Evidence loss is acceptable;
+            // runtime correctness must not depend on evidence collection.
+            #[cfg(feature = "tracing-integration")]
+            crate::tracing_compat::warn!(error = %e, "evidence sink write failed");
+            let _ = e;
         }
     }
 }
@@ -121,12 +117,12 @@ impl CollectorSink {
 
     /// Return all collected entries.
     pub fn entries(&self) -> Vec<EvidenceLedger> {
-        self.entries.lock().map(|g| g.clone()).unwrap_or_default()
+        self.entries.lock().clone()
     }
 
     /// Number of collected entries.
     pub fn len(&self) -> usize {
-        self.entries.lock().map_or(0, |g| g.len())
+        self.entries.lock().len()
     }
 
     /// Returns `true` if no entries have been collected.
@@ -137,9 +133,7 @@ impl CollectorSink {
 
 impl EvidenceSink for CollectorSink {
     fn emit(&self, entry: &EvidenceLedger) {
-        if let Ok(mut entries) = self.entries.lock() {
-            entries.push(entry.clone());
-        }
+        self.entries.lock().push(entry.clone());
     }
 }
 
