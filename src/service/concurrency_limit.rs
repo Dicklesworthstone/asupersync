@@ -75,13 +75,7 @@ impl<S> Layer<S> for ConcurrencyLimitLayer {
 /// Internal state for the concurrency limit service.
 enum State {
     Idle,
-    Acquiring(
-        Pin<
-            Box<
-                dyn Future<Output = Result<OwnedSemaphorePermit, crate::sync::AcquireError>> + Send,
-            >,
-        >,
-    ),
+    Acquiring(Pin<Box<OwnedAcquireFuture>>),
     Ready(OwnedSemaphorePermit),
 }
 
