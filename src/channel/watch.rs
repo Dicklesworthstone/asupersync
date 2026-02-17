@@ -41,7 +41,7 @@
 use smallvec::SmallVec;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 use std::task::{Context, Poll, Waker};
 
@@ -120,9 +120,9 @@ struct WatchInner<T> {
     /// The current value and its version number.
     value: RwLock<(T, u64)>,
     /// Number of active receivers (excluding sender's implicit subscription).
-    receiver_count: Mutex<usize>,
+    receiver_count: AtomicUsize,
     /// Whether the sender has been dropped.
-    sender_dropped: Mutex<bool>,
+    sender_dropped: AtomicBool,
     /// Wakers for receivers waiting on value changes.
     waiters: Mutex<SmallVec<[WatchWaiter; 4]>>,
 }
@@ -131,18 +131,18 @@ impl<T> WatchInner<T> {
     fn new(initial: T) -> Self {
         Self {
             value: RwLock::new((initial, 0)),
-            receiver_count: Mutex::new(1), // Counts the Receiver returned by channel()
-            sender_dropped: Mutex::new(false),
+            receiver_count: AtomicUsize::new(1), // Counts the Receiver returned by channel()
+            sender_dropped: AtomicBool::new(false),
             waiters: Mutex::new(SmallVec::new()),
         }
     }
 
     fn is_sender_dropped(&self) -> bool {
-        *self.sender_dropped.lock().expect("watch lock poisoned")
+        self.sender_dropped.load(Ordering::Acquire)
     }
 
     fn mark_sender_dropped(&self) {
-        *self.sender_dropped.lock().expect("watch lock poisoned") = true;
+        self.sender_dropped.store(true, Ordering::Release);
     }
 
     fn current_version(&self) -> u64 {
@@ -245,13 +245,9 @@ impl<T> Sender<T> {
     ///
     /// Returns `SendError::Closed(value)` if all receivers have been dropped.
     pub fn send(&self, value: T) -> Result<(), SendError<T>> {
-        let receiver_count = *self
-            .inner
-            .receiver_count
-            .lock()
-            .expect("watch lock poisoned");
+        let receiver_count = self.inner.receiver_count.load(Ordering::Acquire);
 
-        // Check if anyone is listening (receiver_count includes implicit sender subscription)
+        // Check if anyone is listening
         if receiver_count == 0 {
             return Err(SendError::Closed(value));
         }
@@ -279,11 +275,7 @@ impl<T> Sender<T> {
     where
         F: FnOnce(&mut T),
     {
-        let receiver_count = *self
-            .inner
-            .receiver_count
-            .lock()
-            .expect("watch lock poisoned");
+        let receiver_count = self.inner.receiver_count.load(Ordering::Acquire);
 
         if receiver_count == 0 {
             return Err(ModifyError);
@@ -317,14 +309,7 @@ impl<T> Sender<T> {
     /// version, so it will only see future changes.
     #[must_use]
     pub fn subscribe(&self) -> Receiver<T> {
-        {
-            let mut count = self
-                .inner
-                .receiver_count
-                .lock()
-                .expect("watch lock poisoned");
-            *count += 1;
-        }
+        self.inner.receiver_count.fetch_add(1, Ordering::AcqRel);
 
         let current_version = self.inner.current_version();
         Receiver {
@@ -337,34 +322,19 @@ impl<T> Sender<T> {
     /// Returns the number of active receivers (excluding sender).
     #[must_use]
     pub fn receiver_count(&self) -> usize {
-        *self
-            .inner
-            .receiver_count
-            .lock()
-            .expect("watch lock poisoned")
+        self.inner.receiver_count.load(Ordering::Acquire)
     }
 
     /// Returns true if all receivers have been dropped.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        *self
-            .inner
-            .receiver_count
-            .lock()
-            .expect("watch lock poisoned")
-            == 0
+        self.inner.receiver_count.load(Ordering::Acquire) == 0
     }
 }
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
-        // Use defensive locking to avoid double-panic abort if a
-        // mutex is already poisoned during stack unwinding.
-        if let Ok(mut dropped) = self.inner.sender_dropped.lock() {
-            *dropped = true;
-        } else {
-            return; // Poisoned — bail out.
-        }
+        self.inner.sender_dropped.store(true, Ordering::Release);
         // Wake all waiting receivers so they see Closed.
         // Collect wakers under lock, wake outside.
         let waiters: SmallVec<[WatchWaiter; 4]> = {
@@ -566,14 +536,7 @@ impl<T> Future for ChangedFuture<'_, '_, T> {
 
 impl<T> Clone for Receiver<T> {
     fn clone(&self) -> Self {
-        {
-            let mut count = self
-                .inner
-                .receiver_count
-                .lock()
-                .expect("watch lock poisoned");
-            *count += 1;
-        }
+        self.inner.receiver_count.fetch_add(1, Ordering::AcqRel);
         Self {
             inner: Arc::clone(&self.inner),
             seen_version: self.seen_version,
@@ -584,11 +547,7 @@ impl<T> Clone for Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        // Use defensive locking to avoid double-panic abort if a
-        // mutex is already poisoned during stack unwinding.
-        if let Ok(mut count) = self.inner.receiver_count.lock() {
-            *count = count.saturating_sub(1);
-        }
+        self.inner.receiver_count.fetch_sub(1, Ordering::AcqRel);
 
         // Eagerly remove this receiver's waiter entry so dropped receivers do not
         // leave stale wakers behind until a later send/re-registration.
@@ -1371,36 +1330,33 @@ mod tests {
     }
 
     #[test]
-    fn sender_drop_on_poisoned_mutex_does_not_panic() {
-        init_test("sender_drop_on_poisoned_mutex_does_not_panic");
-        let (tx, _rx) = channel::<i32>(0);
+    fn sender_drop_sets_sender_dropped_atomically() {
+        init_test("sender_drop_sets_sender_dropped_atomically");
+        let (tx, rx) = channel::<i32>(0);
 
-        // Poison the sender_dropped mutex.
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = tx.inner.sender_dropped.lock().expect("lock");
-            panic!("intentional poison");
-        }));
+        let dropped = tx.inner.sender_dropped.load(Ordering::Acquire);
+        crate::assert_with_log!(!dropped, "sender not dropped yet", false, dropped);
 
-        // Dropping tx should NOT panic (it should bail gracefully).
         drop(tx);
-        crate::test_complete!("sender_drop_on_poisoned_mutex_does_not_panic");
+
+        let dropped = rx.inner.sender_dropped.load(Ordering::Acquire);
+        crate::assert_with_log!(dropped, "sender dropped after drop", true, dropped);
+        crate::test_complete!("sender_drop_sets_sender_dropped_atomically");
     }
 
     #[test]
-    fn receiver_drop_on_poisoned_mutex_does_not_panic() {
-        init_test("receiver_drop_on_poisoned_mutex_does_not_panic");
+    fn receiver_drop_decrements_count_atomically() {
+        init_test("receiver_drop_decrements_count_atomically");
         let (tx, rx) = channel::<i32>(0);
 
-        // Poison the receiver_count mutex.
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = tx.inner.receiver_count.lock().expect("lock");
-            panic!("intentional poison");
-        }));
+        let count = tx.inner.receiver_count.load(Ordering::Acquire);
+        crate::assert_with_log!(count == 1, "initial count", 1usize, count);
 
-        // Dropping rx should NOT panic.
         drop(rx);
-        drop(tx);
-        crate::test_complete!("receiver_drop_on_poisoned_mutex_does_not_panic");
+
+        let count = tx.inner.receiver_count.load(Ordering::Acquire);
+        crate::assert_with_log!(count == 0, "count after drop", 0usize, count);
+        crate::test_complete!("receiver_drop_decrements_count_atomically");
     }
 
     #[test]
