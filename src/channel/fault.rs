@@ -271,7 +271,12 @@ impl<T: Clone> FaultSender<T> {
     pub async fn flush(&self, cx: &Cx) -> Result<(), SendError<()>> {
         let mut messages = {
             let mut buffer = self.reorder_buffer.lock().expect("reorder buffer poisoned");
-            std::mem::take(&mut *buffer)
+            // Replace with a freshly pre-sized buffer so subsequent sends keep a
+            // stable reorder allocation profile even after repeated flushes.
+            std::mem::replace(
+                &mut *buffer,
+                Vec::with_capacity(self.config.reorder_buffer_size),
+            )
         };
 
         if messages.is_empty() {
@@ -354,7 +359,8 @@ impl<T: Clone> FaultSender<T> {
     }
 
     fn record_duplication(&self) {
-        self.stat_messages_duplicated.fetch_add(1, Ordering::Relaxed);
+        self.stat_messages_duplicated
+            .fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -599,6 +605,30 @@ mod tests {
         assert_eq!(received.len(), 5);
         received.sort_unstable();
         assert_eq!(received, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn flush_reestablishes_reorder_buffer_preallocation() {
+        let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
+        let buffer_size = 8;
+        let config = FaultChannelConfig::new(42).with_reorder(1.0, buffer_size);
+        let (fault_tx, _rx) = fault_channel::<u32>(32, config, sink);
+        let cx = test_cx();
+
+        for i in 0..3 {
+            block_on(fault_tx.send(&cx, i)).expect("send failed");
+        }
+        block_on(fault_tx.flush(&cx)).expect("flush failed");
+
+        let cap = fault_tx
+            .reorder_buffer
+            .lock()
+            .expect("reorder buffer poisoned")
+            .capacity();
+        assert!(
+            cap >= buffer_size,
+            "expected reorder buffer capacity >= {buffer_size}, got {cap}"
+        );
     }
 
     #[test]
