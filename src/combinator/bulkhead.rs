@@ -181,11 +181,26 @@ pub struct Bulkhead {
     /// Next queue entry ID.
     next_id: AtomicU64,
 
-    /// Metrics.
-    metrics: RwLock<BulkheadMetrics>,
-
     /// Wait time accumulator for average calculation.
     total_wait_time_ms: AtomicU64,
+
+    /// Total operations executed.
+    total_executed_atomic: AtomicU64,
+
+    /// Total operations queued.
+    total_queued_atomic: AtomicU64,
+
+    /// Total operations rejected.
+    total_rejected_atomic: AtomicU64,
+
+    /// Total operations timed out in queue.
+    total_timeout_atomic: AtomicU64,
+
+    /// Total operations cancelled while queued.
+    total_cancelled_atomic: AtomicU64,
+
+    /// Max queue wait time (ms).
+    max_queue_wait_ms_atomic: AtomicU64,
 }
 
 impl Bulkhead {
@@ -199,8 +214,13 @@ impl Bulkhead {
             available_permits: AtomicU32::new(available),
             queue: RwLock::new(Vec::with_capacity(max_queue)),
             next_id: AtomicU64::new(0),
-            metrics: RwLock::new(BulkheadMetrics::default()),
             total_wait_time_ms: AtomicU64::new(0),
+            total_executed_atomic: AtomicU64::new(0),
+            total_queued_atomic: AtomicU64::new(0),
+            total_rejected_atomic: AtomicU64::new(0),
+            total_timeout_atomic: AtomicU64::new(0),
+            total_cancelled_atomic: AtomicU64::new(0),
+            max_queue_wait_ms_atomic: AtomicU64::new(0),
         }
     }
 
@@ -231,20 +251,29 @@ impl Bulkhead {
         let used_permits =
             self.policy.max_concurrent - self.available_permits.load(Ordering::Acquire);
 
-        let mut m = self.metrics.read().expect("lock poisoned").clone();
-        m.active_permits = used_permits;
-        m.queue_depth = active;
-        m.utilization = if self.policy.max_concurrent > 0 {
-            f64::from(used_permits) / f64::from(self.policy.max_concurrent)
+        let total_executed = self.total_executed_atomic.load(Ordering::Relaxed);
+        let avg_queue_wait_ms = if total_executed > 0 {
+            self.total_wait_time_ms.load(Ordering::Relaxed) as f64 / total_executed as f64
         } else {
             0.0
         };
-        // Compute average lazily instead of per-grant in process_queue.
-        if m.total_executed > 0 {
-            m.avg_queue_wait_ms =
-                self.total_wait_time_ms.load(Ordering::Relaxed) as f64 / m.total_executed as f64;
+
+        BulkheadMetrics {
+            active_permits: used_permits,
+            queue_depth: active,
+            total_executed,
+            total_queued: self.total_queued_atomic.load(Ordering::Relaxed),
+            total_rejected: self.total_rejected_atomic.load(Ordering::Relaxed),
+            total_timeout: self.total_timeout_atomic.load(Ordering::Relaxed),
+            total_cancelled: self.total_cancelled_atomic.load(Ordering::Relaxed),
+            avg_queue_wait_ms,
+            max_queue_wait_ms: self.max_queue_wait_ms_atomic.load(Ordering::Relaxed),
+            utilization: if self.policy.max_concurrent > 0 {
+                f64::from(used_permits) / f64::from(self.policy.max_concurrent)
+            } else {
+                0.0
+            },
         }
-        m
     }
 
     /// Try to acquire permit without waiting.
@@ -297,7 +326,7 @@ impl Bulkhead {
             }
         }
         if timeout_count > 0 {
-            self.metrics.write().expect("lock poisoned").total_timeout += timeout_count;
+            self.total_timeout_atomic.fetch_add(timeout_count, Ordering::Relaxed);
         }
 
         // Find first waiting entry that can be granted
@@ -332,16 +361,8 @@ impl Bulkhead {
                 self.total_wait_time_ms
                     .fetch_add(wait_ms, Ordering::Relaxed);
 
-                {
-                    let mut metrics = self.metrics.write().expect("lock poisoned");
-                    metrics.total_executed += 1;
-                    if wait_ms > metrics.max_queue_wait_ms {
-                        metrics.max_queue_wait_ms = wait_ms;
-                    }
-                    // avg_queue_wait_ms is computed lazily in metrics() from
-                    // total_wait_time_ms and total_executed, avoiding a float
-                    // division on every grant in the hot path.
-                }
+                self.total_executed_atomic.fetch_add(1, Ordering::Relaxed);
+                self.max_queue_wait_ms_atomic.fetch_max(wait_ms, Ordering::Relaxed);
 
                 return Some(entry.id);
             }
@@ -369,11 +390,11 @@ impl Bulkhead {
         // We check total length (including completed-but-unclaimed entries) to
         // prevent unbounded memory growth if the user abandons request IDs.
         if queue.len() >= self.policy.max_queue as usize {
-            let mut metrics = self.metrics.write().expect("lock poisoned");
-            metrics.total_rejected += 1;
+            self.total_rejected_atomic.fetch_add(1, Ordering::Relaxed);
 
             if let Some(ref callback) = self.policy.on_full {
-                callback(&metrics);
+                drop(queue);
+                callback(&self.metrics());
             }
 
             return Err(BulkheadError::QueueFull);
@@ -389,7 +410,7 @@ impl Bulkhead {
             result: None,
         });
 
-        self.metrics.write().expect("lock poisoned").total_queued += 1;
+        self.total_queued_atomic.fetch_add(1, Ordering::Relaxed);
 
         Ok(entry_id)
     }
@@ -458,12 +479,12 @@ impl Bulkhead {
                 queue.remove(idx);
                 drop(queue);
                 self.release_permit(weight);
-                self.metrics.write().expect("lock poisoned").total_cancelled += 1;
+                self.total_cancelled_atomic.fetch_add(1, Ordering::Relaxed);
             } else if entry.result.is_none() {
                 // Still waiting. Mark as cancelled.
                 entry.result = Some(Err(RejectionReason::Cancelled));
                 drop(queue);
-                self.metrics.write().expect("lock poisoned").total_cancelled += 1;
+                self.total_cancelled_atomic.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -520,7 +541,7 @@ impl Bulkhead {
 
         match result {
             Ok(Ok(value)) => {
-                self.metrics.write().expect("lock poisoned").total_executed += 1;
+                self.total_executed_atomic.fetch_add(1, Ordering::Relaxed);
                 Ok(value)
             }
             Ok(Err(e)) => Err(BulkheadError::Inner(e)),
