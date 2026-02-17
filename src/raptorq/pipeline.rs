@@ -104,11 +104,11 @@ impl<T: SymbolSink + Unpin> RaptorQSender<T> {
         let source_count = data
             .len()
             .div_ceil(self.config.encoding.symbol_size as usize);
-        let needed_symbols = source_count + repair_count;
-        let pool_max = self.config.resources.symbol_pool_size.max(needed_symbols);
+        let (pool_initial, pool_max) =
+            sender_pool_bounds(self.config.resources.symbol_pool_size, source_count, repair_count);
         let pool = SymbolPool::new(PoolConfig {
             symbol_size: self.config.encoding.symbol_size,
-            initial_size: self.config.resources.symbol_pool_size,
+            initial_size: pool_initial,
             max_size: pool_max,
             allow_growth: true,
             growth_increment: 64,
@@ -318,6 +318,23 @@ fn compute_repair_count(data_len: usize, symbol_size: usize, overhead: f64) -> u
     total.saturating_sub(source_count).max(1)
 }
 
+/// Derives deterministic symbol-pool bounds for a single send operation.
+///
+/// The lower bound is capped to actual per-object demand so small sends avoid
+/// large pre-allocation bursts, while the upper bound preserves enough headroom
+/// for full source+repair coverage.
+fn sender_pool_bounds(
+    configured_pool_size: usize,
+    source_symbols: usize,
+    repair_symbols: usize,
+) -> (usize, usize) {
+    let needed_symbols = source_symbols.saturating_add(repair_symbols);
+    (
+        configured_pool_size.min(needed_symbols),
+        configured_pool_size.max(needed_symbols),
+    )
+}
+
 /// Synchronous single-poll for sending a symbol.
 #[allow(clippy::result_large_err)]
 fn poll_send_blocking<T: SymbolSink + Unpin>(
@@ -505,6 +522,42 @@ mod tests {
         let data_len = 64;
         let symbol_size = 256;
         assert_eq!(compute_repair_count(data_len, symbol_size, 1.01), 1);
+    }
+
+    #[test]
+    fn sender_pool_bounds_caps_initial_allocation_to_object_need() {
+        let configured_pool_size = 1024;
+        let source_symbols = 256;
+        let repair_symbols = 64;
+
+        let (initial, max) =
+            sender_pool_bounds(configured_pool_size, source_symbols, repair_symbols);
+        assert_eq!(
+            initial, 320,
+            "initial pool should be capped to required source+repair symbols"
+        );
+        assert_eq!(
+            max, configured_pool_size,
+            "max pool should preserve configured ceiling when it exceeds object need"
+        );
+    }
+
+    #[test]
+    fn sender_pool_bounds_preserves_capacity_for_large_objects() {
+        let configured_pool_size = 1024;
+        let source_symbols = 1200;
+        let repair_symbols = 300;
+
+        let (initial, max) =
+            sender_pool_bounds(configured_pool_size, source_symbols, repair_symbols);
+        assert_eq!(
+            initial, configured_pool_size,
+            "initial pool should remain configured when object need exceeds baseline"
+        );
+        assert_eq!(
+            max, 1500,
+            "max pool should expand to full source+repair demand"
+        );
     }
 
     #[test]
