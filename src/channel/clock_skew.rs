@@ -37,7 +37,8 @@
 //! ```
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use crate::evidence_sink::EvidenceSink;
 use crate::lab::chaos::ChaosRng;
@@ -327,7 +328,7 @@ impl SkewClock {
         // Jitter: random symmetric offset.
         if self.config.jitter_probability > 0.0 && self.config.jitter_max_ns > 0 {
             let (should, magnitude, direction) = {
-                let mut rng = self.rng.lock().expect("skew rng lock poisoned");
+                let mut rng = self.rng.lock();
                 let should = rng.should_inject(self.config.jitter_probability);
                 let mag = rng.next_u64() % self.config.jitter_max_ns;
                 let dir = rng.next_u64().is_multiple_of(2);

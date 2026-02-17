@@ -33,7 +33,8 @@
 //! to an [`EvidenceSink`].
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use crate::channel::mpsc::{SendError, Sender};
 use crate::cx::Cx;
@@ -226,7 +227,7 @@ struct CrashState {
 
 impl std::fmt::Debug for CrashController {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let state = self.state.lock().expect("crash state lock poisoned");
+        let state = self.state.lock();
         f.debug_struct("CrashController")
             .field("crashed", &state.crashed)
             .field("exhausted", &state.exhausted)
@@ -256,7 +257,7 @@ impl CrashController {
 
     /// Trigger a crash. Returns `true` if the actor was running and is now crashed.
     pub fn crash(&self) -> bool {
-        let mut state = self.state.lock().expect("crash state lock poisoned");
+        let mut state = self.state.lock();
         if state.crashed || state.exhausted {
             return false;
         }
@@ -273,7 +274,7 @@ impl CrashController {
     /// - The actor is not crashed (already running)
     /// - The restart limit is exhausted
     pub fn restart(&self) -> bool {
-        let mut state = self.state.lock().expect("crash state lock poisoned");
+        let mut state = self.state.lock();
         if !state.crashed || state.exhausted {
             return false;
         }
@@ -301,28 +302,19 @@ impl CrashController {
     /// Returns `true` if the actor is currently crashed.
     #[must_use]
     pub fn is_crashed(&self) -> bool {
-        self.state
-            .lock()
-            .expect("crash state lock poisoned")
-            .crashed
+        self.state.lock().crashed
     }
 
     /// Returns `true` if restart attempts are exhausted.
     #[must_use]
     pub fn is_exhausted(&self) -> bool {
-        self.state
-            .lock()
-            .expect("crash state lock poisoned")
-            .exhausted
+        self.state.lock().exhausted
     }
 
     /// Returns the restart mode configured for this controller.
     #[must_use]
     pub fn restart_mode(&self) -> RestartMode {
-        self.state
-            .lock()
-            .expect("crash state lock poisoned")
-            .restart_mode
+        self.state.lock().restart_mode
     }
 
     /// Returns a reference to the crash statistics.
@@ -420,7 +412,7 @@ impl<T> CrashSender<T> {
         // Check probabilistic crash trigger.
         if self.config.crash_probability > 0.0 {
             let should_crash = {
-                let mut rng = self.rng.lock().expect("crash rng lock poisoned");
+                let mut rng = self.rng.lock();
                 rng.should_inject(self.config.crash_probability)
             };
             if should_crash {

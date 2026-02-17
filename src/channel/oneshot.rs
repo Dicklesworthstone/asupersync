@@ -48,7 +48,8 @@
 use crate::cx::Cx;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 /// Error returned when sending fails.
@@ -220,7 +221,7 @@ impl<T> Sender<T> {
         cx.trace("oneshot::reserve creating permit");
 
         {
-            let mut inner = self.inner.lock().expect("oneshot lock poisoned");
+            let mut inner = self.inner.lock();
             inner.sender_consumed = true;
             inner.permit_outstanding = true;
         }
@@ -246,20 +247,14 @@ impl<T> Sender<T> {
     /// Checks if the receiver has been dropped.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.inner
-            .lock()
-            .expect("oneshot lock poisoned")
-            .receiver_dropped
+        self.inner.lock().receiver_dropped
     }
 }
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         let waker = {
-            let Ok(mut inner) = self.inner.lock() else {
-                // Mutex poisoned — bail to avoid double-panic abort.
-                return;
-            };
+            let mut inner = self.inner.lock();
             if inner.sender_consumed {
                 None
             } else {
@@ -303,7 +298,7 @@ impl<T> SendPermit<T> {
     /// Returns `Err(SendError::Disconnected(value))` if the receiver was dropped.
     pub fn send(mut self, value: T) -> Result<(), SendError<T>> {
         let (result, waker) = {
-            let mut inner = self.inner.lock().expect("oneshot lock poisoned");
+            let mut inner = self.inner.lock();
 
             if inner.receiver_dropped {
                 // Receiver gone, return the value.  Clear stale waker
@@ -338,7 +333,7 @@ impl<T> SendPermit<T> {
     /// will see a `Closed` error when attempting to receive.
     pub fn abort(mut self) {
         let waker = {
-            let mut inner = self.inner.lock().expect("oneshot lock poisoned");
+            let mut inner = self.inner.lock();
             inner.permit_outstanding = false;
             // Take waker under lock, wake outside.
             inner.take_waker()
@@ -352,10 +347,7 @@ impl<T> SendPermit<T> {
     /// Returns `true` if the receiver has been dropped.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.inner
-            .lock()
-            .expect("oneshot lock poisoned")
-            .receiver_dropped
+        self.inner.lock().receiver_dropped
     }
 }
 
@@ -364,10 +356,7 @@ impl<T> Drop for SendPermit<T> {
         if !self.sent {
             // Permit dropped without sending - abort
             let waker = {
-                let Ok(mut inner) = self.inner.lock() else {
-                    // Mutex poisoned — bail to avoid double-panic abort.
-                    return;
-                };
+                let mut inner = self.inner.lock();
                 inner.permit_outstanding = false;
                 inner.take_waker()
             };
@@ -390,7 +379,7 @@ impl<T> Future for RecvFuture<'_, T> {
 
     fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        let mut inner = this.receiver.inner.lock().expect("oneshot lock poisoned");
+        let mut inner = this.receiver.inner.lock();
 
         // 1. Check if value is ready
         if let Some(value) = inner.value.take() {
@@ -445,9 +434,7 @@ impl<T> Drop for RecvFuture<'_, T> {
     fn drop(&mut self) {
         // If dropped while Pending (e.g., select/race loser), clear
         // the registered waker to avoid retaining stale executor state.
-        let Ok(mut inner) = self.receiver.inner.lock() else {
-            return;
-        };
+        let mut inner = self.receiver.inner.lock();
         // Clear only if this future still owns the registered waiter slot.
         if self
             .waiter_id
@@ -503,7 +490,7 @@ impl<T> Receiver<T> {
     /// - `TryRecvError::Empty` if no value is available yet but sender exists
     /// - `TryRecvError::Closed` if the sender was dropped without sending
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        let mut inner = self.inner.lock().expect("oneshot lock poisoned");
+        let mut inner = self.inner.lock();
 
         inner.value.take().map_or_else(
             || {
@@ -520,26 +507,19 @@ impl<T> Receiver<T> {
     /// Returns true if a value is ready to receive.
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        self.inner.lock().expect("oneshot lock poisoned").is_ready()
+        self.inner.lock().is_ready()
     }
 
     /// Returns true if the sender has been dropped without sending.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.inner
-            .lock()
-            .expect("oneshot lock poisoned")
-            .is_closed()
+        self.inner.lock().is_closed()
     }
 }
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        let Ok(mut inner) = self.inner.lock() else {
-            // Mutex poisoned — bail to avoid double-panic abort.
-            return;
-        };
-        inner.receiver_dropped = true;
+        self.inner.lock().receiver_dropped = true;
     }
 }
 
@@ -904,7 +884,7 @@ mod tests {
         );
 
         let registered_before_cancel = {
-            let inner = rx.inner.lock().expect("oneshot lock poisoned");
+            let inner = rx.inner.lock();
             inner.waker.is_some()
         };
         crate::assert_with_log!(
@@ -924,7 +904,7 @@ mod tests {
         );
 
         let registered_after_cancel = {
-            let inner = rx.inner.lock().expect("oneshot lock poisoned");
+            let inner = rx.inner.lock();
             inner.waker.is_some()
         };
         crate::assert_with_log!(
@@ -954,7 +934,7 @@ mod tests {
         let first = fut.as_mut().poll(&mut task_cx);
         assert!(matches!(first, Poll::Pending));
         assert!(
-            rx.inner.lock().unwrap().waker.is_some(),
+            rx.inner.lock().waker.is_some(),
             "waker should be registered after Pending"
         );
 
@@ -970,7 +950,7 @@ mod tests {
 
         // Waker must be cleared
         assert!(
-            rx.inner.lock().unwrap().waker.is_none(),
+            rx.inner.lock().waker.is_none(),
             "waker should be cleared after successful recv"
         );
 
@@ -991,7 +971,7 @@ mod tests {
         // First poll: Pending
         let first = fut.as_mut().poll(&mut task_cx);
         assert!(matches!(first, Poll::Pending));
-        assert!(rx.inner.lock().unwrap().waker.is_some());
+        assert!(rx.inner.lock().waker.is_some());
 
         // Drop sender → channel closes
         drop(tx);
@@ -1005,7 +985,7 @@ mod tests {
 
         // Waker must be cleared
         assert!(
-            rx.inner.lock().unwrap().waker.is_none(),
+            rx.inner.lock().waker.is_none(),
             "waker should be cleared after Closed recv"
         );
 
@@ -1031,7 +1011,7 @@ mod tests {
 
         // Waker was cleared by RecvFuture::Drop
         assert!(
-            tx.inner.lock().unwrap().waker.is_none(),
+            tx.inner.lock().waker.is_none(),
             "RecvFuture::Drop should clear stale waker"
         );
 
@@ -1053,7 +1033,7 @@ mod tests {
 
         // Poison the mutex.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = tx.inner.lock().expect("lock");
+            let _guard = tx.inner.lock();
             panic!("intentional poison");
         }));
 
@@ -1072,7 +1052,7 @@ mod tests {
 
         // Poison the mutex.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = permit.inner.lock().expect("lock");
+            let _guard = permit.inner.lock();
             panic!("intentional poison");
         }));
 
@@ -1088,7 +1068,7 @@ mod tests {
 
         // Poison the mutex.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = tx.inner.lock().expect("lock");
+            let _guard = tx.inner.lock();
             panic!("intentional poison");
         }));
 
@@ -1112,7 +1092,7 @@ mod tests {
             let poll = fut.as_mut().poll(&mut task_cx);
             assert!(matches!(poll, Poll::Pending));
             assert!(
-                rx.inner.lock().unwrap().waker.is_some(),
+                rx.inner.lock().waker.is_some(),
                 "waker registered after Pending"
             );
             // fut dropped here
@@ -1120,7 +1100,7 @@ mod tests {
 
         // Waker should be cleared by RecvFuture::Drop
         assert!(
-            rx.inner.lock().unwrap().waker.is_none(),
+            rx.inner.lock().waker.is_none(),
             "waker cleared after RecvFuture drop"
         );
 
