@@ -598,7 +598,7 @@ enum LabJoinState {
 
 struct SharedLabInner {
     handle: TaskHandle<BTreeSet<String>>,
-    state: std::sync::Mutex<LabJoinState>,
+    state: parking_lot::Mutex<LabJoinState>,
 }
 
 #[derive(Clone)]
@@ -611,7 +611,7 @@ impl SharedLabHandle {
         Self {
             inner: std::sync::Arc::new(SharedLabInner {
                 handle,
-                state: std::sync::Mutex::new(LabJoinState::Empty),
+                state: parking_lot::Mutex::new(LabJoinState::Empty),
             }),
         }
     }
@@ -620,7 +620,7 @@ impl SharedLabHandle {
         let cx = crate::cx::Cx::current().expect("cx set");
         let i_am_joiner;
         {
-            let mut state = self.inner.state.lock().unwrap();
+            let mut state = self.inner.state.lock();
             match &*state {
                 LabJoinState::Ready(result) => return result.clone(),
                 LabJoinState::InFlight => {
@@ -636,12 +636,12 @@ impl SharedLabHandle {
 
         if i_am_joiner {
             let result = self.inner.handle.join(&cx).await.unwrap_or_default();
-            *self.inner.state.lock().unwrap() = LabJoinState::Ready(result.clone());
+            *self.inner.state.lock() = LabJoinState::Ready(result.clone());
             result
         } else {
             loop {
                 {
-                    let state = self.inner.state.lock().unwrap();
+                    let state = self.inner.state.lock();
                     if let LabJoinState::Ready(result) = &*state {
                         return result.clone();
                     }
@@ -655,7 +655,7 @@ impl SharedLabHandle {
     }
 
     fn try_join_probe(&self) -> Option<BTreeSet<String>> {
-        let mut state = self.inner.state.lock().unwrap();
+        let mut state = self.inner.state.lock();
         match &*state {
             LabJoinState::Ready(result) => Some(result.clone()),
             LabJoinState::InFlight => None,
@@ -922,7 +922,7 @@ fn spawn_lab_race(
 
         // Cache winner result in SharedLabHandle so other DAG parents
         // that share this child (diamond patterns) see the value.
-        *child_handles[winner_idx].inner.state.lock().unwrap() =
+        *child_handles[winner_idx].inner.state.lock() =
             LabJoinState::Ready(winner_result.clone());
 
         // Drain losers: wait for each non-winner to observe cancellation

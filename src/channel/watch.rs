@@ -1110,7 +1110,7 @@ mod tests {
         }
 
         // The waiters vec should have exactly 1 entry, not 100.
-        let waiter_count = tx.inner.waiters.lock().unwrap().len();
+        let waiter_count = tx.inner.waiters.lock().len();
         crate::assert_with_log!(
             waiter_count == 1,
             "waiter count after repeated polls",
@@ -1124,7 +1124,7 @@ mod tests {
         let value = *rx.borrow();
         crate::assert_with_log!(value == 42, "value after send", 42, value);
 
-        let waiter_count = tx.inner.waiters.lock().unwrap().len();
+        let waiter_count = tx.inner.waiters.lock().len();
         crate::assert_with_log!(
             waiter_count == 0,
             "waiter count after drain",
@@ -1151,7 +1151,7 @@ mod tests {
             // future dropped here
         }
 
-        let waiter_count = tx.inner.waiters.lock().unwrap().len();
+        let waiter_count = tx.inner.waiters.lock().len();
         crate::assert_with_log!(
             waiter_count == 1,
             "stale entries pruned across cancel cycles",
@@ -1161,7 +1161,7 @@ mod tests {
 
         // A single send drains all stale entries.
         tx.send(1).expect("send failed");
-        let waiter_count = tx.inner.waiters.lock().unwrap().len();
+        let waiter_count = tx.inner.waiters.lock().len();
         crate::assert_with_log!(waiter_count == 0, "all drained after send", 0, waiter_count);
         crate::test_complete!("cancel_and_recreate_bounded_waiters");
     }
@@ -1190,7 +1190,7 @@ mod tests {
             assert!(result.is_pending());
         }
 
-        let waiter_count = tx.inner.waiters.lock().unwrap().len();
+        let waiter_count = tx.inner.waiters.lock().len();
         crate::assert_with_log!(
             waiter_count == 1,
             "dropped receiver waiter pruned",
@@ -1214,12 +1214,12 @@ mod tests {
             assert!(result.is_pending());
         }
 
-        let waiter_count = tx.inner.waiters.lock().unwrap().len();
+        let waiter_count = tx.inner.waiters.lock().len();
         crate::assert_with_log!(waiter_count == 1, "waiter registered", 1, waiter_count);
 
         drop(rx);
 
-        let waiter_count = tx.inner.waiters.lock().unwrap().len();
+        let waiter_count = tx.inner.waiters.lock().len();
         crate::assert_with_log!(
             waiter_count == 0,
             "waiter removed on receiver drop",
