@@ -3603,7 +3603,7 @@ mod golden_vectors {
             expected_repair_hash: 0xa2aa_4bdd_ff69_3720,
             expected_peeled: 9,
             expected_inactivated: 18,
-            expected_gauss_ops: 415,
+            expected_gauss_ops: 247,
         },
         E2eVector {
             scenario_id: "RQ-D1-E2E-002",
@@ -3625,7 +3625,7 @@ mod golden_vectors {
             expected_repair_hash: 0x3f33_232c_4a7c_a3b1,
             expected_peeled: 21,
             expected_inactivated: 18,
-            expected_gauss_ops: 400,
+            expected_gauss_ops: 250,
         },
         E2eVector {
             scenario_id: "RQ-D1-E2E-004",

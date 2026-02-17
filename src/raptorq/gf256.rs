@@ -772,12 +772,10 @@ fn gf256_add_slice_aarch64_neon(dst: &mut [u8], src: &[u8]) {
     gf256_add_slice_scalar(dst, src);
 }
 
-/// Minimum slice length to amortise building a 256-byte multiplication table.
-///
-/// The table build is 255 lookups; above this threshold the per-element
-/// savings from single-lookup (vs. branch + double-lookup) outweigh the
-/// up-front cost.
+/// Minimum slice length to amortize SIMD nibble-table setup in mul paths.
 const MUL_TABLE_THRESHOLD: usize = 64;
+/// Minimum slice length to amortize SIMD nibble-table setup in addmul paths.
+const ADDMUL_TABLE_THRESHOLD: usize = 64;
 
 #[inline]
 fn mul_table_for(c: Gf256) -> &'static [u8; 256] {
@@ -888,17 +886,12 @@ fn gf256_mul_slice_scalar(dst: &mut [u8], c: Gf256) {
     if c == Gf256::ONE {
         return;
     }
+    let table = mul_table_for(c);
     if dst.len() >= MUL_TABLE_THRESHOLD {
         let nib = NibbleTables::for_scalar(c);
-        let table = mul_table_for(c);
         mul_with_table_wide(dst, &nib, table);
     } else {
-        let log_c = LOG[c.0 as usize] as usize;
-        for d in dst.iter_mut() {
-            if *d != 0 {
-                *d = EXP[LOG[*d as usize] as usize + log_c];
-            }
-        }
+        mul_with_table_scalar(dst, table);
     }
 }
 
@@ -972,13 +965,29 @@ fn mul_with_table_wide(dst: &mut [u8], nib: &NibbleTables, table: &[u8; 256]) {
 
 #[cfg(not(feature = "simd-intrinsics"))]
 fn mul_with_table_wide(dst: &mut [u8], _nib: &NibbleTables, table: &[u8; 256]) {
-    for d in dst.iter_mut() {
+    let mut chunks = dst.chunks_exact_mut(8);
+    for chunk in chunks.by_ref() {
+        let mapped = [
+            table[chunk[0] as usize],
+            table[chunk[1] as usize],
+            table[chunk[2] as usize],
+            table[chunk[3] as usize],
+            table[chunk[4] as usize],
+            table[chunk[5] as usize],
+            table[chunk[6] as usize],
+            table[chunk[7] as usize],
+        ];
+        chunk.copy_from_slice(&mapped);
+    }
+    for d in chunks.into_remainder() {
         *d = table[*d as usize];
     }
 }
 
-/// Scalar inner loop for `gf256_mul_slice` (retained for test comparison).
-#[cfg(test)]
+/// Table-driven scalar inner loop for `gf256_mul_slice`.
+///
+/// Used by the production scalar path for short slices and by tests as the
+/// scalar reference against the wide table kernel.
 fn mul_with_table_scalar(dst: &mut [u8], table: &[u8; 256]) {
     let mut chunks = dst.chunks_exact_mut(8);
     for chunk in chunks.by_ref() {
@@ -1024,13 +1033,35 @@ fn addmul_with_table_wide(dst: &mut [u8], src: &[u8], nib: &NibbleTables, table:
 
 #[cfg(not(feature = "simd-intrinsics"))]
 fn addmul_with_table_wide(dst: &mut [u8], src: &[u8], _nib: &NibbleTables, table: &[u8; 256]) {
-    for (d, s) in dst.iter_mut().zip(src.iter().copied()) {
-        *d ^= table[s as usize];
+    let mut d_chunks = dst.chunks_exact_mut(8);
+    let mut s_chunks = src.chunks_exact(8);
+    for (d_chunk, s_chunk) in d_chunks.by_ref().zip(s_chunks.by_ref()) {
+        let d_word = u64::from_ne_bytes(d_chunk[..].try_into().unwrap());
+        let s_word = u64::from_ne_bytes([
+            table[s_chunk[0] as usize],
+            table[s_chunk[1] as usize],
+            table[s_chunk[2] as usize],
+            table[s_chunk[3] as usize],
+            table[s_chunk[4] as usize],
+            table[s_chunk[5] as usize],
+            table[s_chunk[6] as usize],
+            table[s_chunk[7] as usize],
+        ]);
+        d_chunk.copy_from_slice(&(d_word ^ s_word).to_ne_bytes());
+    }
+    for (d, s) in d_chunks
+        .into_remainder()
+        .iter_mut()
+        .zip(s_chunks.remainder())
+    {
+        *d ^= table[*s as usize];
     }
 }
 
-/// Scalar inner loop for `gf256_addmul_slice` (retained for test comparison).
-#[cfg(test)]
+/// Table-driven scalar inner loop for `gf256_addmul_slice`.
+///
+/// Used by the production scalar path for short slices and by tests as the
+/// scalar reference against the wide table kernel.
 fn addmul_with_table_scalar(dst: &mut [u8], src: &[u8], table: &[u8; 256]) {
     let mut d_chunks = dst.chunks_exact_mut(8);
     let mut s_chunks = src.chunks_exact(8);
@@ -1060,10 +1091,8 @@ fn addmul_with_table_scalar(dst: &mut [u8], src: &[u8], table: &[u8; 256]) {
 
 /// Multiply-accumulate: `dst[i] += c * src[i]` in GF(256).
 ///
-/// For slices >= 64 bytes the hot path builds a 256-entry multiplication
-/// table and processes 8 bytes at a time via `u64` wide-XOR
-/// (`addmul_with_table_wide`). Smaller slices fall back to scalar
-/// log/exp lookups.
+/// For slices >= `ADDMUL_TABLE_THRESHOLD` bytes the hot path uses wide table
+/// kernels. Smaller slices use scalar table lookups.
 ///
 /// # Panics
 ///
@@ -1155,8 +1184,6 @@ pub fn gf256_addmul_slices2(
 }
 
 fn gf256_addmul_slice_scalar(dst: &mut [u8], src: &[u8], c: Gf256) {
-    const ADDMUL_TABLE_THRESHOLD: usize = 64;
-
     assert_eq!(dst.len(), src.len(), "slice length mismatch");
     if c.is_zero() {
         return;
@@ -1165,18 +1192,13 @@ fn gf256_addmul_slice_scalar(dst: &mut [u8], src: &[u8], c: Gf256) {
         gf256_add_slice_scalar(dst, src);
         return;
     }
+    let table = mul_table_for(c);
     if src.len() >= ADDMUL_TABLE_THRESHOLD {
         let nib = NibbleTables::for_scalar(c);
-        let table = mul_table_for(c);
         addmul_with_table_wide(dst, src, &nib, table);
         return;
     }
-    let log_c = LOG[c.0 as usize] as usize;
-    for (d, s) in dst.iter_mut().zip(src.iter()) {
-        if *s != 0 {
-            *d ^= EXP[LOG[*s as usize] as usize + log_c];
-        }
-    }
+    addmul_with_table_scalar(dst, src, table);
 }
 
 #[cfg(all(

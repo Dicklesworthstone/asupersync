@@ -373,6 +373,43 @@ fn dense_col_index(col_to_dense: &[usize], col: usize) -> Option<usize> {
     Some(dense_col)
 }
 
+fn sparse_first_dense_columns(
+    equations: &[Equation],
+    dense_rows: &[usize],
+    unsolved: &[usize],
+) -> Vec<usize> {
+    if unsolved.len() < 2 {
+        return unsolved.to_vec();
+    }
+
+    let col_to_dense = build_dense_col_index_map(unsolved);
+    let mut support = vec![0usize; unsolved.len()];
+
+    for &eq_idx in dense_rows {
+        for &(col, coef) in &equations[eq_idx].terms {
+            if coef.is_zero() {
+                continue;
+            }
+            if let Some(dense_col) = dense_col_index(&col_to_dense, col) {
+                support[dense_col] += 1;
+            }
+        }
+    }
+
+    let mut ordered: Vec<(usize, usize)> = unsolved
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(dense_col, col)| (col, support[dense_col]))
+        .collect();
+
+    // Sparse-first ordering shrinks expected fill-in while remaining deterministic.
+    ordered.sort_by(|(col_a, support_a), (col_b, support_b)| {
+        support_a.cmp(support_b).then_with(|| col_a.cmp(col_b))
+    });
+    ordered.into_iter().map(|(col, _)| col).collect()
+}
+
 fn failure_reason_with_trace(err: &DecodeError, elimination: &EliminationTrace) -> FailureReason {
     match err {
         DecodeError::SingularMatrix { row } => FailureReason::SingularMatrix {
@@ -389,6 +426,8 @@ const HARD_REGIME_NEAR_SQUARE_EXTRA_ROWS: usize = 2;
 const BLOCK_SCHUR_MIN_COLS: usize = 12;
 const BLOCK_SCHUR_MIN_DENSITY_PERCENT: usize = 45;
 const BLOCK_SCHUR_TRAILING_COLS: usize = 4;
+const HYBRID_SPARSE_COST_NUMERATOR: usize = 3;
+const HYBRID_SPARSE_COST_DENOMINATOR: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HardRegimePlan {
@@ -422,6 +461,28 @@ fn row_nonzero_count(a: &[Gf256], n_cols: usize, row: usize) -> usize {
         .iter()
         .filter(|coef| !coef.is_zero())
         .count()
+}
+
+#[inline]
+fn should_use_sparse_row_update(pivot_nnz: usize, n_cols: usize) -> bool {
+    if n_cols == 0 {
+        return false;
+    }
+
+    // Explicit cost model: compare sparse-vs-dense column-touch counts with
+    // a conservative overhead multiplier for sparse index iteration.
+    pivot_nnz.saturating_mul(HYBRID_SPARSE_COST_DENOMINATOR)
+        <= n_cols.saturating_mul(HYBRID_SPARSE_COST_NUMERATOR)
+}
+
+fn pivot_nonzero_columns(pivot_row: &[Gf256], n_cols: usize) -> Vec<usize> {
+    let mut cols = Vec::with_capacity(n_cols.min(32));
+    for (idx, coef) in pivot_row.iter().take(n_cols).enumerate() {
+        if !coef.is_zero() {
+            cols.push(idx);
+        }
+    }
+    cols
 }
 
 fn should_activate_hard_regime(n_rows: usize, n_cols: usize, a: &[Gf256]) -> bool {
@@ -954,10 +1015,13 @@ impl InactivationDecoder {
             state.stats.inactivated += 1;
         }
 
+        // Reorder dense elimination columns deterministically by sparse support.
+        let dense_cols = sparse_first_dense_columns(&state.equations, &dense_rows, &unsolved);
+
         // Build dense submatrix for Gaussian elimination
         // Rows = unused equations, Columns = unsolved columns
         let n_rows = dense_rows.len();
-        let n_cols = unsolved.len();
+        let n_cols = dense_cols.len();
         state.stats.dense_core_rows = n_rows;
         state.stats.dense_core_cols = n_cols;
 
@@ -970,7 +1034,7 @@ impl InactivationDecoder {
 
         // Column index mapping: unsolved column -> dense index.
         // Dense vector lookup avoids per-term HashMap probes in this hot path.
-        let col_to_dense = build_dense_col_index_map(&unsolved);
+        let col_to_dense = build_dense_col_index_map(&dense_cols);
 
         // Build flat row-major dense matrix A and RHS vector b.
         // Flat layout avoids per-row heap allocation and improves cache locality.
@@ -1018,7 +1082,7 @@ impl InactivationDecoder {
                 let pivot =
                     select_pivot_row(&a, n_rows, n_cols, col, &row_used, hard_regime, hard_plan);
                 let Some(prow) = pivot else {
-                    elimination_error = Some(singular_matrix_error(&unsolved, col));
+                    elimination_error = Some(singular_matrix_error(&dense_cols, col));
                     break;
                 };
 
@@ -1041,6 +1105,12 @@ impl InactivationDecoder {
                 // Copy pivot row into reusable buffers (no heap allocation)
                 pivot_buf[..n_cols].copy_from_slice(&a[prow_off..prow_off + n_cols]);
                 pivot_rhs[..symbol_size].copy_from_slice(&b[prow]);
+                let pivot_nnz = row_nonzero_count(&a, n_cols, prow);
+                let sparse_cols = if should_use_sparse_row_update(pivot_nnz, n_cols) {
+                    Some(pivot_nonzero_columns(&pivot_buf[..n_cols], n_cols))
+                } else {
+                    None
+                };
 
                 // Eliminate column in all other rows.
                 for (row, rhs) in b.iter_mut().enumerate().take(n_rows) {
@@ -1052,8 +1122,14 @@ impl InactivationDecoder {
                     if factor.is_zero() {
                         continue;
                     }
-                    for c in 0..n_cols {
-                        a[row_off + c] += factor * pivot_buf[c];
+                    if let Some(cols) = sparse_cols.as_ref() {
+                        for &c in cols {
+                            a[row_off + c] += factor * pivot_buf[c];
+                        }
+                    } else {
+                        for c in 0..n_cols {
+                            a[row_off + c] += factor * pivot_buf[c];
+                        }
                     }
                     gf256_addmul_slice(rhs, &pivot_rhs[..symbol_size], factor);
                     gauss_ops += 1;
@@ -1095,7 +1171,7 @@ impl InactivationDecoder {
         };
 
         // Extract solutions: move RHS vectors instead of cloning
-        for (dense_col, &col) in unsolved.iter().enumerate() {
+        for (dense_col, &col) in dense_cols.iter().enumerate() {
             let prow = pivot_row[dense_col];
             if prow < n_rows {
                 state.solved[col] = Some(std::mem::take(&mut b[prow]));
@@ -1150,10 +1226,13 @@ impl InactivationDecoder {
             trace.record_inactivation(col);
         }
 
+        // Reorder dense elimination columns deterministically by sparse support.
+        let dense_cols = sparse_first_dense_columns(&state.equations, &dense_rows, &unsolved);
+
         // Build dense submatrix for Gaussian elimination
         // Rows = unused equations, Columns = unsolved columns
         let n_rows = dense_rows.len();
-        let n_cols = unsolved.len();
+        let n_cols = dense_cols.len();
         state.stats.dense_core_rows = n_rows;
         state.stats.dense_core_cols = n_cols;
 
@@ -1166,7 +1245,7 @@ impl InactivationDecoder {
 
         // Column index mapping: unsolved column -> dense index.
         // Dense vector lookup avoids per-term HashMap probes in this hot path.
-        let col_to_dense = build_dense_col_index_map(&unsolved);
+        let col_to_dense = build_dense_col_index_map(&dense_cols);
 
         // Build flat row-major dense matrix A and RHS vector b.
         // Move (take) RHS data from state instead of cloning to avoid O(n_rows * symbol_size)
@@ -1217,7 +1296,7 @@ impl InactivationDecoder {
                 let pivot =
                     select_pivot_row(&a, n_rows, n_cols, col, &row_used, hard_regime, hard_plan);
                 let Some(prow) = pivot else {
-                    elimination_error = Some(singular_matrix_error(&unsolved, col));
+                    elimination_error = Some(singular_matrix_error(&dense_cols, col));
                     break;
                 };
 
@@ -1228,7 +1307,7 @@ impl InactivationDecoder {
                     markowitz_pivots += 1;
                 }
                 // Record pivot in proof trace (use original column index)
-                trace.record_pivot(unsolved[col], prow);
+                trace.record_pivot(dense_cols[col], prow);
 
                 // Scale pivot row so a[prow][col] = 1
                 let prow_off = prow * n_cols;
@@ -1242,6 +1321,12 @@ impl InactivationDecoder {
                 // Copy pivot row into reusable buffers
                 pivot_buf[..n_cols].copy_from_slice(&a[prow_off..prow_off + n_cols]);
                 pivot_rhs[..symbol_size].copy_from_slice(&b[prow]);
+                let pivot_nnz = row_nonzero_count(&a, n_cols, prow);
+                let sparse_cols = if should_use_sparse_row_update(pivot_nnz, n_cols) {
+                    Some(pivot_nonzero_columns(&pivot_buf[..n_cols], n_cols))
+                } else {
+                    None
+                };
 
                 // Eliminate column in all other rows.
                 for (row, rhs) in b.iter_mut().enumerate().take(n_rows) {
@@ -1253,8 +1338,14 @@ impl InactivationDecoder {
                     if factor.is_zero() {
                         continue;
                     }
-                    for c in 0..n_cols {
-                        a[row_off + c] += factor * pivot_buf[c];
+                    if let Some(cols) = sparse_cols.as_ref() {
+                        for &c in cols {
+                            a[row_off + c] += factor * pivot_buf[c];
+                        }
+                    } else {
+                        for c in 0..n_cols {
+                            a[row_off + c] += factor * pivot_buf[c];
+                        }
                     }
                     gf256_addmul_slice(rhs, &pivot_rhs[..symbol_size], factor);
                     gauss_ops += 1;
@@ -1316,7 +1407,7 @@ impl InactivationDecoder {
         };
 
         // Extract solutions: move RHS vectors instead of cloning
-        for (dense_col, &col) in unsolved.iter().enumerate() {
+        for (dense_col, &col) in dense_cols.iter().enumerate() {
             let prow = pivot_row[dense_col];
             if prow < n_rows {
                 state.solved[col] = Some(std::mem::take(&mut b[prow]));
@@ -1507,6 +1598,45 @@ mod tests {
         assert_eq!(dense_col_index(&col_to_dense, 11), Some(2));
         assert_eq!(dense_col_index(&col_to_dense, 3), None);
         assert_eq!(dense_col_index(&col_to_dense, 99), None);
+    }
+
+    #[test]
+    fn sparse_first_dense_columns_orders_by_support_then_column() {
+        let equations = vec![
+            Equation::new(vec![7, 11], vec![Gf256::ONE, Gf256::ONE]),
+            Equation::new(vec![2, 7], vec![Gf256::ONE, Gf256::ONE]),
+            Equation::new(vec![7], vec![Gf256::ONE]),
+            Equation::new(vec![2], vec![Gf256::ONE]),
+        ];
+        let dense_rows = vec![0, 1, 2, 3];
+        let unsolved = vec![7, 2, 11];
+
+        let ordered = sparse_first_dense_columns(&equations, &dense_rows, &unsolved);
+
+        // supports: col 11 -> 1, col 2 -> 2, col 7 -> 3
+        assert_eq!(ordered, vec![11, 2, 7]);
+    }
+
+    #[test]
+    fn hybrid_cost_model_prefers_sparse_for_low_support() {
+        assert!(should_use_sparse_row_update(3, 8));
+        assert!(should_use_sparse_row_update(6, 10));
+        assert!(!should_use_sparse_row_update(7, 10));
+        assert!(!should_use_sparse_row_update(1, 0));
+    }
+
+    #[test]
+    fn pivot_nonzero_columns_returns_stable_sorted_positions() {
+        let row = vec![
+            Gf256::ZERO,
+            Gf256::ONE,
+            Gf256::ZERO,
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ZERO,
+        ];
+        let cols = pivot_nonzero_columns(&row, row.len());
+        assert_eq!(cols, vec![1, 3, 4]);
     }
 
     fn make_source_data(k: usize, symbol_size: usize) -> Vec<Vec<u8>> {
