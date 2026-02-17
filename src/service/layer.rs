@@ -60,6 +60,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
     use crate::service::{Service, ServiceBuilder, ServiceExt};
     use std::future::Future;
     use std::pin::Pin;
@@ -158,11 +159,11 @@ mod tests {
     #[derive(Clone)]
     struct TrackingLayer {
         id: u32,
-        order: Arc<std::sync::Mutex<Vec<u32>>>,
+        order: Arc<Mutex<Vec<u32>>>,
     }
 
     impl TrackingLayer {
-        fn new(id: u32, order: Arc<std::sync::Mutex<Vec<u32>>>) -> Self {
+        fn new(id: u32, order: Arc<Mutex<Vec<u32>>>) -> Self {
             Self { id, order }
         }
     }
@@ -170,14 +171,14 @@ mod tests {
     struct TrackingService<S> {
         inner: S,
         id: u32,
-        call_order: Arc<std::sync::Mutex<Vec<u32>>>,
+        call_order: Arc<Mutex<Vec<u32>>>,
     }
 
     impl<S> Layer<S> for TrackingLayer {
         type Service = TrackingService<S>;
 
         fn layer(&self, inner: S) -> Self::Service {
-            self.order.lock().unwrap().push(self.id);
+            self.order.lock().push(self.id);
             TrackingService {
                 inner,
                 id: self.id,
@@ -200,7 +201,7 @@ mod tests {
         }
 
         fn call(&mut self, req: Request) -> Self::Future {
-            self.call_order.lock().unwrap().push(self.id);
+            self.call_order.lock().push(self.id);
             TrackingFuture(self.inner.call(req))
         }
     }
@@ -299,7 +300,7 @@ mod tests {
 
     #[test]
     fn stack_applies_inner_then_outer() {
-        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let order = Arc::new(Mutex::new(Vec::new()));
         let inner_layer = TrackingLayer::new(1, Arc::clone(&order));
         let outer_layer = TrackingLayer::new(2, Arc::clone(&order));
 
@@ -307,7 +308,7 @@ mod tests {
         let _svc = stack.layer(EchoService);
 
         let applied = {
-            let applied = order.lock().unwrap();
+            let applied = order.lock();
             applied.clone()
         };
         assert_eq!(
@@ -319,7 +320,7 @@ mod tests {
 
     #[test]
     fn service_builder_applies_layers_in_order() {
-        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let order = Arc::new(Mutex::new(Vec::new()));
 
         let _svc = ServiceBuilder::new()
             .layer(TrackingLayer::new(1, Arc::clone(&order)))
@@ -328,7 +329,7 @@ mod tests {
             .service(EchoService);
 
         let applied = {
-            let applied = order.lock().unwrap();
+            let applied = order.lock();
             applied.clone()
         };
         assert_eq!(
@@ -342,7 +343,7 @@ mod tests {
     fn stack_call_order_outer_wraps_inner() {
         // With Stack(inner=A, outer=B), calling the composed service
         // invokes B.call first (outermost), then A.call, then the base service.
-        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let order = Arc::new(Mutex::new(Vec::new()));
 
         let stack = Stack::new(
             TrackingLayer::new(1, Arc::clone(&order)),
@@ -351,11 +352,11 @@ mod tests {
         let mut svc = stack.layer(EchoService);
 
         // Clear the layer-application order, we only care about call order now.
-        order.lock().unwrap().clear();
+        order.lock().clear();
 
         let _fut = svc.call(42);
         let calls = {
-            let calls = order.lock().unwrap();
+            let calls = order.lock();
             calls.clone()
         };
         // Outer (2) call runs first, then inner (1)
@@ -442,7 +443,7 @@ mod tests {
 
     #[test]
     fn error_propagates_through_layer_stack() {
-        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let order = Arc::new(Mutex::new(Vec::new()));
         let stack = Stack::new(
             TrackingLayer::new(1, Arc::clone(&order)),
             TrackingLayer::new(2, Arc::clone(&order)),

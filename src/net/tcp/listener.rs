@@ -252,11 +252,7 @@ mod tests {
 
         let poll = listener.poll_accept(&mut cx);
         assert!(matches!(poll, Poll::Pending));
-        let registered = listener
-            .registration
-            .lock()
-            .expect("lock poisoned")
-            .is_some();
+        let registered = listener.registration.lock().is_some();
         assert!(registered);
     }
 
