@@ -1727,7 +1727,7 @@ impl ThreeLaneWorker {
                 let waiter_priority = record
                     .cx_inner
                     .as_ref()
-                    .and_then(|inner| inner.read().ok().map(|cx| cx.budget.priority))
+                    .map(|inner| inner.read().budget.priority)
                     .unwrap_or_default();
                 if record.wake_state.notify() {
                     if record.is_local() {
@@ -1848,7 +1848,7 @@ impl ThreeLaneWorker {
                 let priority = record
                     .cx_inner
                     .as_ref()
-                    .and_then(|inner| inner.read().ok().map(|cx| cx.budget.priority))
+                    .map(|inner| inner.read().budget.priority)
                     .unwrap_or_default();
                 let task_cx = record.cx.clone();
                 let cx_inner = record.cx_inner.clone();

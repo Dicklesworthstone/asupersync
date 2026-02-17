@@ -2439,7 +2439,7 @@ impl TaskSnapshot {
         let poll_count = record
             .cx_inner
             .as_ref()
-            .and_then(|inner| inner.read().ok())
+            .map(|inner| inner.read())
             .map(|inner| inner.budget_baseline.poll_quota)
             .map_or(0, |baseline| {
                 u64::from(baseline.saturating_sub(record.polls_remaining))
