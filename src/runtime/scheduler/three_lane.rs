@@ -2831,7 +2831,7 @@ mod tests {
             Budget::INFINITE,
         )));
         {
-            let mut guard = cx_inner.write().expect("lock poisoned");
+            let mut guard = cx_inner.write();
             guard.cancel_requested = true;
             guard.cancel_reason = Some(CancelReason::timeout());
         }
@@ -3012,7 +3012,7 @@ mod tests {
             Budget::INFINITE,
         )));
         {
-            let mut guard = cx_inner.write().expect("cx_inner lock poisoned");
+            let mut guard = cx_inner.write();
             guard.cancel_requested = true;
             guard.cancel_reason = Some(CancelReason::new(CancelKind::User));
         }
@@ -5014,7 +5014,7 @@ mod tests {
         }
         // Set cancel_acknowledged.
         {
-            let mut guard = cx_inner.write().unwrap();
+            let mut guard = cx_inner.write();
             guard.cancel_acknowledged = true;
         }
 
@@ -5026,7 +5026,7 @@ mod tests {
         assert!(result, "cancel ack should be consumed from task table");
 
         // Flag should be cleared.
-        let ack = cx_inner.read().unwrap().cancel_acknowledged;
+        let ack = cx_inner.read().cancel_acknowledged;
         assert!(!ack, "cancel_acknowledged should be cleared");
     }
 }
