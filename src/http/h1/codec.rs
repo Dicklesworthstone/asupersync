@@ -229,20 +229,21 @@ fn is_valid_header_name_byte(b: u8) -> bool {
 }
 
 fn parse_header_line_bounds(line_bytes: &[u8]) -> Result<(usize, usize, usize), HttpError> {
-    let colon = line_bytes
-        .iter()
-        .position(|&b| b == b':')
-        .ok_or(HttpError::BadHeader)?;
-    let raw_name = &line_bytes[..colon];
-
-    // Header field names cannot be empty or surrounded by whitespace.
-    if raw_name.is_empty()
-        || raw_name.first().is_some_and(u8::is_ascii_whitespace)
-        || raw_name.last().is_some_and(u8::is_ascii_whitespace)
-    {
-        return Err(HttpError::InvalidHeaderName);
+    let mut colon = None;
+    let mut invalid_name = false;
+    for (idx, &b) in line_bytes.iter().enumerate() {
+        if b == b':' {
+            colon = Some(idx);
+            break;
+        }
+        if !is_valid_header_name_byte(b) {
+            invalid_name = true;
+        }
     }
-    if raw_name.iter().any(|&b| !is_valid_header_name_byte(b)) {
+    let colon = colon.ok_or(HttpError::BadHeader)?;
+
+    // Header field names cannot be empty.
+    if colon == 0 || invalid_name {
         return Err(HttpError::InvalidHeaderName);
     }
 
@@ -254,11 +255,10 @@ fn parse_header_line_bounds(line_bytes: &[u8]) -> Result<(usize, usize, usize), 
     while value_end > value_start && line_bytes[value_end - 1].is_ascii_whitespace() {
         value_end -= 1;
     }
-    if line_bytes[value_start..value_end]
-        .iter()
-        .any(|&b| b == b'\r' || b == b'\n')
-    {
-        return Err(HttpError::InvalidHeaderValue);
+    for &b in &line_bytes[value_start..value_end] {
+        if b == b'\r' || b == b'\n' {
+            return Err(HttpError::InvalidHeaderValue);
+        }
     }
 
     Ok((colon, value_start, value_end))
