@@ -33,7 +33,7 @@
 
 use crate::obligation::graded::{AbortedProof, CommittedProof, LeaseKind, ObligationToken};
 use crate::types::{RegionId, TaskId, Time};
-use std::collections::BTreeMap;
+use crate::util::{DetBuildHasher, DetHashMap};
 use std::fmt;
 use std::sync::Arc;
 
@@ -437,25 +437,26 @@ impl std::error::Error for NameLeaseError {}
 
 /// In-memory name registry tracking active name leases.
 ///
-/// Uses `BTreeMap` for deterministic iteration order (sorted by name).
+/// Uses deterministic hash maps for O(1) average lookup behavior while
+/// preserving deterministic public outputs via explicit sorting where needed.
 /// All mutations emit [`RegistryEvent`]s for trace visibility.
 #[derive(Debug)]
 pub struct NameRegistry {
-    /// Active leases keyed by name (deterministic BTreeMap ordering).
-    leases: BTreeMap<String, NameEntry>,
+    /// Active leases keyed by name.
+    leases: DetHashMap<String, NameEntry>,
     /// Pending permits keyed by name (reserved but not yet committed).
-    pending: BTreeMap<String, NameEntry>,
+    pending: DetHashMap<String, NameEntry>,
     /// Budgeted waiters keyed by name (FIFO order per name).
-    waiters: BTreeMap<String, Vec<WaiterEntry>>,
+    waiters: DetHashMap<String, Vec<WaiterEntry>>,
     /// Leases granted to waiters, pending retrieval by the waiter's task.
     /// Use [`take_granted`](Self::take_granted) to drain.
     granted: Vec<GrantedLease>,
     /// Name ownership watchers keyed by watch reference.
-    watchers_by_ref: BTreeMap<NameWatchRef, NameWatcher>,
+    watchers_by_ref: DetHashMap<NameWatchRef, NameWatcher>,
     /// Reverse index: name -> watch refs interested in ownership changes.
-    watchers_by_name: BTreeMap<String, Vec<NameWatchRef>>,
+    watchers_by_name: DetHashMap<String, Vec<NameWatchRef>>,
     /// Reverse index: watcher region -> watch refs (for region-close cleanup).
-    watchers_by_region: BTreeMap<RegionId, Vec<NameWatchRef>>,
+    watchers_by_region: DetHashMap<RegionId, Vec<NameWatchRef>>,
     /// Buffered ownership change notifications.
     notifications: Vec<NameOwnershipNotification>,
     /// Monotonic counter for allocating `NameWatchRef` values.
@@ -548,13 +549,13 @@ impl NameRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            leases: BTreeMap::new(),
-            pending: BTreeMap::new(),
-            waiters: BTreeMap::new(),
+            leases: DetHashMap::with_capacity_and_hasher(32, DetBuildHasher),
+            pending: DetHashMap::with_capacity_and_hasher(16, DetBuildHasher),
+            waiters: DetHashMap::with_capacity_and_hasher(16, DetBuildHasher),
             granted: Vec::new(),
-            watchers_by_ref: BTreeMap::new(),
-            watchers_by_name: BTreeMap::new(),
-            watchers_by_region: BTreeMap::new(),
+            watchers_by_ref: DetHashMap::with_capacity_and_hasher(16, DetBuildHasher),
+            watchers_by_name: DetHashMap::with_capacity_and_hasher(16, DetBuildHasher),
+            watchers_by_region: DetHashMap::with_capacity_and_hasher(8, DetBuildHasher),
             notifications: Vec::new(),
             next_watch_ref: 1,
         }
@@ -1032,7 +1033,9 @@ impl NameRegistry {
     /// Returns all names currently registered, sorted deterministically.
     #[must_use]
     pub fn registered_names(&self) -> Vec<&str> {
-        self.leases.keys().map(String::as_str).collect()
+        let mut names: Vec<&str> = self.leases.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        names
     }
 
     /// Returns the number of active name registrations.
@@ -1566,7 +1569,7 @@ mod tests {
         let mut l2 = reg.register("alpha", tid(2), rid(0), Time::ZERO).unwrap();
         let mut l3 = reg.register("middle", tid(3), rid(0), Time::ZERO).unwrap();
 
-        // BTreeMap guarantees sorted order
+        // API contract guarantees sorted order
         assert_eq!(reg.registered_names(), vec!["alpha", "middle", "zebra"]);
 
         l1.release().unwrap();
@@ -1588,7 +1591,7 @@ mod tests {
         assert_eq!(reg.len(), 3);
 
         let removed = reg.cleanup_region(rid(1));
-        assert_eq!(removed, vec!["svc_a", "svc_b"]); // sorted by BTreeMap
+        assert_eq!(removed, vec!["svc_a", "svc_b"]); // sorted by cleanup contract
         assert_eq!(reg.len(), 1);
         assert!(reg.is_registered("svc_c"));
         assert!(!reg.is_registered("svc_a"));
@@ -1935,7 +1938,7 @@ mod tests {
 
         // Simulate task 1 crash: cleanup removes all its names
         let removed = reg.cleanup_task(tid(1));
-        assert_eq!(removed, vec!["svc_a", "svc_b", "svc_c"]); // sorted by BTreeMap
+        assert_eq!(removed, vec!["svc_a", "svc_b", "svc_c"]); // sorted by cleanup contract
 
         // Post-crash invariants
         assert_eq!(reg.len(), 1);
@@ -2205,7 +2208,7 @@ mod tests {
                     region: rid(0),
                     count: 3,
                 },
-                // Abort events follow BTreeMap order (a, b, c)
+                // Abort events follow deterministic lexical order (a, b, c)
                 RegistryEvent::NameAborted {
                     name: "a".into(),
                     holder: tid(1),
@@ -2236,7 +2239,7 @@ mod tests {
             );
         }
 
-        // Verify that cleanup_region returns names in sorted order (BTreeMap guarantee)
+        // Verify that cleanup_region returns names in sorted order.
         // which ensures abort events follow a deterministic order.
         let mut reg = NameRegistry::new();
         let mut l1 = reg.register("b", tid(2), rid(0), Time::ZERO).unwrap();
@@ -2248,7 +2251,7 @@ mod tests {
             .unwrap();
 
         let removed = reg.cleanup_region(rid(0));
-        // BTreeMap iteration guarantees sorted order regardless of insertion order
+        // Output order stays sorted regardless of insertion order.
         assert_eq!(
             removed,
             vec!["a", "b", "c"],
@@ -2393,7 +2396,7 @@ mod tests {
             );
         }
 
-        // Invariant check: names are sorted (BTreeMap guarantee)
+        // Invariant check: names are sorted by API contract.
         for window in names.windows(2) {
             assert!(
                 window[0] <= window[1],
