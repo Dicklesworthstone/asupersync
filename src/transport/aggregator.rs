@@ -784,7 +784,7 @@ impl SymbolReorderer {
             .entry(object_id)
             .or_insert_with(ObjectReorderState::new);
 
-        let mut ready = Vec::new();
+        let mut ready = Vec::with_capacity(1);
 
         // Check if this is the expected symbol
         if seq == state.next_expected {
@@ -840,10 +840,10 @@ impl SymbolReorderer {
     pub fn flush_timeouts(&self, now: Time) -> Vec<Symbol> {
         let mut objects = self.objects.write();
         let max_wait_nanos = self.config.max_wait_time.as_nanos();
-        let mut flushed = Vec::new();
+        let mut flushed = Vec::with_capacity(4);
 
         for state in objects.values_mut() {
-            let mut to_remove = Vec::new();
+            let mut to_remove = Vec::with_capacity(state.buffer.len());
 
             for (&seq, buffered) in &state.buffer {
                 let wait_time = now

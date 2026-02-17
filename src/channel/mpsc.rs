@@ -446,7 +446,7 @@ impl<T> Clone for Sender<T> {
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
-        let old = self.shared.sender_count.fetch_sub(1, Ordering::AcqRel);
+        let old = self.shared.sender_count.fetch_sub(1, Ordering::Release);
         debug_assert!(old > 0, "sender_count underflow in Sender::drop");
         if old == 1 {
             // Last sender dropped — acquire lock to take recv_waker.
@@ -486,7 +486,11 @@ impl<T> WeakSender<T> {
         self.shared.upgrade().and_then(|shared| {
             // CAS loop avoids touching the channel mutex on upgrade while still
             // preventing resurrection from zero senders.
-            let mut observed = shared.sender_count.load(Ordering::Acquire);
+            //
+            // `sender_count` is a liveness counter only; channel data/wakers are
+            // synchronized by `inner` mutexes. We only need atomicity here to
+            // prevent zero->nonzero resurrection, not cross-thread data visibility.
+            let mut observed = shared.sender_count.load(Ordering::Relaxed);
             loop {
                 if observed == 0 {
                     return None;
@@ -494,8 +498,8 @@ impl<T> WeakSender<T> {
                 match shared.sender_count.compare_exchange_weak(
                     observed,
                     observed + 1,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
                 ) {
                     Ok(_) => return Some(Sender { shared }),
                     Err(actual) => observed = actual,

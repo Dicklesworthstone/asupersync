@@ -52,7 +52,7 @@ impl InterceptorLayer {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            interceptors: Vec::new(),
+            interceptors: Vec::with_capacity(4),
         }
     }
 
@@ -75,6 +75,10 @@ impl InterceptorLayer {
     where
         I: Interceptor + 'static,
     {
+        let interceptors = interceptors.into_iter();
+        let (lower, upper) = interceptors.size_hint();
+        self.interceptors.reserve(upper.unwrap_or(lower));
+
         for interceptor in interceptors {
             self.interceptors.push(Arc::new(interceptor));
         }
@@ -319,8 +323,15 @@ impl MetadataPropagator {
     /// Create a new metadata propagator.
     #[must_use]
     pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        let keys = keys.into_iter();
+        let (lower, upper) = keys.size_hint();
+        let mut collected_keys = Vec::with_capacity(upper.unwrap_or(lower));
+        for key in keys {
+            collected_keys.push(key.into());
+        }
+
         Self {
-            keys: keys.into_iter().map(Into::into).collect(),
+            keys: collected_keys,
         }
     }
 }
@@ -329,12 +340,12 @@ impl Interceptor for MetadataPropagator {
     fn intercept_request(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
         // For propagation, we store the keys to propagate in a special metadata entry
         // This is a simplified approach that stores the key names
-        let keys_to_propagate: Vec<String> = self
-            .keys
-            .iter()
-            .filter(|key| request.metadata().get(key).is_some())
-            .cloned()
-            .collect();
+        let mut keys_to_propagate = Vec::with_capacity(self.keys.len());
+        for key in &self.keys {
+            if request.metadata().get(key).is_some() {
+                keys_to_propagate.push(key.clone());
+            }
+        }
 
         if !keys_to_propagate.is_empty() {
             request

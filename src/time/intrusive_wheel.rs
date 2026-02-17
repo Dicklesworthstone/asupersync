@@ -282,8 +282,8 @@ impl TimerSlot {
     ///
     /// All nodes in the slot must be valid.
     unsafe fn collect_expired(&self, now: Instant) -> Vec<Waker> {
-        let mut wakers = Vec::new();
-        let mut expired = Vec::new();
+        let mut wakers = Vec::with_capacity(self.count.get());
+        let mut expired = Vec::with_capacity(self.count.get());
 
         // First pass: identify expired nodes
         let mut current = self.head.get();
@@ -469,7 +469,7 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
     ///
     /// All timer nodes in the wheel must be valid.
     pub unsafe fn advance_to(&mut self, now: Instant) -> Vec<Waker> {
-        let mut all_wakers = Vec::new();
+        let mut all_wakers = Vec::with_capacity(self.count);
 
         // Calculate how many ticks to advance
         let elapsed = now.saturating_duration_since(self.base_time);
@@ -727,7 +727,7 @@ impl HierarchicalTimerWheel {
     pub unsafe fn advance_to(&mut self, now: Instant) -> Vec<Waker> {
         let elapsed = now.saturating_duration_since(self.base_time);
         let target_tick = duration_to_ns(elapsed) / self.level0.resolution_ns.max(1);
-        let mut wakers = Vec::new();
+        let mut wakers = Vec::with_capacity(self.count);
 
         while self.current_tick < target_tick {
             let mut tick_wakers = self.tick();

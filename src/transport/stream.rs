@@ -372,7 +372,7 @@ impl SymbolStream for ChannelStream {
             let mut queue = this.shared.queue.lock();
             if let Some(entry) = queue.pop_front() {
                 symbol = Some(entry);
-            } else if this.shared.closed.load(Ordering::SeqCst) {
+            } else if this.shared.closed.load(Ordering::Acquire) {
                 closed = true;
             }
         }
@@ -405,7 +405,7 @@ impl SymbolStream for ChannelStream {
         let mut closed = false;
         {
             let mut wakers = this.shared.recv_wakers.lock();
-            if this.shared.closed.load(Ordering::SeqCst) {
+            if this.shared.closed.load(Ordering::Acquire) {
                 closed = true;
             } else {
                 match this.waiter.as_ref() {
@@ -455,7 +455,7 @@ impl SymbolStream for ChannelStream {
         // registration, finding no recv_waker to wake.
         {
             let queue = this.shared.queue.lock();
-            if !queue.is_empty() || this.shared.closed.load(Ordering::SeqCst) {
+            if !queue.is_empty() || this.shared.closed.load(Ordering::Acquire) {
                 drop(queue);
                 cx.waker().wake_by_ref();
             }

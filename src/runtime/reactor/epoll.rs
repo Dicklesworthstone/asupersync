@@ -86,8 +86,8 @@ struct ReactorState {
 impl ReactorState {
     fn new() -> Self {
         Self {
-            tokens: HashMap::new(),
-            fds: HashMap::new(),
+            tokens: HashMap::with_capacity(64),
+            fds: HashMap::with_capacity(64),
         }
     }
 }

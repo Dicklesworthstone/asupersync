@@ -296,13 +296,13 @@ impl SymbolCancelToken {
     ///
     /// Wire format (25 bytes): token_id(8) + object_high(8) + object_low(8) + cancelled(1).
     #[must_use]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(TOKEN_WIRE_SIZE);
+    pub fn to_bytes(&self) -> [u8; TOKEN_WIRE_SIZE] {
+        let mut buf = [0u8; TOKEN_WIRE_SIZE];
 
-        buf.extend_from_slice(&self.state.token_id.to_be_bytes());
-        buf.extend_from_slice(&self.state.object_id.high().to_be_bytes());
-        buf.extend_from_slice(&self.state.object_id.low().to_be_bytes());
-        buf.push(u8::from(self.is_cancelled()));
+        buf[0..8].copy_from_slice(&self.state.token_id.to_be_bytes());
+        buf[8..16].copy_from_slice(&self.state.object_id.high().to_be_bytes());
+        buf[16..24].copy_from_slice(&self.state.object_id.low().to_be_bytes());
+        buf[24] = u8::from(self.is_cancelled());
 
         buf
     }
@@ -482,17 +482,17 @@ impl CancelMessage {
 
     /// Serializes to bytes.
     #[must_use]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(MESSAGE_WIRE_SIZE);
+    pub fn to_bytes(&self) -> [u8; MESSAGE_WIRE_SIZE] {
+        let mut buf = [0u8; MESSAGE_WIRE_SIZE];
 
-        buf.extend_from_slice(&self.token_id.to_be_bytes());
-        buf.extend_from_slice(&self.object_id.high().to_be_bytes());
-        buf.extend_from_slice(&self.object_id.low().to_be_bytes());
-        buf.push(cancel_kind_to_u8(self.kind));
-        buf.extend_from_slice(&self.initiated_at.as_nanos().to_be_bytes());
-        buf.extend_from_slice(&self.sequence.to_be_bytes());
-        buf.push(self.hops);
-        buf.push(self.max_hops);
+        buf[0..8].copy_from_slice(&self.token_id.to_be_bytes());
+        buf[8..16].copy_from_slice(&self.object_id.high().to_be_bytes());
+        buf[16..24].copy_from_slice(&self.object_id.low().to_be_bytes());
+        buf[24] = cancel_kind_to_u8(self.kind);
+        buf[25..33].copy_from_slice(&self.initiated_at.as_nanos().to_be_bytes());
+        buf[33..41].copy_from_slice(&self.sequence.to_be_bytes());
+        buf[41] = self.hops;
+        buf[42] = self.max_hops;
 
         buf
     }
@@ -698,12 +698,13 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         // Single read lock: cancel local token + extract token_id.
         let token_id = {
             let tokens = self.active_tokens.read();
-            if let Some(token) = tokens.get(&object_id) {
-                token.cancel(reason, now);
-                token.token_id()
-            } else {
-                object_id.high() ^ object_id.low()
-            }
+            tokens.get(&object_id).map_or_else(
+                || object_id.high() ^ object_id.low(),
+                |token| {
+                    token.cancel(reason, now);
+                    token.token_id()
+                },
+            )
         };
 
         let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);

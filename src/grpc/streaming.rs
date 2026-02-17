@@ -142,7 +142,7 @@ impl<T> Response<T> {
 }
 
 /// gRPC metadata (headers/trailers).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Metadata {
     /// The metadata entries.
     entries: Vec<(String, MetadataValue)>,
@@ -162,8 +162,13 @@ impl Metadata {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            entries: Vec::new(),
+            entries: Vec::with_capacity(4),
         }
+    }
+
+    /// Reserve capacity for at least `additional` more entries.
+    pub fn reserve(&mut self, additional: usize) {
+        self.entries.reserve(additional);
     }
 
     /// Insert an ASCII value.
@@ -207,6 +212,12 @@ impl Metadata {
     #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+}
+
+impl Default for Metadata {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -569,5 +580,16 @@ mod tests {
             _ => panic!("expected ascii value"),
         }
         crate::test_complete!("test_metadata_get_prefers_latest_value");
+    }
+
+    #[test]
+    fn test_metadata_reserve_preserves_behavior() {
+        init_test("test_metadata_reserve_preserves_behavior");
+        let mut metadata = Metadata::new();
+        metadata.reserve(8);
+        metadata.insert("x-key", "value");
+        let has = metadata.get("x-key").is_some();
+        crate::assert_with_log!(has, "reserved metadata insert", true, has);
+        crate::test_complete!("test_metadata_reserve_preserves_behavior");
     }
 }

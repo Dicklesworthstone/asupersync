@@ -294,7 +294,7 @@ impl Bulkhead {
                     .compare_exchange(
                         available,
                         available - weight,
-                        Ordering::AcqRel,
+                        Ordering::Release,
                         Ordering::Acquire,
                     )
                     .is_ok()
@@ -322,7 +322,7 @@ impl Bulkhead {
     }
 
     /// Inner queue processing logic that operates on an already-locked queue.
-    fn process_queue_inner(&self, queue: &mut Vec<QueueEntry>, now: Time) -> Option<u64> {
+    fn process_queue_inner(&self, queue: &mut [QueueEntry], now: Time) -> Option<u64> {
         let now_millis = now.as_millis();
 
         // First, timeout expired entries — count timeouts locally and batch-update
@@ -356,7 +356,7 @@ impl Bulkhead {
                         .compare_exchange(
                             current,
                             current - entry.weight,
-                            Ordering::AcqRel,
+                            Ordering::Release,
                             Ordering::Acquire,
                         )
                         .is_ok()
@@ -515,7 +515,7 @@ impl Bulkhead {
             }
             if self
                 .available_permits
-                .compare_exchange(current, new, Ordering::AcqRel, Ordering::Acquire)
+                .compare_exchange(current, new, Ordering::Release, Ordering::Acquire)
                 .is_ok()
             {
                 break;

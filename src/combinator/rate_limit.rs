@@ -307,11 +307,9 @@ impl RateLimiter {
         let total_waited = self.total_waited.load(Ordering::Relaxed);
         let total_wait_time_ms = self.total_wait_time_ms.load(Ordering::Relaxed);
         let max_wait_time_ms = self.max_wait_time_ms.load(Ordering::Relaxed);
-        let avg_wait_time = if total_waited > 0 {
-            Duration::from_millis(total_wait_time_ms / total_waited)
-        } else {
-            Duration::ZERO
-        };
+        let avg_wait_time = total_wait_time_ms
+            .checked_div(total_waited)
+            .map_or(Duration::ZERO, Duration::from_millis);
 
         RateLimitMetrics {
             available_tokens,
@@ -434,8 +432,7 @@ impl RateLimiter {
         }
 
         let tokens_needed = cost_fixed - current_fixed;
-        let period_ms = self.policy.period.as_millis() as f64;
-        let tokens_per_ms = (f64::from(self.policy.rate) / period_ms) * FIXED_POINT_SCALE as f64;
+        let tokens_per_ms = self.tokens_per_ms_fixed;
 
         if tokens_per_ms <= 0.0 {
             return Duration::MAX; // No refill rate

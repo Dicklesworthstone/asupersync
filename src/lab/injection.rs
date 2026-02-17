@@ -915,7 +915,7 @@ mod tests {
             move |injector| {
                 // Recording run discovers several points; subsequent injection runs
                 // intentionally complete quickly, so higher targets may be unreachable.
-                let call_index = invocation_count.fetch_add(1, Ordering::SeqCst);
+                let call_index = invocation_count.fetch_add(1, Ordering::Relaxed);
                 let yields = if call_index == 0 { 2 } else { 0 };
                 let future = YieldingFuture::new(yields, 42);
                 InstrumentedFuture::new(future, injector)

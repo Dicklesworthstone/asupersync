@@ -73,7 +73,7 @@ impl SharedChannel {
     }
 
     pub(crate) fn close(&self) {
-        self.closed.store(true, Ordering::SeqCst);
+        self.closed.store(true, Ordering::Release);
         // Wake everyone (drop locks before waking to avoid deadlocks).
         let send_wakers = {
             let mut wakers = self.send_wakers.lock();

@@ -356,7 +356,7 @@ impl DeadlineMonitor {
             let remaining = Duration::from_nanos(remaining_nanos);
             let total_nanos = deadline.duration_since(task.created_at());
             let total = Duration::from_nanos(total_nanos);
-            let adaptive_threshold = self.adaptive_warning_threshold(&task_type, total);
+            let adaptive_threshold = self.adaptive_warning_threshold(task_type, total);
             let approaching_deadline = if self.config.adaptive.adaptive_enabled {
                 let elapsed = Duration::from_nanos(now.duration_since(task.created_at()));
                 elapsed >= adaptive_threshold
@@ -443,13 +443,13 @@ impl DeadlineMonitor {
             }
 
             if let Some(interval) = checkpoint_interval {
-                self.emit_checkpoint_interval(&task_type, interval);
+                self.emit_checkpoint_interval(task_type, interval);
             }
             if let Some(over_by) = deadline_violation {
-                self.emit_deadline_violation(&task_type, over_by);
+                self.emit_deadline_violation(task_type, over_by);
             }
             if let Some((warning, reason, remaining)) = warning_to_emit {
-                self.emit_deadline_warning(&task_type, reason, remaining);
+                self.emit_deadline_warning(task_type, reason, remaining);
                 self.emit_warning(warning);
             }
         }

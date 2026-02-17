@@ -91,13 +91,18 @@ where
 pub struct ReadyChunks<S: Stream> {
     stream: S,
     cap: usize,
+    items: Vec<S::Item>,
 }
 
 impl<S: Stream> ReadyChunks<S> {
     /// Creates a new `ReadyChunks` stream.
     pub(crate) fn new(stream: S, cap: usize) -> Self {
         assert!(cap > 0, "chunk size must be non-zero");
-        Self { stream, cap }
+        Self {
+            stream,
+            cap,
+            items: Vec::with_capacity(cap),
+        }
     }
 
     /// Returns a reference to the underlying stream.
@@ -125,27 +130,32 @@ where
     type Item = Vec<S::Item>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut items = Vec::with_capacity(self.cap);
+        // Reuse the buffer across polls; ensure capacity after a previous take.
+        let cap = self.cap;
+        let need = cap.saturating_sub(self.items.capacity());
+        if need > 0 {
+            self.items.reserve(need);
+        }
 
         loop {
             match Pin::new(&mut self.stream).poll_next(cx) {
                 Poll::Ready(Some(item)) => {
-                    items.push(item);
-                    if items.len() >= self.cap {
-                        return Poll::Ready(Some(items));
+                    self.items.push(item);
+                    if self.items.len() >= cap {
+                        return Poll::Ready(Some(std::mem::take(&mut self.items)));
                     }
                 }
                 Poll::Ready(None) => {
-                    if items.is_empty() {
+                    if self.items.is_empty() {
                         return Poll::Ready(None);
                     }
-                    return Poll::Ready(Some(items));
+                    return Poll::Ready(Some(std::mem::take(&mut self.items)));
                 }
                 Poll::Pending => {
-                    if items.is_empty() {
+                    if self.items.is_empty() {
                         return Poll::Pending;
                     }
-                    return Poll::Ready(Some(items));
+                    return Poll::Ready(Some(std::mem::take(&mut self.items)));
                 }
             }
         }

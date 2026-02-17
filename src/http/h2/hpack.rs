@@ -431,7 +431,7 @@ impl Decoder {
     /// representation). Any size update after a header field representation is
     /// a COMPRESSION_ERROR.
     pub fn decode(&mut self, src: &mut Bytes) -> Result<Vec<Header>, H2Error> {
-        let mut headers = Vec::new();
+        let mut headers = Vec::with_capacity(8);
         let mut total_size = 0;
 
         // RFC 7541 §4.2: dynamic table size updates are valid at the beginning
@@ -628,7 +628,7 @@ fn decode_integer(src: &mut Bytes, prefix_bits: u8) -> Result<usize, H2Error> {
 /// Packs variable-length Huffman codes into whole bytes with EOS-padding
 /// (all-1s) in the final partial byte, as required by Section 5.2.
 fn encode_huffman(src: &[u8]) -> Vec<u8> {
-    let mut dst = Vec::new();
+    let mut dst = Vec::with_capacity(src.len());
     let mut accumulator: u64 = 0;
     let mut bits: u32 = 0;
 
@@ -970,7 +970,7 @@ static HUFFMAN_TABLE: [(u32, u8); 257] = [
 /// input byte to a constant factor.
 #[allow(clippy::too_many_lines)] // Huffman decoding table is large; splitting obscures verification.
 fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
-    let mut result = Vec::new();
+    let mut result = Vec::with_capacity(src.len());
     let mut accumulator: u64 = 0;
     let mut bits: u32 = 0;
 

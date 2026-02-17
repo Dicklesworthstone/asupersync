@@ -1347,7 +1347,7 @@ impl PgConnection {
         // Process responses
         let mut columns: Option<Arc<Vec<PgColumn>>> = None;
         let mut column_indices: Option<Arc<BTreeMap<String, usize>>> = None;
-        let mut rows = Vec::new();
+        let mut rows = Vec::with_capacity(16);
 
         loop {
             let (msg_type, data) = match self.read_message().await {

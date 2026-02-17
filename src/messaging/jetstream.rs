@@ -539,7 +539,7 @@ impl fmt::Debug for JsMessage {
             .field("delivered", &self.delivered)
             .field("payload_len", &self.payload.len())
             .field("reply_subject", &self.reply_subject)
-            .field("acked", &self.acked.load(Ordering::SeqCst))
+            .field("acked", &self.acked.load(Ordering::Relaxed))
             .finish()
     }
 }
@@ -547,13 +547,13 @@ impl fmt::Debug for JsMessage {
 impl JsMessage {
     /// Check if the message has been acknowledged.
     pub fn is_acked(&self) -> bool {
-        self.acked.load(Ordering::SeqCst)
+        self.acked.load(Ordering::Acquire)
     }
 }
 
 impl Drop for JsMessage {
     fn drop(&mut self) {
-        if !self.acked.load(Ordering::SeqCst) {
+        if !self.acked.load(Ordering::Acquire) {
             warn!(
                 subject = %self.subject,
                 sequence = self.sequence,
@@ -989,7 +989,7 @@ impl JsMessage {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
         client.publish(cx, &self.reply_subject, b"+ACK").await?;
-        self.acked.store(true, Ordering::SeqCst);
+        self.acked.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -998,7 +998,7 @@ impl JsMessage {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
         client.publish(cx, &self.reply_subject, b"-NAK").await?;
-        self.acked.store(true, Ordering::SeqCst);
+        self.acked.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -1015,7 +1015,7 @@ impl JsMessage {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
         client.publish(cx, &self.reply_subject, b"+TERM").await?;
-        self.acked.store(true, Ordering::SeqCst);
+        self.acked.store(true, Ordering::Release);
         Ok(())
     }
 }

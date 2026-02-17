@@ -253,8 +253,8 @@ impl RecoveryCollector {
     pub fn new(config: RecoveryConfig) -> Self {
         Self {
             config,
-            collected: Vec::new(),
-            esi_to_idx: HashMap::new(),
+            collected: Vec::with_capacity(64),
+            esi_to_idx: HashMap::with_capacity(64),
             object_params: None,
             progress: RecoveryProgress {
                 started_at: Time::ZERO,
@@ -431,8 +431,8 @@ impl StateDecoder {
                 received: 0,
                 needed: 0,
             },
-            symbols: Vec::new(),
-            seen_esi: HashSet::new(),
+            symbols: Vec::with_capacity(64),
+            seen_esi: HashSet::with_capacity(64),
         }
     }
 
@@ -505,12 +505,14 @@ impl StateDecoder {
             // If verify_integrity is true, the pipeline will validate auth tags.
             verify_auth: self.config.verify_integrity,
         };
-        let mut pipeline = match (
-            self.config.verify_integrity,
-            self.config.auth_context.clone(),
-        ) {
-            (true, Some(ctx)) => DecodingPipeline::with_auth(config, ctx),
-            _ => DecodingPipeline::new(config),
+        let mut pipeline = if self.config.verify_integrity {
+            if let Some(ctx) = self.config.auth_context.clone() {
+                DecodingPipeline::with_auth(config, ctx)
+            } else {
+                DecodingPipeline::new(config)
+            }
+        } else {
+            DecodingPipeline::new(config)
         };
         if let Err(err) = pipeline.set_object_params(*params) {
             self.decoder_state = DecoderState::Failed {

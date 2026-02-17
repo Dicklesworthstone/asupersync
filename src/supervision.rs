@@ -1384,7 +1384,7 @@ impl CompiledSupervisor {
         let child_by_name =
             |name: &str| -> Option<&ChildSpec> { self.children.iter().find(|c| c.name == name) };
 
-        let mut ops = Vec::new();
+        let mut ops = Vec::with_capacity(plan.cancel_order.len() * 2 + plan.restart_order.len());
 
         // Phase 1: Cancel in cancel_order (dependents-first)
         for name in &plan.cancel_order {

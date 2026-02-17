@@ -470,7 +470,7 @@ impl CircuitBreaker {
                             .compare_exchange(
                                 current_bits,
                                 new_state.to_bits(),
-                                Ordering::AcqRel,
+                                Ordering::Release,
                                 Ordering::Acquire,
                             )
                             .is_ok()
@@ -510,7 +510,7 @@ impl CircuitBreaker {
                             .compare_exchange(
                                 current_bits,
                                 new_state.to_bits(),
-                                Ordering::AcqRel,
+                                Ordering::Release,
                                 Ordering::Acquire,
                             )
                             .is_ok()
@@ -558,7 +558,7 @@ impl CircuitBreaker {
                                 .compare_exchange(
                                     current_bits,
                                     new_state.to_bits(),
-                                    Ordering::AcqRel,
+                                    Ordering::Release,
                                     Ordering::Acquire,
                                 )
                                 .is_ok()
@@ -591,7 +591,7 @@ impl CircuitBreaker {
                                     .compare_exchange(
                                         current_bits,
                                         new_state.to_bits(),
-                                        Ordering::AcqRel,
+                                        Ordering::Release,
                                         Ordering::Acquire,
                                     )
                                     .is_ok()
@@ -618,7 +618,7 @@ impl CircuitBreaker {
                                     .compare_exchange(
                                         current_bits,
                                         new_state.to_bits(),
-                                        Ordering::AcqRel,
+                                        Ordering::Release,
                                         Ordering::Acquire,
                                     )
                                     .is_ok()
@@ -693,7 +693,7 @@ impl CircuitBreaker {
                 .compare_exchange(
                     current_bits,
                     new_state.to_bits(),
-                    Ordering::AcqRel,
+                    Ordering::Release,
                     Ordering::Acquire,
                 )
                 .is_ok()
@@ -753,7 +753,7 @@ impl CircuitBreaker {
                                 .compare_exchange(
                                     current_bits,
                                     new_state.to_bits(),
-                                    Ordering::AcqRel,
+                                    Ordering::Release,
                                     Ordering::Acquire,
                                 )
                                 .is_ok()
@@ -801,7 +801,7 @@ impl CircuitBreaker {
                                 .compare_exchange(
                                     current_bits,
                                     new_state.to_bits(),
-                                    Ordering::AcqRel,
+                                    Ordering::Release,
                                     Ordering::Acquire,
                                 )
                                 .is_ok()
@@ -827,7 +827,7 @@ impl CircuitBreaker {
                                 .compare_exchange(
                                     current_bits,
                                     new_state.to_bits(),
-                                    Ordering::AcqRel,
+                                    Ordering::Release,
                                     Ordering::Acquire,
                                 )
                                 .is_ok()
@@ -854,7 +854,7 @@ impl CircuitBreaker {
                                 .compare_exchange(
                                     current_bits,
                                     new_state.to_bits(),
-                                    Ordering::AcqRel,
+                                    Ordering::Release,
                                     Ordering::Acquire,
                                 )
                                 .is_ok()

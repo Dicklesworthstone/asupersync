@@ -323,7 +323,7 @@ impl SymbolSink for ChannelSink {
         let this = self.get_mut();
         let queue = this.shared.queue.lock();
 
-        if this.shared.closed.load(Ordering::SeqCst) {
+        if this.shared.closed.load(Ordering::Acquire) {
             return Poll::Ready(Err(SinkError::Closed));
         }
 
@@ -335,7 +335,7 @@ impl SymbolSink for ChannelSink {
             Poll::Ready(Ok(()))
         } else {
             drop(queue); // Release queue lock before acquiring wakers lock
-            if this.shared.closed.load(Ordering::SeqCst) {
+            if this.shared.closed.load(Ordering::Acquire) {
                 return Poll::Ready(Err(SinkError::Closed));
             }
 
@@ -346,7 +346,7 @@ impl SymbolSink for ChannelSink {
             let mut closed = false;
             {
                 let mut wakers = this.shared.send_wakers.lock();
-                if this.shared.closed.load(Ordering::SeqCst) {
+                if this.shared.closed.load(Ordering::Acquire) {
                     closed = true;
                 } else {
                     match this.waiter.as_ref() {
@@ -396,7 +396,7 @@ impl SymbolSink for ChannelSink {
             // and waiter registration, finding no send_waker to wake.
             {
                 let queue = this.shared.queue.lock();
-                if queue.len() < this.shared.capacity || this.shared.closed.load(Ordering::SeqCst) {
+                if queue.len() < this.shared.capacity || this.shared.closed.load(Ordering::Acquire) {
                     drop(queue);
                     cx.waker().wake_by_ref();
                 }
@@ -415,7 +415,7 @@ impl SymbolSink for ChannelSink {
         {
             let mut queue = this.shared.queue.lock();
 
-            if this.shared.closed.load(Ordering::SeqCst) {
+            if this.shared.closed.load(Ordering::Acquire) {
                 return Poll::Ready(Err(SinkError::Closed));
             }
 

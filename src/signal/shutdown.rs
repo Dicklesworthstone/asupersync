@@ -80,7 +80,7 @@ impl ShutdownController {
         if self
             .state
             .initiated
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .compare_exchange(false, true, Ordering::Release, Ordering::Relaxed)
             .is_ok()
         {
             // Wake all waiters.
@@ -91,7 +91,7 @@ impl ShutdownController {
     /// Checks if shutdown has been initiated.
     #[must_use]
     pub fn is_shutting_down(&self) -> bool {
-        self.state.initiated.load(Ordering::SeqCst)
+        self.state.initiated.load(Ordering::Acquire)
     }
 
     /// Spawns a background task to listen for shutdown signals.
@@ -161,7 +161,7 @@ impl ShutdownReceiver {
     /// Checks if shutdown has been initiated.
     #[must_use]
     pub fn is_shutting_down(&self) -> bool {
-        self.state.initiated.load(Ordering::SeqCst)
+        self.state.initiated.load(Ordering::Acquire)
     }
 }
 

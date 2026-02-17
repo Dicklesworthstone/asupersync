@@ -434,13 +434,15 @@ impl Default for MetadataInterceptor {
 
 impl ClientInterceptor for MetadataInterceptor {
     fn intercept(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
+        let request_metadata = request.metadata_mut();
+        request_metadata.reserve(self.metadata.len());
         for (key, value) in self.metadata.iter() {
             match value {
                 super::streaming::MetadataValue::Ascii(v) => {
-                    request.metadata_mut().insert(key, v.clone());
+                    request_metadata.insert(key, v.clone());
                 }
                 super::streaming::MetadataValue::Binary(v) => {
-                    request.metadata_mut().insert_bin(key, v.clone());
+                    request_metadata.insert_bin(key, v.clone());
                 }
             }
         }

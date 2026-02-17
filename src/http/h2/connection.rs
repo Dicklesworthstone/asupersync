@@ -1019,7 +1019,7 @@ impl Connection {
                     // immediately after this HEADERS frame, before any other
                     // pending ops (RFC 9113 §6.10 requires CONTINUATION to
                     // follow HEADERS without interleaving other frame types).
-                    let mut chunks = Vec::new();
+                    let mut chunks = Vec::with_capacity(remaining.len().div_ceil(max_frame_size));
                     let mut offset = 0;
                     while offset < remaining.len() {
                         let chunk_end = (offset + max_frame_size).min(remaining.len());

@@ -42,7 +42,7 @@ impl VirtualServer {
     /// This dispatches the request through the router synchronously.
     /// The request count is incremented.
     pub fn handle(&self, req: Request) -> Response {
-        self.request_count.fetch_add(1, Ordering::SeqCst);
+        self.request_count.fetch_add(1, Ordering::Relaxed);
         self.router.handle(req)
     }
 
@@ -58,7 +58,7 @@ impl VirtualServer {
     /// Returns the total number of requests processed.
     #[must_use]
     pub fn request_count(&self) -> u64 {
-        self.request_count.load(Ordering::SeqCst)
+        self.request_count.load(Ordering::Relaxed)
     }
 
     /// Returns a reference to the underlying router.

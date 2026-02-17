@@ -977,7 +977,7 @@ impl SymbolDispatcher {
         let _guard = DispatchGuard { dispatcher: self };
 
         let result = match strategy {
-            DispatchStrategy::Unicast => self.dispatch_unicast(cx, &symbol).await,
+            DispatchStrategy::Unicast => self.dispatch_unicast(cx, symbol).await,
             DispatchStrategy::Multicast { count } => {
                 self.dispatch_multicast(cx, &symbol, count).await
             }
@@ -1010,7 +1010,7 @@ impl SymbolDispatcher {
     async fn dispatch_unicast(
         &self,
         cx: &Cx,
-        symbol: &AuthenticatedSymbol,
+        symbol: AuthenticatedSymbol,
     ) -> Result<DispatchResult, DispatchError> {
         let route = self.router.route(symbol.symbol())?;
 
@@ -1026,7 +1026,7 @@ impl SymbolDispatcher {
             if let Some(sink) = sink {
                 let send_result =
                     match OwnedMutexGuard::lock(sink, cx).await {
-                        Ok(mut guard) => guard.send(symbol.clone()).await.map_err(|_| {
+                        Ok(mut guard) => guard.send(symbol).await.map_err(|_| {
                             DispatchError::SendFailed {
                                 endpoint: route.endpoint.id,
                                 reason: "Send failed".into(),

@@ -97,7 +97,7 @@ mod tests {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     fn unique_temp_dir(name: &str) -> std::path::PathBuf {
-        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut path = std::env::temp_dir();
         path.push(format!("asupersync_test_{name}_{id}"));
         path

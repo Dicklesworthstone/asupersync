@@ -273,7 +273,7 @@ impl Future for Notified<'_> {
                             .compare_exchange(
                                 stored,
                                 stored - 1,
-                                Ordering::AcqRel,
+                                Ordering::Release,
                                 Ordering::Acquire,
                             )
                             .is_ok()
@@ -309,7 +309,7 @@ impl Future for Notified<'_> {
                     if self
                         .notify
                         .stored_notifications
-                        .compare_exchange(stored, stored - 1, Ordering::AcqRel, Ordering::Acquire)
+                        .compare_exchange(stored, stored - 1, Ordering::Release, Ordering::Acquire)
                         .is_ok()
                     {
                         drop(waiters);

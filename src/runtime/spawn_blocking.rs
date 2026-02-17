@@ -198,7 +198,7 @@ where
         let current = FALLBACK_THREAD_COUNT.load(Ordering::Relaxed);
         if current < MAX_FALLBACK_THREADS {
             if FALLBACK_THREAD_COUNT
-                .compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Relaxed)
+                .compare_exchange_weak(current, current + 1, Ordering::Release, Ordering::Relaxed)
                 .is_ok()
             {
                 break;
@@ -224,13 +224,13 @@ where
                 .expect("spawn_blocking_on_thread fn missing");
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
             tx.send(result);
-            FALLBACK_THREAD_COUNT.fetch_sub(1, Ordering::AcqRel);
+            FALLBACK_THREAD_COUNT.fetch_sub(1, Ordering::Release);
         });
 
     match thread_result {
         Ok(_) => rx.await,
         Err(_err) => {
-            FALLBACK_THREAD_COUNT.fetch_sub(1, Ordering::AcqRel);
+            FALLBACK_THREAD_COUNT.fetch_sub(1, Ordering::Release);
             let f = f_cell
                 .lock()
                 .take()

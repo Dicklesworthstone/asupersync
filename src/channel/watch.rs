@@ -320,7 +320,7 @@ impl<T> Sender<T> {
     /// version, so it will only see future changes.
     #[must_use]
     pub fn subscribe(&self) -> Receiver<T> {
-        self.inner.receiver_count.fetch_add(1, Ordering::AcqRel);
+        self.inner.receiver_count.fetch_add(1, Ordering::Relaxed);
 
         let current_version = self.inner.current_version();
         Receiver {
@@ -545,7 +545,7 @@ impl<T> Future for ChangedFuture<'_, '_, T> {
 
 impl<T> Clone for Receiver<T> {
     fn clone(&self) -> Self {
-        self.inner.receiver_count.fetch_add(1, Ordering::AcqRel);
+        self.inner.receiver_count.fetch_add(1, Ordering::Relaxed);
         Self {
             inner: Arc::clone(&self.inner),
             seen_version: self.seen_version,
@@ -556,7 +556,7 @@ impl<T> Clone for Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        self.inner.receiver_count.fetch_sub(1, Ordering::AcqRel);
+        self.inner.receiver_count.fetch_sub(1, Ordering::Release);
 
         // Eagerly remove this receiver's waiter entry so dropped receivers do not
         // leave stale wakers behind until a later send/re-registration.

@@ -1040,7 +1040,7 @@ impl NatsClient {
     pub async fn close(&mut self, cx: &Cx) -> Result<(), NatsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
-        self.state.closed.store(true, Ordering::SeqCst);
+        self.state.closed.store(true, Ordering::Release);
 
         // Clear all subscriptions
         {
@@ -1092,7 +1092,7 @@ impl Subscription {
     pub async fn next(&mut self, cx: &Cx) -> Result<Option<Message>, NatsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
-        if self.state.closed.load(Ordering::SeqCst) {
+        if self.state.closed.load(Ordering::Acquire) {
             return Ok(None);
         }
 

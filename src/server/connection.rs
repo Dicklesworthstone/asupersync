@@ -83,7 +83,9 @@ impl ConnectionManager {
     #[must_use]
     pub fn new(max_connections: Option<usize>, shutdown_signal: ShutdownSignal) -> Self {
         Self {
-            state: Arc::new(Mutex::new(HashMap::new())),
+            state: Arc::new(Mutex::new(HashMap::with_capacity(
+                max_connections.unwrap_or(64),
+            ))),
             next_id: Arc::new(AtomicU64::new(1)),
             max_connections,
             shutdown_signal,

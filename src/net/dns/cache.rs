@@ -106,16 +106,25 @@ impl DnsCache {
         }
 
         // Slow path: entry was expired — upgrade to write lock to evict.
-        let mut cache = self.ip_cache.write();
-        if let Some(entry) = cache.get(host) {
-            if entry.is_expired() {
+        let mut evicted_expired = false;
+        let refreshed = {
+            let mut cache = self.ip_cache.write();
+            let expired = cache.get(host).is_some_and(CacheEntry::is_expired);
+            if expired {
                 cache.remove(host);
-                self.stat_evictions.fetch_add(1, Ordering::Relaxed);
+                evicted_expired = true;
+                None
             } else {
-                // Another thread refreshed the entry between locks.
-                self.stat_hits.fetch_add(1, Ordering::Relaxed);
-                return Some(entry.data.clone());
+                // Another thread may have refreshed the entry between locks.
+                cache.get(host).map(|entry| entry.data.clone())
             }
+        };
+        if evicted_expired {
+            self.stat_evictions.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Some(data) = refreshed {
+            self.stat_hits.fetch_add(1, Ordering::Relaxed);
+            return Some(data);
         }
         self.stat_misses.fetch_add(1, Ordering::Relaxed);
         None
