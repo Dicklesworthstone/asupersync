@@ -10,7 +10,7 @@
 use crate::error::{Error, ErrorKind};
 use crate::types::symbol::{ObjectId, Symbol, SymbolId};
 use crate::types::Time;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -174,8 +174,8 @@ pub struct TransportPath {
     /// Duplicate symbols received on this path.
     pub duplicates_received: AtomicU64,
 
-    /// Last activity time.
-    pub last_activity: RwLock<Time>,
+    /// Last activity time (nanoseconds, atomic for lock-free updates).
+    pub last_activity: AtomicU64,
 
     /// Creation time.
     pub created_at: Time,
@@ -194,7 +194,7 @@ impl TransportPath {
             symbols_received: AtomicU64::new(0),
             symbols_lost: AtomicU64::new(0),
             duplicates_received: AtomicU64::new(0),
-            last_activity: RwLock::new(Time::ZERO),
+            last_activity: AtomicU64::new(0),
             created_at: Time::ZERO,
         }
     }
@@ -220,7 +220,7 @@ impl TransportPath {
     /// Records symbol receipt.
     pub fn record_receipt(&self, now: Time) {
         self.symbols_received.fetch_add(1, Ordering::Relaxed);
-        *self.last_activity.write().expect("lock poisoned") = now;
+        self.last_activity.store(now.as_nanos(), Ordering::Relaxed);
     }
 
     /// Records a duplicate.
@@ -295,7 +295,7 @@ pub enum PathSelectionPolicy {
 #[derive(Debug)]
 pub struct PathSet {
     /// All registered paths.
-    paths: RwLock<BTreeMap<PathId, Arc<TransportPath>>>,
+    paths: RwLock<HashMap<PathId, Arc<TransportPath>>>,
 
     /// Selection policy.
     policy: PathSelectionPolicy,
@@ -312,7 +312,7 @@ impl PathSet {
     #[must_use]
     pub fn new(policy: PathSelectionPolicy) -> Self {
         Self {
-            paths: RwLock::new(BTreeMap::new()),
+            paths: RwLock::new(HashMap::new()),
             policy,
             rr_counter: AtomicU64::new(0),
             next_id: AtomicU64::new(0),
@@ -508,13 +508,13 @@ impl Default for DeduplicatorConfig {
 #[derive(Debug)]
 struct ObjectDeduplicationState {
     /// Symbols seen for this object.
-    seen: BTreeSet<SymbolId>,
+    seen: HashSet<SymbolId>,
 
     /// When each symbol was first seen.
-    first_seen: BTreeMap<SymbolId, Time>,
+    first_seen: HashMap<SymbolId, Time>,
 
     /// Which path each symbol arrived on first.
-    first_path: BTreeMap<SymbolId, PathId>,
+    first_path: HashMap<SymbolId, PathId>,
 
     /// When this state was created.
     #[allow(dead_code)]
@@ -527,9 +527,9 @@ struct ObjectDeduplicationState {
 impl ObjectDeduplicationState {
     fn new(created_at: Time) -> Self {
         Self {
-            seen: BTreeSet::new(),
-            first_seen: BTreeMap::new(),
-            first_path: BTreeMap::new(),
+            seen: HashSet::new(),
+            first_seen: HashMap::new(),
+            first_path: HashMap::new(),
             created_at,
             last_activity: created_at,
         }
@@ -540,7 +540,7 @@ impl ObjectDeduplicationState {
 #[derive(Debug)]
 pub struct SymbolDeduplicator {
     /// Per-object deduplication state.
-    objects: RwLock<BTreeMap<ObjectId, ObjectDeduplicationState>>,
+    objects: RwLock<HashMap<ObjectId, ObjectDeduplicationState>>,
 
     /// Configuration.
     config: DeduplicatorConfig,
@@ -557,7 +557,7 @@ impl SymbolDeduplicator {
     #[must_use]
     pub fn new(config: DeduplicatorConfig) -> Self {
         Self {
-            objects: RwLock::new(BTreeMap::new()),
+            objects: RwLock::new(HashMap::new()),
             config,
             duplicates_detected: AtomicU64::new(0),
             unique_symbols: AtomicU64::new(0),
@@ -747,7 +747,7 @@ impl ObjectReorderState {
 #[derive(Debug)]
 pub struct SymbolReorderer {
     /// Per-object reordering state.
-    objects: RwLock<BTreeMap<ObjectId, ObjectReorderState>>,
+    objects: RwLock<HashMap<ObjectId, ObjectReorderState>>,
 
     /// Configuration.
     config: ReordererConfig,
@@ -767,7 +767,7 @@ impl SymbolReorderer {
     #[must_use]
     pub fn new(config: ReordererConfig) -> Self {
         Self {
-            objects: RwLock::new(BTreeMap::new()),
+            objects: RwLock::new(HashMap::new()),
             config,
             in_order_deliveries: AtomicU64::new(0),
             reordered_deliveries: AtomicU64::new(0),
@@ -996,8 +996,8 @@ pub struct MultipathAggregator {
     /// Total symbols processed.
     total_processed: AtomicU64,
 
-    /// Last flush time.
-    last_flush: RwLock<Time>,
+    /// Last flush time (nanoseconds, atomic for lock-free check).
+    last_flush: AtomicU64,
 }
 
 impl MultipathAggregator {
@@ -1012,7 +1012,7 @@ impl MultipathAggregator {
             reorderer: SymbolReorderer::new(config.reorder.clone()),
             config,
             total_processed: AtomicU64::new(0),
-            last_flush: RwLock::new(Time::ZERO),
+            last_flush: AtomicU64::new(0),
         }
     }
 
@@ -1062,14 +1062,25 @@ impl MultipathAggregator {
 
     /// Flushes any timed-out symbols.
     pub fn flush(&self, now: Time) -> Vec<Symbol> {
-        // Check flush interval
-        {
-            let mut last = self.last_flush.write().expect("lock poisoned");
-            let interval_nanos = self.config.flush_interval.as_nanos();
-            if now.as_nanos().saturating_sub(last.as_nanos()) < interval_nanos {
+        // Check flush interval (lock-free CAS)
+        let interval_nanos = self.config.flush_interval.as_nanos();
+        loop {
+            let last_nanos = self.last_flush.load(Ordering::Relaxed);
+            if now.as_nanos().saturating_sub(last_nanos) < interval_nanos {
                 return vec![];
             }
-            *last = now;
+            if self
+                .last_flush
+                .compare_exchange_weak(
+                    last_nanos,
+                    now.as_nanos(),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                break;
+            }
         }
 
         // Flush reorderer timeouts
@@ -1930,7 +1941,7 @@ mod tests {
         }
 
         // Should see both paths represented (2 paths, 4 calls)
-        let unique_ids: BTreeSet<PathId> = ids.iter().copied().collect();
+        let unique_ids: HashSet<PathId> = ids.iter().copied().collect();
         crate::assert_with_log!(
             unique_ids.len() == 2,
             "round robin covers both paths",
