@@ -15,11 +15,11 @@ use crate::transport::sink::{SymbolSink, SymbolSinkExt};
 use crate::types::symbol::{ObjectId, Symbol};
 use crate::types::{RegionId, Time};
 use smallvec::{smallvec, SmallVec};
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
-type EndpointSinkMap = BTreeMap<EndpointId, Arc<Mutex<Box<dyn SymbolSink>>>>;
+type EndpointSinkMap = HashMap<EndpointId, Arc<Mutex<Box<dyn SymbolSink>>>>;
 
 // ============================================================================
 // Endpoint Types
@@ -103,14 +103,14 @@ pub struct Endpoint {
     /// Total failures for this endpoint.
     pub failures: AtomicU64,
 
-    /// Last successful operation time.
-    pub last_success: RwLock<Option<Time>>,
+    /// Last successful operation time (nanoseconds; 0 = None).
+    pub last_success: AtomicU64,
 
-    /// Last failure time.
-    pub last_failure: RwLock<Option<Time>>,
+    /// Last failure time (nanoseconds; 0 = None).
+    pub last_failure: AtomicU64,
 
     /// Custom metadata.
-    pub metadata: BTreeMap<String, String>,
+    pub metadata: HashMap<String, String>,
 }
 
 impl Endpoint {
@@ -125,9 +125,9 @@ impl Endpoint {
             active_connections: AtomicU32::new(0),
             symbols_sent: AtomicU64::new(0),
             failures: AtomicU64::new(0),
-            last_success: RwLock::new(None),
-            last_failure: RwLock::new(None),
-            metadata: BTreeMap::new(),
+            last_success: AtomicU64::new(0),
+            last_failure: AtomicU64::new(0),
+            metadata: HashMap::new(),
         }
     }
 
@@ -148,13 +148,13 @@ impl Endpoint {
     /// Records a successful operation.
     pub fn record_success(&self, now: Time) {
         self.symbols_sent.fetch_add(1, Ordering::Relaxed);
-        *self.last_success.write().expect("lock poisoned") = Some(now);
+        self.last_success.store(now.as_nanos(), Ordering::Relaxed);
     }
 
     /// Records a failure.
     pub fn record_failure(&self, now: Time) {
         self.failures.fetch_add(1, Ordering::Relaxed);
-        *self.last_failure.write().expect("lock poisoned") = Some(now);
+        self.last_failure.store(now.as_nanos(), Ordering::Relaxed);
     }
 
     /// Acquires a connection slot.
@@ -468,13 +468,13 @@ impl RouteKey {
 #[derive(Debug)]
 pub struct RoutingTable {
     /// Routes by key.
-    routes: RwLock<BTreeMap<RouteKey, RoutingEntry>>,
+    routes: RwLock<HashMap<RouteKey, RoutingEntry>>,
 
     /// Default route (if no specific route matches).
     default_route: RwLock<Option<RoutingEntry>>,
 
     /// All known endpoints.
-    endpoints: RwLock<BTreeMap<EndpointId, Arc<Endpoint>>>,
+    endpoints: RwLock<HashMap<EndpointId, Arc<Endpoint>>>,
 }
 
 impl RoutingTable {
@@ -482,9 +482,9 @@ impl RoutingTable {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            routes: RwLock::new(BTreeMap::new()),
+            routes: RwLock::new(HashMap::new()),
             default_route: RwLock::new(None),
-            endpoints: RwLock::new(BTreeMap::new()),
+            endpoints: RwLock::new(HashMap::new()),
         }
     }
 
@@ -976,7 +976,7 @@ impl SymbolDispatcher {
             active_dispatches: AtomicU32::new(0),
             total_dispatched: AtomicU64::new(0),
             total_failures: AtomicU64::new(0),
-            sinks: RwLock::new(BTreeMap::new()),
+            sinks: RwLock::new(HashMap::new()),
         }
     }
 
