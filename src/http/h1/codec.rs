@@ -216,38 +216,33 @@ fn is_valid_header_name_bytes(name: &[u8]) -> bool {
     if name.is_empty() {
         return false;
     }
-    name.iter().all(|&b| {
-        matches!(
-            b,
-            b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^'
-                | b'_' | b'`' | b'|' | b'~' | b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z'
-        )
-    })
+    name.iter().all(|&b| is_valid_header_name_byte(b))
 }
 
-fn parse_header_line_bytes(line_bytes: &[u8]) -> Result<(String, String), HttpError> {
-    let line = std::str::from_utf8(line_bytes).map_err(|_| HttpError::BadHeader)?;
-    parse_header_line(line)
+#[inline]
+fn is_valid_header_name_byte(b: u8) -> bool {
+    matches!(
+        b,
+        b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^'
+            | b'_' | b'`' | b'|' | b'~' | b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z'
+    )
 }
 
-/// Parse a single `Name: Value` header line.
-pub(super) fn parse_header_line(line: &str) -> Result<(String, String), HttpError> {
-    let line_bytes = line.as_bytes();
+fn parse_header_line_impl(line_bytes: &[u8]) -> Result<(&[u8], &[u8]), HttpError> {
     let colon = line_bytes
         .iter()
         .position(|&b| b == b':')
         .ok_or(HttpError::BadHeader)?;
     let raw_name = &line_bytes[..colon];
 
-    // Header field names cannot be surrounded by whitespace.
-    if raw_name.first().is_some_and(u8::is_ascii_whitespace)
+    // Header field names cannot be empty or surrounded by whitespace.
+    if raw_name.is_empty()
+        || raw_name.first().is_some_and(u8::is_ascii_whitespace)
         || raw_name.last().is_some_and(u8::is_ascii_whitespace)
     {
         return Err(HttpError::InvalidHeaderName);
     }
-
-    let name = &line[..colon];
-    if !is_valid_header_name(name) {
+    if raw_name.iter().any(|&b| !is_valid_header_name_byte(b)) {
         return Err(HttpError::InvalidHeaderName);
     }
 
@@ -259,11 +254,28 @@ pub(super) fn parse_header_line(line: &str) -> Result<(String, String), HttpErro
     while value_end > value_start && line_bytes[value_end - 1].is_ascii_whitespace() {
         value_end -= 1;
     }
-    let value = &line[value_start..value_end];
-    if value.contains('\r') || value.contains('\n') {
+    if line_bytes[value_start..value_end]
+        .iter()
+        .any(|&b| b == b'\r' || b == b'\n')
+    {
         return Err(HttpError::InvalidHeaderValue);
     }
 
+    Ok((raw_name, &line_bytes[value_start..value_end]))
+}
+
+fn parse_header_line_bytes(line_bytes: &[u8]) -> Result<(String, String), HttpError> {
+    let (name_bytes, value_bytes) = parse_header_line_impl(line_bytes)?;
+    let name = std::str::from_utf8(name_bytes).map_err(|_| HttpError::BadHeader)?;
+    let value = std::str::from_utf8(value_bytes).map_err(|_| HttpError::BadHeader)?;
+    Ok((name.to_owned(), value.to_owned()))
+}
+
+/// Parse a single `Name: Value` header line.
+pub(super) fn parse_header_line(line: &str) -> Result<(String, String), HttpError> {
+    let (name_bytes, value_bytes) = parse_header_line_impl(line.as_bytes())?;
+    let name = std::str::from_utf8(name_bytes).map_err(|_| HttpError::BadHeader)?;
+    let value = std::str::from_utf8(value_bytes).map_err(|_| HttpError::BadHeader)?;
     Ok((name.to_owned(), value.to_owned()))
 }
 
