@@ -6,7 +6,8 @@ mod common;
 use asupersync::record::TaskRecord;
 use asupersync::types::{Budget, CancelReason, CxInner, RegionId, TaskId};
 use common::*;
-use std::sync::{Arc, RwLock};
+use parking_lot::RwLock;
+use std::sync::Arc;
 
 #[test]
 fn repro_cancel_strengthening_bug() {
@@ -41,7 +42,7 @@ fn repro_cancel_strengthening_bug() {
     // Verify inner has loose budget
     test_section!("verify_loose_budget");
     let loose_quota = {
-        let guard = inner.read().unwrap();
+        let guard = inner.read();
         let quota = guard.budget.poll_quota;
         drop(guard);
         quota
@@ -71,7 +72,7 @@ fn repro_cancel_strengthening_bug() {
     // 6. Verify inner has tight budget (The Bug)
     test_section!("verify_inner_budget");
     let tight_quota = {
-        let guard = inner.read().unwrap();
+        let guard = inner.read();
         let quota = guard.budget.poll_quota;
         drop(guard);
         quota

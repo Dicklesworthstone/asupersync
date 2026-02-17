@@ -1025,7 +1025,7 @@ fn run_plan(runtime: &mut LabRuntime, plan: &PlanDag) -> NodeValue {
         for (_, record) in runtime.state.tasks_iter() {
             if record.is_runnable() {
                 let prio = record.cx_inner.as_ref().map_or(0, |inner| {
-                    inner.read().expect("lock poisoned").budget.priority
+                    inner.read().budget.priority
                 });
                 sched.schedule(record.id, prio);
             }
@@ -1233,7 +1233,7 @@ where
         .find(|(_, record)| record.id == task_id)
         .and_then(|(_, record)| record.cx_inner.as_ref())
         .map_or(0, |inner| {
-            inner.read().expect("lock poisoned").budget.priority
+            inner.read().budget.priority
         });
     runtime
         .scheduler

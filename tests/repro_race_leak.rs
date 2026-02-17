@@ -149,7 +149,7 @@ fn repro_race_leak() {
 
         let task_record = state.task(loser_task_id).expect("task record");
         let inner = task_record.cx_inner.as_ref().expect("cx inner missing");
-        let is_cancelled = inner.read().unwrap().cancel_requested;
+        let is_cancelled = inner.read().cancel_requested;
 
         tracing::debug!(is_cancelled, "loser cancelled");
 
