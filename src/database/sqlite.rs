@@ -39,7 +39,8 @@ use crate::types::{CancelReason, Outcome};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use parking_lot::Mutex;
+use std::sync::{Arc, OnceLock};
 
 /// Global blocking pool for SQLite operations.
 ///
@@ -323,7 +324,7 @@ impl fmt::Debug for SqliteConnection {
         f.debug_struct("SqliteConnection")
             .field(
                 "open",
-                &self.inner.lock().map(|g| g.conn.is_some()).unwrap_or(false),
+                &self.inner.lock().conn.is_some(),
             )
             .finish()
     }
@@ -437,7 +438,7 @@ impl SqliteConnection {
 
         let handle = self.pool.spawn(move || {
             let result = (|| {
-                let guard = inner.lock().map_err(|_| SqliteError::LockPoisoned)?;
+                let guard = inner.lock();
                 let conn = guard.get()?;
 
                 let params_refs: Vec<&dyn rusqlite::ToSql> =
@@ -479,7 +480,7 @@ impl SqliteConnection {
 
         let handle = self.pool.spawn(move || {
             let result = (|| {
-                let guard = inner.lock().map_err(|_| SqliteError::LockPoisoned)?;
+                let guard = inner.lock();
                 let conn = guard.get()?;
                 conn.execute_batch(&sql)
                     .map_err(|e| SqliteError::Sqlite(e.to_string()))
@@ -522,7 +523,7 @@ impl SqliteConnection {
 
         let handle = self.pool.spawn(move || {
             let result = (|| {
-                let guard = inner.lock().map_err(|_| SqliteError::LockPoisoned)?;
+                let guard = inner.lock();
                 let conn = guard.get()?;
 
                 let params_refs: Vec<&dyn rusqlite::ToSql> =
@@ -655,7 +656,7 @@ impl SqliteConnection {
 
     /// Closes the connection.
     pub fn close(&self) -> Result<(), SqliteError> {
-        let mut guard = self.inner.lock().map_err(|_| SqliteError::LockPoisoned)?;
+        let mut guard = self.inner.lock();
         guard.close();
         Ok(())
     }
@@ -663,7 +664,7 @@ impl SqliteConnection {
     /// Returns true if the connection is open.
     #[must_use]
     pub fn is_open(&self) -> bool {
-        self.inner.lock().map(|g| g.conn.is_some()).unwrap_or(false)
+        self.inner.lock().conn.is_some()
     }
 }
 
@@ -748,10 +749,9 @@ impl Drop for SqliteTransaction<'_> {
             let pool = self.conn.pool.clone();
 
             let handle = pool.spawn(move || {
-                if let Ok(guard) = inner.lock() {
-                    if let Ok(conn) = guard.get() {
-                        let _ = conn.execute("ROLLBACK", []);
-                    }
+                let guard = inner.lock();
+                if let Ok(conn) = guard.get() {
+                    let _ = conn.execute("ROLLBACK", []);
                 }
             });
 

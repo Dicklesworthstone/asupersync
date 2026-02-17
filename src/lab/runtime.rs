@@ -34,7 +34,8 @@ use crate::types::{ObligationId, RegionId, TaskId};
 use crate::util::{DetEntropy, DetRng};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
@@ -925,7 +926,7 @@ impl LabRuntime {
             }
 
             // Run until the scheduler is empty
-            let is_empty = self.scheduler.lock().unwrap().is_empty();
+            let is_empty = self.scheduler.lock().is_empty();
             if !is_empty {
                 self.step();
                 continue;
@@ -1056,7 +1057,7 @@ impl LabRuntime {
                 }
             }
 
-            let is_empty = self.scheduler.lock().unwrap().is_empty();
+            let is_empty = self.scheduler.lock().is_empty();
             if is_empty {
                 break;
             }
@@ -1322,7 +1323,7 @@ impl LabRuntime {
         let worker_hint = (rng_value as usize) % worker_count;
         let now = self.now();
         let (task_id, dispatch_lane) = {
-            let mut sched = self.scheduler.lock().unwrap();
+            let mut sched = self.scheduler.lock();
             if let Some((tid, lane)) = sched.pop_for_worker(worker_hint, rng_value, now) {
                 (tid, lane)
             } else if let Some(tid) = sched.steal_for_worker(worker_hint, rng_value.rotate_left(17))
@@ -1349,7 +1350,7 @@ impl LabRuntime {
         // 3. Prepare context and enforce budget
         let priority = self.state.task(task_id).map_or(0, |record| {
             record.cx_inner.as_ref().map_or(0, |inner| {
-                let mut guard = inner.write().expect("lock poisoned");
+                let mut guard = inner.write();
 
                 // Enforce poll quota
                 if guard.budget.consume_poll().is_none() {
@@ -1378,7 +1379,8 @@ impl LabRuntime {
                     priority,
                     scheduler: self.scheduler.clone(),
                 }));
-                if let Ok(mut guard) = inner.write() {
+                {
+                    let mut guard = inner.write();
                     guard.cancel_waker = Some(cancel_waker);
                 }
             }
@@ -1410,7 +1412,7 @@ impl LabRuntime {
             Poll::Ready(outcome) => {
                 // Task completed
                 self.state.remove_stored_future(task_id);
-                self.scheduler.lock().unwrap().forget_task(task_id);
+                self.scheduler.lock().forget_task(task_id);
 
                 // Update state to Completed if not already terminal
                 if let Some(record) = self.state.task_mut(task_id) {
@@ -1478,7 +1480,7 @@ impl LabRuntime {
                         let (task_type, deadline) = record
                             .cx_inner
                             .as_ref()
-                            .and_then(|inner| inner.read().ok())
+                            .map(|inner| inner.read())
                             .map_or_else(
                                 || ("default".to_string(), None),
                                 |inner| {
@@ -1499,14 +1501,14 @@ impl LabRuntime {
                 let waiters = self.state.task_completed(task_id);
 
                 // Schedule waiters
-                let mut sched = self.scheduler.lock().unwrap();
+                let mut sched = self.scheduler.lock();
                 for waiter in waiters {
                     let prio = self
                         .state
                         .task(waiter)
                         .and_then(|t| t.cx_inner.as_ref())
                         .map_or(0, |inner| {
-                            inner.read().expect("lock poisoned").budget.priority
+                            inner.read().budget.priority
                         });
                     sched.schedule(waiter, prio);
                 }
@@ -1664,9 +1666,9 @@ impl LabRuntime {
         let priority = record
             .cx_inner
             .as_ref()
-            .and_then(|inner| inner.read().ok().map(|cx| cx.budget.priority))
+            .map(|inner| inner.read().budget.priority)
             .unwrap_or(0);
-        let mut sched = self.scheduler.lock().unwrap();
+        let mut sched = self.scheduler.lock();
         sched.schedule_cancel(task_id, priority);
     }
 
@@ -1675,7 +1677,7 @@ impl LabRuntime {
         if tasks.is_empty() {
             return;
         }
-        let mut sched = self.scheduler.lock().unwrap();
+        let mut sched = self.scheduler.lock();
         for (task_id, priority) in tasks {
             sched.schedule(task_id, priority);
         }
@@ -1689,7 +1691,8 @@ impl LabRuntime {
             return false;
         };
         let mut acknowledged = false;
-        if let Ok(mut guard) = inner.write() {
+        {
+            let mut guard = inner.write();
             if guard.cancel_acknowledged {
                 guard.cancel_acknowledged = false;
                 acknowledged = true;
@@ -1739,10 +1742,9 @@ impl LabRuntime {
         // Set the task's budget quotas to zero
         if let Some(record) = self.state.task(task_id) {
             if let Some(cx_inner) = &record.cx_inner {
-                if let Ok(mut inner) = cx_inner.write() {
-                    inner.budget.poll_quota = 0;
-                    inner.budget.cost_quota = Some(0);
-                }
+                let mut inner = cx_inner.write();
+                inner.budget.poll_quota = 0;
+                inner.budget.cost_quota = Some(0);
             }
         }
 
@@ -1767,7 +1769,7 @@ impl LabRuntime {
             .record_wakeup_storm_injection(task_id, count as u32);
 
         // Schedule the task multiple times (spurious wakeups)
-        let mut sched = self.scheduler.lock().unwrap();
+        let mut sched = self.scheduler.lock();
         for _ in 0..count {
             sched.schedule(task_id, priority);
         }
@@ -2283,7 +2285,9 @@ mod tests {
     use crate::runtime::reactor::{Event, Interest};
     use crate::types::{Budget, CxInner, Outcome, TaskId};
     use crate::util::ArenaIndex;
-    use std::sync::{Arc, Mutex, RwLock};
+    use parking_lot::RwLock;
+    use parking_lot::Mutex;
+use std::sync::Arc;
     use std::task::{Wake, Waker};
     use std::time::Duration;
 
@@ -2525,7 +2529,7 @@ mod tests {
                         crate::runtime::yield_now::yield_now().await;
                     })
                     .expect("create task");
-                runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+                runtime.scheduler.lock().schedule(task_id, 0);
             }
             runtime.run_until_quiescent();
         });
@@ -2550,7 +2554,7 @@ mod tests {
                         crate::runtime::yield_now::yield_now().await;
                     })
                     .expect("create task");
-                runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+                runtime.scheduler.lock().schedule(task_id, 0);
             }
         };
 
@@ -2601,7 +2605,7 @@ mod tests {
         };
 
         runtime.enable_deadline_monitoring_with_handler(config, move |warning| {
-            warnings_clone.lock().unwrap().push(warning);
+            warnings_clone.lock().push(warning);
         });
 
         let root = runtime.state.create_root_region(Budget::INFINITE);
@@ -2626,7 +2630,7 @@ mod tests {
 
         runtime.step();
 
-        let warnings = warnings.lock().unwrap();
+        let warnings = warnings.lock();
         let warning = warnings.first().expect("expected warning");
         crate::assert_with_log!(
             warning.task_id == task_id,
@@ -2666,7 +2670,7 @@ mod tests {
         };
 
         runtime.enable_deadline_monitoring_with_handler(config, move |warning| {
-            warnings_clone.lock().unwrap().push(warning);
+            warnings_clone.lock().push(warning);
         });
 
         let root = runtime.state.create_root_region(Budget::INFINITE);
@@ -2684,7 +2688,7 @@ mod tests {
 
         runtime.step();
 
-        let warnings = warnings.lock().unwrap();
+        let warnings = warnings.lock();
         let warning = warnings.first().expect("expected warning");
         crate::assert_with_log!(
             warning.task_id == task_id,
@@ -2828,7 +2832,7 @@ mod tests {
             .expect("create obligation");
 
         // Schedule and run well past the threshold.
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
         for _ in 0..20 {
             runtime.step();
         }
@@ -3332,7 +3336,7 @@ mod tests {
             .state
             .create_task(region, Budget::INFINITE, async {})
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task, 0);
+        runtime.scheduler.lock().schedule(task, 0);
         runtime.run_until_quiescent();
         runtime
             .state
@@ -3394,7 +3398,7 @@ mod tests {
             .state
             .create_task(region, Budget::INFINITE, async {})
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task, 0);
+        runtime.scheduler.lock().schedule(task, 0);
         runtime.run_until_quiescent();
         runtime
             .state
@@ -3440,7 +3444,7 @@ mod tests {
             .state
             .create_task(region, Budget::INFINITE, async {})
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task, 0);
+        runtime.scheduler.lock().schedule(task, 0);
         runtime.run_until_quiescent();
         runtime
             .state
@@ -3783,7 +3787,7 @@ mod tests {
                 crate::runtime::yield_now::yield_now().await;
             })
             .expect("create task");
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
 
         // Step once: task yields (Pending)
         runtime.step();
@@ -3804,7 +3808,7 @@ mod tests {
 
         // Reschedule and run to completion: the cancel protocol will
         // complete it as Cancelled when the wrapped future returns Ok.
-        runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+        runtime.scheduler.lock().schedule(task_id, 0);
         runtime.run_until_quiescent();
 
         // Verify the task completed as Cancelled

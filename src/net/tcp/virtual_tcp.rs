@@ -30,7 +30,8 @@ use std::io;
 use std::net::{Shutdown, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 // =============================================================================
@@ -129,7 +130,7 @@ impl AsyncRead for VirtualTcpStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        let mut half = this.read_half.lock().expect("channel lock poisoned");
+        let mut half = this.read_half.lock();
 
         if half.read_shutdown {
             return Poll::Ready(Ok(()));
@@ -168,7 +169,7 @@ impl AsyncWrite for VirtualTcpStream {
             )));
         }
 
-        let mut half = this.write_half.lock().expect("channel lock poisoned");
+        let mut half = this.write_half.lock();
         if half.closed {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -199,7 +200,7 @@ impl AsyncWrite for VirtualTcpStream {
         this.write_shutdown.store(true, Ordering::Relaxed);
 
         // Signal EOF to the reader
-        let mut half = this.write_half.lock().expect("channel lock poisoned");
+        let mut half = this.write_half.lock();
         half.closed = true;
         let wake = half.waker.take();
         drop(half);
@@ -216,25 +217,21 @@ impl Drop for VirtualTcpStream {
     fn drop(&mut self) {
         *self.write_shutdown.get_mut() = true;
 
-        let read_wake = self.read_half.lock().map_or_else(
-            |_| None,
-            |mut half| {
-                half.read_shutdown = true;
-                half.buf.clear();
-                half.waker.take()
-            },
-        );
+        let read_wake = {
+            let mut half = self.read_half.lock();
+            half.read_shutdown = true;
+            half.buf.clear();
+            half.waker.take()
+        };
         if let Some(waker) = read_wake {
             waker.wake();
         }
 
-        let write_wake = self.write_half.lock().map_or_else(
-            |_| None,
-            |mut half| {
-                half.closed = true;
-                half.waker.take()
-            },
-        );
+        let write_wake = {
+            let mut half = self.write_half.lock();
+            half.closed = true;
+            half.waker.take()
+        };
         if let Some(waker) = write_wake {
             waker.wake();
         }
@@ -265,7 +262,7 @@ impl TcpStreamApi for VirtualTcpStream {
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         match how {
             Shutdown::Read | Shutdown::Both => {
-                let mut half = self.read_half.lock().expect("lock poisoned");
+                let mut half = self.read_half.lock();
                 half.read_shutdown = true;
                 half.buf.clear();
                 let wake = half.waker.take();
@@ -279,7 +276,7 @@ impl TcpStreamApi for VirtualTcpStream {
         match how {
             Shutdown::Write | Shutdown::Both => {
                 self.write_shutdown.store(true, Ordering::Relaxed);
-                let mut half = self.write_half.lock().expect("lock poisoned");
+                let mut half = self.write_half.lock();
                 half.closed = true;
                 let wake = half.waker.take();
                 drop(half);
@@ -381,7 +378,7 @@ impl VirtualTcpListener {
     /// The stream will be returned by the next `accept()` call.
     /// `remote_addr` is the address reported as the peer address.
     pub fn inject_connection(&self, stream: VirtualTcpStream, remote_addr: SocketAddr) {
-        let mut state = self.state.lock().expect("lock poisoned");
+        let mut state = self.state.lock();
         if state.closed {
             // Listener is closed: do not enqueue new virtual connections.
             return;
@@ -395,12 +392,12 @@ impl VirtualTcpListener {
     /// Returns the number of pending (injected but not yet accepted) connections.
     #[must_use]
     pub fn pending_count(&self) -> usize {
-        self.state.lock().expect("lock poisoned").connections.len()
+        self.state.lock().connections.len()
     }
 
     /// Close the listener, causing future `accept()` calls to return an error.
     pub fn close(&self) {
-        let mut state = self.state.lock().expect("lock poisoned");
+        let mut state = self.state.lock();
         state.closed = true;
         state.connections.clear();
         if let Some(waker) = state.waker.take() {
@@ -429,7 +426,7 @@ pub struct VirtualConnectionInjector {
 impl VirtualConnectionInjector {
     /// Inject a connection into the listener's accept queue.
     pub fn inject(&self, stream: VirtualTcpStream, remote_addr: SocketAddr) {
-        let mut state = self.state.lock().expect("lock poisoned");
+        let mut state = self.state.lock();
         if state.closed {
             // Listener is closed: do not enqueue new virtual connections.
             return;
@@ -462,7 +459,7 @@ impl TcpListenerApi for VirtualTcpListener {
         let state = Arc::clone(&self.state);
         async move {
             std::future::poll_fn(|cx| {
-                let mut guard = state.lock().expect("lock poisoned");
+                let mut guard = state.lock();
                 if guard.closed {
                     return Poll::Ready(Err(io::Error::new(
                         io::ErrorKind::NotConnected,
@@ -480,7 +477,7 @@ impl TcpListenerApi for VirtualTcpListener {
     }
 
     fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<(Self::Stream, SocketAddr)>> {
-        let mut state = self.state.lock().expect("lock poisoned");
+        let mut state = self.state.lock();
         if state.closed {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::NotConnected,
@@ -729,7 +726,7 @@ mod tests {
         let state = Arc::clone(&listener.state);
         drop(listener);
 
-        let closed = state.lock().expect("lock poisoned").closed;
+        let closed = state.lock().closed;
         assert!(closed);
     }
 

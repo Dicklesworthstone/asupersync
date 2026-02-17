@@ -5,9 +5,10 @@
 
 use crate::types::TaskId;
 use crate::util::DetRng;
+use parking_lot::Mutex;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc,
 };
 
 /// Core trait for entropy providers.
@@ -103,20 +104,16 @@ impl DetEntropy {
 
 impl EntropySource for DetEntropy {
     fn fill_bytes(&self, dest: &mut [u8]) {
-        let mut inner = self.inner.lock().expect("det entropy lock poisoned");
+        let mut inner = self.inner.lock();
         inner.rng.fill_bytes(dest);
     }
 
     fn next_u64(&self) -> u64 {
-        self.inner
-            .lock()
-            .expect("det entropy lock poisoned")
-            .rng
-            .next_u64()
+        self.inner.lock().rng.next_u64()
     }
 
     fn fork(&self, task_id: TaskId) -> Arc<dyn EntropySource> {
-        let mut inner = self.inner.lock().expect("det entropy lock poisoned");
+        let mut inner = self.inner.lock();
         let counter = inner.fork_counter;
         inner.fork_counter = inner.fork_counter.wrapping_add(1);
         drop(inner);

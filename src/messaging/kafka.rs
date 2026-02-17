@@ -43,7 +43,9 @@ use std::future::Future;
 #[cfg(feature = "kafka")]
 use std::pin::Pin;
 #[cfg(feature = "kafka")]
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+#[cfg(feature = "kafka")]
+use std::sync::Arc;
 #[cfg(feature = "kafka")]
 use std::task::{Context, Poll, Waker};
 
@@ -157,7 +159,7 @@ struct DeliverySender {
 #[cfg(feature = "kafka")]
 impl DeliverySender {
     fn complete(self, value: Result<RecordMetadata, KafkaError>) {
-        let mut state = self.inner.lock().expect("delivery lock poisoned");
+        let mut state = self.inner.lock();
         if state.closed || state.value.is_some() {
             return;
         }
@@ -178,7 +180,7 @@ struct DeliveryReceiver {
 #[cfg(feature = "kafka")]
 impl Drop for DeliveryReceiver {
     fn drop(&mut self) {
-        let mut state = self.inner.lock().expect("delivery lock poisoned");
+        let mut state = self.inner.lock();
         state.closed = true;
         state.waker = None;
     }
@@ -190,13 +192,13 @@ impl Future for DeliveryReceiver {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.cx.checkpoint().is_err() {
-            let mut state = self.inner.lock().expect("delivery lock poisoned");
+            let mut state = self.inner.lock();
             state.closed = true;
             state.waker = None;
             return Poll::Ready(Err(KafkaError::Cancelled));
         }
 
-        let mut state = self.inner.lock().expect("delivery lock poisoned");
+        let mut state = self.inner.lock();
         if let Some(value) = state.value.take() {
             Poll::Ready(value)
         } else {
