@@ -425,34 +425,6 @@ fn append_chunk_size_line(dst: &mut BytesMut, mut size: usize) {
     dst.extend_from_slice(b"\r\n");
 }
 
-/// Determine body length from headers.
-///
-/// Per RFC 7230 Section 3.3.3, having both Transfer-Encoding and Content-Length
-/// is an error that could indicate a request smuggling attempt.
-fn body_kind(version: Version, headers: &[(String, String)]) -> Result<BodyKind, HttpError> {
-    let (te, cl) = transfer_and_content_length(headers)?;
-
-    // RFC 7230 3.3.3: Reject requests with both Transfer-Encoding and Content-Length
-    // to prevent request smuggling attacks.
-    if te.is_some() && cl.is_some() {
-        return Err(HttpError::AmbiguousBodyLength);
-    }
-
-    if let Some(te) = te {
-        // HTTP/1.0 does not support Transfer-Encoding.
-        if version == Version::Http10 {
-            return Err(HttpError::BadTransferEncoding);
-        }
-        require_transfer_encoding_chunked(te)?;
-        return Ok(BodyKind::Chunked);
-    }
-    if let Some(cl) = cl {
-        let len: usize = cl.trim().parse().map_err(|_| HttpError::BadContentLength)?;
-        return Ok(BodyKind::ContentLength(len));
-    }
-    Ok(BodyKind::ContentLength(0))
-}
-
 /// Return `(Transfer-Encoding, Content-Length)` while enforcing duplicate rules.
 fn transfer_and_content_length(
     headers: &[(String, String)],
@@ -657,6 +629,8 @@ fn decode_head(
     let (method, uri, version) = parse_request_line_bytes(request_line)?;
 
     let mut headers = Vec::with_capacity(8);
+    let mut transfer_encoding_idx = None;
+    let mut content_length_idx = None;
     let mut cursor = request_line_end + 2;
     while cursor < head.len() {
         let line_end = find_crlf(&head[cursor..]).ok_or(HttpError::BadHeader)?;
@@ -665,14 +639,47 @@ fn decode_head(
         }
         let line_start = cursor;
         let line_end = cursor + line_end;
-        headers.push(parse_header_line_bytes(&head[line_start..line_end])?);
+
+        let header = parse_header_line_bytes(&head[line_start..line_end])?;
+        if header.0.eq_ignore_ascii_case("transfer-encoding") {
+            if transfer_encoding_idx.is_some() {
+                return Err(HttpError::DuplicateTransferEncoding);
+            }
+            transfer_encoding_idx = Some(headers.len());
+        } else if header.0.eq_ignore_ascii_case("content-length") {
+            if content_length_idx.is_some() {
+                return Err(HttpError::DuplicateContentLength);
+            }
+            content_length_idx = Some(headers.len());
+        }
+
+        headers.push(header);
         if headers.len() > MAX_HEADERS {
             return Err(HttpError::TooManyHeaders);
         }
         cursor = line_end + 2;
     }
 
-    let kind = body_kind(version, &headers)?;
+    let kind = match (transfer_encoding_idx, content_length_idx) {
+        (Some(_), Some(_)) => return Err(HttpError::AmbiguousBodyLength),
+        (Some(te_idx), None) => {
+            if version == Version::Http10 {
+                return Err(HttpError::BadTransferEncoding);
+            }
+            require_transfer_encoding_chunked(headers[te_idx].1.as_str())?;
+            BodyKind::Chunked
+        }
+        (None, Some(cl_idx)) => {
+            let len: usize = headers[cl_idx]
+                .1
+                .trim()
+                .parse()
+                .map_err(|_| HttpError::BadContentLength)?;
+            BodyKind::ContentLength(len)
+        }
+        (None, None) => BodyKind::ContentLength(0),
+    };
+
     Ok(Some((method, uri, version, headers, kind)))
 }
 
