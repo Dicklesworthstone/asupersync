@@ -10,9 +10,9 @@ use crate::codec::{Decoder, Encoder};
 
 use super::error::{ErrorCode, H2Error};
 use super::frame::{
-    parse_frame, ContinuationFrame, DataFrame, Frame, FrameHeader, FrameType, GoAwayFrame,
+    ContinuationFrame, DataFrame, FRAME_HEADER_SIZE, Frame, FrameHeader, FrameType, GoAwayFrame,
     HeadersFrame, PingFrame, PushPromiseFrame, RstStreamFrame, Setting, SettingsFrame,
-    WindowUpdateFrame, FRAME_HEADER_SIZE,
+    WindowUpdateFrame, parse_frame,
 };
 use super::hpack::{self, Header};
 use super::settings::Settings;
@@ -1381,10 +1381,12 @@ mod tests {
         match frame {
             Frame::Settings(settings) => {
                 assert!(!settings.ack);
-                assert!(settings
-                    .settings
-                    .iter()
-                    .any(|setting| matches!(setting, Setting::EnablePush(false))));
+                assert!(
+                    settings
+                        .settings
+                        .iter()
+                        .any(|setting| matches!(setting, Setting::EnablePush(false)))
+                );
             }
             _ => panic!("expected SETTINGS frame"),
         }
@@ -1439,10 +1441,12 @@ mod tests {
         let frame = conn.next_frame().expect("expected initial settings frame");
         match frame {
             Frame::Settings(settings) => {
-                assert!(!settings
-                    .settings
-                    .iter()
-                    .any(|setting| matches!(setting, Setting::EnablePush(_))));
+                assert!(
+                    !settings
+                        .settings
+                        .iter()
+                        .any(|setting| matches!(setting, Setting::EnablePush(_)))
+                );
             }
             _ => panic!("expected SETTINGS frame"),
         }

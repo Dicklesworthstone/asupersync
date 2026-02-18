@@ -50,7 +50,7 @@ pub mod split;
 pub mod stream;
 
 pub use ancillary::{
-    ancillary_space_for_fds, AncillaryMessage, AncillaryMessages, ScmRights, SocketAncillary,
+    AncillaryMessage, AncillaryMessages, ScmRights, SocketAncillary, ancillary_space_for_fds,
 };
 pub use datagram::UnixDatagram;
 pub use listener::{Incoming, UnixListener};

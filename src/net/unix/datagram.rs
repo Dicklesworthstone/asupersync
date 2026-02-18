@@ -585,7 +585,7 @@ impl UnixDatagram {
     ///
     /// This is useful for implementing custom poll loops.
     pub fn poll_send_ready(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+        use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
         use std::os::unix::io::AsFd;
 
         let mut fds = [PollFd::new(self.inner.as_fd(), PollFlags::POLLOUT)];
@@ -1065,8 +1065,8 @@ mod tests {
     #[test]
     fn test_datagram_registers_on_wouldblock() {
         use crate::cx::Cx;
-        use crate::runtime::io_driver::IoDriverHandle;
         use crate::runtime::LabReactor;
+        use crate::runtime::io_driver::IoDriverHandle;
         use crate::types::{Budget, RegionId, TaskId};
 
         init_test("test_datagram_registers_on_wouldblock");
@@ -1126,8 +1126,8 @@ mod tests {
     #[test]
     fn test_datagram_send_registers_on_wouldblock() {
         use crate::cx::Cx;
-        use crate::runtime::io_driver::IoDriverHandle;
         use crate::runtime::LabReactor;
+        use crate::runtime::io_driver::IoDriverHandle;
         use crate::types::{Budget, RegionId, TaskId};
 
         init_test("test_datagram_send_registers_on_wouldblock");

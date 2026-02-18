@@ -19,8 +19,8 @@ pub use aggregator::{
 };
 pub use error::{SinkError, StreamError};
 pub use mock::{
-    sim_channel, NodeId, SimChannelSink, SimChannelStream, SimLink, SimNetwork, SimSymbolSink,
-    SimSymbolStream, SimTransportConfig,
+    NodeId, SimChannelSink, SimChannelStream, SimLink, SimNetwork, SimSymbolSink, SimSymbolStream,
+    SimTransportConfig, sim_channel,
 };
 pub use router::{
     DispatchConfig, DispatchError, DispatchResult, DispatchStrategy, Endpoint, EndpointId,
@@ -35,8 +35,8 @@ use crate::types::Symbol;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::collections::{HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Waker;
 
 /// A set of unique symbols.
@@ -118,8 +118,8 @@ mod inline_tests {
     use crate::transport::{SymbolSinkExt, SymbolStreamExt};
     use crate::types::{Symbol, SymbolId, SymbolKind};
     use futures_lite::future;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Wake, Waker};
 
     fn init_test(name: &str) {

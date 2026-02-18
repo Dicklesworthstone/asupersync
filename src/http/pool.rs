@@ -373,7 +373,10 @@ impl Pool {
     /// so stale entries do not block new connections.
     #[must_use]
     pub fn can_create_connection(&mut self, key: &PoolKey, now: Time) -> bool {
-        self.maybe_cleanup(now);
+        // Capacity checks must ignore expired idle sockets immediately, not only
+        // on periodic cleanup ticks.
+        self.cleanup_expired(now);
+        self.last_cleanup = now;
         // Check total connection limit
         let total = self
             .hosts

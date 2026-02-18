@@ -37,9 +37,9 @@
 //! - **No partial results**: Either all stages complete or none
 //! - **Cancel-correctness**: Respects cancellation at stage boundaries
 
+use crate::types::Outcome;
 use crate::types::cancel::CancelReason;
 use crate::types::outcome::PanicPayload;
-use crate::types::Outcome;
 use core::fmt;
 use std::marker::PhantomData;
 

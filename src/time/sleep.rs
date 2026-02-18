@@ -632,8 +632,8 @@ mod tests {
     use crate::time::{TimerDriverHandle, VirtualClock};
     use crate::types::{Budget, RegionId, TaskId};
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::{Context, Wake, Waker};
 
     // =========================================================================

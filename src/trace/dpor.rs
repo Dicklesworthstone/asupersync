@@ -33,7 +33,7 @@
 //! - Abdulla et al., "Optimal dynamic partial order reduction" (POPL 2014)
 
 use crate::trace::event::{TraceData, TraceEvent, TraceEventKind};
-use crate::trace::independence::{accesses_conflict, independent, resource_footprint, Resource};
+use crate::trace::independence::{Resource, accesses_conflict, independent, resource_footprint};
 use crate::types::TaskId;
 use std::collections::BTreeMap;
 
@@ -614,10 +614,12 @@ mod tests {
         // (0,2) has intervening event 1 that depends on both -> NOT a race.
         assert_eq!(analysis.race_count(), 2);
         // Verify (0,2) is not in the races list.
-        assert!(!analysis
-            .races
-            .iter()
-            .any(|r| r.earlier == 0 && r.later == 2));
+        assert!(
+            !analysis
+                .races
+                .iter()
+                .any(|r| r.earlier == 0 && r.later == 2)
+        );
     }
 
     #[test]

@@ -722,7 +722,7 @@ fn recv_with_ancillary_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nix::fcntl::{fcntl, FcntlArg, OFlag};
+    use nix::fcntl::{FcntlArg, OFlag, fcntl};
     use std::io::{self, IoSlice, IoSliceMut, Read};
 
     fn init_test(name: &str) {

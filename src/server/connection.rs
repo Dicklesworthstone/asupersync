@@ -10,8 +10,8 @@ use crate::time::sleep_until;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 /// Unique identifier for a tracked connection.
@@ -814,7 +814,7 @@ mod tests {
             let s = Arc::clone(&successes);
             handles.push(std::thread::spawn(move || {
                 b.wait();
-                if m.register(test_addr(9000 + i)).is_some() {
+                if let Some(_guard) = m.register(test_addr(9000 + i)) {
                     s.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     // Hold the guard alive until thread exits
                     std::thread::sleep(Duration::from_millis(100));

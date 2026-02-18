@@ -204,9 +204,9 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
@@ -1605,10 +1605,10 @@ impl DestroyReason {
 #[cfg(feature = "metrics")]
 mod pool_metrics {
     use super::{DestroyReason, Duration, PoolStats};
-    use opentelemetry::metrics::{Counter, Histogram, Meter, ObservableGauge};
     use opentelemetry::KeyValue;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use opentelemetry::metrics::{Counter, Histogram, Meter, ObservableGauge};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Shared state backing observable gauges for pool metrics.
     #[derive(Debug, Default)]

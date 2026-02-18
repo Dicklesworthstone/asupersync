@@ -12,15 +12,15 @@
 
 #![allow(clippy::result_large_err)]
 
+use crate::RejectReason;
 use crate::combinator::retry::RetryPolicy;
 use crate::decoding::{DecodingConfig, DecodingPipeline, SymbolAcceptResult};
 use crate::error::{Error, ErrorKind};
-use crate::security::tag::AuthenticationTag;
 use crate::security::AuthenticatedSymbol;
 use crate::security::SecurityContext;
+use crate::security::tag::AuthenticationTag;
 use crate::types::symbol::{ObjectParams, Symbol};
 use crate::types::{RegionId, Time};
-use crate::RejectReason;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
@@ -302,6 +302,7 @@ impl RecoveryCollector {
     ///
     /// Returns `true` if the symbol was accepted (new ESI or replaced unverified),
     /// `false` if duplicate/rejected.
+    #[inline]
     pub fn add_collected(&mut self, cs: CollectedSymbol) -> bool {
         let esi = cs.symbol.esi();
         if let Some(&idx) = self.esi_to_idx.get(&esi) {
@@ -326,6 +327,7 @@ impl RecoveryCollector {
     ///
     /// Rejects symbols that have an ESI beyond the expected range if
     /// object parameters are known.
+    #[inline]
     pub fn add_collected_with_verify(&mut self, cs: CollectedSymbol) -> Result<bool, Error> {
         if let Some(params) = &self.object_params {
             let max_expected = params
@@ -1283,7 +1285,8 @@ mod tests {
     #[test]
     fn collector_verify_rejects_out_of_range_esi() {
         let mut collector = RecoveryCollector::new(RecoveryConfig::default());
-        // K=10, total_source=10, min_symbols=0 → max_expected = 10+0 = 10, threshold = 110
+        // K=10, total_source=10, min_symbols=0, plus 50_000 repair-symbol slack:
+        // max accepted ESI is 50_010.
         collector.object_params = Some(ObjectParams::new(
             ObjectId::new_for_test(1),
             1280,
@@ -1292,9 +1295,9 @@ mod tests {
             10,
         ));
 
-        // ESI 200 > 110 threshold → rejected as corrupt
+        // ESI 60_000 exceeds threshold and should be rejected as corrupt.
         let cs = CollectedSymbol {
-            symbol: Symbol::new_for_test(1, 0, 200, &[0u8; 128]),
+            symbol: Symbol::new_for_test(1, 0, 60_000, &[0u8; 128]),
             tag: AuthenticationTag::zero(),
             source_replica: "r1".to_string(),
             collected_at: Time::ZERO,

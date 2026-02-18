@@ -45,8 +45,8 @@
 use parking_lot::RwLock;
 use std::collections::VecDeque;
 use std::fmt;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::types::Time;

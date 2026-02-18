@@ -54,10 +54,10 @@ mod split;
 
 pub use client::{Message, WebSocket, WebSocketConfig, WsConnectError};
 pub use close::{CloseConfig, CloseHandshake, CloseReason, CloseState};
-pub use frame::{apply_mask, CloseCode, Frame, FrameCodec, Opcode, Role, WsError};
+pub use frame::{CloseCode, Frame, FrameCodec, Opcode, Role, WsError, apply_mask};
 pub use handshake::{
-    compute_accept_key, AcceptResponse, ClientHandshake, HandshakeError, HttpRequest, HttpResponse,
-    ServerHandshake, WsUrl,
+    AcceptResponse, ClientHandshake, HandshakeError, HttpRequest, HttpResponse, ServerHandshake,
+    WsUrl, compute_accept_key,
 };
 pub use server::{ServerWebSocket, WebSocketAcceptor, WsAcceptError};
 pub use split::{ReuniteError as WsReuniteError, WebSocketRead, WebSocketWrite};

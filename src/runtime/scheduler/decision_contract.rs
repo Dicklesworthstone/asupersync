@@ -162,13 +162,15 @@ impl SchedulerDecisionContract {
         let cancel_drain_ratio = (cancel_load + drain_load) / (1.0 + cancel_load + drain_load);
         let partitioned_score = deadline_signal * (0.5 + cancel_drain_ratio);
 
-        // Floor to avoid zero likelihoods (keeps posterior well-defined).
+        // Keep likelihoods in [floor, 1.0] so callers can treat them as
+        // bounded evidentiary strengths without additional clipping.
         let floor = 0.01;
+        let clamp_likelihood = |score: f64| score.clamp(floor, 1.0);
         [
-            healthy_score.max(floor),
-            congested_score.max(floor),
-            unstable_score.max(floor),
-            partitioned_score.max(floor),
+            clamp_likelihood(healthy_score),
+            clamp_likelihood(congested_score),
+            clamp_likelihood(unstable_score),
+            clamp_likelihood(partitioned_score),
         ]
     }
 }
@@ -237,7 +239,7 @@ impl DecisionContract for SchedulerDecisionContract {
 mod tests {
     use super::*;
     use crate::types::Time;
-    use franken_decision::{evaluate, EvalContext, Posterior};
+    use franken_decision::{EvalContext, Posterior, evaluate};
     use franken_kernel::{DecisionId, TraceId};
 
     fn test_ctx(cal: f64) -> EvalContext {

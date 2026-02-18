@@ -568,11 +568,11 @@ mod tests {
     use crate::security::authenticated::AuthenticatedSymbol;
     use crate::security::tag::AuthenticationTag;
     use crate::transport::sink::SymbolSink;
-    use crate::transport::{channel, SymbolStreamExt};
+    use crate::transport::{SymbolStreamExt, channel};
     use crate::types::{Symbol, SymbolId, SymbolKind};
     use futures_lite::future;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::task::{Wake, Waker};
     use std::thread;
     use std::time::Instant;

@@ -7,6 +7,7 @@ use crate::util::DetRng;
 /// Tries to steal a task from a list of stealers.
 ///
 /// Starts at a random index and iterates through all stealers.
+#[inline]
 pub fn steal_task(stealers: &[Stealer], rng: &mut DetRng) -> Option<TaskId> {
     if stealers.is_empty() {
         return None;
@@ -25,6 +26,7 @@ pub fn steal_task(stealers: &[Stealer], rng: &mut DetRng) -> Option<TaskId> {
     None
 }
 
+#[inline]
 fn circular_index(start: usize, offset: usize, len: usize) -> usize {
     debug_assert!(len > 0);
     start.wrapping_add(offset) % len

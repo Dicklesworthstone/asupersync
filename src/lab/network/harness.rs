@@ -937,18 +937,24 @@ mod tests {
 
         // B should have received and completed the spawn
         let node_b = harness.node(&b).unwrap();
-        assert!(node_b
-            .events()
-            .iter()
-            .any(|e| matches!(e, NodeEvent::SpawnReceived { .. })));
-        assert!(node_b
-            .events()
-            .iter()
-            .any(|e| matches!(e, NodeEvent::SpawnAccepted { .. })));
-        assert!(node_b
-            .events()
-            .iter()
-            .any(|e| matches!(e, NodeEvent::TaskCompleted { .. })));
+        assert!(
+            node_b
+                .events()
+                .iter()
+                .any(|e| matches!(e, NodeEvent::SpawnReceived { .. }))
+        );
+        assert!(
+            node_b
+                .events()
+                .iter()
+                .any(|e| matches!(e, NodeEvent::SpawnAccepted { .. }))
+        );
+        assert!(
+            node_b
+                .events()
+                .iter()
+                .any(|e| matches!(e, NodeEvent::TaskCompleted { .. }))
+        );
     }
 
     #[test]
@@ -978,10 +984,12 @@ mod tests {
         assert!(ack_count >= 2);
 
         let node_b = harness.node(&b).unwrap();
-        assert!(node_b
-            .events()
-            .iter()
-            .any(|e| matches!(e, NodeEvent::DuplicateSpawn { .. })));
+        assert!(
+            node_b
+                .events()
+                .iter()
+                .any(|e| matches!(e, NodeEvent::DuplicateSpawn { .. }))
+        );
         assert_eq!(node_b.running_task_count(), 1);
     }
 
@@ -1030,14 +1038,18 @@ mod tests {
         harness.run_for(Duration::from_millis(200));
 
         let node_b = harness.node(&b).unwrap();
-        assert!(node_b
-            .events()
-            .iter()
-            .any(|e| matches!(e, NodeEvent::CancelReceived { .. })));
-        assert!(node_b
-            .events()
-            .iter()
-            .any(|e| matches!(e, NodeEvent::TaskCancelled { .. })));
+        assert!(
+            node_b
+                .events()
+                .iter()
+                .any(|e| matches!(e, NodeEvent::CancelReceived { .. }))
+        );
+        assert!(
+            node_b
+                .events()
+                .iter()
+                .any(|e| matches!(e, NodeEvent::TaskCancelled { .. }))
+        );
     }
 
     #[test]
@@ -1065,10 +1077,12 @@ mod tests {
 
         // B should NOT have received the spawn
         let node_b = harness.node(&b).unwrap();
-        assert!(!node_b
-            .events()
-            .iter()
-            .any(|e| matches!(e, NodeEvent::SpawnReceived { .. })));
+        assert!(
+            !node_b
+                .events()
+                .iter()
+                .any(|e| matches!(e, NodeEvent::SpawnReceived { .. }))
+        );
     }
 
     #[test]
@@ -1085,10 +1099,12 @@ mod tests {
         let node_b = harness.node(&b).unwrap();
         assert!(node_b.crashed);
         assert_eq!(node_b.running_task_count(), 0);
-        assert!(node_b
-            .events()
-            .iter()
-            .any(|e| matches!(e, NodeEvent::Crashed)));
+        assert!(
+            node_b
+                .events()
+                .iter()
+                .any(|e| matches!(e, NodeEvent::Crashed))
+        );
     }
 
     #[test]
@@ -1134,14 +1150,18 @@ mod tests {
         harness.run_for(Duration::from_millis(200));
 
         let node_b = harness.node(&b).unwrap();
-        assert!(node_b
-            .events()
-            .iter()
-            .any(|e| matches!(e, NodeEvent::Crashed)));
-        assert!(node_b
-            .events()
-            .iter()
-            .any(|e| matches!(e, NodeEvent::Restarted)));
+        assert!(
+            node_b
+                .events()
+                .iter()
+                .any(|e| matches!(e, NodeEvent::Crashed))
+        );
+        assert!(
+            node_b
+                .events()
+                .iter()
+                .any(|e| matches!(e, NodeEvent::Restarted))
+        );
         // After restart, node is not crashed
         assert!(!node_b.crashed);
     }
@@ -1264,10 +1284,12 @@ mod tests {
 
         let node_b = harness.node(&b).unwrap();
         assert!(!node_b.crashed);
-        assert!(node_b
-            .events()
-            .iter()
-            .any(|e| matches!(e, NodeEvent::Restarted)));
+        assert!(
+            node_b
+                .events()
+                .iter()
+                .any(|e| matches!(e, NodeEvent::Restarted))
+        );
         assert!(node_b.events().iter().any(
             |e| matches!(e, NodeEvent::TaskCompleted { task_id } if *task_id == recovered_task)
         ));

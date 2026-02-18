@@ -566,6 +566,7 @@ impl ThreeLaneScheduler {
     ///
     /// Uses the sharded task table when available, otherwise falls back to
     /// RuntimeState's embedded table.
+    #[inline]
     fn with_task_table_ref<R, F: FnOnce(&TaskTable) -> R>(&self, f: F) -> R {
         if let Some(tt) = &self.task_table {
             let guard = tt.lock().expect("lock poisoned");
@@ -646,6 +647,7 @@ impl ThreeLaneScheduler {
     }
 
     /// Injects a task into the ready lane with queue limit checks.
+    #[inline]
     fn inject_global_ready_checked(&self, task: TaskId, priority: u8) {
         if self.global_queue_limit > 0 && self.global.ready_count() >= self.global_queue_limit {
             crate::tracing_compat::warn!(
@@ -697,14 +699,12 @@ impl ThreeLaneScheduler {
             self.inject_global_ready_checked(task, priority);
             trace!(
                 ?task,
-                priority,
-                "inject_ready: task injected into global ready queue"
+                priority, "inject_ready: task injected into global ready queue"
             );
         } else {
             trace!(
                 ?task,
-                priority,
-                "inject_ready: task NOT scheduled (should_schedule=false)"
+                priority, "inject_ready: task NOT scheduled (should_schedule=false)"
             );
         }
     }
@@ -852,6 +852,7 @@ impl ThreeLaneScheduler {
     }
 
     /// Wakes one idle worker.
+    #[inline]
     fn wake_one(&self) {
         self.coordinator.wake_one();
     }
@@ -986,6 +987,7 @@ impl ThreeLaneWorker {
     /// This is the hot-path accessor: when `task_table` is `Some`, only the
     /// task shard lock is acquired, avoiding contention with region/obligation
     /// mutations.
+    #[inline]
     fn with_task_table<R, F: FnOnce(&mut TaskTable) -> R>(&self, f: F) -> R {
         if let Some(tt) = &self.task_table {
             let mut guard = tt.lock().expect("lock poisoned");
@@ -997,6 +999,7 @@ impl ThreeLaneWorker {
     }
 
     /// Read-only version of [`with_task_table`] for task record lookups.
+    #[inline]
     fn with_task_table_ref<R, F: FnOnce(&TaskTable) -> R>(&self, f: F) -> R {
         if let Some(tt) = &self.task_table {
             let guard = tt.lock().expect("lock poisoned");
@@ -1506,6 +1509,7 @@ impl ThreeLaneWorker {
     /// `try_ready_work` each fall through to the local scheduler.
     ///
     /// Returns `(lane_tag, task_id)` — 0=cancel, 1=timed, 2=ready.
+    #[inline]
     pub(crate) fn try_local_any_lane(&mut self) -> Option<(u8, TaskId)> {
         let now = self
             .timer_driver
@@ -1522,6 +1526,7 @@ impl ThreeLaneWorker {
     /// cancel, timed, and ready lanes in the order dictated by the
     /// governor suggestion.  Returns `(lane_tag, task_id)` where
     /// lane_tag is 0=cancel, 1=timed, 2=ready.
+    #[inline]
     fn try_local_all_lanes(
         &mut self,
         suggestion: SchedulingSuggestion,
@@ -1953,16 +1958,16 @@ impl ThreeLaneWorker {
                         cx_inner: Arc::downgrade(inner),
                     }))
                 };
-                // New waker: register in CxInner (read-first).
-                let needs_update = {
-                    let guard = inner.read();
-                    !guard
+                // New waker: register in CxInner (single write lock).
+                {
+                    let mut guard = inner.write();
+                    let needs_update = !guard
                         .cancel_waker
                         .as_ref()
-                        .is_some_and(|existing| existing.will_wake(&w))
-                };
-                if needs_update {
-                    inner.write().cancel_waker = Some(w.clone());
+                        .is_some_and(|existing| existing.will_wake(&w));
+                    if needs_update {
+                        guard.cancel_waker = Some(w.clone());
+                    }
                 }
                 (w, priority)
             })
@@ -4841,8 +4846,6 @@ mod tests {
             record.mark_local();
             record.pin_to_worker(0);
 
-            // Simulate task in waiting state
-            record.wake_state.begin_poll();
             tid
         };
 

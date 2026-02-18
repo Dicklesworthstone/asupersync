@@ -257,6 +257,7 @@ pub fn parse_toml_file(path: &std::path::Path) -> Result<RuntimeTomlConfig, Buil
 // =========================================================================
 
 #[cfg(test)]
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
     use crate::runtime::config::RuntimeConfig;
@@ -276,9 +277,11 @@ mod tests {
         F: FnOnce() -> R,
     {
         with_clean_env(|| {
-            std::env::set_var(var, val);
+            // SAFETY: test helpers guard environment mutation with env_lock.
+            unsafe { std::env::set_var(var, val) };
             let result = f();
-            std::env::remove_var(var);
+            // SAFETY: test helpers guard environment mutation with env_lock.
+            unsafe { std::env::remove_var(var) };
             result
         })
     }
@@ -289,11 +292,13 @@ mod tests {
     {
         with_clean_env(|| {
             for (k, v) in vars {
-                std::env::set_var(k, v);
+                // SAFETY: test helpers guard environment mutation with env_lock.
+                unsafe { std::env::set_var(k, v) };
             }
             let result = f();
             for (k, _) in vars {
-                std::env::remove_var(k);
+                // SAFETY: test helpers guard environment mutation with env_lock.
+                unsafe { std::env::remove_var(k) };
             }
             result
         })
@@ -319,7 +324,8 @@ mod tests {
             ENV_ENABLE_GOVERNOR,
             ENV_GOVERNOR_INTERVAL,
         ] {
-            std::env::remove_var(var);
+            // SAFETY: test helpers guard environment mutation with env_lock.
+            unsafe { std::env::remove_var(var) };
         }
     }
 
@@ -532,9 +538,12 @@ mod tests {
     #[test]
     fn clean_env_locked_removes_governor_related_vars() {
         let _guard = crate::test_utils::env_lock();
-        std::env::set_var(ENV_CANCEL_LANE_MAX_STREAK, "99");
-        std::env::set_var(ENV_ENABLE_GOVERNOR, "true");
-        std::env::set_var(ENV_GOVERNOR_INTERVAL, "123");
+        // SAFETY: this test holds env_lock for exclusive process-wide env mutation.
+        unsafe {
+            std::env::set_var(ENV_CANCEL_LANE_MAX_STREAK, "99");
+            std::env::set_var(ENV_ENABLE_GOVERNOR, "true");
+            std::env::set_var(ENV_GOVERNOR_INTERVAL, "123");
+        }
 
         clean_env_locked();
 

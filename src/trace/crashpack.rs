@@ -44,7 +44,7 @@
 //!
 //! bd-2md12 | Parent: bd-qbcnu
 
-use crate::trace::canonicalize::{canonicalize, trace_event_key, trace_fingerprint, TraceEventKey};
+use crate::trace::canonicalize::{TraceEventKey, canonicalize, trace_event_key, trace_fingerprint};
 use crate::trace::event::TraceEvent;
 use crate::trace::replay::ReplayEvent;
 use crate::trace::scoring::EvidenceEntry;
@@ -2048,21 +2048,28 @@ mod tests {
             .build();
 
         assert_eq!(pack.manifest.attachments.len(), 3);
-        assert!(pack
-            .manifest
-            .has_attachment(&AttachmentKind::CanonicalPrefix));
-        assert!(pack
-            .manifest
-            .has_attachment(&AttachmentKind::DivergentPrefix));
-        assert!(pack
-            .manifest
-            .has_attachment(&AttachmentKind::OracleViolations));
-        assert!(!pack
-            .manifest
-            .has_attachment(&AttachmentKind::EvidenceLedger));
-        assert!(!pack
-            .manifest
-            .has_attachment(&AttachmentKind::SupervisionLog));
+        assert!(
+            pack.manifest
+                .has_attachment(&AttachmentKind::CanonicalPrefix)
+        );
+        assert!(
+            pack.manifest
+                .has_attachment(&AttachmentKind::DivergentPrefix)
+        );
+        assert!(
+            pack.manifest
+                .has_attachment(&AttachmentKind::OracleViolations)
+        );
+        assert!(
+            !pack
+                .manifest
+                .has_attachment(&AttachmentKind::EvidenceLedger)
+        );
+        assert!(
+            !pack
+                .manifest
+                .has_attachment(&AttachmentKind::SupervisionLog)
+        );
 
         crate::test_complete!("manifest_attachments_auto_populated");
     }
@@ -2455,10 +2462,12 @@ mod tests {
         let json_str = &writer.written()[0].1;
         let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap();
         assert!(parsed["replay"]["program"].as_str().is_some());
-        assert!(parsed["replay"]["command_line"]
-            .as_str()
-            .unwrap()
-            .contains("--seed"));
+        assert!(
+            parsed["replay"]["command_line"]
+                .as_str()
+                .unwrap()
+                .contains("--seed")
+        );
 
         crate::test_complete!("replay_command_in_crash_pack");
     }
@@ -2843,7 +2852,7 @@ mod tests {
 
     #[test]
     fn golden_minimization_integration() {
-        use crate::trace::divergence::{minimize_divergent_prefix, MinimizationConfig};
+        use crate::trace::divergence::{MinimizationConfig, minimize_divergent_prefix};
         use crate::trace::replay::{ReplayEvent, ReplayTrace, TraceMetadata};
 
         init_test("golden_minimization_integration");
@@ -2964,12 +2973,14 @@ mod tests {
         );
 
         // Manifest auto-populates the attachment table.
-        assert!(pack
-            .manifest
-            .has_attachment(&AttachmentKind::CanonicalPrefix));
-        assert!(pack
-            .manifest
-            .has_attachment(&AttachmentKind::OracleViolations));
+        assert!(
+            pack.manifest
+                .has_attachment(&AttachmentKind::CanonicalPrefix)
+        );
+        assert!(
+            pack.manifest
+                .has_attachment(&AttachmentKind::OracleViolations)
+        );
 
         crate::test_complete!("walkthrough_01_forced_failure_and_emission");
     }
@@ -3127,7 +3138,7 @@ mod tests {
     /// that still reproduces the failure. This is the "bisect" phase.
     #[test]
     fn walkthrough_05_minimization() {
-        use crate::trace::divergence::{minimize_divergent_prefix, MinimizationConfig};
+        use crate::trace::divergence::{MinimizationConfig, minimize_divergent_prefix};
         use crate::trace::replay::{ReplayEvent, ReplayTrace, TraceMetadata};
 
         init_test("walkthrough_05_minimization");
@@ -3185,9 +3196,10 @@ mod tests {
         );
 
         // Attachment table reflects the divergent prefix.
-        assert!(pack
-            .manifest
-            .has_attachment(&AttachmentKind::DivergentPrefix));
+        assert!(
+            pack.manifest
+                .has_attachment(&AttachmentKind::DivergentPrefix)
+        );
         let att = pack
             .manifest
             .attachment(&AttachmentKind::DivergentPrefix)

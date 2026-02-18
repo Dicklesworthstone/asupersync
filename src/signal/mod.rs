@@ -59,13 +59,13 @@ mod kind;
 mod shutdown;
 mod signal;
 
-pub use ctrl_c::{ctrl_c, is_available, CtrlCError};
+pub use ctrl_c::{CtrlCError, ctrl_c, is_available};
 pub use graceful::{
-    with_graceful_shutdown, GracePeriodGuard, GracefulBuilder, GracefulConfig, GracefulOutcome,
+    GracePeriodGuard, GracefulBuilder, GracefulConfig, GracefulOutcome, with_graceful_shutdown,
 };
 pub use kind::SignalKind;
 pub use shutdown::{ShutdownController, ShutdownReceiver};
-pub use signal::{signal, Signal, SignalError};
+pub use signal::{Signal, SignalError, signal};
 
 // Unix-specific signal helpers
 #[cfg(unix)]

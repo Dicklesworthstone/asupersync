@@ -64,7 +64,7 @@
 //!   Decentralized Authorization in the Cloud" (NDSS 2014)
 //! - Alien CS Graveyard §11.8 (Capability-Based Security)
 
-use crate::security::key::{AuthKey, AUTH_KEY_SIZE};
+use crate::security::key::{AUTH_KEY_SIZE, AuthKey};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::fmt;
@@ -1570,9 +1570,11 @@ mod tests {
 
         // Verifier checks everything.
         let ctx = VerificationContext::new().with_time(1000);
-        assert!(token
-            .verify_with_discharges(&root_key, &ctx, &[bound_discharge])
-            .is_ok());
+        assert!(
+            token
+                .verify_with_discharges(&root_key, &ctx, &[bound_discharge])
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1654,9 +1656,11 @@ mod tests {
         let bound = token.bind_for_request(&discharge);
 
         let ctx = VerificationContext::new();
-        assert!(token
-            .verify_with_discharges(&root_key, &ctx, &[bound])
-            .is_ok());
+        assert!(
+            token
+                .verify_with_discharges(&root_key, &ctx, &[bound])
+                .is_ok()
+        );
     }
 
     /// Regression: discharge caveats must be checked against context.
@@ -1677,9 +1681,11 @@ mod tests {
 
         // At time=500 — passes (discharge caveat satisfied).
         let ctx_ok = VerificationContext::new().with_time(500);
-        assert!(token
-            .verify_with_discharges(&root_key, &ctx_ok, std::slice::from_ref(&bound))
-            .is_ok());
+        assert!(
+            token
+                .verify_with_discharges(&root_key, &ctx_ok, std::slice::from_ref(&bound))
+                .is_ok()
+        );
 
         // At time=5000 — fails (discharge caveat expired).
         let ctx_expired = VerificationContext::new().with_time(5000);
@@ -1708,14 +1714,18 @@ mod tests {
         let bound = token.bind_for_request(&discharge);
 
         let ctx_ok = VerificationContext::new().with_use_count(3);
-        assert!(token
-            .verify_with_discharges(&root_key, &ctx_ok, std::slice::from_ref(&bound))
-            .is_ok());
+        assert!(
+            token
+                .verify_with_discharges(&root_key, &ctx_ok, std::slice::from_ref(&bound))
+                .is_ok()
+        );
 
         let ctx_over = VerificationContext::new().with_use_count(6);
-        assert!(token
-            .verify_with_discharges(&root_key, &ctx_over, &[bound])
-            .is_err());
+        assert!(
+            token
+                .verify_with_discharges(&root_key, &ctx_over, &[bound])
+                .is_err()
+        );
     }
 
     #[test]
@@ -1761,22 +1771,26 @@ mod tests {
         let bd2 = token.bind_for_request(&d2);
 
         let ctx = VerificationContext::new().with_time(5000).with_region(42);
-        assert!(token
-            .verify_with_discharges(&root_key, &ctx, &[bd1, bd2])
-            .is_ok());
+        assert!(
+            token
+                .verify_with_discharges(&root_key, &ctx, &[bd1, bd2])
+                .is_ok()
+        );
 
         // Fail if a first-party caveat fails.
         let bad_ctx = VerificationContext::new().with_time(5000).with_region(99);
-        assert!(token
-            .verify_with_discharges(
-                &root_key,
-                &bad_ctx,
-                &[
-                    token.bind_for_request(&MacaroonToken::mint(&ck1, "check1", "tp1")),
-                    token.bind_for_request(&MacaroonToken::mint(&ck2, "check2", "tp2")),
-                ]
-            )
-            .is_err());
+        assert!(
+            token
+                .verify_with_discharges(
+                    &root_key,
+                    &bad_ctx,
+                    &[
+                        token.bind_for_request(&MacaroonToken::mint(&ck1, "check1", "tp1")),
+                        token.bind_for_request(&MacaroonToken::mint(&ck2, "check2", "tp2")),
+                    ]
+                )
+                .is_err()
+        );
     }
 
     // --- ResourceScope caveat tests (bd-2lqyk.3) ---
@@ -2376,15 +2390,19 @@ mod tests {
 
         // Verify the full chain.
         let ctx = VerificationContext::new().with_time(5000).with_region(1);
-        assert!(token
-            .verify_with_discharges(&root_key, &ctx, std::slice::from_ref(&bound))
-            .is_ok());
+        assert!(
+            token
+                .verify_with_discharges(&root_key, &ctx, std::slice::from_ref(&bound))
+                .is_ok()
+        );
 
         // Fail: first-party caveat violated (wrong region).
         let bad_ctx = VerificationContext::new().with_time(5000).with_region(99);
-        assert!(token
-            .verify_with_discharges(&root_key, &bad_ctx, std::slice::from_ref(&bound))
-            .is_err());
+        assert!(
+            token
+                .verify_with_discharges(&root_key, &bad_ctx, std::slice::from_ref(&bound))
+                .is_err()
+        );
 
         // Fail: missing discharge.
         assert!(token.verify_with_discharges(&root_key, &ctx, &[]).is_err());
@@ -2393,9 +2411,11 @@ mod tests {
         let wrong_key = AuthKey::from_seed(9999);
         let bad_discharge = MacaroonToken::mint(&wrong_key, "user_auth", "auth-svc");
         let bad_bound = token.bind_for_request(&bad_discharge);
-        assert!(token
-            .verify_with_discharges(&root_key, &ctx, &[bad_bound])
-            .is_err());
+        assert!(
+            token
+                .verify_with_discharges(&root_key, &ctx, &[bad_bound])
+                .is_err()
+        );
     }
 
     // --- Verification error display ---

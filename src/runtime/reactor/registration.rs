@@ -107,12 +107,14 @@ impl Registration {
     }
 
     /// Returns the token identifying this registration.
+    #[inline]
     #[must_use]
     pub fn token(&self) -> Token {
         self.token
     }
 
     /// Returns the current interest set.
+    #[inline]
     #[must_use]
     pub fn interest(&self) -> Interest {
         self.interest.get()
@@ -137,6 +139,7 @@ impl Registration {
     /// // Later, also monitor for writes
     /// registration.set_interest(Interest::READABLE | Interest::WRITABLE)?;
     /// ```
+    #[inline]
     pub fn set_interest(&self, interest: Interest) -> io::Result<()> {
         if let Some(reactor) = self.reactor.upgrade() {
             reactor.modify_interest(self.token, interest)?;
@@ -189,31 +192,23 @@ impl Registration {
                 Ok(())
             },
             |reactor| {
-                let first = deregister_no_panic(&*reactor, this.token)
-                    .unwrap_or_else(panicked_deregister_result);
-                match first {
-                    Ok(()) => {
-                        this.disarmed.set(true);
-                        Ok(())
-                    }
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                        this.disarmed.set(true);
-                        Ok(())
-                    }
-                    Err(first_err) => {
-                        // Best-effort retry, then disarm Drop so we don't loop.
-                        let second = deregister_no_panic(&*reactor, this.token)
-                            .unwrap_or_else(panicked_deregister_result);
-                        this.disarmed.set(true);
-                        match second {
-                            Ok(()) => Ok(()),
-                            Err(second_err) if second_err.kind() == io::ErrorKind::NotFound => {
-                                Ok(())
-                            }
-                            Err(_second_err) => Err(first_err),
+                let outcome = match deregister_no_panic(&*reactor, this.token) {
+                    Some(Ok(())) => Ok(()),
+                    Some(Err(err)) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+                    Some(Err(first_err)) => {
+                        // Best-effort retry on ordinary errors.
+                        match deregister_no_panic(&*reactor, this.token) {
+                            Some(Ok(())) => Ok(()),
+                            Some(Err(err)) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+                            Some(Err(_)) | None => Err(first_err),
                         }
                     }
-                }
+                    // Reactor panicked while deregistering: surface the error and
+                    // don't attempt a second deregister call.
+                    None => panicked_deregister_result(),
+                };
+                this.disarmed.set(true);
+                outcome
             },
         )
     }
@@ -259,8 +254,8 @@ mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
     use parking_lot::Mutex;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// Test reactor for testing Registration RAII behavior.
     struct TestReactor {

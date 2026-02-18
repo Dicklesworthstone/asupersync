@@ -12,11 +12,11 @@ use crate::error::{Error, ErrorKind};
 use crate::observability::metrics::{MetricsProvider, NoOpMetrics, OutcomeKind};
 use crate::observability::{LogCollector, ObservabilityConfig};
 use crate::record::{
-    finalizer::{finalizer_budget, Finalizer, FINALIZER_TIME_BUDGET_NANOS},
-    region::RegionState,
-    task::TaskState,
     AdmissionError, ObligationAbortReason, ObligationKind, ObligationRecord, ObligationState,
     RegionLimits, RegionRecord, SourceLocation, TaskRecord,
+    finalizer::{FINALIZER_TIME_BUDGET_NANOS, Finalizer, finalizer_budget},
+    region::RegionState,
+    task::TaskState,
 };
 use crate::runtime::config::{LeakEscalation, ObligationLeakResponse};
 use crate::runtime::io_driver::{IoDriver, IoDriverHandle};
@@ -462,6 +462,7 @@ impl RuntimeState {
     /// Returns a reference to the I/O driver handle, if present.
     ///
     /// Returns `None` if the runtime was created without a reactor.
+    #[inline]
     #[must_use]
     pub fn io_driver(&self) -> Option<&IoDriverHandle> {
         self.io_driver.as_ref()
@@ -477,6 +478,7 @@ impl RuntimeState {
     /// Returns a cloned handle to the I/O driver, if present.
     ///
     /// Returns `None` if the runtime was created without a reactor.
+    #[inline]
     #[must_use]
     pub fn io_driver_handle(&self) -> Option<IoDriverHandle> {
         self.io_driver.clone()
@@ -485,6 +487,7 @@ impl RuntimeState {
     /// Returns a reference to the timer driver handle, if present.
     ///
     /// Returns `None` if the runtime was created without a timer driver.
+    #[inline]
     #[must_use]
     pub fn timer_driver(&self) -> Option<&TimerDriverHandle> {
         self.timer_driver.as_ref()
@@ -493,12 +496,14 @@ impl RuntimeState {
     /// Returns a cloned handle to the timer driver, if present.
     ///
     /// Returns `None` if the runtime was created without a timer driver.
+    #[inline]
     #[must_use]
     pub fn timer_driver_handle(&self) -> Option<TimerDriverHandle> {
         self.timer_driver.clone()
     }
 
     /// Returns a cloned handle to the blocking pool, if present.
+    #[inline]
     #[must_use]
     pub fn blocking_pool_handle(&self) -> Option<BlockingPoolHandle> {
         self.blocking_pool.clone()
@@ -537,6 +542,7 @@ impl RuntimeState {
     }
 
     /// Returns the entropy source for this runtime.
+    #[inline]
     #[must_use]
     pub fn entropy_source(&self) -> Arc<dyn EntropySource> {
         self.entropy_source.clone()
@@ -574,12 +580,14 @@ impl RuntimeState {
     }
 
     /// Returns a handle to the trace buffer.
+    #[inline]
     #[must_use]
     pub fn trace_handle(&self) -> TraceBufferHandle {
         self.trace.clone()
     }
 
     /// Returns the metrics provider for this runtime.
+    #[inline]
     #[must_use]
     pub fn metrics_provider(&self) -> Arc<dyn MetricsProvider> {
         self.metrics.clone()
@@ -591,12 +599,14 @@ impl RuntimeState {
     }
 
     /// Returns a shared reference to a task record by ID.
+    #[inline]
     #[must_use]
     pub fn task(&self, task_id: TaskId) -> Option<&TaskRecord> {
         self.tasks.task(task_id)
     }
 
     /// Returns a mutable reference to a task record by ID.
+    #[inline]
     pub fn task_mut(&mut self, task_id: TaskId) -> Option<&mut TaskRecord> {
         self.tasks.task_mut(task_id)
     }
@@ -604,6 +614,7 @@ impl RuntimeState {
     /// Inserts a new task record into the arena.
     ///
     /// Returns the assigned arena index.
+    #[inline]
     pub fn insert_task(&mut self, record: TaskRecord) -> ArenaIndex {
         self.tasks.insert_task(record)
     }
@@ -611,6 +622,7 @@ impl RuntimeState {
     /// Inserts a new task record produced by `f` into the arena.
     ///
     /// The closure receives the assigned `ArenaIndex`.
+    #[inline]
     pub fn insert_task_with<F>(&mut self, f: F) -> ArenaIndex
     where
         F: FnOnce(ArenaIndex) -> TaskRecord,
@@ -621,6 +633,7 @@ impl RuntimeState {
     /// Removes a task record from the arena.
     ///
     /// Returns the removed record if it existed.
+    #[inline]
     pub fn remove_task(&mut self, task_id: TaskId) -> Option<TaskRecord> {
         self.tasks.remove_task(task_id)
     }
@@ -654,12 +667,14 @@ impl RuntimeState {
     }
 
     /// Returns a shared reference to a region record by ID.
+    #[inline]
     #[must_use]
     pub fn region(&self, region_id: RegionId) -> Option<&RegionRecord> {
         self.regions.get(region_id.arena_index())
     }
 
     /// Returns a mutable reference to a region record by ID.
+    #[inline]
     pub fn region_mut(&mut self, region_id: RegionId) -> Option<&mut RegionRecord> {
         self.regions.get_mut(region_id.arena_index())
     }
@@ -688,6 +703,7 @@ impl RuntimeState {
     }
 
     /// Returns a mutable reference to an obligation record by ID.
+    #[inline]
     pub fn obligation_mut(&mut self, obligation_id: ObligationId) -> Option<&mut ObligationRecord> {
         self.obligations.get_mut(obligation_id.arena_index())
     }
@@ -710,6 +726,7 @@ impl RuntimeState {
     }
 
     /// Returns `true` if this runtime has an I/O driver.
+    #[inline]
     #[must_use]
     pub fn has_io_driver(&self) -> bool {
         self.io_driver.is_some()
@@ -1395,6 +1412,7 @@ impl RuntimeState {
     /// Gets a mutable reference to a stored future for polling.
     ///
     /// Returns `None` if no future is stored for this task.
+    #[inline]
     pub fn get_stored_future(&mut self, task_id: TaskId) -> Option<&mut StoredTask> {
         self.tasks.get_stored_future(task_id)
     }
@@ -1402,6 +1420,7 @@ impl RuntimeState {
     /// Removes and returns a stored future.
     ///
     /// Called when a task completes to clean up the future storage.
+    #[inline]
     pub fn remove_stored_future(&mut self, task_id: TaskId) -> Option<StoredTask> {
         self.tasks.remove_stored_future(task_id)
     }
@@ -1421,6 +1440,7 @@ impl RuntimeState {
     /// state.store_spawned_task(handle.task_id(), stored);
     /// // Now the executor can poll the task
     /// ```
+    #[inline]
     pub fn store_spawned_task(&mut self, task_id: TaskId, stored: StoredTask) {
         self.tasks.store_spawned_task(task_id, stored);
     }
@@ -1483,12 +1503,12 @@ impl RuntimeState {
         child: TaskId,
         outcome: &Outcome<(), crate::error::Error>,
         policy: &P,
-    ) -> (PolicyAction, Vec<(TaskId, u8)>) {
+    ) -> (PolicyAction, SmallVec<[(TaskId, u8); 4]>) {
         let action = policy.on_child_outcome(child, outcome);
         let tasks_to_schedule = if let PolicyAction::CancelSiblings(reason) = &action {
             self.cancel_sibling_tasks(region, child, reason)
         } else {
-            Vec::new()
+            SmallVec::new()
         };
         (action, tasks_to_schedule)
     }
@@ -1498,14 +1518,15 @@ impl RuntimeState {
         region: RegionId,
         child: TaskId,
         reason: &CancelReason,
-    ) -> Vec<(TaskId, u8)> {
+    ) -> SmallVec<[(TaskId, u8); 4]> {
         let Some(region_record) = self.regions.get(region.arena_index()) else {
-            return Vec::new();
+            return SmallVec::new();
         };
-        let sibling_candidates = region_record.task_ids();
-        let mut tasks_to_cancel = Vec::with_capacity(sibling_candidates.len().saturating_sub(1));
+        let sibling_candidates = region_record.task_ids_small();
+        let mut tasks_to_cancel =
+            SmallVec::with_capacity(sibling_candidates.len().saturating_sub(1));
 
-        for task_id in sibling_candidates {
+        for &task_id in &sibling_candidates {
             if task_id == child {
                 continue;
             }
@@ -1689,15 +1710,16 @@ impl RuntimeState {
             }
         }
 
-        // Second pass: mark tasks for cancellation
+        // Second pass: mark tasks for cancellation.
+        // Reuse a single buffer across iterations to avoid per-region allocation.
+        let mut task_id_buf = Vec::new();
         for node in &regions_to_cancel {
             let rid = node.id;
             // Need to get tasks list first to avoid borrow conflict
-            let task_ids: Vec<TaskId> = self
-                .regions
-                .get(rid.arena_index())
-                .map(RegionRecord::task_ids)
-                .unwrap_or_default();
+            task_id_buf.clear();
+            if let Some(region) = self.regions.get(rid.arena_index()) {
+                region.copy_task_ids_into(&mut task_id_buf);
+            }
 
             // Get the region's cancel reason with proper cause chain
             let task_reason = region_reasons
@@ -1705,7 +1727,7 @@ impl RuntimeState {
                 .cloned()
                 .unwrap_or_else(|| reason.clone());
 
-            for task_id in task_ids {
+            for &task_id in &task_id_buf {
                 if let Some(task) = self.task_mut(task_id) {
                     let task_budget = task_reason.cleanup_budget();
                     let newly_cancelled =
@@ -1765,8 +1787,8 @@ impl RuntimeState {
             let Some(region) = self.regions.get(node.id.arena_index()) else {
                 continue;
             };
-            let no_children = region.child_ids().is_empty();
-            let no_tasks = region.task_ids().is_empty();
+            let no_children = region.child_count() == 0;
+            let no_tasks = region.task_count() == 0;
             let has_finalizers = !region.finalizers_empty();
             if no_children && no_tasks && has_finalizers {
                 self.advance_region_state(node.id);
@@ -1785,6 +1807,7 @@ impl RuntimeState {
     ) -> Vec<CancelRegionNode> {
         let mut result = Vec::with_capacity(self.regions_len());
         let mut stack = Vec::with_capacity(self.regions_len());
+        let mut child_buf = Vec::new();
         stack.push((region_id, None, 0usize));
 
         while let Some((rid, parent, depth)) = stack.pop() {
@@ -1795,7 +1818,9 @@ impl RuntimeState {
             });
 
             if let Some(region) = self.regions.get(rid.arena_index()) {
-                for child_id in region.child_ids() {
+                child_buf.clear();
+                region.copy_child_ids_into(&mut child_buf);
+                for &child_id in &child_buf {
                     stack.push((child_id, Some(rid), depth + 1));
                 }
             }
@@ -2141,7 +2166,7 @@ impl RuntimeState {
         // otherwise re-entrant advance_region_state calls can prematurely close
         // the region while task_completed is still processing obligations.
         let all_tasks_done = region
-            .task_ids()
+            .task_ids_small()
             .iter()
             .all(|&task_id| self.task(task_id).is_some_and(|t| t.state.is_terminal()));
 
@@ -2190,8 +2215,8 @@ impl RuntimeState {
                         let Some(region) = self.regions.get(region_id.arena_index()) else {
                             break;
                         };
-                        let no_children = region.child_ids().is_empty();
-                        let no_tasks = region.task_ids().is_empty();
+                        let no_children = region.child_count() == 0;
+                        let no_tasks = region.task_count() == 0;
                         if no_children && no_tasks {
                             region.begin_finalize()
                         } else {
@@ -2226,7 +2251,7 @@ impl RuntimeState {
                     // triggering premature leak detection.
                     if let Some(region) = self.regions.get(region_id.arena_index()) {
                         if region.pending_obligations() > 0 {
-                            let tasks_done = region.task_ids().iter().all(|&task_id| {
+                            let tasks_done = region.task_ids_small().iter().all(|&task_id| {
                                 self.task(task_id).is_some_and(|t| t.state.is_terminal())
                             });
                             if tasks_done {
@@ -2401,8 +2426,8 @@ pub struct RegionSnapshot {
 
 impl RegionSnapshot {
     fn from_record(record: &RegionRecord) -> Self {
-        let child_count = record.child_ids().len();
-        let task_count = record.task_ids().len();
+        let child_count = record.child_count();
+        let task_count = record.task_count();
         Self {
             id: record.id.into(),
             parent_id: record.parent.map(IdSnapshot::from),
@@ -3303,8 +3328,8 @@ mod tests {
     use crate::types::{CancelAttributionConfig, CancelKind};
     use crate::util::ArenaIndex;
     use parking_lot::Mutex;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::{Wake, Waker};
 
     #[derive(Default)]
@@ -5779,8 +5804,8 @@ mod tests {
         use crate::runtime::reactor::{EpollReactor, Interest};
         use std::io::Write;
         use std::os::unix::net::UnixStream;
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
         use std::task::{Wake, Waker};
         use std::time::Duration;
 
@@ -6371,9 +6396,9 @@ mod tests {
 
     #[test]
     fn shardguard_locking_patterns_exercised() {
-        use crate::runtime::sharded_state::ShardedConfig;
         use crate::runtime::ShardGuard;
         use crate::runtime::ShardedState;
+        use crate::runtime::sharded_state::ShardedConfig;
 
         // Verifies: ShardGuard factory methods correctly acquire locks
         // for each cross-entity operation pattern.

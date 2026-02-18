@@ -1231,10 +1231,12 @@ mod tests {
         let report =
             dag.apply_rewrites(RewritePolicy::conservative(), &[RewriteRule::DedupRaceJoin]);
         assert_eq!(report.steps().len(), 2);
-        assert!(report
-            .steps()
-            .iter()
-            .all(|step| step.rule == RewriteRule::DedupRaceJoin));
+        assert!(
+            report
+                .steps()
+                .iter()
+                .all(|step| step.rule == RewriteRule::DedupRaceJoin)
+        );
         let root = dag.root().expect("root");
         let PlanNode::Join { children } = dag.node(root).expect("root exists") else {
             panic!("expected join at root");

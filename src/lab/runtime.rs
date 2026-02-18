@@ -9,26 +9,26 @@
 use super::chaos::{ChaosRng, ChaosStats};
 use super::config::LabConfig;
 use super::oracle::OracleSuite;
-use crate::record::task::TaskState;
 use crate::record::ObligationKind;
+use crate::record::task::TaskState;
+use crate::runtime::RuntimeState;
 use crate::runtime::config::ObligationLeakResponse;
 use crate::runtime::deadline_monitor::{
-    default_warning_handler, DeadlineMonitor, DeadlineWarning, MonitorConfig,
+    DeadlineMonitor, DeadlineWarning, MonitorConfig, default_warning_handler,
 };
 use crate::runtime::reactor::LabReactor;
 use crate::runtime::scheduler::{DispatchLane, ScheduleCertificate};
-use crate::runtime::RuntimeState;
 use crate::time::VirtualClock;
+use crate::trace::TraceBufferHandle;
 use crate::trace::crashpack::{
-    artifact_filename, CrashPack, CrashPackConfig, FailureInfo, FailureOutcome, ReplayCommand,
+    CrashPack, CrashPackConfig, FailureInfo, FailureOutcome, ReplayCommand, artifact_filename,
 };
 use crate::trace::event::TraceEventKind;
 use crate::trace::recorder::TraceRecorder;
 use crate::trace::replay::{ReplayEvent, ReplayTrace, TraceMetadata};
 use crate::trace::scoring::seed_fingerprint;
-use crate::trace::TraceBufferHandle;
-use crate::trace::{canonicalize::trace_fingerprint, certificate::TraceCertificate};
 use crate::trace::{TraceData, TraceEvent};
+use crate::trace::{canonicalize::trace_fingerprint, certificate::TraceCertificate};
 use crate::types::Time;
 use crate::types::{ObligationId, RegionId, TaskId};
 use crate::util::{DetEntropy, DetRng};

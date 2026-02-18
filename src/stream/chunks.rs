@@ -171,8 +171,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stream::iter;
     use crate::stream::StreamExt;
+    use crate::stream::iter;
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 

@@ -35,7 +35,7 @@
 
 use std::fmt;
 
-use crate::cx::{cap, Cx};
+use crate::cx::{Cx, cap};
 use crate::error::Error;
 use crate::web::extract::Request;
 use crate::web::response::{Response, StatusCode};
@@ -88,6 +88,7 @@ impl<'a> RequestRegion<'a> {
     ///
     /// Use [`into_response`](RegionOutcome::into_response) to convert the
     /// outcome to an HTTP response.
+    #[inline]
     pub fn run<F>(self, handler: F) -> RegionOutcome
     where
         F: FnOnce(&RequestContext<'_>) -> Response,
@@ -122,6 +123,7 @@ impl<'a> RequestRegion<'a> {
     ///
     /// For Phase 0 (synchronous execution), use [`run`](Self::run) instead.
     /// This method exists to establish the async API surface for Phase 1+.
+    #[inline]
     #[allow(clippy::result_large_err)]
     pub fn run_sync<F>(self, handler: F) -> RegionOutcome
     where
@@ -178,6 +180,7 @@ pub struct RequestContext<'a> {
 
 impl RequestContext<'_> {
     /// Returns the HTTP request.
+    #[inline]
     #[must_use]
     pub fn request(&self) -> &Request {
         self.request
@@ -189,6 +192,7 @@ impl RequestContext<'_> {
     /// - Check cancellation: `ctx.cx().checkpoint()?`
     /// - Read cancel state: `ctx.cx().is_cancel_requested()`
     /// - Access budget: `ctx.cx().remaining_budget()`
+    #[inline]
     #[must_use]
     pub fn cx(&self) -> &Cx {
         self.cx
@@ -208,6 +212,7 @@ impl RequestContext<'_> {
     /// type RequestCaps = CapSet<true, true, false, false, false>;
     /// let limited = ctx.cx_narrow::<RequestCaps>();
     /// ```
+    #[inline]
     #[must_use]
     pub fn cx_narrow<Caps>(&self) -> Cx<Caps>
     where
@@ -217,30 +222,35 @@ impl RequestContext<'_> {
     }
 
     /// Returns a fully restricted context (no capabilities).
+    #[inline]
     #[must_use]
     pub fn cx_readonly(&self) -> Cx<cap::None> {
         self.cx.restrict::<cap::None>()
     }
 
     /// Returns the HTTP method of the request.
+    #[inline]
     #[must_use]
     pub fn method(&self) -> &str {
         &self.request.method
     }
 
     /// Returns the request path.
+    #[inline]
     #[must_use]
     pub fn path(&self) -> &str {
         &self.request.path
     }
 
     /// Returns a path parameter by name, if present.
+    #[inline]
     #[must_use]
     pub fn path_param(&self, name: &str) -> Option<&str> {
         self.request.path_params.get(name).map(String::as_str)
     }
 
     /// Returns a header value by name, if present.
+    #[inline]
     #[must_use]
     pub fn header(&self, name: &str) -> Option<&str> {
         self.request.headers.get(name).map(String::as_str)
@@ -302,6 +312,7 @@ impl RegionOutcome {
     /// - `Error(e)` → 500 with error message body
     /// - `Cancelled` → 503 Service Unavailable
     /// - `Panicked(msg)` → 500 Internal Server Error
+    #[inline]
     #[must_use]
     pub fn into_response(self) -> Response {
         match self {
@@ -369,6 +380,7 @@ where
     ///
     /// Returns an HTTP response in all cases — panics are caught and
     /// converted to 500 responses.
+    #[inline]
     pub fn call(&self, cx: &Cx, request: Request) -> Response {
         let region = RequestRegion::new(cx, request);
         region.run(&self.handler).into_response()

@@ -200,6 +200,7 @@ impl<T> RwLock<T> {
 
 impl<T> RwLock<T> {
     /// Returns true if the lock is poisoned.
+    #[inline]
     #[must_use]
     pub fn is_poisoned(&self) -> bool {
         self.poisoned.load(Ordering::Acquire)
@@ -275,6 +276,7 @@ impl<T> RwLock<T> {
         self.data.get_mut().expect("rwlock poisoned")
     }
 
+    #[inline]
     fn try_acquire_read_state(&self) -> Result<(), TryReadError> {
         if self.is_poisoned() {
             return Err(TryReadError::Poisoned);
@@ -290,6 +292,7 @@ impl<T> RwLock<T> {
         Ok(())
     }
 
+    #[inline]
     fn try_acquire_write_state(&self) -> Result<(), TryWriteError> {
         if self.is_poisoned() {
             return Err(TryWriteError::Poisoned);
@@ -307,14 +310,17 @@ impl<T> RwLock<T> {
         Ok(())
     }
 
+    #[inline]
     fn pop_writer_waiter(state: &mut State) -> Option<Waker> {
         state.writer_queue.pop_front().map(|w| w.waker)
     }
 
+    #[inline]
     fn drain_reader_waiters(state: &mut State) -> SmallVec<[Waker; 4]> {
         state.reader_waiters.drain(..).map(|w| w.waker).collect()
     }
 
+    #[inline]
     fn release_reader(&self) {
         let waker = {
             let mut state = self.state.lock();
@@ -330,6 +336,7 @@ impl<T> RwLock<T> {
         }
     }
 
+    #[inline]
     fn release_writer(&self) {
         let (writer_waker, reader_wakers) = {
             let mut state = self.state.lock();
@@ -387,6 +394,7 @@ pub struct ReadFuture<'a, 'b, T> {
 impl<'a, T> Future for ReadFuture<'a, '_, T> {
     type Output = Result<RwLockReadGuard<'a, T>, RwLockError>;
 
+    #[inline]
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         if self.lock.is_poisoned() {
             return Poll::Ready(Err(RwLockError::Poisoned));
@@ -489,6 +497,7 @@ pub struct WriteFuture<'a, 'b, T> {
 impl<'a, T> Future for WriteFuture<'a, '_, T> {
     type Output = Result<RwLockWriteGuard<'a, T>, RwLockError>;
 
+    #[inline]
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         if self.lock.is_poisoned() {
             return Poll::Ready(Err(RwLockError::Poisoned));
@@ -630,6 +639,7 @@ impl<T> Deref for RwLockReadGuard<'_, T> {
 }
 
 impl<T> Drop for RwLockReadGuard<'_, T> {
+    #[inline]
     fn drop(&mut self) {
         if std::thread::panicking() {
             self.lock.poisoned.store(true, Ordering::Release);
@@ -666,6 +676,7 @@ impl<T> DerefMut for RwLockWriteGuard<'_, T> {
 }
 
 impl<T> Drop for RwLockWriteGuard<'_, T> {
+    #[inline]
     fn drop(&mut self) {
         if std::thread::panicking() {
             self.lock.poisoned.store(true, Ordering::Release);
@@ -710,6 +721,7 @@ impl<T> OwnedRwLockReadGuard<T> {
 }
 
 impl<T> Drop for OwnedRwLockReadGuard<T> {
+    #[inline]
     fn drop(&mut self) {
         if std::thread::panicking() {
             self.lock.poisoned.store(true, Ordering::Release);
@@ -752,6 +764,7 @@ impl<T> OwnedRwLockWriteGuard<T> {
 }
 
 impl<T> Drop for OwnedRwLockWriteGuard<T> {
+    #[inline]
     fn drop(&mut self) {
         if std::thread::panicking() {
             self.lock.poisoned.store(true, Ordering::Release);
@@ -770,6 +783,7 @@ pub struct OwnedReadFuture<'b, T> {
 impl<T> Future for OwnedReadFuture<'_, T> {
     type Output = Result<OwnedRwLockReadGuard<T>, RwLockError>;
 
+    #[inline]
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         if self.lock.is_poisoned() {
             return Poll::Ready(Err(RwLockError::Poisoned));
@@ -852,6 +866,7 @@ pub struct OwnedWriteFuture<'b, T> {
 impl<T> Future for OwnedWriteFuture<'_, T> {
     type Output = Result<OwnedRwLockWriteGuard<T>, RwLockError>;
 
+    #[inline]
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         if self.lock.is_poisoned() {
             return Poll::Ready(Err(RwLockError::Poisoned));
@@ -962,8 +977,8 @@ mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
     use crate::util::ArenaIndex;
-    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
     use std::sync::Arc as StdArc;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
     use std::thread;
 
     fn init_test(name: &str) {

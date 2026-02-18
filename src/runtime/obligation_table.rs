@@ -578,9 +578,11 @@ mod tests {
         let fake = ObligationId::from_arena(ArenaIndex::new(99, 0));
 
         assert!(table.commit(fake, Time::from_nanos(100)).is_err());
-        assert!(table
-            .abort(fake, Time::from_nanos(100), ObligationAbortReason::Cancel)
-            .is_err());
+        assert!(
+            table
+                .abort(fake, Time::from_nanos(100), ObligationAbortReason::Cancel)
+                .is_err()
+        );
         assert!(table.mark_leaked(fake, Time::from_nanos(100)).is_err());
     }
 

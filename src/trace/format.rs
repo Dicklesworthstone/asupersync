@@ -3,7 +3,7 @@
 //! Provides human-readable and machine-readable formatting for traces.
 
 use super::buffer::TraceBuffer;
-use super::canonicalize::{canonicalize, trace_event_key, trace_fingerprint, TraceEventKey};
+use super::canonicalize::{TraceEventKey, canonicalize, trace_event_key, trace_fingerprint};
 use super::event::TraceEvent;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Write};
@@ -150,11 +150,7 @@ impl GoldenTraceDiff {
     }
 
     fn into_result(self) -> Result<(), Self> {
-        if self.is_empty() {
-            Ok(())
-        } else {
-            Err(self)
-        }
+        if self.is_empty() { Ok(()) } else { Err(self) }
     }
 }
 

@@ -123,24 +123,28 @@ impl<S> ConcurrencyLimit<S> {
     }
 
     /// Returns the maximum concurrency limit.
+    #[inline]
     #[must_use]
     pub fn max_concurrency(&self) -> usize {
         self.semaphore.max_permits()
     }
 
     /// Returns the number of available slots.
+    #[inline]
     #[must_use]
     pub fn available(&self) -> usize {
         self.semaphore.available_permits()
     }
 
     /// Returns a reference to the inner service.
+    #[inline]
     #[must_use]
     pub const fn inner(&self) -> &S {
         &self.inner
     }
 
     /// Returns a mutable reference to the inner service.
+    #[inline]
     pub fn inner_mut(&mut self) -> &mut S {
         &mut self.inner
     }
@@ -188,6 +192,7 @@ where
     type Error = ConcurrencyLimitError<S::Error>;
     type Future = ConcurrencyLimitFuture<S::Future>;
 
+    #[inline]
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         match self
             .inner
@@ -207,11 +212,13 @@ where
         loop {
             match &mut self.state {
                 State::Idle => {
-                    // Fast lock-free check: skip Arc clone + mutex when at capacity.
+                    // Fast lock-free check: skip mutex when at capacity.
                     if self.semaphore.available_permits() > 0 {
-                        // Try to acquire synchronously (may still fail due to FIFO fairness)
+                        // Try to acquire synchronously (may still fail due to FIFO fairness).
+                        // Uses try_acquire_arc to defer Arc::clone to the success path,
+                        // avoiding a refcount round-trip on contention.
                         if let Ok(permit) =
-                            OwnedSemaphorePermit::try_acquire(self.semaphore.clone(), 1)
+                            OwnedSemaphorePermit::try_acquire_arc(&self.semaphore, 1)
                         {
                             self.state = State::Ready(permit);
                             return Poll::Ready(Ok(()));
@@ -243,6 +250,7 @@ where
         }
     }
 
+    #[inline]
     fn call(&mut self, req: Request) -> Self::Future {
         // Take the permit that was acquired in poll_ready
         let State::Ready(permit) = std::mem::replace(&mut self.state, State::Idle) else {
@@ -280,6 +288,7 @@ where
 {
     type Output = Result<T, ConcurrencyLimitError<E>>;
 
+    #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         match Pin::new(&mut this.inner).poll(cx) {
@@ -303,8 +312,8 @@ impl<F: std::fmt::Debug> std::fmt::Debug for ConcurrencyLimitFuture<F> {
 mod tests {
     use super::*;
     use std::future::ready;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::{Wake, Waker};
 
     fn init_test(name: &str) {

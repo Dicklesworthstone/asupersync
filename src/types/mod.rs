@@ -25,24 +25,24 @@ pub mod symbol_set;
 pub mod task_context;
 pub mod typed_symbol;
 
-pub use budget::{backlog_bound, delay_bound, Budget, CurveBudget, CurveError, MinPlusCurve};
+pub use budget::{Budget, CurveBudget, CurveError, MinPlusCurve, backlog_bound, delay_bound};
 pub use builder::{BuildError, BuildResult};
 pub use cancel::{
     CancelAttributionConfig, CancelKind, CancelPhase, CancelReason, CancelWitness,
     CancelWitnessError,
 };
 pub use id::{ObligationId, RegionId, TaskId, Time};
-pub use outcome::{join_outcomes, Outcome, OutcomeError, PanicPayload, Severity};
+pub use outcome::{Outcome, OutcomeError, PanicPayload, Severity, join_outcomes};
 pub use policy::Policy;
 pub use pressure::SystemPressure;
 pub use rref::{RRef, RRefAccess, RRefAccessWitness, RRefError};
-pub use symbol::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind, DEFAULT_SYMBOL_SIZE};
+pub use symbol::{DEFAULT_SYMBOL_SIZE, ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 pub use symbol_set::{
     BlockProgress, ConcurrentSymbolSet, InsertResult, SymbolSet, ThresholdConfig,
 };
 pub use task_context::{CheckpointState, CxInner, MAX_MASK_DEPTH};
 pub use typed_symbol::{
     DeserializationError, Deserializer, SerdeCodec, SerializationError, SerializationFormat,
-    Serializer, TypeDescriptor, TypeMismatchError, TypeRegistry, TypedDecoder, TypedEncoder,
-    TypedSymbol, TYPED_SYMBOL_HEADER_LEN, TYPED_SYMBOL_MAGIC,
+    Serializer, TYPED_SYMBOL_HEADER_LEN, TYPED_SYMBOL_MAGIC, TypeDescriptor, TypeMismatchError,
+    TypeRegistry, TypedDecoder, TypedEncoder, TypedSymbol,
 };

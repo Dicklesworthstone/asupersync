@@ -711,11 +711,7 @@ fn ansi256_to_basic(idx: u8) -> u8 {
     }
     let (r, g, b) = ansi256_to_rgb(idx);
     let (bright, basic) = rgb_to_basic(r, g, b);
-    if bright {
-        basic + 8
-    } else {
-        basic
-    }
+    if bright { basic + 8 } else { basic }
 }
 
 fn ansi256_to_rgb(idx: u8) -> (u8, u8, u8) {
@@ -817,8 +813,8 @@ mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn init_test(name: &str) {
         init_test_logging();

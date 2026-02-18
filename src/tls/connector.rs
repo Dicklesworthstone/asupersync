@@ -9,11 +9,11 @@ use super::types::{Certificate, CertificateChain, PrivateKey, RootCertStore};
 use crate::io::{AsyncRead, AsyncWrite};
 
 #[cfg(feature = "tls")]
-use rustls::pki_types::ServerName;
-#[cfg(feature = "tls")]
 use rustls::ClientConfig;
 #[cfg(feature = "tls")]
 use rustls::ClientConnection;
+#[cfg(feature = "tls")]
+use rustls::pki_types::ServerName;
 
 #[cfg(feature = "tls")]
 use std::future::poll_fn;

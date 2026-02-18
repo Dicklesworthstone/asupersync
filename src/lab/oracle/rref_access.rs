@@ -451,9 +451,11 @@ mod tests {
         oracle.on_rref_access_with_witness(rref(0, 0), tid, r_b, t(10));
 
         let violations = oracle.all_violations();
-        assert!(violations
-            .iter()
-            .any(|v| matches!(v.kind, RRefAccessViolationKind::WitnessMismatch { .. })));
+        assert!(
+            violations
+                .iter()
+                .any(|v| matches!(v.kind, RRefAccessViolationKind::WitnessMismatch { .. }))
+        );
     }
 
     // ================================================================

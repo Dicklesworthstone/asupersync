@@ -549,11 +549,7 @@ fn compute_pressure(usage: &ResourceUsage, limits: &ResourceLimits) -> f64 {
 #[allow(clippy::cast_precision_loss)]
 fn ratio(value: usize, limit: usize) -> f64 {
     if limit == 0 {
-        if value == 0 {
-            0.0
-        } else {
-            1.0
-        }
+        if value == 0 { 0.0 } else { 1.0 }
     } else {
         (value as f64 / limit as f64).min(1.0)
     }

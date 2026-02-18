@@ -44,8 +44,8 @@
 use crossbeam_queue::SegQueue;
 use parking_lot::{Condvar, Mutex};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle as ThreadJoinHandle};
 use std::time::Duration;
 

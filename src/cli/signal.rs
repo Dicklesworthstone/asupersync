@@ -3,8 +3,8 @@
 //! Provides structured signal handling with proper cleanup semantics.
 //! Integrates with cancellation tokens for graceful shutdown.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// Global signal state for tracking received signals.
 static SIGNAL_RECEIVED: AtomicBool = AtomicBool::new(false);

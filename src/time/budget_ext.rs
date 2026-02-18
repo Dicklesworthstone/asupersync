@@ -1,7 +1,7 @@
 //! Budget extensions for time operations.
 
 use crate::cx::Cx;
-use crate::time::{sleep_until, Elapsed, Sleep};
+use crate::time::{Elapsed, Sleep, sleep_until};
 use crate::types::{Budget, Time};
 use std::future::Future;
 use std::marker::Unpin;

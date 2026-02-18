@@ -15,8 +15,8 @@ use parking_lot::Mutex;
 use std::fmt;
 use std::path::PathBuf;
 
-use franken_evidence::export::JsonlExporter;
 use franken_evidence::EvidenceLedger;
+use franken_evidence::export::JsonlExporter;
 
 // ---------------------------------------------------------------------------
 // Trait

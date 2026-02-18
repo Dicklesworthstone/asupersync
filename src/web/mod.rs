@@ -54,4 +54,4 @@ pub mod router;
 pub use extract::{Form, FromRequest, FromRequestParts, Json as JsonExtract, Path, Query, State};
 pub use handler::Handler;
 pub use response::{Html, IntoResponse, Json, Redirect, Response, StatusCode};
-pub use router::{delete, get, patch, post, put, MethodRouter, Router};
+pub use router::{MethodRouter, Router, delete, get, patch, post, put};

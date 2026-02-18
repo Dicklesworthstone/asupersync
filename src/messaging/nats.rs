@@ -24,8 +24,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -445,7 +445,7 @@ impl NatsClient {
                     _ => {
                         return Err(NatsError::Protocol(
                             "expected INFO message from server".to_string(),
-                        ))
+                        ));
                     }
                 }
             }
@@ -633,15 +633,15 @@ impl NatsClient {
         // MSG <subject> <sid> [reply-to] <#bytes>
         let mut parts = header.split_whitespace();
         let _msg = parts.next(); // "MSG"
-        let subject_str = parts.next().ok_or_else(|| {
-            NatsError::Protocol(format!("malformed MSG header: {header}"))
-        })?;
-        let sid_str = parts.next().ok_or_else(|| {
-            NatsError::Protocol(format!("malformed MSG header: {header}"))
-        })?;
-        let third = parts.next().ok_or_else(|| {
-            NatsError::Protocol(format!("malformed MSG header: {header}"))
-        })?;
+        let subject_str = parts
+            .next()
+            .ok_or_else(|| NatsError::Protocol(format!("malformed MSG header: {header}")))?;
+        let sid_str = parts
+            .next()
+            .ok_or_else(|| NatsError::Protocol(format!("malformed MSG header: {header}")))?;
+        let third = parts
+            .next()
+            .ok_or_else(|| NatsError::Protocol(format!("malformed MSG header: {header}")))?;
         let fourth = parts.next();
 
         let subject = subject_str.to_string();
@@ -659,9 +659,9 @@ impl NatsClient {
         } else {
             (
                 None,
-                third.parse::<usize>().map_err(|_| {
-                    NatsError::Protocol(format!("invalid payload length: {third}"))
-                })?,
+                third
+                    .parse::<usize>()
+                    .map_err(|_| NatsError::Protocol(format!("invalid payload length: {third}")))?,
             )
         };
 

@@ -111,6 +111,7 @@ impl<T> OnceCell<T> {
     }
 
     /// Returns `true` if the cell has been initialized.
+    #[inline]
     #[must_use]
     pub fn is_initialized(&self) -> bool {
         self.state.load(Ordering::Acquire) == INITIALIZED
@@ -119,6 +120,7 @@ impl<T> OnceCell<T> {
     /// Gets the value if initialized.
     ///
     /// Returns `None` if the cell is not yet initialized.
+    #[inline]
     #[must_use]
     pub fn get(&self) -> Option<&T> {
         if self.is_initialized() {
@@ -575,8 +577,8 @@ mod tests {
     use crate::test_utils::init_test_logging;
     use futures_lite::future::{block_on, pending};
     use std::future::Future;
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
     use std::task::{Context, Poll, Wake, Waker};
     use std::thread;
 

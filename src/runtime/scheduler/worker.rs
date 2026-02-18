@@ -1,11 +1,11 @@
 //! Worker thread logic.
 
 use crate::observability::metrics::MetricsProvider;
+use crate::runtime::RuntimeState;
 use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::scheduler::global_queue::GlobalQueue;
 use crate::runtime::scheduler::local_queue::{LocalQueue, Stealer};
 use crate::runtime::scheduler::stealing;
-use crate::runtime::RuntimeState;
 use crate::sync::ContendedMutex;
 use crate::time::TimerDriverHandle;
 use crate::trace::{TraceBufferHandle, TraceEvent};
@@ -261,11 +261,11 @@ impl Worker {
                                         }
                                         Some(_worker_id) => {
                                             error!(
-                                            ?waiter,
-                                            worker_id = _worker_id,
-                                            current_worker = self.worker.id,
-                                            "panic path: pinned local waiter has invalid worker id, wake skipped"
-                                        );
+                                                ?waiter,
+                                                worker_id = _worker_id,
+                                                current_worker = self.worker.id,
+                                                "panic path: pinned local waiter has invalid worker id, wake skipped"
+                                            );
                                             // We consumed `notify()` above; clear the wake bit so a
                                             // future valid wake is not permanently dedup-suppressed.
                                             record.wake_state.clear();
@@ -331,12 +331,7 @@ impl Worker {
                     let wake_state = Arc::clone(&record.wake_state);
                     let cached = record.cached_waker.take();
                     drop(state);
-                    (
-                        AnyStoredTask::Global(stored),
-                        task_cx,
-                        wake_state,
-                        cached,
-                    )
+                    (AnyStoredTask::Global(stored), task_cx, wake_state, cached)
                 } else {
                     return; // Task record missing?
                 }
@@ -533,6 +528,7 @@ impl Worker {
         true
     }
 
+    #[inline]
     fn consume_cancel_ack_locked(state: &mut RuntimeState, task_id: TaskId) -> bool {
         let Some(record) = state.task_mut(task_id) else {
             return false;
@@ -604,7 +600,10 @@ pub struct Parker {
 impl Parker {
     #[inline]
     fn lock_unpoisoned(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.inner.mutex.lock().expect("lock poisoned")
+        self.inner
+            .mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Creates a new parker.
@@ -620,6 +619,7 @@ impl Parker {
     }
 
     /// Parks the current thread until notified.
+    #[inline]
     pub fn park(&self) {
         if self.inner.notified.swap(false, Ordering::Acquire) {
             return;
@@ -627,12 +627,17 @@ impl Parker {
 
         let mut guard = self.lock_unpoisoned();
         while !self.inner.notified.swap(false, Ordering::Acquire) {
-            guard = self.inner.cvar.wait(guard).expect("lock poisoned");
+            guard = self
+                .inner
+                .cvar
+                .wait(guard)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         drop(guard);
     }
 
     /// Parks the current thread with a timeout.
+    #[inline]
     pub fn park_timeout(&self, duration: Duration) {
         if self.inner.notified.swap(false, Ordering::Acquire) {
             return;
@@ -644,7 +649,7 @@ impl Parker {
             .wait_timeout_while(self.lock_unpoisoned(), duration, |()| {
                 !self.inner.notified.swap(false, Ordering::Acquire)
             })
-            .expect("lock poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         drop(guard);
     }
 
@@ -655,6 +660,7 @@ impl Parker {
     /// we skip the mutex + condvar entirely.  Only when the previous state was
     /// "not notified" do we acquire the mutex and signal the condvar, which is
     /// the only case where the thread might actually be parked.
+    #[inline]
     pub fn unpark(&self) {
         if self.inner.notified.swap(true, Ordering::Release) {
             // Already notified — the thread will see it on the next
@@ -1124,8 +1130,8 @@ mod tests {
     #[test]
     fn test_execute_panic_completes_task_and_wakes_waiters() {
         use crate::record::task::TaskRecord;
-        use crate::runtime::stored_task::StoredTask;
         use crate::runtime::RuntimeState;
+        use crate::runtime::stored_task::StoredTask;
         use crate::sync::ContendedMutex;
         use crate::types::{Budget, RegionId};
 
@@ -1196,8 +1202,8 @@ mod tests {
     #[test]
     fn test_execute_ready_with_foreign_local_waiter_does_not_panic() {
         use crate::record::task::TaskRecord;
-        use crate::runtime::stored_task::StoredTask;
         use crate::runtime::RuntimeState;
+        use crate::runtime::stored_task::StoredTask;
         use crate::sync::ContendedMutex;
         use crate::types::{Budget, Outcome, RegionId};
 
@@ -1275,8 +1281,8 @@ mod tests {
     #[test]
     fn test_execute_panic_with_foreign_local_waiter_clears_notified_state() {
         use crate::record::task::TaskRecord;
-        use crate::runtime::stored_task::StoredTask;
         use crate::runtime::RuntimeState;
+        use crate::runtime::stored_task::StoredTask;
         use crate::sync::ContendedMutex;
         use crate::types::{Budget, RegionId};
 

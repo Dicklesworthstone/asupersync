@@ -42,8 +42,8 @@ use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use smallvec::SmallVec;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use crate::cx::Cx;

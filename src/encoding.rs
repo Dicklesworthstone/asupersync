@@ -449,11 +449,7 @@ fn seed_for(object_id: ObjectId, sbn: u8, esi: u32) -> u64 {
     let mut seed = hi ^ lo.rotate_left(13);
     seed ^= u64::from(sbn) << 56;
     seed ^= u64::from(esi);
-    if seed == 0 {
-        1
-    } else {
-        seed
-    }
+    if seed == 0 { 1 } else { seed }
 }
 
 fn build_source_symbols(data: &[u8], block: &BlockPlan, symbol_size: usize) -> Vec<Vec<u8>> {
@@ -474,8 +470,8 @@ fn build_source_symbols(data: &[u8], block: &BlockPlan, symbol_size: usize) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::resource::PoolConfig;
     use crate::types::ObjectId;
+    use crate::types::resource::PoolConfig;
 
     fn test_config(
         symbol_size: u16,

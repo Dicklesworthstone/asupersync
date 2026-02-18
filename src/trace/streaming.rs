@@ -625,7 +625,7 @@ impl EventSource for StreamingReplayer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::file::{write_trace, TraceWriter};
+    use crate::trace::file::{TraceWriter, write_trace};
     use crate::trace::replay::CompactTaskId;
     use tempfile::NamedTempFile;
 

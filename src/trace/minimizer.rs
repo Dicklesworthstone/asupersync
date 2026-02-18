@@ -300,7 +300,7 @@ impl TraceMinimizer {
         let mut remaining: Vec<usize> = active
             .iter()
             .enumerate()
-            .filter(|(_, &a)| a)
+            .filter(|(_, a)| **a)
             .map(|(i, _)| i)
             .collect();
         remaining = ddmin(&remaining, elements, &checker, &mut replays, &mut steps);

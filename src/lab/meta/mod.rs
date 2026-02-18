@@ -8,6 +8,6 @@ pub mod mutation;
 pub mod runner;
 
 pub use mutation::{
-    builtin_mutations, invariant_from_violation, BuiltinMutation, ALL_ORACLE_INVARIANTS,
+    ALL_ORACLE_INVARIANTS, BuiltinMutation, builtin_mutations, invariant_from_violation,
 };
 pub use runner::{MetaCoverageEntry, MetaCoverageReport, MetaReport, MetaResult, MetaRunner};

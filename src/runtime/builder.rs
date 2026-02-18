@@ -131,17 +131,17 @@
 //! ```
 
 use crate::error::Error;
-use crate::observability::metrics::MetricsProvider;
 use crate::observability::ObservabilityConfig;
+use crate::observability::metrics::MetricsProvider;
 use crate::record::RegionLimits;
+use crate::runtime::RuntimeState;
+use crate::runtime::SpawnError;
 use crate::runtime::config::RuntimeConfig;
 use crate::runtime::deadline_monitor::{
-    default_warning_handler, AdaptiveDeadlineConfig, DeadlineWarning, MonitorConfig,
+    AdaptiveDeadlineConfig, DeadlineWarning, MonitorConfig, default_warning_handler,
 };
 use crate::runtime::reactor::Reactor;
 use crate::runtime::scheduler::ThreeLaneScheduler;
-use crate::runtime::RuntimeState;
-use crate::runtime::SpawnError;
 use crate::time::TimerDriverHandle;
 use crate::trace::distributed::LogicalClockMode;
 use crate::types::{Budget, CancelAttributionConfig};
@@ -1290,6 +1290,7 @@ fn noop_waker() -> Waker {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
     use crate::cx::Cx;
@@ -1680,11 +1681,13 @@ mod tests {
     {
         with_clean_env(|| {
             for (k, v) in vars {
-                std::env::set_var(k, v);
+                // SAFETY: test helpers guard environment mutation with env_lock.
+                unsafe { std::env::set_var(k, v) };
             }
             let result = f();
             for (k, _) in vars {
-                std::env::remove_var(k);
+                // SAFETY: test helpers guard environment mutation with env_lock.
+                unsafe { std::env::remove_var(k) };
             }
             result
         })
@@ -1708,7 +1711,8 @@ mod tests {
             ENV_ENABLE_PARKING,
             ENV_POLL_BUDGET,
         ] {
-            std::env::remove_var(var);
+            // SAFETY: test helpers guard environment mutation with env_lock.
+            unsafe { std::env::remove_var(var) };
         }
     }
 

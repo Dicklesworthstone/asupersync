@@ -3,7 +3,7 @@
 //! Tags are fixed-size (32 byte) MACs (Message Authentication Codes) that guarantee
 //! integrity and authenticity of symbols.
 
-use crate::security::key::{AuthKey, AUTH_KEY_SIZE};
+use crate::security::key::{AUTH_KEY_SIZE, AuthKey};
 use crate::types::Symbol;
 use std::fmt;
 

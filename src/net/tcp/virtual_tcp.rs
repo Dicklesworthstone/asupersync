@@ -30,8 +30,8 @@ use std::collections::VecDeque;
 use std::io;
 use std::net::{Shutdown, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::task::{Context, Poll, Waker};
 
 const VIRTUAL_TCP_CHANNEL_CAPACITY_BYTES: usize = 1024;

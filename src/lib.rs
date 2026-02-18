@@ -144,11 +144,12 @@ pub use decoding::{
 };
 pub use encoding::{EncodedSymbol, EncodingError, EncodingPipeline, EncodingStats};
 pub use epoch::{
-    bulkhead_call_in_epoch, bulkhead_call_weighted_in_epoch, circuit_breaker_call_in_epoch,
-    epoch_join2, epoch_race2, epoch_select, BarrierResult, BarrierTrigger, Epoch, EpochBarrier,
-    EpochBulkheadError, EpochCircuitBreakerError, EpochClock, EpochConfig, EpochContext,
-    EpochError, EpochId, EpochJoin2, EpochPolicy, EpochRace2, EpochScoped, EpochSelect,
-    EpochSource, EpochState, EpochTransitionBehavior, SymbolValidityWindow,
+    BarrierResult, BarrierTrigger, Epoch, EpochBarrier, EpochBulkheadError,
+    EpochCircuitBreakerError, EpochClock, EpochConfig, EpochContext, EpochError, EpochId,
+    EpochJoin2, EpochPolicy, EpochRace2, EpochScoped, EpochSelect, EpochSource, EpochState,
+    EpochTransitionBehavior, SymbolValidityWindow, bulkhead_call_in_epoch,
+    bulkhead_call_weighted_in_epoch, circuit_breaker_call_in_epoch, epoch_join2, epoch_race2,
+    epoch_select,
 };
 pub use error::{
     AcquireError, BackoffHint, Error, ErrorCategory, ErrorKind, Recoverability, RecoveryAction,
@@ -156,15 +157,15 @@ pub use error::{
 };
 pub use lab::{LabConfig, LabRuntime};
 pub use remote::{
-    spawn_remote, CancelRequest, CompensationResult, ComputationName, DedupDecision,
-    IdempotencyKey, IdempotencyRecord, IdempotencyStore, Lease, LeaseError, LeaseRenewal,
-    LeaseState, NodeId, RemoteCap, RemoteError, RemoteHandle, RemoteMessage, RemoteOutcome,
-    RemoteTaskId, ResultDelivery, Saga, SagaState, SagaStepError, SpawnAck, SpawnAckStatus,
-    SpawnRejectReason, SpawnRequest,
+    CancelRequest, CompensationResult, ComputationName, DedupDecision, IdempotencyKey,
+    IdempotencyRecord, IdempotencyStore, Lease, LeaseError, LeaseRenewal, LeaseState, NodeId,
+    RemoteCap, RemoteError, RemoteHandle, RemoteMessage, RemoteOutcome, RemoteTaskId,
+    ResultDelivery, Saga, SagaState, SagaStepError, SpawnAck, SpawnAckStatus, SpawnRejectReason,
+    SpawnRequest, spawn_remote,
 };
 pub use types::{
-    join_outcomes, Budget, CancelKind, CancelReason, ObligationId, Outcome, OutcomeError,
-    PanicPayload, Policy, RegionId, Severity, SystemPressure, TaskId, Time,
+    Budget, CancelKind, CancelReason, ObligationId, Outcome, OutcomeError, PanicPayload, Policy,
+    RegionId, Severity, SystemPressure, TaskId, Time, join_outcomes,
 };
 
 // Re-export proc macros when the proc-macros feature is enabled

@@ -55,11 +55,10 @@ pub use health::{
     ServingStatus,
 };
 pub use interceptor::{
-    auth_bearer_interceptor, auth_validator, fn_interceptor, logging_interceptor,
-    metadata_propagator, rate_limiter, timeout_interceptor, trace_interceptor,
     BearerAuthInterceptor, BearerAuthValidator, FnInterceptor, InterceptorLayer,
     LoggingInterceptor, MetadataPropagator, RateLimitInterceptor, TimeoutInterceptor,
-    TracingInterceptor,
+    TracingInterceptor, auth_bearer_interceptor, auth_validator, fn_interceptor,
+    logging_interceptor, metadata_propagator, rate_limiter, timeout_interceptor, trace_interceptor,
 };
 pub use server::{
     CallContext, CallContextWithCx, Interceptor, Server, ServerBuilder, ServerConfig,

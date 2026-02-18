@@ -21,12 +21,12 @@
 use crate::lab::config::LabConfig;
 use crate::lab::runtime::{InvariantViolation, LabRuntime};
 use crate::trace::boundary::SquareComplex;
-use crate::trace::canonicalize::{trace_fingerprint, TraceMonoid};
+use crate::trace::canonicalize::{TraceMonoid, trace_fingerprint};
 use crate::trace::dpor::detect_races;
 use crate::trace::event::TraceEvent;
 use crate::trace::event_structure::TracePoset;
 use crate::trace::scoring::{
-    score_persistence, seed_fingerprint, ClassId, EvidenceLedger, TopologicalScore,
+    ClassId, EvidenceLedger, TopologicalScore, score_persistence, seed_fingerprint,
 };
 use serde::Serialize;
 use std::collections::hash_map::DefaultHasher;

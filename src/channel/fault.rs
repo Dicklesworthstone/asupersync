@@ -39,8 +39,8 @@
 //! ```
 
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::channel::mpsc::{SendError, Sender};
 use crate::cx::Cx;

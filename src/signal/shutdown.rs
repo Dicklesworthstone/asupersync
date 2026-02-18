@@ -4,8 +4,8 @@
 //! signals throughout an application. Uses our sync primitives (Notify) to
 //! coordinate without external dependencies.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::sync::Notify;
 

@@ -766,12 +766,12 @@ mod tests {
     use crate::types::cancel::CancelReason;
     use crate::types::outcome::PanicPayload;
 
-    fn test_task_id(index: u32, gen: u32) -> TaskId {
-        TaskId::new_for_test(index, gen)
+    fn test_task_id(index: u32, generation: u32) -> TaskId {
+        TaskId::new_for_test(index, generation)
     }
 
-    fn test_region_id(index: u32, gen: u32) -> RegionId {
-        RegionId::new_for_test(index, gen)
+    fn test_region_id(index: u32, generation: u32) -> RegionId {
+        RegionId::new_for_test(index, generation)
     }
 
     // ── LinkRef ────────────────────────────────────────────────────────

@@ -631,11 +631,7 @@ impl<E: fmt::Debug + fmt::Display> std::error::Error for OutcomeError<E> {}
 ///
 /// This implements the lattice join operation.
 pub fn join_outcomes<T, E>(a: Outcome<T, E>, b: Outcome<T, E>) -> Outcome<T, E> {
-    if a.severity() >= b.severity() {
-        a
-    } else {
-        b
-    }
+    if a.severity() >= b.severity() { a } else { b }
 }
 
 #[cfg(test)]

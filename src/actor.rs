@@ -41,8 +41,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::channel::mpsc;
 use crate::channel::mpsc::SendError;
@@ -919,7 +919,8 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             Some(child_observability),
             io_driver,
             Some(child_entropy),
-        );
+        )
+        .with_blocking_pool_handle(cx.blocking_pool_handle());
 
         if let Some(record) = state.task_mut(task_id) {
             record.set_cx_inner(child_cx.inner.clone());
@@ -1048,8 +1049,8 @@ where
 mod tests {
     use super::*;
     use crate::runtime::state::RuntimeState;
-    use crate::types::policy::FailFast;
     use crate::types::Budget;
+    use crate::types::policy::FailFast;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();

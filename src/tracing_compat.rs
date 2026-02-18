@@ -28,8 +28,8 @@
 
 #[cfg(feature = "tracing-integration")]
 pub use tracing::{
-    debug, debug_span, error, error_span, event, info, info_span, instrument, span, trace,
-    trace_span, warn, warn_span, Instrument, Level, Span,
+    Instrument, Level, Span, debug, debug_span, error, error_span, event, info, info_span,
+    instrument, span, trace, trace_span, warn, warn_span,
 };
 
 // When tracing is disabled, provide no-op macros

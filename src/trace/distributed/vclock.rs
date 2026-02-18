@@ -35,8 +35,8 @@ use crate::types::Time;
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Logical clock trait for causally ordering distributed events.
 ///
@@ -116,10 +116,12 @@ impl LamportClock {
         let mut current = self.counter.load(Ordering::Acquire);
         loop {
             let next = current.max(sender.raw()) + 1;
-            match self
-                .counter
-                .compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire)
-            {
+            match self.counter.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
                 Ok(_) => return LamportTime(next),
                 Err(actual) => current = actual,
             }

@@ -15,7 +15,7 @@ mod imp {
     #![allow(clippy::cast_sign_loss)]
 
     use super::super::{Event, Events, Interest, Reactor, Source, Token};
-    use io_uring::{opcode, types, IoUring};
+    use io_uring::{IoUring, opcode, types};
     use parking_lot::Mutex;
     use std::collections::HashMap;
     use std::io;

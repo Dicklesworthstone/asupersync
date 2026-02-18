@@ -50,7 +50,7 @@ pub trait Policy: Clone + Send + Sync + 'static {
     ///
     /// Returns an action indicating how to respond.
     fn on_child_outcome<T>(&self, child: TaskId, outcome: &Outcome<T, Self::Error>)
-        -> PolicyAction;
+    -> PolicyAction;
 
     /// Aggregates all child outcomes into a decision.
     fn aggregate_outcomes<T>(
@@ -96,7 +96,7 @@ impl Policy for FailFast {
                     return AggregateDecision::Panicked {
                         payload: p.clone(),
                         first_panic_index: i,
-                    }
+                    };
                 }
                 Outcome::Cancelled(r) => match &mut strongest_cancel {
                     None => strongest_cancel = Some(r.clone()),
@@ -151,7 +151,7 @@ impl Policy for CollectAll {
                     return AggregateDecision::Panicked {
                         payload: p.clone(),
                         first_panic_index: i,
-                    }
+                    };
                 }
                 Outcome::Cancelled(r) => match &mut strongest_cancel {
                     None => strongest_cancel = Some(r.clone()),

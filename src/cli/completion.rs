@@ -361,7 +361,10 @@ fn generate_powershell_completions<W: Write, C: Completable>(
     }
     writeln!(writer, "    )")?;
     writeln!(writer)?;
-    writeln!(writer, "    $commands + $options | Where-Object {{ $_.CompletionText -like \"$wordToComplete*\" }}")?;
+    writeln!(
+        writer,
+        "    $commands + $options | Where-Object {{ $_.CompletionText -like \"$wordToComplete*\" }}"
+    )?;
     writeln!(writer, "}}")?;
 
     Ok(())

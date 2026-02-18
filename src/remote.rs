@@ -25,8 +25,8 @@ use crate::types::{Budget, CancelReason, ObligationId, RegionId, TaskId, Time};
 use crate::util::det_hash::DetHashMap;
 use std::fmt;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 // ---------------------------------------------------------------------------

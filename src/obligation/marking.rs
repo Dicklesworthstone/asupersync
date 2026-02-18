@@ -362,7 +362,7 @@ impl ObligationMarking {
         let mut result: Vec<_> = self
             .counts
             .iter()
-            .filter(|(_, &c)| c > 0)
+            .filter(|(_, c)| **c > 0)
             .map(|(DimKey(ki, region), count)| {
                 (
                     MarkingDimension {

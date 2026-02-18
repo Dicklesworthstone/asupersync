@@ -10,7 +10,7 @@ use crate::error::{Error, ErrorKind};
 use crate::raptorq::decoder::{
     DecodeError as RaptorDecodeError, InactivationDecoder, ReceivedSymbol,
 };
-use crate::raptorq::gf256::{gf256_addmul_slice, Gf256};
+use crate::raptorq::gf256::{Gf256, gf256_addmul_slice};
 use crate::raptorq::systematic::{ConstraintMatrix, SystematicParams};
 use crate::security::{AuthenticatedSymbol, SecurityContext};
 use crate::types::symbol_set::{InsertResult, SymbolSet, ThresholdConfig};
@@ -838,11 +838,7 @@ fn seed_for(object_id: ObjectId, sbn: u8, esi: u32) -> u64 {
     let mut seed = hi ^ lo.rotate_left(13);
     seed ^= u64::from(sbn) << 56;
     seed ^= u64::from(esi);
-    if seed == 0 {
-        1
-    } else {
-        seed
-    }
+    if seed == 0 { 1 } else { seed }
 }
 
 #[cfg(test)]

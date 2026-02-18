@@ -334,11 +334,7 @@ impl SymbolSet {
             .iter()
             .filter_map(
                 |(id, symbol)| {
-                    if symbol.sbn() == sbn {
-                        Some(*id)
-                    } else {
-                        None
-                    }
+                    if symbol.sbn() == sbn { Some(*id) } else { None }
                 },
             )
             .collect();

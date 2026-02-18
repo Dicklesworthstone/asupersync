@@ -283,7 +283,7 @@ pub mod errors {
 
 #[cfg(test)]
 mod tests {
-    use super::{errors, CliError, ExitCode};
+    use super::{CliError, ExitCode, errors};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();

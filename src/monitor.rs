@@ -453,12 +453,12 @@ impl Default for DownBatch {
 mod tests {
     use super::*;
 
-    fn test_task_id(index: u32, gen: u32) -> TaskId {
-        TaskId::new_for_test(index, gen)
+    fn test_task_id(index: u32, generation: u32) -> TaskId {
+        TaskId::new_for_test(index, generation)
     }
 
-    fn test_region_id(index: u32, gen: u32) -> RegionId {
-        RegionId::new_for_test(index, gen)
+    fn test_region_id(index: u32, generation: u32) -> RegionId {
+        RegionId::new_for_test(index, generation)
     }
 
     // ── MonitorRef ──────────────────────────────────────────────────────
@@ -1159,7 +1159,7 @@ mod tests {
         // vt=100: tid(2) before tid(3)
         assert_eq!(sorted[0].monitored, t_d); // tid(2), vt=100
         assert_eq!(sorted[1].monitored, t_b); // tid(3), vt=100
-                                              // vt=200: tid(5) before tid(8)
+        // vt=200: tid(5) before tid(8)
         assert_eq!(sorted[2].monitored, t_a); // tid(5), vt=200
         assert_eq!(sorted[3].monitored, t_c); // tid(8), vt=200
     }

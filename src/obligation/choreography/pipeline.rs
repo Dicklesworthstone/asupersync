@@ -1203,14 +1203,18 @@ mod tests {
             .expect("pipeline failed");
 
         let coord = &output.participants["coordinator"];
-        assert!(coord
-            .source_code
-            .contains("pub fn two_phase_commit_coordinator_saga_plan()"));
+        assert!(
+            coord
+                .source_code
+                .contains("pub fn two_phase_commit_coordinator_saga_plan()")
+        );
 
         let worker = &output.participants["worker"];
-        assert!(worker
-            .source_code
-            .contains("pub fn two_phase_commit_worker_saga_plan()"));
+        assert!(
+            worker
+                .source_code
+                .contains("pub fn two_phase_commit_worker_saga_plan()")
+        );
     }
 
     #[test]
@@ -1254,12 +1258,16 @@ mod tests {
             !output.lab_test_code.is_empty(),
             "lab test code should be generated"
         );
-        assert!(output
-            .lab_test_code
-            .contains("test_two_phase_commit_choreography"));
-        assert!(output
-            .lab_test_code
-            .contains("test_two_phase_commit_calm_analysis"));
+        assert!(
+            output
+                .lab_test_code
+                .contains("test_two_phase_commit_choreography")
+        );
+        assert!(
+            output
+                .lab_test_code
+                .contains("test_two_phase_commit_calm_analysis")
+        );
     }
 
     #[test]
@@ -1287,9 +1295,11 @@ mod tests {
 
         assert!(output.lab_test_code.contains("_coordinator_task"));
         assert!(output.lab_test_code.contains("_worker_task"));
-        assert!(output
-            .lab_test_code
-            .contains("LabRuntime::new(asupersync::LabConfig::default())"));
+        assert!(
+            output
+                .lab_test_code
+                .contains("LabRuntime::new(asupersync::LabConfig::default())")
+        );
         assert!(!output.lab_test_code.contains("tokio::spawn"));
     }
 
@@ -1301,12 +1311,16 @@ mod tests {
             .expect("pipeline failed");
 
         // Pairwise directional placeholders must exist.
-        assert!(output
-            .lab_test_code
-            .contains("let (chan_proxy_a_to_proxy_b, chan_proxy_b_to_proxy_a) = ("));
-        assert!(output
-            .lab_test_code
-            .contains("let (chan_proxy_a_to_worker_a, chan_worker_a_to_proxy_a) = ("));
+        assert!(
+            output
+                .lab_test_code
+                .contains("let (chan_proxy_a_to_proxy_b, chan_proxy_b_to_proxy_a) = (")
+        );
+        assert!(
+            output
+                .lab_test_code
+                .contains("let (chan_proxy_a_to_worker_a, chan_worker_a_to_proxy_a) = (")
+        );
 
         // Each participant should have exactly one entry-channel placeholder.
         for name in ["proxy_a", "proxy_b", "worker_a", "worker_b"] {

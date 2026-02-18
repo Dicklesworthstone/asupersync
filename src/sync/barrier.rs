@@ -160,24 +160,23 @@ impl Future for BarrierWaitFuture<'_> {
                     state.arrived = 0;
                     state.generation = state.generation.wrapping_add(1);
 
-                    // Wake all waiters.
-                    for waker in state.waiters.drain(..) {
+                    // Drain wakers and release lock before waking to
+                    // avoid wake-under-lock contention.
+                    let wakers: SmallVec<[Waker; 7]> = state.waiters.drain(..).collect();
+                    drop(state);
+                    for waker in wakers {
                         waker.wake();
                     }
-                    drop(state);
 
                     Poll::Ready(Ok(BarrierWaitResult { is_leader: true }))
                 } else {
                     // Not full yet. Arrive and wait.
                     state.arrived += 1;
-                    let gen = state.generation;
+                    let generation = state.generation;
                     let slot = state.waiters.len();
                     state.waiters.push(cx.waker().clone());
                     drop(state);
-                    self.state = WaitState::Waiting {
-                        generation: gen,
-                        slot,
-                    };
+                    self.state = WaitState::Waiting { generation, slot };
                     Poll::Pending
                 }
             }
@@ -264,8 +263,8 @@ impl BarrierWaitResult {
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     fn init_test(name: &str) {
@@ -389,7 +388,7 @@ mod tests {
         let leader_count = Arc::new(AtomicUsize::new(0));
 
         // Run two generations of the barrier.
-        for gen in 0..2u32 {
+        for generation in 0..2u32 {
             let b = Arc::clone(&barrier);
             let lc = Arc::clone(&leader_count);
             let handle = std::thread::spawn(move || {
@@ -408,7 +407,7 @@ mod tests {
 
             handle.join().expect("thread failed");
             let leaders_so_far = leader_count.load(Ordering::SeqCst);
-            let expected = (gen + 1) as usize;
+            let expected = (generation + 1) as usize;
             crate::assert_with_log!(
                 leaders_so_far == expected,
                 "leader per generation",

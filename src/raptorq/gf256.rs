@@ -46,15 +46,15 @@ use core::arch::aarch64::{
 };
 #[cfg(all(feature = "simd-intrinsics", target_arch = "x86"))]
 use core::arch::x86::{
-    __m128i, __m256i, _mm256_and_si256, _mm256_broadcastsi128_si256, _mm256_loadu_si256,
-    _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16, _mm256_storeu_si256,
-    _mm256_xor_si256, _mm_loadu_si128,
+    __m128i, __m256i, _mm_loadu_si128, _mm256_and_si256, _mm256_broadcastsi128_si256,
+    _mm256_loadu_si256, _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16,
+    _mm256_storeu_si256, _mm256_xor_si256,
 };
 #[cfg(all(feature = "simd-intrinsics", target_arch = "x86_64"))]
 use core::arch::x86_64::{
-    __m128i, __m256i, _mm256_and_si256, _mm256_broadcastsi128_si256, _mm256_loadu_si256,
-    _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16, _mm256_storeu_si256,
-    _mm256_xor_si256, _mm_loadu_si128,
+    __m128i, __m256i, _mm_loadu_si128, _mm256_and_si256, _mm256_broadcastsi128_si256,
+    _mm256_loadu_si256, _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16,
+    _mm256_storeu_si256, _mm256_xor_si256,
 };
 
 /// The irreducible polynomial x^8 + x^4 + x^3 + x^2 + 1.

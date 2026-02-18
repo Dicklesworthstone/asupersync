@@ -33,8 +33,8 @@
 //! to an [`EvidenceSink`].
 
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::channel::mpsc::{SendError, Sender};
 use crate::cx::Cx;
@@ -506,10 +506,7 @@ fn emit_crash_evidence(sink: &Arc<dyn EvidenceSink>, action: &str, count: u32) {
     let entry = EvidenceLedger {
         ts_unix_ms: now_ms,
         component: "channel_crash".to_string(),
-        expected_loss_by_action: std::collections::BTreeMap::from([(
-            action_str.clone(),
-            0.0,
-        )]),
+        expected_loss_by_action: std::collections::BTreeMap::from([(action_str.clone(), 0.0)]),
         action: action_str,
         posterior: vec![1.0],
         chosen_expected_loss: 0.0,

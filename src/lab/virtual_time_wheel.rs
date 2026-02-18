@@ -321,8 +321,8 @@ impl VirtualTimerWheel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Wake;
 
     /// A waker that counts how many times it has been woken.

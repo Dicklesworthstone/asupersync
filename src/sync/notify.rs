@@ -80,6 +80,7 @@ impl WaiterSlab {
     }
 
     /// Insert a waiter entry, reusing a free slot if available.
+    #[inline]
     fn insert(&mut self, entry: WaiterEntry) -> usize {
         if entry.waker.is_some() {
             self.active += 1;
@@ -95,6 +96,7 @@ impl WaiterSlab {
     }
 
     /// Remove a waiter entry by index, returning its slot to the free list.
+    #[inline]
     fn remove(&mut self, index: usize) {
         if index < self.entries.len() {
             if self.entries[index].waker.is_some() {
@@ -121,6 +123,7 @@ impl WaiterSlab {
     }
 
     /// Count active waiters (those with a waker set).  O(1) via maintained counter.
+    #[inline]
     fn active_count(&self) -> usize {
         self.active
     }
@@ -262,21 +265,19 @@ pub struct Notified<'a> {
 impl Future for Notified<'_> {
     type Output = ();
 
+    #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         match self.state {
             NotifiedState::Init => {
                 // Check for stored notification.
                 let mut stored = self.notify.stored_notifications.load(Ordering::Acquire);
                 while stored > 0 {
-                    match self
-                        .notify
-                        .stored_notifications
-                        .compare_exchange_weak(
-                            stored,
-                            stored - 1,
-                            Ordering::Release,
-                            Ordering::Acquire,
-                        ) {
+                    match self.notify.stored_notifications.compare_exchange_weak(
+                        stored,
+                        stored - 1,
+                        Ordering::Release,
+                        Ordering::Acquire,
+                    ) {
                         Ok(_) => {
                             self.state = NotifiedState::Done;
                             return Poll::Ready(());
@@ -301,11 +302,12 @@ impl Future for Notified<'_> {
                 {
                     let mut stored = self.notify.stored_notifications.load(Ordering::Acquire);
                     while stored > 0 {
-                        match self
-                            .notify
-                            .stored_notifications
-                            .compare_exchange_weak(stored, stored - 1, Ordering::Release, Ordering::Acquire)
-                        {
+                        match self.notify.stored_notifications.compare_exchange_weak(
+                            stored,
+                            stored - 1,
+                            Ordering::Release,
+                            Ordering::Acquire,
+                        ) {
                             Ok(_) => {
                                 drop(waiters);
                                 self.state = NotifiedState::Done;
@@ -444,8 +446,8 @@ impl Drop for Notified<'_> {
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
-    use std::sync::mpsc;
     use std::sync::Arc;
+    use std::sync::mpsc;
     use std::task::Wake;
     use std::thread;
     use std::time::Duration;

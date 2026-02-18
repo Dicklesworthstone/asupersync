@@ -643,10 +643,12 @@ mod tests {
         assert_eq!(result.scenario_id, "empty.lifecycle");
         assert_eq!(result.config.seed, 777);
         assert_eq!(result.report.app, "empty_app");
-        assert!(result
-            .expected_invariants
-            .iter()
-            .any(|i| i == "no_task_leaks"));
+        assert!(
+            result
+                .expected_invariants
+                .iter()
+                .any(|i| i == "no_task_leaks")
+        );
 
         crate::test_complete!("scenario_runner_register_and_run");
     }
@@ -1031,9 +1033,11 @@ mod tests {
             result.report.oracle_failures()
         );
         assert_eq!(result.scenario_id, "conformance.lifecycle");
-        assert!(result
-            .expected_invariants
-            .contains(&"no_task_leaks".to_string()));
+        assert!(
+            result
+                .expected_invariants
+                .contains(&"no_task_leaks".to_string())
+        );
 
         crate::test_complete!("conformance_scenario_lifecycle_with_invariants");
     }

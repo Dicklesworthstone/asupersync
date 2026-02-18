@@ -31,12 +31,12 @@ pub use sqlite::{SqliteConnection, SqliteError, SqliteRow, SqliteTransaction, Sq
 
 #[cfg(feature = "postgres")]
 pub use postgres::{
-    oid as pg_oid, PgColumn, PgConnectOptions, PgConnection, PgError, PgRow, PgTransaction,
-    PgValue, SslMode,
+    PgColumn, PgConnectOptions, PgConnection, PgError, PgRow, PgTransaction, PgValue, SslMode,
+    oid as pg_oid,
 };
 
 #[cfg(feature = "mysql")]
 pub use mysql::{
-    column_type as mysql_column_type, MySqlColumn, MySqlConnectOptions, MySqlConnection,
-    MySqlError, MySqlRow, MySqlTransaction, MySqlValue, SslMode as MySqlSslMode,
+    MySqlColumn, MySqlConnectOptions, MySqlConnection, MySqlError, MySqlRow, MySqlTransaction,
+    MySqlValue, SslMode as MySqlSslMode, column_type as mysql_column_type,
 };

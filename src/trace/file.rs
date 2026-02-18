@@ -58,8 +58,8 @@
 //! }
 //! ```
 
-use super::recorder::{LimitAction, LimitKind, LimitReached, DEFAULT_MAX_FILE_SIZE};
-use super::replay::{ReplayEvent, TraceMetadata, REPLAY_SCHEMA_VERSION};
+use super::recorder::{DEFAULT_MAX_FILE_SIZE, LimitAction, LimitKind, LimitReached};
+use super::replay::{REPLAY_SCHEMA_VERSION, ReplayEvent, TraceMetadata};
 use crate::tracing_compat::{error, warn};
 use libc::ENOSPC;
 use std::fs::File;
@@ -757,7 +757,7 @@ impl TraceReader {
             match CompressionMode::from_byte(comp_byte[0]) {
                 Some(mode) => mode,
                 None if is_compressed => {
-                    return Err(TraceFileError::UnsupportedCompression(comp_byte[0]))
+                    return Err(TraceFileError::UnsupportedCompression(comp_byte[0]));
                 }
                 None => CompressionMode::None,
             }
@@ -1189,8 +1189,8 @@ pub fn read_trace(path: impl AsRef<Path>) -> TraceFileResult<(TraceMetadata, Vec
 mod tests {
     use super::*;
     use crate::trace::replay::CompactTaskId;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::NamedTempFile;
 
     fn sample_events() -> Vec<ReplayEvent> {

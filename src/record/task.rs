@@ -10,8 +10,8 @@ use crate::types::{
 };
 use parking_lot::RwLock;
 use smallvec::SmallVec;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::task::Waker;
 #[cfg(feature = "tracing-integration")]
 use std::time::Instant;

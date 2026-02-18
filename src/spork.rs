@@ -136,9 +136,9 @@ pub mod supervisor {
 /// - `call` replies are linear obligations (reply or abort).
 pub mod gen_server {
     pub use crate::gen_server::{
-        named_gen_server_start, CallError, CastError, CastOverflowPolicy, DownMsg, ExitMsg,
-        GenServer, GenServerHandle, GenServerRef, InfoError, NamedGenServerStart, Reply,
-        ReplyOutcome, SystemMsg, TimeoutMsg,
+        CallError, CastError, CastOverflowPolicy, DownMsg, ExitMsg, GenServer, GenServerHandle,
+        GenServerRef, InfoError, NamedGenServerStart, Reply, ReplyOutcome, SystemMsg, TimeoutMsg,
+        named_gen_server_start,
     };
 }
 
@@ -218,8 +218,8 @@ pub mod prelude {
 
     // -- GenServer --
     pub use crate::gen_server::{
-        named_gen_server_start, CallError, CastError, DownMsg, ExitMsg, GenServer, GenServerHandle,
-        NamedGenServerStart, Reply, SystemMsg, TimeoutMsg,
+        CallError, CastError, DownMsg, ExitMsg, GenServer, GenServerHandle, NamedGenServerStart,
+        Reply, SystemMsg, TimeoutMsg, named_gen_server_start,
     };
 
     // -- Registry --

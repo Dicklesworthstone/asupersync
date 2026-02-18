@@ -66,6 +66,7 @@ impl StoredTask {
     ///
     /// The executor should call this before each `poll()` to include
     /// budget information in the trace output.
+    #[inline]
     pub fn set_polls_remaining(&mut self, remaining: u32) {
         self.polls_remaining = Some(remaining);
     }
@@ -74,6 +75,7 @@ impl StoredTask {
     ///
     /// Returns `Poll::Ready(Outcome)` when the task is complete, or `Poll::Pending`
     /// if it needs to be polled again.
+    #[inline]
     #[allow(clippy::used_underscore_binding)]
     pub fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Outcome<(), ()>> {
         self.poll_count += 1;
@@ -170,11 +172,13 @@ impl LocalStoredTask {
     }
 
     /// Sets the budget polls remaining.
+    #[inline]
     pub fn set_polls_remaining(&mut self, remaining: u32) {
         self.polls_remaining = Some(remaining);
     }
 
     /// Polls the stored task.
+    #[inline]
     #[allow(clippy::used_underscore_binding)]
     pub fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Outcome<(), ()>> {
         self.poll_count += 1;
@@ -228,6 +232,7 @@ pub enum AnyStoredTask {
 
 impl AnyStoredTask {
     /// Polls the inner task.
+    #[inline]
     pub fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Outcome<(), ()>> {
         match self {
             Self::Global(t) => t.poll(cx),
@@ -236,12 +241,14 @@ impl AnyStoredTask {
     }
 
     /// Returns `true` when this is a `!Send` local task.
+    #[inline]
     #[must_use]
     pub fn is_local(&self) -> bool {
         matches!(self, Self::Local(_))
     }
 
     /// Sets budget info on the inner task.
+    #[inline]
     pub fn set_polls_remaining(&mut self, remaining: u32) {
         match self {
             Self::Global(t) => t.set_polls_remaining(remaining),
@@ -254,8 +261,8 @@ impl AnyStoredTask {
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
 
     struct NoopWaker;

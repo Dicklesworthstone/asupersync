@@ -740,15 +740,15 @@ impl TraceRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn make_task_id(index: u32, gen: u32) -> TaskId {
-        TaskId::new_for_test(index, gen)
+    fn make_task_id(index: u32, generation: u32) -> TaskId {
+        TaskId::new_for_test(index, generation)
     }
 
-    fn make_region_id(index: u32, gen: u32) -> RegionId {
-        RegionId::new_for_test(index, gen)
+    fn make_region_id(index: u32, generation: u32) -> RegionId {
+        RegionId::new_for_test(index, generation)
     }
 
     #[test]

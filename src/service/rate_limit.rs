@@ -6,7 +6,6 @@
 use super::{Layer, Service};
 use crate::time::{TimeSource, WallClock};
 use crate::types::Time;
-use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::OnceLock;
@@ -105,7 +104,10 @@ impl<S> Layer<S> for RateLimitLayer {
 #[derive(Debug)]
 pub struct RateLimit<S> {
     inner: S,
-    state: Mutex<RateLimitState>,
+    /// Current number of available tokens (plain field — `&mut self` is exclusive).
+    tokens: u64,
+    /// Last time tokens were refilled.
+    last_refill: Option<Time>,
     /// Maximum tokens (bucket capacity).
     rate: u64,
     /// Period for refilling tokens.
@@ -113,23 +115,12 @@ pub struct RateLimit<S> {
     time_getter: fn() -> Time,
 }
 
-#[derive(Debug)]
-struct RateLimitState {
-    /// Current number of available tokens.
-    tokens: u64,
-    /// Last time tokens were refilled.
-    last_refill: Option<Time>,
-}
-
 impl<S: Clone> Clone for RateLimit<S> {
     fn clone(&self) -> Self {
-        let state = self.state.lock();
         Self {
             inner: self.inner.clone(),
-            state: Mutex::new(RateLimitState {
-                tokens: state.tokens,
-                last_refill: state.last_refill,
-            }),
+            tokens: self.tokens,
+            last_refill: self.last_refill,
             rate: self.rate,
             period: self.period,
             time_getter: self.time_getter,
@@ -149,10 +140,8 @@ impl<S> RateLimit<S> {
     pub fn new(inner: S, rate: u64, period: Duration) -> Self {
         Self {
             inner,
-            state: Mutex::new(RateLimitState {
-                tokens: rate, // Start with full bucket
-                last_refill: None,
-            }),
+            tokens: rate, // Start with full bucket
+            last_refill: None,
             rate,
             period,
             time_getter: wall_clock_now,
@@ -169,10 +158,8 @@ impl<S> RateLimit<S> {
     ) -> Self {
         Self {
             inner,
-            state: Mutex::new(RateLimitState {
-                tokens: rate,
-                last_refill: None,
-            }),
+            tokens: rate,
+            last_refill: None,
             rate,
             period,
             time_getter,
@@ -200,16 +187,18 @@ impl<S> RateLimit<S> {
     /// Returns the current number of available tokens.
     #[must_use]
     pub fn available_tokens(&self) -> u64 {
-        self.state.lock().tokens
+        self.tokens
     }
 
     /// Returns a reference to the inner service.
+    #[inline]
     #[must_use]
     pub const fn inner(&self) -> &S {
         &self.inner
     }
 
     /// Returns a mutable reference to the inner service.
+    #[inline]
     pub fn inner_mut(&mut self) -> &mut S {
         &mut self.inner
     }
@@ -220,16 +209,16 @@ impl<S> RateLimit<S> {
         self.inner
     }
 
-    /// Refills tokens based on elapsed time (no locking — caller holds the lock).
-    fn refill_state(&self, state: &mut RateLimitState, now: Time) {
-        let last_refill = state.last_refill.unwrap_or(now);
+    /// Refills tokens based on elapsed time.
+    fn refill_state(&mut self, now: Time) {
+        let last_refill = self.last_refill.unwrap_or(now);
         let elapsed_nanos = now.as_nanos().saturating_sub(last_refill.as_nanos());
         let period_nanos = self.period.as_nanos().min(u128::from(u64::MAX)) as u64;
 
         if period_nanos == 0 {
             // Zero period means "no throttling": keep the bucket full.
-            state.tokens = self.rate;
-            state.last_refill = Some(now);
+            self.tokens = self.rate;
+            self.last_refill = Some(now);
             return;
         }
 
@@ -239,27 +228,25 @@ impl<S> RateLimit<S> {
             if periods > 0 {
                 // Add tokens for complete periods
                 let new_tokens = periods.saturating_mul(self.rate);
-                state.tokens = state.tokens.saturating_add(new_tokens).min(self.rate);
+                self.tokens = self.tokens.saturating_add(new_tokens).min(self.rate);
                 // Update last_refill to the last complete period boundary
                 let refill_time = last_refill.saturating_add_nanos(periods * period_nanos);
-                state.last_refill = Some(refill_time);
+                self.last_refill = Some(refill_time);
             }
-        } else if state.last_refill.is_none() {
-            state.last_refill = Some(now);
+        } else if self.last_refill.is_none() {
+            self.last_refill = Some(now);
         }
     }
 
     /// Refills tokens based on elapsed time.
-    fn refill(&self, now: Time) {
-        let mut state = self.state.lock();
-        self.refill_state(&mut state, now);
+    fn refill(&mut self, now: Time) {
+        self.refill_state(now);
     }
 
     /// Tries to acquire a token.
-    fn try_acquire(&self) -> bool {
-        let mut state = self.state.lock();
-        if state.tokens > 0 {
-            state.tokens -= 1;
+    fn try_acquire(&mut self) -> bool {
+        if self.tokens > 0 {
+            self.tokens -= 1;
             true
         } else {
             false
@@ -277,18 +264,9 @@ impl<S> RateLimit<S> {
     where
         S: Service<()>,
     {
-        let acquired = {
-            let mut state = self.state.lock();
-            self.refill_state(&mut state, now);
-            if state.tokens > 0 {
-                state.tokens -= 1;
-                true
-            } else {
-                false
-            }
-        };
-
-        if acquired {
+        self.refill_state(now);
+        if self.tokens > 0 {
+            self.tokens -= 1;
             Poll::Ready(Ok(()))
         } else {
             // Wake up caller to retry later
@@ -337,34 +315,26 @@ where
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let now = (self.time_getter)();
 
-        // Single lock: refill + eagerly acquire token.
-        let acquired = {
-            let mut state = self.state.lock();
-            self.refill_state(&mut state, now);
-            if state.tokens > 0 {
-                state.tokens -= 1;
-                true
-            } else {
-                false
-            }
-        };
-
-        if !acquired {
+        // Refill + eagerly acquire token (no lock — `&mut self` is exclusive).
+        self.refill_state(now);
+        if self.tokens == 0 {
             cx.waker().wake_by_ref();
             return Poll::Pending;
         }
+        self.tokens -= 1;
 
         // Token reserved. Check inner readiness.
         match self.inner.poll_ready(cx).map_err(RateLimitError::Inner) {
             Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
             other => {
                 // Inner not ready or errored — return the reserved token.
-                self.state.lock().tokens += 1;
+                self.tokens += 1;
                 other
             }
         }
     }
 
+    #[inline]
     fn call(&mut self, req: Request) -> Self::Future {
         RateLimitFuture::new(self.inner.call(req))
     }
@@ -389,6 +359,7 @@ where
 {
     type Output = Result<T, RateLimitError<E>>;
 
+    #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         match Pin::new(&mut this.inner).poll(cx) {
@@ -411,8 +382,8 @@ impl<F: std::fmt::Debug> std::fmt::Debug for RateLimitFuture<F> {
 mod tests {
     use super::*;
     use std::future::ready;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::task::{Wake, Waker};
 
     fn init_test(name: &str) {
@@ -601,13 +572,12 @@ mod tests {
     #[test]
     fn refill_adds_tokens() {
         init_test("refill_adds_tokens");
-        let svc = RateLimit::new(EchoService, 10, Duration::from_secs(1));
+        let mut svc = RateLimit::new(EchoService, 10, Duration::from_secs(1));
 
         // Drain all tokens
         {
-            let mut state = svc.state.lock();
-            state.tokens = 0;
-            state.last_refill = Some(Time::from_secs(0));
+            svc.tokens = 0;
+            svc.last_refill = Some(Time::from_secs(0));
         }
 
         // Refill after 1 second
@@ -622,13 +592,12 @@ mod tests {
     #[test]
     fn refill_caps_at_rate() {
         init_test("refill_caps_at_rate");
-        let svc = RateLimit::new(EchoService, 5, Duration::from_secs(1));
+        let mut svc = RateLimit::new(EchoService, 5, Duration::from_secs(1));
 
         // Start with some tokens
         {
-            let mut state = svc.state.lock();
-            state.tokens = 3;
-            state.last_refill = Some(Time::from_secs(0));
+            svc.tokens = 3;
+            svc.last_refill = Some(Time::from_secs(0));
         }
 
         // Refill after 2 seconds
@@ -646,9 +615,8 @@ mod tests {
         let mut svc =
             RateLimit::with_time_getter(EchoService, 5, Duration::from_secs(1), test_time);
         {
-            let mut state = svc.state.lock();
-            state.tokens = 0;
-            state.last_refill = Some(Time::from_secs(0));
+            svc.tokens = 0;
+            svc.last_refill = Some(Time::from_secs(0));
         }
         TEST_NOW.store(1_000_000_000, Ordering::SeqCst);
         let waker = noop_waker();
@@ -668,9 +636,8 @@ mod tests {
         init_test("zero_period_keeps_bucket_full");
         let mut svc = RateLimit::with_time_getter(EchoService, 2, Duration::ZERO, test_time);
         {
-            let mut state = svc.state.lock();
-            state.tokens = 0;
-            state.last_refill = Some(Time::from_secs(0));
+            svc.tokens = 0;
+            svc.last_refill = Some(Time::from_secs(0));
         }
 
         TEST_NOW.store(1, Ordering::SeqCst);

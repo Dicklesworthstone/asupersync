@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::bytes::Bytes;
-use crate::cx::{cap, Cx};
+use crate::cx::{Cx, cap};
 
 use super::service::{NamedService, ServiceHandler};
 use super::status::{GrpcError, Status};

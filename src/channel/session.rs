@@ -99,7 +99,7 @@ impl<T> TrackedSender<T> {
         let permit = match self.reserve(cx).await {
             Ok(p) => p,
             Err(mpsc::SendError::Disconnected(())) => {
-                return Err(mpsc::SendError::Disconnected(value))
+                return Err(mpsc::SendError::Disconnected(value));
             }
             Err(mpsc::SendError::Full(())) => return Err(mpsc::SendError::Full(value)),
             Err(mpsc::SendError::Cancelled(())) => return Err(mpsc::SendError::Cancelled(value)),

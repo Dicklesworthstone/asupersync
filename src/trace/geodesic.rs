@@ -1254,8 +1254,8 @@ pub fn is_valid_linear_extension(poset: &TracePoset, schedule: &[usize]) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::event_structure::TracePoset;
     use crate::trace::TraceEvent;
+    use crate::trace::event_structure::TracePoset;
     use crate::types::{RegionId, TaskId, Time};
 
     fn make_poset(events: &[TraceEvent]) -> TracePoset {

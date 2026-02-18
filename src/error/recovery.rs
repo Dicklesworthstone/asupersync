@@ -5,7 +5,7 @@
 
 use crate::error::{Error, Recoverability};
 use crate::types::Time;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 /// Strategy for recovering from transient errors.

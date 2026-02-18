@@ -292,8 +292,8 @@ where
 mod tests {
     use super::*;
     use std::future::{pending, ready};
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::{Wake, Waker};
 
     /// A no-op waker for testing.

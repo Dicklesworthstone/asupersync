@@ -43,8 +43,8 @@
 //! assert_eq!(accounting.obligations_peak(), 2);
 //! ```
 
-use crate::record::region::AdmissionKind;
 use crate::record::ObligationKind;
+use crate::record::region::AdmissionKind;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 /// Number of [`ObligationKind`] variants.
