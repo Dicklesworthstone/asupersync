@@ -15,14 +15,14 @@
 #![allow(missing_docs)]
 #![allow(clippy::semicolon_if_nothing_returned)]
 
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 
 use asupersync::record::task::TaskRecord;
-use asupersync::runtime::scheduler::{
-    GlobalQueue, IntrusiveRing, IntrusiveStack, LocalQueue, Parker, Scheduler, QUEUE_TAG_READY,
-};
 use asupersync::runtime::RuntimeState;
+use asupersync::runtime::scheduler::{
+    GlobalQueue, IntrusiveRing, IntrusiveStack, LocalQueue, Parker, QUEUE_TAG_READY, Scheduler,
+};
 use asupersync::sync::ContendedMutex;
 use asupersync::types::{Budget, RegionId, TaskId, Time};
 use asupersync::util::{Arena, ArenaIndex};

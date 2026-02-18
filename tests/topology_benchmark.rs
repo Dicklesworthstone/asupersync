@@ -13,14 +13,14 @@
 mod common;
 use common::*;
 
-use asupersync::lab::explorer::{ExplorerConfig, ScheduleExplorer, TopologyExplorer};
 use asupersync::lab::ExplorationReport;
 use asupersync::lab::LabRuntime;
+use asupersync::lab::explorer::{ExplorerConfig, ScheduleExplorer, TopologyExplorer};
 use asupersync::trace::EvidenceLedger;
 use asupersync::types::Budget;
 use serde_json::json;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 // ---------------------------------------------------------------------------
 // Bug Shape 1: Classic Deadlock Square

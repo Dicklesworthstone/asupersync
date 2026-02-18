@@ -14,8 +14,8 @@ mod common;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::yield_now;
 use asupersync::trace::{
-    diagnose_divergence, minimal_divergent_prefix, write_trace, DiagnosticConfig, ReplayEvent,
-    ReplayTrace, StreamingReplayer, TraceReader, TraceReplayer,
+    DiagnosticConfig, ReplayEvent, ReplayTrace, StreamingReplayer, TraceReader, TraceReplayer,
+    diagnose_divergence, minimal_divergent_prefix, write_trace,
 };
 use asupersync::types::Budget;
 use asupersync::util::DetRng;

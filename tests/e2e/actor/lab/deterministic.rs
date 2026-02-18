@@ -34,8 +34,7 @@ fn run_counter_scenario(seed: u64) -> Vec<String> {
     runtime.scheduler.lock().schedule(task_id, 0);
     runtime.run_until_quiescent();
 
-    let result = events.lock().clone();
-    result
+    events.lock().clone()
 }
 
 /// Run a multi-actor scenario with message exchanges.
@@ -79,8 +78,7 @@ fn run_multi_actor_scenario(seed: u64) -> Vec<String> {
     }
 
     runtime.run_until_quiescent();
-    let result = events.lock().clone();
-    result
+    events.lock().clone()
 }
 
 #[test]

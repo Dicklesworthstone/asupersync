@@ -28,7 +28,7 @@
 
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::record::{ObligationAbortReason, ObligationKind};
-use asupersync::trace::{write_trace, TraceMetadata};
+use asupersync::trace::{TraceMetadata, write_trace};
 use asupersync::types::{Budget, CancelKind, CancelReason, ObligationId};
 use std::time::Instant;
 

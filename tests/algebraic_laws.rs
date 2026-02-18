@@ -29,11 +29,11 @@
 #[macro_use]
 mod common;
 
-use asupersync::combinator::join::{join2_outcomes, join_all_outcomes};
-use asupersync::combinator::race::{race2_outcomes, RaceWinner};
+use asupersync::combinator::join::{join_all_outcomes, join2_outcomes};
+use asupersync::combinator::race::{RaceWinner, race2_outcomes};
 use asupersync::combinator::timeout::effective_deadline;
 use asupersync::types::cancel::{CancelKind, CancelReason};
-use asupersync::types::outcome::{join_outcomes, PanicPayload};
+use asupersync::types::outcome::{PanicPayload, join_outcomes};
 use asupersync::types::{Budget, Outcome, RegionId, Severity, Time};
 use common::*;
 use proptest::prelude::*;
@@ -773,7 +773,7 @@ fn budget_zero_is_absorbing_for_quotas() {
 // Coverage-Tracked Algebraic Law Tests (asupersync-9w45)
 // ============================================================================
 
-use common::coverage::{assert_coverage, InvariantTracker};
+use common::coverage::{InvariantTracker, assert_coverage};
 use proptest::test_runner::TestRunner;
 use std::cell::RefCell;
 

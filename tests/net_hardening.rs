@@ -24,8 +24,8 @@ use std::thread;
 use std::time::Duration;
 
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
-use asupersync::net::tcp::stream::TcpStreamBuilder;
 use asupersync::net::UdpSocket;
+use asupersync::net::tcp::stream::TcpStreamBuilder;
 use asupersync::net::{TcpListener, TcpStream};
 
 struct NoopWaker;

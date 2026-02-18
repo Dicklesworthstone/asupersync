@@ -5,7 +5,7 @@ mod common;
 use asupersync::web::extract::{Json as JsonExtract, Path, Query, Request};
 use asupersync::web::handler::{FnHandler, FnHandler1};
 use asupersync::web::response::{Html, Json, Redirect, StatusCode};
-use asupersync::web::router::{delete, get, post, Router};
+use asupersync::web::router::{Router, delete, get, post};
 
 // =========================================================================
 // Handlers

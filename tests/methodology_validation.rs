@@ -13,14 +13,14 @@ mod common;
 
 use std::sync::Arc;
 
+use asupersync::Cx;
 use asupersync::evidence_sink::{
-    emit_budget_evidence, emit_cancel_evidence, emit_scheduler_evidence, CollectorSink,
-    EvidenceSink, NullSink,
+    CollectorSink, EvidenceSink, NullSink, emit_budget_evidence, emit_cancel_evidence,
+    emit_scheduler_evidence,
 };
 use asupersync::runtime::scheduler::decision_contract::{self, SchedulerDecisionContract};
 use asupersync::types::Time;
-use asupersync::Cx;
-use franken_decision::{evaluate, DecisionContract, EvalContext, FallbackPolicy, Posterior};
+use franken_decision::{DecisionContract, EvalContext, FallbackPolicy, Posterior, evaluate};
 use franken_kernel::{DecisionId, TraceId};
 
 // ============================================================================

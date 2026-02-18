@@ -28,8 +28,8 @@ use asupersync::types::{Budget, CancelKind, CancelReason, Outcome, RegionId, Tas
 use asupersync::util::ArenaIndex;
 use common::*;
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 static ALLOC_TEST_GUARD: Mutex<()> = Mutex::new(());

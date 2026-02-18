@@ -2,8 +2,8 @@
 
 #[cfg(feature = "proc-macros")]
 mod demo {
-    use asupersync::proc_macros::{scope, spawn};
     use asupersync::Budget;
+    use asupersync::proc_macros::{scope, spawn};
     use std::future::Future;
     use std::marker::PhantomData;
 

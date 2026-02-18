@@ -10,8 +10,8 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     };
     use std::task::{Context, Poll};
 

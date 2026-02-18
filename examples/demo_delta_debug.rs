@@ -21,7 +21,7 @@
 
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::record::{ObligationAbortReason, ObligationKind};
-use asupersync::trace::minimizer::{generate_narrative, ScenarioElement, TraceMinimizer};
+use asupersync::trace::minimizer::{ScenarioElement, TraceMinimizer, generate_narrative};
 use asupersync::types::{Budget, CancelKind, CancelReason, ObligationId};
 use std::collections::HashMap;
 use std::time::Instant;

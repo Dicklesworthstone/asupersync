@@ -18,8 +18,8 @@ use asupersync::sync::ContendedMutex;
 use parking_lot::Mutex;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ── Counting allocator (same pattern as allocation_audit.rs) ──────────
 
@@ -103,12 +103,12 @@ fn measure_allocs<F: FnOnce()>(f: F) -> (u64, u64) {
 
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::record::task::TaskRecord;
+use asupersync::runtime::RuntimeState;
 use asupersync::runtime::scheduler::{
     GlobalQueue, IntrusivePriorityHeap, LocalQueue, PriorityScheduler,
 };
-use asupersync::runtime::RuntimeState;
 use asupersync::types::{Budget, RegionId, TaskId};
-use asupersync::util::{Arena, ArenaIndex, CachePadded, CACHE_LINE_SIZE};
+use asupersync::util::{Arena, ArenaIndex, CACHE_LINE_SIZE, CachePadded};
 
 fn init_test(test_name: &str) {
     common::init_test_logging();

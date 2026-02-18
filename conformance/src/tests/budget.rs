@@ -43,7 +43,7 @@
 //! - CB-003: ZERO budget absorbs all
 //! - CB-004: Priority uses max (not min)
 
-use crate::{checkpoint, ConformanceTest, RuntimeInterface, TestCategory, TestMeta, TestResult};
+use crate::{ConformanceTest, RuntimeInterface, TestCategory, TestMeta, TestResult, checkpoint};
 use std::time::Duration;
 
 // Re-export the Budget type from the main crate for testing

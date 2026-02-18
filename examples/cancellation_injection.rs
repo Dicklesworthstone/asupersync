@@ -31,7 +31,7 @@
 //! cargo run --example cancellation_injection
 //! ```
 
-use asupersync::lab::injection::{lab, LabInjectionConfig, LabInjectionRunner};
+use asupersync::lab::injection::{LabInjectionConfig, LabInjectionRunner, lab};
 use asupersync::lab::{
     CancellationInjector, InjectionRunner, InjectionStrategy, InstrumentedFuture,
     InstrumentedPollResult,

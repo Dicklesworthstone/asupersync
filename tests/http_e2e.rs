@@ -13,7 +13,7 @@ mod common;
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::Decoder;
 use asupersync::http::body::{Body, Empty, Full, HeaderMap, HeaderName, HeaderValue};
-use asupersync::http::compress::{negotiate_encoding, ContentEncoding};
+use asupersync::http::compress::{ContentEncoding, negotiate_encoding};
 use asupersync::http::h1::codec::Http1Codec;
 use asupersync::http::h1::server::Http1Config;
 use asupersync::http::h1::types::{Method, Request as H1Request, Version};
@@ -22,7 +22,7 @@ use asupersync::types::Time;
 use asupersync::web::extract::{FromRequest, FromRequestParts, Path, Query, Request};
 use asupersync::web::handler::{FnHandler, FnHandler1};
 use asupersync::web::response::{Json, StatusCode};
-use asupersync::web::router::{get, post, Router};
+use asupersync::web::router::{Router, get, post};
 use common::*;
 use std::collections::HashMap;
 

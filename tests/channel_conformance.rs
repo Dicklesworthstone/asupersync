@@ -11,10 +11,9 @@ use asupersync::net;
 use asupersync::runtime::RuntimeBuilder;
 use common::*;
 use conformance::{
-    render_console_summary, run_conformance_suite, AsyncFile, BroadcastReceiver,
-    BroadcastRecvError, BroadcastSender, MpscReceiver, MpscSender, OneshotSender, RunConfig,
-    RuntimeInterface, TcpListener, TcpStream, TimeoutError, UdpSocket, WatchReceiver,
-    WatchRecvError, WatchSender,
+    AsyncFile, BroadcastReceiver, BroadcastRecvError, BroadcastSender, MpscReceiver, MpscSender,
+    OneshotSender, RunConfig, RuntimeInterface, TcpListener, TcpStream, TimeoutError, UdpSocket,
+    WatchReceiver, WatchRecvError, WatchSender, render_console_summary, run_conformance_suite,
 };
 use futures_lite::future;
 use parking_lot::Mutex;
@@ -23,8 +22,8 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -196,12 +195,17 @@ impl<T: Send + 'static> Future for OneshotReceiverWrapper<T> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        let current = current_cx();
-        let mut recv = this.receiver.recv(&current);
-        match Pin::new(&mut recv).poll(cx) {
-            Poll::Ready(Ok(value)) => Poll::Ready(Ok(value)),
-            Poll::Ready(Err(_)) => Poll::Ready(Err(conformance::OneshotRecvError)),
-            Poll::Pending => Poll::Pending,
+        match this.receiver.try_recv() {
+            Ok(value) => Poll::Ready(Ok(value)),
+            Err(asupersync::channel::oneshot::TryRecvError::Closed) => {
+                Poll::Ready(Err(conformance::OneshotRecvError))
+            }
+            Err(asupersync::channel::oneshot::TryRecvError::Empty) => {
+                // Re-schedule to poll again; avoid creating and immediately dropping
+                // a fresh recv future each poll, which can clear registered waiters.
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
         }
     }
 }

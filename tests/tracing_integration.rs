@@ -7,8 +7,8 @@ mod common;
 /// These use the internal LogCollector and do not require the tracing-integration feature.
 mod cx_tracing_tests {
     use crate::common::*;
-    use asupersync::observability::{LogCollector, ObservabilityConfig};
     use asupersync::Cx;
+    use asupersync::observability::{LogCollector, ObservabilityConfig};
 
     fn make_cx_with_collector() -> (Cx, LogCollector) {
         let config = ObservabilityConfig::testing();

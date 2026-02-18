@@ -92,8 +92,7 @@ fn run_with_seed(seed: u64) -> Vec<String> {
     runtime.scheduler.lock().schedule(client_task_id, 0);
 
     runtime.run_until_quiescent();
-    let snapshot = events.lock().expect("poisoned").clone();
-    snapshot
+    events.lock().expect("poisoned").clone()
 }
 
 #[test]

@@ -668,18 +668,18 @@ fn scan_file_for_conformance(path: &Path) -> Result<TraceabilityScan, Traceabili
             continue;
         }
 
-        if let Some(name) = parse_fn_name(trimmed) {
-            if !pending.is_empty() {
-                let line_number = (index + 1) as u32;
-                for args in pending.drain(..) {
-                    entries.push(TraceabilityEntry::new(
-                        args.spec,
-                        args.requirement,
-                        name.clone(),
-                        path.to_path_buf(),
-                        line_number,
-                    ));
-                }
+        if let Some(name) = parse_fn_name(trimmed)
+            && !pending.is_empty()
+        {
+            let line_number = (index + 1) as u32;
+            for args in pending.drain(..) {
+                entries.push(TraceabilityEntry::new(
+                    args.spec,
+                    args.requirement,
+                    name.clone(),
+                    path.to_path_buf(),
+                    line_number,
+                ));
             }
         }
 
@@ -1074,13 +1074,15 @@ mod tests {
         let scan = scan_conformance_attributes(std::slice::from_ref(&file)).unwrap();
         assert!(scan.warnings.is_empty());
         assert_eq!(scan.entries.len(), 2);
-        assert!(scan
-            .entries
-            .iter()
-            .any(|entry| entry.spec_section == "3.2.1"));
-        assert!(scan
-            .entries
-            .iter()
-            .any(|entry| entry.spec_section == "3.2.2"));
+        assert!(
+            scan.entries
+                .iter()
+                .any(|entry| entry.spec_section == "3.2.1")
+        );
+        assert!(
+            scan.entries
+                .iter()
+                .any(|entry| entry.spec_section == "3.2.2")
+        );
     }
 }

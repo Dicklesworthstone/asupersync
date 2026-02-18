@@ -176,15 +176,21 @@ fn spawn_ack_complete_lifecycle() {
 
     let events = h.node(&b).unwrap().events();
     // B received spawn, accepted it, and completed the task.
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, NodeEvent::SpawnReceived { task_id, .. } if *task_id == tid)));
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, NodeEvent::SpawnAccepted { task_id } if *task_id == tid)));
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, NodeEvent::TaskCompleted { task_id } if *task_id == tid)));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::SpawnReceived { task_id, .. } if *task_id == tid))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::SpawnAccepted { task_id } if *task_id == tid))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::TaskCompleted { task_id } if *task_id == tid))
+    );
     // B should have no running tasks after completion.
     assert_eq!(h.node(&b).unwrap().running_task_count(), 0);
 
@@ -209,9 +215,11 @@ fn spawn_ack_sent_immediately() {
 
     // B accepted but task is still running.
     let events = h.node(&b).unwrap().events();
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, NodeEvent::SpawnAccepted { .. })));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::SpawnAccepted { .. }))
+    );
     assert!(h.node(&b).unwrap().running_task_count() > 0);
 
     // Ack was sent back to A.
@@ -237,12 +245,16 @@ fn cancel_before_completion() {
     h.run_for(Duration::from_millis(50)); // cancel arrives, task terminates
 
     let events = h.node(&b).unwrap().events();
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, NodeEvent::CancelReceived { task_id } if *task_id == tid)));
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, NodeEvent::TaskCancelled { task_id } if *task_id == tid)));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::CancelReceived { task_id } if *task_id == tid))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::TaskCancelled { task_id } if *task_id == tid))
+    );
     assert_eq!(h.node(&b).unwrap().running_task_count(), 0);
 
     // B sends a Cancelled ResultDelivery back to A.
@@ -547,21 +559,29 @@ fn three_node_chain_spawn_cascade() {
 
     // B accepted t1 and completed it.
     let events_b = h.node(&b).unwrap().events();
-    assert!(events_b
-        .iter()
-        .any(|e| matches!(e, NodeEvent::SpawnAccepted { task_id } if *task_id == t1)));
-    assert!(events_b
-        .iter()
-        .any(|e| matches!(e, NodeEvent::TaskCompleted { task_id } if *task_id == t1)));
+    assert!(
+        events_b
+            .iter()
+            .any(|e| matches!(e, NodeEvent::SpawnAccepted { task_id } if *task_id == t1))
+    );
+    assert!(
+        events_b
+            .iter()
+            .any(|e| matches!(e, NodeEvent::TaskCompleted { task_id } if *task_id == t1))
+    );
 
     // C accepted t2 and completed it.
     let events_c = h.node(&c).unwrap().events();
-    assert!(events_c
-        .iter()
-        .any(|e| matches!(e, NodeEvent::SpawnAccepted { task_id } if *task_id == t2)));
-    assert!(events_c
-        .iter()
-        .any(|e| matches!(e, NodeEvent::TaskCompleted { task_id } if *task_id == t2)));
+    assert!(
+        events_c
+            .iter()
+            .any(|e| matches!(e, NodeEvent::SpawnAccepted { task_id } if *task_id == t2))
+    );
+    assert!(
+        events_c
+            .iter()
+            .any(|e| matches!(e, NodeEvent::TaskCompleted { task_id } if *task_id == t2))
+    );
 
     // No running tasks anywhere.
     assert_eq!(h.node(&a).unwrap().running_task_count(), 0);
@@ -590,14 +610,18 @@ fn three_node_cancel_cascade() {
     h.run_for(Duration::from_millis(100));
 
     let events_b = h.node(&b).unwrap().events();
-    assert!(events_b
-        .iter()
-        .any(|e| matches!(e, NodeEvent::TaskCancelled { task_id } if *task_id == t1)));
+    assert!(
+        events_b
+            .iter()
+            .any(|e| matches!(e, NodeEvent::TaskCancelled { task_id } if *task_id == t1))
+    );
 
     let events_c = h.node(&c).unwrap().events();
-    assert!(events_c
-        .iter()
-        .any(|e| matches!(e, NodeEvent::TaskCancelled { task_id } if *task_id == t2)));
+    assert!(
+        events_c
+            .iter()
+            .any(|e| matches!(e, NodeEvent::TaskCancelled { task_id } if *task_id == t2))
+    );
 }
 
 // ===========================================================================
@@ -708,12 +732,13 @@ fn partition_blocks_ack_heal_recovers() {
     h.run_for(Duration::from_millis(200));
 
     // Now B should have received and completed.
-    assert!(h
-        .node(&b)
-        .unwrap()
-        .events()
-        .iter()
-        .any(|e| matches!(e, NodeEvent::TaskCompleted { .. })));
+    assert!(
+        h.node(&b)
+            .unwrap()
+            .events()
+            .iter()
+            .any(|e| matches!(e, NodeEvent::TaskCompleted { .. }))
+    );
 }
 
 #[test]
@@ -812,12 +837,13 @@ fn crash_drops_all_tasks_restart_accepts_new() {
     h.inject_spawn(&a, &b, t2);
     h.run_for(Duration::from_millis(200));
 
-    assert!(h
-        .node(&b)
-        .unwrap()
-        .events()
-        .iter()
-        .any(|e| matches!(e, NodeEvent::TaskCompleted { task_id } if *task_id == t2)));
+    assert!(
+        h.node(&b)
+            .unwrap()
+            .events()
+            .iter()
+            .any(|e| matches!(e, NodeEvent::TaskCompleted { task_id } if *task_id == t2))
+    );
 }
 
 #[test]
@@ -1122,12 +1148,16 @@ fn spawn_to_self() {
     h.run_for(Duration::from_millis(200));
 
     let events = h.node(&a).unwrap().events();
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, NodeEvent::SpawnAccepted { task_id } if *task_id == tid)));
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, NodeEvent::TaskCompleted { task_id } if *task_id == tid)));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::SpawnAccepted { task_id } if *task_id == tid))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::TaskCompleted { task_id } if *task_id == tid))
+    );
 }
 
 #[test]
@@ -1169,9 +1199,11 @@ fn cancel_nonexistent_task_is_silent() {
 
     // CancelReceived is logged but no TaskCancelled (nothing to cancel).
     let events = h.node(&b).unwrap().events();
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, NodeEvent::CancelReceived { .. })));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::CancelReceived { .. }))
+    );
     assert_eq!(
         count_events(events, |e| matches!(e, NodeEvent::TaskCancelled { .. })),
         0

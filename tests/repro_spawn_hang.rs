@@ -3,12 +3,12 @@
 #[cfg(test)]
 mod tests {
     use asupersync::cx::Cx;
-    use asupersync::runtime::scheduler::ThreeLaneScheduler;
     use asupersync::runtime::RuntimeState;
+    use asupersync::runtime::scheduler::ThreeLaneScheduler;
     use asupersync::sync::ContendedMutex;
     use asupersync::types::{Budget, TaskId};
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     #[test]

@@ -351,8 +351,8 @@ fn normalize_message_for_signature(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_frontier_report, normalize_message_for_signature, parse_diagnostic_line,
-        LeanDiagnosticSeverity, LEAN_FRONTIER_SCHEMA_VERSION,
+        LEAN_FRONTIER_SCHEMA_VERSION, LeanDiagnosticSeverity, extract_frontier_report,
+        normalize_message_for_signature, parse_diagnostic_line,
     };
 
     #[test]

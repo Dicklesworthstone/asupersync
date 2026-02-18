@@ -21,15 +21,15 @@ use asupersync::remote::{
 use asupersync::trace::causality::{CausalOrderVerifier, CausalityViolationKind};
 use asupersync::trace::certificate::{CertificateVerifier, TraceCertificate};
 use asupersync::trace::compat::{
-    check_schema_compatibility, CompatStats, CompatibilityResult, TraceMigrator,
+    CompatStats, CompatibilityResult, TraceMigrator, check_schema_compatibility,
 };
 use asupersync::trace::distributed::{LamportClock, LogicalTime, VectorClock};
 use asupersync::trace::event::{TraceData, TraceEvent, TraceEventKind};
 use asupersync::trace::geodesic::{
-    count_switches, is_valid_linear_extension, normalize, GeodesicConfig,
+    GeodesicConfig, count_switches, is_valid_linear_extension, normalize,
 };
 use asupersync::trace::replay::{
-    CompactRegionId, CompactTaskId, ReplayEvent, ReplayTrace, TraceMetadata, REPLAY_SCHEMA_VERSION,
+    CompactRegionId, CompactTaskId, REPLAY_SCHEMA_VERSION, ReplayEvent, ReplayTrace, TraceMetadata,
 };
 use asupersync::trace::replayer::{Breakpoint, ReplayMode, TraceReplayer};
 use asupersync::types::{CancelReason, RegionId, TaskId, Time};
@@ -139,9 +139,10 @@ fn causality_equal_lamport_same_task_is_violation() {
 
     let trace = vec![spawn_ev(0, tid(1), t1), schedule_ev(1, tid(1), t1_dup)];
     let err = CausalOrderVerifier::verify(&trace).unwrap_err();
-    assert!(err
-        .iter()
-        .any(|v| v.kind == CausalityViolationKind::SameTaskConcurrent));
+    assert!(
+        err.iter()
+            .any(|v| v.kind == CausalityViolationKind::SameTaskConcurrent)
+    );
 }
 
 #[test]
@@ -439,24 +440,24 @@ fn replay_metadata_config_hash_preserved() {
 #[test]
 fn replay_compact_task_id_roundtrip_extremes() {
     // Test edge values for compact task ID packing
-    for (index, gen) in [(0, 0), (u32::MAX, u32::MAX), (1, 0), (0, 1)] {
-        let task = TaskId::new_for_test(index, gen);
+    for (index, generation) in [(0, 0), (u32::MAX, u32::MAX), (1, 0), (0, 1)] {
+        let task = TaskId::new_for_test(index, generation);
         let compact = CompactTaskId::from(task);
         let (idx, g) = compact.unpack();
-        assert_eq!(idx, index, "index mismatch for ({index}, {gen})");
-        assert_eq!(g, gen, "gen mismatch for ({index}, {gen})");
+        assert_eq!(idx, index, "index mismatch for ({index}, {generation})");
+        assert_eq!(g, generation, "gen mismatch for ({index}, {generation})");
         assert_eq!(compact.to_task_id(), task);
     }
 }
 
 #[test]
 fn replay_compact_region_id_roundtrip_extremes() {
-    for (index, gen) in [(0, 0), (u32::MAX, u32::MAX), (100, 200)] {
-        let region = RegionId::new_for_test(index, gen);
+    for (index, generation) in [(0, 0), (u32::MAX, u32::MAX), (100, 200)] {
+        let region = RegionId::new_for_test(index, generation);
         let compact = CompactRegionId::from(region);
         let (idx, g) = compact.unpack();
         assert_eq!(idx, index);
-        assert_eq!(g, gen);
+        assert_eq!(g, generation);
         assert_eq!(compact.to_region_id(), region);
     }
 }

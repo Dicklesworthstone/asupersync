@@ -10,8 +10,8 @@
 //! The tests in this module skip when `REDIS_URL` is not set.
 
 use asupersync::cx::Cx;
-use asupersync::messaging::redis::RespValue;
 use asupersync::messaging::RedisClient;
+use asupersync::messaging::redis::RespValue;
 use std::time::Duration;
 
 fn init_redis_test(test_name: &str) {

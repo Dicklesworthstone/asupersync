@@ -16,7 +16,7 @@
 
 use asupersync::channel::mpsc;
 use asupersync::channel::partition::{
-    partition_channel, ActorId, PartitionBehavior, PartitionController,
+    ActorId, PartitionBehavior, PartitionController, partition_channel,
 };
 use asupersync::evidence_sink::{CollectorSink, EvidenceSink};
 use asupersync::types::Budget;
@@ -317,14 +317,13 @@ fn cancelled_context_during_partition_error_mode() {
     // Cancel the context.
     cx.set_cancel_requested(true);
 
-    // Without partition: cancellation error takes precedence.
-    // With partition: partition check happens first, returns Disconnected.
+    // Cancellation checkpoint runs before partition behavior, so Cancelled
+    // takes precedence even when the link is partitioned.
     ctrl.partition(a, b);
     let result = block_on(ptx.send(&cx, 42));
-    // Should get Disconnected (partition check is before cx.checkpoint).
     assert!(
-        matches!(result, Err(mpsc::SendError::Disconnected(42))),
-        "partition should intercept before checkpoint: {result:?}"
+        matches!(result, Err(mpsc::SendError::Cancelled(42))),
+        "cancel checkpoint should take precedence over partition behavior: {result:?}"
     );
 }
 

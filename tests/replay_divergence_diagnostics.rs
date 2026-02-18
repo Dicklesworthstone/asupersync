@@ -9,8 +9,8 @@ mod common;
 
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::trace::{
-    diagnose_divergence, minimal_divergent_prefix, CompactTaskId, DiagnosticConfig,
-    DivergenceCategory, ReplayEvent, ReplayTrace, TraceMetadata, TraceReplayer,
+    CompactTaskId, DiagnosticConfig, DivergenceCategory, ReplayEvent, ReplayTrace, TraceMetadata,
+    TraceReplayer, diagnose_divergence, minimal_divergent_prefix,
 };
 use asupersync::types::Budget;
 use common::*;

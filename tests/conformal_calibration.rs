@@ -9,7 +9,7 @@ use common::*;
 
 use asupersync::lab::conformal::{CalibrationReport, ConformalCalibrator, ConformalConfig};
 use asupersync::lab::oracle::OracleSuite;
-use asupersync::lab::{LabConfig, LabRuntime, OracleReport, ALL_ORACLE_INVARIANTS};
+use asupersync::lab::{ALL_ORACLE_INVARIANTS, LabConfig, LabRuntime, OracleReport};
 use asupersync::types::{Budget, Time};
 
 const SEED_BASE: u64 = 0xCAFE_1234;

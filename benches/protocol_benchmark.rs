@@ -13,7 +13,7 @@
 #![allow(missing_docs)]
 #![allow(clippy::semicolon_if_nothing_returned)]
 
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 
 use asupersync::bytes::{Bytes, BytesMut};

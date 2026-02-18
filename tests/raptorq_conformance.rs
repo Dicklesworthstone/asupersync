@@ -701,8 +701,8 @@ mod pipeline_e2e {
     use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
     use asupersync::raptorq::proof::{FailureReason, ProofOutcome};
     use asupersync::raptorq::systematic::ConstraintMatrix;
-    use asupersync::security::tag::AuthenticationTag;
     use asupersync::security::AuthenticatedSymbol;
+    use asupersync::security::tag::AuthenticationTag;
     use asupersync::types::resource::{PoolConfig, SymbolPool};
     use asupersync::types::{ObjectId, ObjectParams, Symbol, SymbolKind};
     use asupersync::util::DetRng;
@@ -838,11 +838,7 @@ mod pipeline_e2e {
         let lo = obj as u64;
         let mut seed = hi ^ lo.rotate_left(13);
         seed ^= u64::from(sbn) << 56;
-        if seed == 0 {
-            1
-        } else {
-            seed
-        }
+        if seed == 0 { 1 } else { seed }
     }
 
     fn pool_for(symbol_size: u16) -> SymbolPool {
@@ -1433,7 +1429,7 @@ mod differential_harness {
     use super::*;
     use asupersync::raptorq::linalg::{DenseRow, GaussianResult, GaussianSolver};
     use asupersync::raptorq::test_log_schema::{
-        validate_unit_log_json, UnitDecodeStats, UnitLogEntry,
+        UnitDecodeStats, UnitLogEntry, validate_unit_log_json,
     };
 
     const DIFF_REPLAY_REF: &str = "replay:rq-d2-diff-harness-v1";
@@ -1829,15 +1825,14 @@ mod metamorphic_property {
     use super::*;
     use asupersync::raptorq::rfc6330::rand;
     use asupersync::raptorq::test_log_schema::{
-        validate_unit_log_json, UnitDecodeStats, UnitLogEntry,
+        UnitDecodeStats, UnitLogEntry, validate_unit_log_json,
     };
 
     const D4_ARTIFACT_PATH: &str = "artifacts/raptorq_d4_decode_failure_policy_v1.json";
     const D4_REPLAY_REF: &str = "replay:rq-d4-decode-failure-policy-v1";
     const D4_REPRO_INSUFFICIENT: &str = "rch exec -- cargo test --test raptorq_conformance insufficient_symbols_returns_error -- --nocapture";
     const D4_REPRO_COLUMN_RANGE: &str = "rch exec -- cargo test --test raptorq_conformance invalid_column_index_returns_unrecoverable_error -- --nocapture";
-    const D4_REPRO_MULTI_SEED: &str =
-        "rch exec -- cargo test --test raptorq_conformance multi_seed_erasure_stress -- --nocapture";
+    const D4_REPRO_MULTI_SEED: &str = "rch exec -- cargo test --test raptorq_conformance multi_seed_erasure_stress -- --nocapture";
 
     fn emit_d4_unit_log(
         scenario_id: &str,
@@ -2575,13 +2570,12 @@ mod metamorphic_property {
 mod stress_soak_e2e {
     use super::*;
     use asupersync::raptorq::test_log_schema::{
-        validate_unit_log_json, UnitDecodeStats, UnitLogEntry,
+        UnitDecodeStats, UnitLogEntry, validate_unit_log_json,
     };
     use serde::Serialize;
 
     const D8_ARTIFACT_PATH: &str = "artifacts/raptorq_d8_stress_soak_v1.json";
-    const D8_REPRO_COMMAND: &str =
-        "rch exec -- cargo test --test raptorq_conformance soak_stress_profiles_deterministic_with_forensic_logs -- --nocapture";
+    const D8_REPRO_COMMAND: &str = "rch exec -- cargo test --test raptorq_conformance soak_stress_profiles_deterministic_with_forensic_logs -- --nocapture";
     const D8_FORENSIC_SCHEMA_VERSION: &str = "raptorq-d8-stress-forensic-v1";
 
     #[derive(Clone, Copy)]
@@ -3092,7 +3086,7 @@ mod stress_soak_e2e {
 
 mod golden_vectors {
     use super::*;
-    use asupersync::raptorq::rfc6330::{deg, next_prime_ge, rand, tuple, tuple_indices, LtTuple};
+    use asupersync::raptorq::rfc6330::{LtTuple, deg, next_prime_ge, rand, tuple, tuple_indices};
 
     // ----------------------------------------------------------------
     // G1: Systematic Parameter Lookup (RFC 6330 Table 2)

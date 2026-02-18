@@ -13,8 +13,8 @@
 //! - IO-007: Socket read timeout
 
 use crate::{
-    checkpoint, AsyncFile, ConformanceTest, MpscReceiver, MpscSender, RuntimeInterface,
-    TcpListener, TcpStream, TestCategory, TestMeta, TestResult, UdpSocket,
+    AsyncFile, ConformanceTest, MpscReceiver, MpscSender, RuntimeInterface, TcpListener, TcpStream,
+    TestCategory, TestMeta, TestResult, UdpSocket, checkpoint,
 };
 use std::io::SeekFrom;
 use std::time::Duration;

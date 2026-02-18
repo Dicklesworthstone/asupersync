@@ -13,7 +13,7 @@ use common::*;
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::error::{ErrorCode, H2Error};
 use asupersync::http::h2::frame::{
-    FrameHeader, FRAME_HEADER_SIZE, MAX_FRAME_SIZE, MIN_MAX_FRAME_SIZE,
+    FRAME_HEADER_SIZE, FrameHeader, MAX_FRAME_SIZE, MIN_MAX_FRAME_SIZE,
 };
 use asupersync::http::h2::hpack::{Decoder as HpackDecoder, Encoder as HpackEncoder, Header};
 use asupersync::http::h2::settings::SettingsBuilder;
@@ -102,7 +102,7 @@ fn hpack_consecutive_size_updates_limited() {
 
     // Send 17 consecutive size update instructions (limit is 16)
     let mut malicious = vec![0x20; 17]; // 17 consecutive size update instructions (limit is 16)
-                                        // Follow with a valid indexed header to trigger decoding
+    // Follow with a valid indexed header to trigger decoding
     malicious.push(0x82); // :method GET (static index 2)
 
     let mut src = Bytes::from(malicious);

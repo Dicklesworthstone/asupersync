@@ -8,8 +8,8 @@
 
 use crate::e2e::combinator::util::{DrainFlag, DrainTracker, NeverComplete};
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// Test basic quorum (2 of 3).
 #[test]

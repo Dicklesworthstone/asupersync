@@ -17,7 +17,7 @@
 //! 9. **Stats tracking**: All operations are counted accurately.
 //! 10. **Two-phase commit safety**: Crash after reserve aborts cleanly.
 
-use asupersync::channel::crash::{crash_channel, CrashConfig, CrashSender, RestartMode};
+use asupersync::channel::crash::{CrashConfig, CrashSender, RestartMode, crash_channel};
 use asupersync::channel::mpsc;
 use asupersync::evidence_sink::{CollectorSink, EvidenceSink};
 use asupersync::types::Budget;

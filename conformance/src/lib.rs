@@ -45,32 +45,33 @@ pub mod tests;
 pub mod traceability;
 
 pub use bench::{
-    default_benchmarks, run_benchmark_comparison, BenchAllocSnapshot, BenchAllocStats,
-    BenchCategory, BenchComparisonResult, BenchComparisonSummary, BenchConfig, BenchOutput,
-    BenchRunResult, BenchRunSummary, BenchRunner, BenchThresholds, Benchmark, Comparison,
-    ComparisonConfidence, RegressionCheck, RegressionConfig, RegressionMetric, Stats, StatsError,
+    BenchAllocSnapshot, BenchAllocStats, BenchCategory, BenchComparisonResult,
+    BenchComparisonSummary, BenchConfig, BenchOutput, BenchRunResult, BenchRunSummary, BenchRunner,
+    BenchThresholds, Benchmark, Comparison, ComparisonConfidence, RegressionCheck,
+    RegressionConfig, RegressionMetric, Stats, StatsError, default_benchmarks,
+    run_benchmark_comparison,
 };
 pub use lean_coverage_matrix::{
     BlockerCode, CoverageBlocker, CoverageEvidence, CoverageRow, CoverageRowType, CoverageStatus,
-    LeanCoverageMatrix, LEAN_COVERAGE_SCHEMA_VERSION,
+    LEAN_COVERAGE_SCHEMA_VERSION, LeanCoverageMatrix,
 };
 pub use lean_frontier::{
-    extract_frontier_report, LeanDiagnosticSeverity, LeanFrontierBucket, LeanFrontierDiagnostic,
-    LeanFrontierReport, LEAN_FRONTIER_SCHEMA_VERSION,
+    LEAN_FRONTIER_SCHEMA_VERSION, LeanDiagnosticSeverity, LeanFrontierBucket,
+    LeanFrontierDiagnostic, LeanFrontierReport, extract_frontier_report,
 };
 pub use logging::{
     ConformanceTestLogger, LogCollector, LogConfig, LogEntry, LogLevel, TestEvent, TestEventKind,
 };
 pub use report::{render_console_summary, write_json_report};
 pub use runner::{
-    compare_results, run_comparison, run_conformance_suite, ComparisonResult, ComparisonStatus,
-    ComparisonSummary, RunConfig, RunSummary, SingleRunResult, SuiteResult, SuiteTestResult,
-    TestRunner,
+    ComparisonResult, ComparisonStatus, ComparisonSummary, RunConfig, RunSummary, SingleRunResult,
+    SuiteResult, SuiteTestResult, TestRunner, compare_results, run_comparison,
+    run_conformance_suite,
 };
 pub use traceability::{
-    requirements_from_entries, scan_conformance_attributes, CiReport, CoverageStats, ScanWarning,
-    SpecRequirement, TraceabilityEntry, TraceabilityMatrix, TraceabilityMatrixBuilder,
-    TraceabilityScan, TraceabilityScanError,
+    CiReport, CoverageStats, ScanWarning, SpecRequirement, TraceabilityEntry, TraceabilityMatrix,
+    TraceabilityMatrixBuilder, TraceabilityScan, TraceabilityScanError, requirements_from_entries,
+    scan_conformance_attributes,
 };
 
 // ============================================================================

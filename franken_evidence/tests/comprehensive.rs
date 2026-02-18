@@ -4,11 +4,11 @@
 //! full pipeline (builder → JSONL → read → render), schema migration,
 //! and galaxy-brain rendering determinism.
 
-use franken_evidence::export::{read_jsonl, ExporterConfig, JsonlExporter};
+use franken_evidence::export::{ExporterConfig, JsonlExporter, read_jsonl};
 use franken_evidence::render::{self, DiffContext};
 use franken_evidence::{EvidenceLedger, EvidenceLedgerBuilder, ValidationError};
 use proptest::prelude::*;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 
@@ -126,7 +126,7 @@ proptest! {
             component: "test".to_string(),
             action: "act".to_string(),
             posterior: raw,
-            expected_loss_by_action: HashMap::new(),
+            expected_loss_by_action: BTreeMap::new(),
             chosen_expected_loss: 0.0,
             calibration_score: 0.5,
             fallback_active: false,
@@ -148,7 +148,7 @@ proptest! {
             component: "test".to_string(),
             action: "act".to_string(),
             posterior: vec![1.0],
-            expected_loss_by_action: HashMap::new(),
+            expected_loss_by_action: BTreeMap::new(),
             chosen_expected_loss: 0.0,
             calibration_score: cal,
             fallback_active: false,

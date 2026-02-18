@@ -4,9 +4,9 @@
 mod common;
 
 use asupersync::time::{CoalescingConfig, TimerWheel, TimerWheelConfig};
-use asupersync::types::cancel::{CancelKind, CancelReason};
-use asupersync::types::outcome::{join_outcomes, Outcome, PanicPayload, Severity};
 use asupersync::types::Time;
+use asupersync::types::cancel::{CancelKind, CancelReason};
+use asupersync::types::outcome::{Outcome, PanicPayload, Severity, join_outcomes};
 use common::{init_test_logging, test_proptest_config};
 use proptest::prelude::*;
 use std::sync::Arc;

@@ -49,8 +49,8 @@ use actor_e2e::util::{CounterActor, CounterMessage, EchoActor};
 use asupersync::channel::mpsc::SendError;
 use asupersync::cx::{Cx, Scope};
 use asupersync::lab::{LabConfig, LabRuntime};
-use asupersync::types::policy::FailFast;
 use asupersync::types::Budget;
+use asupersync::types::policy::FailFast;
 use parking_lot::Mutex;
 use std::sync::Arc;
 

@@ -29,8 +29,8 @@ use asupersync::runtime::deadline_monitor::{AdaptiveDeadlineConfig, MonitorConfi
 use asupersync::runtime::{RegionLimits, RuntimeBuilder, SpawnError};
 use asupersync::types::Time;
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 fn init_test(name: &str) {

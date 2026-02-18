@@ -302,7 +302,7 @@ pub fn level2(entry: &EvidenceLedger) -> String {
             "    {}---+----------+-------",
             "-".repeat(max_name_len.saturating_sub(5))
         );
-        for (action, &loss) in &actions {
+        for (action, &loss) in actions {
             let chosen = if **action == entry.action { " *" } else { "" };
             let pad = " ".repeat(max_name_len.saturating_sub(action.len()));
             let _ = writeln!(out, "    {pad}{action} | {loss:<8.4} |{chosen}");
@@ -645,7 +645,7 @@ pub fn html(entry: &EvidenceLedger) -> String {
         );
         let mut actions: Vec<_> = entry.expected_loss_by_action.iter().collect();
         actions.sort_by(|a, b| a.0.cmp(b.0));
-        for (action, &loss) in &actions {
+        for (action, &loss) in actions {
             let style = if **action == entry.action {
                 "font-weight:bold;color:#38bdf8"
             } else {
@@ -772,7 +772,7 @@ pub fn markdown(entry: &EvidenceLedger) -> String {
         actions.sort_by(|a, b| a.0.cmp(b.0));
         let _ = writeln!(out, "| Action | Loss | |");
         let _ = writeln!(out, "|--------|-----:|---|");
-        for (action, &loss) in &actions {
+        for (action, &loss) in actions {
             let marker = if **action == entry.action {
                 ":arrow_left:"
             } else {

@@ -1,7 +1,6 @@
 use crate::{
-    conformance_test, BroadcastReceiver, BroadcastSender, ConformanceTest, MpscReceiver,
-    MpscSender, OneshotSender, RuntimeInterface, TestCategory, TestResult, WatchReceiver,
-    WatchSender,
+    BroadcastReceiver, BroadcastSender, ConformanceTest, MpscReceiver, MpscSender, OneshotSender,
+    RuntimeInterface, TestCategory, TestResult, WatchReceiver, WatchSender, conformance_test,
 };
 
 pub fn collect_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> {

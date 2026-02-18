@@ -24,12 +24,12 @@
 //! - §3.4: Obligations
 
 use crate::{
-    checkpoint, BroadcastReceiver, BroadcastSender, ConformanceTest, MpscReceiver, MpscSender,
-    OneshotSender, RuntimeInterface, TestCategory, TestMeta, TestResult,
+    BroadcastReceiver, BroadcastSender, ConformanceTest, MpscReceiver, MpscSender, OneshotSender,
+    RuntimeInterface, TestCategory, TestMeta, TestResult, checkpoint,
 };
 use std::env;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 // ============================================================================
@@ -344,13 +344,13 @@ fn neg_ch_002_send_to_closed<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                 }
 
                 // Verify we get the value back
-                if let Err(value) = result {
-                    if value != 42 {
-                        return TestResult::failed(format!(
-                            "Error should contain original value 42, got {}",
-                            value
-                        ));
-                    }
+                if let Err(value) = result
+                    && value != 42
+                {
+                    return TestResult::failed(format!(
+                        "Error should contain original value 42, got {}",
+                        value
+                    ));
                 }
 
                 TestResult::passed()

@@ -4,17 +4,17 @@
 mod common;
 
 use asupersync::cx::Cx;
-use asupersync::lab::assert_deterministic;
 use asupersync::lab::LabConfig;
 use asupersync::lab::LabRuntime;
+use asupersync::lab::assert_deterministic;
 use asupersync::runtime::{AdaptiveDeadlineConfig, DeadlineWarning, MonitorConfig, WarningReason};
 use asupersync::types::{Budget, Time};
 use common::*;
 use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
 fn init_test(test_name: &str) {

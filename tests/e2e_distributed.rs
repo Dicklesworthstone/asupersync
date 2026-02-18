@@ -7,6 +7,7 @@ mod common;
 
 use std::time::Duration;
 
+use asupersync::distributed::HashRing;
 use asupersync::distributed::assignment::{AssignmentStrategy, SymbolAssigner};
 use asupersync::distributed::bridge::{EffectiveState, RegionBridge, RegionMode};
 use asupersync::distributed::distribution::{
@@ -18,7 +19,6 @@ use asupersync::distributed::recovery::{
     RecoveryDecodingConfig, RecoveryOrchestrator, RecoveryTrigger, StateDecoder,
 };
 use asupersync::distributed::snapshot::{BudgetSnapshot, RegionSnapshot, TaskSnapshot, TaskState};
-use asupersync::distributed::HashRing;
 use asupersync::error::ErrorKind;
 use asupersync::record::distributed_region::{
     ConsistencyLevel, DistributedRegionConfig, DistributedRegionRecord, DistributedRegionState,

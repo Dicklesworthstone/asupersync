@@ -6,7 +6,7 @@
 #![allow(missing_docs)]
 
 use asupersync::plan::{EGraph, Extractor};
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::time::Duration;
 
 // ---------------------------------------------------------------------------

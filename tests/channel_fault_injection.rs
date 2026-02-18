@@ -12,7 +12,7 @@
 //! 4. **Evidence logging**: All injected faults are logged to the evidence sink.
 //! 5. **Determinism**: Same seed produces identical fault sequences.
 
-use asupersync::channel::fault::{fault_channel, FaultChannelConfig};
+use asupersync::channel::fault::{FaultChannelConfig, fault_channel};
 use asupersync::evidence_sink::{CollectorSink, EvidenceSink};
 use asupersync::types::Budget;
 use asupersync::util::ArenaIndex;
