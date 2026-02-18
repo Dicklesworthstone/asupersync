@@ -164,17 +164,22 @@ impl CrdtObligationLedger {
             .entries
             .entry(id)
             .or_insert_with(CrdtObligationEntry::new);
-        entry.kind = Some(kind);
-        if !entry.is_terminal() {
-            *entry
-                .acquire_counts
-                .entry(self.local_node.clone())
-                .or_insert(0) += 1;
+        if entry.kind.is_none() {
+            entry.kind = Some(kind);
         }
+        if entry.is_terminal() {
+            return entry.state;
+        }
+        *entry
+            .acquire_counts
+            .entry(self.local_node.clone())
+            .or_insert(0) += 1;
         entry.state = entry.state.join(LatticeState::Reserved);
-        entry
+        let witness = entry
             .witnesses
-            .insert(self.local_node.clone(), LatticeState::Reserved);
+            .entry(self.local_node.clone())
+            .or_insert(LatticeState::Unknown);
+        *witness = witness.join(LatticeState::Reserved);
         entry.state
     }
 
@@ -770,5 +775,44 @@ mod tests {
         let violations = ledger.linearity_violations();
         let display = format!("{}", violations[0]);
         assert!(display.contains("acquires=2"));
+    }
+
+    #[test]
+    fn acquire_keeps_first_observed_kind() {
+        let mut ledger = CrdtObligationLedger::new(node("A"));
+        let id = oid(42);
+
+        ledger.record_acquire(id, ObligationKind::SendPermit);
+        ledger.record_acquire(id, ObligationKind::Lease);
+
+        let entry = ledger.get_entry(&id).expect("entry should exist");
+        assert_eq!(entry.kind, Some(ObligationKind::SendPermit));
+    }
+
+    #[test]
+    fn acquire_after_terminal_preserves_terminal_witness() {
+        let mut ledger = CrdtObligationLedger::new(node("A"));
+        let id = oid(43);
+
+        ledger.record_acquire(id, ObligationKind::Ack);
+        ledger.record_commit(id);
+        let before = ledger
+            .get_entry(&id)
+            .expect("entry should exist")
+            .witnesses
+            .get(&node("A"))
+            .copied();
+
+        // A late acquire observation must not downgrade witness provenance
+        // on a terminal entry.
+        let state = ledger.record_acquire(id, ObligationKind::Lease);
+        let entry = ledger.get_entry(&id).expect("entry should exist");
+        let after = entry.witnesses.get(&node("A")).copied();
+
+        assert_eq!(state, LatticeState::Committed);
+        assert_eq!(before, Some(LatticeState::Committed));
+        assert_eq!(after, Some(LatticeState::Committed));
+        assert_eq!(entry.total_acquires(), 1);
+        assert_eq!(entry.total_resolves(), 1);
     }
 }

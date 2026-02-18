@@ -425,6 +425,11 @@ pub struct RegionBridge {
 }
 
 impl RegionBridge {
+    fn mark_sync_pending(&mut self) {
+        self.sync_state.sync_pending = true;
+        self.sync_state.pending_ops = self.sync_state.pending_ops.saturating_add(1);
+    }
+
     /// Creates a new bridge in local-only mode.
     #[must_use]
     pub fn new_local(id: RegionId, parent: Option<RegionId>, budget: Budget) -> Self {
@@ -578,6 +583,10 @@ impl RegionBridge {
             None
         };
 
+        if local_changed || distributed_transition.is_some() {
+            self.mark_sync_pending();
+        }
+
         Ok(CloseResult {
             local_changed,
             distributed_transition,
@@ -589,7 +598,7 @@ impl RegionBridge {
     pub fn begin_drain(&mut self) -> Result<bool, Error> {
         let changed = self.local.begin_drain();
         if changed {
-            self.sync_state.sync_pending = true;
+            self.mark_sync_pending();
         }
         Ok(changed)
     }
@@ -598,7 +607,7 @@ impl RegionBridge {
     pub fn begin_finalize(&mut self) -> Result<bool, Error> {
         let changed = self.local.begin_finalize();
         if changed {
-            self.sync_state.sync_pending = true;
+            self.mark_sync_pending();
         }
         Ok(changed)
     }
@@ -612,6 +621,10 @@ impl RegionBridge {
         } else {
             None
         };
+
+        if local_changed || distributed_transition.is_some() {
+            self.mark_sync_pending();
+        }
 
         Ok(CloseResult {
             local_changed,
@@ -632,17 +645,23 @@ impl RegionBridge {
             );
         }
 
+        let before = self.local.child_ids().len();
         self.local
             .add_child(child)
             .map_err(|e| Error::new(ErrorKind::AdmissionDenied).with_message(format!("{e:?}")))?;
-        self.sync_state.sync_pending = true;
+        if self.local.child_ids().len() > before {
+            self.mark_sync_pending();
+        }
         Ok(())
     }
 
     /// Removes a child region.
     pub fn remove_child(&mut self, child: RegionId) {
+        let before = self.local.child_ids().len();
         self.local.remove_child(child);
-        self.sync_state.sync_pending = true;
+        if self.local.child_ids().len() < before {
+            self.mark_sync_pending();
+        }
     }
 
     /// Adds a task to the region.
@@ -653,17 +672,23 @@ impl RegionBridge {
             );
         }
 
+        let before = self.local.task_ids().len();
         self.local
             .add_task(task)
             .map_err(|e| Error::new(ErrorKind::AdmissionDenied).with_message(format!("{e:?}")))?;
-        self.sync_state.sync_pending = true;
+        if self.local.task_ids().len() > before {
+            self.mark_sync_pending();
+        }
         Ok(())
     }
 
     /// Removes a task from the region.
     pub fn remove_task(&mut self, task: TaskId) {
+        let before = self.local.task_ids().len();
         self.local.remove_task(task);
-        self.sync_state.sync_pending = true;
+        if self.local.task_ids().len() < before {
+            self.mark_sync_pending();
+        }
     }
 
     // =========================================================================
@@ -1466,6 +1491,38 @@ mod tests {
         assert!(matches!(result, SyncResult::Synced { .. }));
         assert_eq!(bridge.sync_state.pending_ops, 0);
         assert!(!bridge.sync_state.sync_pending);
+    }
+
+    #[test]
+    fn pending_ops_counts_only_real_mutations() {
+        let mut bridge = create_distributed_bridge();
+
+        bridge.add_task(TaskId::new_for_test(1, 0)).unwrap();
+        bridge.add_task(TaskId::new_for_test(1, 0)).unwrap(); // duplicate, no mutation
+        bridge.remove_task(TaskId::new_for_test(999, 0)); // absent, no mutation
+        bridge.remove_task(TaskId::new_for_test(1, 0)); // present, mutation
+
+        bridge.add_child(RegionId::new_for_test(2, 0)).unwrap();
+        bridge.add_child(RegionId::new_for_test(2, 0)).unwrap(); // duplicate, no mutation
+        bridge.remove_child(RegionId::new_for_test(777, 0)); // absent, no mutation
+        bridge.remove_child(RegionId::new_for_test(2, 0)); // present, mutation
+
+        assert!(bridge.sync_state.sync_pending);
+        assert_eq!(bridge.sync_state.pending_ops, 4);
+    }
+
+    #[test]
+    fn close_transitions_mark_sync_pending() {
+        let mut bridge = create_distributed_bridge();
+        if let Some(ref mut dist) = bridge.distributed {
+            let _ = dist.activate(Time::from_secs(0));
+        }
+        assert!(!bridge.sync_state.sync_pending);
+        assert_eq!(bridge.sync_state.pending_ops, 0);
+
+        bridge.begin_close(None, Time::from_secs(1)).unwrap();
+        assert!(bridge.sync_state.sync_pending);
+        assert!(bridge.sync_state.pending_ops >= 1);
     }
 
     #[test]
