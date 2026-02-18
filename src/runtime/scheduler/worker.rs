@@ -1,5 +1,6 @@
 //! Worker thread logic.
 
+use crate::observability::metrics::MetricsProvider;
 use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::scheduler::global_queue::GlobalQueue;
 use crate::runtime::scheduler::local_queue::{LocalQueue, Stealer};
@@ -47,6 +48,8 @@ pub struct Worker {
     pub timer_driver: Option<TimerDriverHandle>,
     /// Tokens seen for I/O trace emission (HashSet for O(1) insert vs BTreeSet O(log n)).
     seen_io_tokens: HashSet<u64>,
+    /// Cached metrics provider — avoids Arc clone per task execution.
+    metrics: Arc<dyn MetricsProvider>,
     /// Pre-allocated scratch vec for local waiters (reused across polls).
     scratch_local: Cell<Vec<TaskId>>,
     /// Pre-allocated scratch vec for global waiters (reused across polls).
@@ -70,12 +73,13 @@ impl Worker {
         state: Arc<ContendedMutex<RuntimeState>>,
         shutdown: Arc<AtomicBool>,
     ) -> Self {
-        let (io_driver, trace, timer_driver) = {
+        let (io_driver, trace, timer_driver, metrics) = {
             let guard = state.lock().expect("runtime state lock poisoned");
             (
                 guard.io_driver_handle(),
                 guard.trace_handle(),
                 guard.timer_driver_handle(),
+                guard.metrics_provider(),
             )
         };
 
@@ -91,9 +95,10 @@ impl Worker {
             io_driver,
             trace,
             timer_driver,
-            seen_io_tokens: HashSet::new(),
-            scratch_local: Cell::new(Vec::new()),
-            scratch_global: Cell::new(Vec::new()),
+            seen_io_tokens: HashSet::with_capacity(32),
+            metrics,
+            scratch_local: Cell::new(Vec::with_capacity(16)),
+            scratch_global: Cell::new(Vec::with_capacity(16)),
         }
     }
 
@@ -296,7 +301,7 @@ impl Worker {
         // state, failing the global lookup, dropping, then re-locking.
         let local_task = crate::runtime::local::remove_local_task(task_id);
 
-        let (mut stored, task_cx, wake_state, metrics, cached_waker) = {
+        let (mut stored, task_cx, wake_state, cached_waker) = {
             let mut state = self.state.lock().expect("runtime state lock poisoned");
 
             if let Some(local_task) = local_task {
@@ -307,13 +312,11 @@ impl Worker {
                     let task_cx = record.cx.clone();
                     let wake_state = Arc::clone(&record.wake_state);
                     let cached = record.cached_waker.take();
-                    let metrics = state.metrics_provider();
                     drop(state);
                     (
                         AnyStoredTask::Local(local_task),
                         task_cx,
                         wake_state,
-                        metrics,
                         cached,
                     )
                 } else {
@@ -327,13 +330,11 @@ impl Worker {
                     let task_cx = record.cx.clone();
                     let wake_state = Arc::clone(&record.wake_state);
                     let cached = record.cached_waker.take();
-                    let metrics = state.metrics_provider();
                     drop(state);
                     (
                         AnyStoredTask::Global(stored),
                         task_cx,
                         wake_state,
-                        metrics,
                         cached,
                     )
                 } else {
@@ -515,7 +516,7 @@ impl Worker {
                 guard.completed = true;
             }
         }
-        metrics.scheduler_tick(1, poll_start.elapsed());
+        self.metrics.scheduler_tick(1, poll_start.elapsed());
     }
 
     fn schedule_ready_finalizers(&self) -> bool {
@@ -562,6 +563,7 @@ struct WorkStealingWaker {
 }
 
 impl WorkStealingWaker {
+    #[inline]
     fn schedule(&self) {
         if self.wake_state.notify() {
             if let Some(local) = &self.local {
@@ -575,10 +577,12 @@ impl WorkStealingWaker {
 }
 
 impl Wake for WorkStealingWaker {
+    #[inline]
     fn wake(self: Arc<Self>) {
         self.schedule();
     }
 
+    #[inline]
     fn wake_by_ref(self: &Arc<Self>) {
         self.schedule();
     }

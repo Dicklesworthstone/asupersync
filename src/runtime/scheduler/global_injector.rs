@@ -150,6 +150,7 @@ impl GlobalInjector {
     ///
     /// Timed tasks are scheduled by their deadline (earliest deadline first)
     /// and have priority over ready tasks but not cancel tasks.
+    #[inline]
     pub fn inject_timed(&self, task: TaskId, deadline: Time) {
         // Increment counters *before* the push so that `timed_count` is always
         // >= the true heap length.  A brief over-count is harmless (pop just

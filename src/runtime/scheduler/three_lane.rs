@@ -216,6 +216,7 @@ impl Drop for ScopedLocalReady {
 /// Schedules a local (`!Send`) task on the current thread's non-stealable queue.
 ///
 /// Returns `true` if a local-ready queue was available on this thread.
+#[inline]
 pub(crate) fn schedule_local_task(task: TaskId) -> bool {
     CURRENT_LOCAL_READY.with(|cell| {
         cell.borrow().as_ref().is_some_and(|queue| {
@@ -225,6 +226,7 @@ pub(crate) fn schedule_local_task(task: TaskId) -> bool {
     })
 }
 
+#[inline]
 fn remove_from_local_ready(queue: &Arc<LocalReadyQueue>, task: TaskId) -> bool {
     let mut local_ready = queue.lock();
     // Single scan: wake_state.notify() dedup prevents duplicate entries, so
@@ -239,6 +241,7 @@ fn remove_from_local_ready(queue: &Arc<LocalReadyQueue>, task: TaskId) -> bool {
         })
 }
 
+#[inline]
 pub(crate) fn remove_from_current_local_ready(task: TaskId) -> bool {
     CURRENT_LOCAL_READY.with(|cell| {
         cell.borrow()
@@ -247,10 +250,12 @@ pub(crate) fn remove_from_current_local_ready(task: TaskId) -> bool {
     })
 }
 
+#[inline]
 pub(crate) fn current_worker_id() -> Option<WorkerId> {
     CURRENT_WORKER_ID.with(|cell| *cell.borrow())
 }
 
+#[inline]
 pub(crate) fn schedule_on_current_local(task: TaskId, priority: u8) -> bool {
     // Fast path: O(1) push to LocalQueue IntrusiveStack
     if LocalQueue::schedule_local(task) {
@@ -266,26 +271,19 @@ pub(crate) fn schedule_on_current_local(task: TaskId, priority: u8) -> bool {
     })
 }
 
+#[inline]
 pub(crate) fn schedule_cancel_on_current_local(task: TaskId, priority: u8) -> bool {
-    // Check if we have a local scheduler first to avoid spurious removal
-    let has_local = CURRENT_LOCAL.with(|cell| cell.borrow().is_some());
-
-    if has_local {
+    CURRENT_LOCAL.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(local) = borrow.as_ref() else {
+            return false;
+        };
         // LOCK ORDER: local_ready (B) then local (A)
         // Matches order in inject_cancel: remove from ready queue first
         let _ = remove_from_current_local_ready(task);
-
-        CURRENT_LOCAL.with(|cell| {
-            if let Some(local) = cell.borrow().as_ref() {
-                local.lock().move_to_cancel_lane(task, priority);
-                return true;
-            }
-            // Should be unreachable if has_local was true
-            false
-        })
-    } else {
-        false
-    }
+        local.lock().move_to_cancel_lane(task, priority);
+        true
+    })
 }
 
 /// A multi-worker scheduler with 3-lane priority support.
@@ -418,7 +416,7 @@ impl ThreeLaneScheduler {
         }
         // Create non-stealable local queues for !Send tasks
         for _ in 0..worker_count {
-            local_ready.push(Arc::new(LocalReadyQueue::new(Vec::new())));
+            local_ready.push(Arc::new(LocalReadyQueue::new(Vec::with_capacity(32))));
         }
 
         // Create parkers first
@@ -1249,17 +1247,19 @@ impl ThreeLaneWorker {
         }
 
         // ── PHASE 2: Fast ready paths (no PriorityScheduler lock) ────
+        // Check lock-free fast_queue first (O(1) atomic pop), then
+        // local_ready which requires a try_lock.
+        if let Some(task) = self.fast_queue.pop() {
+            self.cancel_streak = 0;
+            self.preemption_metrics.ready_dispatches += 1;
+            return Some(task);
+        }
         if let Some(mut queue) = self.local_ready.try_lock() {
             if let Some(task) = queue.pop() {
                 self.cancel_streak = 0;
                 self.preemption_metrics.ready_dispatches += 1;
                 return Some(task);
             }
-        }
-        if let Some(task) = self.fast_queue.pop() {
-            self.cancel_streak = 0;
-            self.preemption_metrics.ready_dispatches += 1;
-            return Some(task);
         }
         if let Some(pt) = self.global.pop_ready() {
             self.cancel_streak = 0;
@@ -2212,6 +2212,7 @@ struct ThreeLaneWaker {
 }
 
 impl ThreeLaneWaker {
+    #[inline]
     fn schedule(&self) {
         if self.wake_state.notify() {
             self.global.inject_ready(self.task_id, self.priority);
@@ -2221,10 +2222,12 @@ impl ThreeLaneWaker {
 }
 
 impl Wake for ThreeLaneWaker {
+    #[inline]
     fn wake(self: Arc<Self>) {
         self.schedule();
     }
 
+    #[inline]
     fn wake_by_ref(self: &Arc<Self>) {
         self.schedule();
     }
@@ -2240,6 +2243,7 @@ struct ThreeLaneLocalWaker {
 }
 
 impl ThreeLaneLocalWaker {
+    #[inline]
     fn schedule(&self) {
         if self.wake_state.notify() {
             // Fast path: push to non-stealable local_ready queue via TLS.
@@ -2254,10 +2258,12 @@ impl ThreeLaneLocalWaker {
 }
 
 impl Wake for ThreeLaneLocalWaker {
+    #[inline]
     fn wake(self: Arc<Self>) {
         self.schedule();
     }
 
+    #[inline]
     fn wake_by_ref(self: &Arc<Self>) {
         self.schedule();
     }
@@ -2273,6 +2279,7 @@ struct CancelLaneWaker {
 }
 
 impl CancelLaneWaker {
+    #[inline]
     fn schedule(&self) {
         let Some(inner) = self.cx_inner.upgrade() else {
             return;
@@ -2303,10 +2310,12 @@ impl CancelLaneWaker {
 }
 
 impl Wake for CancelLaneWaker {
+    #[inline]
     fn wake(self: Arc<Self>) {
         self.schedule();
     }
 
+    #[inline]
     fn wake_by_ref(self: &Arc<Self>) {
         self.schedule();
     }
@@ -2323,6 +2332,7 @@ struct ThreeLaneLocalCancelWaker {
 }
 
 impl ThreeLaneLocalCancelWaker {
+    #[inline]
     fn schedule(&self) {
         let Some(inner) = self.cx_inner.upgrade() else {
             return;
@@ -2357,10 +2367,12 @@ impl ThreeLaneLocalCancelWaker {
 }
 
 impl Wake for ThreeLaneLocalCancelWaker {
+    #[inline]
     fn wake(self: Arc<Self>) {
         self.schedule();
     }
 
+    #[inline]
     fn wake_by_ref(self: &Arc<Self>) {
         self.schedule();
     }
