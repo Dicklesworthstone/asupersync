@@ -990,7 +990,11 @@ static HUFFMAN_TABLE: [(u32, u8); 257] = [
 /// input byte to a constant factor.
 #[allow(clippy::too_many_lines)] // Huffman decoding table is large; splitting obscures verification.
 fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
-    let mut result = Vec::with_capacity(src.len());
+    // Shortest HPACK Huffman code is 5 bits, so decoded symbols are bounded by
+    // ceil(input_bits / 5). Preallocating to this bound avoids growth reallocs
+    // on the common path where decoded output is larger than encoded bytes.
+    let estimated_symbols = src.len().saturating_mul(8).saturating_add(4) / 5;
+    let mut result = Vec::with_capacity(estimated_symbols);
     let mut accumulator: u64 = 0;
     let mut bits: u32 = 0;
 

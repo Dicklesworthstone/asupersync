@@ -32,6 +32,8 @@ impl<T: Clone> WatchStream<T> {
     #[must_use]
     pub fn from_changes(cx: Cx, recv: watch::Receiver<T>) -> Self {
         let mut stream = Self::new(cx, recv);
+        // Skip whatever value/version is current at construction time.
+        stream.inner.mark_seen();
         stream.has_seen_initial = true;
         stream
     }
@@ -49,6 +51,8 @@ impl<T: Clone + Send + Sync> Stream for WatchStream<T> {
         // First poll: return current value immediately
         if !this.has_seen_initial {
             this.has_seen_initial = true;
+            // The initial snapshot counts as observed by this stream.
+            this.inner.mark_seen();
             return Poll::Ready(Some(this.inner.borrow_and_clone()));
         }
 
@@ -111,5 +115,64 @@ mod tests {
         let still_none = matches!(poll, Poll::Ready(None));
         crate::assert_with_log!(still_none, "stream remains terminated", true, still_none);
         crate::test_complete!("watch_stream_none_is_terminal_after_cancel");
+    }
+
+    #[test]
+    fn watch_stream_initial_snapshot_does_not_duplicate_pending_update() {
+        init_test("watch_stream_initial_snapshot_does_not_duplicate_pending_update");
+        let cx: Cx = Cx::for_testing();
+        let (tx, rx) = watch::channel(0);
+        tx.send(1).expect("pre-send should succeed");
+
+        let mut stream = WatchStream::new(cx, rx);
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut stream).poll_next(&mut task_cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(Some(1))),
+            "first poll returns latest snapshot once",
+            "Ready(Some(1))",
+            format!("{first:?}")
+        );
+
+        let second = Pin::new(&mut stream).poll_next(&mut task_cx);
+        crate::assert_with_log!(
+            second.is_pending(),
+            "second poll waits for a new change",
+            true,
+            second.is_pending()
+        );
+        crate::test_complete!("watch_stream_initial_snapshot_does_not_duplicate_pending_update");
+    }
+
+    #[test]
+    fn watch_stream_from_changes_skips_current_value() {
+        init_test("watch_stream_from_changes_skips_current_value");
+        let cx: Cx = Cx::for_testing();
+        let (tx, rx) = watch::channel(0);
+        tx.send(1).expect("pre-send should succeed");
+
+        let mut stream = WatchStream::from_changes(cx, rx);
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut stream).poll_next(&mut task_cx);
+        crate::assert_with_log!(
+            first.is_pending(),
+            "from_changes skips current value",
+            true,
+            first.is_pending()
+        );
+
+        tx.send(2).expect("second send should succeed");
+        let second = Pin::new(&mut stream).poll_next(&mut task_cx);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Some(2))),
+            "next change is yielded",
+            "Ready(Some(2))",
+            format!("{second:?}")
+        );
+        crate::test_complete!("watch_stream_from_changes_skips_current_value");
     }
 }

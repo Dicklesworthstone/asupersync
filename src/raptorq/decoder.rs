@@ -911,9 +911,12 @@ impl InactivationDecoder {
         intermediate: &[Vec<u8>],
     ) -> Result<(), DecodeError> {
         let symbol_size = self.params.symbol_size;
+        // Reuse a single scratch buffer across rows to avoid per-symbol
+        // heap allocation in decode hot paths.
+        let mut reconstructed = vec![0u8; symbol_size];
 
         for sym in symbols {
-            let mut reconstructed = vec![0u8; symbol_size];
+            reconstructed.fill(0);
             for (&column, &coefficient) in sym.columns.iter().zip(sym.coefficients.iter()) {
                 if coefficient.is_zero() {
                     continue;
