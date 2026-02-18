@@ -451,6 +451,20 @@ fn transfer_and_content_length(
     Ok((transfer_encoding, content_length))
 }
 
+const HEADER_TRANSFER_ENCODING: &[u8] = b"transfer-encoding";
+const HEADER_CONTENT_LENGTH: &[u8] = b"content-length";
+
+#[inline]
+fn is_transfer_encoding_name(name: &str) -> bool {
+    name.as_bytes()
+        .eq_ignore_ascii_case(HEADER_TRANSFER_ENCODING)
+}
+
+#[inline]
+fn is_content_length_name(name: &str) -> bool {
+    name.as_bytes().eq_ignore_ascii_case(HEADER_CONTENT_LENGTH)
+}
+
 enum BodyKind {
     ContentLength(usize),
     Chunked,
@@ -621,10 +635,10 @@ fn decode_head(
 
     let head_bytes = src.split_to(end);
     let head = head_bytes.as_ref();
-    let request_line_end = request_line_end_hint
-        .filter(|&line_end| line_end < head.len())
-        .or_else(|| find_crlf(head))
-        .ok_or(HttpError::BadRequestLine)?;
+    let request_line_end = request_line_end_hint.ok_or(HttpError::BadRequestLine)?;
+    if request_line_end >= head.len() {
+        return Err(HttpError::BadRequestLine);
+    }
     let request_line = &head[..request_line_end];
     let (method, uri, version) = parse_request_line_bytes(request_line)?;
 
@@ -641,12 +655,12 @@ fn decode_head(
         let line_end = cursor + line_end;
 
         let header = parse_header_line_bytes(&head[line_start..line_end])?;
-        if header.0.eq_ignore_ascii_case("transfer-encoding") {
+        if is_transfer_encoding_name(header.0.as_str()) {
             if transfer_encoding_idx.is_some() {
                 return Err(HttpError::DuplicateTransferEncoding);
             }
             transfer_encoding_idx = Some(headers.len());
-        } else if header.0.eq_ignore_ascii_case("content-length") {
+        } else if is_content_length_name(header.0.as_str()) {
             if content_length_idx.is_some() {
                 return Err(HttpError::DuplicateContentLength);
             }

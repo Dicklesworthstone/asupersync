@@ -41,6 +41,8 @@ use std::time::Duration;
 pub struct CloseReason {
     /// Close status code (if present).
     pub code: Option<CloseCode>,
+    /// Raw close status code from wire payload, including custom codes.
+    pub raw_code: Option<u16>,
     /// Close reason text (if present).
     pub text: Option<String>,
 }
@@ -49,8 +51,10 @@ impl CloseReason {
     /// Create a new close reason.
     #[must_use]
     pub fn new(code: CloseCode, text: Option<&str>) -> Self {
+        let raw = u16::from(code);
         Self {
             code: Some(code),
+            raw_code: Some(raw),
             text: text.map(String::from),
         }
     }
@@ -60,6 +64,7 @@ impl CloseReason {
     pub fn empty() -> Self {
         Self {
             code: None,
+            raw_code: None,
             text: None,
         }
     }
@@ -116,7 +121,11 @@ impl CloseReason {
                     None
                 };
 
-                Ok(Self { code, text })
+                Ok(Self {
+                    code,
+                    raw_code: Some(code_raw),
+                    text,
+                })
             }
         }
     }
@@ -124,14 +133,11 @@ impl CloseReason {
     /// Encode this close reason into a frame payload.
     #[must_use]
     pub fn encode(&self) -> Bytes {
-        match (&self.code, &self.text) {
+        let code = self.raw_code.or_else(|| self.code.map(u16::from));
+        match (code, &self.text) {
             (None, _) => Bytes::new(),
-            (Some(code), None) => {
-                let code_val: u16 = (*code).into();
-                Bytes::copy_from_slice(&code_val.to_be_bytes())
-            }
-            (Some(code), Some(text)) => {
-                let code_val: u16 = (*code).into();
+            (Some(code_val), None) => Bytes::copy_from_slice(&code_val.to_be_bytes()),
+            (Some(code_val), Some(text)) => {
                 let mut buf = Vec::with_capacity(2 + text.len());
                 buf.extend_from_slice(&code_val.to_be_bytes());
                 buf.extend_from_slice(text.as_bytes());
@@ -143,13 +149,14 @@ impl CloseReason {
     /// Convert to a close frame.
     #[must_use]
     pub fn to_frame(&self) -> Frame {
-        Frame::close(self.code.map(u16::from), self.text.as_deref())
+        let code = self.raw_code.or_else(|| self.code.map(u16::from));
+        Frame::close(code, self.text.as_deref())
     }
 
     /// Check if this represents a normal closure.
     #[must_use]
     pub fn is_normal(&self) -> bool {
-        self.code == Some(CloseCode::Normal)
+        self.raw_code == Some(u16::from(CloseCode::Normal))
     }
 
     /// Check if this represents a protocol error.
@@ -164,6 +171,12 @@ impl CloseReason {
                     | CloseCode::InternalError
             )
         )
+    }
+
+    /// Returns the wire close code (including custom codes).
+    #[must_use]
+    pub const fn wire_code(&self) -> Option<u16> {
+        self.raw_code
     }
 }
 
@@ -412,7 +425,7 @@ impl CloseHandshake {
             CloseState::Open => {
                 // Peer initiated close - we need to respond
                 self.state = CloseState::CloseReceived;
-                self.peer_reason = Some(reason.clone());
+                self.peer_reason = Some(reason);
 
                 // Echo peer code as-is when present, including custom valid
                 // application codes in 3000..=4999.
@@ -472,6 +485,7 @@ mod tests {
     fn close_reason_parse_empty() {
         let reason = CloseReason::parse(&[]).unwrap();
         assert_eq!(reason.code, None);
+        assert_eq!(reason.raw_code, None);
         assert_eq!(reason.text, None);
     }
 
@@ -480,6 +494,7 @@ mod tests {
         let payload = 1000u16.to_be_bytes();
         let reason = CloseReason::parse(&payload).unwrap();
         assert_eq!(reason.code, Some(CloseCode::Normal));
+        assert_eq!(reason.raw_code, Some(1000));
         assert_eq!(reason.text, None);
     }
 
@@ -491,7 +506,21 @@ mod tests {
 
         let reason = CloseReason::parse(&payload).unwrap();
         assert_eq!(reason.code, Some(CloseCode::GoingAway));
+        assert_eq!(reason.raw_code, Some(1001));
         assert_eq!(reason.text.as_deref(), Some("Going away"));
+    }
+
+    #[test]
+    fn close_reason_parse_custom_code_preserves_raw_code() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&3001u16.to_be_bytes());
+        payload.extend_from_slice(b"custom");
+
+        let reason = CloseReason::parse(&payload).unwrap();
+        assert_eq!(reason.code, None);
+        assert_eq!(reason.raw_code, Some(3001));
+        assert_eq!(reason.wire_code(), Some(3001));
+        assert_eq!(reason.text.as_deref(), Some("custom"));
     }
 
     #[test]
@@ -557,6 +586,7 @@ mod tests {
         let parsed = CloseReason::parse(&encoded).unwrap();
 
         assert_eq!(original.code, parsed.code);
+        assert_eq!(original.raw_code, parsed.raw_code);
         assert_eq!(original.text, parsed.text);
     }
 
@@ -631,6 +661,7 @@ mod tests {
         let response = handshake.receive_close(&close_frame).unwrap().unwrap();
         assert_eq!(response.opcode, Opcode::Close);
         assert_eq!(&response.payload[..2], &3001u16.to_be_bytes());
+        assert_eq!(handshake.peer_reason().unwrap().wire_code(), Some(3001));
         assert_eq!(handshake.state(), CloseState::CloseReceived);
     }
 
