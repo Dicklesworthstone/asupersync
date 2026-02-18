@@ -1085,10 +1085,12 @@ mod tests {
 
         // Construct an impossible-but-valid-internal state to model hash collision:
         // same fingerprint, different canonical form.
+        let TraceMonoid {
+            canonical: FoataTrace { layers },
+            ..
+        } = mb;
         let spoof = TraceMonoid {
-            canonical: FoataTrace {
-                layers: mb.canonical.layers.clone(),
-            },
+            canonical: FoataTrace { layers },
             fingerprint: ma.fingerprint,
         };
 

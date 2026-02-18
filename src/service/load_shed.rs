@@ -174,8 +174,7 @@ where
 
     fn call(&mut self, req: Request) -> Self::Future {
         if self.overloaded {
-            // Reset overloaded flag for next check
-            self.overloaded = false;
+            // Stay overloaded until `poll_ready` observes the inner service as ready.
             LoadShedFuture::overloaded()
         } else {
             LoadShedFuture::inner(self.inner.call(req))
@@ -310,6 +309,28 @@ mod tests {
         }
     }
 
+    struct ToggleReadyService {
+        ready: bool,
+    }
+
+    impl Service<i32> for ToggleReadyService {
+        type Response = i32;
+        type Error = std::convert::Infallible;
+        type Future = std::future::Ready<Result<i32, std::convert::Infallible>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if self.ready {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        }
+
+        fn call(&mut self, req: i32) -> Self::Future {
+            ready(Ok(req))
+        }
+    }
+
     #[test]
     fn load_shed_layer_creates_service() {
         init_test("load_shed_layer_creates_service");
@@ -378,10 +399,57 @@ mod tests {
         let mut future = svc.call(42);
         let _ = Pin::new(&mut future).poll(&mut cx);
 
-        // Overloaded flag should be cleared
+        // Overloaded flag should remain set until poll_ready observes readiness.
         let overloaded = svc.is_overloaded();
-        crate::assert_with_log!(!overloaded, "overload cleared", false, overloaded);
+        crate::assert_with_log!(overloaded, "overload persists", true, overloaded);
         crate::test_complete!("load_shed_recovers_after_shed");
+    }
+
+    #[test]
+    fn load_shed_keeps_shedding_until_ready_again() {
+        init_test("load_shed_keeps_shedding_until_ready_again");
+        let mut svc = LoadShed::new(ToggleReadyService { ready: false });
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let ready = svc.poll_ready(&mut cx);
+        let ok = matches!(ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ok, "ready ok while overloaded", true, ok);
+
+        let mut first = svc.call(1);
+        let first_result = Pin::new(&mut first).poll(&mut cx);
+        let first_overloaded =
+            matches!(first_result, Poll::Ready(Err(LoadShedError::Overloaded(_))));
+        crate::assert_with_log!(
+            first_overloaded,
+            "first call overloaded",
+            true,
+            first_overloaded
+        );
+
+        let mut second = svc.call(2);
+        let second_result = Pin::new(&mut second).poll(&mut cx);
+        let second_overloaded = matches!(
+            second_result,
+            Poll::Ready(Err(LoadShedError::Overloaded(_)))
+        );
+        crate::assert_with_log!(
+            second_overloaded,
+            "second call still overloaded",
+            true,
+            second_overloaded
+        );
+
+        svc.inner_mut().ready = true;
+        let ready = svc.poll_ready(&mut cx);
+        let ready_ok = matches!(ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready_ok, "ready once inner recovers", true, ready_ok);
+
+        let mut success = svc.call(99);
+        let success_result = Pin::new(&mut success).poll(&mut cx);
+        let success_ok = matches!(success_result, Poll::Ready(Ok(99)));
+        crate::assert_with_log!(success_ok, "call succeeds after recovery", true, success_ok);
+        crate::test_complete!("load_shed_keeps_shedding_until_ready_again");
     }
 
     #[test]

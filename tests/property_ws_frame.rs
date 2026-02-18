@@ -51,8 +51,8 @@ fn arb_data_opcode() -> impl Strategy<Value = Opcode> {
 }
 
 fn arb_sendable_close_code() -> impl Strategy<Value = u16> {
-    // RFC 6455 §7.4.1 reserves 1005/1006/1015 for internal use only.
-    prop_oneof![1000u16..=1004, 1007u16..=1014, 1016u16..=4999,]
+    // Keep in sync with CloseCode::is_valid_code policy in close.rs.
+    prop_oneof![1000u16..=1003, 1007u16..=1011, 3000u16..=4999,]
 }
 
 // ============================================================================
@@ -354,21 +354,21 @@ proptest! {
 proptest! {
     #![proptest_config(test_proptest_config(50))]
 
-    /// Non-sendable close codes are exactly the three specified by RFC 6455.
+    /// Non-sendable enum close codes are exactly the four forbidden wire values.
     #[test]
     fn close_code_sendability(_dummy in 0u8..1) {
         init_test_logging();
-        let non_sendable: [CloseCode; 3] = [
+        let non_sendable: [CloseCode; 4] = [
+            CloseCode::Reserved,
             CloseCode::NoStatusReceived,
             CloseCode::Abnormal,
             CloseCode::TlsHandshake,
         ];
-        let sendable: [CloseCode; 10] = [
+        let sendable: [CloseCode; 9] = [
             CloseCode::Normal,
             CloseCode::GoingAway,
             CloseCode::ProtocolError,
             CloseCode::Unsupported,
-            CloseCode::Reserved,
             CloseCode::InvalidPayload,
             CloseCode::PolicyViolation,
             CloseCode::MessageTooBig,
