@@ -182,7 +182,8 @@ impl RoutePattern {
 
     /// Try to match a path against this pattern, extracting parameters.
     fn matches(&self, path: &str) -> Option<HashMap<String, String>> {
-        let path_segments: SmallVec<[&str; 8]> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let path_segments: SmallVec<[&str; 8]> =
+            path.split('/').filter(|s| !s.is_empty()).collect();
 
         // Check for wildcard at the end.
         let has_wildcard = self

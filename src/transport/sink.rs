@@ -396,7 +396,8 @@ impl SymbolSink for ChannelSink {
             // and waiter registration, finding no send_waker to wake.
             {
                 let queue = this.shared.queue.lock();
-                if queue.len() < this.shared.capacity || this.shared.closed.load(Ordering::Acquire) {
+                if queue.len() < this.shared.capacity || this.shared.closed.load(Ordering::Acquire)
+                {
                     drop(queue);
                     cx.waker().wake_by_ref();
                 }

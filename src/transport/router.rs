@@ -1022,46 +1022,45 @@ impl SymbolDispatcher {
 
         let _guard = route.endpoint.acquire_connection_guard();
 
-        let result =
-            if let Some(sink) = sink {
-                let send_result =
-                    match OwnedMutexGuard::lock(sink, cx).await {
-                        Ok(mut guard) => guard.send(symbol).await.map_err(|_| {
-                            DispatchError::SendFailed {
-                                endpoint: route.endpoint.id,
-                                reason: "Send failed".into(),
-                            }
-                        }),
-                        Err(_) => Err(DispatchError::Timeout),
-                    };
-
-                match send_result {
-                    Ok(()) => {
-                        route.endpoint.record_success(Time::ZERO);
-                        Ok(DispatchResult {
-                            successes: 1,
-                            failures: 0,
-                            sent_to: smallvec![route.endpoint.id],
-                            failed_endpoints: SmallVec::new(),
-                            duration: Time::ZERO,
-                        })
-                    }
-                    Err(err) => {
-                        route.endpoint.record_failure(Time::ZERO);
-                        Err(err)
-                    }
-                }
-            } else {
-                // Fallback to simulation if no sink registered (for existing logic)
-                route.endpoint.record_success(Time::ZERO);
-                Ok(DispatchResult {
-                    successes: 1,
-                    failures: 0,
-                    sent_to: smallvec![route.endpoint.id],
-                    failed_endpoints: SmallVec::new(),
-                    duration: Time::ZERO,
-                })
+        let result = if let Some(sink) = sink {
+            let send_result = match OwnedMutexGuard::lock(sink, cx).await {
+                Ok(mut guard) => guard
+                    .send(symbol)
+                    .await
+                    .map_err(|_| DispatchError::SendFailed {
+                        endpoint: route.endpoint.id,
+                        reason: "Send failed".into(),
+                    }),
+                Err(_) => Err(DispatchError::Timeout),
             };
+
+            match send_result {
+                Ok(()) => {
+                    route.endpoint.record_success(Time::ZERO);
+                    Ok(DispatchResult {
+                        successes: 1,
+                        failures: 0,
+                        sent_to: smallvec![route.endpoint.id],
+                        failed_endpoints: SmallVec::new(),
+                        duration: Time::ZERO,
+                    })
+                }
+                Err(err) => {
+                    route.endpoint.record_failure(Time::ZERO);
+                    Err(err)
+                }
+            }
+        } else {
+            // Fallback to simulation if no sink registered (for existing logic)
+            route.endpoint.record_success(Time::ZERO);
+            Ok(DispatchResult {
+                successes: 1,
+                failures: 0,
+                sent_to: smallvec![route.endpoint.id],
+                failed_endpoints: SmallVec::new(),
+                duration: Time::ZERO,
+            })
+        };
 
         // Guard drop releases connection
         result
