@@ -131,7 +131,7 @@ impl<T> ChannelInner<T> {
         Self {
             queue: VecDeque::with_capacity(capacity),
             reserved: 0,
-            send_wakers: VecDeque::new(),
+            send_wakers: VecDeque::with_capacity(4),
             recv_waker: None,
             next_waiter_id: 0,
         }

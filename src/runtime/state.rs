@@ -721,7 +721,8 @@ impl RuntimeState {
     /// recent trace events. It is designed to be lightweight and serializable.
     #[must_use]
     pub fn snapshot(&self) -> RuntimeSnapshot {
-        let mut obligations_by_task: HashMap<TaskId, Vec<ObligationId>> = HashMap::new();
+        let mut obligations_by_task: HashMap<TaskId, Vec<ObligationId>> =
+            HashMap::with_capacity(self.obligations_len());
         let obligations: Vec<ObligationSnapshot> = self
             .obligations_iter()
             .map(|(_, record)| {
@@ -1498,12 +1499,13 @@ impl RuntimeState {
         child: TaskId,
         reason: &CancelReason,
     ) -> Vec<(TaskId, u8)> {
-        let mut tasks_to_cancel = Vec::new();
         let Some(region_record) = self.regions.get(region.arena_index()) else {
-            return tasks_to_cancel;
+            return Vec::new();
         };
+        let sibling_candidates = region_record.task_ids();
+        let mut tasks_to_cancel = Vec::with_capacity(sibling_candidates.len().saturating_sub(1));
 
-        for task_id in region_record.task_ids() {
+        for task_id in sibling_candidates {
             if task_id == child {
                 continue;
             }
@@ -1563,7 +1565,7 @@ impl RuntimeState {
         reason: &CancelReason,
         _source_task: Option<TaskId>,
     ) -> Vec<(TaskId, u8)> {
-        let mut tasks_to_cancel = Vec::new();
+        let mut tasks_to_cancel = Vec::with_capacity(self.live_task_count());
         let _cleanup_budget = reason.cleanup_budget();
         let root_span = debug_span!(
             "cancel_request",
@@ -1595,7 +1597,8 @@ impl RuntimeState {
 
         // Build a map of region -> cancel reason for cause chain construction.
         // Each child region's reason chains to its parent's reason.
-        let mut region_reasons: HashMap<RegionId, CancelReason> = HashMap::new();
+        let mut region_reasons: HashMap<RegionId, CancelReason> =
+            HashMap::with_capacity(regions_to_cancel.len());
 
         // First pass: mark regions with cancellation reason and transition to Closing
         for node in &regions_to_cancel {
@@ -1780,8 +1783,9 @@ impl RuntimeState {
         &self,
         region_id: RegionId,
     ) -> Vec<CancelRegionNode> {
-        let mut result = Vec::new();
-        let mut stack = vec![(region_id, None, 0usize)];
+        let mut result = Vec::with_capacity(self.regions_len());
+        let mut stack = Vec::with_capacity(self.regions_len());
+        stack.push((region_id, None, 0usize));
 
         while let Some((rid, parent, depth)) = stack.pop() {
             result.push(CancelRegionNode {

@@ -50,6 +50,17 @@ use std::time::Duration;
 
 /// Default capacity for the events buffer.
 const DEFAULT_EVENTS_CAPACITY: usize = 1024;
+/// Default lower bound for the token->interest map.
+const DEFAULT_INTERESTS_CAPACITY: usize = 64;
+
+#[inline]
+const fn interest_map_capacity(events_capacity: usize) -> usize {
+    if events_capacity > DEFAULT_INTERESTS_CAPACITY {
+        events_capacity
+    } else {
+        DEFAULT_INTERESTS_CAPACITY
+    }
+}
 
 /// Statistics for I/O driver diagnostics.
 ///
@@ -103,7 +114,7 @@ impl IoDriver {
         Self {
             reactor,
             wakers: TokenSlab::new(),
-            interests: HashMap::new(),
+            interests: HashMap::with_capacity(interest_map_capacity(DEFAULT_EVENTS_CAPACITY)),
             events: Events::with_capacity(DEFAULT_EVENTS_CAPACITY),
             stats: IoStats::default(),
         }
@@ -117,7 +128,7 @@ impl IoDriver {
         Self {
             reactor,
             wakers: TokenSlab::new(),
-            interests: HashMap::new(),
+            interests: HashMap::with_capacity(interest_map_capacity(events_capacity)),
             events: Events::with_capacity(events_capacity),
             stats: IoStats::default(),
         }
@@ -952,6 +963,12 @@ mod tests {
             "events capacity",
             256usize,
             driver.events.capacity()
+        );
+        crate::assert_with_log!(
+            driver.interests.capacity() >= 256,
+            "interest map capacity",
+            true,
+            driver.interests.capacity() >= 256
         );
         crate::test_complete!("io_driver_with_capacity");
     }

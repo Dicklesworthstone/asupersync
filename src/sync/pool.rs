@@ -986,14 +986,14 @@ where
             factory,
             config,
             state: PoolMutex::new(GenericPoolState {
-                idle: std::collections::VecDeque::new(),
+                idle: std::collections::VecDeque::with_capacity(8),
                 active: 0,
                 creating: 0,
                 total_created: 0,
                 total_acquisitions: 0,
                 total_wait_time: Duration::ZERO,
                 closed: false,
-                waiters: std::collections::VecDeque::new(),
+                waiters: std::collections::VecDeque::with_capacity(4),
                 next_waiter_id: 0,
             }),
             return_tx,
@@ -1544,7 +1544,7 @@ where
                 self.closed.store(true, Ordering::Release);
 
                 // Drain waiters, then wake after releasing the state lock.
-                let waiters: Vec<Waker> =
+                let waiters: SmallVec<[Waker; 4]> =
                     state.waiters.drain(..).map(|waiter| waiter.waker).collect();
 
                 // Record how many idle resources we're clearing (only needed for metrics)

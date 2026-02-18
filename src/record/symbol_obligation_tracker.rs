@@ -299,9 +299,9 @@ impl SymbolObligationTracker {
     #[must_use]
     pub fn new(region_id: RegionId) -> Self {
         Self {
-            obligations: HashMap::new(),
-            by_symbol: HashMap::new(),
-            by_object: HashMap::new(),
+            obligations: HashMap::with_capacity(16),
+            by_symbol: HashMap::with_capacity(16),
+            by_object: HashMap::with_capacity(16),
             region_id,
         }
     }
@@ -320,12 +320,18 @@ impl SymbolObligationTracker {
         match &obligation.kind {
             SymbolObligationKind::SymbolTransmit { symbol_id, .. }
             | SymbolObligationKind::SymbolAck { symbol_id, .. } => {
-                self.by_symbol.entry(*symbol_id).or_default().push(id);
+                self.by_symbol
+                    .entry(*symbol_id)
+                    .or_insert_with(|| Vec::with_capacity(2))
+                    .push(id);
             }
             SymbolObligationKind::DecodingInProgress { object_id, .. }
             | SymbolObligationKind::EncodingSession { object_id, .. }
             | SymbolObligationKind::SymbolLease { object_id, .. } => {
-                self.by_object.entry(*object_id).or_default().push(id);
+                self.by_object
+                    .entry(*object_id)
+                    .or_insert_with(|| Vec::with_capacity(2))
+                    .push(id);
             }
         }
 
@@ -402,7 +408,7 @@ impl SymbolObligationTracker {
     /// Checks for leaked obligations and marks them.
     /// Called during region close.
     pub fn check_leaks(&mut self, now: Time) -> Vec<ObligationId> {
-        let mut leaked = Vec::new();
+        let mut leaked = Vec::with_capacity(self.obligations.len());
         for (id, ob) in &mut self.obligations {
             if ob.is_pending() {
                 ob.mark_leaked(now);
@@ -414,7 +420,7 @@ impl SymbolObligationTracker {
 
     /// Aborts all pending obligations outside the given epoch window.
     pub fn abort_expired_epoch(&mut self, current_epoch: EpochId, now: Time) -> Vec<ObligationId> {
-        let mut aborted = Vec::new();
+        let mut aborted = Vec::with_capacity(self.obligations.len());
         for (id, ob) in &mut self.obligations {
             if ob.is_pending() && !ob.is_epoch_valid(current_epoch) {
                 ob.abort(now);
@@ -426,7 +432,7 @@ impl SymbolObligationTracker {
 
     /// Aborts all pending obligations that have passed their deadline.
     pub fn abort_expired_deadlines(&mut self, now: Time) -> Vec<ObligationId> {
-        let mut aborted = Vec::new();
+        let mut aborted = Vec::with_capacity(self.obligations.len());
         for (id, ob) in &mut self.obligations {
             if ob.is_pending() && ob.is_expired(now) {
                 ob.abort(now);

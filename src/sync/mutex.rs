@@ -115,7 +115,7 @@ impl<T> Mutex<T> {
             poisoned: AtomicBool::new(false),
             state: ParkingMutex::new(MutexState {
                 locked: false,
-                waiters: VecDeque::new(),
+                waiters: VecDeque::with_capacity(4),
                 next_waiter_id: 0,
             }),
         }

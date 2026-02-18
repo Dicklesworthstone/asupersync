@@ -552,11 +552,11 @@ impl NameRegistry {
             leases: DetHashMap::with_capacity_and_hasher(32, DetBuildHasher),
             pending: DetHashMap::with_capacity_and_hasher(16, DetBuildHasher),
             waiters: DetHashMap::with_capacity_and_hasher(16, DetBuildHasher),
-            granted: Vec::new(),
+            granted: Vec::with_capacity(8),
             watchers_by_ref: DetHashMap::with_capacity_and_hasher(16, DetBuildHasher),
             watchers_by_name: DetHashMap::with_capacity_and_hasher(16, DetBuildHasher),
             watchers_by_region: DetHashMap::with_capacity_and_hasher(8, DetBuildHasher),
-            notifications: Vec::new(),
+            notifications: Vec::with_capacity(8),
             next_watch_ref: 1,
         }
     }
@@ -664,6 +664,7 @@ impl NameRegistry {
         };
         let mut refs = refs;
         refs.sort();
+        self.notifications.reserve(refs.len());
         for watch_ref in refs {
             if let Some(watcher) = self.watchers_by_ref.get(&watch_ref) {
                 self.notifications.push(NameOwnershipNotification {
@@ -1073,18 +1074,16 @@ impl NameRegistry {
         // Region close semantics: watchers owned by the region are removed before
         // ownership-change notifications are emitted.
         let _removed_watchers = self.cleanup_name_watchers_region(region);
-        let mut active_removed: Vec<(String, TaskId, RegionId)> = self
-            .leases
-            .iter()
-            .filter(|(_, e)| e.region == region)
-            .map(|(name, e)| (name.clone(), e.holder, e.region))
-            .collect();
-        let mut to_remove: Vec<String> = self
-            .leases
-            .iter()
-            .filter(|(_, e)| e.region == region)
-            .map(|(name, _)| name.clone())
-            .collect();
+        let mut active_removed: Vec<(String, TaskId, RegionId)> =
+            Vec::with_capacity(self.leases.len());
+        let mut to_remove: Vec<String> =
+            Vec::with_capacity(self.leases.len().saturating_add(self.pending.len()));
+        for (name, entry) in &self.leases {
+            if entry.region == region {
+                active_removed.push((name.clone(), entry.holder, entry.region));
+                to_remove.push(name.clone());
+            }
+        }
         to_remove.extend(
             self.pending
                 .iter()
@@ -1145,16 +1144,16 @@ impl NameRegistry {
     /// by the task. The caller is responsible for resolving the corresponding
     /// obligations.
     pub fn cleanup_task_at(&mut self, task: TaskId, now: Time) -> Vec<String> {
-        let mut active_removed: Vec<(String, TaskId, RegionId)> = self
-            .leases
-            .iter()
-            .filter(|(_, e)| e.holder == task)
-            .map(|(name, e)| (name.clone(), e.holder, e.region))
-            .collect();
-        let mut to_remove: Vec<String> = active_removed
-            .iter()
-            .map(|(name, _, _)| name.clone())
-            .collect();
+        let mut active_removed: Vec<(String, TaskId, RegionId)> =
+            Vec::with_capacity(self.leases.len());
+        let mut to_remove: Vec<String> =
+            Vec::with_capacity(self.leases.len().saturating_add(self.pending.len()));
+        for (name, entry) in &self.leases {
+            if entry.holder == task {
+                active_removed.push((name.clone(), entry.holder, entry.region));
+                to_remove.push(name.clone());
+            }
+        }
         to_remove.extend(
             self.pending
                 .iter()

@@ -369,11 +369,11 @@ impl TimerWheel {
         Self {
             current_tick,
             levels,
-            overflow: BinaryHeap::new(),
-            ready: Vec::new(),
+            overflow: BinaryHeap::with_capacity(8),
+            ready: Vec::with_capacity(8),
             next_id: 0,
             next_generation: 0,
-            active: HashMap::new(),
+            active: HashMap::with_capacity(64),
             config,
             coalescing,
         }

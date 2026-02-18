@@ -109,7 +109,7 @@ impl ObligationTable {
     pub fn new() -> Self {
         Self {
             obligations: Arena::new(),
-            by_holder: Vec::new(),
+            by_holder: Vec::with_capacity(32),
         }
     }
 

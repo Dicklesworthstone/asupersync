@@ -105,9 +105,10 @@ struct DurationHistory {
 
 impl DurationHistory {
     fn new(max_history: usize) -> Self {
+        let cap = max_history.max(1);
         Self {
-            samples: VecDeque::new(),
-            max_history: max_history.max(1),
+            samples: VecDeque::with_capacity(cap),
+            max_history: cap,
         }
     }
 
@@ -181,8 +182,8 @@ impl DeadlineMonitor {
         Self {
             config,
             on_warning: None,
-            monitored: Vec::new(),
-            history: HashMap::new(),
+            monitored: Vec::with_capacity(16),
+            history: HashMap::with_capacity(16),
             metrics_provider: None,
             last_scan_time: None,
             last_scan_instant: None,
