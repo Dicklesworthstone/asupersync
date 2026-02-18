@@ -13,7 +13,7 @@ name = "frankenlab"
 path = "src/main.rs"
 
 [dependencies]
-asupersync = { version = "0.2.3", path = "..", features = ["cli", "test-internals"] }
+asupersync = { version = "0.2.4", path = "..", features = ["cli", "test-internals"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
