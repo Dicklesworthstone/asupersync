@@ -113,8 +113,10 @@ mod iocp_impl {
             let event = Self::interest_to_poll_event(token, interest);
             // SAFETY: the caller must uphold the invariant that `source` (and thus
             // its raw socket) remains valid until `deregister()` is called.
+            let borrowed_socket = unsafe { BorrowedSocket::borrow_raw(raw_socket) };
+            // SAFETY: `borrowed_socket` references a live socket owned by `source`.
             unsafe {
-                self.poller.add(raw_socket, event)?;
+                self.poller.add(&borrowed_socket, event)?;
             }
 
             regs.insert(
@@ -135,9 +137,9 @@ mod iocp_impl {
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "token not registered"))?;
 
             let event = Self::interest_to_poll_event(token, interest);
-            // `polling::Poller::modify` requires an `AsSource` socket wrapper on Windows.
-            let socket = unsafe { BorrowedSocket::borrow_raw(info.raw_socket) };
-            if let Err(err) = self.poller.modify(socket, event) {
+            // SAFETY: registration implies the raw socket remains valid while tracked.
+            let borrowed_socket = unsafe { BorrowedSocket::borrow_raw(info.raw_socket) };
+            if let Err(err) = self.poller.modify(&borrowed_socket, event) {
                 if Self::is_already_gone_error(&err) {
                     regs.remove(&token);
                     return Err(io::Error::new(
@@ -159,9 +161,9 @@ mod iocp_impl {
             let info = regs
                 .get(&token)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "token not registered"))?;
-            // `polling::Poller::delete` requires an `AsSource` socket wrapper on Windows.
-            let socket = unsafe { BorrowedSocket::borrow_raw(info.raw_socket) };
-            match self.poller.delete(socket) {
+            // SAFETY: registration implies the raw socket remains valid while tracked.
+            let borrowed_socket = unsafe { BorrowedSocket::borrow_raw(info.raw_socket) };
+            match self.poller.delete(&borrowed_socket) {
                 Ok(()) => {
                     regs.remove(&token);
                     Ok(())
