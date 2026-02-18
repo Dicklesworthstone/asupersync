@@ -1,7 +1,7 @@
 [package]
 name = "franken-decision"
 version = "0.2.0"
-edition = "2021"
+edition = "2024"
 license = "MIT"
 description = "Decision Contract schema and runtime for FrankenSuite."
 repository = "https://github.com/Dicklesworthstone/asupersync"
@@ -14,8 +14,8 @@ serde = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]
 serde_json = "1.0"
-toml = "0.8"
-proptest = "1.6"
+toml = "1.0"
+proptest = "1.10"
 
 [lints.rust]
 unsafe_code = "deny"

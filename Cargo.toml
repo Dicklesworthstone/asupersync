@@ -13,7 +13,7 @@ exclude = ["fuzz"]
 [package]
 name = "asupersync"
 version = "0.2.3"
-edition = "2021"
+edition = "2024"
 license = "MIT"
 description = "Spec-first, cancel-correct, capability-secure async runtime for Rust."
 repository = "https://github.com/Dicklesworthstone/asupersync"
@@ -98,7 +98,7 @@ crossbeam-queue = "0.3"
 parking_lot = "0.12"
 polling = "3.11"
 slab = "0.4"
-smallvec = "1.13"
+smallvec = "1.15"
 pin-project = "1.1"
 rmp-serde = "1.3"
 serde = { version = "1.0", features = ["derive"] }
@@ -107,9 +107,8 @@ socket2 = { version = "0.6", features = ["all"] }
 libc = "0.2"
 nix = { version = "0.31", features = ["fs", "poll", "socket", "uio", "user"] }
 getrandom = "0.4"
-# NOTE: bincode 1.3.3 is marked unmaintained (RustSec-2025-0141) but stable.
-# Consider migration to postcard in future. See UPGRADE_LOG.md for details.
-bincode = "1.3"
+# Use maintained bincode-next (crate imported as `bincode`) with serde interop.
+bincode = { package = "bincode-next", version = "2.1", features = ["serde"] }
 # Optional tracing integration - only compiled when tracing-integration feature is enabled
 tracing = { version = "0.1", optional = true }
 # Optional tracing subscriber for test-internals feature
@@ -132,10 +131,10 @@ lz4_flex = { version = "0.12", optional = true }
 # Optional visibility macro for test-internals feature
 visibility = { version = "0.1", optional = true }
 # Tempfile helper for test-internals and test logging utilities.
-tempfile = "3.17"
+tempfile = "3.25"
 # TLS support via rustls
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12"], optional = true }
-rustls-pki-types = { version = "1.12", optional = true }
+rustls-pki-types = { version = "1.14", optional = true }
 # Optional native root certificates
 rustls-native-certs = { version = "0.8", optional = true }
 # Optional webpki root certificates
@@ -179,11 +178,11 @@ io-uring = { version = "0.7.11", optional = true }
 ring = { version = "0.17", optional = true }
 
 [dev-dependencies]
-proptest = "1.6"
+proptest = "1.10"
 criterion = { version = "0.8", features = ["html_reports"] }
 futures-lite = "2.6"
 conformance = { package = "asupersync-conformance", version = "0.2.0", path = "conformance" }
-tempfile = "3.17"
+tempfile = "3.25"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 opentelemetry_sdk = { version = "0.31", default-features = false, features = ["metrics", "testing"] }
@@ -191,7 +190,7 @@ lz4_flex = "0.12"
 toml = "1.0"
 # Certificate generation for TLS/QUIC tests
 rcgen = "0.14"
-rayon = "1.10"
+rayon = "1.11"
 serde_yaml = "0.9"
 
 [[bench]]
@@ -286,3 +285,5 @@ doc_markdown = "allow"
 cast_possible_truncation = "allow"
 # Many Duration::from_millis(1000) patterns are intentionally explicit about units
 duration_suboptimal_units = "allow"
+# Rust 2024 migration: postpone broad style-only rewrites from let-chain opportunities.
+collapsible_if = "allow"
