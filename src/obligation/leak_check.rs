@@ -1201,10 +1201,7 @@ mod tests {
                     kind: ObligationKind::SendPermit,
                 },
                 Instruction::Branch {
-                    arms: vec![
-                        vec![Instruction::Commit { var: v(0) }],
-                        vec![],
-                    ],
+                    arms: vec![vec![Instruction::Commit { var: v(0) }], vec![]],
                 },
                 Instruction::Reserve {
                     var: v(0),
@@ -1228,7 +1225,12 @@ mod tests {
             .filter(|d| d.kind == DiagnosticKind::DefiniteLeak)
             .count();
 
-        crate::assert_with_log!(potential_count == 1, "potential overwrite leak", 1, potential_count);
+        crate::assert_with_log!(
+            potential_count == 1,
+            "potential overwrite leak",
+            1,
+            potential_count
+        );
         crate::assert_with_log!(definite_count == 0, "no definite leak", 0, definite_count);
         crate::test_complete!("overwrite_after_mayhold_is_potential_leak");
     }

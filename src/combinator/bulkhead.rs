@@ -388,7 +388,11 @@ impl Bulkhead {
     #[allow(clippy::significant_drop_tightening, clippy::cast_precision_loss)]
     pub fn enqueue(&self, weight: u32, now: Time) -> Result<u64, BulkheadError<()>> {
         let now_millis = now.as_millis();
-        let timeout_millis = self.policy.queue_timeout.as_millis().min(u128::from(u64::MAX)) as u64;
+        let timeout_millis = self
+            .policy
+            .queue_timeout
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
         let deadline_millis = now_millis.saturating_add(timeout_millis);
 
         let mut queue = self.queue.write();

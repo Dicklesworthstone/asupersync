@@ -996,7 +996,9 @@ mod tests {
         if stale_fd != new_sock_fd {
             let close_result = unsafe { libc::close(stale_fd) };
             if close_result != 0 {
-                let errno = io::Error::last_os_error().raw_os_error().unwrap_or_default();
+                let errno = io::Error::last_os_error()
+                    .raw_os_error()
+                    .unwrap_or_default();
                 crate::assert_with_log!(
                     errno == libc::EBADF,
                     "close reused duplicated fd or already closed",
@@ -1085,7 +1087,9 @@ mod tests {
         if stale_fd != new_sock_fd {
             let close_result = unsafe { libc::close(stale_fd) };
             if close_result != 0 {
-                let errno = io::Error::last_os_error().raw_os_error().unwrap_or_default();
+                let errno = io::Error::last_os_error()
+                    .raw_os_error()
+                    .unwrap_or_default();
                 crate::assert_with_log!(
                     errno == libc::EBADF,
                     "close reused duplicated fd or already closed",

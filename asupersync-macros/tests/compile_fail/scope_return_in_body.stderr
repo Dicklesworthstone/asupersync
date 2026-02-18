@@ -1,5 +1,5 @@
 error: scope! body must not use return; use break or early return pattern
- --> tests/compile_fail/scope_return_in_body.rs:5:18
+ --> tests/compile_fail/scope_return_in_body.rs:7:18
   |
-5 |     scope!(cx, { return 42; });
-  |                  ^^^^^^
+7 |     scope!(cx, { return 42; });
+  |                  ^^^^^^^^^
