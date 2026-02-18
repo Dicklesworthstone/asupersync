@@ -256,7 +256,11 @@ impl CallContext {
     /// Check if the deadline has expired.
     #[must_use]
     pub fn is_expired(&self) -> bool {
-        self.deadline.is_some_and(|d| std::time::Instant::now() > d)
+        self.is_expired_at(std::time::Instant::now())
+    }
+
+    fn is_expired_at(&self, now: std::time::Instant) -> bool {
+        self.deadline.is_some_and(|deadline| now >= deadline)
     }
 
     /// Attach a capability context to this call.
@@ -495,6 +499,38 @@ mod tests {
         let _readonly = wrapped.cx_readonly();
         let _narrow = wrapped.cx_narrow::<cap::CapSet<true, true, false, false, false>>();
         crate::test_complete!("test_call_context");
+    }
+
+    #[test]
+    fn test_call_context_expiry_boundary_is_inclusive() {
+        init_test("test_call_context_expiry_boundary_is_inclusive");
+        let now = std::time::Instant::now();
+        let ctx = CallContext {
+            metadata: Metadata::new(),
+            deadline: Some(now),
+            peer_addr: None,
+        };
+        let expired_at_boundary = ctx.is_expired_at(now);
+        crate::assert_with_log!(
+            expired_at_boundary,
+            "expired at deadline boundary",
+            true,
+            expired_at_boundary
+        );
+
+        let before_deadline_ctx = CallContext {
+            metadata: Metadata::new(),
+            deadline: Some(now + std::time::Duration::from_millis(1)),
+            peer_addr: None,
+        };
+        let not_yet_expired = before_deadline_ctx.is_expired_at(now);
+        crate::assert_with_log!(
+            !not_yet_expired,
+            "not expired before deadline",
+            false,
+            not_yet_expired
+        );
+        crate::test_complete!("test_call_context_expiry_boundary_is_inclusive");
     }
 
     #[test]
