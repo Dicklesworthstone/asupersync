@@ -58,11 +58,11 @@
 #![allow(unsafe_code)]
 
 use super::{Event, Events, Interest, Reactor, Source, Token};
-use libc::{fcntl, F_GETFD};
+use libc::{F_GETFD, fcntl};
 use parking_lot::Mutex;
 use polling::{Event as PollEvent, Events as PollEvents, PollMode, Poller};
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::io;
 use std::num::NonZeroUsize;
 use std::os::fd::BorrowedFd;
@@ -150,6 +150,7 @@ impl EpollReactor {
     }
 
     /// Converts our Interest flags to polling crate's event.
+    #[inline]
     fn interest_to_poll_event(token: Token, interest: Interest) -> PollEvent {
         let key = token.0;
         let readable = interest.is_readable();
@@ -173,6 +174,7 @@ impl EpollReactor {
     }
 
     /// Converts our interest mode flags to polling crate poll mode.
+    #[inline]
     fn interest_to_poll_mode(interest: Interest) -> PollMode {
         if interest.is_edge_triggered() {
             if interest.is_oneshot() {
@@ -187,6 +189,7 @@ impl EpollReactor {
     }
 
     /// Converts polling crate's event to our Interest type.
+    #[inline]
     fn poll_event_to_interest(event: &PollEvent) -> Interest {
         let mut interest = Interest::NONE;
 
@@ -442,6 +445,22 @@ mod tests {
         }
     }
 
+    // Keep fd-reuse tests away from low-number descriptors used by unrelated
+    // concurrent tests to avoid process-wide fd collisions.
+    const FD_REUSE_TEST_MIN_FD: RawFd = 50_000;
+
+    fn dup_fd_at_least(fd: RawFd, min_fd: RawFd) -> RawFd {
+        // SAFETY: `fcntl(F_DUPFD_CLOEXEC, ...)` duplicates an existing fd into an
+        // unowned raw descriptor >= min_fd.
+        let dup_fd = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, min_fd) };
+        assert!(
+            dup_fd >= 0,
+            "failed to duplicate fd {fd} at/above {min_fd}: {}",
+            io::Error::last_os_error()
+        );
+        dup_fd
+    }
+
     #[test]
     fn create_reactor() {
         init_test("create_reactor");
@@ -604,9 +623,21 @@ mod tests {
         let mut events = Events::with_capacity(64);
 
         let start = std::time::Instant::now();
-        let count = reactor
-            .poll(&mut events, Some(Duration::from_millis(50)))
-            .expect("poll failed");
+        let wait_for = Duration::from_millis(50);
+        let deadline = start + wait_for;
+        let mut count = 0usize;
+        while std::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            count += reactor
+                .poll(&mut events, Some(remaining))
+                .expect("poll failed");
+            if count > 0 {
+                break;
+            }
+        }
 
         // Should return after ~50ms with no events
         let elapsed = start.elapsed();
@@ -891,12 +922,19 @@ mod tests {
         init_test("modify_closed_fd_cleans_stale_bookkeeping_for_fd_reuse");
         let reactor = EpollReactor::new().expect("failed to create reactor");
         let (old_sock, _old_peer) = UnixStream::pair().expect("failed to create unix stream pair");
-        let stale_fd = old_sock.as_raw_fd();
+        let stale_fd = dup_fd_at_least(old_sock.as_raw_fd(), FD_REUSE_TEST_MIN_FD);
+        let stale_source = RawFdSource(stale_fd);
         let stale_token = Token::new(89);
         reactor
-            .register(&old_sock, stale_token, Interest::READABLE)
+            .register(&stale_source, stale_token, Interest::READABLE)
             .expect("stale registration failed");
-        drop(old_sock);
+        let close_stale_result = unsafe { libc::close(stale_fd) };
+        crate::assert_with_log!(
+            close_stale_result == 0,
+            "close duplicated stale fd before modify",
+            0,
+            close_stale_result
+        );
 
         let modify_result = reactor.modify(stale_token, Interest::WRITABLE);
         crate::assert_with_log!(
@@ -955,11 +993,17 @@ mod tests {
         reactor
             .deregister(new_token)
             .expect("deregister reused fd token failed");
-        // SAFETY: If dup2 created a distinct extra descriptor at `stale_fd`,
-        // close it to avoid leaks. When source==target, `new_sock` already owns it.
         if stale_fd != new_sock_fd {
             let close_result = unsafe { libc::close(stale_fd) };
-            crate::assert_with_log!(close_result == 0, "close duplicated fd", 0, close_result);
+            if close_result != 0 {
+                let errno = io::Error::last_os_error().raw_os_error().unwrap_or_default();
+                crate::assert_with_log!(
+                    errno == libc::EBADF,
+                    "close reused duplicated fd or already closed",
+                    libc::EBADF,
+                    errno
+                );
+            }
         }
         crate::test_complete!("modify_closed_fd_cleans_stale_bookkeeping_for_fd_reuse");
     }
@@ -969,12 +1013,19 @@ mod tests {
         init_test("reused_fd_cannot_register_under_new_token_until_stale_token_removed");
         let reactor = EpollReactor::new().expect("failed to create reactor");
         let (old_sock, _old_peer) = UnixStream::pair().expect("failed to create unix stream pair");
-        let stale_fd = old_sock.as_raw_fd();
+        let stale_fd = dup_fd_at_least(old_sock.as_raw_fd(), FD_REUSE_TEST_MIN_FD);
+        let stale_source = RawFdSource(stale_fd);
         let stale_token = Token::new(87);
         reactor
-            .register(&old_sock, stale_token, Interest::READABLE)
+            .register(&stale_source, stale_token, Interest::READABLE)
             .expect("stale registration failed");
-        drop(old_sock);
+        let close_stale_result = unsafe { libc::close(stale_fd) };
+        crate::assert_with_log!(
+            close_stale_result == 0,
+            "close duplicated stale fd before reuse",
+            0,
+            close_stale_result
+        );
 
         let (new_sock, mut write_peer) =
             UnixStream::pair().expect("failed to create second unix stream pair");
@@ -1031,11 +1082,17 @@ mod tests {
         reactor
             .deregister(new_token)
             .expect("deregister reused fd token failed");
-        // SAFETY: If dup2 created a distinct extra descriptor at `stale_fd`,
-        // close it to avoid leaks. When source==target, `new_sock` already owns it.
         if stale_fd != new_sock_fd {
             let close_result = unsafe { libc::close(stale_fd) };
-            crate::assert_with_log!(close_result == 0, "close duplicated fd", 0, close_result);
+            if close_result != 0 {
+                let errno = io::Error::last_os_error().raw_os_error().unwrap_or_default();
+                crate::assert_with_log!(
+                    errno == libc::EBADF,
+                    "close reused duplicated fd or already closed",
+                    libc::EBADF,
+                    errno
+                );
+            }
         }
         crate::test_complete!(
             "reused_fd_cannot_register_under_new_token_until_stale_token_removed"

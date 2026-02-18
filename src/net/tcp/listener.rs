@@ -202,7 +202,7 @@ mod tests {
     use crate::runtime::{IoDriverHandle, LabReactor};
     use crate::types::{Budget, RegionId, TaskId};
     #[cfg(unix)]
-    use nix::fcntl::{fcntl, FcntlArg, OFlag};
+    use nix::fcntl::{FcntlArg, OFlag, fcntl};
     use std::net::SocketAddr;
     use std::sync::Arc;
     use std::task::{Context, Wake, Waker};

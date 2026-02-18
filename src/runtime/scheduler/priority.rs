@@ -338,12 +338,14 @@ impl Scheduler {
     }
 
     /// Returns the total number of scheduled tasks.
+    #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
         self.scheduled.len()
     }
 
     /// Returns true if no tasks are scheduled.
+    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.scheduled.is_empty()
@@ -355,6 +357,7 @@ impl Scheduler {
     /// - Cancel lane is not empty
     /// - Ready lane is not empty
     /// - Timed lane has a task with `deadline <= now`
+    #[inline]
     #[must_use]
     pub fn has_runnable_work(&self, now: Time) -> bool {
         if !self.cancel_lane.is_empty() || !self.ready_lane.is_empty() {
@@ -364,6 +367,7 @@ impl Scheduler {
     }
 
     /// Returns the earliest deadline from the timed lane, if any.
+    #[inline]
     #[must_use]
     pub fn next_deadline(&self) -> Option<Time> {
         self.timed_lane.peek().map(|t| t.deadline)
@@ -371,9 +375,9 @@ impl Scheduler {
 
     /// Allocates and returns the next generation number for FIFO ordering.
     fn next_gen(&mut self) -> u64 {
-        let gen = self.next_generation;
+        let generation = self.next_generation;
         self.next_generation += 1;
-        gen
+        generation
     }
 
     /// Schedules a task in the ready lane.
@@ -415,6 +419,7 @@ impl Scheduler {
     ///
     /// Does nothing if the task is already scheduled.
     /// O(log n) insertion via binary heap.
+    #[inline]
     pub fn schedule_timed(&mut self, task: TaskId, deadline: Time) {
         if self.scheduled.insert(task) {
             let generation = self.next_gen();
@@ -454,6 +459,7 @@ impl Scheduler {
     ///
     /// Order: cancel lane > timed lane > ready lane.
     /// O(log n) pop via binary heap.
+    #[inline]
     pub fn pop_with_rng_hint(&mut self, rng_hint: u64) -> Option<TaskId> {
         self.pop_with_lane(rng_hint).map(|(task, _)| task)
     }
@@ -466,6 +472,7 @@ impl Scheduler {
     /// This method is deadline-agnostic for timed tasks. If your caller keeps
     /// future timed tasks in the scheduler, use [`Self::pop_with_lane_if_due`]
     /// instead to prevent dispatch before deadline.
+    #[inline]
     pub fn pop_with_lane(&mut self, rng_hint: u64) -> Option<(TaskId, DispatchLane)> {
         // For lab determinism, we want tie-breaking to vary with a seed while still being fully
         // deterministic for a given `rng_hint` sequence. We do this by selecting uniformly among
@@ -498,6 +505,7 @@ impl Scheduler {
     ///
     /// Lane priority remains Cancel > Timed > Ready, but timed tasks are
     /// dispatched only when `deadline <= now`.
+    #[inline]
     pub fn pop_with_lane_if_due(
         &mut self,
         rng_hint: u64,
@@ -534,6 +542,7 @@ impl Scheduler {
     }
 
     /// Pop a task from the cancel lane using deterministic RNG tie-breaking.
+    #[inline]
     pub fn pop_cancel_with_rng(&mut self, rng_hint: u64) -> Option<(TaskId, DispatchLane)> {
         let entry =
             Self::pop_entry_with_rng(&mut self.cancel_lane, rng_hint, &mut self.scratch_entries)?;
@@ -548,6 +557,7 @@ impl Scheduler {
     /// This method is deadline-agnostic for timed tasks. If your caller keeps
     /// future timed tasks in the scheduler, use
     /// [`Self::pop_non_cancel_with_rng_if_due`] to prevent early dispatch.
+    #[inline]
     pub fn pop_non_cancel_with_rng(&mut self, rng_hint: u64) -> Option<(TaskId, DispatchLane)> {
         if let Some(entry) =
             Self::pop_timed_with_rng(&mut self.timed_lane, rng_hint, &mut self.scratch_timed)
@@ -570,6 +580,7 @@ impl Scheduler {
     ///
     /// Timed lane retains priority over ready lane, but timed tasks are
     /// dispatched only when `deadline <= now`.
+    #[inline]
     pub fn pop_non_cancel_with_rng_if_due(
         &mut self,
         rng_hint: u64,
@@ -761,6 +772,7 @@ impl Scheduler {
     ///
     /// Use this for strict cancel-first processing in multi-worker scenarios.
     /// O(log n) pop via binary heap.
+    #[inline]
     #[must_use]
     pub fn pop_cancel_only(&mut self) -> Option<TaskId> {
         if let Some(entry) = self.cancel_lane.pop() {
@@ -771,6 +783,7 @@ impl Scheduler {
     }
 
     /// Pops only from the cancel lane with RNG tie-breaking.
+    #[inline]
     #[must_use]
     pub fn pop_cancel_only_with_hint(&mut self, rng_hint: u64) -> Option<TaskId> {
         let entry =
@@ -786,6 +799,7 @@ impl Scheduler {
     /// before their deadline when in the local scheduler.
     ///
     /// O(log n) pop via binary heap.
+    #[inline]
     #[must_use]
     pub fn pop_timed_only(&mut self, now: Time) -> Option<TaskId> {
         if let Some(entry) = self.timed_lane.peek() {
@@ -800,6 +814,7 @@ impl Scheduler {
 
     /// Pops only from the timed lane if the earliest deadline is due,
     /// with RNG tie-breaking among tasks sharing the earliest deadline.
+    #[inline]
     #[must_use]
     pub fn pop_timed_only_with_hint(&mut self, rng_hint: u64, now: Time) -> Option<TaskId> {
         let earliest = self.timed_lane.peek()?;
@@ -817,6 +832,7 @@ impl Scheduler {
     ///
     /// Use this for strict lane ordering in multi-worker scenarios.
     /// O(log n) pop via binary heap.
+    #[inline]
     #[must_use]
     pub fn pop_ready_only(&mut self) -> Option<TaskId> {
         if let Some(entry) = self.ready_lane.pop() {
@@ -827,6 +843,7 @@ impl Scheduler {
     }
 
     /// Pops only from the ready lane with RNG tie-breaking among equal priorities.
+    #[inline]
     #[must_use]
     pub fn pop_ready_only_with_hint(&mut self, rng_hint: u64) -> Option<TaskId> {
         let entry =
@@ -840,6 +857,7 @@ impl Scheduler {
     /// caller would check each lane sequentially.
     ///
     /// Returns `(lane_tag, task_id)` where lane_tag is 0=cancel, 1=timed, 2=ready.
+    #[inline]
     #[must_use]
     pub fn pop_any_lane_with_hint(&mut self, rng_hint: u64, now: Time) -> Option<(u8, TaskId)> {
         // Cancel lane first (highest priority).
@@ -914,18 +932,21 @@ impl Scheduler {
     }
 
     /// Returns true if the cancel lane has pending tasks.
+    #[inline]
     #[must_use]
     pub fn has_cancel_work(&self) -> bool {
         !self.cancel_lane.is_empty()
     }
 
     /// Returns true if the timed lane has pending tasks.
+    #[inline]
     #[must_use]
     pub fn has_timed_work(&self) -> bool {
         !self.timed_lane.is_empty()
     }
 
     /// Returns true if the ready lane has pending tasks.
+    #[inline]
     #[must_use]
     pub fn has_ready_work(&self) -> bool {
         !self.ready_lane.is_empty()

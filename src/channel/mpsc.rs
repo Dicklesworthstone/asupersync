@@ -189,6 +189,7 @@ pub struct Sender<T> {
 
 impl<T> Sender<T> {
     /// Reserves a slot in the channel for sending.
+    #[inline]
     #[must_use]
     pub fn reserve<'a>(&'a self, cx: &'a Cx) -> Reserve<'a, T> {
         Reserve {
@@ -214,6 +215,7 @@ impl<T> Sender<T> {
     /// Attempts to reserve a slot without blocking.
     ///
     /// Returns `Full` when waiting senders exist, to preserve FIFO ordering.
+    #[inline]
     pub fn try_reserve(&self) -> Result<SendPermit<'_, T>, SendError<()>> {
         let mut inner = self.shared.inner.lock();
 
@@ -238,6 +240,7 @@ impl<T> Sender<T> {
     }
 
     /// Attempts to send a value without blocking.
+    #[inline]
     pub fn try_send(&self, value: T) -> Result<(), SendError<T>> {
         match self.try_reserve() {
             Ok(permit) => {
@@ -251,6 +254,7 @@ impl<T> Sender<T> {
     }
 
     /// Returns true if the receiver has been dropped.
+    #[inline]
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.shared.receiver_dropped.load(Ordering::Acquire)
@@ -527,6 +531,7 @@ pub struct SendPermit<'a, T> {
 
 impl<T> SendPermit<'_, T> {
     /// Commits the reserved slot, enqueuing the value.
+    #[inline]
     pub fn send(mut self, value: T) {
         self.sent = true;
         let mut inner = self.sender.shared.inner.lock();
@@ -620,12 +625,14 @@ impl<T: std::fmt::Debug> std::fmt::Debug for Receiver<T> {
 
 impl<T> Receiver<T> {
     /// Creates a receive future for the next value.
+    #[inline]
     #[must_use]
     pub fn recv<'a>(&'a self, cx: &'a Cx) -> Recv<'a, T> {
         Recv { receiver: self, cx }
     }
 
     /// Attempts to receive a value without blocking.
+    #[inline]
     pub fn try_recv(&self) -> Result<T, RecvError> {
         let mut inner = self.shared.inner.lock();
         inner.queue.pop_front().map_or_else(
@@ -648,6 +655,7 @@ impl<T> Receiver<T> {
     }
 
     /// Returns true if all senders have been dropped.
+    #[inline]
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.shared.sender_count.load(Ordering::Acquire) == 0

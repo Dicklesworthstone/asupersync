@@ -25,8 +25,8 @@
 use crate::cx::Cx;
 use crate::runtime::blocking_pool::{BlockingPoolHandle, BlockingTaskHandle};
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Waker;
 use std::thread;
 
@@ -251,8 +251,8 @@ mod tests {
     use super::*;
     use crate::types::{Budget, RegionId, TaskId};
     use futures_lite::future;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
 
     fn init_test(name: &str) {

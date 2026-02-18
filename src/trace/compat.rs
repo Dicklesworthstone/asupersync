@@ -32,8 +32,8 @@
 //! }
 //! ```
 
-use super::file::{TraceFileError, TraceFileResult, HEADER_SIZE, TRACE_FILE_VERSION, TRACE_MAGIC};
-use super::replay::{ReplayEvent, TraceMetadata, REPLAY_SCHEMA_VERSION};
+use super::file::{HEADER_SIZE, TRACE_FILE_VERSION, TRACE_MAGIC, TraceFileError, TraceFileResult};
+use super::replay::{REPLAY_SCHEMA_VERSION, ReplayEvent, TraceMetadata};
 use crate::tracing_compat::warn;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -675,7 +675,7 @@ fn extract_event_type(bytes: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::file::{write_trace, TraceWriter};
+    use crate::trace::file::{TraceWriter, write_trace};
     use crate::trace::replay::CompactTaskId;
     use tempfile::NamedTempFile;
 

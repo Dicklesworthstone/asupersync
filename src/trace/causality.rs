@@ -291,9 +291,10 @@ mod tests {
             schedule_event(1, task(1), t3), // t3 < t1, non-monotonic
         ];
         let err = CausalOrderVerifier::verify(&trace).unwrap_err();
-        assert!(err
-            .iter()
-            .any(|v| v.kind == CausalityViolationKind::NonMonotonic));
+        assert!(
+            err.iter()
+                .any(|v| v.kind == CausalityViolationKind::NonMonotonic)
+        );
     }
 
     #[test]
@@ -304,9 +305,10 @@ mod tests {
         // task(1) spawn at t2, then schedule at t1 — violation
         let trace = vec![spawn_event(0, task(1), t2), schedule_event(1, task(1), t1)];
         let err = CausalOrderVerifier::verify(&trace).unwrap_err();
-        assert!(err
-            .iter()
-            .any(|v| v.kind == CausalityViolationKind::SameTaskConcurrent));
+        assert!(
+            err.iter()
+                .any(|v| v.kind == CausalityViolationKind::SameTaskConcurrent)
+        );
     }
 
     #[test]
@@ -327,9 +329,10 @@ mod tests {
         // Spawn at t2 but wake at t1 — wake doesn't reflect spawn dependency
         let trace = vec![spawn_event(0, task(1), t2), wake_event(1, task(1), t1)];
         let err = CausalOrderVerifier::verify(&trace).unwrap_err();
-        assert!(err
-            .iter()
-            .any(|v| v.kind == CausalityViolationKind::MissingDependency));
+        assert!(
+            err.iter()
+                .any(|v| v.kind == CausalityViolationKind::MissingDependency)
+        );
     }
 
     // =========================================================================

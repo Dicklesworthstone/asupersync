@@ -55,6 +55,6 @@ pub use registry::{
 };
 pub use scope::Scope;
 pub use wrappers::{
-    narrow, BackgroundCaps, BackgroundContext, EntropyCaps, GrpcCaps, GrpcContext, PureCaps,
-    WebCaps, WebContext,
+    BackgroundCaps, BackgroundContext, EntropyCaps, GrpcCaps, GrpcContext, PureCaps, WebCaps,
+    WebContext, narrow,
 };

@@ -434,8 +434,8 @@ mod tests {
     use std::cell::Cell;
     use std::future::Future;
     use std::rc::Rc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
 
     // =========================================================================

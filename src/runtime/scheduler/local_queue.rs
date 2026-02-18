@@ -106,6 +106,7 @@ impl LocalQueue {
     /// Returns `true` if the task was accepted by a local queue (or was already
     /// queued there), `false` if no local queue is set or the task record is
     /// missing from the backing arena.
+    #[inline]
     pub(crate) fn schedule_local(task: TaskId) -> bool {
         CURRENT_QUEUE.with(|slot| {
             slot.borrow()
@@ -299,6 +300,7 @@ impl Stealer {
     }
 
     /// Steals a task from the queue.
+    #[inline]
     #[must_use]
     pub fn steal(&self) -> Option<TaskId> {
         self.tasks.with_tasks_arena_mut(|arena| {
@@ -330,6 +332,7 @@ impl Stealer {
     }
 
     /// Steals a batch of tasks.
+    #[inline]
     #[must_use]
     #[allow(clippy::significant_drop_tightening)]
     pub fn steal_batch(&self, dest: &LocalQueue) -> bool {

@@ -51,13 +51,13 @@
 
 use crate::observability::metrics::{MetricsProvider, OutcomeKind};
 use crate::types::{CancelKind, RegionId, TaskId};
-use opentelemetry::metrics::{Counter, Histogram, Meter, ObservableGauge};
 use opentelemetry::KeyValue;
+use opentelemetry::metrics::{Counter, Histogram, Meter, ObservableGauge};
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 // =============================================================================
@@ -1059,8 +1059,8 @@ mod tests {
     use crate::test_utils::init_test_logging;
     use opentelemetry::metrics::MeterProvider;
     use opentelemetry_sdk::metrics::{
-        data::ResourceMetrics, InMemoryMetricExporter as OtelInMemoryExporter, PeriodicReader,
-        SdkMeterProvider,
+        InMemoryMetricExporter as OtelInMemoryExporter, PeriodicReader, SdkMeterProvider,
+        data::ResourceMetrics,
     };
     use std::collections::HashSet;
     use std::path::Path;

@@ -38,8 +38,8 @@ pub fn with_timeout<'a, P: Policy>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::policy::FailFast;
     use crate::types::Budget;
+    use crate::types::policy::FailFast;
     use crate::util::ArenaIndex;
 
     fn init_test(name: &str) {

@@ -164,7 +164,7 @@ pub use obligation_table::{
     ObligationAbortInfo, ObligationCommitInfo, ObligationLeakInfo, ObligationTable,
 };
 pub use reactor::{Event, Events, Interest, LabReactor, Reactor, Registration, Source, Token};
-pub use region_heap::{global_alloc_count, HeapIndex, HeapRef, HeapStats, RegionHeap};
+pub use region_heap::{HeapIndex, HeapRef, HeapStats, RegionHeap, global_alloc_count};
 pub use region_table::{RegionCreateError, RegionTable};
 pub use scheduler::Scheduler;
 pub use sharded_state::{ShardGuard, ShardedConfig, ShardedObservability, ShardedState};

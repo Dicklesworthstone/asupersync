@@ -752,14 +752,18 @@ mod tests {
         scenario.oracles = vec!["task_leak".to_string(), "obligation_leak".to_string()];
         let result = ScenarioRunner::run(&scenario).unwrap();
         assert_eq!(result.oracle_report.checked.len(), 2);
-        assert!(result
-            .oracle_report
-            .checked
-            .contains(&"task_leak".to_string()));
-        assert!(result
-            .oracle_report
-            .checked
-            .contains(&"obligation_leak".to_string()));
+        assert!(
+            result
+                .oracle_report
+                .checked
+                .contains(&"task_leak".to_string())
+        );
+        assert!(
+            result
+                .oracle_report
+                .checked
+                .contains(&"obligation_leak".to_string())
+        );
         crate::test_complete!("oracle_filtering_works");
     }
 

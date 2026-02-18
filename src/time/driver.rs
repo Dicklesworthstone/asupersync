@@ -6,8 +6,8 @@
 
 use crate::types::Time;
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::Waker;
 use std::time::Duration;
 
@@ -128,10 +128,12 @@ impl VirtualClock {
         let target = time.as_nanos();
         let mut current = self.now.load(Ordering::Acquire);
         while current < target {
-            match self
-                .now
-                .compare_exchange_weak(current, target, Ordering::Release, Ordering::Relaxed)
-            {
+            match self.now.compare_exchange_weak(
+                current,
+                target,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
                 Ok(_) => break,
                 Err(actual) => current = actual,
             }
@@ -424,11 +426,13 @@ impl std::fmt::Debug for TimerDriverHandle {
 
 impl TimerDriverHandle {
     /// Creates a new handle wrapping the given timer driver.
+    #[inline]
     pub fn new<T: TimeSource + std::fmt::Debug + 'static>(driver: Arc<TimerDriver<T>>) -> Self {
         Self { inner: driver }
     }
 
     /// Returns true if two handles refer to the same underlying driver.
+    #[inline]
     pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
@@ -449,6 +453,7 @@ impl TimerDriverHandle {
     }
 
     /// Returns the current time from the timer driver.
+    #[inline]
     #[must_use]
     pub fn now(&self) -> Time {
         self.inner.now()
@@ -457,12 +462,14 @@ impl TimerDriverHandle {
     /// Registers a timer to fire at the given deadline.
     ///
     /// Returns a handle that can be used to cancel or update the timer.
+    #[inline]
     #[must_use]
     pub fn register(&self, deadline: Time, waker: Waker) -> TimerHandle {
         self.inner.register(deadline, waker)
     }
 
     /// Updates an existing timer with a new deadline and waker.
+    #[inline]
     #[must_use]
     pub fn update(&self, handle: &TimerHandle, deadline: Time, waker: Waker) -> TimerHandle {
         self.inner.update(handle, deadline, waker)
@@ -471,12 +478,14 @@ impl TimerDriverHandle {
     /// Cancels an existing timer.
     ///
     /// Returns true if the timer was active and is now cancelled.
+    #[inline]
     #[must_use]
     pub fn cancel(&self, handle: &TimerHandle) -> bool {
         self.inner.cancel(handle)
     }
 
     /// Returns the next deadline that will fire, if any.
+    #[inline]
     #[must_use]
     pub fn next_deadline(&self) -> Option<Time> {
         self.inner.next_deadline()
@@ -485,18 +494,21 @@ impl TimerDriverHandle {
     /// Processes all expired timers, calling their wakers.
     ///
     /// Returns the number of timers fired.
+    #[inline]
     #[must_use]
     pub fn process_timers(&self) -> usize {
         self.inner.process_timers()
     }
 
     /// Returns the number of pending timers.
+    #[inline]
     #[must_use]
     pub fn pending_count(&self) -> usize {
         self.inner.pending_count()
     }
 
     /// Returns true if no timers are pending.
+    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
@@ -506,8 +518,8 @@ impl TimerDriverHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();

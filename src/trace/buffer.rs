@@ -5,8 +5,8 @@
 
 use super::event::TraceEvent;
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A ring buffer for storing trace events.
 ///

@@ -18,8 +18,8 @@
 //! | `root_region_limits` | `None` |
 //! | `observability` | `None` |
 
-use crate::observability::metrics::{MetricsProvider, NoOpMetrics};
 use crate::observability::ObservabilityConfig;
+use crate::observability::metrics::{MetricsProvider, NoOpMetrics};
 use crate::record::RegionLimits;
 use crate::runtime::deadline_monitor::{DeadlineWarning, MonitorConfig};
 use crate::trace::distributed::LogicalClockMode;

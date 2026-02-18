@@ -492,6 +492,7 @@ pub fn write_artifact_bundle(
 // ============================================================================
 
 #[cfg(test)]
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
     use crate::test_logging::{Interest, TestLogLevel};
@@ -641,7 +642,8 @@ mod tests {
         init_test("test_write_artifact_bundle_roundtrip");
 
         let tmp = tempfile::TempDir::new().expect("create temp dir");
-        std::env::set_var("ASUPERSYNC_TEST_ARTIFACTS_DIR", tmp.path());
+        // SAFETY: tests serialize env access with test_utils::env_lock.
+        unsafe { std::env::set_var("ASUPERSYNC_TEST_ARTIFACTS_DIR", tmp.path()) };
 
         let ctx = TestContext::new("bundle_test", 0xBEEF)
             .with_subsystem("scheduler")
@@ -682,7 +684,8 @@ mod tests {
         let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(first["event"], "TaskSpawn");
 
-        std::env::remove_var("ASUPERSYNC_TEST_ARTIFACTS_DIR");
+        // SAFETY: tests serialize env access with test_utils::env_lock.
+        unsafe { std::env::remove_var("ASUPERSYNC_TEST_ARTIFACTS_DIR") };
         crate::test_complete!("test_write_artifact_bundle_roundtrip");
     }
 

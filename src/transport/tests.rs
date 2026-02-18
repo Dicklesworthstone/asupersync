@@ -1,14 +1,14 @@
 #[cfg(test)]
 mod tests {
+    use crate::Cx;
     use crate::security::authenticated::AuthenticatedSymbol;
     use crate::security::tag::AuthenticationTag;
     use crate::transport::error::{SinkError, StreamError};
     use crate::transport::stream::{MergedStream, VecStream};
     use crate::transport::{
-        channel, SymbolSet, SymbolSink, SymbolSinkExt, SymbolStream, SymbolStreamExt,
+        SymbolSet, SymbolSink, SymbolSinkExt, SymbolStream, SymbolStreamExt, channel,
     };
     use crate::types::{Symbol, SymbolId, SymbolKind, Time};
-    use crate::Cx;
     use futures_lite::future;
     use std::future::Future;
     use std::pin::Pin;
@@ -337,7 +337,7 @@ mod tests {
             PathSelectionPolicy, PathSet, ReordererConfig, SymbolDeduplicator, SymbolReorderer,
             TransportPath,
         };
-        use crate::transport::mock::{sim_channel, SimNetwork, SimTransportConfig};
+        use crate::transport::mock::{SimNetwork, SimTransportConfig, sim_channel};
         use crate::transport::router::{
             DispatchConfig, DispatchStrategy, Endpoint, EndpointId, LoadBalanceStrategy, RouteKey,
             RoutingEntry, RoutingTable, SymbolDispatcher, SymbolRouter,

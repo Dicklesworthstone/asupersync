@@ -834,9 +834,11 @@ mod tests {
         stream
             .add_header_fragment(Bytes::from(vec![0; 16]))
             .unwrap();
-        assert!(stream
-            .add_header_fragment(Bytes::from(vec![0; 17]))
-            .is_err());
+        assert!(
+            stream
+                .add_header_fragment(Bytes::from(vec![0; 17]))
+                .is_err()
+        );
     }
 
     #[test]

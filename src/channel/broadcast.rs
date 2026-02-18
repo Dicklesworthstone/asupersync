@@ -24,6 +24,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
 /// Error returned when sending fails.
@@ -76,10 +77,6 @@ struct Shared<T> {
     capacity: usize,
     /// Total number of messages ever sent (for lag detection).
     total_sent: u64,
-    /// Number of active receivers.
-    receiver_count: usize,
-    /// Number of active senders.
-    sender_count: usize,
     /// Waiting receivers.
     wakers: Arena<Waker>,
 }
@@ -93,6 +90,10 @@ struct Slot<T> {
 
 /// Shared wrapper.
 struct Channel<T> {
+    /// Number of active senders (lock-free for clone/drop).
+    sender_count: AtomicUsize,
+    /// Number of active receivers (lock-free for reserve/clone/drop).
+    receiver_count: AtomicUsize,
     inner: Mutex<Shared<T>>,
 }
 
@@ -114,12 +115,12 @@ pub fn channel<T: Clone>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     assert!(capacity > 0, "capacity must be non-zero");
 
     let shared = Arc::new(Channel {
+        sender_count: AtomicUsize::new(1),
+        receiver_count: AtomicUsize::new(1),
         inner: Mutex::new(Shared {
             buffer: VecDeque::with_capacity(capacity),
             capacity,
             total_sent: 0,
-            receiver_count: 1,
-            sender_count: 1,
             wakers: Arena::new(),
         }),
     });
@@ -156,11 +157,8 @@ impl<T: Clone> Sender<T> {
             cx.trace("broadcast::reserve called with cancel pending");
         }
 
-        {
-            let inner = self.channel.inner.lock();
-            if inner.receiver_count == 0 {
-                return Err(SendError::Closed(()));
-            }
+        if self.channel.receiver_count.load(Ordering::Acquire) == 0 {
+            return Err(SendError::Closed(()));
         }
 
         Ok(SendPermit { sender: self })
@@ -185,9 +183,9 @@ impl<T: Clone> Sender<T> {
     /// Creates a new receiver subscribed to this channel.
     #[must_use]
     pub fn subscribe(&self) -> Receiver<T> {
+        self.channel.receiver_count.fetch_add(1, Ordering::Relaxed);
         let total_sent = {
-            let mut inner = self.channel.inner.lock();
-            inner.receiver_count += 1;
+            let inner = self.channel.inner.lock();
             inner.total_sent
         };
 
@@ -200,7 +198,7 @@ impl<T: Clone> Sender<T> {
 
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        self.channel.inner.lock().sender_count += 1;
+        self.channel.sender_count.fetch_add(1, Ordering::Relaxed);
         Self {
             channel: Arc::clone(&self.channel),
         }
@@ -209,17 +207,15 @@ impl<T> Clone for Sender<T> {
 
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
-        let mut wakers_to_wake: SmallVec<[Waker; 4]> = SmallVec::new();
-        {
-            let mut inner = self.channel.inner.lock();
-            inner.sender_count -= 1;
-            if inner.sender_count == 0 {
-                inner.wakers.retain(|waker| {
-                    wakers_to_wake.push(waker.clone());
-                    false
-                });
-            }
+        // Lock-free decrement; only acquire the mutex when the last sender
+        // drops and receivers need waking.
+        if self.channel.sender_count.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return;
         }
+        let wakers_to_wake: SmallVec<[Waker; 4]> = {
+            let mut inner = self.channel.inner.lock();
+            inner.wakers.drain_values().collect()
+        };
         for waker in wakers_to_wake {
             waker.wake();
         }
@@ -242,13 +238,13 @@ impl<T: Clone> SendPermit<'_, T> {
     /// If all receivers drop after reservation but before commit, this returns
     /// `0` and does not mutate channel state.
     pub fn send(self, msg: T) -> usize {
-        let mut inner = self.sender.channel.inner.lock();
-
-        // A reservation can outlive the last receiver dropping.
-        // In that case, do not enqueue an unobservable message.
-        if inner.receiver_count == 0 {
+        // Check receiver count atomically before locking.
+        let receiver_count = self.sender.channel.receiver_count.load(Ordering::Acquire);
+        if receiver_count == 0 {
             return 0;
         }
+
+        let mut inner = self.sender.channel.inner.lock();
 
         if inner.buffer.len() == inner.capacity {
             inner.buffer.pop_front();
@@ -258,15 +254,9 @@ impl<T: Clone> SendPermit<'_, T> {
         inner.buffer.push_back(Slot { msg, index });
         inner.total_sent += 1;
 
-        let receiver_count = inner.receiver_count;
-
-        // Collect wakers under lock, wake outside to avoid deadlock
-        // with inline-polling executors.
-        let mut wakers_to_wake: SmallVec<[Waker; 4]> = SmallVec::new();
-        inner.wakers.retain(|waker| {
-            wakers_to_wake.push(waker.clone());
-            false
-        });
+        // Drain wakers under lock (by ownership, no clone), wake outside
+        // to avoid deadlock with inline-polling executors.
+        let wakers_to_wake: SmallVec<[Waker; 4]> = inner.wakers.drain_values().collect();
 
         drop(inner);
 
@@ -274,7 +264,8 @@ impl<T: Clone> SendPermit<'_, T> {
             waker.wake();
         }
 
-        receiver_count
+        // Re-read for most accurate count (a receiver could drop during send).
+        self.sender.channel.receiver_count.load(Ordering::Acquire)
     }
 }
 
@@ -364,7 +355,7 @@ impl<T: Clone> Future for Recv<'_, T> {
         }
 
         // 3. Check if closed
-        if inner.sender_count == 0 {
+        if this.receiver.channel.sender_count.load(Ordering::Acquire) == 0 {
             // Clear waiter before returning (matches other Ready paths).
             // When the last Sender drops, retain() already removed our
             // entry and bumped the arena generation, so this is a no-op,
@@ -410,7 +401,7 @@ impl<T> Drop for Recv<'_, T> {
 
 impl<T> Clone for Receiver<T> {
     fn clone(&self) -> Self {
-        self.channel.inner.lock().receiver_count += 1;
+        self.channel.receiver_count.fetch_add(1, Ordering::Relaxed);
         Self {
             channel: Arc::clone(&self.channel),
             next_index: self.next_index,
@@ -420,8 +411,7 @@ impl<T> Clone for Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        let mut inner = self.channel.inner.lock();
-        inner.receiver_count -= 1;
+        self.channel.receiver_count.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -432,8 +422,8 @@ mod tests {
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
     use std::future::Future;
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::task::{Context, Poll, Waker};
 
     fn init_test(name: &str) {

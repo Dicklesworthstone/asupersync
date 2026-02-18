@@ -71,5 +71,5 @@ pub mod tag;
 pub use authenticated::AuthenticatedSymbol;
 pub use context::{AuthMode, SecurityContext};
 pub use error::{AuthError, AuthErrorKind, AuthResult};
-pub use key::{AuthKey, AUTH_KEY_SIZE};
+pub use key::{AUTH_KEY_SIZE, AuthKey};
 pub use tag::AuthenticationTag;

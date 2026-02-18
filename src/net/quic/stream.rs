@@ -4,8 +4,8 @@
 
 use super::error::QuicError;
 use crate::cx::Cx;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Tracks active streams for cleanup on cancellation.
 #[derive(Debug, Default)]

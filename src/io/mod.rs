@@ -47,8 +47,8 @@ mod write;
 mod write_permit;
 
 pub use copy::{
-    copy, copy_bidirectional, copy_buf, copy_with_progress, AsyncBufRead, Copy, CopyBidirectional,
-    CopyBuf, CopyWithProgress,
+    AsyncBufRead, Copy, CopyBidirectional, CopyBuf, CopyWithProgress, copy, copy_bidirectional,
+    copy_buf, copy_with_progress,
 };
 pub use ext::{
     AsyncReadExt, AsyncReadVectoredExt, ReadExact, ReadToEnd, ReadToString, ReadU8, ReadVectored,
@@ -57,7 +57,7 @@ pub use ext::{AsyncWriteExt, Buf, Flush, Shutdown, WriteAll, WriteAllBuf, WriteU
 pub use read::{AsyncRead, AsyncReadVectored, Chain, Take};
 pub use read_buf::ReadBuf;
 pub use seek::AsyncSeek;
-pub use split::{split, ReadHalf, SplitStream, WriteHalf};
+pub use split::{ReadHalf, SplitStream, WriteHalf, split};
 pub use write::{AsyncWrite, AsyncWriteVectored};
 pub use write_permit::WritePermit;
 

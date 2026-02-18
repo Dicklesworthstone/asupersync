@@ -10,7 +10,7 @@ use crate::lab::{LabConfig, LabRuntime, OracleSuite};
 use crate::record::ObligationKind;
 use crate::types::{Budget, ObligationId, RegionId, TaskId, Time};
 
-use super::mutation::{invariant_from_violation, BuiltinMutation, ALL_ORACLE_INVARIANTS};
+use super::mutation::{ALL_ORACLE_INVARIANTS, BuiltinMutation, invariant_from_violation};
 
 pub(crate) struct MetaHarness {
     pub runtime: LabRuntime,

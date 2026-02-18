@@ -779,7 +779,7 @@ mod tests {
         d.set(2, 1); // edge 1: v1-v2
         d.set(0, 2);
         d.set(2, 2); // edge 2: v0-v2
-                     // edges 3,4 duplicate edge 0
+        // edges 3,4 duplicate edge 0
         d.set(0, 3);
         d.set(1, 3);
         d.set(0, 4);

@@ -472,7 +472,7 @@ impl CertificatePin {
     /// Compute the SPKI SHA-256 pin for a certificate.
     #[cfg(feature = "tls")]
     pub fn compute_spki_sha256(cert: &Certificate) -> Result<Self, TlsError> {
-        use ring::digest::{digest, SHA256};
+        use ring::digest::{SHA256, digest};
         use x509_parser::prelude::*;
 
         let (_, parsed) = X509Certificate::from_der(cert.as_der())
@@ -491,7 +491,7 @@ impl CertificatePin {
     /// Compute the certificate SHA-256 pin for a certificate.
     #[cfg(feature = "tls")]
     pub fn compute_cert_sha256(cert: &Certificate) -> Result<Self, TlsError> {
-        use ring::digest::{digest, SHA256};
+        use ring::digest::{SHA256, digest};
         let hash = digest(&SHA256, cert.as_der());
         Ok(Self::CertSha256(hash.as_ref().to_vec()))
     }

@@ -64,7 +64,7 @@ pub use path_ops::{
     canonicalize, copy, hard_link, metadata, read, read_link, read_to_string, remove_file, rename,
     set_permissions, symlink_metadata, write,
 };
-pub use read_dir::{read_dir, DirEntry, ReadDir};
+pub use read_dir::{DirEntry, ReadDir, read_dir};
 
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
 pub use uring::IoUringFile;

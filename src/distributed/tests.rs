@@ -27,8 +27,8 @@ use crate::record::distributed_region::{
     ReplicaInfo, ReplicaStatus, TransitionReason,
 };
 use crate::record::region::RegionState;
-use crate::security::tag::AuthenticationTag;
 use crate::security::AuthenticatedSymbol;
+use crate::security::tag::AuthenticationTag;
 use crate::types::budget::Budget;
 use crate::types::symbol::{ObjectId, ObjectParams};
 use crate::types::{Outcome, RegionId, TaskId, Time};

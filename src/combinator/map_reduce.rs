@@ -37,10 +37,10 @@
 use core::fmt;
 use std::marker::PhantomData;
 
+use crate::types::Outcome;
 use crate::types::cancel::CancelReason;
 use crate::types::outcome::PanicPayload;
 use crate::types::policy::AggregateDecision;
-use crate::types::Outcome;
 
 /// A map-reduce combinator for parallel computation with aggregation.
 ///
@@ -266,7 +266,9 @@ impl<E: fmt::Display> fmt::Display for MapReduceError<E> {
                 "map-reduce task {index} failed: {error} ({total_failures} failures, {success_count} successes)"
             ),
             Self::Cancelled(r) => write!(f, "map-reduce cancelled: {r}"),
-            Self::Panicked { payload, index } => write!(f, "map-reduce task {index} panicked: {payload}"),
+            Self::Panicked { payload, index } => {
+                write!(f, "map-reduce task {index} panicked: {payload}")
+            }
             Self::Empty => write!(f, "map-reduce requires at least one input"),
         }
     }

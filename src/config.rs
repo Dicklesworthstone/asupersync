@@ -910,7 +910,7 @@ fn apply_observability_kv(
         _ => {
             return Err(ConfigError::Parse(format!(
                 "unknown key: observability.{key}"
-            )))
+            )));
         }
     }
     Ok(())
@@ -1008,6 +1008,7 @@ fn parse_path_strategy(value: &str, key: &str) -> Result<PathSelectionStrategy, 
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
 
@@ -1034,10 +1035,12 @@ mod tests {
 
     #[test]
     fn env_override_symbol_size() {
-        std::env::set_var("RAPTORQ_ENCODING_SYMBOL_SIZE", "512");
+        // SAFETY: tests serialize env access with test_utils::env_lock.
+        unsafe { std::env::set_var("RAPTORQ_ENCODING_SYMBOL_SIZE", "512") };
         let config = ConfigLoader::default().load().unwrap();
         assert_eq!(config.encoding.symbol_size, 512);
-        std::env::remove_var("RAPTORQ_ENCODING_SYMBOL_SIZE");
+        // SAFETY: tests serialize env access with test_utils::env_lock.
+        unsafe { std::env::remove_var("RAPTORQ_ENCODING_SYMBOL_SIZE") };
     }
 
     #[test]

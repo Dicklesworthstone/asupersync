@@ -6,7 +6,7 @@
 
 use super::analysis::SideConditionChecker;
 use super::rewrite::{
-    check_side_conditions, RewritePolicy, RewriteReport, RewriteRule, RewriteStep,
+    RewritePolicy, RewriteReport, RewriteRule, RewriteStep, check_side_conditions,
 };
 use super::{PlanDag, PlanId, PlanNode};
 
@@ -730,7 +730,7 @@ fn verify_join_assoc_result(
                 return Err(StepVerifyError::InvalidBeforeShape {
                     step: idx,
                     expected: "Join children must exist",
-                })
+                });
             }
         }
     }
@@ -797,7 +797,7 @@ fn verify_race_assoc_result(
                 return Err(StepVerifyError::InvalidBeforeShape {
                     step: idx,
                     expected: "Race children must exist",
-                })
+                });
             }
         }
     }
@@ -1068,7 +1068,7 @@ fn verify_dedup_race_join_result(
                 return Err(StepVerifyError::InvalidBeforeShape {
                     step: idx,
                     expected: "Shared child must be a Leaf under Conservative policy",
-                })
+                });
             }
         }
     }

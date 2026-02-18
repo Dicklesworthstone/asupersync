@@ -13,10 +13,10 @@
 //! sufficient to derive conflicts. Conflicts require branching observations
 //! (alternative traces) or additional semantic metadata.
 
-use crate::trace::independence::independent;
 use crate::trace::TraceData;
 use crate::trace::TraceEvent;
 use crate::trace::TraceEventKind;
+use crate::trace::independence::independent;
 use crate::types::{RegionId, TaskId};
 use core::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -220,11 +220,7 @@ impl TracePoset {
             }
         }
 
-        if out.len() == self.n {
-            Some(out)
-        } else {
-            None
-        }
+        if out.len() == self.n { Some(out) } else { None }
     }
 }
 

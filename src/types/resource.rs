@@ -690,11 +690,7 @@ fn exceeds_with_current(limit: usize, current: usize, requested: usize) -> bool 
 #[allow(clippy::cast_precision_loss)]
 fn ratio(usage: usize, limit: usize) -> f64 {
     if limit == 0 {
-        if usage == 0 {
-            0.0
-        } else {
-            1.0
-        }
+        if usage == 0 { 0.0 } else { 1.0 }
     } else {
         (usage as f64) / (limit as f64)
     }

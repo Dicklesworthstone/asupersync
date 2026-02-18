@@ -159,7 +159,7 @@ mod tests {
     use super::*;
     use crate::web::handler::FnHandler;
     use crate::web::response::StatusCode;
-    use crate::web::router::{get, post, Router};
+    use crate::web::router::{Router, get, post};
 
     fn test_server() -> VirtualServer {
         let router = Router::new()

@@ -1,7 +1,7 @@
 //! Mutable buffer with efficient growth and splitting.
 
-use super::buf::BufMut;
 use super::Bytes;
+use super::buf::BufMut;
 use std::ops::{Deref, DerefMut, RangeBounds};
 
 /// Mutable buffer that can be frozen into `Bytes`.

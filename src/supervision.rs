@@ -5201,12 +5201,12 @@ mod tests {
     // Monitor + Down Notification tests (bd-4r1ep)
     // ---------------------------------------------------------------
 
-    fn task_id(index: u32, gen: u32) -> TaskId {
-        TaskId::from_arena(ArenaIndex::new(index, gen))
+    fn task_id(index: u32, generation: u32) -> TaskId {
+        TaskId::from_arena(ArenaIndex::new(index, generation))
     }
 
-    fn region_id(index: u32, gen: u32) -> RegionId {
-        RegionId::from_arena(ArenaIndex::new(index, gen))
+    fn region_id(index: u32, generation: u32) -> RegionId {
+        RegionId::from_arena(ArenaIndex::new(index, generation))
     }
 
     #[test]
@@ -6385,17 +6385,21 @@ mod tests {
         let err: Outcome<(), ()> = Outcome::Err(());
 
         // restartable child with Err: plan exists (restart strategy)
-        assert!(compiled
-            .restart_plan_for_failure("restartable", &err)
-            .is_some());
+        assert!(
+            compiled
+                .restart_plan_for_failure("restartable", &err)
+                .is_some()
+        );
 
         // stopper child with Err: no plan (stop strategy)
         assert!(compiled.restart_plan_for_failure("stopper", &err).is_none());
 
         // escalator child with Err: no plan (escalate strategy, not restart)
-        assert!(compiled
-            .restart_plan_for_failure("escalator", &err)
-            .is_none());
+        assert!(
+            compiled
+                .restart_plan_for_failure("escalator", &err)
+                .is_none()
+        );
 
         crate::test_complete!("conformance_per_child_strategy_vs_supervisor_policy");
     }
@@ -7301,10 +7305,10 @@ mod tests {
         // Domain-specific ledger should have the entry.
         assert_eq!(supervisor.evidence().len(), 1);
         // Generalized ledger should also have the entry.
-        let gen = supervisor.generalized_evidence();
-        assert_eq!(gen.len(), 1);
+        let evidence = supervisor.generalized_evidence();
+        assert_eq!(evidence.len(), 1);
 
-        let record = &gen.entries()[0];
+        let record = &evidence.entries()[0];
         assert_eq!(record.subsystem, crate::evidence::Subsystem::Supervision);
         assert_eq!(record.verdict, Verdict::Restart);
         assert_eq!(record.task_id, task);
@@ -7327,10 +7331,10 @@ mod tests {
         let region = RegionId::from_arena(ArenaIndex::new(0, 0));
         supervisor.on_failure(task, region, None, &Outcome::Err(()), 2_000);
 
-        let gen = supervisor.generalized_evidence();
-        assert_eq!(gen.len(), 1);
+        let evidence = supervisor.generalized_evidence();
+        assert_eq!(evidence.len(), 1);
 
-        let record = &gen.entries()[0];
+        let record = &evidence.entries()[0];
         assert_eq!(record.verdict, Verdict::Stop);
         assert!(matches!(
             record.detail,
@@ -7349,10 +7353,10 @@ mod tests {
         let region = RegionId::from_arena(ArenaIndex::new(0, 0));
         supervisor.on_failure(task, region, None, &Outcome::Err(()), 3_000);
 
-        let gen = supervisor.generalized_evidence();
-        assert_eq!(gen.len(), 1);
+        let evidence = supervisor.generalized_evidence();
+        assert_eq!(evidence.len(), 1);
 
-        let record = &gen.entries()[0];
+        let record = &evidence.entries()[0];
         assert_eq!(record.verdict, Verdict::Escalate);
         assert!(matches!(
             record.detail,
@@ -7384,8 +7388,8 @@ mod tests {
             4_000,
         );
 
-        let gen = supervisor.generalized_evidence();
-        let record = &gen.entries()[0];
+        let evidence = supervisor.generalized_evidence();
+        let record = &evidence.entries()[0];
         assert_eq!(record.verdict, Verdict::Stop);
         assert!(matches!(
             record.detail,
@@ -7415,14 +7419,14 @@ mod tests {
         // Second failure: window exhausted.
         supervisor.on_failure(task, region, None, &Outcome::Err(()), 6_000);
 
-        let gen = supervisor.generalized_evidence();
-        assert_eq!(gen.len(), 2);
+        let evidence = supervisor.generalized_evidence();
+        assert_eq!(evidence.len(), 2);
 
         // First: restart.
-        assert_eq!(gen.entries()[0].verdict, Verdict::Restart);
+        assert_eq!(evidence.entries()[0].verdict, Verdict::Restart);
 
         // Second: stop due to window exhaustion.
-        let record = &gen.entries()[1];
+        let record = &evidence.entries()[1];
         assert_eq!(record.verdict, Verdict::Stop);
         assert!(matches!(
             record.detail,
@@ -7460,10 +7464,10 @@ mod tests {
             Some(&budget),
         );
 
-        let gen = supervisor.generalized_evidence();
-        assert_eq!(gen.len(), 1);
+        let evidence = supervisor.generalized_evidence();
+        assert_eq!(evidence.len(), 1);
 
-        let record = &gen.entries()[0];
+        let record = &evidence.entries()[0];
         assert_eq!(record.verdict, Verdict::Stop);
         assert!(matches!(
             record.detail,

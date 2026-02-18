@@ -126,7 +126,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     // ── Entropy ─────────────────────────────────────────────────────────
     AmbientFinding {
         file: "net/websocket/frame.rs",
-        line: 717,
+        line: 768,
         category: AmbientCategory::Entropy,
         severity: Severity::Critical,
         description: "getrandom::fill() for WebSocket mask key",
@@ -136,7 +136,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     // NOTE: net/websocket/handshake.rs was fixed — now uses EntropySource capability.
     AmbientFinding {
         file: "http/h1/stream.rs",
-        line: 1140,
+        line: 1193,
         category: AmbientCategory::Spawn,
         severity: Severity::Critical,
         description: "std::thread::spawn in HTTP/1 stream handling",

@@ -1,8 +1,8 @@
 //! Span types representing symbol operations.
 
 use super::context::SymbolTraceContext;
-use crate::types::symbol::{ObjectId, SymbolId};
 use crate::types::Time;
+use crate::types::symbol::{ObjectId, SymbolId};
 use std::collections::BTreeMap;
 
 /// Status of a symbol span.

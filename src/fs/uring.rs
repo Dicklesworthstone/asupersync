@@ -23,7 +23,7 @@
 #![allow(unsafe_code)]
 
 use crate::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
-use io_uring::{opcode, types, IoUring};
+use io_uring::{IoUring, opcode, types};
 use parking_lot::Mutex;
 use std::ffi::CString;
 use std::io::{self, SeekFrom};
@@ -31,8 +31,8 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll, Waker};
 
 /// Default io_uring queue size for file operations.

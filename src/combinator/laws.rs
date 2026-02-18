@@ -160,8 +160,8 @@
 //! 5. **Quorum degeneracies must hold by construction.**
 //!    quorum(N,N) = join and quorum(1,N) ≃ race are definitional.
 
-use crate::types::policy::AggregateDecision;
 use crate::types::Severity;
+use crate::types::policy::AggregateDecision;
 
 /// Every committed algebraic law, identified by name.
 ///
@@ -495,8 +495,7 @@ pub fn law_sheet() -> Vec<LawEntry> {
         LawEntry {
             law: Law::PipelineAssociativity,
             classification: LawClassification::ConditionalOnPolicy,
-            statement:
-                "pipeline(a, pipeline(b,c)) ~= pipeline(pipeline(a,b), c) under short-circuit",
+            statement: "pipeline(a, pipeline(b,c)) ~= pipeline(pipeline(a,b), c) under short-circuit",
         },
         // First-Ok
         LawEntry {
@@ -549,13 +548,13 @@ mod tests {
     use super::*;
     use crate::combinator::first_ok::first_ok_outcomes;
     use crate::combinator::hedge::{HedgeResult, HedgeWinner};
-    use crate::combinator::join::{join2_outcomes, join_all_outcomes};
-    use crate::combinator::pipeline::{pipeline_n_outcomes, PipelineResult};
+    use crate::combinator::join::{join_all_outcomes, join2_outcomes};
+    use crate::combinator::pipeline::{PipelineResult, pipeline_n_outcomes};
     use crate::combinator::quorum::quorum_outcomes;
-    use crate::combinator::race::{race2_outcomes, RaceWinner};
-    use crate::types::cancel::{CancelKind, CancelReason};
-    use crate::types::outcome::{join_outcomes, PanicPayload};
+    use crate::combinator::race::{RaceWinner, race2_outcomes};
     use crate::types::Outcome;
+    use crate::types::cancel::{CancelKind, CancelReason};
+    use crate::types::outcome::{PanicPayload, join_outcomes};
 
     // -- helpers --
 

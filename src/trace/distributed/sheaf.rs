@@ -551,9 +551,11 @@ mod tests {
         let report = checker.check();
         assert!(report.has_issues());
         assert_eq!(report.constraint_violations.len(), 1);
-        assert!(report.constraint_violations[0]
-            .explanation
-            .contains("Merged states disagree"));
+        assert!(
+            report.constraint_violations[0]
+                .explanation
+                .contains("Merged states disagree")
+        );
     }
 
     #[test]

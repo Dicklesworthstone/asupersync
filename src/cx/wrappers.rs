@@ -16,8 +16,8 @@
 //! Wrappers enforce that handlers cannot access effects they don't need,
 //! preventing ambient authority leaks.
 
-use crate::cx::cap::CapSet;
 use crate::cx::Cx;
+use crate::cx::cap::CapSet;
 use std::sync::Arc;
 
 /// Capability set for web request handlers: time + IO only.

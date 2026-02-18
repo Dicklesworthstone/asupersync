@@ -63,9 +63,9 @@ pub mod progress;
 pub mod signal;
 
 // Re-export commonly used types
-pub use args::{parse_color_choice, parse_output_format, CommonArgs, COMMON_ARGS_HELP};
-pub use completion::{generate_completions, Completable, CompletionItem, Shell};
-pub use error::{errors, CliError};
+pub use args::{COMMON_ARGS_HELP, CommonArgs, parse_color_choice, parse_output_format};
+pub use completion::{Completable, CompletionItem, Shell, generate_completions};
+pub use error::{CliError, errors};
 pub use exit::ExitCode;
 pub use output::{ColorChoice, Output, OutputFormat, Outputtable};
 pub use progress::{ProgressEvent, ProgressKind, ProgressReporter};
@@ -77,8 +77,8 @@ pub use signal::{CancellationToken, Signal, SignalHandler};
 /// use asupersync::cli::prelude::*;
 /// ```
 pub mod prelude {
-    pub use super::args::{CommonArgs, COMMON_ARGS_HELP};
-    pub use super::error::{errors, CliError};
+    pub use super::args::{COMMON_ARGS_HELP, CommonArgs};
+    pub use super::error::{CliError, errors};
     pub use super::exit::ExitCode;
     pub use super::output::{ColorChoice, Output, OutputFormat, Outputtable};
     pub use super::progress::{ProgressEvent, ProgressReporter};

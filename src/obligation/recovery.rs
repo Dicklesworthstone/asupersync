@@ -358,8 +358,8 @@ impl RecoveryGovernor {
     fn find_stale(&self, now_ns: u64) -> Vec<ObligationId> {
         self.first_seen_reserved
             .iter()
-            .filter(|(_, &first_seen)| {
-                now_ns.saturating_sub(first_seen) >= self.config.stale_timeout_ns
+            .filter(|(_, first_seen)| {
+                now_ns.saturating_sub(**first_seen) >= self.config.stale_timeout_ns
             })
             .map(|(id, _)| *id)
             .collect()
@@ -498,10 +498,12 @@ mod tests {
 
         // Recovery resolves it
         let result = gov.tick(&mut a, 0);
-        assert!(result
-            .actions
-            .iter()
-            .any(|a| matches!(a, RecoveryAction::ConflictResolved { .. })));
+        assert!(
+            result
+                .actions
+                .iter()
+                .any(|a| matches!(a, RecoveryAction::ConflictResolved { .. }))
+        );
     }
 
     #[test]
@@ -526,10 +528,12 @@ mod tests {
         a.merge(&b);
 
         let result = gov.tick(&mut a, 0);
-        assert!(result
-            .actions
-            .iter()
-            .any(|a| matches!(a, RecoveryAction::Flagged { .. })));
+        assert!(
+            result
+                .actions
+                .iter()
+                .any(|a| matches!(a, RecoveryAction::Flagged { .. }))
+        );
         assert!(result.remaining_conflicts > 0);
     }
 
@@ -543,10 +547,12 @@ mod tests {
         ledger.record_acquire(oid(1), ObligationKind::SendPermit); // double acquire
 
         let result = gov.tick(&mut ledger, 0);
-        assert!(result
-            .actions
-            .iter()
-            .any(|a| matches!(a, RecoveryAction::ViolationAborted { .. })));
+        assert!(
+            result
+                .actions
+                .iter()
+                .any(|a| matches!(a, RecoveryAction::ViolationAborted { .. }))
+        );
     }
 
     #[test]
@@ -560,10 +566,12 @@ mod tests {
         ledger.record_acquire(oid(1), ObligationKind::SendPermit);
 
         let result = gov.tick(&mut ledger, 0);
-        assert!(result
-            .actions
-            .iter()
-            .any(|a| matches!(a, RecoveryAction::Flagged { .. })));
+        assert!(
+            result
+                .actions
+                .iter()
+                .any(|a| matches!(a, RecoveryAction::Flagged { .. }))
+        );
     }
 
     // ── Convergence ─────────────────────────────────────────────────────
@@ -717,9 +725,11 @@ mod tests {
         // Recovery resolves the conflict
         let mut gov2 = RecoveryGovernor::new(test_config());
         let result = gov2.tick(&mut a, 0);
-        assert!(result
-            .actions
-            .iter()
-            .any(|a| matches!(a, RecoveryAction::ConflictResolved { .. })));
+        assert!(
+            result
+                .actions
+                .iter()
+                .any(|a| matches!(a, RecoveryAction::ConflictResolved { .. }))
+        );
     }
 }

@@ -10,8 +10,8 @@ use crate::signal::{ShutdownController, ShutdownReceiver};
 use crate::sync::Notify;
 use crate::time::wall_now;
 use crate::types::Time;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
 /// Phases of a graceful server shutdown.

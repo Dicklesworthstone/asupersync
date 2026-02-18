@@ -44,45 +44,45 @@ pub use circuit_breaker::{
     StateChangeCallback,
 };
 pub use first_ok::{
-    first_ok_outcomes, first_ok_to_result, FirstOk, FirstOkError, FirstOkFailure, FirstOkResult,
-    FirstOkSuccess,
+    FirstOk, FirstOkError, FirstOkFailure, FirstOkResult, FirstOkSuccess, first_ok_outcomes,
+    first_ok_to_result,
 };
 pub use hedge::{
-    hedge_outcomes, hedge_to_result, Hedge, HedgeConfig, HedgeError, HedgeResult, HedgeWinner,
+    Hedge, HedgeConfig, HedgeError, HedgeResult, HedgeWinner, hedge_outcomes, hedge_to_result,
 };
 pub use join::{
-    aggregate_outcomes, join2_outcomes, join2_to_result, join_all_outcomes, join_all_to_result,
-    make_join_all_result, Join, Join2Result, JoinAll, JoinAllError, JoinAllResult, JoinError,
+    Join, Join2Result, JoinAll, JoinAllError, JoinAllResult, JoinError, aggregate_outcomes,
+    join_all_outcomes, join_all_to_result, join2_outcomes, join2_to_result, make_join_all_result,
 };
 pub use map_reduce::{
-    make_map_reduce_result, map_reduce_outcomes, map_reduce_to_result, reduce_successes, MapReduce,
-    MapReduceError, MapReduceResult,
+    MapReduce, MapReduceError, MapReduceResult, make_map_reduce_result, map_reduce_outcomes,
+    map_reduce_to_result, reduce_successes,
 };
 pub use pipeline::{
-    pipeline2_outcomes, pipeline3_outcomes, pipeline_n_outcomes, pipeline_to_result,
-    pipeline_with_final, stage_outcome_to_result, FailedStage, Pipeline, PipelineConfig,
-    PipelineError, PipelineResult,
+    FailedStage, Pipeline, PipelineConfig, PipelineError, PipelineResult, pipeline_n_outcomes,
+    pipeline_to_result, pipeline_with_final, pipeline2_outcomes, pipeline3_outcomes,
+    stage_outcome_to_result,
 };
 pub use quorum::{
-    quorum_achieved, quorum_outcomes, quorum_still_possible, quorum_to_result, Quorum, QuorumError,
-    QuorumFailure, QuorumResult,
+    Quorum, QuorumError, QuorumFailure, QuorumResult, quorum_achieved, quorum_outcomes,
+    quorum_still_possible, quorum_to_result,
 };
 pub use race::{
-    make_race_all_result, race2_outcomes, race2_to_result, race_all_outcomes, race_all_to_result,
     Cancel, PollingOrder, Race, Race2, Race2Result, Race3, Race4, RaceAll, RaceAllError,
-    RaceAllResult, RaceError, RaceResult, RaceWinner,
+    RaceAllResult, RaceError, RaceResult, RaceWinner, make_race_all_result, race_all_outcomes,
+    race_all_to_result, race2_outcomes, race2_to_result,
 };
 pub use rate_limit::{
     RateLimitAlgorithm, RateLimitError, RateLimitMetrics, RateLimitPolicy, RateLimitPolicyBuilder,
     RateLimiter, RateLimiterRegistry, SlidingWindowRateLimiter, WaitStrategy,
 };
 pub use retry::{
-    calculate_deadline as retry_deadline, calculate_delay, make_retry_result, total_delay_budget,
     AlwaysRetry, NeverRetry, RetryError, RetryFailure, RetryIf, RetryPolicy, RetryPredicate,
-    RetryResult, RetryState,
+    RetryResult, RetryState, calculate_deadline as retry_deadline, calculate_delay,
+    make_retry_result, total_delay_budget,
 };
 pub use select::{Either, Select, SelectAll, SelectAllDrain, SelectAllDrainResult};
 pub use timeout::{
-    effective_deadline, make_timed_result, TimedError, TimedResult, Timeout, TimeoutConfig,
-    TimeoutError,
+    TimedError, TimedResult, Timeout, TimeoutConfig, TimeoutError, effective_deadline,
+    make_timed_result,
 };

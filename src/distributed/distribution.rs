@@ -3,11 +3,11 @@
 //! Provides [`SymbolDistributor`] for distributing encoded symbols to
 //! replicas and tracking acknowledgements with quorum semantics.
 
-use crate::combinator::quorum::{quorum_outcomes, QuorumResult};
+use crate::combinator::quorum::{QuorumResult, quorum_outcomes};
 use crate::error::ErrorKind;
 use crate::record::distributed_region::{ConsistencyLevel, ReplicaInfo};
-use crate::security::authenticated::AuthenticatedSymbol;
 use crate::security::SecurityContext;
+use crate::security::authenticated::AuthenticatedSymbol;
 use crate::types::symbol::ObjectId;
 use crate::types::{Outcome, Time};
 use std::future::Future;
@@ -203,6 +203,7 @@ impl SymbolDistributor {
 
     /// Computes the required acknowledgement count for the given consistency
     /// level and replica count.
+    #[inline]
     #[must_use]
     pub fn required_acks(consistency: ConsistencyLevel, replica_count: usize) -> usize {
         match consistency {
@@ -214,6 +215,7 @@ impl SymbolDistributor {
     }
 
     /// Computes symbol assignments for the given encoded state and replicas.
+    #[inline]
     #[must_use]
     pub fn compute_assignments(
         encoded: &EncodedState,

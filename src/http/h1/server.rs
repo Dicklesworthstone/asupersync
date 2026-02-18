@@ -13,7 +13,7 @@ use crate::io::{AsyncRead, AsyncWrite};
 use crate::server::shutdown::ShutdownSignal;
 use crate::stream::Stream;
 use crate::time::{timeout, wall_now};
-use std::future::{poll_fn, Future};
+use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::Poll;

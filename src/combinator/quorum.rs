@@ -46,9 +46,9 @@
 use core::fmt;
 use std::marker::PhantomData;
 
+use crate::types::Outcome;
 use crate::types::cancel::CancelReason;
 use crate::types::outcome::PanicPayload;
-use crate::types::Outcome;
 
 /// A quorum combinator for M-of-N completion semantics.
 ///

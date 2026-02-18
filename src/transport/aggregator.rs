@@ -8,12 +8,12 @@
 //! - `MultipathAggregator`: Main aggregation orchestrator
 
 use crate::error::{Error, ErrorKind};
-use crate::types::symbol::{ObjectId, Symbol, SymbolId};
 use crate::types::Time;
+use crate::types::symbol::{ObjectId, Symbol, SymbolId};
 use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 // ============================================================================
 // Path Types

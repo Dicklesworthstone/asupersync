@@ -5,7 +5,7 @@
 
 use crate::record::finalizer::{Finalizer, FinalizerStack};
 use crate::runtime::region_heap::{HeapIndex, RegionHeap};
-use crate::tracing_compat::{debug, info_span, Span};
+use crate::tracing_compat::{Span, debug, info_span};
 use crate::types::rref::{RRef, RRefAccessWitness, RRefError};
 use crate::types::{Budget, CancelReason, CurveBudget, RRefAccess, RegionId, TaskId, Time};
 use parking_lot::RwLock;
@@ -394,16 +394,52 @@ impl RegionRecord {
         }
     }
 
+    /// Returns the number of child regions without cloning the list.
+    #[inline]
+    #[must_use]
+    pub fn child_count(&self) -> usize {
+        self.inner.read().children.len()
+    }
+
     /// Returns a snapshot of child region IDs.
     #[must_use]
     pub fn child_ids(&self) -> Vec<RegionId> {
         self.inner.read().children.clone()
     }
 
+    /// Copies child region IDs into the provided buffer (avoids fresh allocation).
+    #[inline]
+    pub fn copy_child_ids_into(&self, buf: &mut Vec<RegionId>) {
+        let inner = self.inner.read();
+        buf.extend_from_slice(&inner.children);
+    }
+
+    /// Returns the number of tracked tasks without cloning the list.
+    #[inline]
+    #[must_use]
+    pub fn task_count(&self) -> usize {
+        self.inner.read().tasks.len()
+    }
+
     /// Returns a snapshot of task IDs.
     #[must_use]
     pub fn task_ids(&self) -> Vec<TaskId> {
         self.inner.read().tasks.clone()
+    }
+
+    /// Copies task IDs into the provided buffer (avoids fresh allocation).
+    #[inline]
+    pub fn copy_task_ids_into(&self, buf: &mut Vec<TaskId>) {
+        let inner = self.inner.read();
+        buf.extend_from_slice(&inner.tasks);
+    }
+
+    /// Returns task IDs as a SmallVec, avoiding heap allocation for typical regions.
+    #[inline]
+    #[must_use]
+    pub fn task_ids_small(&self) -> smallvec::SmallVec<[TaskId; 8]> {
+        let inner = self.inner.read();
+        smallvec::SmallVec::from_slice(&inner.tasks)
     }
 
     /// Returns true if the region has any live children, tasks, or pending obligations.
@@ -1087,23 +1123,33 @@ mod tests {
         });
 
         // Add children
-        assert!(region
-            .add_child(RegionId::from_arena(ArenaIndex::new(2, 0)))
-            .is_ok());
-        assert!(region
-            .add_child(RegionId::from_arena(ArenaIndex::new(3, 0)))
-            .is_err());
+        assert!(
+            region
+                .add_child(RegionId::from_arena(ArenaIndex::new(2, 0)))
+                .is_ok()
+        );
+        assert!(
+            region
+                .add_child(RegionId::from_arena(ArenaIndex::new(3, 0)))
+                .is_err()
+        );
 
         // Add tasks
-        assert!(region
-            .add_task(TaskId::from_arena(ArenaIndex::new(1, 0)))
-            .is_ok());
-        assert!(region
-            .add_task(TaskId::from_arena(ArenaIndex::new(2, 0)))
-            .is_ok());
-        assert!(region
-            .add_task(TaskId::from_arena(ArenaIndex::new(3, 0)))
-            .is_err());
+        assert!(
+            region
+                .add_task(TaskId::from_arena(ArenaIndex::new(1, 0)))
+                .is_ok()
+        );
+        assert!(
+            region
+                .add_task(TaskId::from_arena(ArenaIndex::new(2, 0)))
+                .is_ok()
+        );
+        assert!(
+            region
+                .add_task(TaskId::from_arena(ArenaIndex::new(3, 0)))
+                .is_err()
+        );
 
         // Reserve obligations
         assert!(region.try_reserve_obligation().is_ok());

@@ -114,7 +114,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stream::{iter, StreamExt};
+    use crate::stream::{StreamExt, iter};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();

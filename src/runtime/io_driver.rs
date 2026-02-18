@@ -698,8 +698,8 @@ mod tests {
     use super::*;
     use crate::runtime::reactor::{Event, Interest, LabReactor, Token};
     use crate::test_utils::init_test_logging;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::Wake;
 
     /// A simple waker that sets a flag and counts wakes.

@@ -49,5 +49,5 @@ pub mod session;
 pub mod watch;
 
 // Re-export commonly used types from mpsc (the default channel)
-pub use mpsc::{channel, Receiver, SendPermit, Sender};
-pub use session::{tracked_channel, tracked_oneshot, TrackedOneshotSender, TrackedSender};
+pub use mpsc::{Receiver, SendPermit, Sender, channel};
+pub use session::{TrackedOneshotSender, TrackedSender, tracked_channel, tracked_oneshot};

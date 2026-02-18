@@ -69,77 +69,77 @@ pub mod scoring;
 pub mod streaming;
 pub mod tla_export;
 
-pub use boundary::{matmul_gf2, SquareComplex};
+pub use boundary::{SquareComplex, matmul_gf2};
 pub use buffer::{TraceBuffer, TraceBufferHandle};
 pub use canonicalize::{
-    canonicalize, trace_event_key, trace_fingerprint, FoataTrace, TraceEventKey, TraceMonoid,
+    FoataTrace, TraceEventKey, TraceMonoid, canonicalize, trace_event_key, trace_fingerprint,
 };
 pub use causality::{CausalOrderVerifier, CausalityViolation, CausalityViolationKind};
 pub use certificate::{
     CertificateVerifier, TraceCertificate, VerificationResult as CertificateVerificationResult,
 };
 pub use compat::{
-    check_schema_compatibility, CompatEvent, CompatEventIterator, CompatReader, CompatStats,
-    CompatibilityResult, TraceMigration, TraceMigrator, MIN_SUPPORTED_SCHEMA_VERSION,
+    CompatEvent, CompatEventIterator, CompatReader, CompatStats, CompatibilityResult,
+    MIN_SUPPORTED_SCHEMA_VERSION, TraceMigration, TraceMigrator, check_schema_compatibility,
 };
-pub use compression::{compress as compress_trace, CompressedTrace, Level as CompressionLevel};
+pub use compression::{CompressedTrace, Level as CompressionLevel, compress as compress_trace};
 pub use crashpack::{
-    CrashPack, CrashPackBuilder, CrashPackConfig, CrashPackManifest, EvidenceEntrySnapshot,
-    FailureInfo, FailureOutcome, SupervisionSnapshot, CRASHPACK_SCHEMA_VERSION,
+    CRASHPACK_SCHEMA_VERSION, CrashPack, CrashPackBuilder, CrashPackConfig, CrashPackManifest,
+    EvidenceEntrySnapshot, FailureInfo, FailureOutcome, SupervisionSnapshot,
 };
 pub use delta_debug::{
-    generate_narrative, minimize as delta_debug_minimize, DeltaDebugConfig, DeltaDebugResult,
-    MinimizationStats,
+    DeltaDebugConfig, DeltaDebugResult, MinimizationStats, generate_narrative,
+    minimize as delta_debug_minimize,
 };
 pub use divergence::{
-    diagnose_divergence, minimal_divergent_prefix, minimize_divergent_prefix, AffectedEntities,
-    DiagnosticConfig, DivergenceCategory, DivergenceReport, EventSummary, MinimizationConfig,
-    MinimizationResult,
+    AffectedEntities, DiagnosticConfig, DivergenceCategory, DivergenceReport, EventSummary,
+    MinimizationConfig, MinimizationResult, diagnose_divergence, minimal_divergent_prefix,
+    minimize_divergent_prefix,
 };
 pub use dpor::{
-    detect_hb_races, detect_races, estimated_classes, racing_events, trace_coverage_analysis,
     BacktrackPoint, DetectedRace, HappensBeforeGraph, Race, RaceAnalysis, RaceDetector, RaceKind,
-    RaceReport, ResourceRaceDistribution, SleepSet, TraceCoverageAnalysis,
+    RaceReport, ResourceRaceDistribution, SleepSet, TraceCoverageAnalysis, detect_hb_races,
+    detect_races, estimated_classes, racing_events, trace_coverage_analysis,
 };
-pub use event::{TraceData, TraceEvent, TraceEventKind, TRACE_EVENT_SCHEMA_VERSION};
+pub use event::{TRACE_EVENT_SCHEMA_VERSION, TraceData, TraceEvent, TraceEventKind};
 pub use event_structure::{
     Event, EventId, EventStructure, HdaCell, HdaComplex, OwnerKey, TracePoset,
 };
 pub use file::{
-    read_trace, write_trace, CompressionMode, TraceEventIterator, TraceFileConfig, TraceFileError,
-    TraceReader, TraceWriter, TRACE_FILE_VERSION, TRACE_MAGIC,
+    CompressionMode, TRACE_FILE_VERSION, TRACE_MAGIC, TraceEventIterator, TraceFileConfig,
+    TraceFileError, TraceReader, TraceWriter, read_trace, write_trace,
 };
 pub use filter::{EventCategory, FilterBuilder, FilterableEvent, TraceFilter};
-pub use geodesic::{
-    count_switches, is_valid_linear_extension, normalize as geodesic_normalize, GeodesicAlgorithm,
-    GeodesicConfig, GeodesicResult,
-};
 #[cfg(feature = "test-internals")]
-pub use geodesic::{normalize_with_ledger, DecisionEntry, DecisionLedger};
+pub use geodesic::{DecisionEntry, DecisionLedger, normalize_with_ledger};
+pub use geodesic::{
+    GeodesicAlgorithm, GeodesicConfig, GeodesicResult, count_switches, is_valid_linear_extension,
+    normalize as geodesic_normalize,
+};
 pub use gf2::{BitVec, BoundaryMatrix, PersistencePairs, ReducedMatrix};
 pub use independence::{
-    accesses_conflict, independent, resource_footprint, AccessMode, Resource, ResourceAccess,
+    AccessMode, Resource, ResourceAccess, accesses_conflict, independent, resource_footprint,
 };
 pub use integrity::{
-    find_first_corruption, is_trace_valid_quick, verify_trace, IntegrityIssue, IssueSeverity,
-    VerificationOptions, VerificationResult,
+    IntegrityIssue, IssueSeverity, VerificationOptions, VerificationResult, find_first_corruption,
+    is_trace_valid_quick, verify_trace,
 };
 pub use minimizer::{
-    generate_narrative as generate_scenario_narrative, MinimizationReport, MinimizationStep,
-    ScenarioElement, StepKind, TraceMinimizer,
+    MinimizationReport, MinimizationStep, ScenarioElement, StepKind, TraceMinimizer,
+    generate_narrative as generate_scenario_narrative,
 };
 pub use recorder::{
-    LimitAction, LimitKind, LimitReached, RecorderConfig, TraceRecorder, DEFAULT_MAX_FILE_SIZE,
-    DEFAULT_MAX_MEMORY,
+    DEFAULT_MAX_FILE_SIZE, DEFAULT_MAX_MEMORY, LimitAction, LimitKind, LimitReached,
+    RecorderConfig, TraceRecorder,
 };
 pub use replay::{
-    CompactRegionId, CompactTaskId, ReplayEvent, ReplayTrace, ReplayTraceError, TraceMetadata,
-    REPLAY_SCHEMA_VERSION,
+    CompactRegionId, CompactTaskId, REPLAY_SCHEMA_VERSION, ReplayEvent, ReplayTrace,
+    ReplayTraceError, TraceMetadata,
 };
 pub use replayer::{Breakpoint, DivergenceError, ReplayError, ReplayMode, TraceReplayer};
 pub use scoring::{
-    score_boundary_matrix, score_persistence, seed_fingerprint, ClassId, EvidenceEntry,
-    EvidenceLedger, TopologicalScore,
+    ClassId, EvidenceEntry, EvidenceLedger, TopologicalScore, score_boundary_matrix,
+    score_persistence, seed_fingerprint,
 };
 pub use streaming::{
     ReplayCheckpoint, ReplayProgress, StreamingReplayError, StreamingReplayResult,

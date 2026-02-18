@@ -751,9 +751,9 @@ mod tests {
     fn compact_task_id_roundtrip() {
         let task = TaskId::new_for_test(123, 456);
         let compact = CompactTaskId::from(task);
-        let (index, gen) = compact.unpack();
+        let (index, generation) = compact.unpack();
         assert_eq!(index, 123);
-        assert_eq!(gen, 456);
+        assert_eq!(generation, 456);
         assert_eq!(compact.to_task_id(), task);
     }
 
@@ -1094,9 +1094,9 @@ mod tests {
     fn compact_region_id_roundtrip() {
         let region = RegionId::new_for_test(456, 789);
         let compact = CompactRegionId::from(region);
-        let (index, gen) = compact.unpack();
+        let (index, generation) = compact.unpack();
         assert_eq!(index, 456);
-        assert_eq!(gen, 789);
+        assert_eq!(generation, 789);
         assert_eq!(compact.to_region_id(), region);
     }
 

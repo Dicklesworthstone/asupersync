@@ -885,9 +885,11 @@ mod tests {
                 "entry should have evidence lines"
             );
             // Check first line references the equation.
-            assert!(entry.evidence_lines[0]
-                .equation
-                .contains("P(pass | violated)"));
+            assert!(
+                entry.evidence_lines[0]
+                    .equation
+                    .contains("P(pass | violated)")
+            );
         }
     }
 
@@ -931,9 +933,11 @@ mod tests {
             .find(|e| e.invariant == "task_leak")
             .unwrap();
         assert!(!task_entry.passed);
-        assert!(task_entry.evidence_lines[0]
-            .equation
-            .contains("P(violation_observed | violated)"));
+        assert!(
+            task_entry.evidence_lines[0]
+                .equation
+                .contains("P(violation_observed | violated)")
+        );
     }
 
     // -- violations_by_strength --

@@ -5,9 +5,9 @@
 
 use crate::config::EncodingConfig as PipelineEncodingConfig;
 use crate::encoding::EncodingPipeline;
+use crate::types::Time;
 use crate::types::resource::{PoolConfig, SymbolPool};
 use crate::types::symbol::{ObjectId, ObjectParams, Symbol};
-use crate::types::Time;
 use crate::util::DetRng;
 
 use super::snapshot::RegionSnapshot;

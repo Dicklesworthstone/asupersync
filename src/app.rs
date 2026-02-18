@@ -24,8 +24,8 @@
 //! - **Drop bomb**: `AppHandle` panics on drop if not explicitly stopped or joined,
 //!   matching the `GradedObligation` pattern to prevent silent resource leaks.
 
-use crate::cx::registry::RegistryHandle;
 use crate::cx::Cx;
+use crate::cx::registry::RegistryHandle;
 use crate::record::region::RegionState;
 use crate::runtime::region_table::RegionCreateError;
 use crate::runtime::state::RuntimeState;
@@ -704,9 +704,11 @@ mod tests {
             r.complete_close();
         }
 
-        assert!(state
-            .region(app_region)
-            .is_some_and(|r| r.state() == RegionState::Closed));
+        assert!(
+            state
+                .region(app_region)
+                .is_some_and(|r| r.state() == RegionState::Closed)
+        );
 
         let stopped = handle.join(&state).expect("join ok");
         assert_eq!(stopped.name, "empty_app");

@@ -21,7 +21,7 @@ use super::lookup::{HappyEyeballs, LookupIp, LookupMx, LookupSrv, LookupTxt};
 use crate::cx::Cx;
 use crate::net::TcpStream;
 use crate::runtime::spawn_blocking;
-use crate::time::{sleep, timeout, TimeSource, WallClock};
+use crate::time::{TimeSource, WallClock, sleep, timeout};
 use crate::types::Time;
 
 /// DNS resolver configuration.

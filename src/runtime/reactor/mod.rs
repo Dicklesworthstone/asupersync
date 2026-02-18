@@ -124,7 +124,7 @@ pub use lab::{FaultConfig, LabReactor};
 #[allow(unused_imports)]
 pub(crate) use registration::ReactorHandle;
 pub use registration::Registration;
-pub use source::{next_source_id, Source, SourceId, SourceWrapper};
+pub use source::{Source, SourceId, SourceWrapper, next_source_id};
 pub use token::{SlabToken, TokenSlab};
 
 #[cfg(target_os = "linux")]

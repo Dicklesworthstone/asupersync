@@ -371,12 +371,16 @@ mod tests {
     #[test]
     fn test_apply_max_frame_size_bounds() {
         let mut settings = Settings::default();
-        assert!(settings
-            .apply(Setting::MaxFrameSize(MIN_MAX_FRAME_SIZE))
-            .is_ok());
-        assert!(settings
-            .apply(Setting::MaxFrameSize(MAX_MAX_FRAME_SIZE))
-            .is_ok());
+        assert!(
+            settings
+                .apply(Setting::MaxFrameSize(MIN_MAX_FRAME_SIZE))
+                .is_ok()
+        );
+        assert!(
+            settings
+                .apply(Setting::MaxFrameSize(MAX_MAX_FRAME_SIZE))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -413,17 +417,21 @@ mod tests {
     fn test_to_settings_for_server_omits_enable_push() {
         let settings = SettingsBuilder::server().enable_push(false).build();
         let serialized = settings.to_settings_for_role(false);
-        assert!(!serialized
-            .iter()
-            .any(|setting| matches!(setting, Setting::EnablePush(_))));
+        assert!(
+            !serialized
+                .iter()
+                .any(|setting| matches!(setting, Setting::EnablePush(_)))
+        );
     }
 
     #[test]
     fn test_to_settings_minimal_for_server_omits_enable_push() {
         let settings = SettingsBuilder::server().enable_push(false).build();
         let minimal = settings.to_settings_minimal_for_role(false);
-        assert!(!minimal
-            .iter()
-            .any(|setting| matches!(setting, Setting::EnablePush(_))));
+        assert!(
+            !minimal
+                .iter()
+                .any(|setting| matches!(setting, Setting::EnablePush(_)))
+        );
     }
 }

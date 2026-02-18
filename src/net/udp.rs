@@ -409,7 +409,7 @@ mod tests {
     use crate::types::{Budget, RegionId, TaskId};
     use futures_lite::future;
     #[cfg(unix)]
-    use nix::fcntl::{fcntl, FcntlArg, OFlag};
+    use nix::fcntl::{FcntlArg, OFlag, fcntl};
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 

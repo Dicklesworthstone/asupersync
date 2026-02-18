@@ -431,7 +431,8 @@ where
             }
 
             // Send any pending pongs
-            while let Some(payload) = self.pending_pongs.pop() {
+            let pending_pongs = std::mem::take(&mut self.pending_pongs);
+            for payload in pending_pongs {
                 let pong = Frame::pong(payload);
                 self.send_frame(pong).await?;
             }

@@ -29,8 +29,8 @@
 //! to an [`EvidenceSink`].
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::channel::mpsc::{SendError, Sender};
 use crate::cx::Cx;
@@ -224,6 +224,7 @@ impl PartitionController {
     }
 
     /// Returns `true` if there is an active partition from `src` to `dst`.
+    #[inline]
     #[must_use]
     pub fn is_partitioned(&self, src: ActorId, dst: ActorId) -> bool {
         // Fast-path: skip the lock when no partitions exist (the common case).
@@ -234,6 +235,7 @@ impl PartitionController {
     }
 
     /// Returns the number of active directed partitions.
+    #[inline]
     #[must_use]
     pub fn active_partition_count(&self) -> usize {
         self.partition_count.load(Ordering::Relaxed)
@@ -250,11 +252,13 @@ impl PartitionController {
     }
 
     /// Returns the configured behavior for partitioned sends.
+    #[inline]
     #[must_use]
     pub fn behavior(&self) -> PartitionBehavior {
         self.behavior
     }
 
+    #[inline]
     fn record_drop(&self) {
         self.messages_dropped.fetch_add(1, Ordering::Relaxed);
     }
@@ -340,24 +344,28 @@ impl<T> PartitionSender<T> {
     }
 
     /// Returns the source actor id.
+    #[inline]
     #[must_use]
     pub fn src(&self) -> ActorId {
         self.src
     }
 
     /// Returns the destination actor id.
+    #[inline]
     #[must_use]
     pub fn dst(&self) -> ActorId {
         self.dst
     }
 
     /// Returns a reference to the underlying sender.
+    #[inline]
     #[must_use]
     pub fn inner(&self) -> &Sender<T> {
         &self.inner
     }
 
     /// Returns a reference to the partition controller.
+    #[inline]
     #[must_use]
     pub fn controller(&self) -> &Arc<PartitionController> {
         &self.controller
@@ -507,9 +515,11 @@ mod tests {
             .filter(|e| e.action == "partition_message_dropped")
             .count();
         assert_eq!(drop_entries, 5);
-        assert!(!entries
-            .iter()
-            .any(|e| e.action.starts_with("partition_partition_")));
+        assert!(
+            !entries
+                .iter()
+                .any(|e| e.action.starts_with("partition_partition_"))
+        );
     }
 
     #[test]
@@ -533,12 +543,16 @@ mod tests {
 
         // Evidence should indicate rejection, not drop.
         let entries = collector.entries();
-        assert!(entries
-            .iter()
-            .any(|e| e.action == "partition_message_rejected"));
-        assert!(!entries
-            .iter()
-            .any(|e| e.action == "partition_message_dropped"));
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.action == "partition_message_rejected")
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|e| e.action == "partition_message_dropped")
+        );
     }
 
     #[test]
@@ -707,9 +721,11 @@ mod tests {
             entries.iter().any(|e| e.action == "partition_heal"),
             "should log partition heal"
         );
-        assert!(!entries
-            .iter()
-            .any(|e| e.action.starts_with("partition_partition_")));
+        assert!(
+            !entries
+                .iter()
+                .any(|e| e.action.starts_with("partition_partition_"))
+        );
         for entry in &entries {
             assert_eq!(entry.component, "channel_partition");
             assert!(entry.is_valid());

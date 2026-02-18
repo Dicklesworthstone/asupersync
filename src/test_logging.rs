@@ -3075,10 +3075,11 @@ macro_rules! assert_with_context {
 // ============================================================================
 
 #[cfg(test)]
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -3822,7 +3823,8 @@ mod tests {
         let tmp = std::env::temp_dir().join("asupersync_harness_manifest_test");
         let _ = std::fs::remove_dir_all(&tmp);
 
-        std::env::set_var("ASUPERSYNC_TEST_ARTIFACTS_DIR", tmp.display().to_string());
+        // SAFETY: tests serialize env access with test_utils::env_lock.
+        unsafe { std::env::set_var("ASUPERSYNC_TEST_ARTIFACTS_DIR", tmp.display().to_string()) };
         let ctx = TestContext::new("auto_manifest", 0xCAFE).with_subsystem("time");
         let mut harness = TestHarness::with_context("auto_manifest", ctx);
 
@@ -3872,7 +3874,8 @@ mod tests {
             );
         }
 
-        std::env::remove_var("ASUPERSYNC_TEST_ARTIFACTS_DIR");
+        // SAFETY: tests serialize env access with test_utils::env_lock.
+        unsafe { std::env::remove_var("ASUPERSYNC_TEST_ARTIFACTS_DIR") };
         let _ = std::fs::remove_dir_all(&tmp);
         crate::test_complete!("test_harness_finish_auto_generates_manifest_on_failure");
     }

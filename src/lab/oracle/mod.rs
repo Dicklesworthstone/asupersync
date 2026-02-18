@@ -53,8 +53,8 @@ pub use cancellation_protocol::{
 };
 pub use deadline_monotone::{DeadlineMonotoneOracle, DeadlineMonotoneViolation};
 pub use determinism::{
-    assert_deterministic, assert_deterministic_multi, DeterminismOracle, DeterminismViolation,
-    TraceEventSummary,
+    DeterminismOracle, DeterminismViolation, TraceEventSummary, assert_deterministic,
+    assert_deterministic_multi,
 };
 pub use eprocess::{EProcess, EProcessConfig, EProcessMonitor, EValue, MonitorResult};
 pub use evidence::{

@@ -6,8 +6,8 @@ use crate::transport::{ChannelWaiter, SharedChannel};
 use smallvec::SmallVec;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 
 fn upsert_channel_waiter(
@@ -517,15 +517,15 @@ mod tests {
     use super::*;
     use crate::security::authenticated::AuthenticatedSymbol;
     use crate::security::tag::AuthenticationTag;
+    use crate::transport::SharedChannel;
     use crate::transport::channel;
     use crate::transport::stream::SymbolStream;
     use crate::transport::stream::SymbolStreamExt;
-    use crate::transport::SharedChannel;
     use crate::types::{Symbol, SymbolId, SymbolKind};
     use futures_lite::future;
     use parking_lot::Mutex;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Wake, Waker};
 
     fn init_test(name: &str) {

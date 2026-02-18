@@ -93,7 +93,7 @@ impl WsUrl {
             _ => {
                 return Err(HandshakeError::InvalidUrl(format!(
                     "unsupported scheme: {scheme}"
-                )))
+                )));
             }
         };
 

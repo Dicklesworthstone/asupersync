@@ -98,7 +98,7 @@
 
 use crate::channel::oneshot;
 use crate::combinator::{Either, Select};
-use crate::cx::{cap, Cx};
+use crate::cx::{Cx, cap};
 use crate::record::{AdmissionError, TaskRecord};
 use crate::runtime::task_handle::{JoinError, TaskHandle};
 use crate::runtime::{RegionCreateError, RuntimeState, SpawnError, StoredTask};
@@ -943,8 +943,8 @@ impl<P: Policy> Scope<'_, P> {
         Fut2: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        use crate::combinator::select::Select;
         use crate::combinator::Either;
+        use crate::combinator::select::Select;
         use std::pin::pin;
 
         // 1. Spawn primary

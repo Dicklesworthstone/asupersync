@@ -192,12 +192,12 @@ impl ObligationLedger {
         backtrace: Option<Arc<std::backtrace::Backtrace>>,
         description: Option<String>,
     ) -> ObligationToken {
-        let gen = self.next_gen;
+        let generation = self.next_gen;
         self.next_gen = self
             .next_gen
             .checked_add(1)
             .expect("obligation ledger generation overflow");
-        let idx = ArenaIndex::new(gen, 0);
+        let idx = ArenaIndex::new(generation, 0);
         let id = ObligationId::from_arena(idx);
 
         let record = if let Some(desc) = description {

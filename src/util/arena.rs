@@ -130,15 +130,15 @@ impl<T> Arena<T> {
                     next_free,
                     generation,
                 } => {
-                    let gen = *generation;
+                    let generation_value = *generation;
                     self.free_head = *next_free;
                     *slot = Slot::Occupied {
                         value,
-                        generation: gen,
+                        generation: generation_value,
                     };
                     ArenaIndex {
                         index: free_index,
-                        generation: gen,
+                        generation: generation_value,
                     }
                 }
                 Slot::Occupied { .. } => unreachable!("free list pointed to occupied slot"),
@@ -282,10 +282,10 @@ impl<T> Arena<T> {
 
             // Slot is or becomes vacant. Convert occupied→vacant if needed.
             if let Slot::Occupied { generation, .. } = &self.slots[i] {
-                let gen = *generation;
+                let generation_value = *generation;
                 self.slots[i] = Slot::Vacant {
                     next_free: None,
-                    generation: gen.wrapping_add(1),
+                    generation: generation_value.wrapping_add(1),
                 };
             } else if let Slot::Vacant { next_free, .. } = &mut self.slots[i] {
                 *next_free = None;
@@ -304,6 +304,17 @@ impl<T> Arena<T> {
 
         self.len = new_len;
         self.free_head = first_free;
+    }
+
+    /// Drains all occupied values, leaving the arena empty.
+    ///
+    /// Yields ownership of each value without cloning. All slots become
+    /// vacant and are linked into the free list.
+    pub fn drain_values(&mut self) -> DrainValues<'_, T> {
+        DrainValues {
+            arena: self,
+            pos: 0,
+        }
     }
 
     /// Returns true if the index is valid and points to an occupied slot.
@@ -347,10 +358,61 @@ impl<T> Arena<T> {
     }
 }
 
+/// Iterator that drains all occupied values from an [`Arena`].
+///
+/// Produced by [`Arena::drain_values`]. On each call to `next`, the next
+/// occupied slot is converted to vacant and its value yielded by ownership.
+/// When the iterator is dropped (whether exhausted or not), any remaining
+/// occupied slots are also drained.
+pub struct DrainValues<'a, T> {
+    arena: &'a mut Arena<T>,
+    pos: usize,
+}
+
+impl<T> Iterator for DrainValues<'_, T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        while self.pos < self.arena.slots.len() {
+            let i = self.pos;
+            self.pos += 1;
+
+            if let Slot::Occupied { generation, .. } = &self.arena.slots[i] {
+                let generation_value = *generation;
+                let old = core::mem::replace(
+                    &mut self.arena.slots[i],
+                    Slot::Vacant {
+                        next_free: self.arena.free_head,
+                        generation: generation_value.wrapping_add(1),
+                    },
+                );
+                self.arena.free_head = Some(i as u32);
+                self.arena.len -= 1;
+                if let Slot::Occupied { value, .. } = old {
+                    return Some(value);
+                }
+            }
+        }
+        None
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.arena.len))
+    }
+}
+
+impl<T> Drop for DrainValues<'_, T> {
+    fn drop(&mut self) {
+        // Exhaust the iterator to ensure all values are dropped and
+        // the arena is left in a consistent state.
+        for _ in self {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     #[test]
     fn insert_and_get() {

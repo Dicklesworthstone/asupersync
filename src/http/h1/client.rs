@@ -6,8 +6,8 @@ use crate::bytes::{Buf, BytesCursor, BytesMut};
 use crate::codec::Encoder;
 use crate::http::body::{Body, Frame, HeaderMap, HeaderName, HeaderValue, SizeHint};
 use crate::http::h1::codec::{
-    parse_header_line, require_transfer_encoding_chunked, unique_header_value,
-    validate_header_field, ChunkedBodyDecoder, HttpError,
+    ChunkedBodyDecoder, HttpError, parse_header_line, require_transfer_encoding_chunked,
+    unique_header_value, validate_header_field,
 };
 use crate::http::h1::types::{Method, Request, Response, Version};
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};

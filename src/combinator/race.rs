@@ -36,9 +36,9 @@ use smallvec::SmallVec;
 use std::future::Future;
 use std::marker::PhantomData;
 
+use crate::types::Outcome;
 use crate::types::cancel::CancelReason;
 use crate::types::outcome::PanicPayload;
-use crate::types::Outcome;
 
 // ============================================================================
 // Cancel Trait

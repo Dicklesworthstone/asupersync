@@ -4,8 +4,8 @@
 
 use crate::types::{CancelKind, Outcome, RegionId, TaskId};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::Duration;
 
 /// A monotonically increasing counter.

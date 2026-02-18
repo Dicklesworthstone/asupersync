@@ -9,7 +9,7 @@ use crossbeam_queue::SegQueue;
 use parking_lot::Mutex;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BinaryHeap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// A scheduled task with its priority metadata.
 #[derive(Debug, Clone, Copy)]
@@ -81,6 +81,16 @@ pub struct GlobalInjector {
     /// Approximate count of timed-lane tasks, allowing callers to skip
     /// acquiring the timed_queue mutex when the lane is empty.
     timed_count: CachePadded<AtomicUsize>,
+    /// Cached earliest deadline (nanoseconds) for the timed lane.
+    ///
+    /// Updated under the timed_queue lock on every inject/pop, so it
+    /// always reflects the heap's peek at the time of the last mutation.
+    /// `u64::MAX` means "no timed work" or "unknown".  Readers outside
+    /// the lock may briefly see a stale value, which is harmless:
+    /// stale-low → false positive in `has_runnable_work` (worker tries
+    /// a pop that finds nothing); stale-high → caught on the next
+    /// spin iteration once the store becomes visible.
+    cached_earliest_deadline: CachePadded<AtomicU64>,
 }
 
 /// Thread-safe EDF queue for timed tasks.
@@ -100,6 +110,7 @@ impl Default for GlobalInjector {
             ready_queue: SegQueue::new(),
             ready_count: CachePadded::new(AtomicUsize::new(0)),
             timed_count: CachePadded::new(AtomicUsize::new(0)),
+            cached_earliest_deadline: CachePadded::new(AtomicU64::new(u64::MAX)),
         }
     }
 }
@@ -160,6 +171,13 @@ impl GlobalInjector {
         let generation = queue.next_generation;
         queue.next_generation += 1;
         queue.heap.push(TimedTask::new(task, deadline, generation));
+        // Update cached earliest while under lock — no races with pop paths.
+        let earliest = queue
+            .heap
+            .peek()
+            .map_or(u64::MAX, |t| t.deadline.as_nanos());
+        self.cached_earliest_deadline
+            .store(earliest, Ordering::Relaxed);
         drop(queue);
     }
 
@@ -187,6 +205,7 @@ impl GlobalInjector {
     ///
     /// Returns `None` if the timed lane is empty.
     /// The caller should check if the deadline is due before executing.
+    #[inline]
     #[must_use]
     pub fn pop_timed(&self) -> Option<TimedTask> {
         if self.timed_count.load(Ordering::Relaxed) == 0 {
@@ -194,6 +213,12 @@ impl GlobalInjector {
         }
         let mut queue = self.timed_queue.lock();
         let result = queue.heap.pop();
+        let earliest = queue
+            .heap
+            .peek()
+            .map_or(u64::MAX, |t| t.deadline.as_nanos());
+        self.cached_earliest_deadline
+            .store(earliest, Ordering::Relaxed);
         drop(queue);
         if result.is_some() {
             self.decrement_timed_count();
@@ -204,28 +229,50 @@ impl GlobalInjector {
     /// Peeks at the earliest deadline in the timed lane without removing it.
     ///
     /// Returns `None` if the timed lane is empty.
+    #[inline]
     #[must_use]
     pub fn peek_earliest_deadline(&self) -> Option<Time> {
         if self.timed_count.load(Ordering::Relaxed) == 0 {
             return None;
         }
-        let queue = self.timed_queue.lock();
-        queue.heap.peek().map(|t| t.deadline)
+        // Use the cached earliest deadline to avoid acquiring the mutex.
+        // The cache is updated under lock on every inject/pop.
+        let cached = self.cached_earliest_deadline.load(Ordering::Relaxed);
+        if cached == u64::MAX {
+            None
+        } else {
+            Some(Time::from_nanos(cached))
+        }
     }
 
     /// Pops the earliest timed task only if its deadline is due.
     ///
     /// Returns `None` if the timed lane is empty or if the earliest
     /// deadline is still in the future.
+    #[inline]
     #[must_use]
     pub fn pop_timed_if_due(&self, now: Time) -> Option<TimedTask> {
         if self.timed_count.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        // Fast path: skip the mutex when the cached earliest deadline is
+        // still in the future.  The cache is updated under lock on every
+        // inject/pop, so the only inaccuracy is a brief Relaxed-ordering
+        // visibility lag — same as the timed_count check above.
+        let cached = self.cached_earliest_deadline.load(Ordering::Relaxed);
+        if cached != u64::MAX && Time::from_nanos(cached) > now {
             return None;
         }
         let mut queue = self.timed_queue.lock();
         if let Some(entry) = queue.heap.peek() {
             if entry.deadline <= now {
                 let result = queue.heap.pop();
+                let earliest = queue
+                    .heap
+                    .peek()
+                    .map_or(u64::MAX, |t| t.deadline.as_nanos());
+                self.cached_earliest_deadline
+                    .store(earliest, Ordering::Relaxed);
                 drop(queue);
                 if result.is_some() {
                     self.decrement_timed_count();
@@ -250,6 +297,7 @@ impl GlobalInjector {
     }
 
     /// Returns true if all lanes are empty.
+    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.cancel_queue.is_empty()
@@ -258,6 +306,12 @@ impl GlobalInjector {
     }
 
     /// Returns true if there is work that can be executed immediately.
+    ///
+    /// Uses the cached earliest deadline to avoid acquiring the timed_queue
+    /// mutex on the hot path.  The cache is updated under lock by every
+    /// inject/pop, so the only inaccuracy is a brief Relaxed-ordering
+    /// visibility lag (nanoseconds on x86, bounded spin iterations on ARM).
+    #[inline]
     #[must_use]
     pub fn has_runnable_work(&self, now: Time) -> bool {
         if !self.cancel_queue.is_empty() || !self.ready_queue.is_empty() {
@@ -266,14 +320,15 @@ impl GlobalInjector {
         if self.timed_count.load(Ordering::Relaxed) == 0 {
             return false;
         }
-        let queue = self.timed_queue.lock();
-        queue.heap.peek().is_some_and(|t| t.deadline <= now)
+        let earliest = self.cached_earliest_deadline.load(Ordering::Relaxed);
+        earliest != u64::MAX && Time::from_nanos(earliest) <= now
     }
 
     /// Returns the approximate number of pending tasks across all lanes.
     ///
     /// Derived from per-lane counters; avoids a dedicated atomic counter
     /// on every inject/pop.
+    #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
         self.cancel_queue.len()
@@ -282,24 +337,28 @@ impl GlobalInjector {
     }
 
     /// Returns true if the cancel lane has pending work.
+    #[inline]
     #[must_use]
     pub fn has_cancel_work(&self) -> bool {
         !self.cancel_queue.is_empty()
     }
 
     /// Returns true if the timed lane has pending work.
+    #[inline]
     #[must_use]
     pub fn has_timed_work(&self) -> bool {
         self.timed_count.load(Ordering::Relaxed) > 0
     }
 
     /// Returns true if the ready lane has pending work.
+    #[inline]
     #[must_use]
     pub fn has_ready_work(&self) -> bool {
         !self.ready_queue.is_empty()
     }
 
     /// Returns the approximate number of tasks in the ready lane.
+    #[inline]
     #[must_use]
     pub fn ready_count(&self) -> usize {
         self.ready_count.load(Ordering::Relaxed)

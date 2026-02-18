@@ -330,7 +330,7 @@ impl DeadlineMonitor {
         self.last_scan_time = Some(now);
         self.last_scan_instant = Some(now_instant);
         self.scan_generation = self.scan_generation.wrapping_add(1);
-        let gen = self.scan_generation;
+        let scan_generation = self.scan_generation;
 
         for task in tasks {
             if task.state.is_terminal() {
@@ -383,11 +383,11 @@ impl DeadlineMonitor {
                     last_checkpoint_seen: last_checkpoint,
                     warned: false,
                     violated: false,
-                    seen_gen: gen,
+                    seen_gen: scan_generation,
                 });
 
                 // Keep metadata up to date.
-                entry.seen_gen = gen;
+                entry.seen_gen = scan_generation;
                 entry.region_id = task.owner;
                 entry.deadline = deadline;
                 if let Some(checkpoint) = last_checkpoint {
@@ -458,7 +458,7 @@ impl DeadlineMonitor {
         // Remove tasks that are no longer present in the scan.
         for entry in &mut self.monitored {
             if let Some(monitored) = entry {
-                if monitored.seen_gen != gen {
+                if monitored.seen_gen != scan_generation {
                     *entry = None;
                 }
             }
@@ -536,8 +536,8 @@ mod tests {
     use crate::record::TaskRecord;
     use crate::types::{Budget, CxInner, RegionId, TaskId};
     use parking_lot::{Mutex, RwLock};
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();

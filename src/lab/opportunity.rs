@@ -275,9 +275,11 @@ mod tests {
         let result = s.evaluate();
         assert!(!result.reasons.is_empty());
         assert!(result.reasons.contains(&"score meets threshold (>= 2.0)"));
-        assert!(result
-            .reasons
-            .contains(&"high confidence from profiling evidence"));
+        assert!(
+            result
+                .reasons
+                .contains(&"high confidence from profiling evidence")
+        );
         assert!(result.reasons.contains(&"low implementation effort"));
     }
 
@@ -287,12 +289,16 @@ mod tests {
         // 4 × 0.4 / 1 = 1.6 → NeedsEvidence
         let result = s.evaluate();
         assert_eq!(result.decision, GateDecision::NeedsEvidence);
-        assert!(result
-            .reasons
-            .contains(&"needs profiling data to increase confidence"));
-        assert!(result
-            .reasons
-            .contains(&"high potential impact justifies further investigation"));
+        assert!(
+            result
+                .reasons
+                .contains(&"needs profiling data to increase confidence")
+        );
+        assert!(
+            result
+                .reasons
+                .contains(&"high potential impact justifies further investigation")
+        );
     }
 
     #[test]
@@ -302,9 +308,11 @@ mod tests {
         let result = s.evaluate();
         assert_eq!(result.decision, GateDecision::Reject);
         assert!(result.reasons.contains(&"low expected impact"));
-        assert!(result
-            .reasons
-            .contains(&"high implementation effort relative to gain"));
+        assert!(
+            result
+                .reasons
+                .contains(&"high implementation effort relative to gain")
+        );
     }
 
     #[test]

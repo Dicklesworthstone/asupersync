@@ -19,9 +19,9 @@
 //! ```
 
 use crate::console::Console;
+use crate::record::ObligationState;
 use crate::record::region::RegionState;
 use crate::record::task::TaskState;
-use crate::record::ObligationState;
 use crate::runtime::state::RuntimeState;
 use crate::time::TimerDriverHandle;
 use crate::tracing_compat::{debug, trace, warn};

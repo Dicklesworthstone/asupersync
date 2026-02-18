@@ -27,7 +27,7 @@
 
 #![allow(clippy::many_single_char_names)]
 
-use crate::raptorq::gf256::{gf256_addmul_slice, Gf256};
+use crate::raptorq::gf256::{Gf256, gf256_addmul_slice};
 use crate::raptorq::rfc6330::repair_indices_for_esi;
 #[cfg(test)]
 use crate::util::DetRng;

@@ -3,8 +3,8 @@
 use super::context::RegionTag;
 use super::id::TraceId;
 use super::span::{SymbolSpan, SymbolSpanKind, SymbolSpanStatus};
-use crate::types::symbol::ObjectId;
 use crate::types::Time;
+use crate::types::symbol::ObjectId;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::time::Duration;

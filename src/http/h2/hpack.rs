@@ -518,8 +518,7 @@ impl Decoder {
         let name = if index == 0 {
             decode_string(src)?
         } else {
-            let header = self.get_indexed(index)?;
-            header.name
+            self.get_indexed_name(index)?
         };
 
         let value = decode_string(src)?;
@@ -541,6 +540,27 @@ impl Decoder {
             self.dynamic_table
                 .get(dyn_index)
                 .cloned()
+                .ok_or_else(|| H2Error::compression("invalid dynamic index"))
+        }
+    }
+
+    /// Get only the header name by index from static or dynamic table.
+    ///
+    /// This avoids cloning full header values on indexed-name literal fields.
+    fn get_indexed_name(&self, index: usize) -> Result<String, H2Error> {
+        if index == 0 {
+            return Err(H2Error::compression("invalid index 0"));
+        }
+
+        if index <= STATIC_TABLE.len() {
+            let (name, _) =
+                get_static(index).ok_or_else(|| H2Error::compression("invalid static index"))?;
+            Ok(name.to_string())
+        } else {
+            let dyn_index = index - STATIC_TABLE.len();
+            self.dynamic_table
+                .get(dyn_index)
+                .map(|h| h.name.clone())
                 .ok_or_else(|| H2Error::compression("invalid dynamic index"))
         }
     }

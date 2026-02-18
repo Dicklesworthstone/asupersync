@@ -108,9 +108,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stream::{iter, StreamExt};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::stream::{StreamExt, iter};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Wake, Waker};
 
     struct NoopWaker;

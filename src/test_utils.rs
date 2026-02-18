@@ -24,14 +24,14 @@ use crate::cx::Cx;
 use crate::lab::{LabConfig, LabRuntime};
 use crate::runtime::RuntimeBuilder;
 pub use crate::test_logging::{
-    derive_component_seed, derive_entropy_seed, derive_scenario_seed, wait_until_healthy,
-    AllocatedPort, DockerFixtureService, EnvironmentMetadata, FixtureService, InProcessService,
-    NoOpFixtureService, PortAllocator, ReproManifest, TempDirFixture, TestContext, TestEnvironment,
-    ARTIFACT_SCHEMA_VERSION,
+    ARTIFACT_SCHEMA_VERSION, AllocatedPort, DockerFixtureService, EnvironmentMetadata,
+    FixtureService, InProcessService, NoOpFixtureService, PortAllocator, ReproManifest,
+    TempDirFixture, TestContext, TestEnvironment, derive_component_seed, derive_entropy_seed,
+    derive_scenario_seed, wait_until_healthy,
 };
 pub use crate::test_ndjson::{
-    artifact_base_dir, artifact_bundle_dir, ndjson_file_name, trace_file_name,
-    write_artifact_bundle, NdjsonEvent, NdjsonLogger, NDJSON_SCHEMA_VERSION,
+    NDJSON_SCHEMA_VERSION, NdjsonEvent, NdjsonLogger, artifact_base_dir, artifact_bundle_dir,
+    ndjson_file_name, trace_file_name, write_artifact_bundle,
 };
 use crate::time::timeout;
 use parking_lot::Mutex;

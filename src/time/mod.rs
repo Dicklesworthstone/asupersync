@@ -51,16 +51,16 @@ mod sleep;
 mod timeout_future;
 mod wheel;
 
-pub use budget_ext::{budget_sleep, budget_timeout, BudgetTimeExt};
+pub use budget_ext::{BudgetTimeExt, budget_sleep, budget_timeout};
 pub use deadline::{with_deadline, with_timeout};
 pub use driver::{
     TimeSource, TimerDriver, TimerDriverApi, TimerDriverHandle, TimerHandle, VirtualClock,
     WallClock,
 };
 pub use elapsed::Elapsed;
-pub use interval::{interval, interval_at, Interval, MissedTickBehavior};
-pub use sleep::{sleep, sleep_until, wall_now, Sleep};
-pub use timeout_future::{timeout, timeout_at, TimeoutFuture};
+pub use interval::{Interval, MissedTickBehavior, interval, interval_at};
+pub use sleep::{Sleep, sleep, sleep_until, wall_now};
+pub use timeout_future::{TimeoutFuture, timeout, timeout_at};
 pub use wheel::{
     CoalescingConfig, TimerDurationExceeded, TimerHandle as WheelTimerHandle, TimerWheel,
     TimerWheelConfig,

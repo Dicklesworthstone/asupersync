@@ -1,4 +1,5 @@
 #![allow(unsafe_code)]
+#![allow(unsafe_op_in_unsafe_fn)]
 //! Intrusive single-level timer wheel for efficient timer management.
 //!
 //! This module provides a zero-allocation timer wheel using intrusive linked
@@ -927,8 +928,8 @@ fn duration_to_ns(duration: Duration) -> u64 {
 mod tests {
     use super::*;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::Wake;
 
     fn init_test(name: &str) {

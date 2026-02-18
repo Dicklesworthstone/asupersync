@@ -32,7 +32,7 @@
 //! ```
 
 use super::file::{HEADER_SIZE, TRACE_FILE_VERSION, TRACE_MAGIC};
-use super::replay::{ReplayEvent, TraceMetadata, REPLAY_SCHEMA_VERSION};
+use super::replay::{REPLAY_SCHEMA_VERSION, ReplayEvent, TraceMetadata};
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -945,10 +945,12 @@ mod tests {
         let result = verify_trace(path, &VerificationOptions::strict()).unwrap();
 
         assert!(!result.is_valid());
-        assert!(result
-            .issues()
-            .iter()
-            .any(|i| matches!(i, IntegrityIssue::TimelineNonMonotonic { at_event: 1, .. })));
+        assert!(
+            result
+                .issues()
+                .iter()
+                .any(|i| matches!(i, IntegrityIssue::TimelineNonMonotonic { at_event: 1, .. }))
+        );
     }
 
     #[test]

@@ -1025,11 +1025,13 @@ mod tests {
 
         assert!(!result.calm_optimized);
         assert!(result.fallback_reason.is_some());
-        assert!(result
-            .fallback_reason
-            .as_ref()
-            .unwrap()
-            .contains("simulated"));
+        assert!(
+            result
+                .fallback_reason
+                .as_ref()
+                .unwrap()
+                .contains("simulated")
+        );
     }
 
     #[test]

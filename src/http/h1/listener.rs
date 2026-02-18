@@ -359,8 +359,8 @@ mod tests {
     use super::*;
     use crate::http::h1::types::Response;
     use crate::io::AsyncWriteExt;
-    use crate::runtime::yield_now;
     use crate::runtime::RuntimeBuilder;
+    use crate::runtime::yield_now;
     use crate::sync::Notify;
     use crate::test_utils::init_test_logging;
     use std::sync::Arc;

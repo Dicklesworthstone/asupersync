@@ -63,8 +63,8 @@ mod tests {
     use super::*;
     use futures_lite::future;
     use parking_lot::{Condvar, Mutex};
-    use std::future::poll_fn;
     use std::future::Future;
+    use std::future::poll_fn;
     use std::net::SocketAddr;
     use std::sync::Arc;
     use std::task::Poll;

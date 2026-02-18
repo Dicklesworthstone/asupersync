@@ -29,8 +29,8 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use crate::cx::Cx;
@@ -122,12 +122,14 @@ impl<T> Mutex<T> {
     }
 
     /// Returns true if the mutex is poisoned.
+    #[inline]
     #[must_use]
     pub fn is_poisoned(&self) -> bool {
         self.poisoned.load(Ordering::Acquire)
     }
 
     /// Returns true if the mutex is currently locked.
+    #[inline]
     #[must_use]
     pub fn is_locked(&self) -> bool {
         self.state.lock().locked
@@ -181,6 +183,7 @@ impl<T> Mutex<T> {
         self.poisoned.store(true, Ordering::Release);
     }
 
+    #[inline]
     fn unlock(&self) {
         // Extract the waker to wake outside the lock to prevent deadlocks.
         // Waking while holding the lock can cause priority inversion or deadlock
@@ -213,6 +216,7 @@ pub struct LockFuture<'a, 'b, T> {
 impl<'a, T> Future for LockFuture<'a, '_, T> {
     type Output = Result<MutexGuard<'a, T>, LockError>;
 
+    #[inline]
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         // Check cancellation
         if let Err(_e) = self.cx.checkpoint() {
@@ -381,6 +385,7 @@ impl<T> OwnedMutexGuard<T> {
 
         impl<T> Future for OwnedLockFuture<T> {
             type Output = Result<OwnedMutexGuard<T>, LockError>;
+            #[inline]
             fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
                 if self.cx.checkpoint().is_err() {
                     return Poll::Ready(Err(LockError::Cancelled));

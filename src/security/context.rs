@@ -8,8 +8,8 @@ use crate::security::error::{AuthError, AuthErrorKind};
 use crate::security::key::AuthKey;
 use crate::security::tag::AuthenticationTag;
 use crate::types::Symbol;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Authentication mode for the security context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -40,6 +40,7 @@ where
     F: Fn() -> Res + Send + Sync + 'static,
     Res: IntoResponse,
 {
+    #[inline]
     fn call(&self, _req: Request) -> Response {
         (self.func)().into_response()
     }
@@ -67,6 +68,7 @@ where
     T1: FromRequest + Send + Sync + 'static,
     Res: IntoResponse,
 {
+    #[inline]
     fn call(&self, req: Request) -> Response {
         match T1::from_request(req) {
             Ok(t1) => (self.func)(t1).into_response(),
@@ -98,6 +100,7 @@ where
     T2: FromRequest + Send + Sync + 'static,
     Res: IntoResponse,
 {
+    #[inline]
     fn call(&self, req: Request) -> Response {
         let t1 = match T1::from_request_parts(&req) {
             Ok(v) => v,

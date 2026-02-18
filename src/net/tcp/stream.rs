@@ -179,16 +179,19 @@ impl TcpStream {
     }
 
     /// Get peer address.
+    #[inline]
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
         self.inner.peer_addr()
     }
 
     /// Get local address.
+    #[inline]
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.inner.local_addr()
     }
 
     /// Shutdown.
+    #[inline]
     pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         self.inner.shutdown(how)
     }
@@ -238,6 +241,7 @@ impl TcpStream {
         OwnedReadHalf::new_pair(inner, registration)
     }
 
+    #[inline]
     fn register_interest(&mut self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
         if let Some(registration) = &mut self.registration {
             let combined = registration.interest() | interest;
@@ -394,6 +398,7 @@ async fn wait_for_connect_fallback(socket: &Socket) -> io::Result<()> {
 }
 
 impl AsyncRead for TcpStream {
+    #[inline]
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -420,6 +425,7 @@ impl AsyncRead for TcpStream {
 }
 
 impl AsyncReadVectored for TcpStream {
+    #[inline]
     fn poll_read_vectored(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -443,6 +449,7 @@ impl AsyncReadVectored for TcpStream {
 }
 
 impl AsyncWrite for TcpStream {
+    #[inline]
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -463,6 +470,7 @@ impl AsyncWrite for TcpStream {
         }
     }
 
+    #[inline]
     fn poll_write_vectored(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -484,10 +492,12 @@ impl AsyncWrite for TcpStream {
         }
     }
 
+    #[inline]
     fn is_write_vectored(&self) -> bool {
         true
     }
 
+    #[inline]
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         use std::io::Write;
         let this = self.get_mut();
@@ -504,6 +514,7 @@ impl AsyncWrite for TcpStream {
         }
     }
 
+    #[inline]
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.inner.shutdown(Shutdown::Write)?;
         Poll::Ready(Ok(()))
@@ -530,14 +541,17 @@ impl TcpStreamApi for TcpStream {
         Self::connect(addr)
     }
 
+    #[inline]
     fn peer_addr(&self) -> io::Result<SocketAddr> {
         Self::peer_addr(self)
     }
 
+    #[inline]
     fn local_addr(&self) -> io::Result<SocketAddr> {
         Self::local_addr(self)
     }
 
+    #[inline]
     fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         Self::shutdown(self, how)
     }
@@ -567,13 +581,13 @@ mod tests {
     use crate::types::{Budget, RegionId, TaskId, Time};
     use futures_lite::future;
     #[cfg(unix)]
-    use nix::fcntl::{fcntl, FcntlArg, OFlag};
-    use std::future::poll_fn;
+    use nix::fcntl::{FcntlArg, OFlag, fcntl};
     use std::future::Future;
+    use std::future::poll_fn;
     use std::io;
     use std::net::{SocketAddr, TcpListener};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
     use std::time::Duration;
 

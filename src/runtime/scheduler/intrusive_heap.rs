@@ -164,11 +164,11 @@ impl IntrusivePriorityHeap {
             return;
         }
 
-        let gen = self.next_generation;
+        let generation = self.next_generation;
         self.next_generation += 1;
 
         record.sched_priority = priority;
-        record.sched_generation = gen;
+        record.sched_generation = generation;
 
         let pos = self.heap.len();
         record.heap_index = Some(pos as u32);

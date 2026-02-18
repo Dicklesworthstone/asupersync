@@ -232,7 +232,7 @@ where
             {
                 let shared = &mut *self.shared.lock();
                 shared.write_buf.clear();
-                while let Some(payload) = shared.pending_pongs.pop() {
+                for payload in shared.pending_pongs.drain(..) {
                     let pong = Frame::pong(payload);
                     let (codec, write_buf) = (&mut shared.codec, &mut shared.write_buf);
                     codec.encode(pong, write_buf)?;
@@ -778,7 +778,7 @@ mod tests {
     #[test]
     fn multiple_pong_payloads_all_encoded() {
         // Verifies that when multiple pongs are pending, all are encoded
-        // (not just the last one).
+        // and in FIFO order.
         future::block_on(async {
             let ws = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
             let (read, _write) = ws.split();
@@ -795,20 +795,31 @@ mod tests {
             {
                 let shared = &mut *read.shared.lock();
                 shared.write_buf.clear();
-                while let Some(payload) = shared.pending_pongs.pop() {
+                for payload in shared.pending_pongs.drain(..) {
                     let pong = Frame::pong(payload);
                     let (codec, write_buf) = (&mut shared.codec, &mut shared.write_buf);
                     codec.encode(pong, write_buf).unwrap();
                 }
             }
 
-            // All three pong frames must be present in write_buf.
-            // Each pong frame has at least 2-byte header + payload, so minimum
-            // 8 + 8 + 8 = 24 bytes for 6-byte payloads.
-            let write_buf_len = read.shared.lock().write_buf.len();
-            assert!(
-                write_buf_len >= 24,
-                "write_buf must contain all three pong frames, got {write_buf_len} bytes",
+            let encoded = read.shared.lock().write_buf.clone();
+            let mut decode_buf = encoded;
+            let mut decoder = FrameCodec::server();
+            let mut payloads = Vec::new();
+
+            while let Some(frame) = decoder.decode(&mut decode_buf).unwrap() {
+                assert_eq!(frame.opcode, Opcode::Pong);
+                payloads.push(frame.payload);
+            }
+
+            assert_eq!(
+                payloads,
+                vec![
+                    Bytes::from_static(b"pong-a"),
+                    Bytes::from_static(b"pong-b"),
+                    Bytes::from_static(b"pong-c"),
+                ],
+                "pending pong payloads must be emitted in receive order"
             );
         });
     }

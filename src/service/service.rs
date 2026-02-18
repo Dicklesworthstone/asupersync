@@ -1216,10 +1216,10 @@ mod tests {
             AdapterConfig, AsupersyncAdapter, AsupersyncService, CancellationMode,
             TowerAdapterError,
         };
+        use crate::Cx;
         use crate::time::{TimerDriverHandle, VirtualClock};
         use crate::types::{Budget, RegionId, TaskId, Time};
-        use crate::Cx;
-        use std::future::{pending, Future};
+        use std::future::{Future, pending};
         use std::pin::pin;
         use std::sync::Arc;
         use std::task::{Context, Poll, Wake, Waker};

@@ -7,8 +7,8 @@ use crate::types::TaskId;
 use crate::util::DetRng;
 use parking_lot::Mutex;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 /// Core trait for entropy providers.

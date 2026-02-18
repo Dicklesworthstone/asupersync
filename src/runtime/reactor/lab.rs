@@ -1704,8 +1704,8 @@ mod tests {
     mod io_driver_integration {
         use super::*;
         use crate::runtime::io_driver::IoDriver;
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::task::{Wake, Waker};
 
         struct FlagWaker {

@@ -90,13 +90,8 @@ pub struct CapSet<
     const REMOTE: bool,
 >;
 
-impl<
-        const SPAWN: bool,
-        const TIME: bool,
-        const RANDOM: bool,
-        const IO: bool,
-        const REMOTE: bool,
-    > sealed::Sealed for CapSet<SPAWN, TIME, RANDOM, IO, REMOTE>
+impl<const SPAWN: bool, const TIME: bool, const RANDOM: bool, const IO: bool, const REMOTE: bool>
+    sealed::Sealed for CapSet<SPAWN, TIME, RANDOM, IO, REMOTE>
 {
 }
 
@@ -180,17 +175,17 @@ pub trait SubsetOf<Super>: sealed::Sealed {}
 
 // General pointwise subset: Sub ⊆ Super iff each capability bit in Sub ≤ Super.
 impl<
-        const S1: bool,
-        const T1: bool,
-        const R1: bool,
-        const I1: bool,
-        const RE1: bool,
-        const S2: bool,
-        const T2: bool,
-        const R2: bool,
-        const I2: bool,
-        const RE2: bool,
-    > SubsetOf<CapSet<S2, T2, R2, I2, RE2>> for CapSet<S1, T1, R1, I1, RE1>
+    const S1: bool,
+    const T1: bool,
+    const R1: bool,
+    const I1: bool,
+    const RE1: bool,
+    const S2: bool,
+    const T2: bool,
+    const R2: bool,
+    const I2: bool,
+    const RE2: bool,
+> SubsetOf<CapSet<S2, T2, R2, I2, RE2>> for CapSet<S1, T1, R1, I1, RE1>
 where
     (sealed::Bit<S1>, sealed::Bit<S2>): sealed::Le,
     (sealed::Bit<T1>, sealed::Bit<T2>): sealed::Le,

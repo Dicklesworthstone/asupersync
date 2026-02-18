@@ -57,8 +57,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::actor::{ActorId, ActorState};
 use crate::channel::mpsc;
@@ -1835,9 +1835,9 @@ mod tests {
     use super::*;
     use crate::runtime::state::RuntimeState;
     use crate::supervision::ChildStart;
-    use crate::types::policy::FailFast;
     use crate::types::Budget;
     use crate::types::CancelKind;
+    use crate::types::policy::FailFast;
     use crate::util::ArenaIndex;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
@@ -2935,8 +2935,7 @@ mod tests {
             runtime.scheduler.lock().schedule(server_task_id, 0);
             runtime.run_until_quiescent();
 
-            let out = events.lock().unwrap().clone();
-            out
+            events.lock().unwrap().clone()
         }
 
         init_test("gen_server_info_ordering_is_deterministic_for_seed");
@@ -4085,8 +4084,7 @@ mod tests {
             runtime.scheduler.lock().schedule(server_task_id, 0);
             runtime.run_until_quiescent();
 
-            let r = results.lock().unwrap().clone();
-            r
+            results.lock().unwrap().clone()
         }
 
         // Same seed must produce identical results.

@@ -32,8 +32,8 @@
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::types::Time;
@@ -388,7 +388,8 @@ impl Bulkhead {
     #[allow(clippy::significant_drop_tightening, clippy::cast_precision_loss)]
     pub fn enqueue(&self, weight: u32, now: Time) -> Result<u64, BulkheadError<()>> {
         let now_millis = now.as_millis();
-        let deadline_millis = now_millis + self.policy.queue_timeout.as_millis() as u64;
+        let timeout_millis = self.policy.queue_timeout.as_millis().min(u128::from(u64::MAX)) as u64;
+        let deadline_millis = now_millis.saturating_add(timeout_millis);
 
         let mut queue = self.queue.write();
 
@@ -509,10 +510,12 @@ impl Bulkhead {
             if new == current {
                 break;
             }
-            match self
-                .available_permits
-                .compare_exchange_weak(current, new, Ordering::Release, Ordering::Acquire)
-            {
+            match self.available_permits.compare_exchange_weak(
+                current,
+                new,
+                Ordering::Release,
+                Ordering::Acquire,
+            ) {
                 Ok(_) => break,
                 Err(actual) => current = actual,
             }
@@ -1298,6 +1301,32 @@ mod tests {
         let result: Result<i32, BulkheadError<&str>> = bh.call(|| Err("error"));
 
         assert!(matches!(result, Err(BulkheadError::Inner("error"))));
+        assert_eq!(
+            bh.metrics().total_executed,
+            1,
+            "inner-error calls still executed and should be counted"
+        );
+    }
+
+    #[test]
+    fn enqueue_with_huge_timeout_does_not_wrap_deadline() {
+        let bh = Bulkhead::new(BulkheadPolicy {
+            max_concurrent: 1,
+            max_queue: 2,
+            queue_timeout: Duration::MAX,
+            ..Default::default()
+        });
+
+        let now = Time::MAX;
+        let _p = bh.try_acquire(1).unwrap();
+        let entry_id = bh.enqueue(1, now).unwrap();
+
+        // If deadline arithmetic wraps, this may spuriously timeout immediately.
+        let state = bh.check_entry(entry_id, now);
+        assert!(
+            matches!(state, Ok(None)),
+            "entry should remain pending at enqueue time even with huge timeout"
+        );
     }
 
     #[test]
@@ -1316,7 +1345,7 @@ mod tests {
 
     #[test]
     fn call_releases_permit_on_panic() {
-        use std::panic::{catch_unwind, AssertUnwindSafe};
+        use std::panic::{AssertUnwindSafe, catch_unwind};
 
         let bh = Bulkhead::new(BulkheadPolicy {
             max_concurrent: 1,

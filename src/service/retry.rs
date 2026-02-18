@@ -435,8 +435,8 @@ impl<Request, Res, E> Policy<Request, Res, E> for NoRetry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();

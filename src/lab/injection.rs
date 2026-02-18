@@ -26,13 +26,13 @@ use std::fmt::Write as _;
 use std::future::Future;
 use std::sync::Arc;
 
+use crate::lab::LabConfig;
 use crate::lab::instrumented_future::{
     CancellationInjector, InjectionMode, InjectionOutcome, InjectionResult, InjectionStrategy,
     InstrumentedFuture, InstrumentedPollResult,
 };
 use crate::lab::oracle::{OracleSuite, OracleViolation};
 use crate::lab::runtime::LabRuntime;
-use crate::lab::LabConfig;
 
 /// Configuration for Lab injection testing.
 #[derive(Debug, Clone)]

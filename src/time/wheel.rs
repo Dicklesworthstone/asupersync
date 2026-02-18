@@ -900,8 +900,8 @@ impl Default for TimerWheel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::Wake;
 
     fn init_test(name: &str) {

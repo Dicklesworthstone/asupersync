@@ -8,14 +8,14 @@
 use crate::config::EncodingConfig;
 use crate::decoding::{DecodingConfig, DecodingError, DecodingPipeline};
 use crate::encoding::{EncodingError, EncodingPipeline};
-use crate::security::tag::AuthenticationTag;
 use crate::security::AuthenticatedSymbol;
+use crate::security::tag::AuthenticationTag;
 use crate::transport::{SymbolSink, SymbolSinkExt, SymbolStream, SymbolStreamExt};
 use crate::types::resource::{PoolConfig, SymbolPool};
 use crate::types::symbol_set::SymbolSet;
 use crate::types::{ObjectId, ObjectParams, Symbol, SymbolKind};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -251,8 +251,10 @@ impl<T: Serialize> Serializer<T> for SerdeCodec {
                 })
             }
             SerializationFormat::Bincode => {
-                bincode::serialize(value).map_err(|err| SerializationError::SerializationFailed {
-                    reason: err.to_string(),
+                bincode::serde::encode_to_vec(value, bincode::config::legacy()).map_err(|err| {
+                    SerializationError::SerializationFailed {
+                        reason: err.to_string(),
+                    }
                 })
             }
             SerializationFormat::Json => {
@@ -279,11 +281,13 @@ impl<T: DeserializeOwned> Deserializer<T> for SerdeCodec {
                     reason: err.to_string(),
                 }
             }),
-            SerializationFormat::Bincode => bincode::deserialize(bytes).map_err(|err| {
-                DeserializationError::DeserializationFailed {
-                    reason: err.to_string(),
-                }
-            }),
+            SerializationFormat::Bincode => {
+                bincode::serde::decode_from_slice(bytes, bincode::config::legacy())
+                    .map(|(decoded, _)| decoded)
+                    .map_err(|err| DeserializationError::DeserializationFailed {
+                        reason: err.to_string(),
+                    })
+            }
             SerializationFormat::Json => serde_json::from_slice(bytes).map_err(|err| {
                 DeserializationError::DeserializationFailed {
                     reason: err.to_string(),
@@ -595,7 +599,7 @@ impl<T: Serialize + 'static> TypedEncoder<T> {
                 | crate::types::symbol_set::InsertResult::BlockLimitReached { .. } => {
                     return Err(EncodingError::ComputationFailed {
                         details: "symbol set rejected insert".to_string(),
-                    })
+                    });
                 }
             }
         }

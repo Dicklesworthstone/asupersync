@@ -20,8 +20,8 @@ use parking_lot::RwLock;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -1751,8 +1751,8 @@ mod tests {
     use crate::combinator::{BulkheadPolicy, CircuitBreakerPolicy};
     use crate::time::VirtualClock;
     use futures_lite::future::block_on;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();

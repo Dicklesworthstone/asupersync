@@ -1743,9 +1743,11 @@ mod tests {
             .build();
 
         let errors = protocol.validate();
-        assert!(errors
-            .iter()
-            .any(|e| matches!(e, ValidationError::SelfCommunication { .. })));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::SelfCommunication { .. }))
+        );
         assert!(!protocol.is_deadlock_free());
     }
 
@@ -1795,9 +1797,11 @@ mod tests {
             .build();
 
         let errors = protocol.validate();
-        assert!(errors
-            .iter()
-            .any(|e| matches!(e, ValidationError::KnowledgeOfChoice { branch: "then", .. })));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::KnowledgeOfChoice { branch: "then", .. }))
+        );
         assert!(!protocol.is_deadlock_free());
     }
 
@@ -1835,9 +1839,11 @@ mod tests {
             .build();
 
         let errors = protocol.validate();
-        assert!(errors
-            .iter()
-            .any(|e| matches!(e, ValidationError::EmptyProtocol)));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::EmptyProtocol))
+        );
         assert!(!protocol.is_deadlock_free());
     }
 
@@ -1848,9 +1854,11 @@ mod tests {
             .build();
 
         let errors = protocol.validate();
-        assert!(errors
-            .iter()
-            .any(|e| matches!(e, ValidationError::NoParticipants)));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::NoParticipants))
+        );
         assert!(!protocol.is_deadlock_free());
     }
 
@@ -2351,9 +2359,11 @@ mod tests {
             ))
             .build();
         let errors = protocol.validate();
-        assert!(errors
-            .iter()
-            .any(|e| matches!(e, ValidationError::KnowledgeOfChoice { branch: "else", .. })));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::KnowledgeOfChoice { branch: "else", .. }))
+        );
         assert!(!protocol.is_deadlock_free());
     }
 
@@ -2704,12 +2714,16 @@ mod tests {
         let protocol = example_scatter_gather_disjoint();
         let local_a = protocol.project("worker_a").expect("should project");
         let actions = collect_local_actions(&local_a);
-        assert!(actions
-            .iter()
-            .any(|(a, d)| a == "request_a" && *d == "recv"));
-        assert!(actions
-            .iter()
-            .any(|(a, d)| a == "response_a" && *d == "send"));
+        assert!(
+            actions
+                .iter()
+                .any(|(a, d)| a == "request_a" && *d == "recv")
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|(a, d)| a == "response_a" && *d == "send")
+        );
         assert!(!actions.iter().any(|(a, _)| a == "request_b"));
     }
 
@@ -3003,9 +3017,11 @@ mod tests {
 
     #[test]
     fn first_active_in_continue_is_none() {
-        assert!(Interaction::continue_("x")
-            .first_active_participant()
-            .is_none());
+        assert!(
+            Interaction::continue_("x")
+                .first_active_participant()
+                .is_none()
+        );
     }
 
     // ------------------------------------------------------------------
@@ -3023,9 +3039,11 @@ mod tests {
             .build();
 
         let errors = protocol.validate();
-        assert!(errors
-            .iter()
-            .any(|e| matches!(e, ValidationError::SelfCommunication { .. })));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::SelfCommunication { .. }))
+        );
         assert!(errors.iter().any(
             |e| matches!(e, ValidationError::UndeclaredParticipant { name, .. } if name == "ghost")
         ));

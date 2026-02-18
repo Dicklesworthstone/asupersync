@@ -1803,9 +1803,11 @@ mod tests {
 
         let refs: Vec<NameWatchRef> = notifications.iter().map(|n| n.watch_ref).collect();
         assert_eq!(refs, vec![w1, w2, w3]);
-        assert!(notifications
-            .iter()
-            .all(|n| n.kind == NameOwnershipKind::Acquired));
+        assert!(
+            notifications
+                .iter()
+                .all(|n| n.kind == NameOwnershipKind::Acquired)
+        );
 
         lease.release().unwrap();
 

@@ -64,7 +64,7 @@ use crate::runtime::blocking_pool::BlockingPoolHandle;
 use crate::runtime::io_driver::{IoDriverHandle, IoRegistration};
 use crate::runtime::reactor::{Interest, Source};
 use crate::runtime::task_handle::JoinError;
-use crate::time::{timeout, TimeSource, TimerDriverHandle, WallClock};
+use crate::time::{TimeSource, TimerDriverHandle, WallClock, timeout};
 use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 use crate::trace::{TraceBufferHandle, TraceEvent};
 use crate::tracing_compat::{debug, error, info, trace};
@@ -258,6 +258,7 @@ impl FullCx {
     }
 
     /// Sets the current task context for the duration of the guard.
+    #[inline]
     #[must_use]
     #[cfg_attr(feature = "test-internals", visibility::make(pub))]
     pub(crate) fn set_current(cx: Option<Self>) -> CurrentCxGuard {
@@ -2386,7 +2387,7 @@ mod tests {
 
     #[test]
     fn masked_panic_safety() {
-        use std::panic::{catch_unwind, AssertUnwindSafe};
+        use std::panic::{AssertUnwindSafe, catch_unwind};
 
         let cx = test_cx();
         cx.set_cancel_requested(true);

@@ -345,8 +345,13 @@ impl LeakChecker {
                 // If var already holds an obligation, that's a leak (overwrite).
                 if let Some(existing) = self.state.get(var) {
                     if existing.is_leak() {
+                        let diagnostic_kind = if matches!(existing, VarState::Held(_)) {
+                            DiagnosticKind::DefiniteLeak
+                        } else {
+                            DiagnosticKind::PotentialLeak
+                        };
                         self.diagnostics.push(Diagnostic {
-                            kind: DiagnosticKind::DefiniteLeak,
+                            kind: diagnostic_kind,
                             var: *var,
                             obligation_kind: existing.kind(),
                             scope: self.scope_name.clone(),
@@ -1183,6 +1188,49 @@ mod tests {
         crate::assert_with_log!(leak_count == 1, "overwrite leak", 1, leak_count);
         // The second obligation is committed, so no exit leak.
         crate::test_complete!("overwrite_leak_detected");
+    }
+
+    #[test]
+    fn overwrite_after_mayhold_is_potential_leak() {
+        init_test("overwrite_after_mayhold_is_potential_leak");
+        let body = Body::new(
+            "overwrite_mayhold",
+            vec![
+                Instruction::Reserve {
+                    var: v(0),
+                    kind: ObligationKind::SendPermit,
+                },
+                Instruction::Branch {
+                    arms: vec![
+                        vec![Instruction::Commit { var: v(0) }],
+                        vec![],
+                    ],
+                },
+                Instruction::Reserve {
+                    var: v(0),
+                    kind: ObligationKind::IoOp,
+                },
+                Instruction::Commit { var: v(0) },
+            ],
+        );
+
+        let mut checker = LeakChecker::new();
+        let result = checker.check(&body);
+
+        let potential_count = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.kind == DiagnosticKind::PotentialLeak)
+            .count();
+        let definite_count = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.kind == DiagnosticKind::DefiniteLeak)
+            .count();
+
+        crate::assert_with_log!(potential_count == 1, "potential overwrite leak", 1, potential_count);
+        crate::assert_with_log!(definite_count == 0, "no definite leak", 0, definite_count);
+        crate::test_complete!("overwrite_after_mayhold_is_potential_leak");
     }
 
     // ---- Nested branches ---------------------------------------------------

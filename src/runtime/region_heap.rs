@@ -261,16 +261,16 @@ impl RegionHeap {
                     next_free,
                     generation,
                 } => {
-                    let gen = *generation;
+                    let generation_value = *generation;
                     self.free_head = *next_free;
                     *slot = HeapSlot::Occupied(HeapEntry {
                         value: entry_value,
-                        generation: gen,
+                        generation: generation_value,
                         size_hint,
                     });
                     HeapIndex {
                         index: free_index,
-                        generation: gen,
+                        generation: generation_value,
                         type_id,
                     }
                 }
