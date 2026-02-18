@@ -277,8 +277,9 @@ impl SlidingWindow {
 
     /// Remove entries outside the window.
     fn cleanup(&mut self, now_millis: u64) {
-        let window_start =
-            now_millis.saturating_sub(self.config.window_duration.as_millis() as u64);
+        let window_span =
+            u64::try_from(self.config.window_duration.as_millis()).unwrap_or(u64::MAX);
+        let window_start = now_millis.saturating_sub(window_span);
         while let Some((ts, is_failure)) = self.entries.front() {
             if *ts < window_start {
                 if *is_failure {
@@ -1844,5 +1845,23 @@ mod tests {
             ),
             "Expected reopened circuit to permit probe or briefly report Open"
         );
+    }
+
+    #[test]
+    fn sliding_window_huge_duration_does_not_over_evict() {
+        let mut window = SlidingWindow::new(SlidingWindowConfig {
+            window_duration: Duration::MAX,
+            minimum_calls: 1,
+            failure_rate_threshold: 1.0,
+        });
+
+        window.record_failure(10);
+        window.record_success(20);
+
+        window.cleanup(u64::MAX);
+
+        assert_eq!(window.entries.len(), 2);
+        assert_eq!(window.failure_count, 1);
+        assert_eq!(window.success_count, 1);
     }
 }
