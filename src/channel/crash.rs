@@ -502,15 +502,16 @@ fn emit_crash_evidence(sink: &Arc<dyn EvidenceSink>, action: &str, count: u32) {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64);
 
+    let action_str = format!("inject_{action}");
     let entry = EvidenceLedger {
         ts_unix_ms: now_ms,
         component: "channel_crash".to_string(),
-        action: format!("inject_{action}"),
-        posterior: vec![1.0],
         expected_loss_by_action: std::collections::BTreeMap::from([(
-            format!("inject_{action}"),
+            action_str.clone(),
             0.0,
         )]),
+        action: action_str,
+        posterior: vec![1.0],
         chosen_expected_loss: 0.0,
         calibration_score: 1.0,
         fallback_active: false,

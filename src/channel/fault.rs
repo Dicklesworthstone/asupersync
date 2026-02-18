@@ -375,15 +375,13 @@ fn emit_fault_evidence(sink: &dyn EvidenceSink, fault_type: &str, context: &str)
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64);
 
+    let action = format!("inject_{fault_type}");
     let entry = EvidenceLedger {
         ts_unix_ms: now_ms,
         component: "channel_fault".to_string(),
-        action: format!("inject_{fault_type}"),
+        expected_loss_by_action: std::collections::BTreeMap::from([(action.clone(), 0.0)]),
+        action,
         posterior: vec![1.0],
-        expected_loss_by_action: std::collections::BTreeMap::from([(
-            format!("inject_{fault_type}"),
-            0.0,
-        )]),
         chosen_expected_loss: 0.0,
         calibration_score: 1.0,
         fallback_active: false,

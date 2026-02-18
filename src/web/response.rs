@@ -134,7 +134,7 @@ impl Response {
     pub fn new(status: StatusCode, body: impl Into<Bytes>) -> Self {
         Self {
             status,
-            headers: HashMap::new(),
+            headers: HashMap::with_capacity(4),
             body: body.into(),
         }
     }

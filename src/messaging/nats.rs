@@ -631,30 +631,36 @@ impl NatsClient {
             .map_err(|_| NatsError::Protocol("invalid UTF-8 in MSG header".to_string()))?;
 
         // MSG <subject> <sid> [reply-to] <#bytes>
-        let parts: Vec<&str> = header.split_whitespace().collect();
-        if parts.len() < 4 {
-            return Err(NatsError::Protocol(format!(
-                "malformed MSG header: {header}"
-            )));
-        }
+        let mut parts = header.split_whitespace();
+        let _msg = parts.next(); // "MSG"
+        let subject_str = parts.next().ok_or_else(|| {
+            NatsError::Protocol(format!("malformed MSG header: {header}"))
+        })?;
+        let sid_str = parts.next().ok_or_else(|| {
+            NatsError::Protocol(format!("malformed MSG header: {header}"))
+        })?;
+        let third = parts.next().ok_or_else(|| {
+            NatsError::Protocol(format!("malformed MSG header: {header}"))
+        })?;
+        let fourth = parts.next();
 
-        let subject = parts[1].to_string();
-        let sid: u64 = parts[2]
+        let subject = subject_str.to_string();
+        let sid: u64 = sid_str
             .parse()
-            .map_err(|_| NatsError::Protocol(format!("invalid SID: {}", parts[2])))?;
+            .map_err(|_| NatsError::Protocol(format!("invalid SID: {sid_str}")))?;
 
-        let (reply_to, payload_len) = if parts.len() == 5 {
+        let (reply_to, payload_len) = if let Some(len_str) = fourth {
             (
-                Some(parts[3].to_string()),
-                parts[4].parse::<usize>().map_err(|_| {
-                    NatsError::Protocol(format!("invalid payload length: {}", parts[4]))
+                Some(third.to_string()),
+                len_str.parse::<usize>().map_err(|_| {
+                    NatsError::Protocol(format!("invalid payload length: {len_str}"))
                 })?,
             )
         } else {
             (
                 None,
-                parts[3].parse::<usize>().map_err(|_| {
-                    NatsError::Protocol(format!("invalid payload length: {}", parts[3]))
+                third.parse::<usize>().map_err(|_| {
+                    NatsError::Protocol(format!("invalid payload length: {third}"))
                 })?,
             )
         };

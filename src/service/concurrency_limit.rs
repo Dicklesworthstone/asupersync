@@ -207,11 +207,15 @@ where
         loop {
             match &mut self.state {
                 State::Idle => {
-                    // Try to acquire synchronously first
-                    if let Ok(permit) = OwnedSemaphorePermit::try_acquire(self.semaphore.clone(), 1)
-                    {
-                        self.state = State::Ready(permit);
-                        return Poll::Ready(Ok(()));
+                    // Fast lock-free check: skip Arc clone + mutex when at capacity.
+                    if self.semaphore.available_permits() > 0 {
+                        // Try to acquire synchronously (may still fail due to FIFO fairness)
+                        if let Ok(permit) =
+                            OwnedSemaphorePermit::try_acquire(self.semaphore.clone(), 1)
+                        {
+                            self.state = State::Ready(permit);
+                            return Poll::Ready(Ok(()));
+                        }
                     }
 
                     // Fallback to async acquisition

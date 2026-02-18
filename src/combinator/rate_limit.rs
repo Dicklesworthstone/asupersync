@@ -271,7 +271,7 @@ impl RateLimiter {
                 tokens_fixed: initial_tokens,
                 last_refill: 0,
             }),
-            wait_queue: RwLock::new(VecDeque::new()),
+            wait_queue: RwLock::new(VecDeque::with_capacity(16)),
             next_id: AtomicU64::new(0),
             total_allowed: AtomicU64::new(0),
             total_rejected: AtomicU64::new(0),
@@ -716,9 +716,12 @@ impl SlidingWindowRateLimiter {
     /// Create a new sliding window rate limiter.
     #[must_use]
     pub fn new(policy: RateLimitPolicy) -> Self {
+        let window_capacity = usize::try_from(policy.rate.max(policy.burst))
+            .unwrap_or(usize::MAX)
+            .max(1);
         Self {
             policy,
-            window: RwLock::new(VecDeque::new()),
+            window: RwLock::new(VecDeque::with_capacity(window_capacity)),
             window_cost: AtomicU32::new(0),
             total_allowed: AtomicU64::new(0),
             total_rejected: AtomicU64::new(0),
@@ -990,7 +993,7 @@ impl RateLimiterRegistry {
     #[must_use]
     pub fn new(default_policy: RateLimitPolicy) -> Self {
         Self {
-            limiters: RwLock::new(HashMap::new()),
+            limiters: RwLock::new(HashMap::with_capacity(8)),
             default_policy,
         }
     }
