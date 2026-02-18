@@ -768,7 +768,7 @@ impl<Caps> Cx<Caps> {
             component: "cx_macaroon".to_string(),
             action: action.clone(),
             posterior: vec![1.0],
-            expected_loss_by_action: std::collections::BTreeMap::from([(action, loss)]),
+            expected_loss_by_action: std::collections::HashMap::from([(action, loss)]),
             chosen_expected_loss: loss,
             calibration_score: 1.0,
             fallback_active: false,

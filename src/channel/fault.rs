@@ -379,7 +379,7 @@ fn emit_fault_evidence(sink: &dyn EvidenceSink, fault_type: &str, context: &str)
     let entry = EvidenceLedger {
         ts_unix_ms: now_ms,
         component: "channel_fault".to_string(),
-        expected_loss_by_action: std::collections::BTreeMap::from([(action.clone(), 0.0)]),
+        expected_loss_by_action: std::collections::HashMap::from([(action.clone(), 0.0)]),
         action,
         posterior: vec![1.0],
         chosen_expected_loss: 0.0,

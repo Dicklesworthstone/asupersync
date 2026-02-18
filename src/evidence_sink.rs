@@ -168,7 +168,7 @@ pub fn emit_scheduler_evidence(
         component: "scheduler".to_string(),
         action: suggestion.to_string(),
         posterior,
-        expected_loss_by_action: std::collections::BTreeMap::from([
+        expected_loss_by_action: std::collections::HashMap::from([
             ("meet_deadlines".to_string(), f64::from(timed_depth)),
             ("drain_cancel".to_string(), f64::from(cancel_depth)),
             ("process_ready".to_string(), f64::from(ready_depth)),
@@ -202,7 +202,7 @@ pub fn emit_cancel_evidence(
     let entry = EvidenceLedger {
         ts_unix_ms: now_ms,
         component: "cancellation".to_string(),
-        expected_loss_by_action: std::collections::BTreeMap::from([(action.clone(), 0.0)]),
+        expected_loss_by_action: std::collections::HashMap::from([(action.clone(), 0.0)]),
         action,
         posterior: vec![1.0],
         chosen_expected_loss: 0.0,
@@ -236,7 +236,7 @@ pub fn emit_budget_evidence(
     let entry = EvidenceLedger {
         ts_unix_ms: now_ms,
         component: "budget".to_string(),
-        expected_loss_by_action: std::collections::BTreeMap::from([(action.clone(), 0.0)]),
+        expected_loss_by_action: std::collections::HashMap::from([(action.clone(), 0.0)]),
         action,
         posterior: vec![1.0],
         chosen_expected_loss: 0.0,
