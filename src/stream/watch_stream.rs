@@ -109,7 +109,13 @@ mod tests {
         crate::assert_with_log!(first_none, "first poll none", true, first_none);
 
         cx.set_cancel_requested(false);
-        tx.send(1).expect("send after cancel clear");
+        let send_result = tx.send(1);
+        crate::assert_with_log!(
+            send_result.is_ok(),
+            "send after cancel clear succeeds",
+            true,
+            send_result.is_ok()
+        );
 
         let poll = Pin::new(&mut stream).poll_next(&mut task_cx);
         let still_none = matches!(poll, Poll::Ready(None));
@@ -122,7 +128,13 @@ mod tests {
         init_test("watch_stream_initial_snapshot_does_not_duplicate_pending_update");
         let cx: Cx = Cx::for_testing();
         let (tx, rx) = watch::channel(0);
-        tx.send(1).expect("pre-send should succeed");
+        let send_result = tx.send(1);
+        crate::assert_with_log!(
+            send_result.is_ok(),
+            "pre-send should succeed",
+            true,
+            send_result.is_ok()
+        );
 
         let mut stream = WatchStream::new(cx, rx);
         let waker = noop_waker();
@@ -151,7 +163,13 @@ mod tests {
         init_test("watch_stream_from_changes_skips_current_value");
         let cx: Cx = Cx::for_testing();
         let (tx, rx) = watch::channel(0);
-        tx.send(1).expect("pre-send should succeed");
+        let send_result = tx.send(1);
+        crate::assert_with_log!(
+            send_result.is_ok(),
+            "pre-send should succeed",
+            true,
+            send_result.is_ok()
+        );
 
         let mut stream = WatchStream::from_changes(cx, rx);
         let waker = noop_waker();
@@ -165,7 +183,13 @@ mod tests {
             first.is_pending()
         );
 
-        tx.send(2).expect("second send should succeed");
+        let send_result = tx.send(2);
+        crate::assert_with_log!(
+            send_result.is_ok(),
+            "second send should succeed",
+            true,
+            send_result.is_ok()
+        );
         let second = Pin::new(&mut stream).poll_next(&mut task_cx);
         crate::assert_with_log!(
             matches!(second, Poll::Ready(Some(2))),

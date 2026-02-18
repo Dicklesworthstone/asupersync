@@ -445,20 +445,34 @@ mod tests {
         }
     }
 
-    // Keep fd-reuse tests away from low-number descriptors used by unrelated
-    // concurrent tests to avoid process-wide fd collisions.
+    // Prefer a very high descriptor so fd-reuse tests avoid low-numbered
+    // process-wide fds used by unrelated concurrent tests.
     const FD_REUSE_TEST_MIN_FD: RawFd = 50_000;
 
     fn dup_fd_at_least(fd: RawFd, min_fd: RawFd) -> RawFd {
-        // SAFETY: `fcntl(F_DUPFD_CLOEXEC, ...)` duplicates an existing fd into an
-        // unowned raw descriptor >= min_fd.
-        let dup_fd = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, min_fd) };
-        assert!(
-            dup_fd >= 0,
-            "failed to duplicate fd {fd} at/above {min_fd}: {}",
-            io::Error::last_os_error()
+        // Some test hosts run with low RLIMIT_NOFILE values where high minima
+        // return EINVAL. Retry with progressively lower minima while still
+        // preferring high fd numbers to reduce collision risk in parallel tests.
+        let fallback_minima = [min_fd, 16_384, 4_096, 1_024, 256];
+        for candidate_min in fallback_minima {
+            // SAFETY: `fcntl(F_DUPFD_CLOEXEC, ...)` duplicates an existing fd
+            // into an unowned raw descriptor >= `candidate_min`.
+            let dup_fd = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, candidate_min) };
+            if dup_fd >= 0 {
+                return dup_fd;
+            }
+
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINVAL) {
+                continue;
+            }
+
+            panic!("failed to duplicate fd {fd} at/above {candidate_min}: {err}");
+        }
+
+        panic!(
+            "failed to duplicate fd {fd}: invalid min fd for all candidates starting at {min_fd}"
         );
-        dup_fd
     }
 
     #[test]

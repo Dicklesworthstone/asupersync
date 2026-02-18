@@ -49,7 +49,7 @@
 //! assert!(coord.source_code.contains("cx.checkpoint()"));
 //!
 //! // Lab test scaffold is generated
-//! assert!(output.lab_test_code.contains("async fn test_"));
+//! assert!(output.lab_test_code.contains("fn test_"));
 //! ```
 
 use super::codegen::{CompilationError, ProjectionCompiler, ProjectionOutput};

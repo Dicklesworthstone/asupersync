@@ -50,6 +50,11 @@ fn arb_data_opcode() -> impl Strategy<Value = Opcode> {
     prop_oneof![Just(Opcode::Text), Just(Opcode::Binary),]
 }
 
+fn arb_sendable_close_code() -> impl Strategy<Value = u16> {
+    // RFC 6455 §7.4.1 reserves 1005/1006/1015 for internal use only.
+    prop_oneof![1000u16..=1004, 1007u16..=1014, 1016u16..=4999,]
+}
+
 // ============================================================================
 // Mask Involution: apply_mask(apply_mask(data, key), key) == data
 // ============================================================================
@@ -307,7 +312,7 @@ proptest! {
     /// Close frames with code and short reason round-trip correctly.
     #[test]
     fn close_frame_roundtrip(
-        code in 1000u16..=4999,
+        code in arb_sendable_close_code(),
         reason in "[a-zA-Z0-9 ]{0,50}",
     ) {
         init_test_logging();
@@ -333,7 +338,7 @@ proptest! {
 
     /// Close frames with code only (no reason) have exactly 2-byte payload.
     #[test]
-    fn close_frame_code_only(code in 1000u16..=4999) {
+    fn close_frame_code_only(code in arb_sendable_close_code()) {
         init_test_logging();
         let frame = Frame::close(Some(code), None);
         prop_assert_eq!(frame.payload.len(), 2);

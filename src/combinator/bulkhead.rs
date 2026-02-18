@@ -555,11 +555,10 @@ impl Bulkhead {
         drop(permit);
 
         match result {
-            Ok(Ok(value)) => {
+            Ok(inner_result) => {
                 self.total_executed_atomic.fetch_add(1, Ordering::Relaxed);
-                Ok(value)
+                inner_result.map_err(BulkheadError::Inner)
             }
-            Ok(Err(e)) => Err(BulkheadError::Inner(e)),
             Err(panic_payload) => std::panic::resume_unwind(panic_payload),
         }
     }

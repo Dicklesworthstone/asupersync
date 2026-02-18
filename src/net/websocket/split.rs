@@ -802,7 +802,10 @@ mod tests {
                 }
             }
 
-            let encoded = read.shared.lock().write_buf.clone();
+            let encoded = {
+                let shared = read.shared.lock();
+                BytesMut::from(shared.write_buf.as_ref())
+            };
             let mut decode_buf = encoded;
             let mut decoder = FrameCodec::server();
             let mut payloads = Vec::new();
