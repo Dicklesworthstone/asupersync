@@ -977,15 +977,19 @@ fn hash_supervision_strategy(hasher: &mut crate::util::DetHasher, strategy: &Sup
     }
 }
 
+fn duration_nanos_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
 fn hash_restart_config(hasher: &mut crate::util::DetHasher, config: &RestartConfig) {
     hasher.write_u32(config.max_restarts);
-    hasher.write_u64(config.window.as_nanos() as u64);
+    hasher.write_u64(duration_nanos_u64(config.window));
     hash_backoff_strategy(hasher, &config.backoff);
     hasher.write_u64(config.restart_cost);
     match config.min_remaining_for_restart {
         Some(value) => {
             hasher.write_u8(1);
-            hasher.write_u64(value.as_nanos() as u64);
+            hasher.write_u64(duration_nanos_u64(value));
         }
         None => hasher.write_u8(0),
     }
@@ -997,7 +1001,7 @@ fn hash_backoff_strategy(hasher: &mut crate::util::DetHasher, strategy: &Backoff
         BackoffStrategy::None => hasher.write_u8(0),
         BackoffStrategy::Fixed(value) => {
             hasher.write_u8(1);
-            hasher.write_u64(value.as_nanos() as u64);
+            hasher.write_u64(duration_nanos_u64(*value));
         }
         BackoffStrategy::Exponential {
             initial,
@@ -1005,8 +1009,8 @@ fn hash_backoff_strategy(hasher: &mut crate::util::DetHasher, strategy: &Backoff
             multiplier,
         } => {
             hasher.write_u8(2);
-            hasher.write_u64(initial.as_nanos() as u64);
-            hasher.write_u64(max.as_nanos() as u64);
+            hasher.write_u64(duration_nanos_u64(*initial));
+            hasher.write_u64(duration_nanos_u64(*max));
             hasher.write_u64(multiplier.to_bits());
         }
     }
@@ -1566,7 +1570,7 @@ impl RestartHistory {
     /// Returns `true` if the restart budget has not been exhausted.
     #[must_use]
     pub fn can_restart(&self, now: u64) -> bool {
-        let window_nanos = self.config.window.as_nanos() as u64;
+        let window_nanos = duration_nanos_u64(self.config.window);
         let cutoff = now.saturating_sub(window_nanos);
 
         // Count restarts within the window
@@ -1579,7 +1583,7 @@ impl RestartHistory {
     ///
     /// Also prunes old entries outside the window.
     pub fn record_restart(&mut self, now: u64) {
-        let window_nanos = self.config.window.as_nanos() as u64;
+        let window_nanos = duration_nanos_u64(self.config.window);
         let cutoff = now.saturating_sub(window_nanos);
 
         // Prune old entries
@@ -1592,7 +1596,7 @@ impl RestartHistory {
     /// Get the number of restarts within the current window.
     #[must_use]
     pub fn recent_restart_count(&self, now: u64) -> usize {
-        let window_nanos = self.config.window.as_nanos() as u64;
+        let window_nanos = duration_nanos_u64(self.config.window);
         let cutoff = now.saturating_sub(window_nanos);
         self.restarts.iter().filter(|&&t| t >= cutoff).count()
     }
@@ -1807,7 +1811,7 @@ impl RestartIntensityWindow {
 
     /// Record a restart at the given virtual time and prune old entries.
     pub fn record(&mut self, now: u64) {
-        let window_nanos = self.window.as_nanos() as u64;
+        let window_nanos = duration_nanos_u64(self.window);
         let cutoff = now.saturating_sub(window_nanos);
         self.timestamps.retain(|&t| t >= cutoff);
         self.timestamps.push(now);
@@ -1818,7 +1822,7 @@ impl RestartIntensityWindow {
     /// Returns 0.0 if no restarts have been recorded in the window.
     #[must_use]
     pub fn intensity(&self, now: u64) -> f64 {
-        let window_nanos = self.window.as_nanos() as u64;
+        let window_nanos = duration_nanos_u64(self.window);
         let cutoff = now.saturating_sub(window_nanos);
         let count = self.timestamps.iter().filter(|&&t| t >= cutoff).count();
         if count == 0 {
@@ -1842,7 +1846,7 @@ impl RestartIntensityWindow {
     /// Number of restarts within the current window.
     #[must_use]
     pub fn count(&self, now: u64) -> usize {
-        let window_nanos = self.window.as_nanos() as u64;
+        let window_nanos = duration_nanos_u64(self.window);
         let cutoff = now.saturating_sub(window_nanos);
         self.timestamps.iter().filter(|&&t| t >= cutoff).count()
     }
@@ -5086,6 +5090,39 @@ mod tests {
         assert_eq!(window.count(10_000_000_000), 1);
 
         crate::test_complete!("intensity_window_prunes");
+    }
+
+    #[test]
+    fn restart_history_huge_window_keeps_entries() {
+        init_test("restart_history_huge_window_keeps_entries");
+
+        let config = RestartConfig::new(10, Duration::MAX);
+        let mut history = RestartHistory::new(config);
+
+        history.record_restart(10);
+        history.record_restart(20);
+        history.record_restart(u64::MAX);
+
+        // A maximal window should behave like "effectively infinite", retaining
+        // previously recorded restarts.
+        assert_eq!(history.recent_restart_count(u64::MAX), 3);
+
+        crate::test_complete!("restart_history_huge_window_keeps_entries");
+    }
+
+    #[test]
+    fn intensity_window_huge_window_keeps_entries() {
+        init_test("intensity_window_huge_window_keeps_entries");
+
+        let mut window = RestartIntensityWindow::new(Duration::MAX, 1.0);
+
+        window.record(10);
+        window.record(20);
+        window.record(u64::MAX);
+
+        assert_eq!(window.count(u64::MAX), 3);
+
+        crate::test_complete!("intensity_window_huge_window_keeps_entries");
     }
 
     #[test]

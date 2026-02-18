@@ -643,6 +643,18 @@ fn decode_integer(src: &mut Bytes, prefix_bits: u8) -> Result<usize, H2Error> {
     Ok(value)
 }
 
+const fn build_bit_masks() -> [u64; 65] {
+    let mut masks = [0u64; 65];
+    let mut i = 0usize;
+    while i <= 64 {
+        masks[i] = if i == 64 { u64::MAX } else { (1u64 << i) - 1 };
+        i += 1;
+    }
+    masks
+}
+
+const BIT_MASKS: [u64; 65] = build_bit_masks();
+
 /// Huffman-encode a byte slice per RFC 7541 Appendix B.
 ///
 /// Packs variable-length Huffman codes into whole bytes with EOS-padding
@@ -661,14 +673,14 @@ fn encode_huffman(src: &[u8]) -> Vec<u8> {
         while bits >= 8 {
             bits -= 8;
             dst.push((accumulator >> bits) as u8);
-            accumulator &= (1u64 << bits) - 1;
+            accumulator &= BIT_MASKS[bits as usize];
         }
     }
 
     // Pad remaining bits with EOS prefix (all 1s) per RFC 7541 Section 5.2.
     if bits > 0 {
         let padding = 8 - bits;
-        accumulator = (accumulator << padding) | ((1u64 << padding) - 1);
+        accumulator = (accumulator << padding) | BIT_MASKS[padding as usize];
         dst.push(accumulator as u8);
     }
 
@@ -1022,7 +1034,7 @@ fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
                 };
                 result.push(sym);
                 bits -= 5;
-                accumulator &= (1u64 << bits) - 1;
+                accumulator &= BIT_MASKS[bits as usize];
                 continue;
             }
 
@@ -1063,7 +1075,7 @@ fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
                 if let Some(s) = sym_6 {
                     result.push(s);
                     bits -= 6;
-                    accumulator &= (1u64 << bits) - 1;
+                    accumulator &= BIT_MASKS[bits as usize];
                     continue;
                 }
             }
@@ -1109,7 +1121,7 @@ fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
                 if let Some(s) = sym_7 {
                     result.push(s);
                     bits -= 7;
-                    accumulator &= (1u64 << bits) - 1;
+                    accumulator &= BIT_MASKS[bits as usize];
                     continue;
                 }
             }
@@ -1129,7 +1141,7 @@ fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
                 if let Some(s) = sym_8 {
                     result.push(s);
                     bits -= 8;
-                    accumulator &= (1u64 << bits) - 1;
+                    accumulator &= BIT_MASKS[bits as usize];
                     continue;
                 }
             }
@@ -1158,7 +1170,7 @@ fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
                         }
                         result.push(sym as u8);
                         bits = shift;
-                        accumulator &= (1u64 << bits) - 1;
+                        accumulator &= BIT_MASKS[bits as usize];
                         decoded = true;
                         break;
                     }
@@ -1188,7 +1200,7 @@ fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
 
     // Check remaining bits are valid padding (all 1s) per RFC 7541 Section 5.2
     if bits > 0 && bits < 8 {
-        let mask = (1u64 << bits) - 1;
+        let mask = BIT_MASKS[bits as usize];
         if accumulator != mask {
             return Err(H2Error::compression(
                 "invalid Huffman padding (must be all 1s)",
