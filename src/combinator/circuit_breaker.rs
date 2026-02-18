@@ -57,6 +57,18 @@ use crate::types::Time;
 
 /// Maximum allowed value for `half_open_max_probes` (24 bits).
 pub const MAX_HALF_OPEN_PROBES: u32 = 0x00FF_FFFF;
+/// Minimum allowed value for `half_open_max_probes`.
+pub const MIN_HALF_OPEN_PROBES: u32 = 1;
+
+const fn normalize_half_open_max_probes(max_probes: u32) -> u32 {
+    if max_probes == 0 {
+        MIN_HALF_OPEN_PROBES
+    } else if max_probes > MAX_HALF_OPEN_PROBES {
+        MAX_HALF_OPEN_PROBES
+    } else {
+        max_probes
+    }
+}
 
 /// Circuit breaker configuration.
 #[derive(Clone)]
@@ -75,7 +87,7 @@ pub struct CircuitBreakerPolicy {
 
     /// Maximum concurrent probes in half-open state.
     ///
-    /// Clamped to [`MAX_HALF_OPEN_PROBES`] (16,777,215).
+    /// Clamped to [`MIN_HALF_OPEN_PROBES`]..=[`MAX_HALF_OPEN_PROBES`].
     pub half_open_max_probes: u32,
 
     /// Predicate to determine if error counts as failure.
@@ -383,10 +395,9 @@ impl CircuitBreaker {
     /// Create a new circuit breaker with the given policy.
     #[must_use]
     pub fn new(mut policy: CircuitBreakerPolicy) -> Self {
-        // Clamp max probes to supported range
-        if policy.half_open_max_probes > MAX_HALF_OPEN_PROBES {
-            policy.half_open_max_probes = MAX_HALF_OPEN_PROBES;
-        }
+        // Clamp probes to supported range so half-open accounting cannot violate
+        // caller policy by allowing zero or overflowing values.
+        policy.half_open_max_probes = normalize_half_open_max_probes(policy.half_open_max_probes);
 
         let sliding_window = policy
             .sliding_window
@@ -1040,14 +1051,10 @@ impl CircuitBreakerPolicyBuilder {
 
     /// Set the maximum concurrent probes in half-open state.
     ///
-    /// This value is clamped to [`MAX_HALF_OPEN_PROBES`] (16,777,215).
+    /// This value is clamped to [`MIN_HALF_OPEN_PROBES`]..=[`MAX_HALF_OPEN_PROBES`].
     #[must_use]
     pub const fn half_open_max_probes(mut self, max_probes: u32) -> Self {
-        self.policy.half_open_max_probes = if max_probes > MAX_HALF_OPEN_PROBES {
-            MAX_HALF_OPEN_PROBES
-        } else {
-            max_probes
-        };
+        self.policy.half_open_max_probes = normalize_half_open_max_probes(max_probes);
         self
     }
 
@@ -1657,6 +1664,39 @@ mod tests {
 
         assert_eq!(policy.half_open_max_probes, MAX_HALF_OPEN_PROBES);
         assert_eq!(policy.half_open_max_probes, 0x00FF_FFFF);
+    }
+
+    #[test]
+    fn builder_clamps_zero_probes_to_minimum() {
+        let policy = CircuitBreakerPolicyBuilder::new()
+            .half_open_max_probes(0)
+            .build();
+
+        assert_eq!(policy.half_open_max_probes, MIN_HALF_OPEN_PROBES);
+    }
+
+    #[test]
+    fn constructor_clamps_zero_probes_to_minimum_semantics() {
+        let cb = CircuitBreaker::new(CircuitBreakerPolicy {
+            failure_threshold: 1,
+            open_duration: Duration::ZERO,
+            half_open_max_probes: 0,
+            ..Default::default()
+        });
+        let now = Time::from_millis(0);
+
+        let permit = cb.should_allow(now).unwrap();
+        cb.record_failure(permit, "trip", now);
+        assert!(matches!(cb.state(), State::Open { .. }));
+
+        let probe = cb.should_allow(now);
+        assert!(matches!(probe, Ok(Permit::Probe)));
+
+        let second_probe = cb.should_allow(now);
+        assert!(matches!(
+            second_probe,
+            Err(CircuitBreakerError::HalfOpenFull)
+        ));
     }
 
     // =========================================================================
