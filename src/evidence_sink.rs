@@ -198,15 +198,13 @@ pub fn emit_cancel_evidence(
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64);
 
+    let action = format!("cancel_{cancel_kind}");
     let entry = EvidenceLedger {
         ts_unix_ms: now_ms,
         component: "cancellation".to_string(),
-        action: format!("cancel_{cancel_kind}"),
+        expected_loss_by_action: std::collections::BTreeMap::from([(action.clone(), 0.0)]),
+        action,
         posterior: vec![1.0],
-        expected_loss_by_action: std::collections::BTreeMap::from([(
-            format!("cancel_{cancel_kind}"),
-            0.0,
-        )]),
         chosen_expected_loss: 0.0,
         calibration_score: 1.0,
         fallback_active: false,
@@ -234,15 +232,13 @@ pub fn emit_budget_evidence(
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64);
 
+    let action = format!("exhausted_{exhaustion_kind}");
     let entry = EvidenceLedger {
         ts_unix_ms: now_ms,
         component: "budget".to_string(),
-        action: format!("exhausted_{exhaustion_kind}"),
+        expected_loss_by_action: std::collections::BTreeMap::from([(action.clone(), 0.0)]),
+        action,
         posterior: vec![1.0],
-        expected_loss_by_action: std::collections::BTreeMap::from([(
-            format!("exhausted_{exhaustion_kind}"),
-            0.0,
-        )]),
         chosen_expected_loss: 0.0,
         calibration_score: 1.0,
         fallback_active: false,

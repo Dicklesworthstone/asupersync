@@ -41,7 +41,7 @@ impl MethodRouter {
     /// Create an empty method router.
     fn new() -> Self {
         Self {
-            handlers: HashMap::new(),
+            handlers: HashMap::with_capacity(4),
         }
     }
 
@@ -199,7 +199,7 @@ impl RoutePattern {
             return None;
         }
 
-        let mut params = HashMap::new();
+        let mut params = HashMap::with_capacity(2);
 
         for (i, segment) in self.segments.iter().enumerate() {
             match segment {

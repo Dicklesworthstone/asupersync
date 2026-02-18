@@ -337,29 +337,30 @@ where
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let now = (self.time_getter)();
 
-        // Single lock: refill + token check (was 2 separate locks).
-        let has_tokens = {
+        // Single lock: refill + eagerly acquire token.
+        let acquired = {
             let mut state = self.state.lock();
             self.refill_state(&mut state, now);
-            state.tokens > 0
+            if state.tokens > 0 {
+                state.tokens -= 1;
+                true
+            } else {
+                false
+            }
         };
 
-        if !has_tokens {
+        if !acquired {
             cx.waker().wake_by_ref();
             return Poll::Pending;
         }
 
+        // Token reserved. Check inner readiness.
         match self.inner.poll_ready(cx).map_err(RateLimitError::Inner) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
-            Poll::Ready(Ok(())) => {
-                let acquired = self.try_acquire();
-                if acquired {
-                    Poll::Ready(Ok(()))
-                } else {
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
-                }
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+            other => {
+                // Inner not ready or errored — return the reserved token.
+                self.state.lock().tokens += 1;
+                other
             }
         }
     }

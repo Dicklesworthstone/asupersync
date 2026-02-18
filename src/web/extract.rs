@@ -47,9 +47,9 @@ impl Request {
             method: method.into(),
             path: path.into(),
             query: None,
-            headers: HashMap::new(),
+            headers: HashMap::with_capacity(8),
             body: Bytes::new(),
-            path_params: HashMap::new(),
+            path_params: HashMap::with_capacity(2),
             extensions: Extensions::new(),
         }
     }
