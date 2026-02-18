@@ -7,9 +7,9 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
-    braced,
+    Error, Expr, Ident, LitStr, Token, braced,
     parse::{Parse, ParseStream},
-    parse_macro_input, Error, Expr, Ident, LitStr, Token,
+    parse_macro_input,
 };
 
 /// A single race branch.

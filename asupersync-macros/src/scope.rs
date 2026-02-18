@@ -31,10 +31,10 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
+    Expr, Ident, LitStr, Stmt, Token,
     parse::{Parse, ParseStream},
     parse_macro_input,
     spanned::Spanned,
-    Expr, Ident, LitStr, Stmt, Token,
 };
 
 /// Optional name for the scope (for debugging/tracing).
