@@ -1,0 +1,538 @@
+{
+  "schema_version": "raptorq-optimization-decision-records-v1",
+  "artifact_id": "raptorq_optimization_decision_records_v1",
+  "track_bead_id": "asupersync-3ltrv",
+  "external_ref": "bd-7toum",
+  "generated_at_utc": "2026-02-17T23:30:00Z",
+  "governance_rules": {
+    "required_fields": [
+      "decision_id",
+      "lever_code",
+      "lever_bead_id",
+      "summary",
+      "expected_value",
+      "risk_class",
+      "proof_safety_constraints",
+      "adoption_wedge",
+      "conservative_comparator",
+      "fallback_plan",
+      "rollback_rehearsal",
+      "validation_evidence",
+      "deterministic_replay",
+      "owner",
+      "status"
+    ],
+    "risk_classes": [
+      "low",
+      "medium",
+      "high"
+    ],
+    "status_values": [
+      "approved",
+      "approved_guarded",
+      "proposed",
+      "hold"
+    ],
+    "rollback_rehearsal_policy": {
+      "requires_command": true,
+      "requires_checklist": true,
+      "requires_post_rollback_verification": true
+    }
+  },
+  "decision_cards": [
+    {
+      "decision_id": "g3-e4-fused-gf256-guarded",
+      "lever_code": "E4",
+      "lever_bead_id": "asupersync-348uw",
+      "summary": "Dual fused GF256 kernels with deterministic policy gating (`DualKernelPolicy`).",
+      "status": "approved_guarded",
+      "owner": "FoggyLake",
+      "expected_value": {
+        "impact": "high",
+        "hypothesis": "Substantial throughput gains in selected size/ISA regimes with bounded downside under policy gating.",
+        "measured_highlights": [
+          "mul_slices2 n=4096: fused ~29.42 vs seq ~25.35 GiB/s",
+          "mul_slices2 n=16384: fused ~25.89 vs seq ~36.17 GiB/s (regression)",
+          "addmul_slices2 n=16384: fused ~26.04 vs seq ~27.72 GiB/s (regression)"
+        ]
+      },
+      "risk_class": "high",
+      "proof_safety_constraints": [
+        "Bit-exact equivalence against conservative sequential kernels.",
+        "Policy selection must remain deterministic for identical inputs/config.",
+        "Scalar fallback remains mandatory and selectable."
+      ],
+      "adoption_wedge": {
+        "phase": "guarded rollout",
+        "strategy": "Use deterministic policy windows/ratio thresholds and disable fused path where regressions appear.",
+        "enable_controls": [
+          "ASUPERSYNC_GF256_DUAL_POLICY",
+          "policy ratio/window knobs in `src/raptorq/gf256.rs`"
+        ]
+      },
+      "conservative_comparator": {
+        "mode": "sequential kernels",
+        "evidence_refs": [
+          "asupersync-348uw bead notes (2026-02-14 through 2026-02-15 benchmark corpus)"
+        ]
+      },
+      "fallback_plan": {
+        "trigger": "Any sustained p95 regression versus sequential comparator in target regime.",
+        "action": "Set policy to non-fused path and keep superkernel code gated.",
+        "conservative_mode": "Sequential GF256 kernels only."
+      },
+      "rollback_rehearsal": {
+        "command": "rch exec -- env ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-bench-g3-e4 cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+        "post_rollback_verification_checklist": [
+          "Benchmark output present under target dir and parseable.",
+          "No fused-path activation in logs/config snapshot.",
+          "Targeted tests pass: `rch exec -- cargo test -p asupersync --lib raptorq::gf256 -- --nocapture`."
+        ]
+      },
+      "validation_evidence": {
+        "unit": [
+          "rch exec -- cargo test -p asupersync --lib raptorq::gf256 -- --nocapture",
+          "rch exec -- cargo test -p asupersync --lib raptorq::linalg -- --nocapture"
+        ],
+        "deterministic_e2e": [
+          "rch exec -- ./scripts/run_raptorq_e2e.sh --profile fast"
+        ],
+        "structured_logs": [
+          "target/e2e-results/raptorq/<profile>_<timestamp>/summary.json",
+          "target/e2e-results/raptorq/<profile>_<timestamp>/scenarios.ndjson"
+        ]
+      },
+      "deterministic_replay": {
+        "seed": 424242,
+        "fixture_or_scenario_id": "RQ-G1-GF256-ADDMUL",
+        "pre_change_command": "rch exec -- env ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-bench-g3-e4-pre cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+        "post_change_command": "rch exec -- env ASUPERSYNC_GF256_DUAL_POLICY=auto CARGO_TARGET_DIR=/tmp/rch-bench-g3-e4-post cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1"
+      }
+    },
+    {
+      "decision_id": "g3-e5-scalar-u64-chunking",
+      "lever_code": "E5",
+      "lever_bead_id": "asupersync-2ncba.1",
+      "summary": "Scalar GF256 table-path u64 chunking optimization for non-SIMD paths.",
+      "status": "approved",
+      "owner": "RainyTower",
+      "expected_value": {
+        "impact": "medium",
+        "hypothesis": "Improves scalar arithmetic throughput without ISA-specific complexity.",
+        "measured_highlights": [
+          "addmul_slice throughput +37%",
+          "mul_slice throughput +29%",
+          "addmul_slice secondary benchmark +84%"
+        ]
+      },
+      "risk_class": "medium",
+      "proof_safety_constraints": [
+        "Mapping/XOR order must remain index-stable and deterministic.",
+        "No SIMD/unsafe path required for this optimization.",
+        "Must preserve decode correctness under deterministic test seeds."
+      ],
+      "adoption_wedge": {
+        "phase": "default on scalar path",
+        "strategy": "Keep implementation in scalar-only lane with direct comparator to prior bytewise loop.",
+        "enable_controls": [
+          "Compile-time scalar path selection (non-SIMD environments)."
+        ]
+      },
+      "conservative_comparator": {
+        "mode": "byte-wise table path",
+        "evidence_refs": [
+          "asupersync-2ncba.1 bead notes benchmark deltas"
+        ]
+      },
+      "fallback_plan": {
+        "trigger": "Correctness mismatch or p95 regression in scalar-only environments.",
+        "action": "Revert to prior byte-wise loop implementation for affected functions.",
+        "conservative_mode": "Byte-wise table operations."
+      },
+      "rollback_rehearsal": {
+        "command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch-bench-g3-e5 cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+        "post_rollback_verification_checklist": [
+          "Scalar throughput comparison report captured.",
+          "`rch exec -- cargo test -p asupersync --lib raptorq::gf256 -- --nocapture` passes.",
+          "No decode conformance regression in deterministic E2E fast profile."
+        ]
+      },
+      "validation_evidence": {
+        "unit": [
+          "rch exec -- cargo test -p asupersync --lib raptorq::gf256 -- --nocapture",
+          "rch exec -- cargo check -p asupersync --lib"
+        ],
+        "deterministic_e2e": [
+          "rch exec -- ./scripts/run_raptorq_e2e.sh --profile fast"
+        ],
+        "structured_logs": [
+          "target/e2e-results/raptorq/<profile>_<timestamp>/summary.json"
+        ]
+      },
+      "deterministic_replay": {
+        "seed": 424242,
+        "fixture_or_scenario_id": "RQ-E-GF256-004",
+        "pre_change_command": "rch exec -- git show HEAD~1:src/raptorq/gf256.rs > /tmp/g3_e5_pre_snapshot.rs",
+        "post_change_command": "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1"
+      }
+    },
+    {
+      "decision_id": "g3-c5-block-schur-low-rank",
+      "lever_code": "C5",
+      "lever_bead_id": "asupersync-zfn8v",
+      "summary": "Block-Schur / low-rank accelerated elimination for hard decode systems.",
+      "status": "approved_guarded",
+      "owner": "FoggyLake",
+      "expected_value": {
+        "impact": "high",
+        "hypothesis": "Reduce dense elimination wall time in hardest decode regimes."
+      },
+      "risk_class": "high",
+      "proof_safety_constraints": [
+        "Eligibility checks must prevent unsafe acceleration on unsupported matrices.",
+        "Conservative elimination path is mandatory and tested first.",
+        "Deterministic solver ordering must be preserved."
+      ],
+      "adoption_wedge": {
+        "phase": "eligibility-gated",
+        "strategy": "Only activate on explicitly matched hard-regime structures.",
+        "enable_controls": [
+          "Runtime eligibility predicates with conservative fallback."
+        ]
+      },
+      "conservative_comparator": {
+        "mode": "baseline dense elimination path",
+        "evidence_refs": [
+          "asupersync-zfn8v bead notes (guardrail + fallback requirement)"
+        ]
+      },
+      "fallback_plan": {
+        "trigger": "Numerical instability signal, mismatch, or tail regression.",
+        "action": "Disable accelerated branch and force baseline elimination.",
+        "conservative_mode": "Dense elimination only."
+      },
+      "rollback_rehearsal": {
+        "command": "rch exec -- ./scripts/run_raptorq_e2e.sh --profile full",
+        "post_rollback_verification_checklist": [
+          "Full deterministic E2E profile completes without acceleration branch.",
+          "Decode-success metrics remain at expected values for canonical scenarios.",
+          "Replay catalog entries remain reproducible."
+        ]
+      },
+      "validation_evidence": {
+        "unit": [
+          "rch exec -- cargo test --test raptorq_conformance -- --nocapture"
+        ],
+        "deterministic_e2e": [
+          "rch exec -- ./scripts/run_raptorq_e2e.sh --profile full"
+        ],
+        "structured_logs": [
+          "target/e2e-results/raptorq/full_<timestamp>/scenarios.ndjson"
+        ]
+      },
+      "deterministic_replay": {
+        "seed": 424242,
+        "fixture_or_scenario_id": "RQ-G1-E2E-RANDOM-HIGHLOSS",
+        "pre_change_command": "rch exec -- ./scripts/run_raptorq_e2e.sh --profile full --mode conservative",
+        "post_change_command": "rch exec -- ./scripts/run_raptorq_e2e.sh --profile full --mode accelerated"
+      }
+    },
+    {
+      "decision_id": "g3-c6-peeling-dense-core",
+      "lever_code": "C6",
+      "lever_bead_id": "asupersync-2qfjd",
+      "summary": "Deterministic peeling front-end with dense-core extraction.",
+      "status": "approved_guarded",
+      "owner": "FoggyLake",
+      "expected_value": {
+        "impact": "high",
+        "hypothesis": "Reduce solver burden by shrinking dense core before elimination."
+      },
+      "risk_class": "high",
+      "proof_safety_constraints": [
+        "Peeling decisions must be deterministic and reproducible.",
+        "Unresolved cases must hand off to conservative dense-core solver.",
+        "No silent decode corruption permitted under partial peel outcomes."
+      ],
+      "adoption_wedge": {
+        "phase": "bounded front-end preconditioner",
+        "strategy": "Use deterministic peeling as pre-pass; escalate to conservative solver otherwise.",
+        "enable_controls": [
+          "Bounded peel iteration controls",
+          "Dense-core fallback handoff"
+        ]
+      },
+      "conservative_comparator": {
+        "mode": "direct conservative dense solve without peeling",
+        "evidence_refs": [
+          "asupersync-2qfjd bead notes"
+        ]
+      },
+      "fallback_plan": {
+        "trigger": "Peeling stalls or violates bounded progress criteria.",
+        "action": "Short-circuit to conservative dense-core solve.",
+        "conservative_mode": "Direct dense-core solve."
+      },
+      "rollback_rehearsal": {
+        "command": "rch exec -- ./scripts/run_raptorq_e2e.sh --profile forensics",
+        "post_rollback_verification_checklist": [
+          "Forensics profile emits deterministic logs and replay artifacts.",
+          "No peeling-specific branch taken in rollback mode.",
+          "Decode success parity with baseline retained."
+        ]
+      },
+      "validation_evidence": {
+        "unit": [
+          "rch exec -- cargo test --test raptorq_conformance -- --nocapture"
+        ],
+        "deterministic_e2e": [
+          "rch exec -- ./scripts/run_raptorq_e2e.sh --profile forensics"
+        ],
+        "structured_logs": [
+          "target/e2e-results/raptorq/forensics_<timestamp>/scenarios.ndjson"
+        ]
+      },
+      "deterministic_replay": {
+        "seed": 424242,
+        "fixture_or_scenario_id": "RQ-G1-E2E-BURST-LATE",
+        "pre_change_command": "rch exec -- ./scripts/run_raptorq_e2e.sh --profile forensics --mode conservative",
+        "post_change_command": "rch exec -- ./scripts/run_raptorq_e2e.sh --profile forensics --mode peel_dense_core"
+      }
+    },
+    {
+      "decision_id": "g3-f5-runtime-policy-engine",
+      "lever_code": "F5",
+      "lever_bead_id": "asupersync-324sc",
+      "summary": "Runtime decoder policy engine with expected-loss strategy selection.",
+      "status": "approved_guarded",
+      "owner": "GrayLynx",
+      "expected_value": {
+        "impact": "high",
+        "hypothesis": "Lower arithmetic work and tail latency by selecting strategies online under bounded rules."
+      },
+      "risk_class": "high",
+      "proof_safety_constraints": [
+        "Policy decisions must be deterministic for identical runtime state.",
+        "Fallback to static conservative strategy must always be available.",
+        "Policy logic cannot violate decode correctness invariants."
+      ],
+      "adoption_wedge": {
+        "phase": "bounded online policy",
+        "strategy": "Enable policy engine with explicit caps and conservative comparator tracking.",
+        "enable_controls": [
+          "Policy toggles and bounded decision thresholds."
+        ]
+      },
+      "conservative_comparator": {
+        "mode": "static baseline strategy",
+        "evidence_refs": [
+          "asupersync-324sc bead notes (explicit comparator requirement)"
+        ]
+      },
+      "fallback_plan": {
+        "trigger": "Policy-induced tail regression or unstable strategy flips.",
+        "action": "Force static baseline strategy and disable runtime policy adaptation.",
+        "conservative_mode": "Static baseline decode strategy."
+      },
+      "rollback_rehearsal": {
+        "command": "rch exec -- cargo bench --bench raptorq_benchmark -- raptorq_e2e --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+        "post_rollback_verification_checklist": [
+          "Strategy selection logs show static mode only.",
+          "Tail metrics compared against policy-on run are archived.",
+          "Conformance tests remain green."
+        ]
+      },
+      "validation_evidence": {
+        "unit": [
+          "rch exec -- cargo test --test raptorq_conformance -- --nocapture"
+        ],
+        "deterministic_e2e": [
+          "rch exec -- ./scripts/run_raptorq_e2e.sh --profile full"
+        ],
+        "structured_logs": [
+          "target/e2e-results/raptorq/full_<timestamp>/summary.json"
+        ]
+      },
+      "deterministic_replay": {
+        "seed": 424242,
+        "fixture_or_scenario_id": "RQ-G1-E2E-RANDOM-LOWLOSS",
+        "pre_change_command": "rch exec -- ./scripts/run_raptorq_e2e.sh --profile full --policy static",
+        "post_change_command": "rch exec -- ./scripts/run_raptorq_e2e.sh --profile full --policy expected_loss"
+      }
+    },
+    {
+      "decision_id": "g3-f6-regime-shift-retuning",
+      "lever_code": "F6",
+      "lever_bead_id": "asupersync-j96j4",
+      "summary": "Regime-shift detector with bounded runtime retuning.",
+      "status": "proposed",
+      "owner": null,
+      "expected_value": {
+        "impact": "high",
+        "hypothesis": "Adapt to workload drift while preserving deterministic fallback behavior."
+      },
+      "risk_class": "high",
+      "proof_safety_constraints": [
+        "No unbounded online learning.",
+        "Retuning updates must obey explicit caps and reversion rules.",
+        "Deterministic replay must produce identical retuning events for fixed seeds."
+      ],
+      "adoption_wedge": {
+        "phase": "template-only pending implementation",
+        "strategy": "Ship with retuning disabled by default; require comparator evidence before enablement.",
+        "enable_controls": [
+          "feature flag gate",
+          "bounded retune caps"
+        ]
+      },
+      "conservative_comparator": {
+        "mode": "static policy with retuning disabled",
+        "evidence_refs": []
+      },
+      "fallback_plan": {
+        "trigger": "Retuning oscillation, instability, or policy divergence.",
+        "action": "Disable retuning and force static policy engine behavior.",
+        "conservative_mode": "Static policy only."
+      },
+      "rollback_rehearsal": {
+        "command": "rch exec -- ./scripts/run_raptorq_e2e.sh --profile full --policy static",
+        "post_rollback_verification_checklist": [
+          "Retuning events absent from structured logs.",
+          "Static policy metrics captured for comparator.",
+          "Replay outputs remain deterministic."
+        ]
+      },
+      "validation_evidence": {
+        "unit": [],
+        "deterministic_e2e": [],
+        "structured_logs": []
+      },
+      "deterministic_replay": {
+        "seed": 424242,
+        "fixture_or_scenario_id": "RQ-G1-E2E-RANDOM-HIGHLOSS",
+        "pre_change_command": "rch exec -- ./scripts/run_raptorq_e2e.sh --profile full --policy static",
+        "post_change_command": "rch exec -- ./scripts/run_raptorq_e2e.sh --profile full --policy retune_bounded"
+      }
+    },
+    {
+      "decision_id": "g3-f7-factor-cache-reuse",
+      "lever_code": "F7",
+      "lever_bead_id": "asupersync-n5fk6",
+      "summary": "Cross-block factor-cache + skeleton reuse for burst decode workloads.",
+      "status": "proposed",
+      "owner": null,
+      "expected_value": {
+        "impact": "high",
+        "hypothesis": "Lower p95/p99 latency by reusing validated elimination artifacts in repeating decode structures."
+      },
+      "risk_class": "high",
+      "proof_safety_constraints": [
+        "Reuse only on deterministic structural-equivalence checks.",
+        "Bounded cache policy with memory budget limits.",
+        "Fallback to conservative rebuild on mismatch."
+      ],
+      "adoption_wedge": {
+        "phase": "template-only pending implementation",
+        "strategy": "Introduce cache in observe-only mode first, then gated reuse.",
+        "enable_controls": [
+          "cache capacity cap",
+          "equivalence verdict enforcement"
+        ]
+      },
+      "conservative_comparator": {
+        "mode": "no-cache rebuild path",
+        "evidence_refs": []
+      },
+      "fallback_plan": {
+        "trigger": "Equivalence mismatch, cache corruption suspicion, or memory pressure thresholds.",
+        "action": "Disable cache hit path and force conservative rebuild.",
+        "conservative_mode": "No reuse."
+      },
+      "rollback_rehearsal": {
+        "command": "rch exec -- ./scripts/run_raptorq_e2e.sh --profile full --cache off",
+        "post_rollback_verification_checklist": [
+          "Cache-hit count drops to zero in logs.",
+          "Decode correctness remains unchanged.",
+          "Latency comparator report archived."
+        ]
+      },
+      "validation_evidence": {
+        "unit": [],
+        "deterministic_e2e": [],
+        "structured_logs": []
+      },
+      "deterministic_replay": {
+        "seed": 424242,
+        "fixture_or_scenario_id": "RQ-G1-E2E-BURST-LATE",
+        "pre_change_command": "rch exec -- ./scripts/run_raptorq_e2e.sh --profile full --cache off",
+        "post_change_command": "rch exec -- ./scripts/run_raptorq_e2e.sh --profile full --cache on"
+      }
+    },
+    {
+      "decision_id": "g3-f8-wavefront-overlap",
+      "lever_code": "F8",
+      "lever_bead_id": "asupersync-2zu9p",
+      "summary": "Bounded wavefront decode pipeline with stage overlap.",
+      "status": "proposed",
+      "owner": null,
+      "expected_value": {
+        "impact": "high",
+        "hypothesis": "Reduce pipeline bubbles and improve burst-workload wall-time through bounded overlap."
+      },
+      "risk_class": "high",
+      "proof_safety_constraints": [
+        "Bounded queues with deterministic ordering.",
+        "Sequential conservative fallback remains first-class.",
+        "No stage overlap may bypass correctness guards."
+      ],
+      "adoption_wedge": {
+        "phase": "template-only pending implementation",
+        "strategy": "Begin with conservative sequential baseline comparator and fixed queue bounds.",
+        "enable_controls": [
+          "bounded wavefront queue limits",
+          "sequential mode override"
+        ]
+      },
+      "conservative_comparator": {
+        "mode": "sequential assembly->GF256->solve pipeline",
+        "evidence_refs": []
+      },
+      "fallback_plan": {
+        "trigger": "Queue-pressure instability or tail-latency regression.",
+        "action": "Force sequential stage execution.",
+        "conservative_mode": "Sequential pipeline only."
+      },
+      "rollback_rehearsal": {
+        "command": "rch exec -- ./scripts/run_raptorq_e2e.sh --profile forensics --pipeline sequential",
+        "post_rollback_verification_checklist": [
+          "No overlapped-stage events in structured logs.",
+          "Forensics scenario outcomes match expected decode success.",
+          "Replay command package generated."
+        ]
+      },
+      "validation_evidence": {
+        "unit": [],
+        "deterministic_e2e": [],
+        "structured_logs": []
+      },
+      "deterministic_replay": {
+        "seed": 424242,
+        "fixture_or_scenario_id": "RQ-G1-E2E-BURST-LATE",
+        "pre_change_command": "rch exec -- ./scripts/run_raptorq_e2e.sh --profile forensics --pipeline sequential",
+        "post_change_command": "rch exec -- ./scripts/run_raptorq_e2e.sh --profile forensics --pipeline wavefront"
+      }
+    }
+  ],
+  "coverage_summary": {
+    "cards_total": 8,
+    "cards_with_conservative_comparator": 8,
+    "cards_with_measured_comparator_evidence": 3,
+    "cards_pending_measured_evidence": 5,
+    "cards_with_replay_commands": 8,
+    "closure_blockers": [
+      "Populate measured comparator evidence for planned/open levers: E5 (asupersync-36m6p), F6, F7, F8.",
+      "Attach final rollback rehearsal outcomes per card.",
+      "Attach passing comprehensive unit + deterministic E2E evidence links for all cards marked approved."
+    ]
+  }
+}
