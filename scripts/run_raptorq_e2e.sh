@@ -197,43 +197,103 @@ selected_for_run() {
 
 validate_scenario_contract() {
     local scenario_json="$1"
-    local -a required_string_fields=(
-        "scenario_id"
-        "profile"
-        "category"
-        "replay_ref"
-        "unit_sentinel"
-        "assertion_id"
-        "run_id"
-        "parameter_set"
-        "artifact_path"
-        "repro_command"
-    )
-    local field
+    jq -e '
+        .schema_version == "raptorq-e2e-scenario-log-v2" and
+        (.scenario_id | type == "string" and length > 0) and
+        (.category | type == "string" and length > 0) and
+        (.profile | type == "string" and (. == "fast" or . == "full" or . == "forensics")) and
+        (.profile_set | type == "string" and length > 0) and
+        (.test_filter | type == "string" and length > 0) and
+        (.replay_ref | type == "string" and length > 0) and
+        (.unit_sentinel | type == "string" and length > 0) and
+        (.assertion_id | type == "string" and length > 0) and
+        (.run_id | type == "string" and length > 0) and
+        (.parameter_set | type == "string" and length > 0) and
+        (.artifact_path | type == "string" and length > 0) and
+        (.log_path | type == "string" and length > 0) and
+        (.artifact_path == .log_path) and
+        (.repro_command | type == "string" and test("^((rch exec -- )?cargo test --test raptorq_conformance )")) and
+        (.phase_markers == ["encode","loss","decode","proof","report"]) and
+        (.status == "pass" or .status == "fail") and
+        (.seed | type == "number" and . >= 0 and floor == .) and
+        (.exit_code | type == "number" and floor == .) and
+        (.duration_ms | type == "number" and . >= 0 and floor == .) and
+        (.tests_passed | type == "number" and . >= 0 and floor == .) and
+        (.tests_failed | type == "number" and . >= 0 and floor == .)
+    ' <<<"$scenario_json" >/dev/null
+}
 
-    if [[ "$scenario_json" != *'"schema_version":"raptorq-e2e-scenario-log-v2"'* ]]; then
+print_scenario_contract_help() {
+    cat >&2 <<'EOF'
+Forensic log contract violation (D3 gate).
+Required scenario fields:
+  - schema_version=raptorq-e2e-scenario-log-v2
+  - non-empty: scenario_id, category, profile, profile_set, test_filter, replay_ref,
+    unit_sentinel, assertion_id, run_id, parameter_set, artifact_path, log_path, repro_command
+  - phase_markers exactly: ["encode","loss","decode","proof","report"]
+  - status in {pass, fail}; integer seed/exit_code/duration_ms/tests_passed/tests_failed
+  - repro_command starts with "cargo test --test raptorq_conformance ..." (optionally prefixed by "rch exec -- ")
+Remediation:
+  1. Update scenario JSON formatter in scripts/run_raptorq_e2e.sh.
+  2. Keep schema version and marker order stable unless intentionally version-bumped.
+  3. Re-run with: ./scripts/run_raptorq_e2e.sh --profile forensics --scenario RQ-E2E-FAILURE-INSUFFICIENT
+EOF
+}
+
+validate_suite_contract() {
+    local summary_file="$1"
+    local scenario_log="$2"
+    local expected_count
+    local actual_count
+
+    jq -e '
+        .schema_version == "raptorq-e2e-suite-log-v1" and
+        .suite_id == "RQ-E2E-SUITE-D6" and
+        (.profile | type == "string" and (. == "fast" or . == "full" or . == "forensics")) and
+        (.selected_scenarios | type == "number" and . >= 1 and floor == .) and
+        (.passed_scenarios | type == "number" and . >= 0 and floor == .) and
+        (.failed_scenarios | type == "number" and . >= 0 and floor == .) and
+        (.status == "pass" or .status == "fail") and
+        (.artifact_dir | type == "string" and length > 0) and
+        (.scenario_log | type == "string" and length > 0) and
+        (.preflight_log | type == "string" and length > 0) and
+        ((.passed_scenarios + .failed_scenarios) == .selected_scenarios) and
+        ((.status == "pass" and .failed_scenarios == 0) or (.status == "fail" and .failed_scenarios >= 1))
+    ' "$summary_file" >/dev/null || return 1
+
+    expected_count="$(jq -r '.selected_scenarios' "$summary_file" 2>/dev/null || true)"
+    actual_count="$(jq -s 'length' "$scenario_log" 2>/dev/null || true)"
+    if [[ -z "$expected_count" || -z "$actual_count" || "$expected_count" != "$actual_count" ]]; then
         return 1
     fi
 
-    for field in "${required_string_fields[@]}"; do
-        if ! grep -Eq "\"${field}\":\"[^\"]+\"" <<<"$scenario_json"; then
-            return 1
-        fi
-    done
+    jq -s -e '
+        length > 0 and all(.[]; 
+            .schema_version == "raptorq-e2e-scenario-log-v2" and
+            (.scenario_id | type == "string" and length > 0) and
+            (.profile | type == "string" and (. == "fast" or . == "full" or . == "forensics")) and
+            (.status == "pass" or .status == "fail") and
+            (.artifact_path | type == "string" and length > 0) and
+            (.log_path | type == "string" and length > 0) and
+            (.repro_command | type == "string" and test("^((rch exec -- )?cargo test --test raptorq_conformance )"))
+        )
+    ' "$scenario_log" >/dev/null
+}
 
-    if ! grep -Eq '"seed":[0-9]+' <<<"$scenario_json"; then
-        return 1
-    fi
-
-    if [[ "$scenario_json" != *'"phase_markers":["encode","loss","decode","proof","report"]'* ]]; then
-        return 1
-    fi
-
-    if [[ "$scenario_json" != *'"repro_command":"rch exec -- '* ]]; then
-        return 1
-    fi
-
-    return 0
+print_suite_contract_help() {
+    cat >&2 <<'EOF'
+Suite forensic contract violation (D3 gate).
+Required suite fields:
+  - schema_version=raptorq-e2e-suite-log-v1, suite_id=RQ-E2E-SUITE-D6
+  - valid profile marker (fast/full/forensics)
+  - selected_scenarios == passed_scenarios + failed_scenarios
+  - selected_scenarios must equal number of NDJSON scenario records
+  - status=pass only when failed_scenarios=0
+Remediation:
+  1. Verify summary writer in scripts/run_raptorq_e2e.sh.
+  2. Ensure every selected scenario appends exactly one NDJSON record.
+  3. Re-run deterministic gate and inspect generated summary/scenarios files.
+EOF
 }
 
 while [[ $# -gt 0 ]]; do
@@ -284,9 +344,20 @@ if [[ "$LIST_ONLY" -eq 1 ]]; then
     exit 0
 fi
 
-if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
-    echo "Required executable not found: $RCH_BIN" >&2
+if ! command -v jq >/dev/null 2>&1; then
+    echo "Required executable not found: jq" >&2
     exit 1
+fi
+
+RUN_WITH_RCH=1
+if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+    RUN_WITH_RCH=0
+    echo "warning: '$RCH_BIN' not found; falling back to local cargo execution for this run" >&2
+fi
+
+REPRO_PREFIX="rch exec -- "
+if [[ "$RUN_WITH_RCH" -eq 0 ]]; then
+    REPRO_PREFIX=""
 fi
 
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
@@ -311,8 +382,16 @@ echo "Scenario log:    ${SCENARIO_LOG}"
 echo ""
 
 if [[ "${NO_PREFLIGHT:-0}" != "1" ]]; then
-    echo ">>> [preflight] compile check via rch..."
-    if ! "$RCH_BIN" exec -- cargo test --test raptorq_conformance --no-run >"$PREFLIGHT_LOG" 2>&1; then
+    echo ">>> [preflight] compile check..."
+    set +e
+    if [[ "$RUN_WITH_RCH" -eq 1 ]]; then
+        "$RCH_BIN" exec -- cargo test --test raptorq_conformance --no-run >"$PREFLIGHT_LOG" 2>&1
+    else
+        cargo test --test raptorq_conformance --no-run >"$PREFLIGHT_LOG" 2>&1
+    fi
+    preflight_rc="$?"
+    set -e
+    if [[ "$preflight_rc" -ne 0 ]]; then
         echo "Preflight compilation failed. See ${PREFLIGHT_LOG}" >&2
         cat > "$SUMMARY_FILE" <<EOF
 {
@@ -321,7 +400,7 @@ if [[ "${NO_PREFLIGHT:-0}" != "1" ]]; then
   "status": "preflight_failed",
   "artifact_dir": "$(json_escape "$RUN_DIR")",
   "preflight_log": "$(json_escape "$PREFLIGHT_LOG")",
-  "repro_command": "rch exec -- cargo test --test raptorq_conformance --no-run"
+  "repro_command": "$(json_escape "${REPRO_PREFIX}cargo test --test raptorq_conformance --no-run")"
 }
 EOF
         exit 1
@@ -350,13 +429,17 @@ for scenario_id in "${SCENARIO_IDS[@]}"; do
     scenario_profiles="${SCENARIO_PROFILES[$scenario_id]}"
     scenario_log_file="${RUN_DIR}/${scenario_id}.log"
     run_id="${scenario_id}-${PROFILE}"
-    repro_cmd="rch exec -- cargo test --test raptorq_conformance ${test_filter} -- --nocapture --test-threads=${TEST_THREADS}"
+    repro_cmd="${REPRO_PREFIX}cargo test --test raptorq_conformance ${test_filter} -- --nocapture --test-threads=${TEST_THREADS}"
 
     echo ">>> [${selected_count}] ${scenario_id} (${category})"
     start_s="$(date +%s)"
 
     set +e
-    timeout "$E2E_TIMEOUT" "$RCH_BIN" exec -- cargo test --test raptorq_conformance "$test_filter" -- --nocapture --test-threads="$TEST_THREADS" >"$scenario_log_file" 2>&1
+    if [[ "$RUN_WITH_RCH" -eq 1 ]]; then
+        timeout "$E2E_TIMEOUT" "$RCH_BIN" exec -- cargo test --test raptorq_conformance "$test_filter" -- --nocapture --test-threads="$TEST_THREADS" >"$scenario_log_file" 2>&1
+    else
+        timeout "$E2E_TIMEOUT" cargo test --test raptorq_conformance "$test_filter" -- --nocapture --test-threads="$TEST_THREADS" >"$scenario_log_file" 2>&1
+    fi
     rc=$?
     set -e
 
@@ -433,6 +516,7 @@ for scenario_id in "${SCENARIO_IDS[@]}"; do
             "$(json_escape "$scenario_log_file")" \
             "$(json_escape "$repro_cmd")"
         echo "    FAIL (D7 schema contract) -> ${scenario_log_file}"
+        print_scenario_contract_help
         echo "    repro: ${repro_cmd}"
     fi
 
@@ -467,6 +551,12 @@ cat > "$SUMMARY_FILE" <<EOF
   "preflight_log": "$(json_escape "$PREFLIGHT_LOG")"
 }
 EOF
+
+if ! validate_suite_contract "$SUMMARY_FILE" "$SCENARIO_LOG"; then
+    echo "FAIL (D3 forensic suite contract) -> ${SUMMARY_FILE}" >&2
+    print_suite_contract_help
+    exit 1
+fi
 
 echo ""
 echo "==================================================================="

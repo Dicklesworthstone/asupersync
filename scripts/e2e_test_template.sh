@@ -126,6 +126,7 @@ FAILED=$(grep -c "^test .* FAILED$" "$LOG_FILE" 2>/dev/null || echo "0")
 # Structured summary (machine-readable)
 cat > "${ARTIFACT_DIR}/summary.json" << ENDJSON
 {
+  "schema_version": "e2e-suite-summary-v2",
   "suite": "${SUITE_NAME}_e2e",
   "timestamp": "${TIMESTAMP}",
   "seed": "${TEST_SEED}",
@@ -134,6 +135,8 @@ cat > "${ARTIFACT_DIR}/summary.json" << ENDJSON
   "tests_failed": ${FAILED},
   "exit_code": ${TEST_RESULT},
   "pattern_failures": ${PATTERN_FAILURES},
+  "suite_script": "${SCRIPT_DIR}/$(basename "$0")",
+  "replay_command": "TEST_LOG_LEVEL=${TEST_LOG_LEVEL} RUST_LOG=${RUST_LOG} TEST_SEED=${TEST_SEED} bash ${SCRIPT_DIR}/$(basename "$0")",
   "log_file": "${LOG_FILE}",
   "artifact_dir": "${ARTIFACT_DIR}"
 }
