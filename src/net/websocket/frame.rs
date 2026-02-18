@@ -168,13 +168,12 @@ impl Frame {
     ///
     /// # Panics
     ///
-    /// Panics if `code` is a value that MUST NOT appear in a Close frame
-    /// per RFC 6455 §7.4.1 (1005, 1006, 1015).
+    /// Panics if `code` is not valid for wire transmission per RFC 6455 §7.4.
     #[must_use]
     pub fn close(code: Option<u16>, reason: Option<&str>) -> Self {
         if let Some(c) = code {
             assert!(
-                c != 1005 && c != 1006 && c != 1015,
+                CloseCode::is_valid_code(c),
                 "close code {c} must not be sent in a Close frame (RFC 6455 §7.4.1)"
             );
         }
@@ -808,7 +807,7 @@ impl CloseCode {
     pub const fn is_sendable(self) -> bool {
         !matches!(
             self,
-            Self::NoStatusReceived | Self::Abnormal | Self::TlsHandshake
+            Self::Reserved | Self::NoStatusReceived | Self::Abnormal | Self::TlsHandshake
         )
     }
 }
@@ -1042,6 +1041,7 @@ mod tests {
         assert!(CloseCode::Normal.is_sendable());
         assert!(CloseCode::GoingAway.is_sendable());
         assert!(CloseCode::ProtocolError.is_sendable());
+        assert!(!CloseCode::Reserved.is_sendable());
         assert!(!CloseCode::NoStatusReceived.is_sendable());
         assert!(!CloseCode::Abnormal.is_sendable());
         assert!(!CloseCode::TlsHandshake.is_sendable());
@@ -1369,6 +1369,20 @@ mod tests {
         // RFC 6455 §7.4.1: 1015 (TLS Handshake) MUST NOT be set as a
         // status code in a Close control frame by an endpoint.
         let _ = Frame::close(Some(1015), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "must not be sent")]
+    fn close_frame_code_1004_panics() {
+        // RFC 6455 §7.4.1: 1004 is reserved and MUST NOT be sent.
+        let _ = Frame::close(Some(1004), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "must not be sent")]
+    fn close_frame_code_1012_panics() {
+        // 1012 is outside this implementation's allowed wire set.
+        let _ = Frame::close(Some(1012), None);
     }
 
     #[test]

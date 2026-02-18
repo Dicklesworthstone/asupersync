@@ -94,6 +94,7 @@ impl CloseReason {
     ///
     /// Returns `WsError::InvalidClosePayload` if:
     /// - Payload is exactly 1 byte (invalid)
+    /// - Status code is invalid/reserved for wire use
     /// - Reason text is not valid UTF-8
     pub fn parse(payload: &[u8]) -> Result<Self, WsError> {
         match payload.len() {
@@ -101,6 +102,9 @@ impl CloseReason {
             1 => Err(WsError::InvalidClosePayload),
             _ => {
                 let code_raw = u16::from_be_bytes([payload[0], payload[1]]);
+                if !CloseCode::is_valid_code(code_raw) {
+                    return Err(WsError::InvalidClosePayload);
+                }
                 let code = CloseCode::from_u16(code_raw);
 
                 let text = if payload.len() > 2 {
@@ -410,10 +414,14 @@ impl CloseHandshake {
                 self.state = CloseState::CloseReceived;
                 self.peer_reason = Some(reason.clone());
 
-                // Echo the close code back (or use Normal if none provided)
-                let response_code = reason.code.unwrap_or(CloseCode::Normal);
-                let response = CloseReason::new(response_code, None);
-                Ok(Some(response.to_frame()))
+                // Echo peer code as-is when present, including custom valid
+                // application codes in 3000..=4999.
+                let response_code = if frame.payload.len() >= 2 {
+                    u16::from_be_bytes([frame.payload[0], frame.payload[1]])
+                } else {
+                    u16::from(CloseCode::Normal)
+                };
+                Ok(Some(Frame::close(Some(response_code), None)))
             }
             CloseState::CloseSent => {
                 // We sent close, peer is responding - handshake complete
@@ -500,6 +508,20 @@ mod tests {
 
         let result = CloseReason::parse(&payload);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn close_reason_parse_invalid_reserved_code() {
+        let payload = 1004u16.to_be_bytes();
+        let result = CloseReason::parse(&payload);
+        assert!(matches!(result, Err(WsError::InvalidClosePayload)));
+    }
+
+    #[test]
+    fn close_reason_parse_invalid_unassigned_code() {
+        let payload = 1012u16.to_be_bytes();
+        let result = CloseReason::parse(&payload);
+        assert!(matches!(result, Err(WsError::InvalidClosePayload)));
     }
 
     #[test]
@@ -599,6 +621,17 @@ mod tests {
         assert!(response.is_some());
         assert_eq!(handshake.state(), CloseState::CloseReceived);
         assert!(handshake.peer_reason().is_some());
+    }
+
+    #[test]
+    fn handshake_receive_close_echoes_custom_code() {
+        let mut handshake = CloseHandshake::new();
+        let close_frame = Frame::close(Some(3001), Some("custom"));
+
+        let response = handshake.receive_close(&close_frame).unwrap().unwrap();
+        assert_eq!(response.opcode, Opcode::Close);
+        assert_eq!(&response.payload[..2], &3001u16.to_be_bytes());
+        assert_eq!(handshake.state(), CloseState::CloseReceived);
     }
 
     #[test]
