@@ -916,6 +916,24 @@ impl InactivationDecoder {
         let mut reconstructed = vec![0u8; symbol_size];
 
         for sym in symbols {
+            if sym.is_source
+                && sym.columns.len() == 1
+                && sym.coefficients.len() == 1
+                && sym.coefficients[0] == Gf256::ONE
+            {
+                let source_col = sym.columns[0];
+                let expected = &intermediate[source_col];
+                if let Some(byte_index) = first_mismatch_byte(expected, &sym.data) {
+                    return Err(DecodeError::CorruptDecodedOutput {
+                        esi: sym.esi,
+                        byte_index,
+                        expected: expected[byte_index],
+                        actual: sym.data[byte_index],
+                    });
+                }
+                continue;
+            }
+
             reconstructed.fill(0);
             for (&column, &coefficient) in sym.columns.iter().zip(sym.coefficients.iter()) {
                 if coefficient.is_zero() {
@@ -923,12 +941,7 @@ impl InactivationDecoder {
                 }
                 gf256_addmul_slice(&mut reconstructed, &intermediate[column], coefficient);
             }
-            if reconstructed != sym.data {
-                let byte_index = reconstructed
-                    .iter()
-                    .zip(sym.data.iter())
-                    .position(|(expected, actual)| expected != actual)
-                    .unwrap_or(0);
+            if let Some(byte_index) = first_mismatch_byte(&reconstructed, &sym.data) {
                 return Err(DecodeError::CorruptDecodedOutput {
                     esi: sym.esi,
                     byte_index,
@@ -1318,8 +1331,6 @@ impl InactivationDecoder {
             .filter(|&&support| support == 0)
             .count();
 
-        let base_a = a;
-        let base_b = b;
         let decision = choose_runtime_decoder_policy(
             n_rows,
             n_cols,
@@ -1333,10 +1344,11 @@ impl InactivationDecoder {
             DecoderPolicyMode::ConservativeBaseline | DecoderPolicyMode::HighSupportFirst => {
                 HardRegimePlan::Markowitz
             }
-            DecoderPolicyMode::BlockSchurLowRank => {
-                select_hard_regime_plan(n_rows, n_cols, &base_a)
-            }
+            DecoderPolicyMode::BlockSchurLowRank => select_hard_regime_plan(n_rows, n_cols, &a),
         };
+        let retry_snapshot = (!hard_regime
+            || matches!(hard_plan, HardRegimePlan::BlockSchurLowRank { .. }))
+        .then(|| (a.clone(), snapshot_dense_rhs(&b, symbol_size)));
         if hard_regime {
             state.stats.hard_regime_activated = true;
             state.stats.hard_regime_branch = Some(hard_plan.label());
@@ -1345,9 +1357,8 @@ impl InactivationDecoder {
         }
 
         let mut pivot_row = vec![usize::MAX; n_cols];
-        let mut b = loop {
-            let mut a = base_a.clone();
-            let mut b = base_b.clone();
+        loop {
+            pivot_row.fill(usize::MAX);
 
             // Gaussian elimination with partial pivoting.
             // Pre-allocate a single pivot buffer to avoid per-column clones.
@@ -1427,11 +1438,15 @@ impl InactivationDecoder {
                 if !hard_regime {
                     hard_regime = true;
                     state.stats.hard_regime_activated = true;
-                    hard_plan = select_hard_regime_plan(n_rows, n_cols, &base_a);
+                    hard_plan = select_hard_regime_plan(n_rows, n_cols, &a);
                     state.stats.hard_regime_branch = Some(hard_plan.label());
                     state.stats.hard_regime_fallbacks += 1;
                     state.stats.hard_regime_conservative_fallback_reason =
                         Some("fallback_after_baseline_failure");
+                    if let Some((base_a, base_b)) = retry_snapshot.as_ref() {
+                        a.clone_from(base_a);
+                        restore_dense_rhs(&mut b, base_b, symbol_size);
+                    }
                     continue;
                 }
                 if matches!(hard_plan, HardRegimePlan::BlockSchurLowRank { .. }) {
@@ -1439,12 +1454,16 @@ impl InactivationDecoder {
                     state.stats.hard_regime_fallbacks += 1;
                     state.stats.hard_regime_conservative_fallback_reason =
                         Some("block_schur_failed_to_converge");
+                    if let Some((base_a, base_b)) = retry_snapshot.as_ref() {
+                        a.clone_from(base_a);
+                        restore_dense_rhs(&mut b, base_b, symbol_size);
+                    }
                     continue;
                 }
                 return Err(err);
             }
-            break b;
-        };
+            break;
+        }
 
         // Extract solutions: move RHS vectors instead of cloning
         for (dense_col, &col) in dense_cols.iter().enumerate() {
@@ -1551,9 +1570,6 @@ impl InactivationDecoder {
             .filter(|&&support| support == 0)
             .count();
 
-        let base_a = a;
-        let base_b = b;
-
         trace.set_strategy(InactivationStrategy::AllAtOnce);
         let decision = choose_runtime_decoder_policy(
             n_rows,
@@ -1568,10 +1584,11 @@ impl InactivationDecoder {
             DecoderPolicyMode::ConservativeBaseline | DecoderPolicyMode::HighSupportFirst => {
                 HardRegimePlan::Markowitz
             }
-            DecoderPolicyMode::BlockSchurLowRank => {
-                select_hard_regime_plan(n_rows, n_cols, &base_a)
-            }
+            DecoderPolicyMode::BlockSchurLowRank => select_hard_regime_plan(n_rows, n_cols, &a),
         };
+        let retry_snapshot = (!hard_regime
+            || matches!(hard_plan, HardRegimePlan::BlockSchurLowRank { .. }))
+        .then(|| (a.clone(), snapshot_dense_rhs(&b, symbol_size)));
         if hard_regime {
             state.stats.hard_regime_activated = true;
             state.stats.hard_regime_branch = Some(hard_plan.label());
@@ -1585,9 +1602,8 @@ impl InactivationDecoder {
         }
 
         let mut pivot_row = vec![usize::MAX; n_cols];
-        let mut b = loop {
-            let mut a = base_a.clone();
-            let mut b = base_b.clone();
+        loop {
+            pivot_row.fill(usize::MAX);
             let mut row_used = vec![false; n_rows];
             let mut pivot_buf = vec![Gf256::ZERO; n_cols];
             let mut pivot_rhs = vec![0u8; symbol_size];
@@ -1668,7 +1684,7 @@ impl InactivationDecoder {
                 if !hard_regime {
                     hard_regime = true;
                     state.stats.hard_regime_activated = true;
-                    hard_plan = select_hard_regime_plan(n_rows, n_cols, &base_a);
+                    hard_plan = select_hard_regime_plan(n_rows, n_cols, &a);
                     state.stats.hard_regime_branch = Some(hard_plan.label());
                     state.stats.hard_regime_fallbacks += 1;
                     state.stats.hard_regime_conservative_fallback_reason =
@@ -1682,6 +1698,10 @@ impl InactivationDecoder {
                     trace.pivot_events.clear();
                     trace.row_ops = 0;
                     trace.truncated = false;
+                    if let Some((base_a, base_b)) = retry_snapshot.as_ref() {
+                        a.clone_from(base_a);
+                        restore_dense_rhs(&mut b, base_b, symbol_size);
+                    }
                     continue;
                 }
                 if matches!(hard_plan, HardRegimePlan::BlockSchurLowRank { .. }) {
@@ -1698,12 +1718,16 @@ impl InactivationDecoder {
                     trace.pivot_events.clear();
                     trace.row_ops = 0;
                     trace.truncated = false;
+                    if let Some((base_a, base_b)) = retry_snapshot.as_ref() {
+                        a.clone_from(base_a);
+                        restore_dense_rhs(&mut b, base_b, symbol_size);
+                    }
                     continue;
                 }
                 return Err(err);
             }
-            break b;
-        };
+            break;
+        }
 
         // Extract solutions: move RHS vectors instead of cloning
         for (dense_col, &col) in dense_cols.iter().enumerate() {
@@ -1765,6 +1789,32 @@ impl InactivationDecoder {
         assert!((esi as usize) < self.params.k, "source ESI must be < K");
         // Systematic: source[esi] = intermediate[esi]
         (vec![esi as usize], vec![Gf256::ONE])
+    }
+}
+
+fn first_mismatch_byte(expected: &[u8], actual: &[u8]) -> Option<usize> {
+    expected
+        .iter()
+        .zip(actual.iter())
+        .position(|(expected, actual)| expected != actual)
+}
+
+fn snapshot_dense_rhs(rows: &[Vec<u8>], symbol_size: usize) -> Vec<u8> {
+    let mut snapshot = vec![0u8; rows.len().saturating_mul(symbol_size)];
+    for (row_idx, row) in rows.iter().enumerate() {
+        debug_assert_eq!(row.len(), symbol_size);
+        let off = row_idx * symbol_size;
+        snapshot[off..off + symbol_size].copy_from_slice(row);
+    }
+    snapshot
+}
+
+fn restore_dense_rhs(rows: &mut [Vec<u8>], snapshot: &[u8], symbol_size: usize) {
+    debug_assert_eq!(snapshot.len(), rows.len().saturating_mul(symbol_size));
+    for (row_idx, row) in rows.iter_mut().enumerate() {
+        debug_assert_eq!(row.len(), symbol_size);
+        let off = row_idx * symbol_size;
+        row.copy_from_slice(&snapshot[off..off + symbol_size]);
     }
 }
 
