@@ -92,23 +92,21 @@ impl SignalKind {
         Self::Alarm
     }
 
-    /// Returns the signal number on Unix platforms.
-    ///
-    /// Returns `None` on non-Unix platforms.
+    /// Returns the platform signal number on Unix.
     #[cfg(unix)]
     #[must_use]
     pub const fn as_raw_value(&self) -> i32 {
         match self {
-            Self::Interrupt => 2,     // SIGINT
-            Self::Terminate => 15,    // SIGTERM
-            Self::Hangup => 1,        // SIGHUP
-            Self::Quit => 3,          // SIGQUIT
-            Self::User1 => 10,        // SIGUSR1
-            Self::User2 => 12,        // SIGUSR2
-            Self::Child => 17,        // SIGCHLD
-            Self::WindowChange => 28, // SIGWINCH
-            Self::Pipe => 13,         // SIGPIPE
-            Self::Alarm => 14,        // SIGALRM
+            Self::Interrupt => libc::SIGINT,
+            Self::Terminate => libc::SIGTERM,
+            Self::Hangup => libc::SIGHUP,
+            Self::Quit => libc::SIGQUIT,
+            Self::User1 => libc::SIGUSR1,
+            Self::User2 => libc::SIGUSR2,
+            Self::Child => libc::SIGCHLD,
+            Self::WindowChange => libc::SIGWINCH,
+            Self::Pipe => libc::SIGPIPE,
+            Self::Alarm => libc::SIGALRM,
         }
     }
 
@@ -235,11 +233,33 @@ mod tests {
     fn signal_kind_raw_values() {
         init_test("signal_kind_raw_values");
         let interrupt = SignalKind::Interrupt.as_raw_value();
-        crate::assert_with_log!(interrupt == 2, "interrupt", 2, interrupt);
+        crate::assert_with_log!(
+            interrupt == libc::SIGINT,
+            "interrupt",
+            libc::SIGINT,
+            interrupt
+        );
         let terminate = SignalKind::Terminate.as_raw_value();
-        crate::assert_with_log!(terminate == 15, "terminate", 15, terminate);
+        crate::assert_with_log!(
+            terminate == libc::SIGTERM,
+            "terminate",
+            libc::SIGTERM,
+            terminate
+        );
         let hangup = SignalKind::Hangup.as_raw_value();
-        crate::assert_with_log!(hangup == 1, "hangup", 1, hangup);
+        crate::assert_with_log!(hangup == libc::SIGHUP, "hangup", libc::SIGHUP, hangup);
+        let user1 = SignalKind::User1.as_raw_value();
+        crate::assert_with_log!(user1 == libc::SIGUSR1, "user1", libc::SIGUSR1, user1);
+        let user2 = SignalKind::User2.as_raw_value();
+        crate::assert_with_log!(user2 == libc::SIGUSR2, "user2", libc::SIGUSR2, user2);
+        let child = SignalKind::Child.as_raw_value();
+        crate::assert_with_log!(child == libc::SIGCHLD, "child", libc::SIGCHLD, child);
+        let winch = SignalKind::WindowChange.as_raw_value();
+        crate::assert_with_log!(winch == libc::SIGWINCH, "winch", libc::SIGWINCH, winch);
+        let pipe = SignalKind::Pipe.as_raw_value();
+        crate::assert_with_log!(pipe == libc::SIGPIPE, "pipe", libc::SIGPIPE, pipe);
+        let alarm = SignalKind::Alarm.as_raw_value();
+        crate::assert_with_log!(alarm == libc::SIGALRM, "alarm", libc::SIGALRM, alarm);
         crate::test_complete!("signal_kind_raw_values");
     }
 }
