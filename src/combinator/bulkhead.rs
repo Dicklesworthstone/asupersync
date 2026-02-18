@@ -286,27 +286,24 @@ impl Bulkhead {
     /// Returns `Some(permit)` if acquired immediately, `None` if bulkhead is full.
     #[must_use]
     pub fn try_acquire(&self, weight: u32) -> Option<BulkheadPermit<'_>> {
+        let mut available = self.available_permits.load(Ordering::Acquire);
         loop {
-            let available = self.available_permits.load(Ordering::Acquire);
-            if available >= weight {
-                if self
-                    .available_permits
-                    .compare_exchange(
-                        available,
-                        available - weight,
-                        Ordering::Release,
-                        Ordering::Acquire,
-                    )
-                    .is_ok()
-                {
+            if available < weight {
+                return None;
+            }
+            match self.available_permits.compare_exchange_weak(
+                available,
+                available - weight,
+                Ordering::Release,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
                     return Some(BulkheadPermit {
                         bulkhead: self,
                         weight,
                     });
                 }
-                // CAS failed, retry
-            } else {
-                return None;
+                Err(actual) => available = actual,
             }
         }
     }
@@ -346,22 +343,21 @@ impl Bulkhead {
         for entry in queue.iter_mut() {
             if entry.result.is_none() {
                 // CAS loop to safely consume permits (prevents TOCTOU race with try_acquire)
-                let granted = loop {
-                    let current = self.available_permits.load(Ordering::Acquire);
-                    if current < entry.weight {
-                        break false;
-                    }
-                    if self
-                        .available_permits
-                        .compare_exchange(
+                let granted = {
+                    let mut current = self.available_permits.load(Ordering::Acquire);
+                    loop {
+                        if current < entry.weight {
+                            break false;
+                        }
+                        match self.available_permits.compare_exchange_weak(
                             current,
                             current - entry.weight,
                             Ordering::Release,
                             Ordering::Acquire,
-                        )
-                        .is_ok()
-                    {
-                        break true;
+                        ) {
+                            Ok(_) => break true,
+                            Err(actual) => current = actual,
+                        }
                     }
                 };
                 if !granted {
@@ -507,18 +503,18 @@ impl Bulkhead {
     /// preventing overflow if permits are released after a `reset()`.
     fn release_permit(&self, weight: u32) {
         let max = self.policy.max_concurrent;
+        let mut current = self.available_permits.load(Ordering::Acquire);
         loop {
-            let current = self.available_permits.load(Ordering::Acquire);
             let new = current.saturating_add(weight).min(max);
             if new == current {
                 break;
             }
-            if self
+            match self
                 .available_permits
-                .compare_exchange(current, new, Ordering::Release, Ordering::Acquire)
-                .is_ok()
+                .compare_exchange_weak(current, new, Ordering::Release, Ordering::Acquire)
             {
-                break;
+                Ok(_) => break,
+                Err(actual) => current = actual,
             }
         }
     }

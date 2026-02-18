@@ -118,7 +118,7 @@ impl LamportClock {
             let next = current.max(sender.raw()) + 1;
             match self
                 .counter
-                .compare_exchange(current, next, Ordering::AcqRel, Ordering::Acquire)
+                .compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire)
             {
                 Ok(_) => return LamportTime(next),
                 Err(actual) => current = actual,

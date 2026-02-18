@@ -140,7 +140,9 @@ impl Semaphore {
     /// Returns the number of currently available permits.
     #[must_use]
     pub fn available_permits(&self) -> usize {
-        self.permits_shadow.load(Ordering::Acquire)
+        // Relaxed: advisory fast-path hint only. Stale reads are benign —
+        // callers fall back to the mutex-protected path for correctness.
+        self.permits_shadow.load(Ordering::Relaxed)
     }
 
     /// Returns the maximum number of permits (initial count).
@@ -191,7 +193,11 @@ impl Semaphore {
             Err(TryAcquireError)
         } else if state.permits >= count {
             state.permits -= count;
-            self.permits_shadow.store(state.permits, Ordering::Release);
+            // Relaxed: permits_shadow is an advisory fast-path hint. A stale
+            // read in available_permits() just skips the fast path or causes a
+            // benign try_acquire miss — the real count is protected by the lock.
+            // On ARM this avoids a store-release barrier per acquisition.
+            self.permits_shadow.store(state.permits, Ordering::Relaxed);
             Ok(SemaphorePermit {
                 semaphore: self,
                 count,
@@ -209,7 +215,7 @@ impl Semaphore {
     pub fn add_permits(&self, count: usize) {
         let mut state = self.state.lock();
         state.permits = state.permits.saturating_add(count);
-        self.permits_shadow.store(state.permits, Ordering::Release);
+        self.permits_shadow.store(state.permits, Ordering::Relaxed);
         // Only wake the first waiter since FIFO ordering means only it can acquire.
         // Waking all waiters wastes CPU when only the front can make progress.
         // If the first waiter acquires and releases, it will wake the next.
@@ -298,7 +304,7 @@ impl<'a> Future for AcquireFuture<'a, '_> {
             state.permits -= self.count;
             self.semaphore
                 .permits_shadow
-                .store(state.permits, Ordering::Release);
+                .store(state.permits, Ordering::Relaxed);
 
             // Optimization: Since we verified we are next in line, we are either
             // at the front of the queue or the queue is empty. We can just pop
@@ -515,7 +521,7 @@ impl Future for OwnedAcquireFuture {
             state.permits -= self.count;
             self.semaphore
                 .permits_shadow
-                .store(state.permits, Ordering::Release);
+                .store(state.permits, Ordering::Relaxed);
 
             // Optimization: O(1) removal instead of O(N) retain
             if !state.waiters.is_empty() {

@@ -208,13 +208,13 @@ impl CircuitBreaker {
 
     fn transition(&self, from: CircuitState, to: CircuitState) -> bool {
         self.state
-            .compare_exchange(from as u8, to as u8, Ordering::SeqCst, Ordering::Relaxed)
+            .compare_exchange(from as u8, to as u8, Ordering::Release, Ordering::Relaxed)
             .is_ok()
     }
 
     fn reset(&self) {
         self.state
-            .store(CircuitState::Closed as u8, Ordering::SeqCst);
+            .store(CircuitState::Closed as u8, Ordering::Release);
         self.failures.store(0, Ordering::Relaxed);
     }
 }

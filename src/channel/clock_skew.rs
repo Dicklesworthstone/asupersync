@@ -178,17 +178,16 @@ impl ClockSkewStats {
             self.skewed_reads.fetch_add(1, Ordering::Relaxed);
         }
         // Update max using CAS loop.
-        loop {
-            let current = self.max_abs_skew_ns.load(Ordering::Relaxed);
-            if abs_skew <= current {
-                break;
-            }
-            if self
-                .max_abs_skew_ns
-                .compare_exchange_weak(current, abs_skew, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                break;
+        let mut current = self.max_abs_skew_ns.load(Ordering::Relaxed);
+        while abs_skew > current {
+            match self.max_abs_skew_ns.compare_exchange_weak(
+                current,
+                abs_skew,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
             }
         }
     }

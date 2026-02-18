@@ -140,10 +140,10 @@ impl<T> OnceCell<T> {
         let mut value_opt = Some(value);
 
         loop {
-            match self.state.compare_exchange(
+            match self.state.compare_exchange_weak(
                 UNINIT,
                 INITIALIZING,
-                Ordering::AcqRel,
+                Ordering::Release,
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
@@ -187,10 +187,10 @@ impl<T> OnceCell<T> {
         let mut init_fn = Some(f);
 
         loop {
-            match self.state.compare_exchange(
+            match self.state.compare_exchange_weak(
                 UNINIT,
                 INITIALIZING,
-                Ordering::AcqRel,
+                Ordering::Release,
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
@@ -251,10 +251,10 @@ impl<T> OnceCell<T> {
         let mut init_fn = Some(f);
 
         loop {
-            match self.state.compare_exchange(
+            match self.state.compare_exchange_weak(
                 UNINIT,
                 INITIALIZING,
-                Ordering::AcqRel,
+                Ordering::Release,
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
@@ -325,10 +325,10 @@ impl<T> OnceCell<T> {
 
         loop {
             // Try to become the initializer.
-            match self.state.compare_exchange(
+            match self.state.compare_exchange_weak(
                 UNINIT,
                 INITIALIZING,
-                Ordering::AcqRel,
+                Ordering::Release,
                 Ordering::Acquire,
             ) {
                 Ok(_) => {

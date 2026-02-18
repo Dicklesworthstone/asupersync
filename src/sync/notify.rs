@@ -51,7 +51,9 @@ pub struct Notify {
 #[derive(Debug)]
 struct WaiterSlab {
     entries: Vec<WaiterEntry>,
-    free_slots: Vec<usize>,
+    /// Free-slot indices for reuse. SmallVec<4> avoids heap allocation for
+    /// the common case of few concurrent waiters.
+    free_slots: SmallVec<[usize; 4]>,
     /// Number of active waiters (those with a waker set). Maintained
     /// incrementally so `active_count()` is O(1) instead of a linear scan.
     active: usize,
@@ -69,10 +71,10 @@ struct WaiterEntry {
 }
 
 impl WaiterSlab {
-    const fn new() -> Self {
+    fn new() -> Self {
         Self {
             entries: Vec::new(),
-            free_slots: Vec::new(),
+            free_slots: SmallVec::new(),
             active: 0,
         }
     }
@@ -127,7 +129,7 @@ impl WaiterSlab {
 impl Notify {
     /// Creates a new `Notify` in the empty state.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             generation: AtomicU64::new(0),
             stored_notifications: AtomicUsize::new(0),
@@ -264,27 +266,23 @@ impl Future for Notified<'_> {
         match self.state {
             NotifiedState::Init => {
                 // Check for stored notification.
-                loop {
-                    let stored = self.notify.stored_notifications.load(Ordering::Acquire);
-                    if stored > 0 {
-                        if self
-                            .notify
-                            .stored_notifications
-                            .compare_exchange(
-                                stored,
-                                stored - 1,
-                                Ordering::Release,
-                                Ordering::Acquire,
-                            )
-                            .is_ok()
-                        {
+                let mut stored = self.notify.stored_notifications.load(Ordering::Acquire);
+                while stored > 0 {
+                    match self
+                        .notify
+                        .stored_notifications
+                        .compare_exchange_weak(
+                            stored,
+                            stored - 1,
+                            Ordering::Release,
+                            Ordering::Acquire,
+                        ) {
+                        Ok(_) => {
                             self.state = NotifiedState::Done;
                             return Poll::Ready(());
                         }
-                        // Retry on CAS failure.
-                        continue;
+                        Err(actual) => stored = actual,
                     }
-                    break;
                 }
 
                 // Check if generation changed (notify_waiters called).
@@ -300,21 +298,21 @@ impl Future for Notified<'_> {
                 // Re-check stored notifications and generation while holding the waiter lock.
                 // This closes races where a notifier runs between the lock-free checks above and
                 // the waiter registration below.
-                loop {
-                    let stored = self.notify.stored_notifications.load(Ordering::Acquire);
-                    if stored == 0 {
-                        break;
-                    }
-
-                    if self
-                        .notify
-                        .stored_notifications
-                        .compare_exchange(stored, stored - 1, Ordering::Release, Ordering::Acquire)
-                        .is_ok()
-                    {
-                        drop(waiters);
-                        self.state = NotifiedState::Done;
-                        return Poll::Ready(());
+                {
+                    let mut stored = self.notify.stored_notifications.load(Ordering::Acquire);
+                    while stored > 0 {
+                        match self
+                            .notify
+                            .stored_notifications
+                            .compare_exchange_weak(stored, stored - 1, Ordering::Release, Ordering::Acquire)
+                        {
+                            Ok(_) => {
+                                drop(waiters);
+                                self.state = NotifiedState::Done;
+                                return Poll::Ready(());
+                            }
+                            Err(actual) => stored = actual,
+                        }
                     }
                 }
 

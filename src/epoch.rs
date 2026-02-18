@@ -646,7 +646,7 @@ impl EpochBarrier {
     /// Returns the number of arrived participants.
     #[must_use]
     pub fn arrived(&self) -> u32 {
-        self.arrived.load(Ordering::SeqCst) as u32
+        self.arrived.load(Ordering::Acquire) as u32
     }
 
     /// Returns the number of participants still expected.
@@ -723,7 +723,7 @@ impl EpochBarrier {
             participants.push(participant_id.to_string());
         }
 
-        let arrived = self.arrived.fetch_add(1, Ordering::SeqCst) + 1;
+        let arrived = self.arrived.fetch_add(1, Ordering::AcqRel) + 1;
 
         // Check if all arrived
         if arrived >= u64::from(self.expected) {
@@ -840,7 +840,7 @@ impl EpochClock {
     /// Returns the current epoch ID.
     #[must_use]
     pub fn current(&self) -> EpochId {
-        EpochId(self.current.load(Ordering::SeqCst))
+        EpochId(self.current.load(Ordering::Acquire))
     }
 
     /// Returns the current active epoch, if any.
@@ -878,7 +878,7 @@ impl EpochClock {
         }
 
         // Advance to next epoch
-        let prev = self.current.fetch_add(1, Ordering::SeqCst);
+        let prev = self.current.fetch_add(1, Ordering::AcqRel);
         let new_id = EpochId(prev.saturating_add(1));
         let new_epoch = Epoch::new(new_id, now, self.config.clone());
         *active = Some(new_epoch);
@@ -996,7 +996,7 @@ impl EpochContext {
                 if current >= limit {
                     return false;
                 }
-                match self.operations_used.compare_exchange(
+                match self.operations_used.compare_exchange_weak(
                     current,
                     current + 1,
                     Ordering::AcqRel,

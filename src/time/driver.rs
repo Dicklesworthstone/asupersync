@@ -126,17 +126,14 @@ impl VirtualClock {
             return;
         }
         let target = time.as_nanos();
-        loop {
-            let current = self.now.load(Ordering::Acquire);
-            if current >= target {
-                break;
-            }
-            if self
+        let mut current = self.now.load(Ordering::Acquire);
+        while current < target {
+            match self
                 .now
                 .compare_exchange_weak(current, target, Ordering::Release, Ordering::Relaxed)
-                .is_ok()
             {
-                break;
+                Ok(_) => break,
+                Err(actual) => current = actual,
             }
         }
     }

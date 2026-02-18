@@ -198,7 +198,7 @@ impl SymbolCancelToken {
         if self
             .state
             .cancelled
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(false, true, Ordering::Release, Ordering::Acquire)
             .is_ok()
         {
             self.state

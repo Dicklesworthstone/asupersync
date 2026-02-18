@@ -188,6 +188,7 @@ impl TaskWakeState {
     }
 
     /// Marks a pending wake and returns true if scheduling should occur.
+    #[inline]
     pub fn notify(&self) -> bool {
         // Release is sufficient: we only need to publish the Notified state to
         // readers who subsequently Acquire. The Acquire half of AcqRel is
@@ -203,17 +204,23 @@ impl TaskWakeState {
     ///
     /// Always called under a task table or runtime state lock, so the lock's
     /// release semantics provide the needed ordering. Relaxed suffices here.
+    #[inline]
     pub fn begin_poll(&self) {
         self.state
             .store(WakeState::Polling as u8, Ordering::Relaxed);
     }
 
     /// Finishes polling and returns true if a wake occurred during poll.
+    #[inline]
     pub fn finish_poll(&self) -> bool {
+        // Release on success: publishes poll side-effects before Idle is visible.
+        // Acquire on success is redundant: the old value (Polling) was written by
+        // this thread's begin_poll(), so there is nothing new to acquire.
+        // Acquire on failure: pairs with notify()'s Release to read Notified.
         match self.state.compare_exchange(
             WakeState::Polling as u8,
             WakeState::Idle as u8,
-            Ordering::AcqRel,
+            Ordering::Release,
             Ordering::Acquire,
         ) {
             Ok(_) => false,
@@ -222,11 +229,13 @@ impl TaskWakeState {
     }
 
     /// Clears any pending wake and marks the task idle.
+    #[inline]
     pub fn clear(&self) {
         self.state.store(WakeState::Idle as u8, Ordering::Release);
     }
 
     /// Returns true if a wake is pending.
+    #[inline]
     #[must_use]
     pub fn is_notified(&self) -> bool {
         self.state.load(Ordering::Acquire) == WakeState::Notified as u8

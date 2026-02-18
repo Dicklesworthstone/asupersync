@@ -602,7 +602,7 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
         }
         if inner
             .active_threads
-            .compare_exchange(current, current + 1, Ordering::Relaxed, Ordering::Relaxed)
+            .compare_exchange_weak(current, current + 1, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
         {
             break;
