@@ -176,6 +176,28 @@ pub struct DecodeStats {
     pub dense_core_dropped_rows: usize,
     /// Deterministic reason we fell back from peeling into dense elimination.
     pub peeling_fallback_reason: Option<&'static str>,
+    /// Runtime policy mode selected for dense elimination planning.
+    pub policy_mode: Option<&'static str>,
+    /// Deterministic reason string for the runtime policy decision.
+    pub policy_reason: Option<&'static str>,
+    /// Replay pointer for policy-decision forensics.
+    pub policy_replay_ref: Option<&'static str>,
+    /// Policy feature: matrix density in permille.
+    pub policy_density_permille: usize,
+    /// Policy feature: estimated rank deficit pressure in permille.
+    pub policy_rank_deficit_permille: usize,
+    /// Policy feature: inactivation pressure in permille.
+    pub policy_inactivation_pressure_permille: usize,
+    /// Policy feature: row/column overhead ratio in permille.
+    pub policy_overhead_ratio_permille: usize,
+    /// True if policy feature extraction exhausted its strict budget.
+    pub policy_budget_exhausted: bool,
+    /// Expected-loss term for conservative baseline mode.
+    pub policy_baseline_loss: u32,
+    /// Expected-loss term for high-support mode.
+    pub policy_high_support_loss: u32,
+    /// Expected-loss term for block-schur mode.
+    pub policy_block_schur_loss: u32,
 }
 
 /// Result of successful decoding.
@@ -428,6 +450,35 @@ const BLOCK_SCHUR_MIN_DENSITY_PERCENT: usize = 45;
 const BLOCK_SCHUR_TRAILING_COLS: usize = 4;
 const HYBRID_SPARSE_COST_NUMERATOR: usize = 3;
 const HYBRID_SPARSE_COST_DENOMINATOR: usize = 5;
+const SMALL_ROW_DENSE_FASTPATH_COLS: usize = 4;
+const POLICY_FEATURE_BUDGET_CELLS: usize = 4096;
+const POLICY_REPLAY_REF: &str = "replay:rq-track-f-runtime-policy-v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DecoderPolicyFeatures {
+    density_permille: usize,
+    rank_deficit_permille: usize,
+    inactivation_pressure_permille: usize,
+    overhead_ratio_permille: usize,
+    budget_exhausted: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DecoderPolicyMode {
+    ConservativeBaseline,
+    HighSupportFirst,
+    BlockSchurLowRank,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DecoderPolicyDecision {
+    mode: DecoderPolicyMode,
+    features: DecoderPolicyFeatures,
+    baseline_loss: u32,
+    high_support_loss: u32,
+    block_schur_loss: u32,
+    reason: &'static str,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HardRegimePlan {
@@ -453,6 +504,157 @@ impl HardRegimePlan {
 
 fn matrix_nonzero_count(a: &[Gf256]) -> usize {
     a.iter().filter(|coef| !coef.is_zero()).count()
+}
+
+fn clamp_usize_to_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn compute_decoder_policy_features(
+    n_rows: usize,
+    n_cols: usize,
+    dense_nonzeros: usize,
+    unsupported_cols: usize,
+    inactivation_pressure_permille: usize,
+) -> DecoderPolicyFeatures {
+    if n_rows == 0 || n_cols == 0 {
+        return DecoderPolicyFeatures {
+            density_permille: 0,
+            rank_deficit_permille: 0,
+            inactivation_pressure_permille,
+            overhead_ratio_permille: 0,
+            budget_exhausted: false,
+        };
+    }
+
+    let total_cells = n_rows.saturating_mul(n_cols);
+    let density_permille = dense_nonzeros.saturating_mul(1000) / total_cells.max(1);
+    let rank_deficit_permille = unsupported_cols.saturating_mul(1000) / n_cols;
+    let overhead_ratio_permille = n_rows.saturating_sub(n_cols).saturating_mul(1000) / n_cols;
+
+    DecoderPolicyFeatures {
+        density_permille,
+        rank_deficit_permille,
+        inactivation_pressure_permille,
+        overhead_ratio_permille,
+        budget_exhausted: total_cells > POLICY_FEATURE_BUDGET_CELLS,
+    }
+}
+
+fn policy_losses(features: DecoderPolicyFeatures, n_cols: usize) -> (u32, u32, u32) {
+    let density = clamp_usize_to_u32(features.density_permille);
+    let rank_deficit = clamp_usize_to_u32(features.rank_deficit_permille);
+    let inactivation_pressure = clamp_usize_to_u32(features.inactivation_pressure_permille);
+    let overhead = clamp_usize_to_u32(features.overhead_ratio_permille);
+
+    let baseline_loss = 400u32
+        .saturating_add(density.saturating_mul(3))
+        .saturating_add(rank_deficit.saturating_mul(4))
+        .saturating_add(inactivation_pressure.saturating_mul(2))
+        .saturating_add(overhead);
+
+    let high_support_loss = 700u32
+        .saturating_add(density)
+        .saturating_add(rank_deficit.saturating_mul(3))
+        .saturating_add(inactivation_pressure)
+        .saturating_add(overhead / 2);
+
+    let block_schur_loss = if n_cols < BLOCK_SCHUR_MIN_COLS {
+        u32::MAX
+    } else {
+        750u32
+            .saturating_add(density / 2)
+            .saturating_add(rank_deficit.saturating_mul(2))
+            .saturating_add(inactivation_pressure)
+            .saturating_add(overhead / 3)
+    };
+
+    (baseline_loss, high_support_loss, block_schur_loss)
+}
+
+fn choose_runtime_decoder_policy(
+    n_rows: usize,
+    n_cols: usize,
+    dense_nonzeros: usize,
+    unsupported_cols: usize,
+    inactivation_pressure_permille: usize,
+) -> DecoderPolicyDecision {
+    let features = compute_decoder_policy_features(
+        n_rows,
+        n_cols,
+        dense_nonzeros,
+        unsupported_cols,
+        inactivation_pressure_permille,
+    );
+
+    let (baseline_loss, high_support_loss, mut block_schur_loss) = policy_losses(features, n_cols);
+    if features.budget_exhausted {
+        return DecoderPolicyDecision {
+            mode: DecoderPolicyMode::ConservativeBaseline,
+            features,
+            baseline_loss,
+            high_support_loss,
+            block_schur_loss,
+            reason: "policy_budget_exhausted_conservative",
+        };
+    }
+
+    let hard_gate = n_cols >= HARD_REGIME_MIN_COLS
+        && (features.density_permille >= HARD_REGIME_DENSITY_PERCENT.saturating_mul(10)
+            || n_rows <= n_cols.saturating_add(HARD_REGIME_NEAR_SQUARE_EXTRA_ROWS));
+    if !hard_gate {
+        return DecoderPolicyDecision {
+            mode: DecoderPolicyMode::ConservativeBaseline,
+            features,
+            baseline_loss,
+            high_support_loss,
+            block_schur_loss,
+            reason: "expected_loss_conservative_gate",
+        };
+    }
+
+    let block_gate = n_cols >= BLOCK_SCHUR_MIN_COLS
+        && features.density_permille >= BLOCK_SCHUR_MIN_DENSITY_PERCENT.saturating_mul(10)
+        && n_cols > BLOCK_SCHUR_TRAILING_COLS;
+    if !block_gate {
+        block_schur_loss = u32::MAX;
+    }
+    let mode = if block_schur_loss < high_support_loss {
+        DecoderPolicyMode::BlockSchurLowRank
+    } else {
+        DecoderPolicyMode::HighSupportFirst
+    };
+
+    DecoderPolicyDecision {
+        mode,
+        features,
+        baseline_loss,
+        high_support_loss,
+        block_schur_loss,
+        reason: "expected_loss_minimum",
+    }
+}
+
+const fn decoder_policy_mode_label(mode: DecoderPolicyMode) -> &'static str {
+    match mode {
+        DecoderPolicyMode::ConservativeBaseline => "conservative_baseline",
+        DecoderPolicyMode::HighSupportFirst => "high_support_first",
+        DecoderPolicyMode::BlockSchurLowRank => "block_schur_low_rank",
+    }
+}
+
+fn apply_policy_decision_to_stats(stats: &mut DecodeStats, decision: DecoderPolicyDecision) {
+    stats.policy_mode = Some(decoder_policy_mode_label(decision.mode));
+    stats.policy_reason = Some(decision.reason);
+    stats.policy_replay_ref = Some(POLICY_REPLAY_REF);
+    stats.policy_density_permille = decision.features.density_permille;
+    stats.policy_rank_deficit_permille = decision.features.rank_deficit_permille;
+    stats.policy_inactivation_pressure_permille = decision.features.inactivation_pressure_permille;
+    stats.policy_overhead_ratio_permille = decision.features.overhead_ratio_permille;
+    stats.policy_budget_exhausted = decision.features.budget_exhausted;
+    stats.policy_baseline_loss = decision.baseline_loss;
+    stats.policy_high_support_loss = decision.high_support_loss;
+    stats.policy_block_schur_loss = decision.block_schur_loss;
 }
 
 fn row_nonzero_count(a: &[Gf256], n_cols: usize, row: usize) -> usize {
@@ -483,6 +685,54 @@ fn pivot_nonzero_columns(pivot_row: &[Gf256], n_cols: usize) -> Vec<usize> {
         }
     }
     cols
+}
+
+fn sparse_update_columns_if_beneficial(pivot_row: &[Gf256], n_cols: usize) -> Option<Vec<usize>> {
+    if n_cols == 0 {
+        return None;
+    }
+
+    // Equivalent threshold to should_use_sparse_row_update(pivot_nnz, n_cols).
+    let threshold =
+        n_cols.saturating_mul(HYBRID_SPARSE_COST_NUMERATOR) / HYBRID_SPARSE_COST_DENOMINATOR;
+
+    if n_cols <= SMALL_ROW_DENSE_FASTPATH_COLS {
+        // Very small rows are sensitive to per-pivot heap allocation overhead.
+        // Use an allocation-free density pass; collect columns only if sparse.
+        let mut sparse_nnz = 0usize;
+        for coef in pivot_row.iter().take(n_cols) {
+            if coef.is_zero() {
+                continue;
+            }
+            sparse_nnz += 1;
+            if sparse_nnz > threshold {
+                return None;
+            }
+        }
+
+        let mut cols = Vec::with_capacity(sparse_nnz.max(1));
+        for (idx, coef) in pivot_row.iter().take(n_cols).enumerate() {
+            if !coef.is_zero() {
+                cols.push(idx);
+            }
+        }
+        return Some(cols);
+    }
+
+    // For larger rows, one-pass collection avoids an extra scan on sparse pivots.
+    let mut seen = 0usize;
+    let mut cols = Vec::with_capacity((threshold + 1).min(n_cols).max(1));
+    for (idx, coef) in pivot_row.iter().take(n_cols).enumerate() {
+        if coef.is_zero() {
+            continue;
+        }
+        seen += 1;
+        if seen > threshold {
+            return None;
+        }
+        cols.push(idx);
+    }
+    Some(cols)
 }
 
 fn should_activate_hard_regime(n_rows: usize, n_cols: usize, a: &[Gf256]) -> bool {
@@ -1022,6 +1272,8 @@ impl InactivationDecoder {
         // Rows = unused equations, Columns = unsolved columns
         let n_rows = dense_rows.len();
         let n_cols = dense_cols.len();
+        let inactivation_pressure_permille =
+            unsolved.len().saturating_mul(1000) / state.params.l.max(1);
         state.stats.dense_core_rows = n_rows;
         state.stats.dense_core_cols = n_cols;
 
@@ -1041,6 +1293,8 @@ impl InactivationDecoder {
         // Move (take) RHS data from state instead of cloning to avoid O(n_rows * symbol_size)
         // heap allocation in this hot path.
         let mut a = vec![Gf256::ZERO; n_rows * n_cols];
+        let mut dense_nonzeros = 0usize;
+        let mut dense_col_support = vec![0usize; n_cols];
         let mut b: Vec<Vec<u8>> = Vec::with_capacity(n_rows);
 
         for (row, &eq_idx) in dense_rows.iter().enumerate() {
@@ -1048,19 +1302,43 @@ impl InactivationDecoder {
             for &(col, coef) in &state.equations[eq_idx].terms {
                 if let Some(dense_col) = dense_col_index(&col_to_dense, col) {
                     a[row_off + dense_col] = coef;
+                    if !coef.is_zero() {
+                        dense_nonzeros += 1;
+                        dense_col_support[dense_col] += 1;
+                    }
                 }
             }
             b.push(std::mem::take(&mut state.rhs[eq_idx]));
         }
+        let unsupported_cols = dense_col_support
+            .iter()
+            .filter(|&&support| support == 0)
+            .count();
 
         let base_a = a;
         let base_b = b;
-        let mut hard_regime = should_activate_hard_regime(n_rows, n_cols, &base_a);
-        let mut hard_plan = HardRegimePlan::Markowitz;
+        let decision = choose_runtime_decoder_policy(
+            n_rows,
+            n_cols,
+            dense_nonzeros,
+            unsupported_cols,
+            inactivation_pressure_permille,
+        );
+        apply_policy_decision_to_stats(&mut state.stats, decision);
+        let mut hard_regime = !matches!(decision.mode, DecoderPolicyMode::ConservativeBaseline);
+        let mut hard_plan = match decision.mode {
+            DecoderPolicyMode::ConservativeBaseline | DecoderPolicyMode::HighSupportFirst => {
+                HardRegimePlan::Markowitz
+            }
+            DecoderPolicyMode::BlockSchurLowRank => {
+                select_hard_regime_plan(n_rows, n_cols, &base_a)
+            }
+        };
         if hard_regime {
             state.stats.hard_regime_activated = true;
-            hard_plan = select_hard_regime_plan(n_rows, n_cols, &base_a);
             state.stats.hard_regime_branch = Some(hard_plan.label());
+        } else if decision.reason == "policy_budget_exhausted_conservative" {
+            state.stats.hard_regime_conservative_fallback_reason = Some(decision.reason);
         }
 
         let mut pivot_row = vec![usize::MAX; n_cols];
@@ -1105,12 +1383,7 @@ impl InactivationDecoder {
                 // Copy pivot row into reusable buffers (no heap allocation)
                 pivot_buf[..n_cols].copy_from_slice(&a[prow_off..prow_off + n_cols]);
                 pivot_rhs[..symbol_size].copy_from_slice(&b[prow]);
-                let pivot_nnz = row_nonzero_count(&a, n_cols, prow);
-                let sparse_cols = if should_use_sparse_row_update(pivot_nnz, n_cols) {
-                    Some(pivot_nonzero_columns(&pivot_buf[..n_cols], n_cols))
-                } else {
-                    None
-                };
+                let sparse_cols = sparse_update_columns_if_beneficial(&pivot_buf[..n_cols], n_cols);
 
                 // Eliminate column in all other rows.
                 for (row, rhs) in b.iter_mut().enumerate().take(n_rows) {
@@ -1233,6 +1506,8 @@ impl InactivationDecoder {
         // Rows = unused equations, Columns = unsolved columns
         let n_rows = dense_rows.len();
         let n_cols = dense_cols.len();
+        let inactivation_pressure_permille =
+            unsolved.len().saturating_mul(1000) / state.params.l.max(1);
         state.stats.dense_core_rows = n_rows;
         state.stats.dense_core_cols = n_cols;
 
@@ -1251,6 +1526,8 @@ impl InactivationDecoder {
         // Move (take) RHS data from state instead of cloning to avoid O(n_rows * symbol_size)
         // heap allocation in this hot path.
         let mut a = vec![Gf256::ZERO; n_rows * n_cols];
+        let mut dense_nonzeros = 0usize;
+        let mut dense_col_support = vec![0usize; n_cols];
         let mut b: Vec<Vec<u8>> = Vec::with_capacity(n_rows);
 
         for (row, &eq_idx) in dense_rows.iter().enumerate() {
@@ -1258,26 +1535,50 @@ impl InactivationDecoder {
             for &(col, coef) in &state.equations[eq_idx].terms {
                 if let Some(dense_col) = dense_col_index(&col_to_dense, col) {
                     a[row_off + dense_col] = coef;
+                    if !coef.is_zero() {
+                        dense_nonzeros += 1;
+                        dense_col_support[dense_col] += 1;
+                    }
                 }
             }
             b.push(std::mem::take(&mut state.rhs[eq_idx]));
         }
+        let unsupported_cols = dense_col_support
+            .iter()
+            .filter(|&&support| support == 0)
+            .count();
 
         let base_a = a;
         let base_b = b;
 
         trace.set_strategy(InactivationStrategy::AllAtOnce);
-        let mut hard_regime = should_activate_hard_regime(n_rows, n_cols, &base_a);
-        let mut hard_plan = HardRegimePlan::Markowitz;
+        let decision = choose_runtime_decoder_policy(
+            n_rows,
+            n_cols,
+            dense_nonzeros,
+            unsupported_cols,
+            inactivation_pressure_permille,
+        );
+        apply_policy_decision_to_stats(&mut state.stats, decision);
+        let mut hard_regime = !matches!(decision.mode, DecoderPolicyMode::ConservativeBaseline);
+        let mut hard_plan = match decision.mode {
+            DecoderPolicyMode::ConservativeBaseline | DecoderPolicyMode::HighSupportFirst => {
+                HardRegimePlan::Markowitz
+            }
+            DecoderPolicyMode::BlockSchurLowRank => {
+                select_hard_regime_plan(n_rows, n_cols, &base_a)
+            }
+        };
         if hard_regime {
             state.stats.hard_regime_activated = true;
-            hard_plan = select_hard_regime_plan(n_rows, n_cols, &base_a);
             state.stats.hard_regime_branch = Some(hard_plan.label());
             trace.record_strategy_transition(
                 InactivationStrategy::AllAtOnce,
                 hard_plan.strategy(),
                 "dense_or_near_square",
             );
+        } else if decision.reason == "policy_budget_exhausted_conservative" {
+            state.stats.hard_regime_conservative_fallback_reason = Some(decision.reason);
         }
 
         let mut pivot_row = vec![usize::MAX; n_cols];
@@ -1321,12 +1622,7 @@ impl InactivationDecoder {
                 // Copy pivot row into reusable buffers
                 pivot_buf[..n_cols].copy_from_slice(&a[prow_off..prow_off + n_cols]);
                 pivot_rhs[..symbol_size].copy_from_slice(&b[prow]);
-                let pivot_nnz = row_nonzero_count(&a, n_cols, prow);
-                let sparse_cols = if should_use_sparse_row_update(pivot_nnz, n_cols) {
-                    Some(pivot_nonzero_columns(&pivot_buf[..n_cols], n_cols))
-                } else {
-                    None
-                };
+                let sparse_cols = sparse_update_columns_if_beneficial(&pivot_buf[..n_cols], n_cols);
 
                 // Eliminate column in all other rows.
                 for (row, rhs) in b.iter_mut().enumerate().take(n_rows) {
@@ -1637,6 +1933,40 @@ mod tests {
         ];
         let cols = pivot_nonzero_columns(&row, row.len());
         assert_eq!(cols, vec![1, 3, 4]);
+    }
+
+    #[test]
+    fn sparse_update_columns_if_beneficial_matches_threshold() {
+        // For n_cols=10 and ratio 3/5, sparse path should accept up to 6 non-zero entries.
+        let row_sparse = vec![
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ZERO,
+            Gf256::ONE,
+            Gf256::ZERO,
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ZERO,
+            Gf256::ZERO,
+        ];
+        let row_dense = vec![
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ZERO,
+            Gf256::ZERO,
+            Gf256::ZERO,
+        ];
+
+        let sparse_cols = sparse_update_columns_if_beneficial(&row_sparse, 10)
+            .expect("row_sparse should take sparse update path");
+        assert_eq!(sparse_cols, vec![0, 1, 3, 5, 6, 7]);
+        assert!(sparse_update_columns_if_beneficial(&row_dense, 10).is_none());
     }
 
     fn make_source_data(k: usize, symbol_size: usize) -> Vec<Vec<u8>> {
@@ -2862,5 +3192,89 @@ mod tests {
             trace.strategy_transitions.is_empty(),
             "normal regime must not emit strategy transitions"
         );
+    }
+
+    #[test]
+    fn policy_metadata_is_recorded_for_conservative_mode() {
+        let decoder = InactivationDecoder::new(8, 1, 101);
+        let params = decoder.params().clone();
+        let mut state = make_pivot_tie_break_state(&params, 1, 3, 7);
+
+        decoder
+            .inactivate_and_solve(&mut state)
+            .expect("conservative-mode state should solve");
+
+        assert_eq!(state.stats.policy_mode, Some("conservative_baseline"));
+        assert_eq!(
+            state.stats.policy_reason,
+            Some("expected_loss_conservative_gate")
+        );
+        assert_eq!(state.stats.policy_replay_ref, Some(POLICY_REPLAY_REF));
+        assert!(state.stats.policy_baseline_loss > 0);
+        assert!(state.stats.policy_high_support_loss > 0);
+    }
+
+    #[test]
+    fn policy_metadata_is_recorded_for_aggressive_mode() {
+        let decoder = InactivationDecoder::new(32, 1, 102);
+        let params = decoder.params().clone();
+        let mut state = make_hard_regime_dense_state(&params, 1, 4, 8);
+
+        decoder
+            .inactivate_and_solve(&mut state)
+            .expect("aggressive-mode state should solve");
+
+        assert!(
+            matches!(
+                state.stats.policy_mode,
+                Some("high_support_first" | "block_schur_low_rank")
+            ),
+            "dense state should log an aggressive policy mode"
+        );
+        assert_eq!(state.stats.policy_reason, Some("expected_loss_minimum"));
+        assert_eq!(state.stats.policy_replay_ref, Some(POLICY_REPLAY_REF));
+        assert!(state.stats.policy_density_permille >= 350);
+    }
+
+    #[test]
+    fn decoder_policy_budget_exhaustion_forces_conservative_baseline() {
+        let n_rows = 65;
+        let n_cols = 65;
+        let dense = vec![Gf256::ONE; n_rows * n_cols];
+        let decision = choose_runtime_decoder_policy(n_rows, n_cols, dense.len(), 0, 700);
+        assert_eq!(decision.mode, DecoderPolicyMode::ConservativeBaseline);
+        assert_eq!(decision.reason, "policy_budget_exhausted_conservative");
+        assert!(decision.features.budget_exhausted);
+    }
+
+    #[test]
+    fn decoder_policy_prefers_aggressive_strategy_for_dense_high_pressure() {
+        let n_rows = 16;
+        let n_cols = 16;
+        let dense = vec![Gf256::ONE; n_rows * n_cols];
+        let decision = choose_runtime_decoder_policy(n_rows, n_cols, dense.len(), 0, 850);
+        assert!(
+            matches!(
+                decision.mode,
+                DecoderPolicyMode::HighSupportFirst | DecoderPolicyMode::BlockSchurLowRank
+            ),
+            "dense/high-pressure matrix should avoid conservative baseline"
+        );
+    }
+
+    #[test]
+    fn decoder_policy_prefers_conservative_for_sparse_low_pressure() {
+        let n_rows = 24;
+        let n_cols = 16;
+        let mut sparse = vec![Gf256::ZERO; n_rows * n_cols];
+        for idx in 0..n_cols {
+            sparse[idx * n_cols + idx] = Gf256::ONE;
+        }
+
+        let one = choose_runtime_decoder_policy(n_rows, n_cols, n_cols, 0, 40);
+        let two = choose_runtime_decoder_policy(n_rows, n_cols, n_cols, 0, 40);
+        assert_eq!(one, two, "policy decision should be deterministic");
+        assert_eq!(one.mode, DecoderPolicyMode::ConservativeBaseline);
+        assert_eq!(one.reason, "expected_loss_conservative_gate");
     }
 }

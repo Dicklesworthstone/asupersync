@@ -21,9 +21,14 @@ use asupersync::util::DetRng;
 use std::collections::{BTreeMap, BTreeSet};
 
 const G1_BUDGET_SCHEMA_VERSION: &str = "raptorq-g1-budget-draft-v1";
+const G3_DECISION_RECORDS_SCHEMA_VERSION: &str = "raptorq-optimization-decision-records-v1";
 const BEADS_ISSUES_JSONL: &str = include_str!("../.beads/issues.jsonl");
 const RAPTORQ_BASELINE_PROFILE_MD: &str = include_str!("../docs/raptorq_baseline_bench_profile.md");
 const RAPTORQ_UNIT_MATRIX_MD: &str = include_str!("../docs/raptorq_unit_test_matrix.md");
+const RAPTORQ_OPT_DECISIONS_MD: &str =
+    include_str!("../docs/raptorq_optimization_decision_records.md");
+const RAPTORQ_OPT_DECISIONS_JSON: &str =
+    include_str!("../artifacts/raptorq_optimization_decision_records_v1.json");
 const REPLAY_CATALOG_ARTIFACT_PATH: &str = "artifacts/raptorq_replay_catalog_v1.json";
 const REPLAY_FIXTURE_REF: &str = "RQ-D9-REPLAY-CATALOG-V1";
 const REPLAY_SEED_SWEEP_ID: &str = "replay:rq-u-seed-sweep-structured-v1";
@@ -1298,6 +1303,178 @@ fn g1_budget_unit_matrix_markdown_status_snapshot_matches_artifact_subset() {
         seen, expected_subset,
         "unit matrix markdown must track canonical D5/D6/D7/D9 status subset"
     );
+}
+
+/// Validate G3 decision-record artifact schema and high-impact lever coverage.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn g3_decision_records_schema_and_high_impact_lever_coverage() {
+    let artifact: serde_json::Value = serde_json::from_str(RAPTORQ_OPT_DECISIONS_JSON)
+        .expect("decision-record artifact must be valid JSON");
+
+    assert_eq!(
+        artifact["schema_version"].as_str(),
+        Some(G3_DECISION_RECORDS_SCHEMA_VERSION),
+        "unexpected decision-record schema version"
+    );
+    assert_eq!(
+        artifact["track_bead_id"].as_str(),
+        Some("asupersync-3ltrv"),
+        "decision records must stay anchored to asupersync-3ltrv"
+    );
+    assert_eq!(
+        artifact["external_ref"].as_str(),
+        Some("bd-7toum"),
+        "decision records must stay anchored to bd-7toum"
+    );
+
+    let required_fields = artifact["governance_rules"]["required_fields"]
+        .as_array()
+        .expect("governance_rules.required_fields must be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("required field entries must be strings")
+        })
+        .collect::<BTreeSet<_>>();
+    for field in [
+        "decision_id",
+        "lever_code",
+        "lever_bead_id",
+        "expected_value",
+        "risk_class",
+        "conservative_comparator",
+        "rollback_rehearsal",
+        "validation_evidence",
+        "deterministic_replay",
+        "status",
+    ] {
+        assert!(
+            required_fields.contains(field),
+            "missing required decision-record field {field}"
+        );
+    }
+
+    let cards = artifact["decision_cards"]
+        .as_array()
+        .expect("decision_cards must be an array");
+    assert_eq!(
+        cards.len(),
+        8,
+        "decision_cards must include exactly E4/E5/C5/C6/F5/F6/F7/F8"
+    );
+
+    let expected_levers = BTreeSet::from([
+        "C5".to_string(),
+        "C6".to_string(),
+        "E4".to_string(),
+        "E5".to_string(),
+        "F5".to_string(),
+        "F6".to_string(),
+        "F7".to_string(),
+        "F8".to_string(),
+    ]);
+    let mut observed_levers = BTreeSet::new();
+
+    for card in cards {
+        let lever = card["lever_code"]
+            .as_str()
+            .expect("decision card missing lever_code");
+        observed_levers.insert(lever.to_string());
+
+        let comparator_mode = card["conservative_comparator"]["mode"]
+            .as_str()
+            .expect("decision card missing conservative comparator mode");
+        assert!(
+            !comparator_mode.trim().is_empty(),
+            "decision card {lever} must include conservative comparator mode"
+        );
+
+        let rollback_cmd = card["rollback_rehearsal"]["command"]
+            .as_str()
+            .expect("decision card missing rollback rehearsal command");
+        assert!(
+            rollback_cmd.contains("rch exec --"),
+            "rollback rehearsal command for {lever} must use rch"
+        );
+
+        let rollback_checklist = card["rollback_rehearsal"]["post_rollback_verification_checklist"]
+            .as_array()
+            .expect("decision card missing rollback checklist");
+        assert!(
+            !rollback_checklist.is_empty(),
+            "rollback checklist for {lever} must be non-empty"
+        );
+
+        let pre_cmd = card["deterministic_replay"]["pre_change_command"]
+            .as_str()
+            .expect("decision card missing pre_change_command");
+        let post_cmd = card["deterministic_replay"]["post_change_command"]
+            .as_str()
+            .expect("decision card missing post_change_command");
+        assert!(
+            pre_cmd.contains("rch exec --"),
+            "pre-change replay command for {lever} must use rch"
+        );
+        assert!(
+            post_cmd.contains("rch exec --"),
+            "post-change replay command for {lever} must use rch"
+        );
+
+        let status = card["status"]
+            .as_str()
+            .expect("decision card missing status");
+        if matches!(status, "approved" | "approved_guarded") {
+            let unit = card["validation_evidence"]["unit"]
+                .as_array()
+                .expect("approved cards must include unit evidence array");
+            let e2e = card["validation_evidence"]["deterministic_e2e"]
+                .as_array()
+                .expect("approved cards must include deterministic_e2e array");
+            assert!(
+                !unit.is_empty(),
+                "approved card {lever} must include unit evidence links"
+            );
+            assert!(
+                !e2e.is_empty(),
+                "approved card {lever} must include deterministic e2e evidence links"
+            );
+        }
+    }
+
+    assert_eq!(
+        observed_levers, expected_levers,
+        "decision cards must cover C5/C6/E4/E5/F5/F6/F7/F8"
+    );
+}
+
+/// Validate baseline/profile and decision-record docs cross-link correctly.
+#[test]
+fn g3_decision_record_docs_are_cross_linked() {
+    for required in [
+        "artifacts/raptorq_optimization_decision_records_v1.json",
+        "docs/raptorq_optimization_decision_records.md",
+        "bd-7toum",
+    ] {
+        assert!(
+            RAPTORQ_BASELINE_PROFILE_MD.contains(required),
+            "baseline profile doc must mention {required}"
+        );
+    }
+
+    for required in [
+        "asupersync-3ltrv",
+        "artifacts/raptorq_optimization_decision_records_v1.json",
+        "`E4`",
+        "`F8`",
+        "cards_pending_measured_evidence",
+    ] {
+        assert!(
+            RAPTORQ_OPT_DECISIONS_MD.contains(required),
+            "decision-record doc must mention {required}"
+        );
+    }
 }
 
 // ============================================================================

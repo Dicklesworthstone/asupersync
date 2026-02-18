@@ -102,7 +102,12 @@ Performance budget outcomes are advisory-only until these are present and green:
 - D6 (`bd-3bvdj` / `asupersync-wdk6c`): deterministic E2E scenario suite (`scripts/run_raptorq_e2e.sh`)
 - D7 (`bd-oeql8`) and D9 (`bd-26pqk`): structured forensic logging + replay catalog
 
-No optimization decision record (`bd-7toum`) or CI gate closure (`bd-322jd`) should treat G1 budgets as authoritative without these prerequisites.
+Optimization decision records for `bd-7toum` now live at:
+
+- `artifacts/raptorq_optimization_decision_records_v1.json`
+- `docs/raptorq_optimization_decision_records.md`
+
+These records are still phased: treat G1 budgets as non-authoritative until those cards include final measured evidence and rollback-rehearsal outcomes for all in-scope runtime levers, and CI gate closure (`bd-322jd`) is complete.
 
 Replay-catalog source of truth for deterministic reproduction:
 
