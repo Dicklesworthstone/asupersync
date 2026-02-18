@@ -146,6 +146,67 @@ Invariants to map (non-exhaustive baseline):
 - Deterministic lab runtime with seed-stable traces.
 - Bounded cleanup with explicit budgets.
 
+## Program Closeout Gate + Maintenance Cadence (asupersync-2bqzt.4.6)
+
+This gate defines when the `[TEST-COVERAGE]` program can be considered closed
+and how we keep it from regressing.
+
+### Closeout Gate (all required)
+
+1. Track-D gates are landed and enforced in CI:
+   - D1 coverage ratchet gate
+   - D2 no-new-mock/fake gate + waiver expiry enforcement
+   - D3 forensic logging contract gate
+   - D4 E2E scenario-matrix completeness gate
+2. C7 artifacts are emitted and verified for failure repro:
+   - deterministic manifest/index present
+   - replay commands validated and executable
+3. `TESTING.md` matrix + gap list are synchronized with current code/tests.
+4. No unresolved waivers with expired dates in policy files.
+5. CI evidence bundle is attached for sign-off and contains:
+   - coverage ratchet report
+   - no-mock policy report
+   - forensic logging contract artifacts
+   - E2E scenario matrix validation artifact
+   - C7 replay verification artifact
+
+### Required Sign-Off Record
+
+Before closing the program epic, add a sign-off note containing:
+
+- commit SHA(s) for all D1/D2/D3/D4/C7 deliverables
+- exact CI run URL + artifact paths
+- residual risk list with owners and due dates
+- explicit next maintenance review date
+
+### Maintenance Cadence
+
+- Weekly (owner: test-infra on-call):
+  - run deterministic gate checklist locally or in CI dry-run mode
+  - verify waiver registry for upcoming expirations within 14 days
+- Bi-weekly:
+  - refresh subsystem matrix deltas (new modules/tests, removed tests)
+  - review false-positive/false-negative rates for no-mock and forensic checks
+- Monthly:
+  - ratchet coverage floors upward where two consecutive weeks pass cleanly
+  - re-run E2E scenario matrix audit and C7 replay verifier across all required profiles
+
+### Deterministic Command Checklist
+
+Run the following for a maintenance pass:
+
+```bash
+python3 scripts/check_no_mock_policy.py --policy .github/no_mock_policy.json
+scripts/run_all_e2e.sh --verify-matrix
+NO_PREFLIGHT=1 bash ./scripts/run_raptorq_e2e.sh --profile forensics --scenario RQ-E2E-FAILURE-INSUFFICIENT
+cargo llvm-cov --lib --all-features \
+  --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/' \
+  --text --output-path coverage/coverage.txt
+```
+
+If any command fails, open/refresh a bead under `[TEST-COVERAGE][Track-D]`,
+link the failing artifact, and do not mark maintenance pass as complete.
+
 ## Coverage Audit Matrix (bd-2alu)
 
 This is the current audit matrix mapping subsystems and invariants to tests.
