@@ -1,6 +1,8 @@
 use asupersync_macros::scope;
 
-async fn example(cx: &asupersync::Cx) {
+struct DummyCx;
+
+async fn example(cx: &DummyCx) {
     // return is forbidden inside scope! body
     scope!(cx, { return 42; });
 }
