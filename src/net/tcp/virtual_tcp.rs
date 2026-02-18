@@ -34,6 +34,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
+const VIRTUAL_TCP_CHANNEL_CAPACITY_BYTES: usize = 1024;
+const VIRTUAL_TCP_ACCEPT_QUEUE_CAPACITY: usize = 16;
+
 // =============================================================================
 // VirtualTcpStream
 // =============================================================================
@@ -49,7 +52,7 @@ struct ChannelHalf {
 impl ChannelHalf {
     fn new() -> Self {
         Self {
-            buf: VecDeque::new(),
+            buf: VecDeque::with_capacity(VIRTUAL_TCP_CHANNEL_CAPACITY_BYTES),
             waker: None,
             closed: false,
             read_shutdown: false,
@@ -141,15 +144,23 @@ impl AsyncRead for VirtualTcpStream {
                 // EOF: peer closed their write side
                 return Poll::Ready(Ok(()));
             }
-            half.waker = Some(cx.waker().clone());
+            if !half.waker.as_ref().is_some_and(|w| w.will_wake(cx.waker())) {
+                half.waker = Some(cx.waker().clone());
+            }
             return Poll::Pending;
         }
 
         let unfilled = buf.unfilled();
         let to_read = unfilled.len().min(half.buf.len());
-        let drained: Vec<u8> = half.buf.drain(..to_read).collect();
+        // Copy directly from VecDeque slices to avoid intermediate Vec allocation.
+        let (front, back) = half.buf.as_slices();
+        let front_copy = front.len().min(to_read);
+        unfilled[..front_copy].copy_from_slice(&front[..front_copy]);
+        if front_copy < to_read {
+            unfilled[front_copy..to_read].copy_from_slice(&back[..to_read - front_copy]);
+        }
+        half.buf.drain(..to_read);
         drop(half);
-        unfilled[..to_read].copy_from_slice(&drained);
         buf.advance(to_read);
         Poll::Ready(Ok(()))
     }
@@ -182,6 +193,7 @@ impl AsyncWrite for VirtualTcpStream {
             return Poll::Ready(Ok(buf.len()));
         }
 
+        half.buf.reserve(buf.len());
         half.buf.extend(buf);
         let wake = half.waker.take();
         drop(half);
@@ -366,7 +378,7 @@ impl VirtualTcpListener {
         Self {
             addr,
             state: Arc::new(Mutex::new(VirtualListenerState {
-                connections: VecDeque::new(),
+                connections: VecDeque::with_capacity(VIRTUAL_TCP_ACCEPT_QUEUE_CAPACITY),
                 waker: None,
                 closed: false,
             })),
@@ -469,7 +481,13 @@ impl TcpListenerApi for VirtualTcpListener {
                 if let Some(conn) = guard.connections.pop_front() {
                     return Poll::Ready(Ok(conn));
                 }
-                guard.waker = Some(cx.waker().clone());
+                if !guard
+                    .waker
+                    .as_ref()
+                    .is_some_and(|w| w.will_wake(cx.waker()))
+                {
+                    guard.waker = Some(cx.waker().clone());
+                }
                 Poll::Pending
             })
             .await
@@ -487,7 +505,13 @@ impl TcpListenerApi for VirtualTcpListener {
         if let Some(conn) = state.connections.pop_front() {
             return Poll::Ready(Ok(conn));
         }
-        state.waker = Some(cx.waker().clone());
+        if !state
+            .waker
+            .as_ref()
+            .is_some_and(|w| w.will_wake(cx.waker()))
+        {
+            state.waker = Some(cx.waker().clone());
+        }
         Poll::Pending
     }
 

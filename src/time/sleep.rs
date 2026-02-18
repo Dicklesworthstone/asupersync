@@ -385,7 +385,13 @@ impl Future for Sleep {
 
                 let mut state = self.state.lock();
                 let finished_handle = take_finished_fallback(&mut state);
-                state.waker = Some(cx.waker().clone());
+                if !state
+                    .waker
+                    .as_ref()
+                    .is_some_and(|w| w.will_wake(cx.waker()))
+                {
+                    state.waker = Some(cx.waker().clone());
+                }
 
                 // Prefer timer driver over background thread
                 if let Some(timer) = timer_driver.as_ref() {

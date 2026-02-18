@@ -349,6 +349,7 @@ struct Delay {
     deadline: Instant,
     tx: mpsc::Sender<DelayCmd>,
     registered: AtomicBool,
+    last_waker: Mutex<Option<Waker>>,
 }
 
 impl Delay {
@@ -360,6 +361,7 @@ impl Delay {
             deadline,
             tx: mgr.tx.clone(),
             registered: AtomicBool::new(false),
+            last_waker: Mutex::new(None),
         }
     }
 
@@ -372,16 +374,24 @@ impl Delay {
         }
 
         if self.registered.swap(true, Ordering::AcqRel) {
-            // Keep the stored waker fresh (executors can swap wakers).
-            let _ = self.tx.send(DelayCmd::UpdateWaker {
-                id: self.id,
-                waker: cx.waker().clone(),
-            });
+            // Keep the stored waker fresh when executors swap wakers.
+            let mut last_waker = self.last_waker.lock();
+            if last_waker
+                .as_ref()
+                .is_none_or(|existing| !existing.will_wake(cx.waker()))
+            {
+                let waker = cx.waker().clone();
+                last_waker.replace(waker.clone());
+                drop(last_waker);
+                let _ = self.tx.send(DelayCmd::UpdateWaker { id: self.id, waker });
+            }
         } else {
+            let waker = cx.waker().clone();
+            self.last_waker.lock().replace(waker.clone());
             let _ = self.tx.send(DelayCmd::Register {
                 id: self.id,
                 deadline: self.deadline,
-                waker: cx.waker().clone(),
+                waker,
             });
         }
 
@@ -403,6 +413,22 @@ struct SimWaiter {
     waker: Waker,
     /// Flag indicating if this waiter is still queued. When woken, this is set to false.
     queued: Arc<AtomicBool>,
+}
+
+fn upsert_sim_waiter(waiters: &mut Vec<SimWaiter>, queued: &Arc<AtomicBool>, waker: &Waker) {
+    if let Some(existing) = waiters
+        .iter_mut()
+        .find(|entry| Arc::ptr_eq(&entry.queued, queued))
+    {
+        if !existing.waker.will_wake(waker) {
+            existing.waker.clone_from(waker);
+        }
+    } else {
+        waiters.push(SimWaiter {
+            waker: waker.clone(),
+            queued: Arc::clone(queued),
+        });
+    }
 }
 
 #[derive(Debug)]
@@ -642,19 +668,16 @@ impl SymbolSink for SimSymbolSink {
                 Some(waiter) if !waiter.load(Ordering::Acquire) => {
                     // We were woken but capacity isn't available yet - re-register
                     waiter.store(true, Ordering::Release);
-                    state.send_wakers.push(SimWaiter {
-                        waker: cx.waker().clone(),
-                        queued: Arc::clone(waiter),
-                    });
+                    upsert_sim_waiter(&mut state.send_wakers, waiter, cx.waker());
                 }
-                Some(_) => {} // Still queued, no need to re-register
+                Some(waiter) => {
+                    // Refresh only when the executor changes this task's waker.
+                    upsert_sim_waiter(&mut state.send_wakers, waiter, cx.waker());
+                }
                 None => {
                     // First time waiting - create new waiter
                     let waiter = Arc::new(AtomicBool::new(true));
-                    state.send_wakers.push(SimWaiter {
-                        waker: cx.waker().clone(),
-                        queued: Arc::clone(&waiter),
-                    });
+                    upsert_sim_waiter(&mut state.send_wakers, &waiter, cx.waker());
                     new_waiter = Some(waiter);
                 }
             }
@@ -863,19 +886,16 @@ impl SymbolStream for SimSymbolStream {
             Some(waiter) if !waiter.load(Ordering::Acquire) => {
                 // We were woken but no message yet - re-register
                 waiter.store(true, Ordering::Release);
-                state.recv_wakers.push(SimWaiter {
-                    waker: cx.waker().clone(),
-                    queued: Arc::clone(waiter),
-                });
+                upsert_sim_waiter(&mut state.recv_wakers, waiter, cx.waker());
             }
-            Some(_) => {} // Still queued, no need to re-register
+            Some(waiter) => {
+                // Refresh only when the executor changes this task's waker.
+                upsert_sim_waiter(&mut state.recv_wakers, waiter, cx.waker());
+            }
             None => {
                 // First time waiting - create new waiter
                 let waiter = Arc::new(AtomicBool::new(true));
-                state.recv_wakers.push(SimWaiter {
-                    waker: cx.waker().clone(),
-                    queued: Arc::clone(&waiter),
-                });
+                upsert_sim_waiter(&mut state.recv_wakers, &waiter, cx.waker());
                 new_waiter = Some(waiter);
             }
         }

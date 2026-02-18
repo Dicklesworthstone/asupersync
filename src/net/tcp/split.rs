@@ -198,8 +198,18 @@ impl TcpStreamInner {
 
         // Store this direction's waker for combined dispatch.
         if interest.is_readable() {
-            guard.read_waker = Some(cx.waker().clone());
-        } else {
+            if !guard
+                .read_waker
+                .as_ref()
+                .is_some_and(|w| w.will_wake(cx.waker()))
+            {
+                guard.read_waker = Some(cx.waker().clone());
+            }
+        } else if !guard
+            .write_waker
+            .as_ref()
+            .is_some_and(|w| w.will_wake(cx.waker()))
+        {
             guard.write_waker = Some(cx.waker().clone());
         }
 

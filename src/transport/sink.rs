@@ -3,11 +3,32 @@
 use crate::security::authenticated::AuthenticatedSymbol;
 use crate::transport::error::SinkError;
 use crate::transport::{ChannelWaiter, SharedChannel};
+use smallvec::SmallVec;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
+
+fn upsert_channel_waiter(
+    wakers: &mut SmallVec<[ChannelWaiter; 2]>,
+    queued: &Arc<AtomicBool>,
+    waker: &Waker,
+) {
+    if let Some(existing) = wakers
+        .iter_mut()
+        .find(|entry| Arc::ptr_eq(&entry.queued, queued))
+    {
+        if !existing.waker.will_wake(waker) {
+            existing.waker.clone_from(waker);
+        }
+    } else {
+        wakers.push(ChannelWaiter {
+            waker: waker.clone(),
+            queued: Arc::clone(queued),
+        });
+    }
+}
 
 /// A sink for outgoing symbols.
 pub trait SymbolSink: Send + Unpin {
@@ -353,31 +374,15 @@ impl SymbolSink for ChannelSink {
                         Some(waiter) if !waiter.load(Ordering::Acquire) => {
                             // We were woken but capacity isn't available yet - re-register
                             waiter.store(true, Ordering::Release);
-                            wakers.push(ChannelWaiter {
-                                waker: cx.waker().clone(),
-                                queued: Arc::clone(waiter),
-                            });
+                            upsert_channel_waiter(&mut wakers, waiter, cx.waker());
                         }
                         Some(waiter) => {
-                            if let Some(existing) = wakers
-                                .iter_mut()
-                                .find(|entry| Arc::ptr_eq(&entry.queued, waiter))
-                            {
-                                existing.waker.clone_from(cx.waker());
-                            } else {
-                                wakers.push(ChannelWaiter {
-                                    waker: cx.waker().clone(),
-                                    queued: Arc::clone(waiter),
-                                });
-                            }
+                            upsert_channel_waiter(&mut wakers, waiter, cx.waker());
                         }
                         None => {
                             // First time waiting - create new waiter
                             let waiter = Arc::new(AtomicBool::new(true));
-                            wakers.push(ChannelWaiter {
-                                waker: cx.waker().clone(),
-                                queued: Arc::clone(&waiter),
-                            });
+                            upsert_channel_waiter(&mut wakers, &waiter, cx.waker());
                             new_waiter = Some(waiter);
                         }
                     }

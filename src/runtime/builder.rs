@@ -913,7 +913,13 @@ impl<T> Future for JoinHandle<T> {
         let mut guard = lock_state(&self.state);
         match guard.result.take() {
             None => {
-                guard.waker = Some(cx.waker().clone());
+                if !guard
+                    .waker
+                    .as_ref()
+                    .is_some_and(|w| w.will_wake(cx.waker()))
+                {
+                    guard.waker = Some(cx.waker().clone());
+                }
                 Poll::Pending
             }
             Some(Ok(output)) => Poll::Ready(output),

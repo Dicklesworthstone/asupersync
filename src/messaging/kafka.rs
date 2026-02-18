@@ -202,7 +202,13 @@ impl Future for DeliveryReceiver {
         if let Some(value) = state.value.take() {
             Poll::Ready(value)
         } else {
-            state.waker = Some(cx.waker().clone());
+            if !state
+                .waker
+                .as_ref()
+                .is_some_and(|w| w.will_wake(cx.waker()))
+            {
+                state.waker = Some(cx.waker().clone());
+            }
             Poll::Pending
         }
     }

@@ -117,7 +117,13 @@ impl<T> std::future::Future for BlockingOneshotReceiver<T> {
                 Err(payload) => std::panic::resume_unwind(payload),
             }
         } else {
-            guard.waker = Some(cx.waker().clone());
+            if !guard
+                .waker
+                .as_ref()
+                .is_some_and(|w| w.will_wake(cx.waker()))
+            {
+                guard.waker = Some(cx.waker().clone());
+            }
             std::task::Poll::Pending
         }
     }
