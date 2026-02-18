@@ -407,6 +407,22 @@ impl OwnedSemaphorePermit {
         semaphore: std::sync::Arc<Semaphore>,
         count: usize,
     ) -> Result<Self, TryAcquireError> {
+        let permit = semaphore.try_acquire(count)?;
+        // Transfer ownership: forget the borrow-based permit so it doesn't
+        // release on drop; the OwnedSemaphorePermit will release in its own Drop.
+        std::mem::forget(permit);
+        Ok(Self { semaphore, count })
+    }
+
+    /// Tries to acquire an owned permit without waiting, cloning the `Arc`
+    /// only on success.
+    ///
+    /// This avoids an `Arc::clone` + refcount round-trip when the semaphore
+    /// has no available permits (the common contended case).
+    pub fn try_acquire_arc(
+        semaphore: &std::sync::Arc<Semaphore>,
+        count: usize,
+    ) -> Result<Self, TryAcquireError> {
         // Acquire permits via the semaphore's internal state directly.
         // We forget the SemaphorePermit to avoid its Drop releasing permits,
         // since OwnedSemaphorePermit's Drop will handle the release instead.
@@ -414,7 +430,10 @@ impl OwnedSemaphorePermit {
         // Transfer ownership: forget the borrow-based permit so it doesn't
         // release on drop; the OwnedSemaphorePermit will release in its own Drop.
         std::mem::forget(permit);
-        Ok(Self { semaphore, count })
+        Ok(Self {
+            semaphore: semaphore.clone(),
+            count,
+        })
     }
 
     /// Returns the number of permits held.

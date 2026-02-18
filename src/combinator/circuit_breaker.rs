@@ -473,8 +473,7 @@ impl CircuitBreaker {
                         ) {
                             Ok(_) => {
                                 // State changed, update locked metrics and callback
-                                let callback_metrics =
-                                    self.update_state_metrics(state, new_state);
+                                let callback_metrics = self.update_state_metrics(state, new_state);
                                 if let Some(ref cb) = self.policy.on_state_change {
                                     cb(state, new_state, &callback_metrics);
                                 }
@@ -559,8 +558,7 @@ impl CircuitBreaker {
                                 Ordering::Acquire,
                             ) {
                                 Ok(_) => {
-                                    self.current_failure_streak
-                                        .store(0, Ordering::Relaxed);
+                                    self.current_failure_streak.store(0, Ordering::Relaxed);
                                     break;
                                 }
                                 Err(actual) => current_bits = actual,
@@ -592,16 +590,13 @@ impl CircuitBreaker {
                                     Ordering::Acquire,
                                 ) {
                                     Ok(_) => {
-                                        self.current_failure_streak
-                                            .store(0, Ordering::Relaxed);
-                                        self.times_closed
-                                            .fetch_add(1, Ordering::Relaxed);
+                                        self.current_failure_streak.store(0, Ordering::Relaxed);
+                                        self.times_closed.fetch_add(1, Ordering::Relaxed);
                                         let mut m = self.metrics.write();
                                         m.current_state = new_state;
                                         if self.policy.on_state_change.is_some() {
                                             self.populate_metrics_snapshot(&mut m);
-                                            event =
-                                                Some((state, new_state, m.clone()));
+                                            event = Some((state, new_state, m.clone()));
                                         }
                                         break;
                                     }
@@ -702,6 +697,7 @@ impl CircuitBreaker {
                         self.populate_metrics_snapshot(&mut m);
                         event = Some((state, new_state, m.clone()));
                     }
+                    drop(m);
                     break;
                 }
                 Err(actual) => current_bits = actual,
@@ -781,9 +777,7 @@ impl CircuitBreaker {
                             self.current_failure_streak
                                 .store(new_failures, Ordering::Relaxed);
 
-                            if new_failures >= self.policy.failure_threshold
-                                || window_triggered
-                            {
+                            if new_failures >= self.policy.failure_threshold || window_triggered {
                                 let new_state = State::Open {
                                     since_millis: now_millis,
                                 };
@@ -794,8 +788,7 @@ impl CircuitBreaker {
                                     Ordering::Acquire,
                                 ) {
                                     Ok(_) => {
-                                        self.times_opened
-                                            .fetch_add(1, Ordering::Relaxed);
+                                        self.times_opened.fetch_add(1, Ordering::Relaxed);
                                         let mut m = self.metrics.write();
                                         m.current_state = new_state;
                                         if let Some(ref w) = self.sliding_window {
@@ -803,9 +796,7 @@ impl CircuitBreaker {
                                         }
                                         if self.policy.on_state_change.is_some() {
                                             self.populate_metrics_snapshot(&mut m);
-                                            event = Some((
-                                                state, new_state, m.clone(),
-                                            ));
+                                            event = Some((state, new_state, m.clone()));
                                         }
                                         break;
                                     }
@@ -847,8 +838,7 @@ impl CircuitBreaker {
                                 Ordering::Acquire,
                             ) {
                                 Ok(_) => {
-                                    self.times_opened
-                                        .fetch_add(1, Ordering::Relaxed);
+                                    self.times_opened.fetch_add(1, Ordering::Relaxed);
                                     let mut m = self.metrics.write();
                                     m.current_state = new_state;
                                     if let Some(ref w) = self.sliding_window {
@@ -856,8 +846,7 @@ impl CircuitBreaker {
                                     }
                                     if self.policy.on_state_change.is_some() {
                                         self.populate_metrics_snapshot(&mut m);
-                                        event =
-                                            Some((state, new_state, m.clone()));
+                                        event = Some((state, new_state, m.clone()));
                                     }
                                     break;
                                 }
