@@ -29,29 +29,10 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
-      - name: No-mock policy (allowlist)
+      - name: No-mock policy (allowlist + waiver expiry)
         run: |
-          allowed=$(cat <<'EOF'
-          src/cx/cap.rs
-          src/net/unix/ancillary.rs
-          src/plan/certificate.rs
-          src/runtime/state.rs
-          src/test_logging.rs
-          src/transport/mod.rs
-          src/transport/stream.rs
-          src/transport/tests.rs
-          tests/e2e/console/diagnostics/explain_region.rs
-          tests/e2e/console/diagnostics/explain_task.rs
-          tests/property_region_ops.rs
-          EOF
-          )
-          found=$(rg -l "(?i)mock|fake" src tests | sort)
-          diff=$(comm -13 <(echo "$allowed" | rg -v '^$' | sort) <(echo "$found"))
-          if [ -n "$diff" ]; then
-            echo "No-mock policy violation. New mock/fake references found in:"
-            echo "$diff"
-            exit 1
-          fi
+          python3 scripts/check_no_mock_policy.py \
+            --policy .github/no_mock_policy.json
 
       - name: Clippy lints
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -822,6 +803,16 @@ jobs:
           cargo llvm-cov --lib --all-features \
             --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/' \
             --text --output-path coverage/coverage.txt --no-run
+          cargo llvm-cov report --json --output-path coverage/llvm_cov.json \
+            --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/'
+
+      - name: Coverage ratchet gate (D1)
+        run: |
+          python3 scripts/check_coverage_ratchet.py \
+            --policy .github/coverage_policy.json \
+            --coverage-json coverage/llvm_cov.json \
+            --invariant-map formal/lean/coverage/invariant_theorem_test_link_map.json \
+            --output coverage/coverage_ratchet_report.json
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
@@ -961,6 +952,21 @@ jobs:
 
       - name: RAPTORQ – Encode/decode conformance E2E
         run: cargo test --test raptorq_conformance --all-features -- --nocapture
+
+      - name: RAPTORQ – Forensic logging contract gate (D3)
+        run: |
+          NO_PREFLIGHT=1 bash ./scripts/run_raptorq_e2e.sh --profile forensics --scenario RQ-E2E-FAILURE-INSUFFICIENT
+          latest_dir="$(ls -1dt target/e2e-results/raptorq/forensics_* | head -n1)"
+          mkdir -p phase6-artifacts/raptorq-forensics
+          cp "$latest_dir/summary.json" phase6-artifacts/raptorq-forensics/summary.json
+          cp "$latest_dir/scenarios.ndjson" phase6-artifacts/raptorq-forensics/scenarios.ndjson
+
+      - name: E2E scenario-matrix completeness gate (D4)
+        run: |
+          bash ./scripts/run_all_e2e.sh --verify-matrix
+          latest_dir="$(ls -1dt target/e2e-results/orchestrator_* | head -n1)"
+          mkdir -p phase6-artifacts/e2e-scenario-matrix
+          cp "$latest_dir/scenario_matrix_validation.json" phase6-artifacts/e2e-scenario-matrix/scenario_matrix_validation.json
 
       - name: PLAN – Certified rewrite pipeline E2E
         run: cargo test --test golden_outputs --all-features -- --nocapture

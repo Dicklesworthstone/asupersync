@@ -1,0 +1,150 @@
+{
+  "schema_version": "no-mock-policy-v1",
+  "description": "Policy for mock/fake/stub usage in src/tests with explicit allowlist + waivers.",
+  "scan": {
+    "roots": [
+      "src",
+      "tests"
+    ],
+    "terms": [
+      "mock",
+      "fake",
+      "stub"
+    ]
+  },
+  "default_owner": "runtime-core",
+  "owner_routes": [
+    {
+      "pattern": "src/messaging/**",
+      "owner": "messaging-core"
+    },
+    {
+      "pattern": "src/runtime/reactor/**",
+      "owner": "runtime-reactor"
+    },
+    {
+      "pattern": "src/tls/**",
+      "owner": "tls-core"
+    },
+    {
+      "pattern": "src/web/**",
+      "owner": "web-runtime"
+    },
+    {
+      "pattern": "tests/**",
+      "owner": "test-infra"
+    },
+    {
+      "pattern": "src/**",
+      "owner": "runtime-core"
+    }
+  ],
+  "allowlist_paths": [
+    "src/channel/session.rs",
+    "src/net/unix/ancillary.rs",
+    "src/plan/certificate.rs",
+    "src/remote.rs",
+    "src/runtime/obligation_table.rs",
+    "src/runtime/region_table.rs",
+    "src/runtime/reactor/io_uring.rs",
+    "src/test_logging.rs",
+    "src/transport/mod.rs",
+    "src/transport/tests.rs",
+    "tests/grpc_e2e.rs",
+    "tests/http_shutdown_test.rs",
+    "tests/property_region_ops.rs",
+    "tests/recovery_security.rs"
+  ],
+  "waivers": [
+    {
+      "waiver_id": "waiver.messaging.kafka.phase0-stub.2026-02-18",
+      "path": "src/messaging/kafka.rs",
+      "owner": "messaging-core",
+      "status": "active",
+      "reason": "Phase-0 Kafka API surface intentionally uses stub implementations until real transport completion.",
+      "expires_at_utc": "2026-06-30T00:00:00Z",
+      "replacement_issue": "asupersync-3narc.2.6"
+    },
+    {
+      "waiver_id": "waiver.messaging.kafka-consumer.phase0-stub.2026-02-18",
+      "path": "src/messaging/kafka_consumer.rs",
+      "owner": "messaging-core",
+      "status": "active",
+      "reason": "Phase-0 consumer path is intentionally stubbed; tracked for replacement in coverage closure.",
+      "expires_at_utc": "2026-06-30T00:00:00Z",
+      "replacement_issue": "asupersync-3narc.2.6"
+    },
+    {
+      "waiver_id": "waiver.reactor.uring.phase0-stub.2026-02-18",
+      "path": "src/runtime/reactor/uring.rs",
+      "owner": "runtime-reactor",
+      "status": "active",
+      "reason": "The uring module is a documented stub gate and is intentionally tracked as technical debt.",
+      "expires_at_utc": "2026-06-30T00:00:00Z",
+      "replacement_issue": "asupersync-3narc.2.4"
+    },
+    {
+      "waiver_id": "waiver.reactor.macos.stub-export.2026-02-18",
+      "path": "src/runtime/reactor/macos.rs",
+      "owner": "runtime-reactor",
+      "status": "active",
+      "reason": "Platform fallback/stub export remains while deterministic cross-platform support is hardened.",
+      "expires_at_utc": "2026-06-30T00:00:00Z",
+      "replacement_issue": "asupersync-3narc.2.4"
+    },
+    {
+      "waiver_id": "waiver.reactor.windows.stub-export.2026-02-18",
+      "path": "src/runtime/reactor/windows.rs",
+      "owner": "runtime-reactor",
+      "status": "active",
+      "reason": "Platform fallback/stub export remains while deterministic cross-platform support is hardened.",
+      "expires_at_utc": "2026-06-30T00:00:00Z",
+      "replacement_issue": "asupersync-3narc.2.4"
+    },
+    {
+      "waiver_id": "waiver.tls.phase0-stub.acceptor.2026-02-18",
+      "path": "src/tls/acceptor.rs",
+      "owner": "tls-core",
+      "status": "active",
+      "reason": "Feature-gated TLS paths retain stub wording for disabled-mode behavior.",
+      "expires_at_utc": "2026-06-30T00:00:00Z",
+      "replacement_issue": "asupersync-3narc.2.5"
+    },
+    {
+      "waiver_id": "waiver.tls.phase0-stub.connector.2026-02-18",
+      "path": "src/tls/connector.rs",
+      "owner": "tls-core",
+      "status": "active",
+      "reason": "Feature-gated TLS paths retain stub wording for disabled-mode behavior.",
+      "expires_at_utc": "2026-06-30T00:00:00Z",
+      "replacement_issue": "asupersync-3narc.2.5"
+    },
+    {
+      "waiver_id": "waiver.tls.phase0-stub.stream.2026-02-18",
+      "path": "src/tls/stream.rs",
+      "owner": "tls-core",
+      "status": "active",
+      "reason": "Feature-gated TLS paths retain stub wording for disabled-mode behavior.",
+      "expires_at_utc": "2026-06-30T00:00:00Z",
+      "replacement_issue": "asupersync-3narc.2.5"
+    },
+    {
+      "waiver_id": "waiver.tls.phase0-stub.types.2026-02-18",
+      "path": "src/tls/types.rs",
+      "owner": "tls-core",
+      "status": "active",
+      "reason": "Feature-gated TLS paths retain stub wording for disabled-mode behavior.",
+      "expires_at_utc": "2026-06-30T00:00:00Z",
+      "replacement_issue": "asupersync-3narc.2.5"
+    },
+    {
+      "waiver_id": "waiver.web.debug.stub-endpoints.2026-02-18",
+      "path": "src/web/debug.rs",
+      "owner": "web-runtime",
+      "status": "active",
+      "reason": "Debug surface retains known stub wording while endpoints are migrated.",
+      "expires_at_utc": "2026-06-30T00:00:00Z",
+      "replacement_issue": "asupersync-3narc.2.5"
+    }
+  ]
+}

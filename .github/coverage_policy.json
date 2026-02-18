@@ -1,0 +1,110 @@
+{
+  "schema_version": "coverage-ratchet-policy-v1",
+  "global_line_floor_pct": 5.0,
+  "subsystems": [
+    {
+      "id": "runtime_scheduler",
+      "label": "Runtime + scheduler",
+      "min_line_pct": 20.0,
+      "include_prefixes": ["src/runtime/", "src/cx/"]
+    },
+    {
+      "id": "cancel_obligation",
+      "label": "Cancellation + obligations",
+      "min_line_pct": 20.0,
+      "include_prefixes": ["src/cancel/", "src/obligation/", "src/types/cancel"]
+    },
+    {
+      "id": "channel_sync",
+      "label": "Channels + sync primitives",
+      "min_line_pct": 15.0,
+      "include_prefixes": ["src/channel/", "src/sync/"]
+    },
+    {
+      "id": "io_reactor_time",
+      "label": "IO + reactor + time",
+      "min_line_pct": 15.0,
+      "include_prefixes": ["src/io/", "src/time/", "src/runtime/reactor/"]
+    },
+    {
+      "id": "net_http_protocols",
+      "label": "Net + HTTP + H2 + WebSocket + gRPC",
+      "min_line_pct": 10.0,
+      "include_prefixes": ["src/net/", "src/http/", "src/grpc/"]
+    },
+    {
+      "id": "raptorq_codec",
+      "label": "RaptorQ codec + pipelines",
+      "min_line_pct": 15.0,
+      "include_prefixes": ["src/raptorq/", "src/codec/"]
+    },
+    {
+      "id": "distributed_remote",
+      "label": "Distributed + remote",
+      "min_line_pct": 10.0,
+      "include_prefixes": ["src/distributed/", "src/remote.rs", "src/transport/"]
+    },
+    {
+      "id": "trace_record_replay",
+      "label": "Trace + record + replay + DPOR",
+      "min_line_pct": 15.0,
+      "include_prefixes": ["src/trace/", "src/record/"]
+    },
+    {
+      "id": "security_capabilities",
+      "label": "Security + capabilities",
+      "min_line_pct": 10.0,
+      "include_prefixes": ["src/security/", "src/cx/cap.rs"]
+    },
+    {
+      "id": "lab_testing",
+      "label": "Lab runtime + testing infra",
+      "min_line_pct": 20.0,
+      "include_prefixes": ["src/lab/", "src/test_utils.rs", "src/test_logging.rs"]
+    },
+    {
+      "id": "config_cli_observability",
+      "label": "Config + CLI + observability",
+      "min_line_pct": 10.0,
+      "include_prefixes": ["src/config.rs", "src/cli/", "src/observability/"]
+    }
+  ],
+  "required_invariants": [
+    {
+      "id": "inv.authority.no_ambient",
+      "min_total_refs": 3,
+      "min_integration_refs": 1,
+      "min_e2e_refs": 1
+    },
+    {
+      "id": "inv.cancel.protocol",
+      "min_total_refs": 4,
+      "min_integration_refs": 1,
+      "min_e2e_refs": 1
+    },
+    {
+      "id": "inv.obligation.no_leaks",
+      "min_total_refs": 4,
+      "min_integration_refs": 1,
+      "min_e2e_refs": 1
+    },
+    {
+      "id": "inv.race.losers_drained",
+      "min_total_refs": 4,
+      "min_integration_refs": 1,
+      "min_e2e_refs": 1
+    },
+    {
+      "id": "inv.region_close.quiescence",
+      "min_total_refs": 3,
+      "min_integration_refs": 1,
+      "min_e2e_refs": 0
+    },
+    {
+      "id": "inv.structured_concurrency.single_owner",
+      "min_total_refs": 3,
+      "min_integration_refs": 1,
+      "min_e2e_refs": 1
+    }
+  ]
+}
