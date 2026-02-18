@@ -15,10 +15,10 @@ use crate::transport::sink::{SymbolSink, SymbolSinkExt};
 use crate::types::symbol::{ObjectId, Symbol};
 use crate::types::{RegionId, Time};
 use parking_lot::RwLock;
-use smallvec::{SmallVec, smallvec};
+use smallvec::{smallvec, SmallVec};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 type EndpointSinkMap = HashMap<EndpointId, Arc<Mutex<Box<dyn SymbolSink>>>>;
 
@@ -46,6 +46,7 @@ impl std::fmt::Display for EndpointId {
 
 /// State of an endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum EndpointState {
     /// Endpoint is healthy and available.
     Healthy,
@@ -64,6 +65,20 @@ pub enum EndpointState {
 }
 
 impl EndpointState {
+    const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            x if x == Self::Healthy as u8 => Self::Healthy,
+            x if x == Self::Degraded as u8 => Self::Degraded,
+            x if x == Self::Unhealthy as u8 => Self::Unhealthy,
+            x if x == Self::Draining as u8 => Self::Draining,
+            _ => Self::Removed,
+        }
+    }
+
     /// Returns true if the endpoint can receive new traffic.
     #[must_use]
     pub const fn can_receive(&self) -> bool {
@@ -87,7 +102,7 @@ pub struct Endpoint {
     pub address: String,
 
     /// Current state.
-    pub state: EndpointState,
+    state: AtomicU8,
 
     /// Weight for weighted load balancing (higher = more traffic).
     pub weight: u32,
@@ -120,7 +135,7 @@ impl Endpoint {
         Self {
             id,
             address: address.into(),
-            state: EndpointState::Healthy,
+            state: AtomicU8::new(EndpointState::Healthy.as_u8()),
             weight: 100,
             region: None,
             active_connections: AtomicU32::new(0),
@@ -146,6 +161,24 @@ impl Endpoint {
         self
     }
 
+    /// Sets the endpoint state.
+    #[must_use]
+    pub fn with_state(self, state: EndpointState) -> Self {
+        self.state.store(state.as_u8(), Ordering::Relaxed);
+        self
+    }
+
+    /// Returns the current endpoint state.
+    #[must_use]
+    pub fn state(&self) -> EndpointState {
+        EndpointState::from_u8(self.state.load(Ordering::Relaxed))
+    }
+
+    /// Updates the endpoint state.
+    pub fn set_state(&self, state: EndpointState) {
+        self.state.store(state.as_u8(), Ordering::Relaxed);
+    }
+
     /// Records a successful operation.
     pub fn record_success(&self, now: Time) {
         self.symbols_sent.fetch_add(1, Ordering::Relaxed);
@@ -165,7 +198,11 @@ impl Endpoint {
 
     /// Releases a connection slot.
     pub fn release_connection(&self) {
-        self.active_connections.fetch_sub(1, Ordering::Relaxed);
+        let _ =
+            self.active_connections
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    Some(current.saturating_sub(1))
+                });
     }
 
     /// Returns the current connection count.
@@ -270,18 +307,23 @@ impl LoadBalancer {
     ) -> Option<&'a Arc<Endpoint>> {
         match self.strategy {
             LoadBalanceStrategy::RoundRobin => {
-                let available_len = endpoints.iter().filter(|e| e.state.can_receive()).count();
+                let available_len = endpoints.iter().filter(|e| e.state().can_receive()).count();
                 if available_len == 0 {
                     return None;
                 }
                 let idx =
                     (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize) % available_len;
-                endpoints.iter().filter(|e| e.state.can_receive()).nth(idx)
+                endpoints
+                    .iter()
+                    .filter(|e| e.state().can_receive())
+                    .nth(idx)
             }
 
             LoadBalanceStrategy::WeightedRoundRobin => {
-                let available: SmallVec<[&Arc<Endpoint>; 8]> =
-                    endpoints.iter().filter(|e| e.state.can_receive()).collect();
+                let available: SmallVec<[&Arc<Endpoint>; 8]> = endpoints
+                    .iter()
+                    .filter(|e| e.state().can_receive())
+                    .collect();
                 if available.is_empty() {
                     return None;
                 }
@@ -305,12 +347,12 @@ impl LoadBalancer {
 
             LoadBalanceStrategy::LeastConnections => endpoints
                 .iter()
-                .filter(|e| e.state.can_receive())
+                .filter(|e| e.state().can_receive())
                 .min_by_key(|e| e.connection_count()),
 
             LoadBalanceStrategy::WeightedLeastConnections => endpoints
                 .iter()
-                .filter(|e| e.state.can_receive())
+                .filter(|e| e.state().can_receive())
                 .min_by(|a, b| {
                     let a_score = f64::from(a.connection_count()) / f64::from(a.weight.max(1));
                     let b_score = f64::from(b.connection_count()) / f64::from(b.weight.max(1));
@@ -320,7 +362,7 @@ impl LoadBalancer {
                 }),
 
             LoadBalanceStrategy::Random => {
-                let available_len = endpoints.iter().filter(|e| e.state.can_receive()).count();
+                let available_len = endpoints.iter().filter(|e| e.state().can_receive()).count();
                 if available_len == 0 {
                     return None;
                 }
@@ -328,34 +370,44 @@ impl LoadBalancer {
                 let seed = self.random_seed.fetch_add(1, Ordering::Relaxed);
                 let random = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
                 let idx = (random as usize) % available_len;
-                endpoints.iter().filter(|e| e.state.can_receive()).nth(idx)
+                endpoints
+                    .iter()
+                    .filter(|e| e.state().can_receive())
+                    .nth(idx)
             }
 
             LoadBalanceStrategy::HashBased => object_id.map_or_else(
                 || {
                     // Fall back to round-robin
-                    let available_len = endpoints.iter().filter(|e| e.state.can_receive()).count();
+                    let available_len =
+                        endpoints.iter().filter(|e| e.state().can_receive()).count();
                     if available_len == 0 {
                         return None;
                     }
                     let idx =
                         (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize) % available_len;
-                    endpoints.iter().filter(|e| e.state.can_receive()).nth(idx)
+                    endpoints
+                        .iter()
+                        .filter(|e| e.state().can_receive())
+                        .nth(idx)
                 },
                 |oid| {
-                    let available_len = endpoints.iter().filter(|e| e.state.can_receive()).count();
+                    let available_len =
+                        endpoints.iter().filter(|e| e.state().can_receive()).count();
                     if available_len == 0 {
                         return None;
                     }
                     let hash = oid.as_u128() as usize;
                     endpoints
                         .iter()
-                        .filter(|e| e.state.can_receive())
+                        .filter(|e| e.state().can_receive())
                         .nth(hash % available_len)
                 },
             ),
 
-            LoadBalanceStrategy::FirstAvailable => endpoints.iter().find(|e| e.state.can_receive()),
+            LoadBalanceStrategy::FirstAvailable => {
+                endpoints.iter().find(|e| e.state().can_receive())
+            }
         }
     }
 }
@@ -504,8 +556,11 @@ impl RoutingTable {
     }
 
     /// Updates endpoint state.
-    pub fn update_endpoint_state(&self, id: EndpointId, _state: EndpointState) -> bool {
-        self.endpoints.read().get(&id).is_some_and(|_endpoint| true)
+    pub fn update_endpoint_state(&self, id: EndpointId, state: EndpointState) -> bool {
+        self.endpoints.read().get(&id).is_some_and(|endpoint| {
+            endpoint.set_state(state);
+            true
+        })
     }
 
     /// Adds a route.
@@ -589,7 +644,7 @@ impl RoutingTable {
         self.endpoints
             .read()
             .values()
-            .filter(|e| e.state == EndpointState::Healthy)
+            .filter(|e| e.state() == EndpointState::Healthy)
             .cloned()
             .collect()
     }
@@ -744,7 +799,7 @@ impl SymbolRouter {
         let available: Vec<_> = entry
             .endpoints
             .iter()
-            .filter(|e| e.state.can_receive())
+            .filter(|e| e.state().can_receive())
             .cloned()
             .collect();
 
@@ -1100,7 +1155,7 @@ impl SymbolDispatcher {
 
         let mut selected = SmallVec::<[Arc<Endpoint>; 8]>::new();
         for endpoint in &entry.endpoints {
-            if endpoint.state.can_receive() {
+            if endpoint.state().can_receive() {
                 selected.push(endpoint.clone());
                 if selected.len() >= count {
                     break;
@@ -1676,13 +1731,9 @@ mod tests {
     fn test_symbol_router_failover() {
         let table = Arc::new(RoutingTable::new());
 
-        let mut primary = test_endpoint(1);
-        primary.state = EndpointState::Unhealthy;
-        let mut backup = test_endpoint(2);
-        backup.state = EndpointState::Healthy;
-
-        let primary = table.register_endpoint(primary);
-        let backup = table.register_endpoint(backup);
+        let primary =
+            table.register_endpoint(test_endpoint(1).with_state(EndpointState::Unhealthy));
+        let backup = table.register_endpoint(test_endpoint(2).with_state(EndpointState::Healthy));
 
         let entry = RoutingEntry::new(vec![primary, backup.clone()], Time::ZERO)
             .with_strategy(LoadBalanceStrategy::FirstAvailable);
@@ -1760,6 +1811,23 @@ mod tests {
 
         endpoint.release_connection();
         assert_eq!(endpoint.connection_count(), 1);
+    }
+
+    #[test]
+    fn test_endpoint_release_connection_saturates() {
+        let endpoint = test_endpoint(1);
+        endpoint.release_connection();
+        assert_eq!(endpoint.connection_count(), 0);
+    }
+
+    #[test]
+    fn test_routing_table_updates_endpoint_state() {
+        let table = RoutingTable::new();
+        let endpoint = table.register_endpoint(test_endpoint(9));
+        assert_eq!(endpoint.state(), EndpointState::Healthy);
+        assert!(table.update_endpoint_state(EndpointId(9), EndpointState::Draining));
+        assert_eq!(endpoint.state(), EndpointState::Draining);
+        assert!(!table.update_endpoint_state(EndpointId(999), EndpointState::Healthy));
     }
 
     // Test 14: RoutingError display
