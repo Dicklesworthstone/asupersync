@@ -325,7 +325,12 @@ impl TraceMonoid {
 
 impl PartialEq for TraceMonoid {
     fn eq(&self, other: &Self) -> bool {
-        self.equivalent(other)
+        // Fast path: fingerprints differ => definitely not equivalent.
+        if self.fingerprint != other.fingerprint {
+            return false;
+        }
+        // Guard against theoretical 64-bit hash collisions.
+        self.equivalent_exact(other)
     }
 }
 
@@ -1061,6 +1066,35 @@ mod tests {
         let mb = TraceMonoid::from_events(&trace_b);
         assert_eq!(ma, mb);
         assert!(ma.equivalent_exact(&mb));
+    }
+
+    #[test]
+    fn partial_eq_requires_exact_canonical_match_not_just_fingerprint() {
+        let trace_a = [
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::complete(2, Time::ZERO, tid(1), rid(1)),
+        ];
+        let trace_b = [
+            TraceEvent::spawn(1, Time::ZERO, tid(2), rid(2)),
+            TraceEvent::complete(2, Time::ZERO, tid(2), rid(2)),
+        ];
+
+        let ma = TraceMonoid::from_events(&trace_a);
+        let mb = TraceMonoid::from_events(&trace_b);
+        assert!(!ma.equivalent_exact(&mb));
+
+        // Construct an impossible-but-valid-internal state to model hash collision:
+        // same fingerprint, different canonical form.
+        let spoof = TraceMonoid {
+            canonical: FoataTrace {
+                layers: mb.canonical.layers.clone(),
+            },
+            fingerprint: ma.fingerprint,
+        };
+
+        // Fingerprint-only equivalence says "equal", but PartialEq must remain exact.
+        assert!(ma.equivalent(&spoof));
+        assert_ne!(ma, spoof);
     }
 
     #[test]
