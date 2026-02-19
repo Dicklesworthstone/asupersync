@@ -113,4 +113,18 @@ mod tests {
         codec.encode(vec![1, 2, 3], &mut buf).unwrap();
         assert_eq!(&buf[..], &[1, 2, 3]);
     }
+
+    // =========================================================================
+    // Wave 45 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn bytes_codec_debug_clone_copy_default() {
+        let codec = BytesCodec::default();
+        let dbg = format!("{codec:?}");
+        assert_eq!(dbg, "BytesCodec");
+        let copied = codec;
+        let cloned = codec.clone();
+        assert_eq!(format!("{copied:?}"), format!("{cloned:?}"));
+    }
 }

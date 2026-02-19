@@ -156,4 +156,45 @@ mod tests {
         codec.encode("hello".to_string(), &mut buf).unwrap();
         assert_eq!(&buf[..], b"hello\n");
     }
+
+    // =========================================================================
+    // Wave 45 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn lines_codec_error_debug_clone_copy_eq_display() {
+        let e1 = LinesCodecError::MaxLineLengthExceeded;
+        let e2 = LinesCodecError::InvalidUtf8;
+
+        assert!(format!("{e1:?}").contains("MaxLineLengthExceeded"));
+        assert!(format!("{e2:?}").contains("InvalidUtf8"));
+        assert!(format!("{e1}").contains("maximum length"));
+        assert!(format!("{e2}").contains("not valid UTF-8"));
+
+        let copied = e1;
+        let cloned = e1.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(e1, e2);
+
+        let err: &dyn std::error::Error = &e1;
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn lines_codec_error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "test");
+        let codec_err: LinesCodecError = io_err.into();
+        assert_eq!(codec_err, LinesCodecError::InvalidUtf8);
+    }
+
+    #[test]
+    fn lines_codec_debug_clone_default() {
+        let codec = LinesCodec::new();
+        let dbg = format!("{codec:?}");
+        assert!(dbg.contains("LinesCodec"), "{dbg}");
+        let cloned = codec.clone();
+        assert_eq!(cloned.max_length(), codec.max_length());
+        let def = LinesCodec::default();
+        assert_eq!(def.max_length(), usize::MAX);
+    }
 }

@@ -1236,4 +1236,60 @@ mod tests {
         assert_eq!(p, p2);
         assert!(format!("{p:?}").contains("UnknownTransportParameter"));
     }
+
+    // =========================================================================
+    // Wave 45 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn quic_core_error_debug_clone_eq_display() {
+        let e1 = QuicCoreError::UnexpectedEof;
+        let e2 = QuicCoreError::VarIntOutOfRange(999);
+        let e3 = QuicCoreError::UnsupportedRetryPacket;
+        assert!(format!("{e1:?}").contains("UnexpectedEof"));
+        assert!(format!("{e1}").contains("unexpected EOF"));
+        assert!(format!("{e2}").contains("varint out of range"));
+        assert!(format!("{e3}").contains("retry packet"));
+        assert_eq!(e1.clone(), e1);
+        assert_ne!(e1, e2);
+        let err: &dyn std::error::Error = &e1;
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn connection_id_debug_clone_copy_eq_hash_default() {
+        use std::collections::HashSet;
+        let def = ConnectionId::default();
+        assert!(def.is_empty());
+        assert_eq!(def.len(), 0);
+        let dbg = format!("{def:?}");
+        assert!(dbg.contains("ConnectionId"), "{dbg}");
+
+        let cid = ConnectionId::new(&[0xab, 0xcd]).unwrap();
+        let copied = cid;
+        let cloned = cid.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(cid, def);
+
+        let mut set = HashSet::new();
+        set.insert(cid);
+        set.insert(def);
+        set.insert(cid);
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn transport_parameters_debug_clone_default_eq() {
+        let def = TransportParameters::default();
+        let dbg = format!("{def:?}");
+        assert!(dbg.contains("TransportParameters"), "{dbg}");
+        assert_eq!(def.max_idle_timeout, None);
+        assert!(!def.disable_active_migration);
+
+        let mut tp = TransportParameters::default();
+        tp.max_idle_timeout = Some(5000);
+        let cloned = tp.clone();
+        assert_eq!(cloned, tp);
+        assert_ne!(cloned, def);
+    }
 }
