@@ -17,6 +17,7 @@ set -euo pipefail
 # Environment:
 #   RCH_BIN        - remote compilation helper executable (default: rch)
 #   E2E_TIMEOUT    - per-scenario timeout seconds (default: 600)
+#   VALIDATION_TIMEOUT - timeout for optional bundle stages (default: 1200)
 #   TEST_THREADS   - cargo test thread count (default: 1)
 #   NO_PREFLIGHT   - set to 1 to skip cargo --no-run preflight
 
@@ -28,6 +29,8 @@ TEST_THREADS="${TEST_THREADS:-1}"
 PROFILE="fast"
 SCENARIO_FILTER=""
 LIST_ONLY=0
+RUN_VALIDATION_BUNDLE=0
+VALIDATION_TIMEOUT="${VALIDATION_TIMEOUT:-1200}"
 
 declare -a SCENARIO_IDS=(
     "RQ-E2E-HAPPY-NO-LOSS"
@@ -155,6 +158,7 @@ Usage: ./scripts/run_raptorq_e2e.sh [options]
 
 Options:
   --profile <fast|full|forensics>   Scenario profile (default: fast)
+  --bundle                          Run extra unit + perf-smoke validation stages
   --scenario <SCENARIO_ID>          Run one scenario regardless of profile
   --list                            List available scenarios and exit
   -h, --help                        Show this help
@@ -184,6 +188,14 @@ matches_profile() {
 
 json_escape() {
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+json_bool() {
+    if [[ "$1" -eq 1 ]]; then
+        printf 'true'
+    else
+        printf 'false'
+    fi
 }
 
 selected_for_run() {
@@ -280,6 +292,73 @@ validate_suite_contract() {
     ' "$scenario_log" >/dev/null
 }
 
+run_validation_stage() {
+    local stage_id="$1"
+    local stage_desc="$2"
+    local stage_log="$3"
+    shift 3
+
+    local -a cmd=("$@")
+    local cmd_pretty
+    local repro_cmd
+    local start_s
+    local end_s
+    local duration_ms
+    local tests_passed
+    local tests_failed
+    local rc
+    local status
+
+    cmd_pretty="$(printf '%q ' "${cmd[@]}")"
+    cmd_pretty="${cmd_pretty% }"
+    repro_cmd="${REPRO_PREFIX}${cmd_pretty}"
+
+    echo ">>> [bundle] ${stage_id}: ${stage_desc}"
+    start_s="$(date +%s)"
+    set +e
+    if [[ "$RUN_WITH_RCH" -eq 1 ]]; then
+        timeout "$VALIDATION_TIMEOUT" "$RCH_BIN" exec -- "${cmd[@]}" >"$stage_log" 2>&1
+    else
+        timeout "$VALIDATION_TIMEOUT" "${cmd[@]}" >"$stage_log" 2>&1
+    fi
+    rc=$?
+    set -e
+    end_s="$(date +%s)"
+    duration_ms=$(((end_s - start_s) * 1000))
+    tests_passed="$(grep -c "^test .* ok$" "$stage_log" 2>/dev/null || true)"
+    tests_failed="$(grep -c "^test .* FAILED$" "$stage_log" 2>/dev/null || true)"
+
+    status="pass"
+    if [[ "$rc" -ne 0 ]]; then
+        status="fail"
+        validation_failures=$((validation_failures + 1))
+        if [[ "$rc" -eq 124 ]]; then
+            echo "    FAIL (timeout) -> ${stage_log}"
+        else
+            echo "    FAIL (exit ${rc}) -> ${stage_log}"
+        fi
+        echo "    repro: ${repro_cmd}"
+    else
+        echo "    PASS"
+    fi
+
+    validation_stage_count=$((validation_stage_count + 1))
+    printf '{"schema_version":"raptorq-validation-stage-log-v1","stage_id":"%s","stage_desc":"%s","profile":"%s","status":"%s","exit_code":%d,"duration_ms":%d,"tests_passed":%d,"tests_failed":%d,"artifact_path":"%s","repro_command":"%s"}\n' \
+        "$(json_escape "$stage_id")" \
+        "$(json_escape "$stage_desc")" \
+        "$(json_escape "$PROFILE")" \
+        "$(json_escape "$status")" \
+        "$rc" \
+        "$duration_ms" \
+        "$tests_passed" \
+        "$tests_failed" \
+        "$(json_escape "$stage_log")" \
+        "$(json_escape "$repro_cmd")" \
+        >> "$VALIDATION_STAGE_LOG"
+
+    [[ "$rc" -eq 0 ]]
+}
+
 print_suite_contract_help() {
     cat >&2 <<'EOF'
 Suite forensic contract violation (D3 gate).
@@ -301,6 +380,10 @@ while [[ $# -gt 0 ]]; do
         --profile)
             PROFILE="${2:-}"
             shift 2
+            ;;
+        --bundle)
+            RUN_VALIDATION_BUNDLE=1
+            shift
             ;;
         --scenario)
             SCENARIO_FILTER="${2:-}"
@@ -365,9 +448,15 @@ RUN_DIR="${PROJECT_ROOT}/target/e2e-results/raptorq/${PROFILE}_${TIMESTAMP}"
 SCENARIO_LOG="${RUN_DIR}/scenarios.ndjson"
 SUMMARY_FILE="${RUN_DIR}/summary.json"
 PREFLIGHT_LOG="${RUN_DIR}/preflight.log"
+VALIDATION_STAGE_LOG="${RUN_DIR}/validation_stages.ndjson"
+validation_stage_count=0
+validation_failures=0
 
 mkdir -p "$RUN_DIR"
 : > "$SCENARIO_LOG"
+if [[ "$RUN_VALIDATION_BUNDLE" -eq 1 ]]; then
+    : > "$VALIDATION_STAGE_LOG"
+fi
 
 echo "==================================================================="
 echo "        RaptorQ Deterministic E2E Scenario Suite (D6)             "
@@ -379,6 +468,10 @@ fi
 echo "Timeout:         ${E2E_TIMEOUT}s per scenario"
 echo "Artifact dir:    ${RUN_DIR}"
 echo "Scenario log:    ${SCENARIO_LOG}"
+if [[ "$RUN_VALIDATION_BUNDLE" -eq 1 ]]; then
+    echo "Bundle stages:   enabled"
+    echo "Stage log:       ${VALIDATION_STAGE_LOG}"
+fi
 echo ""
 
 if [[ "${NO_PREFLIGHT:-0}" != "1" ]]; then
@@ -401,6 +494,94 @@ if [[ "${NO_PREFLIGHT:-0}" != "1" ]]; then
   "artifact_dir": "$(json_escape "$RUN_DIR")",
   "preflight_log": "$(json_escape "$PREFLIGHT_LOG")",
   "repro_command": "$(json_escape "${REPRO_PREFIX}cargo test --test raptorq_conformance --no-run")"
+}
+EOF
+        exit 1
+    fi
+fi
+
+if [[ "$RUN_VALIDATION_BUNDLE" -eq 1 ]]; then
+    failed_stage_id=""
+    case "$PROFILE" in
+        fast)
+            run_validation_stage \
+                "unit-fast" \
+                "unit sentinel (repair_zero_only_source)" \
+                "${RUN_DIR}/unit_fast.log" \
+                cargo test --lib raptorq::tests::repair_zero_only_source -- --nocapture || failed_stage_id="unit-fast"
+            if [[ -z "$failed_stage_id" ]]; then
+                run_validation_stage \
+                    "bench-smoke-gf256-primitives" \
+                    "perf smoke (gf256_primitives)" \
+                    "${RUN_DIR}/bench_gf256_primitives.log" \
+                    cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.05 --measurement-time 0.05 || failed_stage_id="bench-smoke-gf256-primitives"
+            fi
+            ;;
+        full)
+            run_validation_stage \
+                "unit-full-raptorq" \
+                "unit suite (raptorq module)" \
+                "${RUN_DIR}/unit_full_raptorq.log" \
+                cargo test --lib raptorq:: -- --nocapture || failed_stage_id="unit-full-raptorq"
+            if [[ -z "$failed_stage_id" ]]; then
+                run_validation_stage \
+                    "bench-smoke-gf256-primitives" \
+                    "perf smoke (gf256_primitives)" \
+                    "${RUN_DIR}/bench_gf256_primitives.log" \
+                    cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.05 --measurement-time 0.05 || failed_stage_id="bench-smoke-gf256-primitives"
+            fi
+            if [[ -z "$failed_stage_id" ]]; then
+                run_validation_stage \
+                    "bench-smoke-gf256-dual-policy" \
+                    "perf smoke (gf256_dual_policy)" \
+                    "${RUN_DIR}/bench_gf256_dual_policy.log" \
+                    cargo bench --bench raptorq_benchmark -- gf256_dual_policy --sample-size 10 --warm-up-time 0.05 --measurement-time 0.05 || failed_stage_id="bench-smoke-gf256-dual-policy"
+            fi
+            ;;
+        forensics)
+            run_validation_stage \
+                "unit-full-raptorq" \
+                "unit suite (raptorq module)" \
+                "${RUN_DIR}/unit_full_raptorq.log" \
+                cargo test --lib raptorq:: -- --nocapture || failed_stage_id="unit-full-raptorq"
+            if [[ -z "$failed_stage_id" ]]; then
+                run_validation_stage \
+                    "bench-smoke-gf256-primitives" \
+                    "perf smoke (gf256_primitives)" \
+                    "${RUN_DIR}/bench_gf256_primitives.log" \
+                    cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.05 --measurement-time 0.05 || failed_stage_id="bench-smoke-gf256-primitives"
+            fi
+            if [[ -z "$failed_stage_id" ]]; then
+                run_validation_stage \
+                    "bench-smoke-gf256-dual-policy" \
+                    "perf smoke (gf256_dual_policy)" \
+                    "${RUN_DIR}/bench_gf256_dual_policy.log" \
+                    cargo bench --bench raptorq_benchmark -- gf256_dual_policy --sample-size 10 --warm-up-time 0.05 --measurement-time 0.05 || failed_stage_id="bench-smoke-gf256-dual-policy"
+            fi
+            if [[ -z "$failed_stage_id" ]]; then
+                run_validation_stage \
+                    "bench-forensics-repair-campaign" \
+                    "forensics perf smoke (repair_campaign)" \
+                    "${RUN_DIR}/bench_repair_campaign.log" \
+                    cargo bench --bench raptorq_benchmark -- repair_campaign --sample-size 10 --warm-up-time 0.05 --measurement-time 0.05 || failed_stage_id="bench-forensics-repair-campaign"
+            fi
+            ;;
+    esac
+
+    if [[ -n "$failed_stage_id" ]]; then
+        cat > "$SUMMARY_FILE" <<EOF
+{
+  "schema_version": "raptorq-e2e-suite-log-v1",
+  "suite_id": "RQ-E2E-SUITE-D6",
+  "profile": "$(json_escape "$PROFILE")",
+  "status": "validation_failed",
+  "failed_stage_id": "$(json_escape "$failed_stage_id")",
+  "validation_bundle": true,
+  "validation_stage_log": "$(json_escape "$VALIDATION_STAGE_LOG")",
+  "validation_stage_count": ${validation_stage_count},
+  "validation_failed_stages": ${validation_failures},
+  "artifact_dir": "$(json_escape "$RUN_DIR")",
+  "preflight_log": "$(json_escape "$PREFLIGHT_LOG")"
 }
 EOF
         exit 1
@@ -542,6 +723,10 @@ cat > "$SUMMARY_FILE" <<EOF
   "schema_version": "raptorq-e2e-suite-log-v1",
   "suite_id": "RQ-E2E-SUITE-D6",
   "profile": "$(json_escape "$PROFILE")",
+  "validation_bundle": $(json_bool "$RUN_VALIDATION_BUNDLE"),
+  "validation_stage_log": "$(json_escape "$VALIDATION_STAGE_LOG")",
+  "validation_stage_count": ${validation_stage_count},
+  "validation_failed_stages": ${validation_failures},
   "selected_scenarios": ${selected_count},
   "passed_scenarios": ${passed_count},
   "failed_scenarios": ${failed_count},
