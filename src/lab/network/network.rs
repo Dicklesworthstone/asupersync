@@ -895,4 +895,127 @@ mod tests {
             assert!(jitter <= max);
         }
     }
+
+    // Pure data-type tests (wave 35 – CyanBarn)
+
+    #[test]
+    fn host_id_debug_copy_ord_hash() {
+        use std::collections::HashSet;
+        let h1 = HostId::new(1);
+        let h2 = HostId::new(2);
+        let h3 = HostId::new(1);
+
+        let dbg = format!("{h1:?}");
+        assert!(dbg.contains("HostId"));
+
+        // Copy
+        let h1_copy = h1;
+        assert_eq!(h1, h1_copy);
+
+        // Ord
+        assert!(h1 < h2);
+        assert_eq!(h1.cmp(&h3), std::cmp::Ordering::Equal);
+
+        // Hash
+        let mut set = HashSet::new();
+        set.insert(h1);
+        set.insert(h2);
+        set.insert(h3); // duplicate of h1
+        assert_eq!(set.len(), 2);
+
+        // raw accessor
+        assert_eq!(h1.raw(), 1);
+        assert_eq!(h2.raw(), 2);
+    }
+
+    #[test]
+    fn packet_debug_clone() {
+        let pkt = Packet {
+            src: HostId::new(1),
+            dst: HostId::new(2),
+            payload: Bytes::copy_from_slice(b"test"),
+            sent_at: Time::ZERO,
+            received_at: Time::from_nanos(1000),
+            corrupted: false,
+        };
+        let dbg = format!("{pkt:?}");
+        assert!(dbg.contains("Packet"));
+
+        let cloned = pkt.clone();
+        assert_eq!(cloned.src, HostId::new(1));
+        assert_eq!(cloned.dst, HostId::new(2));
+        assert!(!cloned.corrupted);
+    }
+
+    #[test]
+    fn fault_debug_clone() {
+        let partition = Fault::Partition {
+            hosts_a: vec![HostId::new(1)],
+            hosts_b: vec![HostId::new(2)],
+        };
+        let dbg = format!("{partition:?}");
+        assert!(dbg.contains("Partition"));
+        let cloned = partition.clone();
+        let dbg2 = format!("{cloned:?}");
+        assert_eq!(dbg, dbg2);
+
+        let crash = Fault::HostCrash { host: HostId::new(5) };
+        let dbg = format!("{crash:?}");
+        assert!(dbg.contains("HostCrash"));
+    }
+
+    #[test]
+    fn network_metrics_debug_default_clone() {
+        let metrics = NetworkMetrics::default();
+        assert_eq!(metrics.packets_sent, 0);
+        assert_eq!(metrics.packets_delivered, 0);
+        assert_eq!(metrics.packets_dropped, 0);
+        assert_eq!(metrics.packets_duplicated, 0);
+        assert_eq!(metrics.packets_corrupted, 0);
+
+        let dbg = format!("{metrics:?}");
+        assert!(dbg.contains("NetworkMetrics"));
+
+        let cloned = metrics.clone();
+        assert_eq!(cloned.packets_sent, 0);
+    }
+
+    #[test]
+    fn network_trace_event_debug_clone() {
+        let event = NetworkTraceEvent {
+            time: Time::from_nanos(500),
+            kind: NetworkTraceKind::Send,
+            src: HostId::new(1),
+            dst: HostId::new(2),
+        };
+        let dbg = format!("{event:?}");
+        assert!(dbg.contains("NetworkTraceEvent"));
+
+        let cloned = event.clone();
+        assert_eq!(cloned.kind, NetworkTraceKind::Send);
+        assert_eq!(cloned.src, HostId::new(1));
+    }
+
+    #[test]
+    fn network_trace_kind_debug_copy_eq() {
+        let kinds = [
+            NetworkTraceKind::Send,
+            NetworkTraceKind::Deliver,
+            NetworkTraceKind::Drop,
+            NetworkTraceKind::Duplicate,
+            NetworkTraceKind::Reorder,
+        ];
+        for kind in &kinds {
+            let dbg = format!("{kind:?}");
+            assert!(!dbg.is_empty());
+
+            // Copy
+            let copy = *kind;
+            assert_eq!(*kind, copy);
+        }
+
+        // Distinct variants
+        assert_ne!(NetworkTraceKind::Send, NetworkTraceKind::Deliver);
+        assert_ne!(NetworkTraceKind::Drop, NetworkTraceKind::Duplicate);
+    }
 }

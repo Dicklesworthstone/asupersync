@@ -1226,4 +1226,139 @@ mod tests {
 
         crate::test_complete!("generalized_ledger_render_cards_deterministic");
     }
+
+    // Pure data-type tests (wave 35 – CyanBarn)
+
+    #[test]
+    fn subsystem_debug_copy_hash() {
+        use std::collections::HashSet;
+        let s = Subsystem::Supervision;
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("Supervision"));
+
+        // Copy
+        let s2 = s;
+        assert_eq!(s, s2);
+
+        // Hash consistency
+        let mut set = HashSet::new();
+        set.insert(Subsystem::Supervision);
+        set.insert(Subsystem::Registry);
+        set.insert(Subsystem::Link);
+        set.insert(Subsystem::Monitor);
+        assert_eq!(set.len(), 4);
+        assert!(set.contains(&Subsystem::Link));
+    }
+
+    #[test]
+    fn verdict_debug_copy_hash() {
+        use std::collections::HashSet;
+        let v = Verdict::Restart;
+        let dbg = format!("{v:?}");
+        assert!(dbg.contains("Restart"));
+
+        // Copy
+        let v2 = v;
+        assert_eq!(v, v2);
+
+        // Hash - all 11 variants distinct
+        let mut set = HashSet::new();
+        for v in [
+            Verdict::Restart, Verdict::Stop, Verdict::Escalate,
+            Verdict::Accept, Verdict::Reject, Verdict::Release,
+            Verdict::Abort, Verdict::Propagate, Verdict::Suppress,
+            Verdict::Deliver, Verdict::Drop,
+        ] {
+            set.insert(v);
+        }
+        assert_eq!(set.len(), 11);
+    }
+
+    #[test]
+    fn evidence_detail_debug_clone_eq() {
+        let detail = EvidenceDetail::Supervision(SupervisionDetail::ExplicitStop);
+        let dbg = format!("{detail:?}");
+        assert!(dbg.contains("Supervision"));
+        assert!(dbg.contains("ExplicitStop"));
+
+        let cloned = detail.clone();
+        assert_eq!(detail, cloned);
+
+        // Different variants are not equal
+        let other = EvidenceDetail::Registry(RegistryDetail::NameAvailable);
+        assert_ne!(detail, other);
+    }
+
+    #[test]
+    fn supervision_detail_debug_clone() {
+        let detail = SupervisionDetail::RestartAllowed {
+            attempt: 3,
+            delay: Some(Duration::from_millis(100)),
+        };
+        let dbg = format!("{detail:?}");
+        assert!(dbg.contains("RestartAllowed"));
+        assert!(dbg.contains("3"));
+
+        let cloned = detail.clone();
+        assert_eq!(detail, cloned);
+    }
+
+    #[test]
+    fn evidence_record_debug_clone_eq() {
+        let record = EvidenceRecord {
+            timestamp: 42,
+            task_id: test_task_id(),
+            region_id: test_region_id(),
+            subsystem: Subsystem::Registry,
+            verdict: Verdict::Accept,
+            detail: EvidenceDetail::Registry(RegistryDetail::NameAvailable),
+        };
+        let dbg = format!("{record:?}");
+        assert!(dbg.contains("EvidenceRecord"));
+        assert!(dbg.contains("42"));
+
+        let cloned = record.clone();
+        assert_eq!(record, cloned);
+    }
+
+    #[test]
+    fn evidence_card_debug_clone() {
+        let record = EvidenceRecord {
+            timestamp: 100,
+            task_id: test_task_id(),
+            region_id: test_region_id(),
+            subsystem: Subsystem::Supervision,
+            verdict: Verdict::Stop,
+            detail: EvidenceDetail::Supervision(SupervisionDetail::ExplicitStop),
+        };
+        let card = record.to_card();
+        let dbg = format!("{card:?}");
+        assert!(dbg.contains("EvidenceCard"));
+
+        let cloned = card.clone();
+        assert_eq!(card, cloned);
+    }
+
+    #[test]
+    fn generalized_ledger_debug_clone_default() {
+        let ledger = GeneralizedLedger::default();
+        assert!(ledger.is_empty());
+        assert_eq!(ledger.len(), 0);
+
+        let dbg = format!("{ledger:?}");
+        assert!(dbg.contains("GeneralizedLedger"));
+
+        let mut ledger2 = GeneralizedLedger::new();
+        ledger2.push(EvidenceRecord {
+            timestamp: 1,
+            task_id: test_task_id(),
+            region_id: test_region_id(),
+            subsystem: Subsystem::Monitor,
+            verdict: Verdict::Deliver,
+            detail: EvidenceDetail::Monitor(MonitorDetail::Demonitored),
+        });
+        let cloned = ledger2.clone();
+        assert_eq!(cloned.len(), 1);
+        assert_eq!(cloned.entries()[0].timestamp, 1);
+    }
 }
