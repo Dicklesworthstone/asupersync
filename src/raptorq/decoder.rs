@@ -2641,7 +2641,7 @@ mod tests {
     fn decode_corrupted_repair_symbol_reports_corrupt_output() {
         let k = 8;
         let symbol_size = 32;
-        let seed = 2027u64;
+        let seed = 42u64; // Use known-good seed (matches decode_all_source_symbols)
 
         let source = make_source_data(k, symbol_size);
         let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
@@ -2657,6 +2657,9 @@ mod tests {
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
 
+        // Sanity: uncorrupted decode must succeed.
+        decoder.decode(&received).expect("uncorrupted decode must succeed");
+
         // Tamper the first actual repair symbol (not a constraint).
         // Constraint symbols come first and their ESIs can overlap with
         // repair ESIs, so index directly into the repair portion.
@@ -2665,10 +2668,9 @@ mod tests {
         let err = decoder
             .decode(&received)
             .expect_err("corrupted repair symbol must fail output verification");
-        // Verification reports the FIRST mismatch in iteration order.
-        // Corrupting a repair symbol produces wrong intermediate symbols,
-        // so the first detected mismatch is typically at an earlier
-        // constraint or source symbol, not at the tampered repair ESI.
+        // Corruption in a repair symbol produces wrong intermediate symbols.
+        // Verification then detects the FIRST mismatch in iteration order,
+        // which is typically an earlier constraint or source symbol.
         assert!(
             matches!(err, DecodeError::CorruptDecodedOutput { .. }),
             "expected CorruptDecodedOutput, got {err:?}"
@@ -2680,7 +2682,7 @@ mod tests {
     fn decode_with_proof_corrupted_repair_symbol_reports_failure_reason() {
         let k = 8;
         let symbol_size = 32;
-        let seed = 2028u64;
+        let seed = 42u64; // Use known-good seed
 
         let source = make_source_data(k, symbol_size);
         let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
