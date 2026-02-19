@@ -252,4 +252,182 @@ mod tests {
         assert_eq!(default_reason(500), "Internal Server Error");
         assert_eq!(default_reason(999), "Unknown");
     }
+
+    // Pure data-type tests (wave 12 – CyanBarn)
+
+    #[test]
+    fn method_display_all_standard() {
+        assert_eq!(Method::Get.to_string(), "GET");
+        assert_eq!(Method::Head.to_string(), "HEAD");
+        assert_eq!(Method::Post.to_string(), "POST");
+        assert_eq!(Method::Put.to_string(), "PUT");
+        assert_eq!(Method::Delete.to_string(), "DELETE");
+        assert_eq!(Method::Connect.to_string(), "CONNECT");
+        assert_eq!(Method::Options.to_string(), "OPTIONS");
+        assert_eq!(Method::Trace.to_string(), "TRACE");
+        assert_eq!(Method::Patch.to_string(), "PATCH");
+    }
+
+    #[test]
+    fn method_display_extension() {
+        let ext = Method::Extension("PURGE".into());
+        assert_eq!(ext.to_string(), "PURGE");
+    }
+
+    #[test]
+    fn method_debug_clone_eq_hash() {
+        let m = Method::Get;
+        let dbg = format!("{:?}", m);
+        assert!(dbg.contains("Get"));
+        let cloned = m.clone();
+        assert_eq!(m, cloned);
+
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(Method::Get);
+        set.insert(Method::Post);
+        set.insert(Method::Get);
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn method_from_bytes_all_standard() {
+        let methods = [
+            (b"GET" as &[u8], Method::Get),
+            (b"HEAD", Method::Head),
+            (b"POST", Method::Post),
+            (b"PUT", Method::Put),
+            (b"DELETE", Method::Delete),
+            (b"CONNECT", Method::Connect),
+            (b"OPTIONS", Method::Options),
+            (b"TRACE", Method::Trace),
+            (b"PATCH", Method::Patch),
+        ];
+        for (bytes, expected) in methods {
+            assert_eq!(Method::from_bytes(bytes), Some(expected));
+        }
+    }
+
+    #[test]
+    fn method_from_bytes_invalid_utf8() {
+        // Invalid UTF-8 should return None (not an extension)
+        assert!(Method::from_bytes(&[0xFF, 0xFE]).is_none());
+    }
+
+    #[test]
+    fn method_inequality() {
+        assert_ne!(Method::Get, Method::Post);
+        assert_ne!(Method::Get, Method::Extension("GET".into()));
+    }
+
+    #[test]
+    fn version_display() {
+        assert_eq!(Version::Http10.to_string(), "HTTP/1.0");
+        assert_eq!(Version::Http11.to_string(), "HTTP/1.1");
+    }
+
+    #[test]
+    fn version_debug_copy_eq_hash() {
+        let v = Version::Http11;
+        let dbg = format!("{:?}", v);
+        assert!(dbg.contains("Http11"));
+        let copied = v;
+        assert_eq!(v, copied);
+
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(Version::Http10);
+        set.insert(Version::Http11);
+        set.insert(Version::Http10);
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn request_debug_clone() {
+        let req = Request {
+            method: Method::Get,
+            uri: "/path".to_string(),
+            version: Version::Http11,
+            headers: vec![("Host".to_string(), "example.com".to_string())],
+            body: b"body".to_vec(),
+            trailers: vec![],
+            peer_addr: None,
+        };
+        let dbg = format!("{:?}", req);
+        assert!(dbg.contains("Get"));
+        assert!(dbg.contains("/path"));
+
+        let cloned = req.clone();
+        assert_eq!(cloned.method, Method::Get);
+        assert_eq!(cloned.uri, "/path");
+        assert_eq!(cloned.headers.len(), 1);
+    }
+
+    #[test]
+    fn request_with_peer_addr() {
+        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let req = Request {
+            method: Method::Post,
+            uri: "/api".to_string(),
+            version: Version::Http11,
+            headers: vec![],
+            body: vec![],
+            trailers: vec![],
+            peer_addr: Some(addr),
+        };
+        assert_eq!(req.peer_addr, Some(addr));
+    }
+
+    #[test]
+    fn response_with_trailer() {
+        let resp = Response::new(200, "OK", Vec::<u8>::new())
+            .with_header("Transfer-Encoding", "chunked")
+            .with_trailer("Checksum", "abc123");
+        assert_eq!(resp.trailers.len(), 1);
+        assert_eq!(resp.trailers[0].0, "Checksum");
+        assert_eq!(resp.trailers[0].1, "abc123");
+    }
+
+    #[test]
+    fn response_debug_clone() {
+        let resp = Response::new(404, "Not Found", b"missing".to_vec());
+        let dbg = format!("{:?}", resp);
+        assert!(dbg.contains("404"));
+        let cloned = resp.clone();
+        assert_eq!(cloned.status, 404);
+        assert_eq!(cloned.reason, "Not Found");
+    }
+
+    #[test]
+    fn response_defaults_version_http11() {
+        let resp = Response::new(200, "OK", Vec::<u8>::new());
+        assert_eq!(resp.version, Version::Http11);
+    }
+
+    #[test]
+    fn default_reason_all_known() {
+        let known = [
+            (100, "Continue"),
+            (201, "Created"),
+            (204, "No Content"),
+            (301, "Moved Permanently"),
+            (302, "Found"),
+            (304, "Not Modified"),
+            (400, "Bad Request"),
+            (401, "Unauthorized"),
+            (403, "Forbidden"),
+            (405, "Method Not Allowed"),
+            (408, "Request Timeout"),
+            (411, "Length Required"),
+            (413, "Payload Too Large"),
+            (414, "URI Too Long"),
+            (431, "Request Header Fields Too Large"),
+            (501, "Not Implemented"),
+            (502, "Bad Gateway"),
+            (503, "Service Unavailable"),
+        ];
+        for (code, expected) in known {
+            assert_eq!(default_reason(code), expected, "code={code}");
+        }
+    }
 }

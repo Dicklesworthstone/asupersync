@@ -260,4 +260,136 @@ mod tests {
         crate::assert_with_log!(ok, "ok", true, ok);
         crate::test_complete!("resolved_obligation_is_not_leak");
     }
+
+    // Pure data-type tests (wave 12 – CyanBarn)
+
+    #[test]
+    fn obligation_leak_display() {
+        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let obligation = ObligationId::from_arena(ArenaIndex::new(2, 0));
+
+        let leak = ObligationLeak {
+            obligation,
+            kind: ObligationKind::SendPermit,
+            holder: task,
+            region,
+        };
+        let display = leak.to_string();
+        assert!(display.contains("SendPermit"));
+    }
+
+    #[test]
+    fn obligation_leak_debug_clone_eq() {
+        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let obligation = ObligationId::from_arena(ArenaIndex::new(2, 0));
+
+        let leak = ObligationLeak {
+            obligation,
+            kind: ObligationKind::Ack,
+            holder: task,
+            region,
+        };
+        let dbg = format!("{:?}", leak);
+        assert!(dbg.contains("ObligationLeak"));
+
+        let cloned = leak.clone();
+        assert_eq!(leak, cloned);
+    }
+
+    #[test]
+    fn obligation_leak_violation_display_debug_error() {
+        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let obligation = ObligationId::from_arena(ArenaIndex::new(2, 0));
+
+        let violation = ObligationLeakViolation {
+            region,
+            leaked: vec![ObligationLeak {
+                obligation,
+                kind: ObligationKind::Lease,
+                holder: task,
+                region,
+            }],
+            region_close_time: Time::ZERO,
+        };
+        let display = violation.to_string();
+        assert!(display.contains("leaked=1"));
+
+        let dbg = format!("{:?}", violation);
+        assert!(dbg.contains("ObligationLeakViolation"));
+
+        // std::error::Error
+        let err: &dyn std::error::Error = &violation;
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn obligation_leak_violation_clone() {
+        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let violation = ObligationLeakViolation {
+            region,
+            leaked: vec![],
+            region_close_time: Time::ZERO,
+        };
+        let cloned = violation.clone();
+        assert_eq!(cloned.leaked.len(), 0);
+    }
+
+    #[test]
+    fn oracle_default_new_counts() {
+        let oracle = ObligationLeakOracle::new();
+        assert_eq!(oracle.obligation_count(), 0);
+        assert_eq!(oracle.closed_region_count(), 0);
+    }
+
+    #[test]
+    fn oracle_debug() {
+        let oracle = ObligationLeakOracle::default();
+        let dbg = format!("{:?}", oracle);
+        assert!(dbg.contains("ObligationLeakOracle"));
+    }
+
+    #[test]
+    fn oracle_reset() {
+        let mut oracle = ObligationLeakOracle::new();
+        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let obligation = ObligationId::from_arena(ArenaIndex::new(2, 0));
+
+        oracle.on_create(obligation, ObligationKind::IoOp, task, region);
+        oracle.on_region_close(region, Time::ZERO);
+        assert_eq!(oracle.obligation_count(), 1);
+        assert_eq!(oracle.closed_region_count(), 1);
+
+        oracle.reset();
+        assert_eq!(oracle.obligation_count(), 0);
+        assert_eq!(oracle.closed_region_count(), 0);
+    }
+
+    #[test]
+    fn oracle_no_leaks_without_region_close() {
+        let mut oracle = ObligationLeakOracle::new();
+        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let obligation = ObligationId::from_arena(ArenaIndex::new(2, 0));
+
+        oracle.on_create(obligation, ObligationKind::SendPermit, task, region);
+        // Don't close the region
+        assert!(oracle.check(Time::ZERO).is_ok());
+    }
+
+    #[test]
+    fn oracle_aborted_not_leaked() {
+        let mut oracle = ObligationLeakOracle::new();
+        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let obligation = ObligationId::from_arena(ArenaIndex::new(2, 0));
+
+        oracle.on_create(obligation, ObligationKind::Lease, task, region);
+        oracle.on_resolve(obligation, ObligationState::Aborted);
+        oracle.on_region_close(region, Time::ZERO);
+        assert!(oracle.check(Time::ZERO).is_ok());
+    }
 }

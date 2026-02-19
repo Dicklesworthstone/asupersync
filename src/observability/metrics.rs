@@ -467,4 +467,187 @@ mod tests {
         let boxed: Box<dyn MetricsProvider> = Box::new(NoOpMetrics);
         boxed.task_spawned(RegionId::testing_default(), TaskId::testing_default());
     }
+
+    // Pure data-type tests (wave 12 – CyanBarn)
+
+    #[test]
+    fn counter_name() {
+        let c = Counter::new("requests_total");
+        assert_eq!(c.name(), "requests_total");
+        assert_eq!(c.get(), 0);
+    }
+
+    #[test]
+    fn counter_debug() {
+        let c = Counter::new("ctr");
+        c.add(42);
+        let dbg = format!("{:?}", c);
+        assert!(dbg.contains("ctr"));
+    }
+
+    #[test]
+    fn gauge_sub() {
+        let g = Gauge::new("g");
+        g.set(10);
+        g.sub(3);
+        assert_eq!(g.get(), 7);
+    }
+
+    #[test]
+    fn gauge_name_debug() {
+        let g = Gauge::new("active_conns");
+        assert_eq!(g.name(), "active_conns");
+        let dbg = format!("{:?}", g);
+        assert!(dbg.contains("active_conns"));
+    }
+
+    #[test]
+    fn gauge_negative_values() {
+        let g = Gauge::new("g");
+        g.set(-5);
+        assert_eq!(g.get(), -5);
+        g.increment();
+        assert_eq!(g.get(), -4);
+    }
+
+    #[test]
+    fn histogram_name_debug() {
+        let h = Histogram::new("latency", vec![0.1, 0.5, 1.0]);
+        assert_eq!(h.name(), "latency");
+        let dbg = format!("{:?}", h);
+        assert!(dbg.contains("latency"));
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn histogram_empty() {
+        let h = Histogram::new("h", vec![1.0, 5.0]);
+        assert_eq!(h.count(), 0);
+        assert_eq!(h.sum(), 0.0);
+    }
+
+    #[test]
+    fn histogram_bucket_sorting() {
+        // Buckets given out of order should still work correctly
+        let h = Histogram::new("h", vec![5.0, 1.0, 10.0]);
+        h.observe(0.5); // should go in the <=1.0 bucket
+        h.observe(3.0); // should go in the <=5.0 bucket
+        h.observe(100.0); // should go in the +Inf bucket
+        assert_eq!(h.count(), 3);
+    }
+
+    #[test]
+    fn metric_value_debug_copy() {
+        let c = MetricValue::Counter(42);
+        let g = MetricValue::Gauge(-7);
+        let h = MetricValue::Histogram(10, 3.14);
+
+        let dbg_c = format!("{:?}", c);
+        assert!(dbg_c.contains("Counter"));
+        assert!(dbg_c.contains("42"));
+
+        let dbg_g = format!("{:?}", g);
+        assert!(dbg_g.contains("Gauge"));
+
+        let dbg_h = format!("{:?}", h);
+        assert!(dbg_h.contains("Histogram"));
+
+        // Copy
+        let c2 = c;
+        let _ = c; // original still usable
+        let _ = c2;
+    }
+
+    #[test]
+    fn metric_value_clone() {
+        let v = MetricValue::Counter(99);
+        let v2 = v;
+        let _ = v; // Copy
+        let _ = v2;
+    }
+
+    #[test]
+    fn outcome_kind_debug_copy_eq_hash() {
+        let ok = OutcomeKind::Ok;
+        let err = OutcomeKind::Err;
+        let canc = OutcomeKind::Cancelled;
+        let pan = OutcomeKind::Panicked;
+
+        assert_ne!(ok, err);
+        assert_ne!(canc, pan);
+        assert_eq!(ok, OutcomeKind::Ok);
+
+        let dbg = format!("{:?}", ok);
+        assert!(dbg.contains("Ok"));
+
+        // Copy
+        let ok2 = ok;
+        assert_eq!(ok, ok2);
+
+        // Hash
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(ok);
+        set.insert(err);
+        set.insert(canc);
+        set.insert(pan);
+        assert_eq!(set.len(), 4);
+    }
+
+    #[test]
+    fn noop_metrics_debug_default_copy() {
+        let m = NoOpMetrics;
+        let dbg = format!("{:?}", m);
+        assert!(dbg.contains("NoOpMetrics"));
+
+        let m2 = NoOpMetrics::default();
+        let _ = m2;
+
+        // Copy
+        let m3 = m;
+        let _ = m;
+        let _ = m3;
+
+        // Clone
+        let m4 = m.clone();
+        let _ = m4;
+    }
+
+    #[test]
+    fn metrics_default_empty() {
+        let m = Metrics::default();
+        let export = m.export_prometheus();
+        assert!(export.is_empty());
+    }
+
+    #[test]
+    fn metrics_same_name_returns_same_counter() {
+        let mut m = Metrics::new();
+        let c1 = m.counter("x");
+        c1.add(5);
+        let c2 = m.counter("x");
+        assert_eq!(c2.get(), 5); // same underlying counter
+    }
+
+    #[test]
+    fn metrics_same_name_returns_same_gauge() {
+        let mut m = Metrics::new();
+        let g1 = m.gauge("y");
+        g1.set(42);
+        let g2 = m.gauge("y");
+        assert_eq!(g2.get(), 42);
+    }
+
+    #[test]
+    fn metrics_export_histogram() {
+        let mut m = Metrics::new();
+        let h = m.histogram("latency", vec![1.0, 5.0]);
+        h.observe(0.5);
+        h.observe(3.0);
+
+        let output = m.export_prometheus();
+        assert!(output.contains("latency_bucket"));
+        assert!(output.contains("latency_sum"));
+        assert!(output.contains("latency_count 2"));
+    }
 }

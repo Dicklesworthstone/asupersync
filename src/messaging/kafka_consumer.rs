@@ -390,4 +390,188 @@ mod tests {
         let consumer = KafkaConsumer::new(config);
         assert!(consumer.is_ok());
     }
+
+    // Pure data-type tests (wave 12 – CyanBarn)
+
+    #[test]
+    fn auto_offset_reset_default() {
+        let d = AutoOffsetReset::default();
+        assert_eq!(d, AutoOffsetReset::Latest);
+    }
+
+    #[test]
+    fn auto_offset_reset_debug_copy_eq() {
+        let e = AutoOffsetReset::Earliest;
+        let dbg = format!("{:?}", e);
+        assert!(dbg.contains("Earliest"));
+
+        // Copy
+        let e2 = e;
+        assert_eq!(e, e2);
+
+        // Clone
+        let e3 = e.clone();
+        assert_eq!(e, e3);
+
+        // Inequality
+        assert_ne!(AutoOffsetReset::Earliest, AutoOffsetReset::Latest);
+        assert_ne!(AutoOffsetReset::Latest, AutoOffsetReset::None);
+    }
+
+    #[test]
+    fn isolation_level_default() {
+        let d = IsolationLevel::default();
+        assert_eq!(d, IsolationLevel::ReadUncommitted);
+    }
+
+    #[test]
+    fn isolation_level_debug_copy_eq() {
+        let rc = IsolationLevel::ReadCommitted;
+        let dbg = format!("{:?}", rc);
+        assert!(dbg.contains("ReadCommitted"));
+
+        let rc2 = rc;
+        assert_eq!(rc, rc2);
+
+        assert_ne!(IsolationLevel::ReadCommitted, IsolationLevel::ReadUncommitted);
+    }
+
+    #[test]
+    fn consumer_config_debug_clone() {
+        let cfg = ConsumerConfig::default();
+        let dbg = format!("{:?}", cfg);
+        assert!(dbg.contains("asupersync-default"));
+
+        let cloned = cfg.clone();
+        assert_eq!(cloned.group_id, "asupersync-default");
+    }
+
+    #[test]
+    fn consumer_config_new_overrides_defaults() {
+        let cfg = ConsumerConfig::new(vec!["broker:9092".into()], "my-group");
+        assert_eq!(cfg.bootstrap_servers, vec!["broker:9092"]);
+        assert_eq!(cfg.group_id, "my-group");
+        // Other fields still have defaults
+        assert_eq!(cfg.max_poll_records, 500);
+        assert!(cfg.enable_auto_commit);
+    }
+
+    #[test]
+    fn consumer_config_session_timeout_builder() {
+        let cfg = ConsumerConfig::default()
+            .session_timeout(Duration::from_secs(60));
+        assert_eq!(cfg.session_timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn consumer_config_heartbeat_builder() {
+        let cfg = ConsumerConfig::default()
+            .heartbeat_interval(Duration::from_secs(10));
+        assert_eq!(cfg.heartbeat_interval, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn consumer_config_auto_commit_interval_builder() {
+        let cfg = ConsumerConfig::default()
+            .auto_commit_interval(Duration::from_secs(15));
+        assert_eq!(cfg.auto_commit_interval, Duration::from_secs(15));
+    }
+
+    #[test]
+    fn consumer_config_fetch_max_wait_builder() {
+        let cfg = ConsumerConfig::default()
+            .fetch_max_wait(Duration::from_millis(1000));
+        assert_eq!(cfg.fetch_max_wait, Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn consumer_config_validate_zero_poll_records() {
+        let cfg = ConsumerConfig::default().max_poll_records(0);
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn consumer_config_validate_whitespace_group() {
+        let cfg = ConsumerConfig::new(vec!["kafka:9092".into()], "   ");
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn consumer_config_validate_ok() {
+        let cfg = ConsumerConfig::default();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn topic_partition_offset_debug_clone_eq() {
+        let tpo = TopicPartitionOffset::new("events", 0, 100);
+        let dbg = format!("{:?}", tpo);
+        assert!(dbg.contains("events"));
+        assert!(dbg.contains("100"));
+
+        let cloned = tpo.clone();
+        assert_eq!(tpo, cloned);
+    }
+
+    #[test]
+    fn topic_partition_offset_inequality() {
+        let a = TopicPartitionOffset::new("t1", 0, 0);
+        let b = TopicPartitionOffset::new("t2", 0, 0);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn consumer_record_debug_clone() {
+        let rec = ConsumerRecord {
+            topic: "test-topic".into(),
+            partition: 3,
+            offset: 42,
+            key: Some(b"key".to_vec()),
+            payload: b"value".to_vec(),
+            timestamp: Some(1000),
+            headers: vec![("h1".into(), b"v1".to_vec())],
+        };
+        let dbg = format!("{:?}", rec);
+        assert!(dbg.contains("test-topic"));
+        assert!(dbg.contains("42"));
+
+        let cloned = rec.clone();
+        assert_eq!(cloned.topic, "test-topic");
+        assert_eq!(cloned.partition, 3);
+        assert_eq!(cloned.key, Some(b"key".to_vec()));
+    }
+
+    #[test]
+    fn consumer_record_no_key_no_timestamp() {
+        let rec = ConsumerRecord {
+            topic: "t".into(),
+            partition: 0,
+            offset: 0,
+            key: None,
+            payload: vec![],
+            timestamp: None,
+            headers: vec![],
+        };
+        assert!(rec.key.is_none());
+        assert!(rec.timestamp.is_none());
+    }
+
+    #[test]
+    fn kafka_consumer_debug_config_accessor() {
+        let cfg = ConsumerConfig::default();
+        let consumer = KafkaConsumer::new(cfg).unwrap();
+        let dbg = format!("{:?}", consumer);
+        assert!(dbg.contains("KafkaConsumer"));
+
+        assert_eq!(consumer.config().group_id, "asupersync-default");
+    }
+
+    #[test]
+    fn kafka_consumer_rejects_invalid_config() {
+        let cfg = ConsumerConfig {
+            bootstrap_servers: vec![],
+            ..Default::default()
+        };
+        assert!(KafkaConsumer::new(cfg).is_err());
+    }
 }

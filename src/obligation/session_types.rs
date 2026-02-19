@@ -918,8 +918,10 @@ mod tests {
     fn delegation_pair_preserves_metadata() {
         use delegation::new_delegation;
 
-        let (delegator_ch, delegatee_ch) =
-            new_delegation::<Initiator, two_phase::InitiatorSession>(201, ObligationKind::SendPermit);
+        let (delegator_ch, delegatee_ch) = new_delegation::<Initiator, two_phase::InitiatorSession>(
+            201,
+            ObligationKind::SendPermit,
+        );
 
         assert_eq!(delegator_ch.channel_id(), 201);
         assert_eq!(delegator_ch.obligation_kind(), ObligationKind::SendPermit);
@@ -934,6 +936,126 @@ mod tests {
     }
 
     // -- Multi-renew lease invariant --
+
+    // Pure data-type tests (wave 12 – CyanBarn)
+
+    #[test]
+    fn branch_debug_copy_eq() {
+        let left = Branch::Left;
+        let right = Branch::Right;
+
+        let dbg = format!("{:?}", left);
+        assert!(dbg.contains("Left"));
+
+        // Copy
+        let left2 = left;
+        assert_eq!(left, left2);
+
+        // Inequality
+        assert_ne!(left, right);
+
+        // Clone
+        let right2 = right.clone();
+        assert_eq!(right, right2);
+    }
+
+    #[test]
+    fn session_proof_debug() {
+        let proof = SessionProof {
+            channel_id: 42,
+            obligation_kind: ObligationKind::SendPermit,
+        };
+        let dbg = format!("{:?}", proof);
+        assert!(dbg.contains("42"));
+        assert!(dbg.contains("SendPermit"));
+    }
+
+    #[test]
+    fn two_phase_reserve_msg_debug_clone() {
+        let msg = two_phase::ReserveMsg {
+            kind: ObligationKind::Lease,
+        };
+        let dbg = format!("{:?}", msg);
+        assert!(dbg.contains("Lease"));
+
+        let cloned = msg.clone();
+        assert_eq!(cloned.kind, ObligationKind::Lease);
+    }
+
+    #[test]
+    fn two_phase_abort_msg_debug_clone() {
+        let msg = two_phase::AbortMsg {
+            reason: "budget_exhausted".to_string(),
+        };
+        let dbg = format!("{:?}", msg);
+        assert!(dbg.contains("budget_exhausted"));
+
+        let cloned = msg.clone();
+        assert_eq!(cloned.reason, "budget_exhausted");
+    }
+
+    #[test]
+    fn selected_left_variant() {
+        let s: Selected<u32, &str> = Selected::Left(42);
+        match s {
+            Selected::Left(v) => assert_eq!(v, 42),
+            Selected::Right(_) => panic!("expected Left"),
+        }
+    }
+
+    #[test]
+    fn selected_right_variant() {
+        let s: Selected<u32, &str> = Selected::Right("hello");
+        match s {
+            Selected::Right(v) => assert_eq!(v, "hello"),
+            Selected::Left(_) => panic!("expected Right"),
+        }
+    }
+
+    #[test]
+    fn chan_accessors() {
+        let (sender, receiver) = send_permit::new_session::<u32>(55);
+        assert_eq!(sender.channel_id(), 55);
+        assert_eq!(sender.obligation_kind(), ObligationKind::SendPermit);
+        assert_eq!(receiver.channel_id(), 55);
+        assert_eq!(receiver.obligation_kind(), ObligationKind::SendPermit);
+
+        // Drive both to End
+        let sender = sender.send(send_permit::ReserveMsg);
+        let sender = sender.select_left();
+        let sender = sender.send(0_u32);
+        let _ = sender.close();
+        let (_, receiver) = receiver.recv(send_permit::ReserveMsg);
+        match receiver.offer(Branch::Left) {
+            Selected::Left(ch) => {
+                let (_, ch) = ch.recv(0_u32);
+                let _ = ch.close();
+            }
+            Selected::Right(_) => panic!("expected Left"),
+        }
+    }
+
+    #[test]
+    fn lease_new_session_obligation_kind() {
+        let (holder, resource) = lease::new_session(99);
+        assert_eq!(holder.obligation_kind(), ObligationKind::Lease);
+        assert_eq!(resource.obligation_kind(), ObligationKind::Lease);
+
+        // Drive to End
+        let holder = holder.send(lease::AcquireMsg);
+        let holder = holder.select_right();
+        let holder = holder.send(lease::ReleaseMsg);
+        let _ = holder.close();
+
+        let (_, resource) = resource.recv(lease::AcquireMsg);
+        match resource.offer(Branch::Right) {
+            Selected::Right(ch) => {
+                let (_, ch) = ch.recv(lease::ReleaseMsg);
+                let _ = ch.close();
+            }
+            Selected::Left(_) => panic!("expected Right"),
+        }
+    }
 
     /// Invariant: lease protocol supports multiple renew cycles before release,
     /// each creating a fresh loop iteration.

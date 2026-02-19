@@ -661,4 +661,155 @@ mod tests {
         );
         crate::test_complete!("with_description_sets_description");
     }
+
+    // Pure data-type tests (wave 12 – CyanBarn)
+
+    #[test]
+    fn source_location_display() {
+        let loc = SourceLocation {
+            file: "src/main.rs",
+            line: 42,
+            column: 5,
+        };
+        assert_eq!(loc.to_string(), "src/main.rs:42:5");
+    }
+
+    #[test]
+    fn source_location_unknown() {
+        let loc = SourceLocation::unknown();
+        assert_eq!(loc.file, "<unknown>");
+        assert_eq!(loc.line, 0);
+        assert_eq!(loc.column, 0);
+        assert_eq!(loc.to_string(), "<unknown>:0:0");
+    }
+
+    #[test]
+    fn source_location_debug_copy_eq() {
+        let loc = SourceLocation {
+            file: "f.rs",
+            line: 1,
+            column: 1,
+        };
+        let dbg = format!("{:?}", loc);
+        assert!(dbg.contains("f.rs"));
+
+        // Copy
+        let loc2 = loc;
+        assert_eq!(loc, loc2);
+
+        // Inequality
+        let loc3 = SourceLocation {
+            file: "g.rs",
+            line: 1,
+            column: 1,
+        };
+        assert_ne!(loc, loc3);
+    }
+
+    #[test]
+    fn obligation_kind_display_all() {
+        assert_eq!(ObligationKind::SendPermit.to_string(), "send_permit");
+        assert_eq!(ObligationKind::Ack.to_string(), "ack");
+        assert_eq!(ObligationKind::Lease.to_string(), "lease");
+        assert_eq!(ObligationKind::IoOp.to_string(), "io_op");
+    }
+
+    #[test]
+    fn obligation_kind_as_str_all() {
+        assert_eq!(ObligationKind::SendPermit.as_str(), "send_permit");
+        assert_eq!(ObligationKind::Ack.as_str(), "ack");
+        assert_eq!(ObligationKind::Lease.as_str(), "lease");
+        assert_eq!(ObligationKind::IoOp.as_str(), "io_op");
+    }
+
+    #[test]
+    fn obligation_kind_debug_copy_hash_ord() {
+        let k = ObligationKind::Lease;
+        let dbg = format!("{:?}", k);
+        assert!(dbg.contains("Lease"));
+
+        // Copy
+        let k2 = k;
+        assert_eq!(k, k2);
+
+        // Hash
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(ObligationKind::SendPermit);
+        set.insert(ObligationKind::Ack);
+        set.insert(ObligationKind::Lease);
+        set.insert(ObligationKind::IoOp);
+        assert_eq!(set.len(), 4);
+
+        // Ord
+        let mut kinds = vec![
+            ObligationKind::IoOp,
+            ObligationKind::SendPermit,
+            ObligationKind::Lease,
+            ObligationKind::Ack,
+        ];
+        kinds.sort();
+        assert_eq!(kinds[0], ObligationKind::SendPermit);
+    }
+
+    #[test]
+    fn obligation_abort_reason_display_all() {
+        assert_eq!(ObligationAbortReason::Cancel.to_string(), "cancel");
+        assert_eq!(ObligationAbortReason::Error.to_string(), "error");
+        assert_eq!(ObligationAbortReason::Explicit.to_string(), "explicit");
+    }
+
+    #[test]
+    fn obligation_abort_reason_debug_copy_eq() {
+        let r = ObligationAbortReason::Cancel;
+        let dbg = format!("{:?}", r);
+        assert!(dbg.contains("Cancel"));
+
+        let r2 = r;
+        assert_eq!(r, r2);
+
+        assert_ne!(ObligationAbortReason::Cancel, ObligationAbortReason::Error);
+    }
+
+    #[test]
+    fn obligation_state_debug_copy_eq() {
+        let states = [
+            ObligationState::Reserved,
+            ObligationState::Committed,
+            ObligationState::Aborted,
+            ObligationState::Leaked,
+        ];
+        for s in &states {
+            let dbg = format!("{:?}", s);
+            assert!(!dbg.is_empty());
+
+            // Copy
+            let s2 = *s;
+            assert_eq!(*s, s2);
+        }
+
+        assert_ne!(ObligationState::Reserved, ObligationState::Committed);
+        assert_ne!(ObligationState::Aborted, ObligationState::Leaked);
+    }
+
+    #[test]
+    fn obligation_record_new_defaults() {
+        let (oid, tid, rid) = test_ids();
+        let ob = ObligationRecord::new(oid, ObligationKind::IoOp, tid, rid, Time::ZERO);
+        assert_eq!(ob.state, ObligationState::Reserved);
+        assert!(ob.description.is_none());
+        assert!(ob.resolved_at.is_none());
+        assert!(ob.abort_reason.is_none());
+        assert!(ob.acquire_backtrace.is_none());
+        assert_eq!(ob.acquired_at, SourceLocation::unknown());
+    }
+
+    #[test]
+    fn obligation_record_debug() {
+        let (oid, tid, rid) = test_ids();
+        let ob = ObligationRecord::new(oid, ObligationKind::SendPermit, tid, rid, Time::ZERO);
+        let dbg = format!("{:?}", ob);
+        assert!(dbg.contains("ObligationRecord"));
+        assert!(dbg.contains("SendPermit"));
+    }
 }
