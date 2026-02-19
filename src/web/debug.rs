@@ -518,4 +518,18 @@ mod tests {
         assert!(DASHBOARD_HTML.contains("/debug/snapshot"));
         assert!(DASHBOARD_HTML.contains("CONFIG"));
     }
+
+    #[test]
+    fn debug_server_config_debug_clone() {
+        let c = DebugServerConfig::default();
+        let dbg = format!("{:?}", c);
+        assert!(dbg.contains("DebugServerConfig"));
+        assert!(dbg.contains("127.0.0.1"));
+
+        let c2 = c.clone();
+        assert_eq!(c2.bind_addr, "127.0.0.1");
+        assert_eq!(c2.max_connections, 16);
+        assert_eq!(c2.refresh_interval_secs, 2);
+        assert!(c2.print_url);
+    }
 }

@@ -2405,4 +2405,18 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), MAX_STRING_LENGTH);
     }
+
+    #[test]
+    fn header_debug_clone_eq() {
+        let h = Header::new("content-type", "application/json");
+        let dbg = format!("{:?}", h);
+        assert!(dbg.contains("content-type"));
+        assert!(dbg.contains("application/json"));
+
+        let h2 = h.clone();
+        assert_eq!(h, h2);
+
+        let h3 = Header::new("accept", "*/*");
+        assert_ne!(h, h3);
+    }
 }

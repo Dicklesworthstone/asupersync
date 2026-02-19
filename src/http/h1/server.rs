@@ -590,4 +590,29 @@ mod tests {
         assert_ne!(ConnectionPhase::Idle, ConnectionPhase::Reading);
         assert_ne!(ConnectionPhase::Processing, ConnectionPhase::Writing);
     }
+
+    #[test]
+    fn connection_phase_debug_clone_copy() {
+        let p = ConnectionPhase::Closing;
+        let dbg = format!("{:?}", p);
+        assert!(dbg.contains("Closing"));
+
+        let p2 = p.clone();
+        assert_eq!(p, p2);
+
+        // Copy
+        let p3 = p;
+        assert_eq!(p, p3);
+    }
+
+    #[test]
+    fn http1_config_debug_clone() {
+        let c = Http1Config::default();
+        let dbg = format!("{:?}", c);
+        assert!(dbg.contains("Http1Config"));
+
+        let c2 = c.clone();
+        assert_eq!(c2.max_headers_size, 64 * 1024);
+        assert_eq!(c2.keep_alive, true);
+    }
 }

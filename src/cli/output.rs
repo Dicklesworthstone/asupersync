@@ -433,4 +433,40 @@ mod tests {
         output.write_list(&items).unwrap();
         crate::test_complete!("output_writer_list_json_is_array");
     }
+
+    #[test]
+    fn output_format_debug_clone_copy_default_eq() {
+        let f = OutputFormat::default();
+        assert_eq!(f, OutputFormat::Human);
+
+        let dbg = format!("{:?}", f);
+        assert!(dbg.contains("Human"));
+
+        let f2 = f.clone();
+        assert_eq!(f, f2);
+
+        // Copy
+        let f3 = f;
+        assert_eq!(f, f3);
+
+        assert_ne!(OutputFormat::Json, OutputFormat::Tsv);
+    }
+
+    #[test]
+    fn color_choice_debug_clone_copy_default_eq() {
+        let c = ColorChoice::default();
+        assert_eq!(c, ColorChoice::Auto);
+
+        let dbg = format!("{:?}", c);
+        assert!(dbg.contains("Auto"));
+
+        let c2 = c.clone();
+        assert_eq!(c, c2);
+
+        // Copy
+        let c3 = c;
+        assert_eq!(c, c3);
+
+        assert_ne!(ColorChoice::Always, ColorChoice::Never);
+    }
 }
