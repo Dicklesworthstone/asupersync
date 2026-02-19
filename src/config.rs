@@ -1131,4 +1131,84 @@ default_timeout_ms = 5000
             Err(ConfigError::InvalidRepairOverhead)
         ));
     }
+
+    /// Invariant: validation rejects symbol_size < 8.
+    #[test]
+    fn invalid_symbol_size() {
+        let mut config = RaptorQConfig::default();
+        config.encoding.symbol_size = 4;
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidSymbolSize)
+        ));
+    }
+
+    /// Invariant: validation rejects max_block_size == 0.
+    #[test]
+    fn invalid_max_block_size() {
+        let mut config = RaptorQConfig::default();
+        config.encoding.max_block_size = 0;
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidMaxBlockSize)
+        ));
+    }
+
+    /// Invariant: validation rejects zero parallelism.
+    #[test]
+    fn invalid_parallelism_encoding() {
+        let mut config = RaptorQConfig::default();
+        config.encoding.encoding_parallelism = 0;
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidParallelism)
+        ));
+    }
+
+    /// Invariant: validation rejects insufficient memory budget.
+    #[test]
+    fn insufficient_memory() {
+        let mut config = RaptorQConfig::default();
+        config.resources.max_symbol_buffer_memory = 512;
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InsufficientMemory)
+        ));
+    }
+
+    /// Invariant: validation rejects too-short timeouts.
+    #[test]
+    fn timeout_too_short() {
+        let mut config = RaptorQConfig::default();
+        config.timeouts.default_timeout = Duration::from_millis(10);
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::TimeoutTooShort)
+        ));
+    }
+
+    /// Invariant: ConfigError Display renders all variants.
+    #[test]
+    fn config_error_display() {
+        let err = ConfigError::InvalidRepairOverhead;
+        assert!(format!("{err}").contains("repair_overhead"));
+
+        let err = ConfigError::InvalidSymbolSize;
+        assert!(format!("{err}").contains("symbol_size"));
+
+        let err = ConfigError::InvalidMaxBlockSize;
+        assert!(format!("{err}").contains("max_block_size"));
+
+        let err = ConfigError::InvalidParallelism;
+        assert!(format!("{err}").contains("parallelism"));
+
+        let err = ConfigError::InsufficientMemory;
+        assert!(format!("{err}").contains("memory"));
+
+        let err = ConfigError::TimeoutTooShort;
+        assert!(format!("{err}").contains("timeout"));
+
+        let err = ConfigError::InvalidSampleRate(1.5);
+        assert!(format!("{err}").contains("sample_rate"));
+    }
 }

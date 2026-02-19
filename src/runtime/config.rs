@@ -532,4 +532,129 @@ mod tests {
         );
         crate::test_complete!("test_normalize_preserves_custom_values");
     }
+
+    // ========================================================================
+    // Pure data-type tests (wave 10 – CyanBarn)
+    // ========================================================================
+
+    #[test]
+    fn obligation_leak_response_clone_copy() {
+        let a = ObligationLeakResponse::Recover;
+        let b = a; // Copy
+        let c = a.clone();
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+    }
+
+    #[test]
+    fn leak_escalation_debug_eq() {
+        let a = LeakEscalation::new(5, ObligationLeakResponse::Panic);
+        let b = LeakEscalation::new(5, ObligationLeakResponse::Panic);
+        assert_eq!(a, b);
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("LeakEscalation"), "{dbg}");
+    }
+
+    #[test]
+    fn leak_escalation_clone_copy() {
+        let a = LeakEscalation::new(10, ObligationLeakResponse::Log);
+        let b = a; // Copy
+        let c = a.clone();
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+    }
+
+    #[test]
+    fn blocking_pool_config_default() {
+        let bp = BlockingPoolConfig::default();
+        assert_eq!(bp.min_threads, 0);
+        assert_eq!(bp.max_threads, 0);
+    }
+
+    #[test]
+    fn blocking_pool_config_clone() {
+        let bp = BlockingPoolConfig {
+            min_threads: 2,
+            max_threads: 8,
+        };
+        let cloned = bp.clone();
+        assert_eq!(cloned.min_threads, 2);
+        assert_eq!(cloned.max_threads, 8);
+    }
+
+    #[test]
+    fn runtime_config_clone() {
+        let config = RuntimeConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned.worker_threads, config.worker_threads);
+        assert_eq!(cloned.poll_budget, config.poll_budget);
+        assert_eq!(
+            cloned.obligation_leak_response,
+            config.obligation_leak_response
+        );
+    }
+
+    /// Invariant: ObligationLeakResponse variants are distinct and Debug-printable.
+    #[test]
+    fn test_obligation_leak_response_variants() {
+        init_test("test_obligation_leak_response_variants");
+        let variants = [
+            ObligationLeakResponse::Panic,
+            ObligationLeakResponse::Log,
+            ObligationLeakResponse::Silent,
+            ObligationLeakResponse::Recover,
+        ];
+        for (i, a) in variants.iter().enumerate() {
+            for (j, b) in variants.iter().enumerate() {
+                if i == j {
+                    crate::assert_with_log!(*a == *b, "same variant eq", true, *a == *b);
+                } else {
+                    crate::assert_with_log!(*a != *b, "diff variant ne", true, *a != *b);
+                }
+            }
+            let dbg = format!("{a:?}");
+            crate::assert_with_log!(!dbg.is_empty(), "Debug non-empty", true, !dbg.is_empty());
+        }
+        crate::test_complete!("test_obligation_leak_response_variants");
+    }
+
+    /// Invariant: LeakEscalation preserves non-zero threshold.
+    #[test]
+    fn test_leak_escalation_preserves_nonzero() {
+        init_test("test_leak_escalation_preserves_nonzero");
+        let escalation = LeakEscalation::new(10, ObligationLeakResponse::Recover);
+        crate::assert_with_log!(
+            escalation.threshold == 10,
+            "threshold preserved",
+            10,
+            escalation.threshold
+        );
+        crate::assert_with_log!(
+            escalation.escalate_to == ObligationLeakResponse::Recover,
+            "escalate_to",
+            ObligationLeakResponse::Recover,
+            escalation.escalate_to
+        );
+        crate::test_complete!("test_leak_escalation_preserves_nonzero");
+    }
+
+    /// Invariant: RuntimeConfig default governor settings are off with interval 32.
+    #[test]
+    fn test_default_governor_settings() {
+        init_test("test_default_governor_settings");
+        let config = RuntimeConfig::default();
+        crate::assert_with_log!(
+            !config.enable_governor,
+            "governor disabled by default",
+            false,
+            config.enable_governor
+        );
+        crate::assert_with_log!(
+            config.governor_interval == 32,
+            "default governor interval",
+            32,
+            config.governor_interval
+        );
+        crate::test_complete!("test_default_governor_settings");
+    }
 }

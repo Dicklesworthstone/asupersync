@@ -1385,4 +1385,91 @@ mod tests {
 
         crate::test_complete!("test_exit_status_display");
     }
+
+    /// Invariant: Command::args adds multiple arguments at once.
+    #[test]
+    fn test_command_args() {
+        init_test("test_command_args");
+
+        let child = Command::new("echo")
+            .args(["hello", "world", "foo"])
+            .stdout(Stdio::Pipe)
+            .spawn()
+            .expect("spawn failed");
+
+        let result = child.wait_with_output().expect("output failed");
+
+        crate::assert_with_log!(
+            result.stdout == b"hello world foo\n",
+            "args",
+            "hello world foo\\n",
+            String::from_utf8_lossy(&result.stdout)
+        );
+        crate::test_complete!("test_command_args");
+    }
+
+    /// Invariant: Command::envs sets multiple env vars at once.
+    #[test]
+    fn test_command_envs() {
+        init_test("test_command_envs");
+
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("echo $A-$B")
+            .envs([("A", "alpha"), ("B", "beta")])
+            .stdout(Stdio::Pipe)
+            .spawn()
+            .expect("spawn failed");
+
+        let result = child.wait_with_output().expect("output failed");
+
+        crate::assert_with_log!(
+            result.stdout == b"alpha-beta\n",
+            "envs",
+            "alpha-beta\\n",
+            String::from_utf8_lossy(&result.stdout)
+        );
+        crate::test_complete!("test_command_envs");
+    }
+
+    /// Invariant: Command::output() runs synchronously and returns Output.
+    #[test]
+    fn test_command_output() {
+        init_test("test_command_output");
+
+        let output = Command::new("echo")
+            .arg("sync_output")
+            .stdout(Stdio::Pipe)
+            .output()
+            .expect("output failed");
+
+        crate::assert_with_log!(
+            output.status.success(),
+            "output success",
+            true,
+            output.status.success()
+        );
+        crate::assert_with_log!(
+            output.stdout == b"sync_output\n",
+            "output stdout",
+            "sync_output\\n",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        crate::test_complete!("test_command_output");
+    }
+
+    /// Invariant: ProcessError has Debug and Display formatting.
+    #[test]
+    fn test_process_error_display() {
+        init_test("test_process_error_display");
+
+        let err = Command::new("nonexistent_command_xyz_12345").spawn();
+        if let Err(e) = err {
+            let disp = format!("{e}");
+            let dbg_str = format!("{e:?}");
+            crate::assert_with_log!(!disp.is_empty(), "display non-empty", true, !disp.is_empty());
+            crate::assert_with_log!(!dbg_str.is_empty(), "debug non-empty", true, !dbg_str.is_empty());
+        }
+        crate::test_complete!("test_process_error_display");
+    }
 }
