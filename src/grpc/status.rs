@@ -579,7 +579,7 @@ mod tests {
         assert!(dbg.contains("NotFound"));
         assert!(dbg.contains("missing"));
 
-        let cloned = status.clone();
+        let cloned = status;
         assert_eq!(cloned.code(), Code::NotFound);
         assert_eq!(cloned.message(), "missing");
     }
@@ -605,10 +605,16 @@ mod tests {
         assert_eq!(Status::cancelled("c").code(), Code::Cancelled);
         assert_eq!(Status::unknown("u").code(), Code::Unknown);
         assert_eq!(Status::invalid_argument("i").code(), Code::InvalidArgument);
-        assert_eq!(Status::deadline_exceeded("d").code(), Code::DeadlineExceeded);
+        assert_eq!(
+            Status::deadline_exceeded("d").code(),
+            Code::DeadlineExceeded
+        );
         assert_eq!(Status::not_found("n").code(), Code::NotFound);
         assert_eq!(Status::already_exists("a").code(), Code::AlreadyExists);
-        assert_eq!(Status::permission_denied("p").code(), Code::PermissionDenied);
+        assert_eq!(
+            Status::permission_denied("p").code(),
+            Code::PermissionDenied
+        );
         assert_eq!(
             Status::resource_exhausted("r").code(),
             Code::ResourceExhausted

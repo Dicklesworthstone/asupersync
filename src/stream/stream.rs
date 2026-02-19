@@ -219,18 +219,18 @@ mod tests {
         crate::test_complete!("ref_mut_stream");
     }
 
+    struct NoHint;
+    impl Stream for NoHint {
+        type Item = ();
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<()>> {
+            Poll::Ready(None)
+        }
+    }
+
     /// Invariant: default size_hint returns (0, None).
     #[test]
     fn default_size_hint() {
         init_test("default_size_hint");
-
-        struct NoHint;
-        impl Stream for NoHint {
-            type Item = ();
-            fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<()>> {
-                Poll::Ready(None)
-            }
-        }
 
         let stream = NoHint;
         let hint = stream.size_hint();

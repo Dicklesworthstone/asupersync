@@ -400,7 +400,7 @@ mod tests {
         let config = NetworkConfig::default();
         let dbg = format!("{config:?}");
         assert!(dbg.contains("NetworkConfig"), "{dbg}");
-        let cloned = config.clone();
+        let cloned = config;
         assert_eq!(cloned.seed, 0x4E45_5457);
     }
 
@@ -451,7 +451,9 @@ mod tests {
     #[test]
     fn network_conditions_satellite() {
         let c = NetworkConditions::satellite();
-        assert!(matches!(c.latency, LatencyModel::Normal { mean, .. } if mean > Duration::from_millis(500)));
+        assert!(
+            matches!(c.latency, LatencyModel::Normal { mean, .. } if mean > Duration::from_millis(500))
+        );
         assert!(c.packet_loss > 0.0);
         assert_eq!(c.bandwidth, Some(10_000_000));
     }
@@ -516,7 +518,7 @@ mod tests {
         };
         let dbg = format!("{uniform:?}");
         assert!(dbg.contains("Uniform"), "{dbg}");
-        let _cloned = uniform.clone();
+        let _cloned = uniform;
     }
 
     #[test]

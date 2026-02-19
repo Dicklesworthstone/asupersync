@@ -69,10 +69,8 @@ sqlite = ["dep:rusqlite"]
 postgres = []
 # Enable MySQL async client with wire protocol.
 mysql = []
-# QUIC and HTTP/3 features removed (bd-9ipp): quinn/h3/h3-quinn
-# unconditionally depend on tokio, which conflicts with this custom
-# async runtime. Source code is preserved behind dead feature gates.
-# Re-enable when a tokio-free QUIC stack is available.
+# QUIC/HTTP3 feature flags are intentionally not exposed here yet.
+# Native Tokio-free transport work is tracked under `net::quic_core`.
 # Enable Kafka client integration via rdkafka.
 kafka = ["dep:rdkafka"]
 # Enable unsafe AVX2/NEON intrinsics for ~8x GF(256) throughput in RaptorQ.
@@ -159,7 +157,8 @@ rusqlite = { version = "0.38", features = ["bundled"], optional = true }
 sha2 = "0.10"
 # HMAC for Macaroon capability token verification (bd-2lqyk.2)
 hmac = "0.12"
-# QUIC/HTTP3 deps removed (bd-9ipp): quinn/h3/h3-quinn depend on tokio.
+# QUIC/HTTP3 deps remain disabled: current upstream stacks pull Tokio transitively.
+# We will replace this surface with native asupersync implementations.
 # quinn = { version = "0.11", default-features = false, features = ["rustls", "runtime-smol"], optional = true }
 # h3 = { version = "0.0.8", optional = true }
 # h3-quinn = { version = "0.0.10", optional = true }

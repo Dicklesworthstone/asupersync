@@ -1848,7 +1848,7 @@ mod tests {
     fn actor_id_copy_clone() {
         let id = ActorId::from_task(TaskId::new_for_test(1, 1));
         let copied = id; // Copy
-        let cloned = id.clone();
+        let cloned = id;
         assert_eq!(id, copied);
         assert_eq!(id, cloned);
     }
@@ -1886,7 +1886,7 @@ mod tests {
     fn actor_state_clone_copy_eq() {
         let s = ActorState::Running;
         let copied = s;
-        let cloned = s.clone();
+        let cloned = s;
         assert_eq!(s, copied);
         assert_eq!(s, cloned);
     }
@@ -1968,7 +1968,7 @@ mod tests {
             assert!(!dbg.is_empty());
         }
         assert!(format!("{:?}", variants[0]).contains("Stopped"));
-        assert!(format!("{:?}", variants[1]).contains("5"));
+        assert!(format!("{:?}", variants[1]).contains('5'));
         assert!(format!("{:?}", variants[2]).contains("Escalated"));
     }
 
@@ -1980,7 +1980,7 @@ mod tests {
         assert!(dbg.contains("64"), "{dbg}");
 
         let copied = cfg;
-        let cloned = cfg.clone();
+        let cloned = cfg;
         assert_eq!(copied.capacity, cfg.capacity);
         assert_eq!(cloned.backpressure, cfg.backpressure);
     }

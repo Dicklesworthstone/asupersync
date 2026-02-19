@@ -766,7 +766,7 @@ mod tests {
             ScenarioElement::CancelRegion { region_idx: 3 },
         ];
 
-        let displays: Vec<String> = cases.iter().map(|e| e.to_string()).collect();
+        let displays: Vec<String> = cases.iter().map(std::string::ToString::to_string).collect();
         assert!(displays[0].contains("create_region"));
         assert!(displays[1].contains("spawn_task"));
         assert!(displays[2].contains("obligation"));
@@ -809,7 +809,7 @@ mod tests {
     #[test]
     fn step_kind_debug_clone_copy_eq() {
         let kind = StepKind::TopDownPrune;
-        let cloned = kind.clone();
+        let cloned = kind;
         let copied = kind;
         assert_eq!(cloned, copied);
         assert_eq!(kind, StepKind::TopDownPrune);
@@ -835,7 +835,7 @@ mod tests {
         let dbg = format!("{step:?}");
         assert!(dbg.contains("MinimizationStep"));
 
-        let cloned = step.clone();
+        let cloned = step;
         assert_eq!(cloned.events_remaining, 10);
         assert_eq!(cloned.replay_time_ms, 42);
     }

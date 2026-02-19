@@ -402,7 +402,7 @@ mod tests {
     #[test]
     fn auto_offset_reset_debug_copy_eq() {
         let e = AutoOffsetReset::Earliest;
-        let dbg = format!("{:?}", e);
+        let dbg = format!("{e:?}");
         assert!(dbg.contains("Earliest"));
 
         // Copy
@@ -410,7 +410,7 @@ mod tests {
         assert_eq!(e, e2);
 
         // Clone
-        let e3 = e.clone();
+        let e3 = e;
         assert_eq!(e, e3);
 
         // Inequality
@@ -427,22 +427,25 @@ mod tests {
     #[test]
     fn isolation_level_debug_copy_eq() {
         let rc = IsolationLevel::ReadCommitted;
-        let dbg = format!("{:?}", rc);
+        let dbg = format!("{rc:?}");
         assert!(dbg.contains("ReadCommitted"));
 
         let rc2 = rc;
         assert_eq!(rc, rc2);
 
-        assert_ne!(IsolationLevel::ReadCommitted, IsolationLevel::ReadUncommitted);
+        assert_ne!(
+            IsolationLevel::ReadCommitted,
+            IsolationLevel::ReadUncommitted
+        );
     }
 
     #[test]
     fn consumer_config_debug_clone() {
         let cfg = ConsumerConfig::default();
-        let dbg = format!("{:?}", cfg);
+        let dbg = format!("{cfg:?}");
         assert!(dbg.contains("asupersync-default"));
 
-        let cloned = cfg.clone();
+        let cloned = cfg;
         assert_eq!(cloned.group_id, "asupersync-default");
     }
 
@@ -458,30 +461,26 @@ mod tests {
 
     #[test]
     fn consumer_config_session_timeout_builder() {
-        let cfg = ConsumerConfig::default()
-            .session_timeout(Duration::from_secs(60));
-        assert_eq!(cfg.session_timeout, Duration::from_secs(60));
+        let cfg = ConsumerConfig::default().session_timeout(Duration::from_mins(1));
+        assert_eq!(cfg.session_timeout, Duration::from_mins(1));
     }
 
     #[test]
     fn consumer_config_heartbeat_builder() {
-        let cfg = ConsumerConfig::default()
-            .heartbeat_interval(Duration::from_secs(10));
+        let cfg = ConsumerConfig::default().heartbeat_interval(Duration::from_secs(10));
         assert_eq!(cfg.heartbeat_interval, Duration::from_secs(10));
     }
 
     #[test]
     fn consumer_config_auto_commit_interval_builder() {
-        let cfg = ConsumerConfig::default()
-            .auto_commit_interval(Duration::from_secs(15));
+        let cfg = ConsumerConfig::default().auto_commit_interval(Duration::from_secs(15));
         assert_eq!(cfg.auto_commit_interval, Duration::from_secs(15));
     }
 
     #[test]
     fn consumer_config_fetch_max_wait_builder() {
-        let cfg = ConsumerConfig::default()
-            .fetch_max_wait(Duration::from_millis(1000));
-        assert_eq!(cfg.fetch_max_wait, Duration::from_millis(1000));
+        let cfg = ConsumerConfig::default().fetch_max_wait(Duration::from_secs(1));
+        assert_eq!(cfg.fetch_max_wait, Duration::from_secs(1));
     }
 
     #[test]
@@ -505,7 +504,7 @@ mod tests {
     #[test]
     fn topic_partition_offset_debug_clone_eq() {
         let tpo = TopicPartitionOffset::new("events", 0, 100);
-        let dbg = format!("{:?}", tpo);
+        let dbg = format!("{tpo:?}");
         assert!(dbg.contains("events"));
         assert!(dbg.contains("100"));
 
@@ -531,11 +530,11 @@ mod tests {
             timestamp: Some(1000),
             headers: vec![("h1".into(), b"v1".to_vec())],
         };
-        let dbg = format!("{:?}", rec);
+        let dbg = format!("{rec:?}");
         assert!(dbg.contains("test-topic"));
         assert!(dbg.contains("42"));
 
-        let cloned = rec.clone();
+        let cloned = rec;
         assert_eq!(cloned.topic, "test-topic");
         assert_eq!(cloned.partition, 3);
         assert_eq!(cloned.key, Some(b"key".to_vec()));
@@ -560,7 +559,7 @@ mod tests {
     fn kafka_consumer_debug_config_accessor() {
         let cfg = ConsumerConfig::default();
         let consumer = KafkaConsumer::new(cfg).unwrap();
-        let dbg = format!("{:?}", consumer);
+        let dbg = format!("{consumer:?}");
         assert!(dbg.contains("KafkaConsumer"));
 
         assert_eq!(consumer.config().group_id, "asupersync-default");

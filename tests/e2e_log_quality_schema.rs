@@ -128,7 +128,10 @@ fn suite_summary_v3_accepts_valid_payload() {
     .expect("valid summary JSON");
 
     let errors = validate_suite_summary_v3(&payload);
-    assert!(errors.is_empty(), "unexpected validation errors: {errors:?}");
+    assert!(
+        errors.is_empty(),
+        "unexpected validation errors: {errors:?}"
+    );
 }
 
 #[test]
@@ -174,7 +177,9 @@ fn suite_summary_v3_rejects_bad_timestamp_order() {
 
     let errors = validate_suite_summary_v3(&payload);
     assert!(
-        errors.iter().any(|msg| msg.contains("timestamp order invalid")),
+        errors
+            .iter()
+            .any(|msg| msg.contains("timestamp order invalid")),
         "expected timestamp-order failure, got: {errors:?}"
     );
 }

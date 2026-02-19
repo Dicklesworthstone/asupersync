@@ -369,7 +369,7 @@ mod tests {
 
         assert_eq!(
             poset.topo_sort(),
-            Some((0..trace.len()).collect::<Vec<_>>())
+            Some((0..trace.len()).collect::<Vec<usize>>())
         );
     }
 
@@ -475,7 +475,7 @@ mod tests {
             OwnerKey::Kind(TraceEventKind::UserTrace),
         ];
         for v in &variants {
-            assert!(format!("{v:?}").len() > 0);
+            assert!(!format!("{v:?}").is_empty());
         }
     }
 

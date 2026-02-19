@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn method_debug_clone_eq_hash() {
         let m = Method::Get;
-        let dbg = format!("{:?}", m);
+        let dbg = format!("{m:?}");
         assert!(dbg.contains("Get"));
         let cloned = m.clone();
         assert_eq!(m, cloned);
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn version_debug_copy_eq_hash() {
         let v = Version::Http11;
-        let dbg = format!("{:?}", v);
+        let dbg = format!("{v:?}");
         assert!(dbg.contains("Http11"));
         let copied = v;
         assert_eq!(v, copied);
@@ -353,11 +353,11 @@ mod tests {
             trailers: vec![],
             peer_addr: None,
         };
-        let dbg = format!("{:?}", req);
+        let dbg = format!("{req:?}");
         assert!(dbg.contains("Get"));
         assert!(dbg.contains("/path"));
 
-        let cloned = req.clone();
+        let cloned = req;
         assert_eq!(cloned.method, Method::Get);
         assert_eq!(cloned.uri, "/path");
         assert_eq!(cloned.headers.len(), 1);
@@ -391,9 +391,9 @@ mod tests {
     #[test]
     fn response_debug_clone() {
         let resp = Response::new(404, "Not Found", b"missing".to_vec());
-        let dbg = format!("{:?}", resp);
+        let dbg = format!("{resp:?}");
         assert!(dbg.contains("404"));
-        let cloned = resp.clone();
+        let cloned = resp;
         assert_eq!(cloned.status, 404);
         assert_eq!(cloned.reason, "Not Found");
     }

@@ -755,7 +755,7 @@ mod tests {
     #[test]
     fn pool_config_debug_clone() {
         let cfg = PoolConfig::default();
-        let cfg2 = cfg.clone();
+        let cfg2 = cfg;
         assert!(format!("{cfg2:?}").contains("PoolConfig"));
     }
 
@@ -808,7 +808,7 @@ mod tests {
     #[test]
     fn pool_stats_debug_clone_default() {
         let stats = PoolStats::default();
-        let stats2 = stats.clone();
+        let stats2 = stats;
         assert_eq!(stats2.allocations, 0);
         assert!(format!("{stats2:?}").contains("PoolStats"));
     }
@@ -831,7 +831,7 @@ mod tests {
     #[test]
     fn resource_limits_debug_clone_default() {
         let lim = ResourceLimits::default();
-        let lim2 = lim.clone();
+        let lim2 = lim;
         assert_eq!(lim2.max_symbol_memory, usize::MAX);
         assert!(format!("{lim2:?}").contains("ResourceLimits"));
     }
@@ -953,7 +953,7 @@ mod tests {
     #[test]
     fn resource_tracker_clone() {
         let tracker = ResourceTracker::new(ResourceLimits::default());
-        let tracker2 = tracker.clone();
+        let tracker2 = tracker;
         assert_eq!(tracker2.usage(), ResourceUsage::default());
     }
 }

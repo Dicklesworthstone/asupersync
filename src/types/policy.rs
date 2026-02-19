@@ -271,18 +271,12 @@ mod tests {
         let tid = test_task_id();
 
         let ok = Outcome::<(), crate::error::Error>::Ok(());
-        assert_eq!(
-            policy.on_child_outcome(tid, &ok),
-            PolicyAction::Continue
-        );
+        assert_eq!(policy.on_child_outcome(tid, &ok), PolicyAction::Continue);
 
         let err = Outcome::<(), crate::error::Error>::Err(crate::error::Error::new(
             crate::error::ErrorKind::User,
         ));
-        assert_eq!(
-            policy.on_child_outcome(tid, &err),
-            PolicyAction::Continue
-        );
+        assert_eq!(policy.on_child_outcome(tid, &err), PolicyAction::Continue);
 
         let panicked = Outcome::<(), crate::error::Error>::Panicked(PanicPayload::new("boom"));
         assert_eq!(
@@ -338,7 +332,9 @@ mod tests {
             Outcome::Cancelled(CancelReason::timeout()),
             panicked,
         ]) {
-            AggregateDecision::Panicked { first_panic_index, .. } => {
+            AggregateDecision::Panicked {
+                first_panic_index, ..
+            } => {
                 assert_eq!(first_panic_index, 3);
             }
             other => panic!("expected Panicked, got {other:?}"),

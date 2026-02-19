@@ -936,7 +936,7 @@ mod tests {
     #[test]
     fn reason_debug_clone() {
         let r = Reason::RegionNotFound;
-        let r2 = r.clone();
+        let r2 = r;
         assert!(format!("{r2:?}").contains("RegionNotFound"));
     }
 
@@ -976,7 +976,7 @@ mod tests {
             reasons: vec![Reason::RegionNotFound],
             recommendations: vec!["check it".into()],
         };
-        let explanation2 = explanation.clone();
+        let explanation2 = explanation;
         assert!(format!("{explanation2:?}").contains("RegionOpenExplanation"));
     }
 
@@ -1001,7 +1001,7 @@ mod tests {
             details: vec!["detail".into()],
             recommendations: vec!["wait".into()],
         };
-        let explanation2 = explanation.clone();
+        let explanation2 = explanation;
         assert!(format!("{explanation2:?}").contains("TaskBlockedExplanation"));
     }
 
@@ -1021,7 +1021,7 @@ mod tests {
     #[test]
     fn block_reason_debug_clone() {
         let r = BlockReason::TaskNotFound;
-        let r2 = r.clone();
+        let r2 = r;
         assert!(format!("{r2:?}").contains("TaskNotFound"));
     }
 
@@ -1071,7 +1071,7 @@ mod tests {
                 kind: CancelKind::User,
             }],
         };
-        let explanation2 = explanation.clone();
+        let explanation2 = explanation;
         assert!(format!("{explanation2:?}").contains("CancellationExplanation"));
     }
 
@@ -1081,7 +1081,7 @@ mod tests {
             region_id: RegionId::new_for_test(1, 0),
             kind: CancelKind::User,
         };
-        let step2 = step.clone();
+        let step2 = step;
         assert!(format!("{step2:?}").contains("CancellationStep"));
     }
 
@@ -1112,7 +1112,7 @@ mod tests {
             region_id: RegionId::new_for_test(1, 0),
             age: std::time::Duration::from_secs(60),
         };
-        let leak2 = leak.clone();
+        let leak2 = leak;
         assert!(format!("{leak2:?}").contains("ObligationLeak"));
     }
 

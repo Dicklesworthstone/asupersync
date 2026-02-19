@@ -455,8 +455,8 @@ mod tests {
         let id = RegionId::new_for_test(5, 3);
         let dbg = format!("{id:?}");
         assert!(dbg.contains("RegionId"), "{dbg}");
-        assert!(dbg.contains("5"), "{dbg}");
-        assert!(dbg.contains("3"), "{dbg}");
+        assert!(dbg.contains('5'), "{dbg}");
+        assert!(dbg.contains('3'), "{dbg}");
     }
 
     #[test]
@@ -497,7 +497,7 @@ mod tests {
     fn region_id_copy_clone() {
         let id = RegionId::new_for_test(1, 0);
         let copied = id;
-        let cloned = id.clone();
+        let cloned = id;
         assert_eq!(id, copied);
         assert_eq!(id, cloned);
     }
@@ -531,7 +531,7 @@ mod tests {
         let dbg = format!("{id:?}");
         assert!(dbg.contains("TaskId"), "{dbg}");
         assert!(dbg.contains("10"), "{dbg}");
-        assert!(dbg.contains("2"), "{dbg}");
+        assert!(dbg.contains('2'), "{dbg}");
     }
 
     #[test]
@@ -570,7 +570,7 @@ mod tests {
     fn task_id_copy_clone() {
         let id = TaskId::new_for_test(5, 1);
         let copied = id;
-        let cloned = id.clone();
+        let cloned = id;
         assert_eq!(id, copied);
         assert_eq!(id, cloned);
     }
@@ -603,7 +603,7 @@ mod tests {
         let id = ObligationId::new_for_test(8, 1);
         let dbg = format!("{id:?}");
         assert!(dbg.contains("ObligationId"), "{dbg}");
-        assert!(dbg.contains("8"), "{dbg}");
+        assert!(dbg.contains('8'), "{dbg}");
     }
 
     #[test]
@@ -642,7 +642,7 @@ mod tests {
     fn obligation_id_copy_clone() {
         let id = ObligationId::new_for_test(1, 0);
         let copied = id;
-        let cloned = id.clone();
+        let cloned = id;
         assert_eq!(id, copied);
         assert_eq!(id, cloned);
     }

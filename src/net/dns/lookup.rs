@@ -341,7 +341,7 @@ mod tests {
     #[test]
     fn lookup_ip_empty() {
         init_test("lookup_ip_empty");
-        let lookup = LookupIp::new(vec![], Duration::from_secs(60));
+        let lookup = LookupIp::new(vec![], Duration::from_mins(1));
         assert!(lookup.is_empty());
         assert_eq!(lookup.len(), 0);
         assert!(lookup.first().is_none());
@@ -353,13 +353,10 @@ mod tests {
     #[test]
     fn lookup_ip_debug_clone() {
         init_test("lookup_ip_debug_clone");
-        let lookup = LookupIp::new(
-            vec!["10.0.0.1".parse().unwrap()],
-            Duration::from_secs(30),
-        );
+        let lookup = LookupIp::new(vec!["10.0.0.1".parse().unwrap()], Duration::from_secs(30));
         let dbg = format!("{lookup:?}");
         assert!(dbg.contains("LookupIp"), "{dbg}");
-        let cloned = lookup.clone();
+        let cloned = lookup;
         assert_eq!(cloned.len(), 1);
         assert_eq!(cloned.ttl(), Duration::from_secs(30));
         crate::test_complete!("lookup_ip_debug_clone");
@@ -370,12 +367,9 @@ mod tests {
         init_test("lookup_ip_first");
         let lookup = LookupIp::new(
             vec!["1.2.3.4".parse().unwrap(), "5.6.7.8".parse().unwrap()],
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         );
-        assert_eq!(
-            lookup.first(),
-            Some("1.2.3.4".parse().unwrap())
-        );
+        assert_eq!(lookup.first(), Some("1.2.3.4".parse().unwrap()));
         crate::test_complete!("lookup_ip_first");
     }
 
@@ -394,10 +388,7 @@ mod tests {
     #[test]
     fn lookup_ip_into_iter_owned() {
         init_test("lookup_ip_into_iter_owned");
-        let lookup = LookupIp::new(
-            vec!["10.0.0.1".parse().unwrap()],
-            Duration::from_secs(5),
-        );
+        let lookup = LookupIp::new(vec!["10.0.0.1".parse().unwrap()], Duration::from_secs(5));
         let addrs: Vec<_> = lookup.into_iter().collect();
         assert_eq!(addrs.len(), 1);
         crate::test_complete!("lookup_ip_into_iter_owned");
@@ -406,10 +397,7 @@ mod tests {
     #[test]
     fn lookup_ip_into_iter_ref() {
         init_test("lookup_ip_into_iter_ref");
-        let lookup = LookupIp::new(
-            vec!["10.0.0.1".parse().unwrap()],
-            Duration::from_secs(5),
-        );
+        let lookup = LookupIp::new(vec!["10.0.0.1".parse().unwrap()], Duration::from_secs(5));
         let addrs: Vec<_> = (&lookup).into_iter().collect();
         assert_eq!(addrs.len(), 1);
         crate::test_complete!("lookup_ip_into_iter_ref");
@@ -424,7 +412,7 @@ mod tests {
                 "::1".parse().unwrap(),
                 "10.0.0.2".parse().unwrap(),
             ],
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         );
         let v4: Vec<_> = lookup.ipv4_addrs().collect();
         assert_eq!(v4.len(), 2);
@@ -437,7 +425,7 @@ mod tests {
         init_test("lookup_ip_ipv6_only");
         let lookup = LookupIp::new(
             vec!["10.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         );
         let v6: Vec<_> = lookup.ipv6_addrs().collect();
         assert_eq!(v6.len(), 1);
@@ -460,7 +448,7 @@ mod tests {
         init_test("happy_eyeballs_from_lookup");
         let lookup = LookupIp::new(
             vec!["10.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         );
         let he = HappyEyeballs::from_lookup(&lookup);
         assert!(!he.is_empty());
@@ -482,20 +470,17 @@ mod tests {
         );
         let addrs: Vec<_> = he.collect();
         assert_eq!(addrs.len(), 2);
-        assert!(addrs.iter().all(|a| a.is_ipv4()));
+        assert!(addrs.iter().all(std::net::IpAddr::is_ipv4));
         crate::test_complete!("happy_eyeballs_v4_only");
     }
 
     #[test]
     fn happy_eyeballs_v6_only() {
         init_test("happy_eyeballs_v6_only");
-        let he = HappyEyeballs::new(
-            vec!["::1".parse().unwrap(), "::2".parse().unwrap()],
-            vec![],
-        );
+        let he = HappyEyeballs::new(vec!["::1".parse().unwrap(), "::2".parse().unwrap()], vec![]);
         let addrs: Vec<_> = he.collect();
         assert_eq!(addrs.len(), 2);
-        assert!(addrs.iter().all(|a| a.is_ipv6()));
+        assert!(addrs.iter().all(std::net::IpAddr::is_ipv6));
         crate::test_complete!("happy_eyeballs_v6_only");
     }
 
@@ -505,7 +490,7 @@ mod tests {
         let he = HappyEyeballs::new(vec!["::1".parse().unwrap()], vec![]);
         let dbg = format!("{he:?}");
         assert!(dbg.contains("HappyEyeballs"), "{dbg}");
-        let cloned = he.clone();
+        let cloned = he;
         assert_eq!(cloned.remaining(), 1);
         crate::test_complete!("happy_eyeballs_debug_clone");
     }
@@ -521,7 +506,7 @@ mod tests {
         }]);
         let dbg = format!("{srv:?}");
         assert!(dbg.contains("LookupSrv"), "{dbg}");
-        let cloned = srv.clone();
+        let cloned = srv;
         assert_eq!(cloned.records().count(), 1);
         crate::test_complete!("lookup_srv_debug_clone");
     }
@@ -537,7 +522,7 @@ mod tests {
         };
         let dbg = format!("{rec:?}");
         assert!(dbg.contains("SrvRecord"), "{dbg}");
-        let cloned = rec.clone();
+        let cloned = rec;
         assert_eq!(cloned.priority, 5);
         assert_eq!(cloned.port, 8080);
         crate::test_complete!("srv_record_debug_clone");
@@ -552,7 +537,7 @@ mod tests {
         };
         let dbg = format!("{rec:?}");
         assert!(dbg.contains("MxRecord"), "{dbg}");
-        let cloned = rec.clone();
+        let cloned = rec;
         assert_eq!(cloned.preference, 10);
         crate::test_complete!("mx_record_debug_clone");
     }
@@ -563,7 +548,7 @@ mod tests {
         let txt = LookupTxt::new(vec!["v=spf1 include:example.com".to_string()]);
         let dbg = format!("{txt:?}");
         assert!(dbg.contains("LookupTxt"), "{dbg}");
-        let cloned = txt.clone();
+        let cloned = txt;
         let records: Vec<_> = cloned.records().collect();
         assert_eq!(records.len(), 1);
         assert!(records[0].contains("spf1"));

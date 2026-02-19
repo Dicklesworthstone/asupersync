@@ -498,15 +498,15 @@ mod tests {
     #[test]
     fn config_debug_clone() {
         let cfg = ObligationTrackerConfig::default();
-        let cfg2 = cfg.clone();
+        let cfg2 = cfg;
         assert!(format!("{cfg2:?}").contains("ObligationTrackerConfig"));
     }
 
     #[test]
     fn config_with_leak_threshold() {
         let cfg = ObligationTrackerConfig::default()
-            .with_leak_threshold(Duration::from_secs(120));
-        assert_eq!(cfg.leak_age_threshold, Duration::from_secs(120));
+            .with_leak_threshold(Duration::from_mins(2));
+        assert_eq!(cfg.leak_age_threshold, Duration::from_mins(2));
         assert!(!cfg.periodic_checks);
     }
 
@@ -550,7 +550,7 @@ mod tests {
     #[test]
     fn obligation_summary_debug_clone() {
         let summary = ObligationSummary::default();
-        let summary2 = summary.clone();
+        let summary2 = summary;
         assert!(format!("{summary2:?}").contains("ObligationSummary"));
     }
 
@@ -564,7 +564,7 @@ mod tests {
             "Lease".to_string(),
             TypeSummary {
                 count: 5,
-                oldest_age: Duration::from_secs(60),
+                oldest_age: Duration::from_mins(1),
                 primary_holder: Some("task-1".into()),
             },
         );
@@ -578,7 +578,7 @@ mod tests {
             oldest_age: Duration::from_secs(30),
             primary_holder: None,
         };
-        let ts2 = ts.clone();
+        let ts2 = ts;
         assert_eq!(ts2.count, 3);
         assert!(format!("{ts2:?}").contains("TypeSummary"));
     }
@@ -605,7 +605,7 @@ mod tests {
             state: ObligationStateInfo::Reserved,
             description: None,
         };
-        let info2 = info.clone();
+        let info2 = info;
         assert!(info2.is_active());
         assert!(format!("{info2:?}").contains("ObligationInfo"));
     }

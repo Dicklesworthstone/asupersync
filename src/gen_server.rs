@@ -5132,7 +5132,7 @@ mod tests {
     fn cast_overflow_policy_eq_clone_copy() {
         let a = CastOverflowPolicy::Reject;
         let b = a; // Copy
-        let c = a.clone();
+        let c = a;
         assert_eq!(a, b);
         assert_eq!(a, c);
         assert_ne!(CastOverflowPolicy::Reject, CastOverflowPolicy::DropOldest);
@@ -5204,7 +5204,7 @@ mod tests {
     fn timeout_msg_constructor_eq_copy() {
         let a = TimeoutMsg::new(Time::from_secs(10), 42);
         let b = a; // Copy
-        let c = a.clone();
+        let c = a;
         assert_eq!(a, b);
         assert_eq!(a, c);
         assert_eq!(a.tick_vt, Time::from_secs(10));
@@ -5336,7 +5336,7 @@ mod tests {
 
         // Copy + Clone
         let copied = a;
-        let cloned = a.clone();
+        let cloned = a;
         assert_eq!(copied, cloned);
 
         // Ord consistency

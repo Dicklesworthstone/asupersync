@@ -413,10 +413,21 @@ impl H3ControlState {
     /// Apply a received control-stream frame with protocol checks.
     pub fn on_remote_control_frame(&mut self, frame: &H3Frame) -> Result<(), H3NativeError> {
         if self.remote_settings_received {
-            if matches!(frame, H3Frame::Settings(_)) {
-                return Err(H3NativeError::ControlProtocol(
-                    "duplicate SETTINGS on remote control stream",
-                ));
+            match frame {
+                H3Frame::Settings(_) => {
+                    return Err(H3NativeError::ControlProtocol(
+                        "duplicate SETTINGS on remote control stream",
+                    ));
+                }
+                H3Frame::Data(_) | H3Frame::Headers(_) | H3Frame::PushPromise { .. } => {
+                    return Err(H3NativeError::ControlProtocol(
+                        "frame type not allowed on control stream",
+                    ));
+                }
+                H3Frame::CancelPush(_)
+                | H3Frame::Goaway(_)
+                | H3Frame::MaxPushId(_)
+                | H3Frame::Unknown { .. } => {}
             }
             Ok(())
         } else {
@@ -733,6 +744,11 @@ impl H3ConnectionState {
         }
         self.control.on_remote_control_frame(frame)?;
         if let H3Frame::Goaway(id) = frame {
+            if self.goaway_id.is_some_and(|prev| *id > prev) {
+                return Err(H3NativeError::ControlProtocol(
+                    "GOAWAY id must not increase",
+                ));
+            }
             self.goaway_id = Some(*id);
         }
         Ok(())
@@ -930,7 +946,11 @@ pub fn validate_response_pseudo_headers(headers: &H3PseudoHeaders) -> Result<(),
             "status must be in 100..=999",
         ));
     }
-    if headers.method.is_some() || headers.scheme.is_some() || headers.path.is_some() {
+    if headers.method.is_some()
+        || headers.scheme.is_some()
+        || headers.authority.is_some()
+        || headers.path.is_some()
+    {
         return Err(H3NativeError::InvalidResponsePseudoHeader(
             "response must not include request pseudo headers",
         ));
@@ -1107,6 +1127,21 @@ mod tests {
     }
 
     #[test]
+    fn control_stream_rejects_data_after_settings() {
+        let mut state = H3ControlState::new();
+        state
+            .on_remote_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect("settings");
+        let err = state
+            .on_remote_control_frame(&H3Frame::Data(vec![1]))
+            .expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::ControlProtocol("frame type not allowed on control stream")
+        );
+    }
+
+    #[test]
     fn connection_state_applies_goaway_to_new_request_ids() {
         let mut c = H3ConnectionState::new();
         c.on_control_frame(&H3Frame::Settings(H3Settings::default()))
@@ -1121,6 +1156,21 @@ mod tests {
         assert_eq!(
             err,
             H3NativeError::ControlProtocol("request stream id rejected after GOAWAY")
+        );
+    }
+
+    #[test]
+    fn connection_state_rejects_increasing_goaway_id() {
+        let mut c = H3ConnectionState::new();
+        c.on_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect("settings");
+        c.on_control_frame(&H3Frame::Goaway(10)).expect("first");
+        let err = c
+            .on_control_frame(&H3Frame::Goaway(12))
+            .expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::ControlProtocol("GOAWAY id must not increase")
         );
     }
 
@@ -1287,7 +1337,7 @@ mod tests {
         let mode: H3QpackMode = Default::default();
         assert_eq!(mode, H3QpackMode::StaticOnly);
         let copied = mode; // Copy
-        let cloned = mode.clone();
+        let cloned = mode;
         assert_eq!(copied, cloned);
         let dbg = format!("{mode:?}");
         assert!(dbg.contains("StaticOnly"), "{dbg}");
@@ -1303,7 +1353,7 @@ mod tests {
         let config = H3ConnectionConfig::default();
         assert_eq!(config.qpack_mode, H3QpackMode::StaticOnly);
         let copied = config; // Copy
-        let cloned = config.clone();
+        let cloned = config;
         assert_eq!(copied, cloned);
         let dbg = format!("{config:?}");
         assert!(dbg.contains("H3ConnectionConfig"), "{dbg}");
@@ -1313,7 +1363,7 @@ mod tests {
     fn h3_uni_stream_type_debug_copy_eq() {
         let t = H3UniStreamType::Control;
         let copied = t; // Copy
-        let cloned = t.clone();
+        let cloned = t;
         assert_eq!(copied, cloned);
         assert_ne!(H3UniStreamType::Control, H3UniStreamType::Push);
         assert_ne!(H3UniStreamType::QpackEncoder, H3UniStreamType::QpackDecoder);
@@ -1495,6 +1545,22 @@ mod tests {
         assert_eq!(
             err,
             H3NativeError::InvalidResponsePseudoHeader("status must be in 100..=999")
+        );
+    }
+
+    #[test]
+    fn response_pseudo_headers_reject_authority() {
+        let headers = H3PseudoHeaders {
+            status: Some(200),
+            authority: Some("example.com".to_string()),
+            ..H3PseudoHeaders::default()
+        };
+        let err = validate_response_pseudo_headers(&headers).expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidResponsePseudoHeader(
+                "response must not include request pseudo headers"
+            )
         );
     }
 

@@ -1012,24 +1012,32 @@ mod tests {
 
     #[test]
     fn redis_error_display_all_variants() {
-        assert!(RedisError::Io(io::Error::other("e"))
-            .to_string()
-            .contains("I/O error"));
-        assert!(RedisError::Protocol("p".into())
-            .to_string()
-            .contains("protocol error"));
-        assert!(RedisError::Redis("r".into())
-            .to_string()
-            .contains("Redis error"));
-        assert!(RedisError::PoolExhausted
-            .to_string()
-            .contains("pool exhausted"));
-        assert!(RedisError::InvalidUrl("bad://".into())
-            .to_string()
-            .contains("bad://"));
-        assert!(RedisError::Cancelled
-            .to_string()
-            .contains("cancelled"));
+        assert!(
+            RedisError::Io(io::Error::other("e"))
+                .to_string()
+                .contains("I/O error")
+        );
+        assert!(
+            RedisError::Protocol("p".into())
+                .to_string()
+                .contains("protocol error")
+        );
+        assert!(
+            RedisError::Redis("r".into())
+                .to_string()
+                .contains("Redis error")
+        );
+        assert!(
+            RedisError::PoolExhausted
+                .to_string()
+                .contains("pool exhausted")
+        );
+        assert!(
+            RedisError::InvalidUrl("bad://".into())
+                .to_string()
+                .contains("bad://")
+        );
+        assert!(RedisError::Cancelled.to_string().contains("cancelled"));
     }
 
     #[test]
@@ -1150,18 +1158,14 @@ mod tests {
 
     #[test]
     fn resp_decode_null_bulk_string() {
-        let (val, n) = RespValue::try_decode(b"$-1\r\n")
-            .unwrap()
-            .expect("decoded");
+        let (val, n) = RespValue::try_decode(b"$-1\r\n").unwrap().expect("decoded");
         assert_eq!(val, RespValue::BulkString(None));
         assert_eq!(n, 5);
     }
 
     #[test]
     fn resp_decode_null_array() {
-        let (val, n) = RespValue::try_decode(b"*-1\r\n")
-            .unwrap()
-            .expect("decoded");
+        let (val, n) = RespValue::try_decode(b"*-1\r\n").unwrap().expect("decoded");
         assert_eq!(val, RespValue::Array(None));
         assert_eq!(n, 5);
     }
@@ -1195,7 +1199,7 @@ mod tests {
     #[test]
     fn redis_config_clone() {
         let cfg = RedisConfig::default();
-        let cloned = cfg.clone();
+        let cloned = cfg;
         assert_eq!(cloned.host, "127.0.0.1");
     }
 

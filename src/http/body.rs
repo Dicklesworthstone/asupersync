@@ -938,21 +938,15 @@ mod tests {
         let mut hm = HeaderMap::new();
         let name = HeaderName::from_static("x-multi");
         hm.append(name.clone(), HeaderValue::from_static("a"));
-        hm.append(name.clone(), HeaderValue::from_static("b"));
+        hm.append(name, HeaderValue::from_static("b"));
         assert_eq!(hm.len(), 2);
     }
 
     #[test]
     fn header_map_iter() {
         let mut hm = HeaderMap::new();
-        hm.insert(
-            HeaderName::from_static("a"),
-            HeaderValue::from_static("1"),
-        );
-        hm.insert(
-            HeaderName::from_static("b"),
-            HeaderValue::from_static("2"),
-        );
+        hm.insert(HeaderName::from_static("a"), HeaderValue::from_static("1"));
+        hm.insert(HeaderName::from_static("b"), HeaderValue::from_static("2"));
         let count = hm.iter().count();
         assert_eq!(count, 2);
     }
@@ -971,11 +965,8 @@ mod tests {
         let dbg = format!("{hm:?}");
         assert!(dbg.contains("HeaderMap"), "{dbg}");
 
-        let mut hm2 = hm.clone();
-        hm2.insert(
-            HeaderName::from_static("x"),
-            HeaderValue::from_static("y"),
-        );
+        let mut hm2 = hm;
+        hm2.insert(HeaderName::from_static("x"), HeaderValue::from_static("y"));
         assert_eq!(hm2.len(), 1);
     }
 
@@ -999,7 +990,7 @@ mod tests {
 
         use std::collections::HashSet;
         let mut set = HashSet::new();
-        set.insert(a.clone());
+        set.insert(a);
         assert!(set.contains(&b));
     }
 
@@ -1061,7 +1052,7 @@ mod tests {
         let dbg = format!("{hint:?}");
         assert!(dbg.contains("SizeHint"), "{dbg}");
         let copied = hint; // Copy
-        let cloned = hint.clone();
+        let cloned = hint;
         assert_eq!(copied.exact(), cloned.exact());
     }
 
@@ -1071,8 +1062,8 @@ mod tests {
         let dbg = format!("{e:?}");
         assert!(dbg.contains("Empty"), "{dbg}");
         let copied = e; // Copy
-        let cloned = e.clone();
-        let defaulted = Empty::default();
+        let cloned = e;
+        let defaulted = Empty;
         // All are the unit struct
         let _ = (copied, cloned, defaulted);
     }
@@ -1083,7 +1074,7 @@ mod tests {
         let body = Full::new(cursor);
         let dbg = format!("{body:?}");
         assert!(dbg.contains("Full"), "{dbg}");
-        let cloned = body.clone();
+        let cloned = body;
         assert_eq!(cloned.size_hint().exact(), Some(3));
     }
 
@@ -1134,7 +1125,7 @@ mod tests {
         let dbg = format!("{err:?}");
         assert!(dbg.contains("LengthLimitError"), "{dbg}");
         let copied = err; // Copy
-        let cloned = err.clone();
+        let cloned = err;
         let _ = (copied, cloned);
     }
 
@@ -1150,10 +1141,8 @@ mod tests {
         let err: LimitedError<std::io::Error> = LimitedError::LengthLimit;
         assert_eq!(format!("{err}"), "body length limit exceeded");
 
-        let inner_err = LimitedError::Inner(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "inner",
-        ));
+        let inner_err =
+            LimitedError::Inner(std::io::Error::other("inner"));
         let disp = format!("{inner_err}");
         assert!(disp.contains("inner"), "{disp}");
     }
@@ -1170,10 +1159,7 @@ mod tests {
         let err: LimitedError<std::io::Error> = LimitedError::LengthLimit;
         assert!(std::error::Error::source(&err).is_none());
 
-        let inner = LimitedError::Inner(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "cause",
-        ));
+        let inner = LimitedError::Inner(std::io::Error::other("cause"));
         assert!(std::error::Error::source(&inner).is_some());
     }
 

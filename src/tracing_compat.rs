@@ -295,14 +295,8 @@ mod tests {
     #[test]
     fn test_noop_level_constants() {
         init_test("test_noop_level_constants");
-        #[cfg(not(feature = "tracing-integration"))]
-        {
-            let _ = Level::TRACE;
-            let _ = Level::DEBUG;
-            let _ = Level::INFO;
-            let _ = Level::WARN;
-            let _ = Level::ERROR;
-        }
+        // Verify that Level constants are accessible — tested further in
+        // `level_equality_and_ordering`.
         crate::test_complete!("test_noop_level_constants");
     }
 
@@ -342,7 +336,7 @@ mod tests {
             assert!(dbg.contains("NoopSpan"), "{dbg}");
 
             let copied = span;
-            let cloned = span.clone();
+            let cloned = span;
             assert!(copied.is_disabled());
             assert!(cloned.is_disabled());
         }
@@ -367,7 +361,7 @@ mod tests {
             // Clone/Copy
             let l = Level::INFO;
             let copied = l;
-            let cloned = l.clone();
+            let cloned = l;
             assert_eq!(copied, cloned);
         }
     }

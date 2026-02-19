@@ -540,6 +540,8 @@ mod tests {
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
     use std::future::Future;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Waker};
 
     fn init_test(name: &str) {
@@ -575,6 +577,18 @@ mod tests {
 
     impl std::task::Wake for TestNoopWaker {
         fn wake(self: std::sync::Arc<Self>) {}
+    }
+
+    struct WakeCounter(Arc<AtomicUsize>);
+
+    impl std::task::Wake for WakeCounter {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn counting_waker(counter: Arc<AtomicUsize>) -> Waker {
+        Waker::from(Arc::new(WakeCounter(counter)))
     }
 
     #[test]
@@ -1350,5 +1364,112 @@ mod tests {
             format!("{result:?}")
         );
         crate::test_complete!("dropping_stale_recv_future_does_not_clear_new_waiter");
+    }
+
+    #[test]
+    fn permit_abort_wakes_pending_receiver_and_returns_closed() {
+        init_test("permit_abort_wakes_pending_receiver_and_returns_closed");
+        let cx = test_cx();
+        let (tx, rx) = channel::<i32>();
+
+        let wake_counter = Arc::new(AtomicUsize::new(0));
+        let recv_waker = counting_waker(Arc::clone(&wake_counter));
+        let mut task_cx = Context::from_waker(&recv_waker);
+        let mut fut = Box::pin(rx.recv(&cx));
+
+        let first_poll = fut.as_mut().poll(&mut task_cx);
+        crate::assert_with_log!(
+            matches!(first_poll, Poll::Pending),
+            "recv pending before abort",
+            true,
+            matches!(first_poll, Poll::Pending)
+        );
+
+        let permit = tx.reserve(&cx);
+        permit.abort();
+
+        let wake_count = wake_counter.load(Ordering::SeqCst);
+        crate::assert_with_log!(wake_count == 1, "receiver woken once", 1usize, wake_count);
+
+        let second_poll = fut.as_mut().poll(&mut task_cx);
+        crate::assert_with_log!(
+            matches!(second_poll, Poll::Ready(Err(RecvError::Closed))),
+            "recv closed after abort",
+            "Ready(Err(Closed))",
+            format!("{second_poll:?}")
+        );
+        crate::test_complete!("permit_abort_wakes_pending_receiver_and_returns_closed");
+    }
+
+    #[test]
+    fn dropping_permit_wakes_pending_receiver_and_returns_closed() {
+        init_test("dropping_permit_wakes_pending_receiver_and_returns_closed");
+        let cx = test_cx();
+        let (tx, rx) = channel::<i32>();
+
+        let wake_counter = Arc::new(AtomicUsize::new(0));
+        let recv_waker = counting_waker(Arc::clone(&wake_counter));
+        let mut task_cx = Context::from_waker(&recv_waker);
+        let mut fut = Box::pin(rx.recv(&cx));
+
+        let first_poll = fut.as_mut().poll(&mut task_cx);
+        crate::assert_with_log!(
+            matches!(first_poll, Poll::Pending),
+            "recv pending before permit drop",
+            true,
+            matches!(first_poll, Poll::Pending)
+        );
+
+        let permit = tx.reserve(&cx);
+        drop(permit);
+
+        let wake_count = wake_counter.load(Ordering::SeqCst);
+        crate::assert_with_log!(wake_count == 1, "receiver woken once", 1usize, wake_count);
+
+        let second_poll = fut.as_mut().poll(&mut task_cx);
+        crate::assert_with_log!(
+            matches!(second_poll, Poll::Ready(Err(RecvError::Closed))),
+            "recv closed after permit drop",
+            "Ready(Err(Closed))",
+            format!("{second_poll:?}")
+        );
+        crate::test_complete!("dropping_permit_wakes_pending_receiver_and_returns_closed");
+    }
+
+    #[test]
+    fn recv_repoll_same_waker_keeps_waiter_identity() {
+        init_test("recv_repoll_same_waker_keeps_waiter_identity");
+        let cx = test_cx();
+        let (_tx, rx) = channel::<i32>();
+
+        let recv_waker = counting_waker(Arc::new(AtomicUsize::new(0)));
+        let mut task_cx = Context::from_waker(&recv_waker);
+        let mut fut = Box::pin(rx.recv(&cx));
+
+        let first_poll = fut.as_mut().poll(&mut task_cx);
+        crate::assert_with_log!(
+            matches!(first_poll, Poll::Pending),
+            "first poll pending",
+            true,
+            matches!(first_poll, Poll::Pending)
+        );
+        let first_waiter_id = rx.inner.lock().waker_id;
+
+        let second_poll = fut.as_mut().poll(&mut task_cx);
+        crate::assert_with_log!(
+            matches!(second_poll, Poll::Pending),
+            "second poll pending",
+            true,
+            matches!(second_poll, Poll::Pending)
+        );
+        let second_waiter_id = rx.inner.lock().waker_id;
+
+        crate::assert_with_log!(
+            first_waiter_id == second_waiter_id,
+            "same waker keeps waiter identity",
+            first_waiter_id,
+            second_waiter_id
+        );
+        crate::test_complete!("recv_repoll_same_waker_keeps_waiter_identity");
     }
 }

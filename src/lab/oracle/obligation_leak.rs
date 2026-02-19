@@ -291,7 +291,7 @@ mod tests {
             holder: task,
             region,
         };
-        let dbg = format!("{:?}", leak);
+        let dbg = format!("{leak:?}");
         assert!(dbg.contains("ObligationLeak"));
 
         let cloned = leak.clone();
@@ -317,7 +317,7 @@ mod tests {
         let display = violation.to_string();
         assert!(display.contains("leaked=1"));
 
-        let dbg = format!("{:?}", violation);
+        let dbg = format!("{violation:?}");
         assert!(dbg.contains("ObligationLeakViolation"));
 
         // std::error::Error
@@ -333,7 +333,7 @@ mod tests {
             leaked: vec![],
             region_close_time: Time::ZERO,
         };
-        let cloned = violation.clone();
+        let cloned = violation;
         assert_eq!(cloned.leaked.len(), 0);
     }
 
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn oracle_debug() {
         let oracle = ObligationLeakOracle::default();
-        let dbg = format!("{:?}", oracle);
+        let dbg = format!("{oracle:?}");
         assert!(dbg.contains("ObligationLeakOracle"));
     }
 

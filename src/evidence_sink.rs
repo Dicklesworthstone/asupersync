@@ -426,7 +426,7 @@ mod tests {
     fn null_sink_is_clone_and_copy() {
         let a = NullSink;
         let b = a;
-        let c = a.clone();
+        let c = a;
         // All are usable (Copy + Clone)
         b.emit(&test_entry("x"));
         c.emit(&test_entry("y"));
@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn null_sink_debug_impl() {
-        let dbg = format!("{:?}", NullSink);
+        let dbg = format!("{NullSink:?}");
         assert_eq!(dbg, "NullSink");
     }
 

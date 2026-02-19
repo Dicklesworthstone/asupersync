@@ -10,6 +10,10 @@ pub mod dns;
 /// QUIC protocol implementation via quinn.
 #[cfg(feature = "quic")]
 pub mod quic;
+/// Native QUIC protocol core codecs and types (Tokio-free, runtime-agnostic).
+pub mod quic_core;
+/// Native QUIC transport state machines (TLS, recovery, streams).
+pub mod quic_native;
 mod resolve;
 pub mod sys;
 /// TCP networking primitives.
@@ -25,6 +29,13 @@ pub mod websocket;
 pub use quic::{
     ClientAuth as QuicClientAuth, QuicConfig, QuicConnection, QuicEndpoint, QuicError,
     RecvStream as QuicRecvStream, SendStream as QuicSendStream,
+};
+pub use quic_native::{
+    AckEvent, AckRange, CryptoLevel, FlowControlError, FlowCredit, KeyUpdateEvent,
+    NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError, PacketNumberSpace,
+    QuicConnectionState, QuicStream, QuicStreamError, QuicTlsError, QuicTlsMachine,
+    QuicTransportMachine, RttEstimator, SentPacketMeta, StreamDirection, StreamId, StreamRole,
+    StreamTable, StreamTableError, TransportError,
 };
 pub use resolve::{lookup_all, lookup_one};
 pub use tcp::listener::{Incoming, TcpListener};

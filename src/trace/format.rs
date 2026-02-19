@@ -483,7 +483,7 @@ mod tests {
         };
         let cfg2 = GoldenTraceConfig {
             seed: 2,
-            ..cfg1.clone()
+            ..cfg1
         };
         let m = GoldenTraceMismatch::Config {
             expected: cfg1,

@@ -274,7 +274,7 @@ It maps common Tokio ecosystem crates to the corresponding Asupersync modules.
 | TLS | `tokio-rustls`, `native-tls` | `src/tls/` (`tls`, `tls-native-roots`, `tls-webpki-roots`) | Feature-gated | Active | Mixed | Medium |
 | WebSocket | `tokio-tungstenite` | `src/net/websocket/` | Built-in | Active | Mixed | Medium |
 | HTTP stack (HTTP/1.1 + HTTP/2) | `hyper`, `h2`, `http-body`, `hyper-util` | `src/http/h1/`, `src/http/h2/`, `src/http/body.rs`, `src/http/pool.rs` | Built-in | Active | Mixed | Medium |
-| QUIC + HTTP/3 | `quinn`, `h3`, `h3-quinn` | `src/net/quic/`, `src/http/h3/` (source present; `quic` / `http3` features currently not exposed in `Cargo.toml`) | In progress | Parked | N/A | High |
+| QUIC + HTTP/3 | `quinn`, `h3`, `h3-quinn` | `src/net/quic/`, `src/http/h3/` (native-only rewrite in progress; not exposed as features in `Cargo.toml`) | In progress | Parked | N/A | High |
 | Web framework | `axum`, `warp`, `tower-http` | `src/web/`, `src/service/`, `src/server/` | In progress | Active | Mixed | Medium |
 | gRPC | `tonic` + `prost` + `tower` + `hyper` | `src/grpc/` | Built-in | Active | Mixed | Medium |
 | Database clients | `tokio-postgres`, `mysql_async`, `sqlx` | `src/database/{postgres,mysql,sqlite}.rs` | Feature-gated | Active | Mixed | Medium |

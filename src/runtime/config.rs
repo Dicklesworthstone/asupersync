@@ -541,7 +541,7 @@ mod tests {
     fn obligation_leak_response_clone_copy() {
         let a = ObligationLeakResponse::Recover;
         let b = a; // Copy
-        let c = a.clone();
+        let c = a;
         assert_eq!(a, b);
         assert_eq!(a, c);
     }
@@ -559,7 +559,7 @@ mod tests {
     fn leak_escalation_clone_copy() {
         let a = LeakEscalation::new(10, ObligationLeakResponse::Log);
         let b = a; // Copy
-        let c = a.clone();
+        let c = a;
         assert_eq!(a, b);
         assert_eq!(a, c);
     }
@@ -577,7 +577,7 @@ mod tests {
             min_threads: 2,
             max_threads: 8,
         };
-        let cloned = bp.clone();
+        let cloned = bp;
         assert_eq!(cloned.min_threads, 2);
         assert_eq!(cloned.max_threads, 8);
     }

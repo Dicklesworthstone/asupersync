@@ -944,7 +944,7 @@ mod tests {
         let left = Branch::Left;
         let right = Branch::Right;
 
-        let dbg = format!("{:?}", left);
+        let dbg = format!("{left:?}");
         assert!(dbg.contains("Left"));
 
         // Copy
@@ -955,7 +955,7 @@ mod tests {
         assert_ne!(left, right);
 
         // Clone
-        let right2 = right.clone();
+        let right2 = right;
         assert_eq!(right, right2);
     }
 
@@ -965,7 +965,7 @@ mod tests {
             channel_id: 42,
             obligation_kind: ObligationKind::SendPermit,
         };
-        let dbg = format!("{:?}", proof);
+        let dbg = format!("{proof:?}");
         assert!(dbg.contains("42"));
         assert!(dbg.contains("SendPermit"));
     }
@@ -975,10 +975,10 @@ mod tests {
         let msg = two_phase::ReserveMsg {
             kind: ObligationKind::Lease,
         };
-        let dbg = format!("{:?}", msg);
+        let dbg = format!("{msg:?}");
         assert!(dbg.contains("Lease"));
 
-        let cloned = msg.clone();
+        let cloned = msg;
         assert_eq!(cloned.kind, ObligationKind::Lease);
     }
 
@@ -987,10 +987,10 @@ mod tests {
         let msg = two_phase::AbortMsg {
             reason: "budget_exhausted".to_string(),
         };
-        let dbg = format!("{:?}", msg);
+        let dbg = format!("{msg:?}");
         assert!(dbg.contains("budget_exhausted"));
 
-        let cloned = msg.clone();
+        let cloned = msg;
         assert_eq!(cloned.reason, "budget_exhausted");
     }
 

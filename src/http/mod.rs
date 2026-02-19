@@ -24,9 +24,17 @@ pub mod h1;
 pub mod h2;
 #[cfg(feature = "http3")]
 pub mod h3;
+pub mod h3_native;
 pub mod pool;
 
 pub use body::{Body, Empty, Frame, Full, HeaderMap, HeaderName, HeaderValue, SizeHint};
 #[cfg(feature = "http3")]
 pub use h3::{H3Body, H3Client, H3Driver, H3Error};
+pub use h3_native::{
+    H3ConnectionConfig, H3ConnectionState, H3ControlState, H3Frame as NativeH3Frame, H3NativeError,
+    H3PseudoHeaders, H3QpackMode, H3RequestHead, H3RequestStreamState, H3ResponseHead,
+    H3Settings as NativeH3Settings, H3UniStreamType, QpackFieldPlan, UnknownSetting,
+    qpack_static_plan_for_request, qpack_static_plan_for_response, validate_request_pseudo_headers,
+    validate_response_pseudo_headers,
+};
 pub use pool::{Pool, PoolConfig, PoolKey, PoolStats, PooledConnectionMeta, PooledConnectionState};

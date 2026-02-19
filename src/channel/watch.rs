@@ -1042,6 +1042,78 @@ mod tests {
     }
 
     #[test]
+    fn cancel_after_pending_repoll_reuses_waiter_slot() {
+        init_test("cancel_after_pending_repoll_reuses_waiter_slot");
+        let cx = test_cx();
+        let (tx, mut rx) = channel(0);
+
+        let waker = Waker::noop();
+        let mut task_cx = Context::from_waker(waker);
+        {
+            let mut future = rx.changed(&cx);
+
+            let first_poll = Pin::new(&mut future).poll(&mut task_cx);
+            crate::assert_with_log!(
+                first_poll.is_pending(),
+                "first poll pending",
+                true,
+                first_poll.is_pending()
+            );
+
+            let waiter_count = tx.inner.waiters.lock().len();
+            crate::assert_with_log!(waiter_count == 1, "waiter registered", 1, waiter_count);
+
+            cx.set_cancel_requested(true);
+            let cancelled_poll = Pin::new(&mut future).poll(&mut task_cx);
+            crate::assert_with_log!(
+                matches!(cancelled_poll, Poll::Ready(Err(RecvError::Cancelled))),
+                "pending waiter observes cancellation",
+                "Ready(Err(Cancelled))",
+                format!("{cancelled_poll:?}")
+            );
+        }
+
+        let waiter_count = tx.inner.waiters.lock().len();
+        crate::assert_with_log!(
+            waiter_count == 1,
+            "cancelled waiter slot retained for receiver reuse",
+            1,
+            waiter_count
+        );
+
+        cx.set_cancel_requested(false);
+        {
+            let mut future = rx.changed(&cx);
+            let repoll = Pin::new(&mut future).poll(&mut task_cx);
+            crate::assert_with_log!(
+                repoll.is_pending(),
+                "recreated future pending",
+                true,
+                repoll.is_pending()
+            );
+        }
+
+        let waiter_count = tx.inner.waiters.lock().len();
+        crate::assert_with_log!(
+            waiter_count == 1,
+            "re-poll reuses waiter slot without growth",
+            1,
+            waiter_count
+        );
+
+        tx.send(1).expect("send failed");
+        poll_ready(&mut rx.changed(&cx)).expect("changed failed after send");
+        let waiter_count = tx.inner.waiters.lock().len();
+        crate::assert_with_log!(
+            waiter_count == 0,
+            "waiters drained after send",
+            0,
+            waiter_count
+        );
+        crate::test_complete!("cancel_after_pending_repoll_reuses_waiter_slot");
+    }
+
+    #[test]
     fn changed_returns_pending_then_ready_after_send() {
         init_test("changed_returns_pending_then_ready_after_send");
         let cx = test_cx();
@@ -1104,6 +1176,78 @@ mod tests {
             matches!(result, Err(RecvError::Closed))
         );
         crate::test_complete!("sender_drop_wakes_pending_receiver");
+    }
+
+    #[test]
+    fn sender_drop_wakes_all_pending_receivers() {
+        init_test("sender_drop_wakes_all_pending_receivers");
+        let cx = test_cx();
+        let (tx, mut rx1) = channel(0);
+        let mut rx2 = tx.subscribe();
+        let inner = Arc::clone(&tx.inner);
+
+        let wake_count1 = Arc::new(AtomicUsize::new(0));
+        let waker1 = Waker::from(Arc::new(CountWake {
+            count: Arc::clone(&wake_count1),
+        }));
+        let mut task_cx1 = Context::from_waker(&waker1);
+        let mut future1 = rx1.changed(&cx);
+        let first_poll = Pin::new(&mut future1).poll(&mut task_cx1);
+        crate::assert_with_log!(
+            first_poll.is_pending(),
+            "receiver 1 pending before sender drop",
+            true,
+            first_poll.is_pending()
+        );
+
+        let wake_count2 = Arc::new(AtomicUsize::new(0));
+        let waker2 = Waker::from(Arc::new(CountWake {
+            count: Arc::clone(&wake_count2),
+        }));
+        let mut task_cx2 = Context::from_waker(&waker2);
+        let mut future2 = rx2.changed(&cx);
+        let second_poll = Pin::new(&mut future2).poll(&mut task_cx2);
+        crate::assert_with_log!(
+            second_poll.is_pending(),
+            "receiver 2 pending before sender drop",
+            true,
+            second_poll.is_pending()
+        );
+
+        let waiter_count = inner.waiters.lock().len();
+        crate::assert_with_log!(waiter_count == 2, "two waiters registered", 2, waiter_count);
+
+        drop(tx);
+
+        let woken1 = wake_count1.load(Ordering::SeqCst);
+        crate::assert_with_log!(woken1 > 0, "receiver 1 woken on close", "> 0", woken1);
+        let woken2 = wake_count2.load(Ordering::SeqCst);
+        crate::assert_with_log!(woken2 > 0, "receiver 2 woken on close", "> 0", woken2);
+
+        let waiter_count = inner.waiters.lock().len();
+        crate::assert_with_log!(
+            waiter_count == 0,
+            "close drains all waiters",
+            0,
+            waiter_count
+        );
+
+        let result1 = Pin::new(&mut future1).poll(&mut task_cx1);
+        crate::assert_with_log!(
+            matches!(result1, Poll::Ready(Err(RecvError::Closed))),
+            "receiver 1 sees closed",
+            "Ready(Err(Closed))",
+            format!("{result1:?}")
+        );
+
+        let result2 = Pin::new(&mut future2).poll(&mut task_cx2);
+        crate::assert_with_log!(
+            matches!(result2, Poll::Ready(Err(RecvError::Closed))),
+            "receiver 2 sees closed",
+            "Ready(Err(Closed))",
+            format!("{result2:?}")
+        );
+        crate::test_complete!("sender_drop_wakes_all_pending_receivers");
     }
 
     #[test]

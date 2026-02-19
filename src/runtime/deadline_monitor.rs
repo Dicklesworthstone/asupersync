@@ -1229,14 +1229,14 @@ mod tests {
             warning_percentile: 0.95,
             min_samples: 20,
             max_history: 500,
-            fallback_threshold: Duration::from_secs(60),
+            fallback_threshold: Duration::from_mins(1),
         };
         let cfg2 = cfg.clone();
         assert!(cfg2.adaptive_enabled);
         assert!((cfg2.warning_percentile - 0.95).abs() < f64::EPSILON);
         assert_eq!(cfg2.min_samples, 20);
         assert_eq!(cfg2.max_history, 500);
-        assert_eq!(cfg2.fallback_threshold, Duration::from_secs(60));
+        assert_eq!(cfg2.fallback_threshold, Duration::from_mins(1));
         crate::test_complete!("adaptive_deadline_config_clone");
     }
 

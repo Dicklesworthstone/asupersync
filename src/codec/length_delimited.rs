@@ -309,7 +309,7 @@ mod tests {
         let codec = LengthDelimitedCodec::builder()
             .max_frame_length(1024)
             .new_codec();
-        let cloned = codec.clone();
+        let cloned = codec;
         let dbg = format!("{cloned:?}");
         assert!(dbg.contains("LengthDelimitedCodec"));
     }
@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn builder_clone() {
         let builder = LengthDelimitedCodec::builder().max_frame_length(512);
-        let cloned = builder.clone();
+        let cloned = builder;
         let dbg = format!("{cloned:?}");
         assert!(dbg.contains("512"));
     }

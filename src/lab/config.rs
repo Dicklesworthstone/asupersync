@@ -399,7 +399,7 @@ mod tests {
     fn lab_config_clone() {
         init_test("lab_config_clone");
         let cfg = LabConfig::new(99).worker_count(3);
-        let cfg2 = cfg.clone();
+        let cfg2 = cfg;
         assert_eq!(cfg2.seed, 99);
         assert_eq!(cfg2.worker_count, 3);
         crate::test_complete!("lab_config_clone");

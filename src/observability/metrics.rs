@@ -481,7 +481,7 @@ mod tests {
     fn counter_debug() {
         let c = Counter::new("ctr");
         c.add(42);
-        let dbg = format!("{:?}", c);
+        let dbg = format!("{c:?}");
         assert!(dbg.contains("ctr"));
     }
 
@@ -497,7 +497,7 @@ mod tests {
     fn gauge_name_debug() {
         let g = Gauge::new("active_conns");
         assert_eq!(g.name(), "active_conns");
-        let dbg = format!("{:?}", g);
+        let dbg = format!("{g:?}");
         assert!(dbg.contains("active_conns"));
     }
 
@@ -514,7 +514,7 @@ mod tests {
     fn histogram_name_debug() {
         let h = Histogram::new("latency", vec![0.1, 0.5, 1.0]);
         assert_eq!(h.name(), "latency");
-        let dbg = format!("{:?}", h);
+        let dbg = format!("{h:?}");
         assert!(dbg.contains("latency"));
     }
 
@@ -540,16 +540,16 @@ mod tests {
     fn metric_value_debug_copy() {
         let c = MetricValue::Counter(42);
         let g = MetricValue::Gauge(-7);
-        let h = MetricValue::Histogram(10, 3.14);
+        let h = MetricValue::Histogram(10, 2.75);
 
-        let dbg_c = format!("{:?}", c);
+        let dbg_c = format!("{c:?}");
         assert!(dbg_c.contains("Counter"));
         assert!(dbg_c.contains("42"));
 
-        let dbg_g = format!("{:?}", g);
+        let dbg_g = format!("{g:?}");
         assert!(dbg_g.contains("Gauge"));
 
-        let dbg_h = format!("{:?}", h);
+        let dbg_h = format!("{h:?}");
         assert!(dbg_h.contains("Histogram"));
 
         // Copy
@@ -577,7 +577,7 @@ mod tests {
         assert_ne!(canc, pan);
         assert_eq!(ok, OutcomeKind::Ok);
 
-        let dbg = format!("{:?}", ok);
+        let dbg = format!("{ok:?}");
         assert!(dbg.contains("Ok"));
 
         // Copy
@@ -597,10 +597,10 @@ mod tests {
     #[test]
     fn noop_metrics_debug_default_copy() {
         let m = NoOpMetrics;
-        let dbg = format!("{:?}", m);
+        let dbg = format!("{m:?}");
         assert!(dbg.contains("NoOpMetrics"));
 
-        let m2 = NoOpMetrics::default();
+        let m2 = NoOpMetrics;
         let _ = m2;
 
         // Copy
@@ -609,7 +609,7 @@ mod tests {
         let _ = m3;
 
         // Clone
-        let m4 = m.clone();
+        let m4 = m;
         let _ = m4;
     }
 

@@ -1384,7 +1384,7 @@ mod tests {
         let dbg = format!("{cfg:?}");
         assert!(dbg.contains("NatsConfig"));
 
-        let cloned = cfg.clone();
+        let cloned = cfg;
         assert_eq!(cloned.host, "127.0.0.1");
         assert_eq!(cloned.port, 4222);
     }
@@ -1429,7 +1429,7 @@ mod tests {
         assert!(dbg.contains("foo.bar"));
         assert!(dbg.contains("_INBOX"));
 
-        let cloned = msg.clone();
+        let cloned = msg;
         assert_eq!(cloned.subject, "foo.bar");
         assert_eq!(cloned.sid, 1);
         assert_eq!(cloned.payload, b"hello");
@@ -1469,7 +1469,7 @@ mod tests {
         let dbg = format!("{info:?}");
         assert!(dbg.contains("ServerInfo"));
 
-        let cloned = info.clone();
+        let cloned = info;
         assert_eq!(cloned.server_id, "test-id");
     }
 

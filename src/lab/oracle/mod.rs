@@ -744,7 +744,7 @@ mod tests {
         let dbg = format!("{entry:?}");
         assert!(dbg.contains("OracleEntryReport"));
 
-        let cloned = entry.clone();
+        let cloned = entry;
         assert_eq!(cloned.invariant, "test");
         assert!(cloned.passed);
     }

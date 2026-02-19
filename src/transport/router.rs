@@ -2004,7 +2004,7 @@ mod tests {
     #[test]
     fn dispatch_config_debug_clone_default() {
         let cfg = DispatchConfig::default();
-        let cfg2 = cfg.clone();
+        let cfg2 = cfg;
         assert_eq!(cfg2.max_retries, 3);
         assert!(format!("{cfg2:?}").contains("DispatchConfig"));
     }
@@ -2023,7 +2023,7 @@ mod tests {
     #[test]
     fn routing_error_debug_clone() {
         let err = RoutingError::EmptyTable;
-        let err2 = err.clone();
+        let err2 = err;
         assert!(format!("{err2:?}").contains("EmptyTable"));
     }
 
@@ -2053,7 +2053,7 @@ mod tests {
     #[test]
     fn dispatch_error_debug_clone() {
         let err = DispatchError::Timeout;
-        let err2 = err.clone();
+        let err2 = err;
         assert!(format!("{err2:?}").contains("Timeout"));
     }
 

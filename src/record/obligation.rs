@@ -690,7 +690,7 @@ mod tests {
             line: 1,
             column: 1,
         };
-        let dbg = format!("{:?}", loc);
+        let dbg = format!("{loc:?}");
         assert!(dbg.contains("f.rs"));
 
         // Copy
@@ -725,7 +725,7 @@ mod tests {
     #[test]
     fn obligation_kind_debug_copy_hash_ord() {
         let k = ObligationKind::Lease;
-        let dbg = format!("{:?}", k);
+        let dbg = format!("{k:?}");
         assert!(dbg.contains("Lease"));
 
         // Copy
@@ -742,12 +742,10 @@ mod tests {
         assert_eq!(set.len(), 4);
 
         // Ord
-        let mut kinds = vec![
-            ObligationKind::IoOp,
+        let mut kinds = [ObligationKind::IoOp,
             ObligationKind::SendPermit,
             ObligationKind::Lease,
-            ObligationKind::Ack,
-        ];
+            ObligationKind::Ack];
         kinds.sort();
         assert_eq!(kinds[0], ObligationKind::SendPermit);
     }
@@ -762,7 +760,7 @@ mod tests {
     #[test]
     fn obligation_abort_reason_debug_copy_eq() {
         let r = ObligationAbortReason::Cancel;
-        let dbg = format!("{:?}", r);
+        let dbg = format!("{r:?}");
         assert!(dbg.contains("Cancel"));
 
         let r2 = r;
@@ -780,7 +778,7 @@ mod tests {
             ObligationState::Leaked,
         ];
         for s in &states {
-            let dbg = format!("{:?}", s);
+            let dbg = format!("{s:?}");
             assert!(!dbg.is_empty());
 
             // Copy
@@ -808,7 +806,7 @@ mod tests {
     fn obligation_record_debug() {
         let (oid, tid, rid) = test_ids();
         let ob = ObligationRecord::new(oid, ObligationKind::SendPermit, tid, rid, Time::ZERO);
-        let dbg = format!("{:?}", ob);
+        let dbg = format!("{ob:?}");
         assert!(dbg.contains("ObligationRecord"));
         assert!(dbg.contains("SendPermit"));
     }

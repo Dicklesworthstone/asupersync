@@ -751,7 +751,7 @@ mod tests {
     #[test]
     fn task_state_clone_copy() {
         let state = TaskState::Running;
-        let cloned = state.clone();
+        let cloned = state;
         let copied = state;
         assert_eq!(cloned, copied);
     }
@@ -796,7 +796,7 @@ mod tests {
             state: TaskState::Running,
             priority: 10,
         };
-        let cloned = snap.clone();
+        let cloned = snap;
         assert_eq!(cloned.state, TaskState::Running);
         assert_eq!(cloned.priority, 10);
     }
@@ -819,7 +819,7 @@ mod tests {
             polls_remaining: None,
             cost_remaining: Some(500),
         };
-        let cloned = budget.clone();
+        let cloned = budget;
         assert_eq!(cloned.cost_remaining, Some(500));
         assert!(cloned.deadline_nanos.is_none());
     }

@@ -949,7 +949,7 @@ mod tests {
         };
         let dbg = format!("{stats:?}");
         assert!(dbg.contains("PoolStats"), "{dbg}");
-        assert!(dbg.contains("5"), "{dbg}");
+        assert!(dbg.contains('5'), "{dbg}");
     }
 
     #[test]

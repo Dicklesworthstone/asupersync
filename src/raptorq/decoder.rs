@@ -2658,7 +2658,9 @@ mod tests {
         }
 
         // Sanity: uncorrupted decode must succeed.
-        decoder.decode(&received).expect("uncorrupted decode must succeed");
+        decoder
+            .decode(&received)
+            .expect("uncorrupted decode must succeed");
 
         // Tamper the first actual repair symbol (not a constraint).
         // Constraint symbols come first and their ESIs can overlap with

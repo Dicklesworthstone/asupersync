@@ -612,8 +612,8 @@ mod tests {
 
     #[test]
     fn test_config_with_timeout() {
-        let cfg = TestConfig::new().with_timeout(Duration::from_secs(60));
-        assert_eq!(cfg.timeout, Duration::from_secs(60));
+        let cfg = TestConfig::new().with_timeout(Duration::from_mins(1));
+        assert_eq!(cfg.timeout, Duration::from_mins(1));
     }
 
     #[test]

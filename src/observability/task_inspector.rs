@@ -732,14 +732,14 @@ mod tests {
     #[test]
     fn config_debug_clone() {
         let cfg = TaskInspectorConfig::default();
-        let cfg2 = cfg.clone();
+        let cfg2 = cfg;
         assert!(format!("{cfg2:?}").contains("TaskInspectorConfig"));
     }
 
     #[test]
     fn task_state_info_debug_clone() {
         let s = TaskStateInfo::Running;
-        let s2 = s.clone();
+        let s2 = s;
         assert!(format!("{s2:?}").contains("Running"));
     }
 
@@ -783,14 +783,14 @@ mod tests {
             obligations: vec![],
             waiters: vec![],
         };
-        let details2 = details.clone();
+        let details2 = details;
         assert!(format!("{details2:?}").contains("TaskDetails"));
     }
 
     #[test]
     fn task_summary_debug_clone_default() {
         let summary = TaskSummary::default();
-        let summary2 = summary.clone();
+        let summary2 = summary;
         assert_eq!(summary2.total_tasks, 0);
         assert!(format!("{summary2:?}").contains("TaskSummary"));
     }

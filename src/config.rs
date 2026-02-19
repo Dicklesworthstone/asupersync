@@ -1290,7 +1290,7 @@ default_timeout_ms = 5000
         let dbg = format!("{bc:?}");
         assert!(dbg.contains("BackoffConfig"));
 
-        let cloned = bc.clone();
+        let cloned = bc;
         assert_eq!(cloned.initial_delay, Duration::from_millis(100));
         assert_eq!(cloned.max_delay, Duration::from_secs(10));
     }
@@ -1301,7 +1301,7 @@ default_timeout_ms = 5000
         let dbg = format!("{ac:?}");
         assert!(dbg.contains("AdaptiveConfig"));
 
-        let cloned = ac.clone();
+        let cloned = ac;
         assert_eq!(cloned.min_samples, 16);
     }
 
@@ -1312,7 +1312,7 @@ default_timeout_ms = 5000
         assert!(dbg.contains("RoundRobin"));
 
         let s = PathSelectionStrategy::Adaptive(AdaptiveConfig::default());
-        let cloned = s.clone();
+        let cloned = s;
         let dbg = format!("{cloned:?}");
         assert!(dbg.contains("Adaptive"));
     }
@@ -1323,7 +1323,7 @@ default_timeout_ms = 5000
         let dbg = format!("{rc:?}");
         assert!(dbg.contains("ResourceConfig"));
 
-        let cloned = rc.clone();
+        let cloned = rc;
         assert_eq!(cloned.max_encoding_ops, 8);
     }
 
@@ -1333,7 +1333,7 @@ default_timeout_ms = 5000
         let dbg = format!("{tc:?}");
         assert!(dbg.contains("TimeoutConfig"));
 
-        let cloned = tc.clone();
+        let cloned = tc;
         assert_eq!(cloned.default_timeout, Duration::from_secs(30));
     }
 
@@ -1343,7 +1343,7 @@ default_timeout_ms = 5000
         let dbg = format!("{sc:?}");
         assert!(dbg.contains("SecurityConfig"));
 
-        let cloned = sc.clone();
+        let cloned = sc;
         assert!(cloned.reject_unauthenticated);
         assert!(cloned.auth_key_seed.is_none());
     }
@@ -1351,7 +1351,7 @@ default_timeout_ms = 5000
     #[test]
     fn server_profile_debug_clone_copy_eq() {
         let p = ServerProfile::Development;
-        let cloned = p.clone();
+        let cloned = p;
         let copied = p;
         assert_eq!(cloned, copied);
         assert_ne!(p, ServerProfile::Production);
@@ -1371,7 +1371,7 @@ default_timeout_ms = 5000
         let dbg = format!("{p:?}");
         assert!(dbg.contains("Development"));
 
-        let cloned = p.clone();
+        let cloned = p;
         let dbg2 = format!("{cloned:?}");
         assert!(dbg2.contains("Development"));
     }
@@ -1382,7 +1382,7 @@ default_timeout_ms = 5000
         let dbg = format!("{loader:?}");
         assert!(dbg.contains("ConfigLoader"));
 
-        let cloned = loader.clone();
+        let cloned = loader;
         let dbg2 = format!("{cloned:?}");
         assert!(dbg2.contains("ConfigLoader"));
 

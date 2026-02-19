@@ -1379,7 +1379,7 @@ mod tests {
         assert!(dbg.contains("StreamConfig"));
         assert!(dbg.contains("TEST"));
 
-        let cloned = cfg.clone();
+        let cloned = cfg;
         assert_eq!(cloned.name, "TEST");
     }
 
@@ -1406,18 +1406,18 @@ mod tests {
             .storage(StorageType::Memory)
             .max_messages(1000)
             .max_bytes(1_000_000)
-            .max_age(Duration::from_secs(3600))
+            .max_age(Duration::from_hours(1))
             .replicas(3)
-            .duplicate_window(Duration::from_secs(120));
+            .duplicate_window(Duration::from_mins(2));
 
         assert_eq!(cfg.subjects.len(), 2);
         assert_eq!(cfg.retention, RetentionPolicy::WorkQueue);
         assert_eq!(cfg.storage, StorageType::Memory);
         assert_eq!(cfg.max_msgs, Some(1000));
         assert_eq!(cfg.max_bytes, Some(1_000_000));
-        assert_eq!(cfg.max_age, Some(Duration::from_secs(3600)));
+        assert_eq!(cfg.max_age, Some(Duration::from_hours(1)));
         assert_eq!(cfg.replicas, 3);
-        assert_eq!(cfg.duplicate_window, Some(Duration::from_secs(120)));
+        assert_eq!(cfg.duplicate_window, Some(Duration::from_mins(2)));
     }
 
     #[test]
@@ -1426,7 +1426,7 @@ mod tests {
         let dbg = format!("{cfg:?}");
         assert!(dbg.contains("ConsumerConfig"));
 
-        let cloned = cfg.clone();
+        let cloned = cfg;
         assert_eq!(cloned.name, Some("processor".into()));
     }
 
@@ -1455,13 +1455,13 @@ mod tests {
         let cfg = ConsumerConfig::new("c1")
             .deliver_policy(DeliverPolicy::New)
             .ack_policy(AckPolicy::All)
-            .ack_wait(Duration::from_secs(60))
+            .ack_wait(Duration::from_mins(1))
             .max_deliver(5)
             .filter_subject("orders.new");
 
         assert_eq!(cfg.deliver_policy, DeliverPolicy::New);
         assert_eq!(cfg.ack_policy, AckPolicy::All);
-        assert_eq!(cfg.ack_wait, Duration::from_secs(60));
+        assert_eq!(cfg.ack_wait, Duration::from_mins(1));
         assert_eq!(cfg.max_deliver, 5);
         assert_eq!(cfg.filter_subject, Some("orders.new".into()));
     }
@@ -1478,7 +1478,7 @@ mod tests {
         let dbg = format!("{state:?}");
         assert!(dbg.contains("StreamState"));
 
-        let cloned = state.clone();
+        let cloned = state;
         assert_eq!(cloned.messages, 0);
     }
 
@@ -1493,7 +1493,7 @@ mod tests {
         assert!(dbg.contains("PubAck"));
         assert!(dbg.contains("ORDERS"));
 
-        let cloned = ack.clone();
+        let cloned = ack;
         assert_eq!(cloned.seq, 42);
         assert!(!cloned.duplicate);
     }
@@ -1507,7 +1507,7 @@ mod tests {
         let dbg = format!("{info:?}");
         assert!(dbg.contains("StreamInfo"));
 
-        let cloned = info.clone();
+        let cloned = info;
         assert_eq!(cloned.config.name, "S");
     }
 }

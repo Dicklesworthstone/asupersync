@@ -752,7 +752,7 @@ mod tests {
     use crate::types::Budget;
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -1037,6 +1037,24 @@ mod tests {
             fn wake(self: std::sync::Arc<Self>) {}
         }
         Waker::from(std::sync::Arc::new(NoopWaker))
+    }
+
+    fn counting_waker(counter: Arc<AtomicUsize>) -> Waker {
+        struct CountingWaker {
+            counter: Arc<AtomicUsize>,
+        }
+
+        impl std::task::Wake for CountingWaker {
+            fn wake(self: std::sync::Arc<Self>) {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &std::sync::Arc<Self>) {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        Waker::from(std::sync::Arc::new(CountingWaker { counter }))
     }
 
     #[test]
@@ -1436,5 +1454,151 @@ mod tests {
             format!("{:?}", result)
         );
         crate::test_complete!("send_evict_oldest_disconnected_after_receiver_drop");
+    }
+
+    #[test]
+    fn reserve_pending_then_cancelled_cleans_waiter_queue() {
+        init_test("reserve_pending_then_cancelled_cleans_waiter_queue");
+        let cx = test_cx();
+        let wait_cx = test_cx();
+        let (tx, _rx) = channel::<i32>(1);
+
+        let permit = block_on(tx.reserve(&cx)).expect("initial reserve");
+        let mut reserve_fut = Box::pin(tx.reserve(&wait_cx));
+        let waker = noop_waker();
+        let mut cx_task = Context::from_waker(&waker);
+
+        let first_poll = reserve_fut.as_mut().poll(&mut cx_task);
+        crate::assert_with_log!(
+            matches!(first_poll, Poll::Pending),
+            "pending waiter queued",
+            "Pending",
+            format!("{:?}", first_poll)
+        );
+
+        let queued_waiters = tx.shared.inner.lock().send_wakers.len();
+        crate::assert_with_log!(queued_waiters == 1, "one waiter queued", 1, queued_waiters);
+
+        wait_cx.set_cancel_requested(true);
+        let cancelled_poll = reserve_fut.as_mut().poll(&mut cx_task);
+        crate::assert_with_log!(
+            matches!(cancelled_poll, Poll::Ready(Err(SendError::Cancelled(())))),
+            "pending waiter observes cancellation",
+            "Ready(Err(Cancelled(())))",
+            format!("{:?}", cancelled_poll)
+        );
+
+        drop(reserve_fut);
+        let queued_after_cancel = tx.shared.inner.lock().send_wakers.len();
+        crate::assert_with_log!(
+            queued_after_cancel == 0,
+            "cancelled waiter removed from queue",
+            0,
+            queued_after_cancel
+        );
+
+        permit.abort();
+        let permit2 = tx.try_reserve().expect("phantom waiter blocks capacity");
+        permit2.abort();
+        crate::test_complete!("reserve_pending_then_cancelled_cleans_waiter_queue");
+    }
+
+    #[test]
+    fn receiver_drop_unblocks_pending_reserve_without_leak() {
+        init_test("receiver_drop_unblocks_pending_reserve_without_leak");
+        let cx = test_cx();
+        let (tx, rx) = channel::<i32>(1);
+
+        let permit = block_on(tx.reserve(&cx)).expect("initial reserve");
+        let mut reserve_fut = Box::pin(tx.reserve(&cx));
+        let waker = noop_waker();
+        let mut cx_task = Context::from_waker(&waker);
+
+        let first_poll = reserve_fut.as_mut().poll(&mut cx_task);
+        crate::assert_with_log!(
+            matches!(first_poll, Poll::Pending),
+            "reserve future pending before receiver drop",
+            "Pending",
+            format!("{:?}", first_poll)
+        );
+
+        let queued_waiters = tx.shared.inner.lock().send_wakers.len();
+        crate::assert_with_log!(queued_waiters == 1, "one waiter queued", 1, queued_waiters);
+
+        drop(rx);
+        let second_poll = reserve_fut.as_mut().poll(&mut cx_task);
+        crate::assert_with_log!(
+            matches!(second_poll, Poll::Ready(Err(SendError::Disconnected(())))),
+            "pending reserve sees disconnect after receiver drop",
+            "Ready(Err(Disconnected(())))",
+            format!("{:?}", second_poll)
+        );
+        drop(reserve_fut);
+
+        let queued_after_drop = tx.shared.inner.lock().send_wakers.len();
+        crate::assert_with_log!(
+            queued_after_drop == 0,
+            "receiver drop drains waiter queue",
+            0,
+            queued_after_drop
+        );
+
+        let try_reserve = tx.try_reserve();
+        crate::assert_with_log!(
+            matches!(try_reserve, Err(SendError::Disconnected(()))),
+            "try_reserve reports disconnected",
+            "Err(Disconnected(()))",
+            format!("{:?}", try_reserve)
+        );
+
+        permit.abort();
+        crate::test_complete!("receiver_drop_unblocks_pending_reserve_without_leak");
+    }
+
+    #[test]
+    fn wake_receiver_notifies_pending_recv_waker() {
+        init_test("wake_receiver_notifies_pending_recv_waker");
+        let cx = test_cx();
+        let (tx, rx) = channel::<i32>(1);
+
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let waker = counting_waker(Arc::clone(&wake_count));
+        let mut cx_task = Context::from_waker(&waker);
+        let mut recv_fut = Box::pin(rx.recv(&cx));
+
+        let first_poll = recv_fut.as_mut().poll(&mut cx_task);
+        crate::assert_with_log!(
+            matches!(first_poll, Poll::Pending),
+            "recv initially pending",
+            "Pending",
+            format!("{:?}", first_poll)
+        );
+
+        tx.wake_receiver();
+        let wakes_after_signal = wake_count.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            wakes_after_signal == 1,
+            "wake_receiver triggered recv waker",
+            1,
+            wakes_after_signal
+        );
+
+        let second_poll = recv_fut.as_mut().poll(&mut cx_task);
+        crate::assert_with_log!(
+            matches!(second_poll, Poll::Pending),
+            "recv remains pending without message",
+            "Pending",
+            format!("{:?}", second_poll)
+        );
+
+        tx.try_send(7).expect("try_send after wake");
+        let third_poll = recv_fut.as_mut().poll(&mut cx_task);
+        crate::assert_with_log!(
+            matches!(third_poll, Poll::Ready(Ok(7))),
+            "recv completes after message send",
+            "Ready(Ok(7))",
+            format!("{:?}", third_poll)
+        );
+        crate::test_complete!("wake_receiver_notifies_pending_recv_waker");
     }
 }

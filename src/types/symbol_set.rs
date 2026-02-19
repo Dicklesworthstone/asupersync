@@ -580,7 +580,10 @@ mod tests {
 
         let _ = set.insert(test_symbol(0, 0, 4)); // source (esi < K when K set)
         let progress = set.block_progress(0).unwrap();
-        assert_eq!(progress.total(), progress.source_symbols + progress.repair_symbols);
+        assert_eq!(
+            progress.total(),
+            progress.source_symbols + progress.repair_symbols
+        );
         assert_eq!(progress.sbn, 0);
     }
 

@@ -580,7 +580,7 @@ mod tests {
     fn progress_event_clone() {
         init_test("progress_event_clone");
         let ev = ProgressEvent::update(3, 10, "cloning");
-        let ev2 = ev.clone();
+        let ev2 = ev;
         assert_eq!(ev2.kind, ProgressKind::Update);
         assert_eq!(ev2.current, Some(3));
         assert_eq!(ev2.total, Some(10));

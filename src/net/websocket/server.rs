@@ -644,7 +644,7 @@ mod tests {
     #[test]
     fn acceptor_clone() {
         let acceptor = WebSocketAcceptor::new().protocol("chat").max_frame_size(4096);
-        let cloned = acceptor.clone();
+        let cloned = acceptor;
         assert_eq!(cloned.config.max_frame_size, 4096);
         assert_eq!(cloned.config.protocols.len(), 1);
     }
@@ -704,7 +704,7 @@ mod tests {
 
     #[test]
     fn ws_accept_error_from_ws_error() {
-        let ws_err = WsError::ProtocolViolation("bad frame".into());
+        let ws_err = WsError::ProtocolViolation("bad frame");
         let accept_err = WsAcceptError::from(ws_err);
         assert!(matches!(accept_err, WsAcceptError::Protocol(_)));
     }

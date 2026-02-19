@@ -1022,7 +1022,7 @@ mod tests {
         let err = Error::insufficient_symbols(5, 10);
         assert_eq!(err.kind(), ErrorKind::InsufficientSymbols);
         let msg = err.to_string();
-        assert!(msg.contains("5"), "{msg}");
+        assert!(msg.contains('5'), "{msg}");
         assert!(msg.contains("10"), "{msg}");
     }
 
@@ -1045,8 +1045,8 @@ mod tests {
         let err = Error::quorum_not_reached(2, 3);
         assert_eq!(err.kind(), ErrorKind::QuorumNotReached);
         let msg = err.to_string();
-        assert!(msg.contains("2"), "{msg}");
-        assert!(msg.contains("3"), "{msg}");
+        assert!(msg.contains('2'), "{msg}");
+        assert!(msg.contains('3'), "{msg}");
     }
 
     #[test]
@@ -1108,7 +1108,7 @@ mod tests {
     fn cancelled_struct_into_error() {
         let reason = CancelReason::user("test cancel");
         let cancelled = Cancelled {
-            reason: reason.clone(),
+            reason: reason,
         };
         let err: Error = cancelled.into();
         assert_eq!(err.kind(), ErrorKind::Cancelled);

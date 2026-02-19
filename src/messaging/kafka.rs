@@ -905,36 +905,46 @@ mod tests {
 
     #[test]
     fn kafka_error_display_all_variants() {
-        assert!(KafkaError::Io(io::Error::other("e"))
+        assert!(
+            KafkaError::Io(io::Error::other("e"))
+                .to_string()
+                .contains("I/O error")
+        );
+        assert!(
+            KafkaError::Protocol("p".into())
+                .to_string()
+                .contains("protocol error")
+        );
+        assert!(
+            KafkaError::Broker("b".into())
+                .to_string()
+                .contains("broker error")
+        );
+        assert!(KafkaError::QueueFull.to_string().contains("queue is full"));
+        assert!(
+            KafkaError::MessageTooLarge {
+                size: 10,
+                max_size: 5
+            }
             .to_string()
-            .contains("I/O error"));
-        assert!(KafkaError::Protocol("p".into())
-            .to_string()
-            .contains("protocol error"));
-        assert!(KafkaError::Broker("b".into())
-            .to_string()
-            .contains("broker error"));
-        assert!(KafkaError::QueueFull
-            .to_string()
-            .contains("queue is full"));
-        assert!(KafkaError::MessageTooLarge {
-            size: 10,
-            max_size: 5
-        }
-        .to_string()
-        .contains("10"));
-        assert!(KafkaError::InvalidTopic("bad".into())
-            .to_string()
-            .contains("bad"));
-        assert!(KafkaError::Transaction("tx".into())
-            .to_string()
-            .contains("transaction error"));
-        assert!(KafkaError::Cancelled
-            .to_string()
-            .contains("cancelled"));
-        assert!(KafkaError::Config("cfg".into())
-            .to_string()
-            .contains("configuration error"));
+            .contains("10")
+        );
+        assert!(
+            KafkaError::InvalidTopic("bad".into())
+                .to_string()
+                .contains("bad")
+        );
+        assert!(
+            KafkaError::Transaction("tx".into())
+                .to_string()
+                .contains("transaction error")
+        );
+        assert!(KafkaError::Cancelled.to_string().contains("cancelled"));
+        assert!(
+            KafkaError::Config("cfg".into())
+                .to_string()
+                .contains("configuration error")
+        );
     }
 
     #[test]
@@ -1040,7 +1050,7 @@ mod tests {
         let dbg = format!("{cfg:?}");
         assert!(dbg.contains("ProducerConfig"));
 
-        let cloned = cfg.clone();
+        let cloned = cfg;
         assert_eq!(cloned.batch_size, 16_384);
     }
 
@@ -1084,7 +1094,7 @@ mod tests {
         let dbg = format!("{meta:?}");
         assert!(dbg.contains("RecordMetadata"));
 
-        let cloned = meta.clone();
+        let cloned = meta;
         assert_eq!(cloned.partition, 1);
         assert!(cloned.timestamp.is_none());
     }
@@ -1118,7 +1128,7 @@ mod tests {
         let dbg = format!("{tc:?}");
         assert!(dbg.contains("TransactionalConfig"));
 
-        let cloned = tc.clone();
+        let cloned = tc;
         assert_eq!(cloned.transaction_id, "tx-1");
     }
 
