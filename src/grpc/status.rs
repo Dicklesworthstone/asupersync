@@ -474,4 +474,239 @@ mod tests {
         );
         crate::test_complete!("test_grpc_error_into_status");
     }
+
+    // Pure data-type tests (wave 13 – CyanBarn)
+
+    #[test]
+    fn code_display_all_variants() {
+        assert_eq!(Code::Ok.to_string(), "OK");
+        assert_eq!(Code::Cancelled.to_string(), "CANCELLED");
+        assert_eq!(Code::Unknown.to_string(), "UNKNOWN");
+        assert_eq!(Code::InvalidArgument.to_string(), "INVALID_ARGUMENT");
+        assert_eq!(Code::DeadlineExceeded.to_string(), "DEADLINE_EXCEEDED");
+        assert_eq!(Code::NotFound.to_string(), "NOT_FOUND");
+        assert_eq!(Code::AlreadyExists.to_string(), "ALREADY_EXISTS");
+        assert_eq!(Code::PermissionDenied.to_string(), "PERMISSION_DENIED");
+        assert_eq!(Code::ResourceExhausted.to_string(), "RESOURCE_EXHAUSTED");
+        assert_eq!(Code::FailedPrecondition.to_string(), "FAILED_PRECONDITION");
+        assert_eq!(Code::Aborted.to_string(), "ABORTED");
+        assert_eq!(Code::OutOfRange.to_string(), "OUT_OF_RANGE");
+        assert_eq!(Code::Unimplemented.to_string(), "UNIMPLEMENTED");
+        assert_eq!(Code::Internal.to_string(), "INTERNAL");
+        assert_eq!(Code::Unavailable.to_string(), "UNAVAILABLE");
+        assert_eq!(Code::DataLoss.to_string(), "DATA_LOSS");
+        assert_eq!(Code::Unauthenticated.to_string(), "UNAUTHENTICATED");
+    }
+
+    #[test]
+    fn code_default_is_unknown() {
+        assert_eq!(Code::default(), Code::Unknown);
+    }
+
+    #[test]
+    fn code_debug_clone_copy_eq_hash() {
+        let code = Code::NotFound;
+        let dbg = format!("{code:?}");
+        assert!(dbg.contains("NotFound"));
+
+        let cloned = code;
+        assert_eq!(code, cloned);
+
+        let mut set = std::collections::HashSet::new();
+        set.insert(Code::Ok);
+        set.insert(Code::Ok);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn code_as_i32_all_variants() {
+        assert_eq!(Code::Ok.as_i32(), 0);
+        assert_eq!(Code::Cancelled.as_i32(), 1);
+        assert_eq!(Code::Unknown.as_i32(), 2);
+        assert_eq!(Code::InvalidArgument.as_i32(), 3);
+        assert_eq!(Code::DeadlineExceeded.as_i32(), 4);
+        assert_eq!(Code::NotFound.as_i32(), 5);
+        assert_eq!(Code::AlreadyExists.as_i32(), 6);
+        assert_eq!(Code::PermissionDenied.as_i32(), 7);
+        assert_eq!(Code::ResourceExhausted.as_i32(), 8);
+        assert_eq!(Code::FailedPrecondition.as_i32(), 9);
+        assert_eq!(Code::Aborted.as_i32(), 10);
+        assert_eq!(Code::OutOfRange.as_i32(), 11);
+        assert_eq!(Code::Unimplemented.as_i32(), 12);
+        assert_eq!(Code::Internal.as_i32(), 13);
+        assert_eq!(Code::Unavailable.as_i32(), 14);
+        assert_eq!(Code::DataLoss.as_i32(), 15);
+        assert_eq!(Code::Unauthenticated.as_i32(), 16);
+    }
+
+    #[test]
+    fn code_from_i32_all_variants() {
+        assert_eq!(Code::from_i32(0), Code::Ok);
+        assert_eq!(Code::from_i32(1), Code::Cancelled);
+        assert_eq!(Code::from_i32(2), Code::Unknown);
+        assert_eq!(Code::from_i32(3), Code::InvalidArgument);
+        assert_eq!(Code::from_i32(4), Code::DeadlineExceeded);
+        assert_eq!(Code::from_i32(5), Code::NotFound);
+        assert_eq!(Code::from_i32(6), Code::AlreadyExists);
+        assert_eq!(Code::from_i32(7), Code::PermissionDenied);
+        assert_eq!(Code::from_i32(8), Code::ResourceExhausted);
+        assert_eq!(Code::from_i32(9), Code::FailedPrecondition);
+        assert_eq!(Code::from_i32(10), Code::Aborted);
+        assert_eq!(Code::from_i32(11), Code::OutOfRange);
+        assert_eq!(Code::from_i32(12), Code::Unimplemented);
+        assert_eq!(Code::from_i32(13), Code::Internal);
+        assert_eq!(Code::from_i32(14), Code::Unavailable);
+        assert_eq!(Code::from_i32(15), Code::DataLoss);
+        assert_eq!(Code::from_i32(16), Code::Unauthenticated);
+        assert_eq!(Code::from_i32(-1), Code::Unknown);
+        assert_eq!(Code::from_i32(999), Code::Unknown);
+    }
+
+    #[test]
+    fn code_as_str_all_variants() {
+        assert_eq!(Code::Ok.as_str(), "OK");
+        assert_eq!(Code::Cancelled.as_str(), "CANCELLED");
+        assert_eq!(Code::Unknown.as_str(), "UNKNOWN");
+        assert_eq!(Code::Aborted.as_str(), "ABORTED");
+        assert_eq!(Code::DataLoss.as_str(), "DATA_LOSS");
+        assert_eq!(Code::Unauthenticated.as_str(), "UNAUTHENTICATED");
+    }
+
+    #[test]
+    fn status_debug_clone() {
+        let status = Status::new(Code::NotFound, "missing");
+        let dbg = format!("{status:?}");
+        assert!(dbg.contains("NotFound"));
+        assert!(dbg.contains("missing"));
+
+        let cloned = status.clone();
+        assert_eq!(cloned.code(), Code::NotFound);
+        assert_eq!(cloned.message(), "missing");
+    }
+
+    #[test]
+    fn status_display_format() {
+        let status = Status::new(Code::Internal, "something broke");
+        let display = status.to_string();
+        assert!(display.contains("INTERNAL"));
+        assert!(display.contains("something broke"));
+    }
+
+    #[test]
+    fn status_error_trait() {
+        let status = Status::new(Code::Unavailable, "down");
+        let err: &dyn std::error::Error = &status;
+        assert!(!err.to_string().is_empty());
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn status_convenience_constructors() {
+        assert_eq!(Status::cancelled("c").code(), Code::Cancelled);
+        assert_eq!(Status::unknown("u").code(), Code::Unknown);
+        assert_eq!(Status::invalid_argument("i").code(), Code::InvalidArgument);
+        assert_eq!(Status::deadline_exceeded("d").code(), Code::DeadlineExceeded);
+        assert_eq!(Status::not_found("n").code(), Code::NotFound);
+        assert_eq!(Status::already_exists("a").code(), Code::AlreadyExists);
+        assert_eq!(Status::permission_denied("p").code(), Code::PermissionDenied);
+        assert_eq!(
+            Status::resource_exhausted("r").code(),
+            Code::ResourceExhausted
+        );
+        assert_eq!(
+            Status::failed_precondition("f").code(),
+            Code::FailedPrecondition
+        );
+        assert_eq!(Status::aborted("a").code(), Code::Aborted);
+        assert_eq!(Status::out_of_range("o").code(), Code::OutOfRange);
+        assert_eq!(Status::unimplemented("u").code(), Code::Unimplemented);
+        assert_eq!(Status::internal("i").code(), Code::Internal);
+        assert_eq!(Status::unavailable("u").code(), Code::Unavailable);
+        assert_eq!(Status::data_loss("d").code(), Code::DataLoss);
+        assert_eq!(Status::unauthenticated("u").code(), Code::Unauthenticated);
+    }
+
+    #[test]
+    fn status_is_ok_false_for_error() {
+        let status = Status::new(Code::Internal, "bad");
+        assert!(!status.is_ok());
+    }
+
+    #[test]
+    fn status_from_io_error() {
+        let io_err = std::io::Error::other("disk fail");
+        let status: Status = Status::from(io_err);
+        assert_eq!(status.code(), Code::Internal);
+        assert!(status.message().contains("disk fail"));
+    }
+
+    #[test]
+    fn grpc_error_display_all_variants() {
+        let status_err = GrpcError::Status(Status::new(Code::NotFound, "gone"));
+        assert!(status_err.to_string().contains("gone"));
+
+        let transport_err = GrpcError::transport("conn refused");
+        assert!(transport_err.to_string().contains("transport error"));
+
+        let protocol_err = GrpcError::protocol("bad frame");
+        assert!(protocol_err.to_string().contains("protocol error"));
+
+        let msg_err = GrpcError::MessageTooLarge;
+        assert!(msg_err.to_string().contains("message too large"));
+
+        let invalid_err = GrpcError::invalid_message("corrupt");
+        assert!(invalid_err.to_string().contains("invalid message"));
+
+        let comp_err = GrpcError::compression("zlib fail");
+        assert!(comp_err.to_string().contains("compression error"));
+    }
+
+    #[test]
+    fn grpc_error_debug() {
+        let err = GrpcError::MessageTooLarge;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("MessageTooLarge"));
+    }
+
+    #[test]
+    fn grpc_error_error_trait() {
+        let err = GrpcError::transport("t");
+        let dyn_err: &dyn std::error::Error = &err;
+        assert!(dyn_err.source().is_none());
+    }
+
+    #[test]
+    fn grpc_error_into_status_all_variants() {
+        let s = GrpcError::Status(Status::ok()).into_status();
+        assert_eq!(s.code(), Code::Ok);
+
+        let s = GrpcError::transport("down").into_status();
+        assert_eq!(s.code(), Code::Unavailable);
+
+        let s = GrpcError::protocol("bad").into_status();
+        assert_eq!(s.code(), Code::Internal);
+
+        let s = GrpcError::MessageTooLarge.into_status();
+        assert_eq!(s.code(), Code::ResourceExhausted);
+
+        let s = GrpcError::invalid_message("x").into_status();
+        assert_eq!(s.code(), Code::InvalidArgument);
+
+        let s = GrpcError::compression("z").into_status();
+        assert_eq!(s.code(), Code::Internal);
+    }
+
+    #[test]
+    fn grpc_error_from_status() {
+        let status = Status::new(Code::Aborted, "abort");
+        let err: GrpcError = GrpcError::from(status);
+        assert!(matches!(err, GrpcError::Status(_)));
+    }
+
+    #[test]
+    fn grpc_error_from_io_error() {
+        let io_err = std::io::Error::other("net fail");
+        let err: GrpcError = GrpcError::from(io_err);
+        assert!(err.to_string().contains("net fail"));
+    }
 }

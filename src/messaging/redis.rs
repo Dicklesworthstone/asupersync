@@ -1007,4 +1007,224 @@ mod tests {
         assert_eq!(config.host, "localhost");
         assert_eq!(config.port, 6379);
     }
+
+    // Pure data-type tests (wave 13 – CyanBarn)
+
+    #[test]
+    fn redis_error_display_all_variants() {
+        assert!(RedisError::Io(io::Error::other("e"))
+            .to_string()
+            .contains("I/O error"));
+        assert!(RedisError::Protocol("p".into())
+            .to_string()
+            .contains("protocol error"));
+        assert!(RedisError::Redis("r".into())
+            .to_string()
+            .contains("Redis error"));
+        assert!(RedisError::PoolExhausted
+            .to_string()
+            .contains("pool exhausted"));
+        assert!(RedisError::InvalidUrl("bad://".into())
+            .to_string()
+            .contains("bad://"));
+        assert!(RedisError::Cancelled
+            .to_string()
+            .contains("cancelled"));
+    }
+
+    #[test]
+    fn redis_error_debug() {
+        let err = RedisError::PoolExhausted;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("PoolExhausted"));
+    }
+
+    #[test]
+    fn redis_error_source_io() {
+        let err = RedisError::Io(io::Error::other("disk"));
+        assert!(std::error::Error::source(&err).is_some());
+    }
+
+    #[test]
+    fn redis_error_source_none_for_others() {
+        assert!(std::error::Error::source(&RedisError::Cancelled).is_none());
+        assert!(std::error::Error::source(&RedisError::PoolExhausted).is_none());
+    }
+
+    #[test]
+    fn redis_error_from_io() {
+        let io_err = io::Error::other("net");
+        let err: RedisError = RedisError::from(io_err);
+        assert!(matches!(err, RedisError::Io(_)));
+    }
+
+    #[test]
+    fn resp_value_encode_error() {
+        let val = RespValue::Error("ERR bad".into());
+        assert_eq!(val.encode(), b"-ERR bad\r\n");
+    }
+
+    #[test]
+    fn resp_value_encode_null_bulk_string() {
+        let val = RespValue::BulkString(None);
+        assert_eq!(val.encode(), b"$-1\r\n");
+    }
+
+    #[test]
+    fn resp_value_encode_null_array() {
+        let val = RespValue::Array(None);
+        assert_eq!(val.encode(), b"*-1\r\n");
+    }
+
+    #[test]
+    fn resp_value_encode_empty_array() {
+        let val = RespValue::Array(Some(vec![]));
+        assert_eq!(val.encode(), b"*0\r\n");
+    }
+
+    #[test]
+    fn resp_value_encode_negative_integer() {
+        let val = RespValue::Integer(-42);
+        assert_eq!(val.encode(), b":-42\r\n");
+    }
+
+    #[test]
+    fn resp_value_encode_zero_integer() {
+        let val = RespValue::Integer(0);
+        assert_eq!(val.encode(), b":0\r\n");
+    }
+
+    #[test]
+    fn resp_value_debug_clone_eq() {
+        let val = RespValue::SimpleString("OK".into());
+        let dbg = format!("{val:?}");
+        assert!(dbg.contains("SimpleString"));
+
+        let cloned = val.clone();
+        assert_eq!(val, cloned);
+    }
+
+    #[test]
+    fn resp_value_ne() {
+        let a = RespValue::Integer(1);
+        let b = RespValue::Integer(2);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn resp_value_as_bytes() {
+        let val = RespValue::BulkString(Some(b"hello".to_vec()));
+        assert_eq!(val.as_bytes(), Some(&b"hello"[..]));
+
+        let null = RespValue::BulkString(None);
+        assert!(null.as_bytes().is_none());
+
+        let not_bulk = RespValue::Integer(1);
+        assert!(not_bulk.as_bytes().is_none());
+    }
+
+    #[test]
+    fn resp_value_as_integer() {
+        let val = RespValue::Integer(99);
+        assert_eq!(val.as_integer(), Some(99));
+
+        let not_int = RespValue::SimpleString("x".into());
+        assert!(not_int.as_integer().is_none());
+    }
+
+    #[test]
+    fn resp_value_is_ok() {
+        assert!(RespValue::SimpleString("OK".into()).is_ok());
+        assert!(!RespValue::SimpleString("PONG".into()).is_ok());
+        assert!(!RespValue::Integer(0).is_ok());
+    }
+
+    #[test]
+    fn resp_decode_error_string() {
+        let (val, n) = RespValue::try_decode(b"-ERR bad\r\n")
+            .unwrap()
+            .expect("decoded");
+        assert_eq!(val, RespValue::Error("ERR bad".into()));
+        assert_eq!(n, 10);
+    }
+
+    #[test]
+    fn resp_decode_null_bulk_string() {
+        let (val, n) = RespValue::try_decode(b"$-1\r\n")
+            .unwrap()
+            .expect("decoded");
+        assert_eq!(val, RespValue::BulkString(None));
+        assert_eq!(n, 5);
+    }
+
+    #[test]
+    fn resp_decode_null_array() {
+        let (val, n) = RespValue::try_decode(b"*-1\r\n")
+            .unwrap()
+            .expect("decoded");
+        assert_eq!(val, RespValue::Array(None));
+        assert_eq!(n, 5);
+    }
+
+    #[test]
+    fn resp_decode_unknown_type() {
+        let err = RespValue::try_decode(b"~invalid\r\n");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn redis_config_default() {
+        let cfg = RedisConfig::default();
+        assert_eq!(cfg.host, "127.0.0.1");
+        assert_eq!(cfg.port, 6379);
+        assert_eq!(cfg.database, 0);
+        assert!(cfg.password.is_none());
+    }
+
+    #[test]
+    fn redis_config_debug_redacts_password() {
+        let cfg = RedisConfig {
+            password: Some("secret".into()),
+            ..Default::default()
+        };
+        let dbg = format!("{cfg:?}");
+        assert!(dbg.contains("REDACTED"));
+        assert!(!dbg.contains("secret"));
+    }
+
+    #[test]
+    fn redis_config_clone() {
+        let cfg = RedisConfig::default();
+        let cloned = cfg.clone();
+        assert_eq!(cloned.host, "127.0.0.1");
+    }
+
+    #[test]
+    fn redis_config_from_url_with_password() {
+        let cfg = RedisConfig::from_url("redis://pass123@myhost:6380/3").unwrap();
+        assert_eq!(cfg.host, "myhost");
+        assert_eq!(cfg.port, 6380);
+        assert_eq!(cfg.database, 3);
+        assert_eq!(cfg.password, Some("pass123".into()));
+    }
+
+    #[test]
+    fn redis_config_from_url_invalid_scheme() {
+        assert!(RedisConfig::from_url("http://localhost").is_err());
+    }
+
+    #[test]
+    fn redis_config_from_url_host_only() {
+        let cfg = RedisConfig::from_url("redis://myhost").unwrap();
+        assert_eq!(cfg.host, "myhost");
+        assert_eq!(cfg.port, 6379);
+    }
+
+    #[test]
+    fn resp_encode_into_reuse_buffer() {
+        let mut buf = Vec::new();
+        RespValue::SimpleString("PING".into()).encode_into(&mut buf);
+        RespValue::Integer(1).encode_into(&mut buf);
+        assert_eq!(&buf, b"+PING\r\n:1\r\n");
+    }
 }

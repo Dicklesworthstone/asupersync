@@ -1241,4 +1241,273 @@ mod tests {
         let deadline = compute_client_deadline(now, Duration::MAX, Consumer::CLIENT_TIMEOUT_SLACK);
         assert_eq!(deadline, Some(Time::MAX));
     }
+
+    // Pure data-type tests (wave 13 – CyanBarn)
+
+    #[test]
+    fn js_error_display_all_variants() {
+        let nats_err = JsError::Nats(NatsError::Io(std::io::Error::other("e")));
+        assert!(nats_err.to_string().contains("NATS error"));
+
+        let api_err = JsError::Api {
+            code: 404,
+            description: "not here".into(),
+        };
+        assert!(api_err.to_string().contains("404"));
+        assert!(api_err.to_string().contains("not here"));
+
+        let stream_err = JsError::StreamNotFound("ORDERS".into());
+        assert!(stream_err.to_string().contains("ORDERS"));
+
+        let consumer_err = JsError::ConsumerNotFound {
+            stream: "S".into(),
+            consumer: "C".into(),
+        };
+        assert!(consumer_err.to_string().contains("S/C"));
+
+        let not_acked = JsError::NotAcked;
+        assert!(not_acked.to_string().contains("not acknowledged"));
+
+        let invalid = JsError::InvalidConfig("bad".into());
+        assert!(invalid.to_string().contains("invalid config"));
+
+        let parse = JsError::ParseError("json".into());
+        assert!(parse.to_string().contains("parse error"));
+    }
+
+    #[test]
+    fn js_error_debug() {
+        let err = JsError::NotAcked;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("NotAcked"));
+    }
+
+    #[test]
+    fn js_error_source_nats() {
+        let err = JsError::Nats(NatsError::Io(std::io::Error::other("x")));
+        assert!(std::error::Error::source(&err).is_some());
+    }
+
+    #[test]
+    fn js_error_source_none_for_others() {
+        let err = JsError::NotAcked;
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn js_error_from_nats_error() {
+        let nats = NatsError::Io(std::io::Error::other("z"));
+        let err: JsError = JsError::from(nats);
+        assert!(matches!(err, JsError::Nats(_)));
+    }
+
+    #[test]
+    fn retention_policy_default_debug_copy_eq() {
+        assert_eq!(RetentionPolicy::default(), RetentionPolicy::Limits);
+
+        let p = RetentionPolicy::Interest;
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("Interest"));
+
+        let copy = p;
+        assert_eq!(p, copy);
+        assert_ne!(p, RetentionPolicy::WorkQueue);
+    }
+
+    #[test]
+    fn storage_type_default_debug_copy_eq() {
+        assert_eq!(StorageType::default(), StorageType::File);
+
+        let s = StorageType::Memory;
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("Memory"));
+
+        let copy = s;
+        assert_eq!(s, copy);
+        assert_ne!(s, StorageType::File);
+    }
+
+    #[test]
+    fn discard_policy_default_debug_copy_eq() {
+        assert_eq!(DiscardPolicy::default(), DiscardPolicy::Old);
+
+        let d = DiscardPolicy::New;
+        let dbg = format!("{d:?}");
+        assert!(dbg.contains("New"));
+
+        let copy = d;
+        assert_eq!(d, copy);
+    }
+
+    #[test]
+    fn deliver_policy_default_debug_copy_eq() {
+        assert_eq!(DeliverPolicy::default(), DeliverPolicy::All);
+
+        let d = DeliverPolicy::Last;
+        let dbg = format!("{d:?}");
+        assert!(dbg.contains("Last"));
+
+        let copy = d;
+        assert_eq!(d, copy);
+        assert_ne!(d, DeliverPolicy::New);
+    }
+
+    #[test]
+    fn deliver_policy_by_start_sequence() {
+        let d = DeliverPolicy::ByStartSequence(42);
+        assert_eq!(d, DeliverPolicy::ByStartSequence(42));
+        assert_ne!(d, DeliverPolicy::ByStartSequence(99));
+    }
+
+    #[test]
+    fn ack_policy_default_debug_copy_eq() {
+        assert_eq!(AckPolicy::default(), AckPolicy::Explicit);
+
+        let a = AckPolicy::None;
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("None"));
+
+        let copy = a;
+        assert_eq!(a, copy);
+        assert_ne!(a, AckPolicy::All);
+    }
+
+    #[test]
+    fn stream_config_debug_clone() {
+        let cfg = StreamConfig::new("TEST");
+        let dbg = format!("{cfg:?}");
+        assert!(dbg.contains("StreamConfig"));
+        assert!(dbg.contains("TEST"));
+
+        let cloned = cfg.clone();
+        assert_eq!(cloned.name, "TEST");
+    }
+
+    #[test]
+    fn stream_config_new_defaults() {
+        let cfg = StreamConfig::new("EVENTS");
+        assert_eq!(cfg.name, "EVENTS");
+        assert!(cfg.subjects.is_empty());
+        assert_eq!(cfg.retention, RetentionPolicy::Limits);
+        assert_eq!(cfg.storage, StorageType::File);
+        assert_eq!(cfg.discard, DiscardPolicy::Old);
+        assert_eq!(cfg.replicas, 1);
+        assert!(cfg.max_msgs.is_none());
+        assert!(cfg.max_bytes.is_none());
+        assert!(cfg.max_age.is_none());
+        assert!(cfg.duplicate_window.is_none());
+    }
+
+    #[test]
+    fn stream_config_builder_chain() {
+        let cfg = StreamConfig::new("ORDERS")
+            .subjects(&["orders.>", "returns.>"])
+            .retention(RetentionPolicy::WorkQueue)
+            .storage(StorageType::Memory)
+            .max_messages(1000)
+            .max_bytes(1_000_000)
+            .max_age(Duration::from_secs(3600))
+            .replicas(3)
+            .duplicate_window(Duration::from_secs(120));
+
+        assert_eq!(cfg.subjects.len(), 2);
+        assert_eq!(cfg.retention, RetentionPolicy::WorkQueue);
+        assert_eq!(cfg.storage, StorageType::Memory);
+        assert_eq!(cfg.max_msgs, Some(1000));
+        assert_eq!(cfg.max_bytes, Some(1_000_000));
+        assert_eq!(cfg.max_age, Some(Duration::from_secs(3600)));
+        assert_eq!(cfg.replicas, 3);
+        assert_eq!(cfg.duplicate_window, Some(Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn consumer_config_debug_clone() {
+        let cfg = ConsumerConfig::new("processor");
+        let dbg = format!("{cfg:?}");
+        assert!(dbg.contains("ConsumerConfig"));
+
+        let cloned = cfg.clone();
+        assert_eq!(cloned.name, Some("processor".into()));
+    }
+
+    #[test]
+    fn consumer_config_new_defaults() {
+        let cfg = ConsumerConfig::new("worker");
+        assert_eq!(cfg.name, Some("worker".into()));
+        assert!(cfg.durable_name.is_none());
+        assert_eq!(cfg.deliver_policy, DeliverPolicy::All);
+        assert_eq!(cfg.ack_policy, AckPolicy::Explicit);
+        assert_eq!(cfg.ack_wait, Duration::from_secs(30));
+        assert_eq!(cfg.max_deliver, -1);
+        assert!(cfg.filter_subject.is_none());
+        assert_eq!(cfg.max_ack_pending, 1000);
+    }
+
+    #[test]
+    fn consumer_config_ephemeral() {
+        let cfg = ConsumerConfig::ephemeral();
+        assert!(cfg.name.is_none());
+        assert!(cfg.durable_name.is_none());
+    }
+
+    #[test]
+    fn consumer_config_builder_chain() {
+        let cfg = ConsumerConfig::new("c1")
+            .deliver_policy(DeliverPolicy::New)
+            .ack_policy(AckPolicy::All)
+            .ack_wait(Duration::from_secs(60))
+            .max_deliver(5)
+            .filter_subject("orders.new");
+
+        assert_eq!(cfg.deliver_policy, DeliverPolicy::New);
+        assert_eq!(cfg.ack_policy, AckPolicy::All);
+        assert_eq!(cfg.ack_wait, Duration::from_secs(60));
+        assert_eq!(cfg.max_deliver, 5);
+        assert_eq!(cfg.filter_subject, Some("orders.new".into()));
+    }
+
+    #[test]
+    fn stream_state_default_debug_clone() {
+        let state = StreamState::default();
+        assert_eq!(state.messages, 0);
+        assert_eq!(state.bytes, 0);
+        assert_eq!(state.first_seq, 0);
+        assert_eq!(state.last_seq, 0);
+        assert_eq!(state.consumer_count, 0);
+
+        let dbg = format!("{state:?}");
+        assert!(dbg.contains("StreamState"));
+
+        let cloned = state.clone();
+        assert_eq!(cloned.messages, 0);
+    }
+
+    #[test]
+    fn pub_ack_debug_clone() {
+        let ack = PubAck {
+            stream: "ORDERS".into(),
+            seq: 42,
+            duplicate: false,
+        };
+        let dbg = format!("{ack:?}");
+        assert!(dbg.contains("PubAck"));
+        assert!(dbg.contains("ORDERS"));
+
+        let cloned = ack.clone();
+        assert_eq!(cloned.seq, 42);
+        assert!(!cloned.duplicate);
+    }
+
+    #[test]
+    fn stream_info_debug_clone() {
+        let info = StreamInfo {
+            config: StreamConfig::new("S"),
+            state: StreamState::default(),
+        };
+        let dbg = format!("{info:?}");
+        assert!(dbg.contains("StreamInfo"));
+
+        let cloned = info.clone();
+        assert_eq!(cloned.config.name, "S");
+    }
 }

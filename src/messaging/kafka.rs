@@ -900,4 +900,247 @@ mod tests {
         assert_eq!(meta.offset, 42);
         assert_eq!(meta.timestamp, Some(1_234_567_890));
     }
+
+    // Pure data-type tests (wave 13 – CyanBarn)
+
+    #[test]
+    fn kafka_error_display_all_variants() {
+        assert!(KafkaError::Io(io::Error::other("e"))
+            .to_string()
+            .contains("I/O error"));
+        assert!(KafkaError::Protocol("p".into())
+            .to_string()
+            .contains("protocol error"));
+        assert!(KafkaError::Broker("b".into())
+            .to_string()
+            .contains("broker error"));
+        assert!(KafkaError::QueueFull
+            .to_string()
+            .contains("queue is full"));
+        assert!(KafkaError::MessageTooLarge {
+            size: 10,
+            max_size: 5
+        }
+        .to_string()
+        .contains("10"));
+        assert!(KafkaError::InvalidTopic("bad".into())
+            .to_string()
+            .contains("bad"));
+        assert!(KafkaError::Transaction("tx".into())
+            .to_string()
+            .contains("transaction error"));
+        assert!(KafkaError::Cancelled
+            .to_string()
+            .contains("cancelled"));
+        assert!(KafkaError::Config("cfg".into())
+            .to_string()
+            .contains("configuration error"));
+    }
+
+    #[test]
+    fn kafka_error_debug() {
+        let err = KafkaError::QueueFull;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("QueueFull"));
+    }
+
+    #[test]
+    fn kafka_error_source_io() {
+        let err = KafkaError::Io(io::Error::other("disk"));
+        let src = std::error::Error::source(&err);
+        assert!(src.is_some());
+    }
+
+    #[test]
+    fn kafka_error_source_none_for_others() {
+        let err = KafkaError::Cancelled;
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn kafka_error_from_io() {
+        let io_err = io::Error::other("net");
+        let err: KafkaError = KafkaError::from(io_err);
+        assert!(matches!(err, KafkaError::Io(_)));
+    }
+
+    #[test]
+    fn compression_default_is_none() {
+        assert_eq!(Compression::default(), Compression::None);
+    }
+
+    #[test]
+    fn compression_debug_clone_copy_eq() {
+        let c = Compression::Snappy;
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("Snappy"));
+
+        let copy = c;
+        assert_eq!(c, copy);
+    }
+
+    #[test]
+    fn compression_all_variants_ne() {
+        let variants = [
+            Compression::None,
+            Compression::Gzip,
+            Compression::Snappy,
+            Compression::Lz4,
+            Compression::Zstd,
+        ];
+        for (i, a) in variants.iter().enumerate() {
+            for (j, b) in variants.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn acks_default_is_all() {
+        assert_eq!(Acks::default(), Acks::All);
+    }
+
+    #[test]
+    fn acks_debug_clone_copy_eq() {
+        let a = Acks::Leader;
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("Leader"));
+
+        let copy = a;
+        assert_eq!(a, copy);
+    }
+
+    #[test]
+    fn acks_as_i16_all_variants() {
+        assert_eq!(Acks::None.as_i16(), 0);
+        assert_eq!(Acks::Leader.as_i16(), 1);
+        assert_eq!(Acks::All.as_i16(), -1);
+    }
+
+    #[test]
+    fn producer_config_default_values() {
+        let cfg = ProducerConfig::default();
+        assert_eq!(cfg.bootstrap_servers, vec!["localhost:9092".to_string()]);
+        assert!(cfg.client_id.is_none());
+        assert_eq!(cfg.batch_size, 16_384);
+        assert_eq!(cfg.linger_ms, 5);
+        assert_eq!(cfg.compression, Compression::None);
+        assert!(cfg.enable_idempotence);
+        assert_eq!(cfg.acks, Acks::All);
+        assert_eq!(cfg.retries, 3);
+        assert_eq!(cfg.request_timeout, Duration::from_secs(30));
+        assert_eq!(cfg.max_message_size, 1_048_576);
+    }
+
+    #[test]
+    fn producer_config_debug_clone() {
+        let cfg = ProducerConfig::default();
+        let dbg = format!("{cfg:?}");
+        assert!(dbg.contains("ProducerConfig"));
+
+        let cloned = cfg.clone();
+        assert_eq!(cloned.batch_size, 16_384);
+    }
+
+    #[test]
+    fn producer_config_builder_linger_retries() {
+        let cfg = ProducerConfig::new(vec!["k:9092".into()])
+            .linger_ms(100)
+            .retries(10)
+            .enable_idempotence(false);
+        assert_eq!(cfg.linger_ms, 100);
+        assert_eq!(cfg.retries, 10);
+        assert!(!cfg.enable_idempotence);
+    }
+
+    #[test]
+    fn producer_config_validate_zero_batch_size() {
+        let cfg = ProducerConfig {
+            batch_size: 0,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn producer_config_validate_zero_max_message() {
+        let cfg = ProducerConfig {
+            max_message_size: 0,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn record_metadata_debug_clone() {
+        let meta = RecordMetadata {
+            topic: "t".into(),
+            partition: 1,
+            offset: 99,
+            timestamp: None,
+        };
+        let dbg = format!("{meta:?}");
+        assert!(dbg.contains("RecordMetadata"));
+
+        let cloned = meta.clone();
+        assert_eq!(cloned.partition, 1);
+        assert!(cloned.timestamp.is_none());
+    }
+
+    #[test]
+    fn kafka_producer_config_accessor() {
+        let cfg = ProducerConfig::new(vec!["host:9092".into()]).batch_size(999);
+        let producer = KafkaProducer::new(cfg).unwrap();
+        assert_eq!(producer.config().batch_size, 999);
+    }
+
+    #[test]
+    fn kafka_producer_debug() {
+        let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
+        let dbg = format!("{producer:?}");
+        assert!(dbg.contains("KafkaProducer"));
+    }
+
+    #[test]
+    fn kafka_producer_reject_empty_servers() {
+        let cfg = ProducerConfig {
+            bootstrap_servers: vec![],
+            ..Default::default()
+        };
+        assert!(KafkaProducer::new(cfg).is_err());
+    }
+
+    #[test]
+    fn transactional_config_debug_clone() {
+        let tc = TransactionalConfig::new(ProducerConfig::default(), "tx-1".into());
+        let dbg = format!("{tc:?}");
+        assert!(dbg.contains("TransactionalConfig"));
+
+        let cloned = tc.clone();
+        assert_eq!(cloned.transaction_id, "tx-1");
+    }
+
+    #[test]
+    fn transactional_config_default_timeout() {
+        let tc = TransactionalConfig::new(ProducerConfig::default(), "tx-2".into());
+        assert_eq!(tc.transaction_timeout, Duration::from_mins(1));
+    }
+
+    #[test]
+    fn transactional_producer_debug() {
+        let tc = TransactionalConfig::new(ProducerConfig::default(), "tx-3".into());
+        let producer = TransactionalProducer::new(tc).unwrap();
+        let dbg = format!("{producer:?}");
+        assert!(dbg.contains("TransactionalProducer"));
+    }
+
+    #[test]
+    fn transactional_producer_accessors() {
+        let tc = TransactionalConfig::new(ProducerConfig::default(), "tx-4".into());
+        let producer = TransactionalProducer::new(tc).unwrap();
+        assert_eq!(producer.transaction_id(), "tx-4");
+        assert_eq!(producer.config().transaction_id, "tx-4");
+    }
 }
