@@ -1027,4 +1027,128 @@ mod tests {
         assert!(display.contains("DeltaDebug:"));
         assert!(display.contains("reduction"));
     }
+
+    // =========================================================================
+    // Wave 26: Data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn delta_debug_config_debug() {
+        let config = DeltaDebugConfig::default();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("DeltaDebugConfig"));
+        assert!(dbg.contains("max_evaluations"));
+        assert!(dbg.contains("verify_minimality"));
+        assert!(dbg.contains("hierarchical"));
+    }
+
+    #[test]
+    fn delta_debug_config_clone() {
+        let config = DeltaDebugConfig {
+            max_evaluations: 42,
+            verify_minimality: false,
+            hierarchical: false,
+            initial_chunk_size: 8,
+        };
+        let config2 = config.clone();
+        assert_eq!(config2.max_evaluations, 42);
+        assert!(!config2.verify_minimality);
+        assert!(!config2.hierarchical);
+        assert_eq!(config2.initial_chunk_size, 8);
+    }
+
+    #[test]
+    fn delta_debug_config_default_fields() {
+        let config = DeltaDebugConfig::default();
+        assert_eq!(config.max_evaluations, 0);
+        assert!(config.verify_minimality);
+        assert!(config.hierarchical);
+        assert_eq!(config.initial_chunk_size, 0);
+    }
+
+    #[test]
+    fn minimization_stats_debug() {
+        let stats = MinimizationStats::default();
+        let dbg = format!("{stats:?}");
+        assert!(dbg.contains("MinimizationStats"));
+        assert!(dbg.contains("oracle_calls"));
+        assert!(dbg.contains("regions_pruned"));
+    }
+
+    #[test]
+    fn minimization_stats_clone() {
+        let stats = MinimizationStats {
+            oracle_calls: 10,
+            regions_pruned: 3,
+            events_pruned_top_down: 20,
+            events_pruned_bottom_up: 5,
+            events_pruned_minimality: 2,
+            budget_exhausted: true,
+            minimality_verified: false,
+        };
+        let stats2 = stats.clone();
+        assert_eq!(stats2.oracle_calls, 10);
+        assert_eq!(stats2.regions_pruned, 3);
+        assert_eq!(stats2.events_pruned_top_down, 20);
+        assert_eq!(stats2.events_pruned_bottom_up, 5);
+        assert_eq!(stats2.events_pruned_minimality, 2);
+        assert!(stats2.budget_exhausted);
+        assert!(!stats2.minimality_verified);
+    }
+
+    #[test]
+    fn minimization_stats_default_fields() {
+        let stats = MinimizationStats::default();
+        assert_eq!(stats.oracle_calls, 0);
+        assert_eq!(stats.regions_pruned, 0);
+        assert_eq!(stats.events_pruned_top_down, 0);
+        assert_eq!(stats.events_pruned_bottom_up, 0);
+        assert_eq!(stats.events_pruned_minimality, 0);
+        assert!(!stats.budget_exhausted);
+        assert!(!stats.minimality_verified);
+    }
+
+    #[test]
+    fn minimization_stats_serialize() {
+        let stats = MinimizationStats {
+            oracle_calls: 7,
+            regions_pruned: 2,
+            events_pruned_top_down: 10,
+            events_pruned_bottom_up: 3,
+            events_pruned_minimality: 1,
+            budget_exhausted: false,
+            minimality_verified: true,
+        };
+        let json = serde_json::to_string(&stats).expect("serialize");
+        assert!(json.contains("\"oracle_calls\":7"));
+        assert!(json.contains("\"regions_pruned\":2"));
+        assert!(json.contains("\"minimality_verified\":true"));
+    }
+
+    #[test]
+    fn delta_debug_result_debug() {
+        let trace = hierarchical_trace();
+        let config = DeltaDebugConfig {
+            verify_minimality: false,
+            ..Default::default()
+        };
+        let result = minimize(&trace, &config, error_oracle);
+        let dbg = format!("{result:?}");
+        assert!(dbg.contains("DeltaDebugResult"));
+        assert!(dbg.contains("minimized"));
+        assert!(dbg.contains("reduction_ratio"));
+    }
+
+    #[test]
+    fn delta_debug_result_display_format() {
+        let trace = hierarchical_trace();
+        let config = DeltaDebugConfig::default();
+        let result = minimize(&trace, &config, error_oracle);
+        let display = format!("{result}");
+        // Format: "DeltaDebug: X -> Y events (Z% reduction, N oracle calls, M regions pruned)"
+        assert!(display.contains("->"));
+        assert!(display.contains("events"));
+        assert!(display.contains("oracle calls"));
+        assert!(display.contains("regions pruned"));
+    }
 }

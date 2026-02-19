@@ -967,4 +967,152 @@ mod tests {
         let (new_meta, _) = result.unwrap();
         assert_eq!(new_meta.version, 2);
     }
+
+    // =========================================================================
+    // Wave 26: Data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn compatibility_result_debug_compatible() {
+        let r = CompatibilityResult::Compatible;
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("Compatible"));
+    }
+
+    #[test]
+    fn compatibility_result_debug_needs_migration() {
+        let r = CompatibilityResult::NeedsMigration { from: 1, to: 3 };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("NeedsMigration"));
+        assert!(dbg.contains("1"));
+        assert!(dbg.contains("3"));
+    }
+
+    #[test]
+    fn compatibility_result_debug_too_old() {
+        let r = CompatibilityResult::TooOld {
+            found: 0,
+            min_supported: 1,
+        };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("TooOld"));
+        assert!(dbg.contains("0"));
+    }
+
+    #[test]
+    fn compatibility_result_debug_too_new() {
+        let r = CompatibilityResult::TooNew {
+            found: 99,
+            max_supported: 2,
+        };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("TooNew"));
+        assert!(dbg.contains("99"));
+    }
+
+    #[test]
+    fn compatibility_result_clone() {
+        let r = CompatibilityResult::NeedsMigration { from: 1, to: 2 };
+        let r2 = r.clone();
+        assert_eq!(r, r2);
+    }
+
+    #[test]
+    fn compatibility_result_eq_different_variants() {
+        assert_ne!(
+            CompatibilityResult::Compatible,
+            CompatibilityResult::TooNew {
+                found: 5,
+                max_supported: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn check_schema_compatibility_version_zero() {
+        let result = check_schema_compatibility(0);
+        assert!(matches!(
+            result,
+            CompatibilityResult::TooOld {
+                found: 0,
+                min_supported: 1,
+            }
+        ));
+    }
+
+    #[test]
+    fn compat_event_debug_event_variant() {
+        let event = CompatEvent::Event(ReplayEvent::RngSeed { seed: 7 });
+        let dbg = format!("{event:?}");
+        assert!(dbg.contains("Event"));
+        assert!(dbg.contains("RngSeed"));
+    }
+
+    #[test]
+    fn compat_event_debug_skipped_variant() {
+        let event = CompatEvent::Skipped {
+            reason: "unknown type".to_string(),
+            raw_bytes: vec![0xde, 0xad],
+        };
+        let dbg = format!("{event:?}");
+        assert!(dbg.contains("Skipped"));
+        assert!(dbg.contains("unknown type"));
+    }
+
+    #[test]
+    fn compat_stats_default_zeroed() {
+        let stats = CompatStats::default();
+        assert_eq!(stats.events_read, 0);
+        assert_eq!(stats.events_skipped, 0);
+        assert_eq!(stats.events_migrated, 0);
+        assert!(stats.unknown_event_types.is_empty());
+    }
+
+    #[test]
+    fn compat_stats_clone() {
+        let mut stats = CompatStats::default();
+        stats.record_read();
+        stats.record_skipped(Some("FooEvent"));
+        let stats2 = stats.clone();
+        assert_eq!(stats2.events_read, 1);
+        assert_eq!(stats2.events_skipped, 1);
+        assert_eq!(stats2.unknown_event_types.len(), 1);
+    }
+
+    #[test]
+    fn compat_stats_debug() {
+        let stats = CompatStats::default();
+        let dbg = format!("{stats:?}");
+        assert!(dbg.contains("CompatStats"));
+        assert!(dbg.contains("events_read"));
+    }
+
+    #[test]
+    fn compat_stats_has_issues_false_when_clean() {
+        let mut stats = CompatStats::default();
+        stats.record_read();
+        stats.record_read();
+        stats.record_migrated();
+        assert!(!stats.has_issues());
+    }
+
+    #[test]
+    fn compat_stats_record_skipped_none_type() {
+        let mut stats = CompatStats::default();
+        stats.record_skipped(None);
+        assert_eq!(stats.events_skipped, 1);
+        assert!(stats.unknown_event_types.is_empty());
+        assert!(stats.has_issues());
+    }
+
+    #[test]
+    fn migrator_default_trait() {
+        let m1 = TraceMigrator::new();
+        let m2 = TraceMigrator::default();
+        // Both should be empty migrators with identical behavior
+        assert!(m1.can_migrate(1, 1));
+        assert!(m2.can_migrate(1, 1));
+        assert!(!m1.can_migrate(1, 2));
+        assert!(!m2.can_migrate(1, 2));
+    }
 }
