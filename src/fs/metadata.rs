@@ -277,4 +277,44 @@ mod tests {
         crate::assert_with_log!(meta.is_symlink(), "is_symlink", true, meta.is_symlink());
         crate::test_complete!("test_metadata_symlink");
     }
+
+    // =========================================================================
+    // Wave 53 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn metadata_debug_clone() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("dbg.txt");
+        fs::write(&path, b"test").expect("write");
+        let meta = Metadata::from_std(fs::metadata(&path).expect("metadata"));
+        let dbg = format!("{meta:?}");
+        assert!(dbg.contains("Metadata"), "{dbg}");
+        let cloned = meta.clone();
+        assert_eq!(cloned.len(), 4);
+    }
+
+    #[test]
+    fn file_type_debug_clone() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("ft.txt");
+        fs::write(&path, b"x").expect("write");
+        let ft = Metadata::from_std(fs::metadata(&path).expect("metadata")).file_type();
+        let dbg = format!("{ft:?}");
+        assert!(dbg.contains("FileType"), "{dbg}");
+        let cloned = ft.clone();
+        assert!(cloned.is_file());
+    }
+
+    #[test]
+    fn permissions_debug_clone() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("pm.txt");
+        fs::write(&path, b"y").expect("write");
+        let perms = Metadata::from_std(fs::metadata(&path).expect("metadata")).permissions();
+        let dbg = format!("{perms:?}");
+        assert!(dbg.contains("Permissions"), "{dbg}");
+        let cloned = perms.clone();
+        assert_eq!(cloned.readonly(), perms.readonly());
+    }
 }

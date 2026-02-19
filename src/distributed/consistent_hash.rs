@@ -290,4 +290,18 @@ mod tests {
         assert_eq!(ring.vnode_count(), 0);
         assert!(ring.node_for_key(&"key").is_none());
     }
+
+    // =========================================================================
+    // Wave 53 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn hash_ring_debug_clone() {
+        let ring = build_ring(2, 4);
+        let dbg = format!("{ring:?}");
+        assert!(dbg.contains("HashRing"), "{dbg}");
+        let cloned = ring.clone();
+        assert_eq!(cloned.node_count(), 2);
+        assert_eq!(cloned.vnode_count(), 8);
+    }
 }

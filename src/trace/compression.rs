@@ -246,4 +246,26 @@ mod tests {
         let compressed = compress(&events, Level::Skeleton);
         assert_eq!(compressed.events.len(), 4);
     }
+
+    // =========================================================================
+    // Wave 53 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn level_debug_clone_copy_eq() {
+        let l = Level::Structural;
+        let dbg = format!("{l:?}");
+        assert!(dbg.contains("Structural"), "{dbg}");
+        let copied = l;
+        let cloned = l.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(Level::Lossless, Level::Skeleton);
+    }
+
+    #[test]
+    fn compressed_trace_debug() {
+        let compressed = compress(&[], Level::Lossless);
+        let dbg = format!("{compressed:?}");
+        assert!(dbg.contains("CompressedTrace"), "{dbg}");
+    }
 }

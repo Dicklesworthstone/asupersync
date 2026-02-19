@@ -452,4 +452,44 @@ mod tests {
 
         assert_eq!(span.context().trace_id(), trace_id);
     }
+
+    // =========================================================================
+    // Wave 53 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn symbol_span_status_debug_clone_copy() {
+        let s = SymbolSpanStatus::InProgress;
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("InProgress"), "{dbg}");
+        let copied = s;
+        let cloned = s.clone();
+        assert_eq!(copied, cloned);
+    }
+
+    #[test]
+    fn symbol_span_kind_debug_clone_copy() {
+        let k = SymbolSpanKind::Encode;
+        let dbg = format!("{k:?}");
+        assert!(dbg.contains("Encode"), "{dbg}");
+        let copied = k;
+        let cloned = k.clone();
+        assert_eq!(copied, cloned);
+    }
+
+    #[test]
+    fn symbol_span_debug_clone() {
+        let mut rng = DetRng::new(99);
+        let ctx = SymbolTraceContext::new_for_encoding(
+            TraceId::new_for_test(99),
+            SymbolSpanId::NIL,
+            RegionTag::new("test"),
+            &mut rng,
+        );
+        let span = SymbolSpan::new_encode(ctx, ObjectId::new_for_test(99), Time::from_millis(0));
+        let dbg = format!("{span:?}");
+        assert!(dbg.contains("SymbolSpan"), "{dbg}");
+        let cloned = span.clone();
+        assert_eq!(cloned.kind(), SymbolSpanKind::Encode);
+    }
 }
