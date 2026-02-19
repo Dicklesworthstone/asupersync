@@ -953,4 +953,42 @@ mod tests {
             assert_eq!(delay, Duration::from_millis(500));
         }
     }
+
+    #[test]
+    fn retry_policy_debug_clone() {
+        let p = RetryPolicy::new();
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("RetryPolicy"), "{dbg}");
+        let cloned = p.clone();
+        assert_eq!(format!("{cloned:?}"), dbg);
+    }
+
+    #[test]
+    fn always_retry_debug_clone_copy_default() {
+        let a = AlwaysRetry::default();
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("AlwaysRetry"), "{dbg}");
+        let copied: AlwaysRetry = a;
+        let cloned = a.clone();
+        let _ = (copied, cloned);
+    }
+
+    #[test]
+    fn never_retry_debug_clone_copy_default() {
+        let n = NeverRetry::default();
+        let dbg = format!("{n:?}");
+        assert!(dbg.contains("NeverRetry"), "{dbg}");
+        let copied: NeverRetry = n;
+        let cloned = n.clone();
+        let _ = (copied, cloned);
+    }
+
+    #[test]
+    fn retry_state_debug_clone() {
+        let s = RetryState::new(RetryPolicy::new());
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("RetryState"), "{dbg}");
+        let cloned = s.clone();
+        assert_eq!(format!("{cloned:?}"), dbg);
+    }
 }

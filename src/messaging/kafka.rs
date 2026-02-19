@@ -1153,4 +1153,29 @@ mod tests {
         assert_eq!(producer.transaction_id(), "tx-4");
         assert_eq!(producer.config().transaction_id, "tx-4");
     }
+
+    #[test]
+    fn compression_debug_clone_copy_default_eq() {
+        let c = Compression::default();
+        assert_eq!(c, Compression::None);
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("None"), "{dbg}");
+        let copied: Compression = c;
+        let cloned = c.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(c, Compression::Zstd);
+    }
+
+    #[test]
+    fn acks_debug_clone_copy_default_eq() {
+        let a = Acks::default();
+        assert_eq!(a, Acks::All);
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("All"), "{dbg}");
+        let copied: Acks = a;
+        let cloned = a.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(a, Acks::Leader);
+    }
+
 }

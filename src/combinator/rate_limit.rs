@@ -1818,4 +1818,46 @@ mod tests {
         drop(state_guard);
         handle.join().expect("metrics thread should complete");
     }
+
+    #[test]
+    fn wait_strategy_debug_clone_default() {
+        let w = WaitStrategy::default();
+        let dbg = format!("{w:?}");
+        assert!(dbg.contains("Block"), "{dbg}");
+        let cloned = w.clone();
+        assert_eq!(format!("{cloned:?}"), dbg);
+    }
+
+    #[test]
+    fn rate_limit_algorithm_debug_clone_default() {
+        let a = RateLimitAlgorithm::default();
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("TokenBucket"), "{dbg}");
+        let cloned = a.clone();
+        assert_eq!(format!("{cloned:?}"), dbg);
+    }
+
+    #[test]
+    fn rate_limit_metrics_debug_clone_default() {
+        let m = RateLimitMetrics::default();
+        let dbg = format!("{m:?}");
+        assert!(dbg.contains("RateLimitMetrics"), "{dbg}");
+        assert_eq!(m.total_allowed, 0);
+        let cloned = m.clone();
+        assert_eq!(format!("{cloned:?}"), dbg);
+    }
+
+    #[test]
+    fn rate_limit_error_debug_clone_eq() {
+        let e = RateLimitError::<String>::RateLimitExceeded;
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("RateLimitExceeded"), "{dbg}");
+        let cloned = e.clone();
+        assert_eq!(e, cloned);
+
+        let e2 = RateLimitError::<String>::Timeout {
+            waited: Duration::from_millis(200),
+        };
+        assert_ne!(e, e2);
+    }
 }

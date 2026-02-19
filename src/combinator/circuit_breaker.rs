@@ -1864,4 +1864,41 @@ mod tests {
         assert_eq!(window.failure_count, 1);
         assert_eq!(window.success_count, 1);
     }
+
+    #[test]
+    fn state_debug_clone_copy_eq_default() {
+        let s = State::default();
+        assert_eq!(s, State::Closed { failures: 0 });
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("Closed"), "{dbg}");
+        let copied: State = s;
+        let cloned = s.clone();
+        assert_eq!(copied, cloned);
+
+        let open = State::Open { since_millis: 999 };
+        assert_ne!(s, open);
+        let dbg_open = format!("{open:?}");
+        assert!(dbg_open.contains("Open"), "{dbg_open}");
+    }
+
+    #[test]
+    fn circuit_breaker_metrics_debug_clone_default() {
+        let m = CircuitBreakerMetrics::default();
+        let dbg = format!("{m:?}");
+        assert!(dbg.contains("CircuitBreakerMetrics"), "{dbg}");
+        assert_eq!(m.total_success, 0);
+        let cloned = m.clone();
+        assert_eq!(format!("{cloned:?}"), dbg);
+    }
+
+    #[test]
+    fn permit_debug_clone_copy_eq() {
+        let p = Permit::Normal;
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("Normal"), "{dbg}");
+        let copied: Permit = p;
+        let cloned = p.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(p, Permit::Probe);
+    }
 }
