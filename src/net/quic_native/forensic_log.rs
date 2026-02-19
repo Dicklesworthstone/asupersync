@@ -36,6 +36,7 @@ pub const SUBSYSTEM: &str = "quic_h3_native";
 /// event categories.
 ///
 /// Each variant carries its typed payload and serializes via `serde`.
+#[allow(missing_docs)]
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type")]
 pub enum QuicH3Event {
@@ -498,6 +499,7 @@ fn current_thread_id() -> u64 {
 ///
 /// Extends the base `ReproManifest` concept with QUIC/H3-specific summaries,
 /// matching the `scenario_manifest` section of the forensic log schema.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize)]
 pub struct QuicH3ScenarioManifest {
     pub schema_id: String,
@@ -523,6 +525,7 @@ pub struct QuicH3ScenarioManifest {
 }
 
 /// A single invariant verdict entry.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize)]
 pub struct InvariantVerdict {
     pub invariant_id: String,
@@ -531,6 +534,7 @@ pub struct InvariantVerdict {
 }
 
 /// Summary of event counts by category and level.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize)]
 pub struct EventTimeline {
     pub total_events: u64,
@@ -539,6 +543,7 @@ pub struct EventTimeline {
 }
 
 /// QUIC transport metrics snapshot at scenario end.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize)]
 pub struct TransportSummary {
     pub packets_sent: u64,
@@ -577,6 +582,7 @@ impl Default for TransportSummary {
 }
 
 /// H3-level metrics at scenario end.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize)]
 pub struct H3Summary {
     pub requests_sent: u32,
@@ -604,6 +610,7 @@ impl Default for H3Summary {
 }
 
 /// An entry in the connection lifecycle state transition log.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize)]
 pub struct LifecycleTransition {
     pub from_state: String,
@@ -613,6 +620,7 @@ pub struct LifecycleTransition {
 }
 
 /// Failure fingerprint for post-mortem triage (populated only on failure).
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize)]
 pub struct FailureFingerprint {
     pub bucket: String,
@@ -811,9 +819,9 @@ impl QuicH3ScenarioManifest {
                     bucket: "assertion_failure".to_string(),
                     assertion: None,
                     backtrace_hash: None,
-                    last_event_before_failure: records.last().map(|r| {
-                        serde_json::to_value(&r.event).unwrap_or(serde_json::Value::Null)
-                    }),
+                    last_event_before_failure: records
+                        .last()
+                        .map(|r| serde_json::to_value(&r.event).unwrap_or(serde_json::Value::Null)),
                 })
             },
             passed,
@@ -952,7 +960,12 @@ mod tests {
         // Read back and verify
         let contents = std::fs::read_to_string(&ndjson_path).expect("read ndjson");
         let lines: Vec<&str> = contents.trim().lines().collect();
-        assert_eq!(lines.len(), 3, "expected 3 NDJSON lines, got {}", lines.len());
+        assert_eq!(
+            lines.len(),
+            3,
+            "expected 3 NDJSON lines, got {}",
+            lines.len()
+        );
 
         // Verify each line is valid JSON with correct envelope fields
         for line in &lines {
@@ -980,11 +993,8 @@ mod tests {
     fn test_manifest_from_logger() {
         init_test("test_manifest_from_logger");
 
-        let logger = QuicH3ForensicLogger::new(
-            "QH3-E2-MANIFEST",
-            0xDEAD_BEEF,
-            "test_manifest_from_logger",
-        );
+        let logger =
+            QuicH3ForensicLogger::new("QH3-E2-MANIFEST", 0xDEAD_BEEF, "test_manifest_from_logger");
 
         // Transport events
         logger.log(
@@ -1103,7 +1113,12 @@ mod tests {
             "pass",
             "Both endpoints reached Established",
         );
-        logger.log_invariant(1100, "inv.quic.rtt_positive", "pass", "smoothed_rtt=20000us");
+        logger.log_invariant(
+            1100,
+            "inv.quic.rtt_positive",
+            "pass",
+            "smoothed_rtt=20000us",
+        );
 
         let manifest = QuicH3ScenarioManifest::from_logger(&logger, true, 1_100_000);
 
@@ -1141,8 +1156,16 @@ mod tests {
 
         // Verify invariants
         assert_eq!(manifest.invariant_ids.len(), 2);
-        assert!(manifest.invariant_ids.contains(&"inv.quic.handshake_completes".to_string()));
-        assert!(manifest.invariant_ids.contains(&"inv.quic.rtt_positive".to_string()));
+        assert!(
+            manifest
+                .invariant_ids
+                .contains(&"inv.quic.handshake_completes".to_string())
+        );
+        assert!(
+            manifest
+                .invariant_ids
+                .contains(&"inv.quic.rtt_positive".to_string())
+        );
         assert_eq!(manifest.invariant_verdicts.len(), 2);
         assert_eq!(manifest.invariant_verdicts[0].verdict, "pass");
 
@@ -1154,8 +1177,16 @@ mod tests {
         );
 
         // Verify replay command
-        assert!(manifest.replay_command.contains("ASUPERSYNC_SEED=0xDEADBEEF"));
-        assert!(manifest.replay_command.contains("test_manifest_from_logger"));
+        assert!(
+            manifest
+                .replay_command
+                .contains("ASUPERSYNC_SEED=0xDEADBEEF")
+        );
+        assert!(
+            manifest
+                .replay_command
+                .contains("test_manifest_from_logger")
+        );
 
         // Verify trace fingerprint is non-empty
         assert!(!manifest.trace_fingerprint.is_empty());
@@ -1178,8 +1209,7 @@ mod tests {
     fn test_invariant_logging() {
         init_test("test_invariant_logging");
 
-        let logger =
-            QuicH3ForensicLogger::new("QH3-INV-TEST", 0xFACE, "test_invariant_logging");
+        let logger = QuicH3ForensicLogger::new("QH3-INV-TEST", 0xFACE, "test_invariant_logging");
 
         logger.log_invariant(
             100,
@@ -1199,7 +1229,12 @@ mod tests {
             "fail",
             "DATA frame preceded SETTINGS on control stream",
         );
-        logger.log_invariant(400, "inv.quic.cwnd_never_below_minimum", "skip", "No cwnd events");
+        logger.log_invariant(
+            400,
+            "inv.quic.cwnd_never_below_minimum",
+            "skip",
+            "No cwnd events",
+        );
 
         assert_eq!(logger.event_count(), 4);
 
@@ -1213,8 +1248,14 @@ mod tests {
 
         // Invariant IDs should be sorted and deduped
         assert_eq!(manifest.invariant_ids.len(), 4);
-        assert_eq!(manifest.invariant_ids[0], "inv.h3.settings_before_other_frames");
-        assert_eq!(manifest.invariant_ids[1], "inv.quic.cwnd_never_below_minimum");
+        assert_eq!(
+            manifest.invariant_ids[0],
+            "inv.h3.settings_before_other_frames"
+        );
+        assert_eq!(
+            manifest.invariant_ids[1],
+            "inv.quic.cwnd_never_below_minimum"
+        );
         assert_eq!(manifest.invariant_ids[2], "inv.quic.handshake_completes");
         assert_eq!(manifest.invariant_ids[3], "inv.quic.rtt_positive");
 
@@ -1251,17 +1292,109 @@ mod tests {
             assert_eq!(parsed["event"], "invariant_checkpoint");
             assert_eq!(parsed["category"], "test_harness");
             // The invariant field should be set for checkpoint events
-            assert!(parsed["invariant"].is_string(), "invariant field should be set");
+            assert!(
+                parsed["invariant"].is_string(),
+                "invariant field should be set"
+            );
         }
 
         // Verify specific invariant fields in the first event
         let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(
-            first["invariant"],
-            "inv.quic.handshake_completes"
-        );
+        assert_eq!(first["invariant"], "inv.quic.handshake_completes");
         assert_eq!(first["data"]["verdict"], "pass");
 
         crate::test_complete!("test_invariant_logging");
+    }
+
+    #[test]
+    fn quic_h3_event_debug_clone() {
+        let ev = QuicH3Event::PacketSent {
+            pn_space: "initial".into(),
+            packet_number: 0,
+            size_bytes: 1200,
+            ack_eliciting: true,
+            in_flight: true,
+            send_time_us: 100,
+        };
+        let dbg = format!("{ev:?}");
+        assert!(dbg.contains("PacketSent"), "{dbg}");
+        let cloned = ev.clone();
+        let dbg2 = format!("{cloned:?}");
+        assert_eq!(dbg, dbg2);
+    }
+
+    #[test]
+    fn invariant_verdict_debug_clone() {
+        let v = InvariantVerdict {
+            invariant_id: "inv.test".into(),
+            verdict: "pass".into(),
+            details: "ok".into(),
+        };
+        let dbg = format!("{v:?}");
+        assert!(dbg.contains("inv.test"), "{dbg}");
+        let cloned = v.clone();
+        assert_eq!(format!("{cloned:?}"), dbg);
+    }
+
+    #[test]
+    fn event_timeline_debug_clone() {
+        let t = EventTimeline {
+            total_events: 42,
+            by_category: BTreeMap::new(),
+            by_level: BTreeMap::new(),
+        };
+        let dbg = format!("{t:?}");
+        assert!(dbg.contains("42"), "{dbg}");
+        let cloned = t.clone();
+        assert_eq!(format!("{cloned:?}"), dbg);
+    }
+
+    #[test]
+    fn transport_summary_debug_clone_default() {
+        let s = TransportSummary::default();
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("TransportSummary"), "{dbg}");
+        assert_eq!(s.packets_sent, 0);
+        let cloned = s.clone();
+        assert_eq!(format!("{cloned:?}"), dbg);
+    }
+
+    #[test]
+    fn h3_summary_debug_clone_default() {
+        let h = H3Summary::default();
+        let dbg = format!("{h:?}");
+        assert!(dbg.contains("H3Summary"), "{dbg}");
+        assert_eq!(h.requests_sent, 0);
+        assert!(!h.settings_exchanged);
+        let cloned = h.clone();
+        assert_eq!(format!("{cloned:?}"), dbg);
+    }
+
+    #[test]
+    fn lifecycle_transition_debug_clone() {
+        let t = LifecycleTransition {
+            from_state: "idle".into(),
+            to_state: "handshaking".into(),
+            ts_us: 100,
+            trigger: "begin".into(),
+        };
+        let dbg = format!("{t:?}");
+        assert!(dbg.contains("idle"), "{dbg}");
+        let cloned = t.clone();
+        assert_eq!(format!("{cloned:?}"), dbg);
+    }
+
+    #[test]
+    fn failure_fingerprint_debug_clone() {
+        let f = FailureFingerprint {
+            bucket: "timeout".into(),
+            assertion: Some("expected ok".into()),
+            backtrace_hash: None,
+            last_event_before_failure: None,
+        };
+        let dbg = format!("{f:?}");
+        assert!(dbg.contains("timeout"), "{dbg}");
+        let cloned = f.clone();
+        assert_eq!(format!("{cloned:?}"), dbg);
     }
 }

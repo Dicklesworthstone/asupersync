@@ -1082,7 +1082,11 @@ mod tests {
         // Trigger loss to set ssthresh via on_loss_congestion.
         // Send packets 0..5, ack only pkt 5 => pkt 0,1,2 lost (packet threshold).
         for pn in 0..6 {
-            t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, pn, 10_000 + pn * 100));
+            t.on_packet_sent(sent(
+                PacketNumberSpace::ApplicationData,
+                pn,
+                10_000 + pn * 100,
+            ));
         }
         let event = t.on_ack_received(PacketNumberSpace::ApplicationData, &[5], 0, 50_000);
         assert!(event.lost_packets > 0, "should have loss");
@@ -1272,6 +1276,67 @@ mod tests {
         let event = t.on_ack_received(PacketNumberSpace::Handshake, &[5], 0, 2_000);
         assert_eq!(event.acked_packets, 0);
         assert_eq!(t.bytes_in_flight(), 100);
+    }
+
+    #[test]
+    fn packet_number_space_debug_clone_copy_eq() {
+        let sp = PacketNumberSpace::ApplicationData;
+        let dbg = format!("{sp:?}");
+        assert!(dbg.contains("ApplicationData"), "{dbg}");
+        let copied: PacketNumberSpace = sp;
+        let cloned = sp.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(sp, PacketNumberSpace::Initial);
+    }
+
+    #[test]
+    fn sent_packet_meta_debug_clone_eq() {
+        let m = SentPacketMeta {
+            space: PacketNumberSpace::Handshake,
+            packet_number: 7,
+            bytes: 1200,
+            ack_eliciting: true,
+            in_flight: true,
+            time_sent_micros: 500,
+        };
+        let dbg = format!("{m:?}");
+        assert!(dbg.contains("Handshake"), "{dbg}");
+        let cloned = m.clone();
+        assert_eq!(m, cloned);
+    }
+
+    #[test]
+    fn ack_range_debug_clone_copy_eq() {
+        let r = AckRange::new(10, 5).unwrap();
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("10"), "{dbg}");
+        let copied: AckRange = r;
+        let cloned = r.clone();
+        assert_eq!(copied, cloned);
+        assert_eq!(r, AckRange::new(10, 5).unwrap());
+    }
+
+    #[test]
+    fn ack_event_debug_clone_eq() {
+        let e = AckEvent {
+            acked_packets: 3,
+            lost_packets: 1,
+            acked_bytes: 3600,
+            lost_bytes: 1200,
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("3600"), "{dbg}");
+        let cloned = e.clone();
+        assert_eq!(e, cloned);
+    }
+
+    #[test]
+    fn rtt_estimator_debug_clone_default_eq() {
+        let r = RttEstimator::default();
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("RttEstimator"), "{dbg}");
+        let cloned = r.clone();
+        assert_eq!(r, cloned);
     }
 
     // ---- Gap 10: start_draining without code -> close_code() stays None ----

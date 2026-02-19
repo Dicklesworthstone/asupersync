@@ -566,4 +566,40 @@ mod tests {
         let headers: Vec<(String, String)> = vec![];
         assert_eq!(accept_encoding_from_headers(&headers), None);
     }
+
+    #[test]
+    fn content_encoding_debug_clone_copy_hash_eq() {
+        use std::collections::HashSet;
+        let gz = ContentEncoding::Gzip;
+        let dbg = format!("{gz:?}");
+        assert!(dbg.contains("Gzip"), "{dbg}");
+
+        let copied: ContentEncoding = gz;
+        let cloned = gz.clone();
+        assert_eq!(copied, cloned);
+        assert_eq!(gz, ContentEncoding::Gzip);
+        assert_ne!(gz, ContentEncoding::Brotli);
+
+        let mut set = HashSet::new();
+        set.insert(ContentEncoding::Identity);
+        set.insert(ContentEncoding::Gzip);
+        set.insert(ContentEncoding::Deflate);
+        set.insert(ContentEncoding::Brotli);
+        assert_eq!(set.len(), 4);
+        assert!(set.contains(&ContentEncoding::Gzip));
+    }
+
+    #[test]
+    fn identity_compressor_debug_default() {
+        let c = IdentityCompressor::default();
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("IdentityCompressor"), "{dbg}");
+    }
+
+    #[test]
+    fn identity_decompressor_debug_default() {
+        let d = IdentityDecompressor::default();
+        let dbg = format!("{d:?}");
+        assert!(dbg.contains("IdentityDecompressor"), "{dbg}");
+    }
 }

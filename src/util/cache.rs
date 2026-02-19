@@ -140,6 +140,18 @@ mod tests {
     }
 
     #[test]
+    fn cache_padded_debug_clone_copy() {
+        let p = CachePadded::new(42u64);
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("42"), "{dbg}");
+
+        let copied: CachePadded<u64> = p;
+        let cloned = p.clone();
+        assert_eq!(*copied, 42);
+        assert_eq!(*cloned, 42);
+    }
+
+    #[test]
     fn two_padded_values_dont_share_cache_line() {
         let a = CachePadded::new(1u64);
         let b = CachePadded::new(2u64);
