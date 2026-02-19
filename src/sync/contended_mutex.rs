@@ -577,6 +577,41 @@ mod tests {
         crate::test_complete!("poisoned_lock_does_not_count_as_contention");
     }
 
+    // =========================================================================
+    // Wave 33: Data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn lock_metrics_snapshot_debug_clone_default() {
+        let snap = LockMetricsSnapshot::default();
+        let dbg = format!("{snap:?}");
+        assert!(dbg.contains("LockMetricsSnapshot"));
+        assert_eq!(snap.acquisitions, 0);
+        assert_eq!(snap.contentions, 0);
+        assert_eq!(snap.wait_ns, 0);
+        assert_eq!(snap.hold_ns, 0);
+        assert_eq!(snap.max_wait_ns, 0);
+        assert_eq!(snap.max_hold_ns, 0);
+        let cloned = snap.clone();
+        assert_eq!(cloned.name, snap.name);
+    }
+
+    #[test]
+    fn contended_mutex_debug() {
+        let m = ContendedMutex::new("test", 42_i32);
+        let dbg = format!("{m:?}");
+        assert!(dbg.contains("ContendedMutex"));
+    }
+
+    #[test]
+    fn contended_mutex_guard_debug() {
+        let m = ContendedMutex::new("test", 42_i32);
+        let guard = m.lock().expect("poisoned");
+        let dbg = format!("{guard:?}");
+        assert!(dbg.contains("ContendedMutexGuard"));
+        drop(guard);
+    }
+
     #[test]
     fn try_lock_returns_poisoned_after_panic() {
         init_test("try_lock_returns_poisoned_after_panic");

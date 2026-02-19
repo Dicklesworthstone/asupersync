@@ -594,6 +594,71 @@ mod tests {
         );
     }
 
+    // =========================================================================
+    // Wave 33: Data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn tracked_sender_debug() {
+        let (tx, _rx) = tracked_channel::<i32>(10);
+        let dbg = format!("{tx:?}");
+        assert!(dbg.contains("TrackedSender"));
+    }
+
+    #[test]
+    fn tracked_sender_clone_is_closed() {
+        let (tx, rx) = tracked_channel::<i32>(10);
+        let cloned = tx.clone();
+        assert!(!cloned.is_closed());
+        drop(rx);
+        assert!(tx.is_closed());
+    }
+
+    #[test]
+    fn tracked_permit_debug() {
+        let (tx, _rx) = tracked_channel::<i32>(10);
+        let permit = tx.try_reserve().expect("reserve");
+        let dbg = format!("{permit:?}");
+        assert!(dbg.contains("TrackedPermit"));
+        let _ = permit.abort();
+    }
+
+    #[test]
+    fn tracked_oneshot_sender_debug() {
+        let (tx, _rx) = tracked_oneshot::<i32>();
+        let dbg = format!("{tx:?}");
+        assert!(dbg.contains("TrackedOneshotSender"));
+    }
+
+    #[test]
+    fn tracked_oneshot_sender_is_closed() {
+        let (tx, rx) = tracked_oneshot::<i32>();
+        assert!(!tx.is_closed());
+        drop(rx);
+        assert!(tx.is_closed());
+    }
+
+    #[test]
+    fn tracked_oneshot_permit_debug() {
+        let cx = test_cx();
+        let (tx, _rx) = tracked_oneshot::<i32>();
+        let permit = tx.reserve(&cx);
+        let dbg = format!("{permit:?}");
+        assert!(dbg.contains("TrackedOneshotPermit"));
+        let _ = permit.abort();
+    }
+
+    #[test]
+    fn tracked_oneshot_permit_is_closed() {
+        let cx = test_cx();
+        let (tx, rx) = tracked_oneshot::<i32>();
+        let permit = tx.reserve(&cx);
+        assert!(!permit.is_closed());
+        drop(rx);
+        assert!(permit.is_closed());
+        let _ = permit.abort();
+    }
+
     // 12. Dropped oneshot receiver: convenience send returns disconnected and original value.
     #[test]
     fn tracked_oneshot_convenience_send_returns_disconnected_when_receiver_dropped() {
