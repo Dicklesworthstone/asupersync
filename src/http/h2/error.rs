@@ -396,4 +396,21 @@ mod tests {
         );
         crate::test_complete!("test_h2error_from_str_protocol");
     }
+
+    #[test]
+    fn error_code_debug_clone_copy_eq_hash() {
+        use std::collections::HashSet;
+        let a = ErrorCode::Cancel;
+        let b = a; // Copy
+        let c = a.clone();
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+        assert_ne!(a, ErrorCode::NoError);
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("Cancel"));
+        let mut set = HashSet::new();
+        set.insert(a);
+        assert!(set.contains(&b));
+        assert!(!set.contains(&ErrorCode::FlowControlError));
+    }
 }

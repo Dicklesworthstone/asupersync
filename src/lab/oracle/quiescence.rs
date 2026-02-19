@@ -433,4 +433,30 @@ mod tests {
         );
         crate::test_complete!("both_tasks_and_children_must_complete");
     }
+
+    #[test]
+    fn quiescence_violation_debug_clone() {
+        let v = QuiescenceViolation {
+            region: region(1),
+            live_children: vec![region(2), region(3)],
+            live_tasks: vec![task(10)],
+            close_time: t(500),
+        };
+        let cloned = v.clone();
+        assert_eq!(cloned.region, v.region);
+        assert_eq!(cloned.live_children.len(), 2);
+        assert_eq!(cloned.live_tasks.len(), 1);
+        let dbg = format!("{v:?}");
+        assert!(dbg.contains("QuiescenceViolation"));
+    }
+
+    #[test]
+    fn quiescence_oracle_debug_default() {
+        let oracle = QuiescenceOracle::default();
+        let dbg = format!("{oracle:?}");
+        assert!(dbg.contains("QuiescenceOracle"));
+        let oracle2 = QuiescenceOracle::new();
+        let dbg2 = format!("{oracle2:?}");
+        assert_eq!(dbg, dbg2);
+    }
 }

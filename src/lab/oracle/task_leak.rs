@@ -409,4 +409,28 @@ mod tests {
         crate::assert_with_log!(has_four, "contains task4", true, has_four);
         crate::test_complete!("many_tasks_some_leaked");
     }
+
+    #[test]
+    fn task_leak_violation_debug_clone() {
+        let v = TaskLeakViolation {
+            region: region(5),
+            leaked_tasks: vec![task(1), task(2)],
+            region_close_time: t(999),
+        };
+        let cloned = v.clone();
+        assert_eq!(cloned.region, v.region);
+        assert_eq!(cloned.leaked_tasks.len(), 2);
+        let dbg = format!("{v:?}");
+        assert!(dbg.contains("TaskLeakViolation"));
+    }
+
+    #[test]
+    fn task_leak_oracle_debug_default() {
+        let oracle = TaskLeakOracle::default();
+        let dbg = format!("{oracle:?}");
+        assert!(dbg.contains("TaskLeakOracle"));
+        let oracle2 = TaskLeakOracle::new();
+        let dbg2 = format!("{oracle2:?}");
+        assert_eq!(dbg, dbg2);
+    }
 }

@@ -224,4 +224,17 @@ mod tests {
         crate::assert_with_log!(opts.mode == Some(0o600), "mode", Some(0o600), opts.mode);
         crate::test_complete!("mode_option_unix");
     }
+
+    #[test]
+    fn open_options_debug_clone_default() {
+        let opts = OpenOptions::new();
+        let cloned = opts.clone();
+        let dbg = format!("{opts:?}");
+        assert!(dbg.contains("OpenOptions"));
+        let dbg2 = format!("{cloned:?}");
+        assert_eq!(dbg, dbg2);
+        let default_opts = OpenOptions::default();
+        let dbg3 = format!("{default_opts:?}");
+        assert_eq!(dbg, dbg3);
+    }
 }
