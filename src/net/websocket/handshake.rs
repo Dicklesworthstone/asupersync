@@ -1036,10 +1036,7 @@ mod tests {
 
     #[test]
     fn http_request_debug_clone() {
-        let r = HttpRequest::parse(
-            b"GET /test HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        )
-        .unwrap();
+        let r = HttpRequest::parse(b"GET /test HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
         let dbg = format!("{:?}", r);
         assert!(dbg.contains("HttpRequest"));
 

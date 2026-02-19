@@ -1177,5 +1177,4 @@ mod tests {
         assert_eq!(copied, cloned);
         assert_ne!(a, Acks::Leader);
     }
-
 }

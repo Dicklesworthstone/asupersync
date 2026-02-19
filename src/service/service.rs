@@ -1330,6 +1330,9 @@ mod tests {
         let e2 = e.clone();
         assert_eq!(e, e2);
 
-        assert_ne!(TowerAdapterError::<String>::Cancelled, TowerAdapterError::Timeout);
+        assert_ne!(
+            TowerAdapterError::<String>::Cancelled,
+            TowerAdapterError::Timeout
+        );
     }
 }

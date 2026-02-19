@@ -764,9 +764,7 @@ mod tests {
 
     #[test]
     fn recovery_action_debug_clone_eq() {
-        let a = RecoveryAction::ConflictResolved {
-            id: oid(42),
-        };
+        let a = RecoveryAction::ConflictResolved { id: oid(42) };
         let dbg = format!("{:?}", a);
         assert!(dbg.contains("ConflictResolved"));
 

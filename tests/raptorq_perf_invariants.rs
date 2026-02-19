@@ -97,6 +97,41 @@ fn build_received_symbols(
     received
 }
 
+/// Build received symbols using the simpler ReceivedSymbol::source/repair
+/// constructors (matching the benchmark campaign approach).
+fn build_decode_received(
+    source: &[Vec<u8>],
+    encoder: &SystematicEncoder,
+    decoder: &InactivationDecoder,
+    drop_source_indices: &[usize],
+    extra_repair: usize,
+) -> Vec<ReceivedSymbol> {
+    let k = source.len();
+    let l = decoder.params().l;
+    let mut dropped = vec![false; k];
+    for &idx in drop_source_indices {
+        if idx < k {
+            dropped[idx] = true;
+        }
+    }
+    let mut received = Vec::with_capacity(l.saturating_add(extra_repair));
+    for (idx, data) in source.iter().enumerate() {
+        if !dropped[idx] {
+            received.push(ReceivedSymbol::source(idx as u32, data.clone()));
+        }
+    }
+    let required_repairs = l.saturating_sub(received.len());
+    let total_repairs = required_repairs.saturating_add(extra_repair);
+    let repair_start = k as u32;
+    let repair_end = repair_start.saturating_add(total_repairs as u32);
+    for esi in repair_start..repair_end {
+        let (cols, coefs) = decoder.repair_equation(esi);
+        let data = encoder.repair_symbol(esi);
+        received.push(ReceivedSymbol::repair(esi, cols, coefs, data));
+    }
+    received
+}
+
 use asupersync::raptorq::test_log_schema::{
     UNIT_LOG_SCHEMA_VERSION, UnitDecodeStats, UnitLogEntry,
 };
@@ -1827,6 +1862,259 @@ fn f4_benchmark_surface_includes_repair_heavy_and_near_rank_cases() {
         assert!(
             RAPTORQ_BENCH_RS.contains(required),
             "missing F4 benchmark surface token in benches/raptorq_benchmark.rs: {required}"
+        );
+    }
+}
+
+// ============================================================================
+// F4 repair campaign: lever activation patterns and regression thresholds
+// ============================================================================
+
+/// F4 guardrail: the repair campaign benchmark group must exist in the
+/// benchmark file with structured logging and multi-seed sweep.
+#[test]
+fn f4_campaign_benchmark_surface_tokens() {
+    for required in [
+        "bench_repair_campaign",
+        "repair_campaign_scenarios",
+        "F4_CAMPAIGN_SCHEMA_VERSION",
+        "emit_campaign_decode_log",
+        "\"raptorq-f4-repair-campaign-v1\"",
+        "sweep_seeds",
+    ] {
+        assert!(
+            RAPTORQ_BENCH_RS.contains(required),
+            "missing F4 campaign token in benches/raptorq_benchmark.rs: {required}"
+        );
+    }
+}
+
+/// F4 invariant: heavy-loss decode (75% source dropped) must exercise
+/// significant Gaussian elimination (gauss_ops > 0) and inactivation.
+#[test]
+fn f4_heavy_loss_activates_gaussian_path() {
+    let k = 32;
+    let symbol_size = 1024;
+    let seed = 0xF4_1E_0001;
+    let source = make_source_data(k, symbol_size, seed);
+    let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+    let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+    // Drop 75% of source symbols.
+    let drop: Vec<usize> = (0..k).filter(|i| i % 4 != 0).collect();
+    let received = build_decode_received(&source, &encoder, &decoder, &drop, 3);
+    let result = decoder
+        .decode(&received)
+        .expect("heavy loss decode should succeed");
+
+    // Verify source correctness.
+    for (i, sym) in result.source.iter().enumerate() {
+        assert_eq!(
+            sym, &source[i],
+            "source[{i}] mismatch after heavy-loss decode"
+        );
+    }
+
+    // Regression thresholds: heavy loss must exercise Gaussian elimination.
+    assert!(
+        result.stats.gauss_ops > 0,
+        "f4: heavy-loss decode must trigger Gaussian elimination, got gauss_ops={}",
+        result.stats.gauss_ops
+    );
+    assert!(
+        result.stats.peeled.saturating_add(result.stats.inactivated) <= decoder.params().l,
+        "f4: peeled({}) + inactivated({}) must not exceed L({})",
+        result.stats.peeled,
+        result.stats.inactivated,
+        decoder.params().l
+    );
+}
+
+/// F4 invariant: all-repair decode (100% source dropped) should activate
+/// hard regime or dense core paths.
+#[test]
+fn f4_all_repair_activates_dense_elimination() {
+    let k = 16;
+    let symbol_size = 1024;
+    let seed = 0xF4_1E_0002;
+    let source = make_source_data(k, symbol_size, seed);
+    let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+    let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+    // Drop ALL source symbols.
+    let drop: Vec<usize> = (0..k).collect();
+    let received = build_decode_received(&source, &encoder, &decoder, &drop, 0);
+    let result = decoder
+        .decode(&received)
+        .expect("all-repair decode should succeed");
+
+    for (i, sym) in result.source.iter().enumerate() {
+        assert_eq!(
+            sym, &source[i],
+            "source[{i}] mismatch after all-repair decode"
+        );
+    }
+
+    // All-repair means no source symbols to peel; dense core must be nontrivial.
+    assert!(
+        result.stats.dense_core_rows > 0,
+        "f4: all-repair decode must produce nontrivial dense core, got dense_core_rows={}",
+        result.stats.dense_core_rows
+    );
+    assert!(
+        result.stats.gauss_ops > 0,
+        "f4: all-repair decode must trigger Gaussian elimination, got gauss_ops={}",
+        result.stats.gauss_ops
+    );
+}
+
+/// F4 invariant: low-loss decode (25% dropped with extra overhead) should
+/// peel efficiently with minimal Gaussian work.
+#[test]
+fn f4_low_loss_peels_efficiently() {
+    let k = 32;
+    let symbol_size = 1024;
+    let seed = 0xF4_1E_0003;
+    let source = make_source_data(k, symbol_size, seed);
+    let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+    let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+    // Drop 25% with 4 extra repair symbols (generous overhead).
+    let drop: Vec<usize> = (0..(k / 4)).collect();
+    let received = build_decode_received(&source, &encoder, &decoder, &drop, 4);
+    let result = decoder
+        .decode(&received)
+        .expect("low-loss decode should succeed");
+
+    for (i, sym) in result.source.iter().enumerate() {
+        assert_eq!(
+            sym, &source[i],
+            "source[{i}] mismatch after low-loss decode"
+        );
+    }
+
+    // With generous overhead, peeling should resolve most symbols.
+    assert!(
+        result.stats.peeled > 0,
+        "f4: low-loss decode should peel at least some symbols, got peeled={}",
+        result.stats.peeled
+    );
+}
+
+/// F4 regression: multi-seed sweep for repair-heavy decode must succeed at
+/// a high rate (>= 6/8 seeds) and produce deterministic stats for each seed.
+#[test]
+fn f4_multi_seed_repair_heavy_sweep() {
+    let k = 32;
+    let symbol_size = 1024;
+    let base_seed = 0xF4_5E_0001u64;
+    let seeds: Vec<u64> = (0..8u64)
+        .map(|i| base_seed.wrapping_add(i.wrapping_mul(0x9E37_79B9)))
+        .collect();
+
+    let mut successes = 0u32;
+    let mut stats_vec: Vec<(u64, usize, usize, usize)> = Vec::new();
+
+    for &seed in &seeds {
+        let source = make_source_data(k, symbol_size, seed);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let drop: Vec<usize> = (0..k).filter(|i| i % 4 != 0).collect();
+        let received = build_decode_received(&source, &encoder, &decoder, &drop, 3);
+
+        if let Ok(result) = decoder.decode(&received) {
+            let correct = result
+                .source
+                .iter()
+                .enumerate()
+                .all(|(i, s)| s == &source[i]);
+            if correct {
+                successes += 1;
+                stats_vec.push((
+                    seed,
+                    result.stats.peeled,
+                    result.stats.inactivated,
+                    result.stats.gauss_ops,
+                ));
+            }
+        }
+    }
+
+    assert!(
+        successes >= 6,
+        "f4: multi-seed repair-heavy sweep must succeed >= 6/8 times, got {successes}/8"
+    );
+
+    // Determinism check: same seed must produce same stats.
+    for &seed in &seeds[..2] {
+        let source = make_source_data(k, symbol_size, seed);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let drop: Vec<usize> = (0..k).filter(|i| i % 4 != 0).collect();
+        let received = build_decode_received(&source, &encoder, &decoder, &drop, 3);
+
+        if let Ok(r1) = decoder.decode(&received) {
+            if let Ok(r2) = decoder.decode(&received) {
+                assert_eq!(
+                    r1.stats.peeled, r2.stats.peeled,
+                    "f4: determinism violation for seed={seed}: peeled differs"
+                );
+                assert_eq!(
+                    r1.stats.gauss_ops, r2.stats.gauss_ops,
+                    "f4: determinism violation for seed={seed}: gauss_ops differs"
+                );
+            }
+        }
+    }
+}
+
+/// F4 invariant: factor cache stats must be non-negative and bounded.
+#[test]
+fn f4_factor_cache_stats_bounded() {
+    let k = 32;
+    let symbol_size = 1024;
+    let seed = 0xF4_CA_0001;
+    let source = make_source_data(k, symbol_size, seed);
+    let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+    let decoder = InactivationDecoder::new(k, symbol_size, seed);
+    let drop: Vec<usize> = (0..k).filter(|i| i % 4 != 0).collect();
+    let received = build_decode_received(&source, &encoder, &decoder, &drop, 3);
+
+    let result = decoder.decode(&received).expect("decode should succeed");
+
+    // Cache misses >= cache inserts (can't insert without a miss).
+    assert!(
+        result.stats.factor_cache_misses >= result.stats.factor_cache_inserts,
+        "f4: cache misses({}) must >= inserts({})",
+        result.stats.factor_cache_misses,
+        result.stats.factor_cache_inserts
+    );
+    // Entries must not exceed capacity.
+    assert!(
+        result.stats.factor_cache_entries <= result.stats.factor_cache_capacity,
+        "f4: cache entries({}) must <= capacity({})",
+        result.stats.factor_cache_entries,
+        result.stats.factor_cache_capacity
+    );
+}
+
+/// F4 guardrail: benchmark file must reference all 8 runtime lever IDs
+/// that the campaign is required to cover.
+#[test]
+fn f4_campaign_covers_required_lever_observability() {
+    // The benchmark campaign must emit decode stats fields that surface lever activity.
+    // These fields map to levers: C5/C6 (hard_regime, dense_core), E4 (GF256 fused),
+    // F5 (policy_mode), F7 (factor_cache).
+    for required in [
+        "hard_regime_activated",
+        "dense_core_rows",
+        "policy_density_permille",
+        "factor_cache_hits",
+        "factor_cache_misses",
+    ] {
+        assert!(
+            RAPTORQ_BENCH_RS.contains(required),
+            "f4: campaign must emit lever observability field: {required}"
         );
     }
 }

@@ -1587,7 +1587,10 @@ mod tests {
 
     #[test]
     fn coverage_tracker_debug_clone() {
-        let t = CoverageTracker { total: 10, covered: 9 };
+        let t = CoverageTracker {
+            total: 10,
+            covered: 9,
+        };
         let dbg = format!("{:?}", t);
         assert!(dbg.contains("CoverageTracker"));
 

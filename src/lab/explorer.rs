@@ -1625,7 +1625,10 @@ mod tests {
         let m3 = m;
         assert_eq!(m, m3);
 
-        assert_ne!(ExplorationMode::Baseline, ExplorationMode::TopologyPrioritized);
+        assert_ne!(
+            ExplorationMode::Baseline,
+            ExplorationMode::TopologyPrioritized
+        );
     }
 
     #[test]

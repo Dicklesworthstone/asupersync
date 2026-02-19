@@ -2729,7 +2729,10 @@ mod tests {
         let r3 = r;
         assert_eq!(r, r3);
 
-        assert_ne!(IndependenceResult::Independent, IndependenceResult::Dependent);
+        assert_ne!(
+            IndependenceResult::Independent,
+            IndependenceResult::Dependent
+        );
     }
 
     #[test]
@@ -2741,6 +2744,9 @@ mod tests {
         let h2 = h.clone();
         assert_eq!(h, h2);
 
-        assert_ne!(TraceEquivalenceHint::Atomic, TraceEquivalenceHint::Sequential);
+        assert_ne!(
+            TraceEquivalenceHint::Atomic,
+            TraceEquivalenceHint::Sequential
+        );
     }
 }

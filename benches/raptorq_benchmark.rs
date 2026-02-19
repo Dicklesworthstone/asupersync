@@ -11,7 +11,7 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
+use asupersync::raptorq::decoder::{DecodeStats, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::{
     Gf256, dual_addmul_kernel_decision, dual_kernel_policy_snapshot, dual_mul_kernel_decision,
     gf256_add_slice, gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slice, gf256_mul_slices2,
@@ -881,6 +881,291 @@ fn bench_encode_decode(c: &mut Criterion) {
 }
 
 // ============================================================================
+// F4 Repair Campaign: multi-seed sweep with lever-aware structured logging
+// ============================================================================
+
+const F4_CAMPAIGN_SCHEMA_VERSION: &str = "raptorq-f4-repair-campaign-v1";
+const F4_CAMPAIGN_REPRO_CMD: &str =
+    "rch exec -- cargo bench --bench raptorq_benchmark -- repair_campaign";
+
+/// Campaign scenario parameterising one repair-heavy decode configuration.
+#[derive(Clone)]
+struct RepairCampaignScenario {
+    scenario_id: &'static str,
+    k: usize,
+    symbol_size: usize,
+    seed: u64,
+    /// Fraction of source symbols to drop (0.0–1.0).
+    loss_fraction: f64,
+    /// Extra repair symbols beyond exact rank.
+    extra_repair: usize,
+    /// Which loss pattern to use: "uniform", "clustered", "alternating".
+    loss_pattern: &'static str,
+}
+
+fn repair_campaign_scenarios() -> Vec<RepairCampaignScenario> {
+    vec![
+        // Heavy uniform loss with moderate overhead
+        RepairCampaignScenario {
+            scenario_id: "RQ-F4-CAMP-001",
+            k: 32,
+            symbol_size: 1024,
+            seed: 0xF4_0001,
+            loss_fraction: 0.75,
+            extra_repair: 3,
+            loss_pattern: "uniform",
+        },
+        // All-repair worst case
+        RepairCampaignScenario {
+            scenario_id: "RQ-F4-CAMP-002",
+            k: 16,
+            symbol_size: 1024,
+            seed: 0xF4_0002,
+            loss_fraction: 1.0,
+            extra_repair: 0,
+            loss_pattern: "uniform",
+        },
+        // Near-rank-deficient with clustered loss
+        RepairCampaignScenario {
+            scenario_id: "RQ-F4-CAMP-003",
+            k: 32,
+            symbol_size: 1024,
+            seed: 0xF4_0003,
+            loss_fraction: 0.50,
+            extra_repair: 1,
+            loss_pattern: "clustered",
+        },
+        // Large k, alternating loss pattern
+        RepairCampaignScenario {
+            scenario_id: "RQ-F4-CAMP-004",
+            k: 64,
+            symbol_size: 256,
+            seed: 0xF4_0004,
+            loss_fraction: 0.50,
+            extra_repair: 2,
+            loss_pattern: "alternating",
+        },
+        // Small k high loss (Gaussian elimination dominant)
+        RepairCampaignScenario {
+            scenario_id: "RQ-F4-CAMP-005",
+            k: 8,
+            symbol_size: 256,
+            seed: 0xF4_0005,
+            loss_fraction: 0.875,
+            extra_repair: 1,
+            loss_pattern: "uniform",
+        },
+        // Medium k with extra overhead (should peel well)
+        RepairCampaignScenario {
+            scenario_id: "RQ-F4-CAMP-006",
+            k: 32,
+            symbol_size: 1024,
+            seed: 0xF4_0006,
+            loss_fraction: 0.25,
+            extra_repair: 4,
+            loss_pattern: "uniform",
+        },
+    ]
+}
+
+fn compute_drop_indices(k: usize, loss_fraction: f64, loss_pattern: &str, seed: u64) -> Vec<usize> {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let n_drop = ((k as f64) * loss_fraction).round() as usize;
+    let n_drop = n_drop.min(k);
+    match loss_pattern {
+        "uniform" => (0..n_drop).collect(),
+        "clustered" => (0..n_drop).collect(),
+        "alternating" => {
+            let mut indices: Vec<usize> = (0..k).filter(|i| i % 2 != 0).collect();
+            // If we need more drops, add even indices deterministically.
+            let mut extra_seed = seed;
+            while indices.len() < n_drop && indices.len() < k {
+                extra_seed = extra_seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let candidate = (extra_seed as usize) % k;
+                if !indices.contains(&candidate) {
+                    indices.push(candidate);
+                }
+            }
+            indices.truncate(n_drop);
+            indices.sort_unstable();
+            indices
+        }
+        _ => (0..n_drop).collect(),
+    }
+}
+
+fn emit_campaign_decode_log(scenario: &RepairCampaignScenario, stats: &DecodeStats, outcome: &str) {
+    eprintln!(
+        "{{\"schema_version\":\"{}\",\"scenario_id\":\"{}\",\"seed\":{},\"k\":{},\"symbol_size\":{},\
+         \"loss_fraction\":{:.3},\"loss_pattern\":\"{}\",\"extra_repair\":{},\"outcome\":\"{}\",\
+         \"peeled\":{},\"inactivated\":{},\"gauss_ops\":{},\"pivots_selected\":{},\
+         \"hard_regime_activated\":{},\"markowitz_pivots\":{},\"hard_regime_fallbacks\":{},\
+         \"peel_queue_pushes\":{},\"peel_queue_pops\":{},\"peel_frontier_peak\":{},\
+         \"dense_core_rows\":{},\"dense_core_cols\":{},\"dense_core_dropped_rows\":{},\
+         \"policy_density_permille\":{},\"policy_rank_deficit_permille\":{},\
+         \"policy_inactivation_pressure_permille\":{},\"policy_overhead_ratio_permille\":{},\
+         \"policy_budget_exhausted\":{},\
+         \"factor_cache_hits\":{},\"factor_cache_misses\":{},\"factor_cache_inserts\":{},\
+         \"factor_cache_evictions\":{},\
+         \"repro_command\":\"{}\"}}",
+        F4_CAMPAIGN_SCHEMA_VERSION,
+        scenario.scenario_id,
+        scenario.seed,
+        scenario.k,
+        scenario.symbol_size,
+        scenario.loss_fraction,
+        scenario.loss_pattern,
+        scenario.extra_repair,
+        outcome,
+        stats.peeled,
+        stats.inactivated,
+        stats.gauss_ops,
+        stats.pivots_selected,
+        stats.hard_regime_activated,
+        stats.markowitz_pivots,
+        stats.hard_regime_fallbacks,
+        stats.peel_queue_pushes,
+        stats.peel_queue_pops,
+        stats.peel_frontier_peak,
+        stats.dense_core_rows,
+        stats.dense_core_cols,
+        stats.dense_core_dropped_rows,
+        stats.policy_density_permille,
+        stats.policy_rank_deficit_permille,
+        stats.policy_inactivation_pressure_permille,
+        stats.policy_overhead_ratio_permille,
+        stats.policy_budget_exhausted,
+        stats.factor_cache_hits,
+        stats.factor_cache_misses,
+        stats.factor_cache_inserts,
+        stats.factor_cache_evictions,
+        F4_CAMPAIGN_REPRO_CMD,
+    );
+}
+
+#[allow(clippy::too_many_lines)]
+fn bench_repair_campaign(c: &mut Criterion) {
+    let mut group = c.benchmark_group("repair_campaign");
+
+    for scenario in repair_campaign_scenarios() {
+        let source: Vec<Vec<u8>> = (0..scenario.k)
+            .map(|i| deterministic_bytes(scenario.symbol_size, scenario.seed ^ (i as u64)))
+            .collect();
+        let encoder = SystematicEncoder::new(&source, scenario.symbol_size, scenario.seed).unwrap();
+        let decoder = InactivationDecoder::new(scenario.k, scenario.symbol_size, scenario.seed);
+        let drop_indices = compute_drop_indices(
+            scenario.k,
+            scenario.loss_fraction,
+            scenario.loss_pattern,
+            scenario.seed,
+        );
+        let received = build_decode_received(
+            &source,
+            &encoder,
+            &decoder,
+            &drop_indices,
+            scenario.extra_repair,
+        );
+
+        // Correctness pre-check + structured log emission.
+        match decoder.decode(&received) {
+            Ok(result) => {
+                // Verify source recovery correctness.
+                for (i, sym) in result.source.iter().enumerate() {
+                    assert_eq!(
+                        sym, &source[i],
+                        "{} seed={} source[{}] mismatch",
+                        scenario.scenario_id, scenario.seed, i
+                    );
+                }
+                emit_campaign_decode_log(&scenario, &result.stats, "ok");
+            }
+            Err(e) => {
+                // Some near-rank-deficient scenarios may fail; log but don't panic.
+                eprintln!(
+                    "{{\"schema_version\":\"{}\",\"scenario_id\":\"{}\",\"seed\":{},\
+                     \"outcome\":\"decode_error\",\"error\":\"{:?}\",\
+                     \"repro_command\":\"{}\"}}",
+                    F4_CAMPAIGN_SCHEMA_VERSION,
+                    scenario.scenario_id,
+                    scenario.seed,
+                    e,
+                    F4_CAMPAIGN_REPRO_CMD,
+                );
+            }
+        }
+
+        let label = format!(
+            "{}_k{}_loss{:.0}pct_{}",
+            scenario.scenario_id,
+            scenario.k,
+            scenario.loss_fraction * 100.0,
+            scenario.loss_pattern
+        );
+        group.throughput(Throughput::Bytes(
+            (scenario.k * scenario.symbol_size) as u64,
+        ));
+
+        // Benchmark decode under this repair regime.
+        group.bench_with_input(BenchmarkId::new("decode", &label), &scenario, |b, _| {
+            b.iter(|| {
+                let result = decoder.decode(std::hint::black_box(&received));
+                std::hint::black_box(result)
+            });
+        });
+
+        // Multi-seed stability sweep: run 8 seeds and log stats for regression detection.
+        let sweep_seeds: Vec<u64> = (0..8u64)
+            .map(|i| {
+                scenario
+                    .seed
+                    .wrapping_add(i.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+            })
+            .collect();
+        for sweep_seed in &sweep_seeds {
+            let sweep_source: Vec<Vec<u8>> = (0..scenario.k)
+                .map(|i| deterministic_bytes(scenario.symbol_size, sweep_seed ^ (i as u64)))
+                .collect();
+            if let Some(sweep_encoder) =
+                SystematicEncoder::new(&sweep_source, scenario.symbol_size, *sweep_seed)
+            {
+                let sweep_decoder =
+                    InactivationDecoder::new(scenario.k, scenario.symbol_size, *sweep_seed);
+                let sweep_drops = compute_drop_indices(
+                    scenario.k,
+                    scenario.loss_fraction,
+                    scenario.loss_pattern,
+                    *sweep_seed,
+                );
+                let sweep_received = build_decode_received(
+                    &sweep_source,
+                    &sweep_encoder,
+                    &sweep_decoder,
+                    &sweep_drops,
+                    scenario.extra_repair,
+                );
+                if let Ok(sweep_result) = sweep_decoder.decode(&sweep_received) {
+                    emit_campaign_decode_log(
+                        &RepairCampaignScenario {
+                            seed: *sweep_seed,
+                            ..scenario.clone()
+                        },
+                        &sweep_result.stats,
+                        "sweep_ok",
+                    );
+                }
+            }
+        }
+    }
+
+    group.finish();
+}
+
+// ============================================================================
 // Criterion setup
 // ============================================================================
 
@@ -891,6 +1176,7 @@ criterion_group!(
     bench_linalg_operations,
     bench_gaussian_elimination,
     bench_encode_decode,
+    bench_repair_campaign,
 );
 
 criterion_main!(benches);
