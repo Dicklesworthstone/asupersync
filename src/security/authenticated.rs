@@ -116,4 +116,20 @@ mod tests {
 
         assert_eq!(unwrapped, symbol);
     }
+
+    // =========================================================================
+    // Wave 52 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn authenticated_symbol_debug_clone_eq() {
+        let id = SymbolId::new_for_test(1, 0, 0);
+        let symbol = Symbol::new(id, vec![1, 2, 3], SymbolKind::Source);
+        let tag = AuthenticationTag::zero();
+        let auth = AuthenticatedSymbol::new_verified(symbol, tag);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("AuthenticatedSymbol"), "{dbg}");
+        let cloned = auth.clone();
+        assert_eq!(auth, cloned);
+    }
 }

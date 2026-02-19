@@ -141,4 +141,24 @@ mod tests {
         assert_eq!(LogLevel::Trace.as_char(), 'T');
         assert_eq!(LogLevel::Error.as_char(), 'E');
     }
+
+    // =========================================================================
+    // Wave 52 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn log_level_debug_clone_copy_hash_default() {
+        use std::collections::HashSet;
+        let l = LogLevel::Warn;
+        let dbg = format!("{l:?}");
+        assert!(dbg.contains("Warn"), "{dbg}");
+        let copied = l;
+        let cloned = l.clone();
+        assert_eq!(copied, cloned);
+        let def = LogLevel::default();
+        assert_eq!(def, LogLevel::Info);
+        let mut set = HashSet::new();
+        set.insert(l);
+        assert!(set.contains(&LogLevel::Warn));
+    }
 }

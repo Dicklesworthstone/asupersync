@@ -1597,4 +1597,66 @@ mod tests {
         assert!(debug.contains("RecoveryOrchestrator"));
         assert!(debug.contains("attempt"));
     }
+
+    // =========================================================================
+    // Wave 52 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn collection_consistency_debug_clone_copy_eq() {
+        let c = CollectionConsistency::Quorum;
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("Quorum"), "{dbg}");
+        let copied = c;
+        let cloned = c.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(CollectionConsistency::Any, CollectionConsistency::All);
+    }
+
+    #[test]
+    fn recovery_phase_debug_clone_copy() {
+        let p = RecoveryPhase::Collecting;
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("Collecting"), "{dbg}");
+        let copied = p;
+        let cloned = p.clone();
+        assert_eq!(copied, cloned);
+    }
+
+    #[test]
+    fn recovery_trigger_debug_clone() {
+        let trigger = RecoveryTrigger::NodeRestart {
+            region_id: RegionId::new_for_test(1, 0),
+            last_known_sequence: 100,
+        };
+        let dbg = format!("{trigger:?}");
+        assert!(dbg.contains("NodeRestart"), "{dbg}");
+        let cloned = trigger.clone();
+        assert_eq!(format!("{cloned:?}"), dbg);
+    }
+
+    #[test]
+    fn recovery_config_debug_clone_default() {
+        let cfg = RecoveryConfig::default();
+        let dbg = format!("{cfg:?}");
+        assert!(dbg.contains("RecoveryConfig"), "{dbg}");
+        let cloned = cfg.clone();
+        assert!(format!("{cloned:?}").contains("RecoveryConfig"));
+    }
+
+    #[test]
+    fn recovery_progress_debug_clone() {
+        let p = RecoveryProgress {
+            started_at: Time::ZERO,
+            symbols_needed: 10,
+            symbols_collected: 5,
+            replicas_queried: 3,
+            replicas_responded: 2,
+            phase: RecoveryPhase::Collecting,
+        };
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("RecoveryProgress"), "{dbg}");
+        let cloned = p.clone();
+        assert!(format!("{cloned:?}").contains("RecoveryProgress"));
+    }
 }
