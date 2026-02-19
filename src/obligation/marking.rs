@@ -1393,4 +1393,54 @@ mod tests {
         crate::assert_with_log!(len == 0, "no obligation events", 0, len);
         crate::test_complete!("project_trace_ignores_non_obligation");
     }
+
+    #[test]
+    fn marking_dimension_debug_clone_copy_eq() {
+        let d = MarkingDimension {
+            kind: ObligationKind::SendPermit,
+            region: r(1),
+        };
+        let dbg = format!("{:?}", d);
+        assert!(dbg.contains("MarkingDimension"));
+
+        let d2 = d.clone();
+        assert_eq!(d, d2);
+
+        let d3 = d;
+        assert_eq!(d, d3);
+    }
+
+    #[test]
+    fn obligation_marking_debug_clone_default() {
+        let m = ObligationMarking::default();
+        let dbg = format!("{:?}", m);
+        assert!(dbg.contains("ObligationMarking"));
+
+        let m2 = m.clone();
+        assert!(m2.is_zero());
+
+        let m3 = ObligationMarking::empty();
+        assert!(m3.is_zero());
+    }
+
+    #[test]
+    fn marking_timeline_debug_clone_default() {
+        let t = MarkingTimeline::default();
+        let dbg = format!("{:?}", t);
+        assert!(dbg.contains("MarkingTimeline"));
+
+        let t2 = t.clone();
+        assert!(t2.snapshots.is_empty());
+    }
+
+    #[test]
+    fn analysis_stats_debug_clone_default() {
+        let s = AnalysisStats::default();
+        let dbg = format!("{:?}", s);
+        assert!(dbg.contains("AnalysisStats"));
+
+        let s2 = s.clone();
+        assert_eq!(s2.total_reserved, 0);
+        assert_eq!(s2.total_committed, 0);
+    }
 }

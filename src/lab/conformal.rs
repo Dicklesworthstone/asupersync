@@ -1541,4 +1541,58 @@ mod tests {
         assert!(json["well_calibrated"].as_bool().unwrap());
         assert_eq!(json["alpha"], 0.05);
     }
+
+    #[test]
+    fn conformal_config_debug_clone_default() {
+        let c = ConformalConfig::default();
+        let dbg = format!("{:?}", c);
+        assert!(dbg.contains("ConformalConfig"));
+
+        let c2 = c.clone();
+        assert!((c2.alpha - 0.05).abs() < f64::EPSILON);
+        assert_eq!(c2.min_calibration_samples, 5);
+    }
+
+    #[test]
+    fn conformity_score_debug_clone_copy_eq() {
+        let s = ConformityScore {
+            value: 0.42,
+            violated: false,
+        };
+        let dbg = format!("{:?}", s);
+        assert!(dbg.contains("ConformityScore"));
+
+        let s2 = s.clone();
+        assert_eq!(s, s2);
+
+        // Copy
+        let s3 = s;
+        assert_eq!(s, s3);
+    }
+
+    #[test]
+    fn threshold_mode_debug_clone_copy_eq() {
+        let m = ThresholdMode::Upper;
+        let dbg = format!("{:?}", m);
+        assert!(dbg.contains("Upper"));
+
+        let m2 = m.clone();
+        assert_eq!(m, m2);
+
+        let m3 = m;
+        assert_eq!(m, m3);
+
+        assert_ne!(ThresholdMode::Upper, ThresholdMode::TwoSided);
+    }
+
+    #[test]
+    fn coverage_tracker_debug_clone() {
+        let t = CoverageTracker { total: 10, covered: 9 };
+        let dbg = format!("{:?}", t);
+        assert!(dbg.contains("CoverageTracker"));
+
+        let t2 = t.clone();
+        assert_eq!(t2.total, 10);
+        assert_eq!(t2.covered, 9);
+    }
 }

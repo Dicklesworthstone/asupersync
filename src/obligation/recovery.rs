@@ -732,4 +732,68 @@ mod tests {
                 .any(|a| matches!(a, RecoveryAction::ConflictResolved { .. }))
         );
     }
+
+    #[test]
+    fn recovery_config_debug_clone_default() {
+        let c = RecoveryConfig::default();
+        let dbg = format!("{:?}", c);
+        assert!(dbg.contains("RecoveryConfig"));
+
+        let c2 = c.clone();
+        assert_eq!(c2.stale_timeout_ns, 30_000_000_000);
+        assert_eq!(c2.max_resolutions_per_tick, 50);
+
+        let c3 = RecoveryConfig::default_for_test();
+        assert_eq!(c3.stale_timeout_ns, 5_000_000_000);
+    }
+
+    #[test]
+    fn recovery_phase_debug_clone_copy_eq() {
+        let p = RecoveryPhase::Idle;
+        let dbg = format!("{:?}", p);
+        assert!(dbg.contains("Idle"));
+
+        let p2 = p.clone();
+        assert_eq!(p, p2);
+
+        let p3 = p;
+        assert_eq!(p, p3);
+
+        assert_ne!(RecoveryPhase::Idle, RecoveryPhase::Scanning);
+    }
+
+    #[test]
+    fn recovery_action_debug_clone_eq() {
+        let a = RecoveryAction::ConflictResolved {
+            id: oid(42),
+        };
+        let dbg = format!("{:?}", a);
+        assert!(dbg.contains("ConflictResolved"));
+
+        let a2 = a.clone();
+        assert_eq!(a, a2);
+
+        let a3 = RecoveryAction::Flagged {
+            id: oid(1),
+            reason: "test".into(),
+        };
+        assert_ne!(a, a3);
+    }
+
+    #[test]
+    fn recovery_tick_result_debug_clone() {
+        let r = RecoveryTickResult {
+            actions: vec![],
+            remaining_pending: 0,
+            remaining_conflicts: 0,
+            remaining_violations: 0,
+            is_quiescent: true,
+        };
+        let dbg = format!("{:?}", r);
+        assert!(dbg.contains("RecoveryTickResult"));
+
+        let r2 = r.clone();
+        assert!(r2.is_quiescent);
+        assert!(r2.actions.is_empty());
+    }
 }

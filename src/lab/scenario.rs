@@ -1026,4 +1026,55 @@ mod tests {
         assert_eq!(s.include.len(), 1);
         assert_eq!(s.include[0].path, "base.yaml");
     }
+
+    #[test]
+    fn network_preset_debug_clone_copy_eq() {
+        let p = NetworkPreset::Wan;
+        let dbg = format!("{:?}", p);
+        assert!(dbg.contains("Wan"));
+
+        let p2 = p.clone();
+        assert_eq!(p, p2);
+
+        let p3 = p;
+        assert_eq!(p, p3);
+
+        assert_ne!(NetworkPreset::Ideal, NetworkPreset::Lossy);
+    }
+
+    #[test]
+    fn chaos_section_debug_clone_default() {
+        let c = ChaosSection::default();
+        let dbg = format!("{:?}", c);
+        assert!(dbg.contains("Off"));
+
+        let c2 = c.clone();
+        let dbg2 = format!("{:?}", c2);
+        assert_eq!(dbg, dbg2);
+    }
+
+    #[test]
+    fn fault_action_debug_clone() {
+        let a = FaultAction::Partition;
+        let dbg = format!("{:?}", a);
+        assert!(dbg.contains("Partition"));
+
+        let a2 = a.clone();
+        let dbg2 = format!("{:?}", a2);
+        assert_eq!(dbg, dbg2);
+    }
+
+    #[test]
+    fn validation_error_debug_clone() {
+        let e = ValidationError {
+            field: "lab.seed".into(),
+            message: "must be positive".into(),
+        };
+        let dbg = format!("{:?}", e);
+        assert!(dbg.contains("lab.seed"));
+
+        let e2 = e.clone();
+        assert_eq!(e2.field, "lab.seed");
+        assert_eq!(e2.message, "must be positive");
+    }
 }
