@@ -1159,4 +1159,80 @@ mod tests {
         let pool = SymbolPool::new(config);
         assert!(pool.config().max_size >= pool.config().initial_size);
     }
+
+    // ── derive-trait coverage (wave 74) ──────────────────────────────────
+
+    #[test]
+    fn pool_stats_debug_clone_default() {
+        let s = PoolStats::default();
+        assert_eq!(s.allocations, 0);
+        assert_eq!(s.current_usage, 0);
+        let s2 = s.clone();
+        let dbg = format!("{s2:?}");
+        assert!(dbg.contains("PoolStats"));
+    }
+
+    #[test]
+    fn pool_exhausted_debug_clone_copy_eq() {
+        let e = PoolExhausted;
+        let e2 = e; // Copy
+        let e3 = e.clone();
+        assert_eq!(e, e2);
+        assert_eq!(e2, e3);
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("PoolExhausted"));
+    }
+
+    #[test]
+    fn resource_kind_debug_clone_copy_eq() {
+        let k = ResourceKind::SymbolMemory;
+        let k2 = k; // Copy
+        assert_eq!(k, k2);
+        assert_ne!(k, ResourceKind::EncodingOps);
+        let dbg = format!("{k:?}");
+        assert!(dbg.contains("SymbolMemory"));
+    }
+
+    #[test]
+    fn resource_limits_debug_clone_default() {
+        let l = ResourceLimits::default();
+        assert!(l.is_zero());
+        let l2 = l.clone();
+        assert_eq!(l2.max_symbol_memory, 0);
+        let dbg = format!("{l2:?}");
+        assert!(dbg.contains("ResourceLimits"));
+    }
+
+    #[test]
+    fn resource_usage_debug_clone_default_eq() {
+        let u = ResourceUsage::default();
+        let u2 = u.clone();
+        assert_eq!(u, u2);
+        assert_eq!(u.symbol_memory, 0);
+        let dbg = format!("{u:?}");
+        assert!(dbg.contains("ResourceUsage"));
+    }
+
+    #[test]
+    fn resource_request_debug_clone_copy_default() {
+        let r = ResourceRequest::default();
+        let r2 = r; // Copy
+        let r3 = r.clone();
+        let _ = r2;
+        let _ = r3;
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("ResourceRequest"));
+    }
+
+    #[test]
+    fn resource_exhausted_debug_clone_copy_eq() {
+        let e = ResourceExhausted::SymbolMemory;
+        let e2 = e; // Copy
+        let e3 = e.clone();
+        assert_eq!(e, e2);
+        assert_eq!(e2, e3);
+        assert_ne!(e, ResourceExhausted::DecodingOps);
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("SymbolMemory"));
+    }
 }

@@ -815,4 +815,60 @@ mod tests {
         assert_eq!(entry.total_acquires(), 1);
         assert_eq!(entry.total_resolves(), 1);
     }
+
+    // ── derive-trait coverage (wave 74) ──────────────────────────────────
+
+    #[test]
+    fn crdt_obligation_entry_debug_clone_eq() {
+        let mut ledger = CrdtObligationLedger::new(node("X"));
+        let id = ObligationId::new_for_test(50, 0);
+        ledger.record_acquire(id, ObligationKind::SendPermit);
+
+        let entry = ledger.get_entry(&id).unwrap();
+        let entry2 = entry.clone();
+        assert_eq!(entry, &entry2);
+        let dbg = format!("{entry:?}");
+        assert!(dbg.contains("CrdtObligationEntry"));
+    }
+
+    #[test]
+    fn crdt_obligation_ledger_debug_clone_eq() {
+        let ledger = CrdtObligationLedger::new(node("Y"));
+        let ledger2 = ledger.clone();
+        assert_eq!(ledger, ledger2);
+        let dbg = format!("{ledger:?}");
+        assert!(dbg.contains("CrdtObligationLedger"));
+    }
+
+    #[test]
+    fn linearity_violation_debug_clone() {
+        let v = LinearityViolation {
+            id: ObligationId::new_for_test(1, 0),
+            total_acquires: 2,
+            total_resolves: 1,
+            witnesses: BTreeMap::new(),
+        };
+        let v2 = v.clone();
+        assert_eq!(v2.total_acquires, 2);
+        let dbg = format!("{v2:?}");
+        assert!(dbg.contains("LinearityViolation"));
+    }
+
+    #[test]
+    fn ledger_snapshot_debug_clone() {
+        let s = LedgerSnapshot {
+            node: node("Z"),
+            total: 10,
+            pending: 3,
+            committed: 5,
+            aborted: 1,
+            conflicts: 1,
+            linearity_violations: 0,
+        };
+        let s2 = s.clone();
+        assert_eq!(s2.total, 10);
+        assert_eq!(s2.pending, 3);
+        let dbg = format!("{s2:?}");
+        assert!(dbg.contains("LedgerSnapshot"));
+    }
 }

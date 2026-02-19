@@ -612,4 +612,46 @@ mod tests {
         crate::assert_with_log!(alert == "ALERT", "alert display", "ALERT", alert);
         crate::test_complete!("alert_state_display");
     }
+
+    // ── derive-trait coverage (wave 74) ──────────────────────────────────
+
+    #[test]
+    fn monitor_config_debug_clone_copy() {
+        let c = MonitorConfig::default();
+        let c2 = c; // Copy
+        let c3 = c.clone();
+        assert!((c2.alpha - 0.01).abs() < 1e-10);
+        assert_eq!(c3.min_observations, 3);
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("MonitorConfig"));
+    }
+
+    #[test]
+    fn alert_state_debug_clone_copy_eq() {
+        let s = AlertState::Clear;
+        let s2 = s; // Copy
+        let s3 = s.clone();
+        assert_eq!(s, s2);
+        assert_eq!(s2, s3);
+        assert_ne!(s, AlertState::Alert);
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("Clear"));
+    }
+
+    #[test]
+    fn monitor_snapshot_debug_clone() {
+        let ms = MonitorSnapshot {
+            e_value: 1.5,
+            threshold: 100.0,
+            observations: 10,
+            alert_state: AlertState::Watching,
+            peak_e_value: 2.0,
+            alert_count: 0,
+        };
+        let ms2 = ms.clone();
+        assert_eq!(ms2.observations, 10);
+        assert_eq!(ms2.alert_state, AlertState::Watching);
+        let dbg = format!("{ms2:?}");
+        assert!(dbg.contains("MonitorSnapshot"));
+    }
 }

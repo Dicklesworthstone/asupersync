@@ -1731,4 +1731,56 @@ mod tests {
         }
         assert_eq!(conv.value_at(t), brute);
     }
+
+    // ── derive-trait coverage (wave 74) ──────────────────────────────────
+
+    #[test]
+    fn budget_clone_copy() {
+        let b = Budget::new().with_poll_quota(42);
+        let b2 = b; // Copy
+        let b3 = b.clone();
+        assert_eq!(b, b2);
+        assert_eq!(b2, b3);
+    }
+
+    #[test]
+    fn curve_error_debug_clone_eq() {
+        let e1 = CurveError::EmptySamples;
+        let e2 = e1.clone();
+        assert_eq!(e1, e2);
+
+        let e3 = CurveError::NonMonotone {
+            index: 2,
+            prev: 10,
+            next: 5,
+        };
+        let e4 = e3.clone();
+        assert_eq!(e3, e4);
+        assert_ne!(e1, e3);
+        let dbg = format!("{e3:?}");
+        assert!(dbg.contains("NonMonotone"));
+    }
+
+    #[test]
+    fn min_plus_curve_debug_clone_eq() {
+        let c1 = MinPlusCurve::new(vec![0, 1, 2], 1).unwrap();
+        let c2 = c1.clone();
+        assert_eq!(c1, c2);
+        let dbg = format!("{c1:?}");
+        assert!(dbg.contains("MinPlusCurve"));
+    }
+
+    #[test]
+    fn curve_budget_debug_clone_eq() {
+        let arrival = MinPlusCurve::new(vec![0, 2, 4], 2).unwrap();
+        let service = MinPlusCurve::new(vec![0, 3, 6], 3).unwrap();
+        let cb = CurveBudget {
+            arrival: arrival.clone(),
+            service: service.clone(),
+        };
+        let cb2 = cb.clone();
+        assert_eq!(cb, cb2);
+        let dbg = format!("{cb:?}");
+        assert!(dbg.contains("CurveBudget"));
+    }
 }
