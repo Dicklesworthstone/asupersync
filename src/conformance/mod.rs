@@ -581,4 +581,68 @@ mod tests {
         // Fresh runtime should be quiescent
         assert!(LabRuntimeTarget::is_quiescent(&runtime));
     }
+
+    #[test]
+    fn test_config_debug() {
+        let cfg = TestConfig::default();
+        let dbg = format!("{cfg:?}");
+        assert!(dbg.contains("TestConfig"));
+    }
+
+    #[test]
+    fn test_config_clone() {
+        let cfg = TestConfig::new().with_seed(99).with_tracing(true);
+        let cfg2 = cfg.clone();
+        assert_eq!(cfg2.rng_seed, Some(99));
+        assert!(cfg2.tracing_enabled);
+    }
+
+    #[test]
+    fn test_config_without_seed() {
+        let cfg = TestConfig::new().without_seed();
+        assert!(cfg.rng_seed.is_none());
+    }
+
+    #[test]
+    fn test_config_with_budget() {
+        let budget = Budget::with_deadline_secs(100);
+        let cfg = TestConfig::new().with_budget(budget);
+        assert_eq!(cfg.root_budget, budget);
+    }
+
+    #[test]
+    fn test_config_with_timeout() {
+        let cfg = TestConfig::new().with_timeout(Duration::from_secs(60));
+        assert_eq!(cfg.timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn task_handle_id() {
+        let tid = TaskId::new_for_test(5, 0);
+        let handle = TaskHandle::new(tid, async { Outcome::Ok(42) });
+        assert_eq!(handle.id(), tid);
+    }
+
+    #[test]
+    fn region_handle_id() {
+        let rid = RegionId::new_for_test(3, 0);
+        let handle = RegionHandle::new(rid, async {});
+        assert_eq!(handle.id(), rid);
+    }
+
+    #[test]
+    fn lab_runtime_target_with_tracing() {
+        let config = TestConfig::new().with_seed(42).with_tracing(true);
+        let runtime = LabRuntimeTarget::create_runtime(config);
+        assert_eq!(runtime.config().seed, 42);
+        assert_eq!(runtime.config().trace_capacity, 64 * 1024);
+    }
+
+    #[test]
+    fn lab_runtime_target_without_seed() {
+        let config = TestConfig::new().without_seed();
+        let runtime = LabRuntimeTarget::create_runtime(config);
+        // Should use default seed 0xDEAD_BEEF when None
+        assert_eq!(runtime.config().seed, 0xDEAD_BEEF);
+    }
 }

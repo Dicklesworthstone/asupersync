@@ -593,4 +593,69 @@ mod tests {
         );
         crate::test_complete!("barrier_drop_one_of_multiple_waiters_allows_trip");
     }
+
+    #[test]
+    fn barrier_wait_error_debug() {
+        init_test("barrier_wait_error_debug");
+        let err = BarrierWaitError::Cancelled;
+        let dbg = format!("{err:?}");
+        assert_eq!(dbg, "Cancelled");
+        crate::test_complete!("barrier_wait_error_debug");
+    }
+
+    #[test]
+    fn barrier_wait_error_clone_copy_eq() {
+        init_test("barrier_wait_error_clone_copy_eq");
+        let err = BarrierWaitError::Cancelled;
+        let err2 = err;
+        let err3 = err;
+        assert_eq!(err2, err3);
+        crate::test_complete!("barrier_wait_error_clone_copy_eq");
+    }
+
+    #[test]
+    fn barrier_wait_error_display() {
+        init_test("barrier_wait_error_display");
+        let err = BarrierWaitError::Cancelled;
+        let display = format!("{err}");
+        assert_eq!(display, "barrier wait cancelled");
+        crate::test_complete!("barrier_wait_error_display");
+    }
+
+    #[test]
+    fn barrier_wait_error_is_std_error() {
+        init_test("barrier_wait_error_is_std_error");
+        let err = BarrierWaitError::Cancelled;
+        let e: &dyn std::error::Error = &err;
+        let display = format!("{e}");
+        assert!(display.contains("cancelled"));
+        crate::test_complete!("barrier_wait_error_is_std_error");
+    }
+
+    #[test]
+    fn barrier_debug() {
+        init_test("barrier_debug");
+        let barrier = Barrier::new(3);
+        let dbg = format!("{barrier:?}");
+        assert!(dbg.contains("Barrier"));
+        crate::test_complete!("barrier_debug");
+    }
+
+    #[test]
+    fn barrier_parties() {
+        init_test("barrier_parties");
+        let barrier = Barrier::new(5);
+        assert_eq!(barrier.parties(), 5);
+        crate::test_complete!("barrier_parties");
+    }
+
+    #[test]
+    fn barrier_wait_result_is_leader() {
+        init_test("barrier_wait_result_is_leader");
+        let result = BarrierWaitResult { is_leader: true };
+        assert!(result.is_leader());
+        let result2 = BarrierWaitResult { is_leader: false };
+        assert!(!result2.is_leader());
+        crate::test_complete!("barrier_wait_result_is_leader");
+    }
 }
