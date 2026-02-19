@@ -731,4 +731,98 @@ mod tests {
             assert!(window[0] < window[1], "should be sorted");
         }
     }
+
+    // Pure data-type tests (wave 34 – CyanBarn)
+
+    #[test]
+    fn obligation_commit_info_debug_clone() {
+        let info = ObligationCommitInfo {
+            id: ObligationId::from_arena(ArenaIndex::new(0, 0)),
+            holder: test_task_id(1),
+            region: test_region_id(1),
+            kind: ObligationKind::SendPermit,
+            duration: 42,
+        };
+        let dbg = format!("{info:?}");
+        assert!(dbg.contains("ObligationCommitInfo"));
+        let cloned = info.clone();
+        assert_eq!(cloned.duration, 42);
+        assert_eq!(cloned.kind, ObligationKind::SendPermit);
+    }
+
+    #[test]
+    fn obligation_abort_info_debug_clone() {
+        let info = ObligationAbortInfo {
+            id: ObligationId::from_arena(ArenaIndex::new(0, 0)),
+            holder: test_task_id(2),
+            region: test_region_id(1),
+            kind: ObligationKind::Ack,
+            duration: 500,
+            reason: ObligationAbortReason::Cancel,
+        };
+        let dbg = format!("{info:?}");
+        assert!(dbg.contains("ObligationAbortInfo"));
+        let cloned = info.clone();
+        assert_eq!(cloned.duration, 500);
+        assert_eq!(cloned.reason, ObligationAbortReason::Cancel);
+    }
+
+    #[test]
+    fn obligation_leak_info_debug_clone() {
+        let info = ObligationLeakInfo {
+            id: ObligationId::from_arena(ArenaIndex::new(0, 0)),
+            holder: test_task_id(3),
+            region: test_region_id(1),
+            kind: ObligationKind::IoOp,
+            duration: 2000,
+            acquired_at: SourceLocation::unknown(),
+            acquire_backtrace: None,
+            description: Some("test leak".into()),
+        };
+        let dbg = format!("{info:?}");
+        assert!(dbg.contains("ObligationLeakInfo"));
+        let cloned = info.clone();
+        assert_eq!(cloned.duration, 2000);
+        assert_eq!(cloned.description.as_deref(), Some("test leak"));
+    }
+
+    #[test]
+    fn obligation_create_args_debug_clone() {
+        let args = ObligationCreateArgs {
+            kind: ObligationKind::Lease,
+            holder: test_task_id(5),
+            region: test_region_id(2),
+            now: Time::ZERO,
+            description: Some("test create".into()),
+            acquired_at: SourceLocation::unknown(),
+            acquire_backtrace: None,
+        };
+        let dbg = format!("{args:?}");
+        assert!(dbg.contains("ObligationCreateArgs"));
+        let cloned = args.clone();
+        assert_eq!(cloned.kind, ObligationKind::Lease);
+        assert_eq!(cloned.description.as_deref(), Some("test create"));
+    }
+
+    #[test]
+    fn obligation_table_debug() {
+        let table = ObligationTable::new();
+        let dbg = format!("{table:?}");
+        assert!(dbg.contains("ObligationTable"));
+    }
+
+    #[test]
+    fn obligation_table_default() {
+        let table = ObligationTable::default();
+        assert!(table.is_empty());
+        assert_eq!(table.len(), 0);
+    }
+
+    #[test]
+    fn obligation_table_new_empty() {
+        let table = ObligationTable::new();
+        assert!(table.is_empty());
+        assert_eq!(table.len(), 0);
+        assert_eq!(table.pending_count(), 0);
+    }
 }

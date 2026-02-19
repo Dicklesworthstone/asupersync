@@ -636,4 +636,57 @@ mod tests {
         // No headers added - request should still have empty metadata
         assert!(request.metadata().get("nonexistent").is_none());
     }
+
+    // Pure data-type tests (wave 34 – CyanBarn)
+
+    #[test]
+    fn response_stream_debug() {
+        let stream = ResponseStream::<u8>::new();
+        let dbg = format!("{stream:?}");
+        assert!(dbg.contains("ResponseStream"));
+    }
+
+    #[test]
+    fn response_stream_default() {
+        let stream = ResponseStream::<i32>::default();
+        let dbg = format!("{stream:?}");
+        assert!(dbg.contains("ResponseStream"));
+    }
+
+    #[test]
+    fn request_sink_debug() {
+        let sink = RequestSink::<u8>::new();
+        let dbg = format!("{sink:?}");
+        assert!(dbg.contains("RequestSink"));
+    }
+
+    #[test]
+    fn request_sink_default() {
+        let sink = RequestSink::<i32>::default();
+        let dbg = format!("{sink:?}");
+        assert!(dbg.contains("RequestSink"));
+    }
+
+    #[test]
+    fn response_future_default() {
+        let _fut = ResponseFuture::<i32>::default();
+        // ResponseFuture does not derive Debug, but Default is implemented
+    }
+
+    #[test]
+    fn metadata_interceptor_clone() {
+        let interceptor = MetadataInterceptor::new()
+            .with_metadata("x-key", "val");
+        let cloned = interceptor.clone();
+        let mut request = Request::new(Bytes::new());
+        cloned.intercept(&mut request).unwrap();
+        assert!(request.metadata().get("x-key").is_some());
+    }
+
+    #[test]
+    fn metadata_interceptor_default() {
+        let interceptor = MetadataInterceptor::default();
+        let dbg = format!("{interceptor:?}");
+        assert!(dbg.contains("MetadataInterceptor"));
+    }
 }
