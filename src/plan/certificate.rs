@@ -1811,4 +1811,58 @@ mod tests {
         assert!(rendered.contains("nodes="));
         assert!(rendered.contains("depth="));
     }
+
+    #[test]
+    fn plan_hash_debug_clone_copy_eq_hash() {
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        dag.set_root(a);
+        let h = PlanHash::of(&dag);
+
+        let dbg = format!("{:?}", h);
+        assert!(dbg.contains("PlanHash"));
+
+        let h2 = h.clone();
+        assert_eq!(h, h2);
+
+        // Copy
+        let h3 = h;
+        assert_eq!(h, h3);
+
+        // Hash: usable in HashSet
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(h);
+        assert!(set.contains(&h));
+    }
+
+    #[test]
+    fn certificate_version_debug_clone_copy_eq() {
+        let v = CertificateVersion::CURRENT;
+        let dbg = format!("{:?}", v);
+        assert!(dbg.contains("CertificateVersion"));
+
+        let v2 = v.clone();
+        assert_eq!(v, v2);
+
+        let v3 = v;
+        assert_eq!(v, v3);
+    }
+
+    #[test]
+    fn compact_step_debug_clone_copy_eq() {
+        let s = CompactStep {
+            rule: 1,
+            before: 10,
+            after: 20,
+        };
+        let dbg = format!("{:?}", s);
+        assert!(dbg.contains("CompactStep"));
+
+        let s2 = s.clone();
+        assert_eq!(s, s2);
+
+        let s3 = s;
+        assert_eq!(s, s3);
+    }
 }

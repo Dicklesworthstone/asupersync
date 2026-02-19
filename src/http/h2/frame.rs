@@ -1964,4 +1964,89 @@ mod tests {
         let result = FrameHeader::parse(&mut buf);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn frame_type_debug_clone_copy_eq_hash() {
+        let ft = FrameType::Headers;
+        let dbg = format!("{:?}", ft);
+        assert!(dbg.contains("Headers"));
+
+        let ft2 = ft.clone();
+        assert_eq!(ft, ft2);
+
+        // Copy
+        let ft3 = ft;
+        assert_eq!(ft, ft3);
+
+        assert_ne!(FrameType::Data, FrameType::Settings);
+
+        // Hash
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(FrameType::Data);
+        set.insert(FrameType::Ping);
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn frame_header_debug_clone_copy_eq() {
+        let fh = FrameHeader {
+            length: 42,
+            frame_type: 0x1,
+            flags: 0x4,
+            stream_id: 1,
+        };
+        let dbg = format!("{:?}", fh);
+        assert!(dbg.contains("FrameHeader"));
+
+        let fh2 = fh.clone();
+        assert_eq!(fh, fh2);
+
+        let fh3 = fh;
+        assert_eq!(fh, fh3);
+    }
+
+    #[test]
+    fn priority_spec_debug_clone_copy_eq() {
+        let ps = PrioritySpec {
+            exclusive: false,
+            dependency: 0,
+            weight: 16,
+        };
+        let dbg = format!("{:?}", ps);
+        assert!(dbg.contains("PrioritySpec"));
+
+        let ps2 = ps.clone();
+        assert_eq!(ps, ps2);
+
+        let ps3 = ps;
+        assert_eq!(ps, ps3);
+    }
+
+    #[test]
+    fn settings_frame_debug_clone_default() {
+        let sf = SettingsFrame::default();
+        let dbg = format!("{:?}", sf);
+        assert!(dbg.contains("SettingsFrame"));
+
+        let sf2 = sf.clone();
+        assert_eq!(sf2.settings.len(), 0);
+        assert!(!sf2.ack);
+    }
+
+    #[test]
+    fn setting_debug_clone_copy_eq() {
+        let s = Setting::HeaderTableSize(4096);
+        let dbg = format!("{:?}", s);
+        assert!(dbg.contains("HeaderTableSize"));
+        assert!(dbg.contains("4096"));
+
+        let s2 = s.clone();
+        assert_eq!(s, s2);
+
+        let s3 = s;
+        assert_eq!(s, s3);
+
+        assert_ne!(Setting::EnablePush(true), Setting::EnablePush(false));
+    }
 }

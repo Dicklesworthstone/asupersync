@@ -1637,4 +1637,68 @@ mod tests {
             assert_eq!(report1.steps().len(), report2.steps().len());
         }
     }
+
+    #[test]
+    fn rewrite_policy_debug_clone_copy_default_eq() {
+        let p = RewritePolicy::default();
+        let dbg = format!("{:?}", p);
+        assert!(dbg.contains("RewritePolicy"));
+
+        let p2 = p.clone();
+        assert_eq!(p, p2);
+
+        // Copy
+        let p3 = p;
+        assert_eq!(p, p3);
+
+        // default == conservative
+        assert_eq!(RewritePolicy::default(), RewritePolicy::conservative());
+        assert_ne!(RewritePolicy::conservative(), RewritePolicy::assume_all());
+    }
+
+    #[test]
+    fn algebraic_law_debug_clone_copy_eq_hash() {
+        let law = AlgebraicLaw::Associativity;
+        let dbg = format!("{:?}", law);
+        assert!(dbg.contains("Associativity"));
+
+        let law2 = law.clone();
+        assert_eq!(law, law2);
+
+        let law3 = law;
+        assert_eq!(law, law3);
+
+        assert_ne!(AlgebraicLaw::Associativity, AlgebraicLaw::Commutativity);
+
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(AlgebraicLaw::Associativity);
+        set.insert(AlgebraicLaw::Commutativity);
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn rewrite_rule_debug_clone_copy_eq() {
+        let r = RewriteRule::JoinAssoc;
+        let dbg = format!("{:?}", r);
+        assert!(dbg.contains("JoinAssoc"));
+
+        let r2 = r.clone();
+        assert_eq!(r, r2);
+
+        let r3 = r;
+        assert_eq!(r, r3);
+
+        assert_ne!(RewriteRule::JoinAssoc, RewriteRule::RaceAssoc);
+    }
+
+    #[test]
+    fn rewrite_report_debug_clone_default() {
+        let rr = RewriteReport::default();
+        let dbg = format!("{:?}", rr);
+        assert!(dbg.contains("RewriteReport"));
+
+        let rr2 = rr.clone();
+        assert_eq!(rr2.steps().len(), 0);
+    }
 }

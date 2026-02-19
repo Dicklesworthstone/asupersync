@@ -2652,4 +2652,95 @@ mod tests {
         // Join → Race structural change ⇒ reject
         assert!(!checker.rewrite_preserves_finalize_order(j, r));
     }
+
+    #[test]
+    fn obligation_safety_debug_clone_copy_ord() {
+        let s = ObligationSafety::Clean;
+        let dbg = format!("{:?}", s);
+        assert!(dbg.contains("Clean"));
+
+        let s2 = s.clone();
+        assert_eq!(s, s2);
+
+        // Copy
+        let s3 = s;
+        assert_eq!(s, s3);
+
+        // Ord: Clean < MayLeak < Leaked < Unknown
+        assert!(ObligationSafety::Clean < ObligationSafety::MayLeak);
+        assert!(ObligationSafety::MayLeak < ObligationSafety::Leaked);
+        assert!(ObligationSafety::Leaked < ObligationSafety::Unknown);
+    }
+
+    #[test]
+    fn cancel_safety_debug_clone_copy_ord() {
+        let c = CancelSafety::Safe;
+        let dbg = format!("{:?}", c);
+        assert!(dbg.contains("Safe"));
+
+        let c2 = c.clone();
+        assert_eq!(c, c2);
+
+        let c3 = c;
+        assert_eq!(c, c3);
+
+        assert!(CancelSafety::Safe < CancelSafety::Unknown);
+    }
+
+    #[test]
+    fn deadline_micros_debug_clone_copy_eq() {
+        let d = DeadlineMicros(Some(1000));
+        let dbg = format!("{:?}", d);
+        assert!(dbg.contains("1000"));
+
+        let d2 = d.clone();
+        assert_eq!(d, d2);
+
+        let d3 = d;
+        assert_eq!(d, d3);
+
+        assert!(DeadlineMicros(None) < DeadlineMicros(Some(0)));
+    }
+
+    #[test]
+    fn obligation_flow_debug_clone_default() {
+        let f = ObligationFlow::default();
+        let dbg = format!("{:?}", f);
+        assert!(dbg.contains("ObligationFlow"));
+
+        let f2 = f.clone();
+        assert_eq!(f, f2);
+
+        // empty() differs from default(): all_paths_resolve = true vs false
+        let f3 = ObligationFlow::empty();
+        assert!(f3.all_paths_resolve);
+        assert!(!f.all_paths_resolve);
+    }
+
+    #[test]
+    fn independence_result_debug_clone_copy_eq() {
+        let r = IndependenceResult::Independent;
+        let dbg = format!("{:?}", r);
+        assert!(dbg.contains("Independent"));
+
+        let r2 = r.clone();
+        assert_eq!(r, r2);
+
+        let r3 = r;
+        assert_eq!(r, r3);
+
+        assert_ne!(IndependenceResult::Independent, IndependenceResult::Dependent);
+    }
+
+    #[test]
+    fn trace_equivalence_hint_debug_clone_eq() {
+        let h = TraceEquivalenceHint::Atomic;
+        let dbg = format!("{:?}", h);
+        assert!(dbg.contains("Atomic"));
+
+        let h2 = h.clone();
+        assert_eq!(h, h2);
+
+        assert_ne!(TraceEquivalenceHint::Atomic, TraceEquivalenceHint::Sequential);
+    }
 }
