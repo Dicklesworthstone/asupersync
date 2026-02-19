@@ -27,6 +27,12 @@
       "include_prefixes": ["src/io/", "src/time/", "src/runtime/reactor/"]
     },
     {
+      "id": "quic_h3_native",
+      "label": "Native QUIC + H3 stack",
+      "min_line_pct": 90.0,
+      "include_prefixes": ["src/net/quic_core/", "src/net/quic_native/", "src/http/h3_native.rs"]
+    },
+    {
       "id": "net_http_protocols",
       "label": "Net + HTTP + H2 + WebSocket + gRPC",
       "min_line_pct": 10.0,
