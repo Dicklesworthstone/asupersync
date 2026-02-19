@@ -1211,4 +1211,141 @@ mod tests {
         crate::assert_with_log!(intervals == 1, "checkpoint intervals", 1usize, intervals);
         crate::test_complete!("checkpoint_interval_metrics_emitted");
     }
+
+    #[test]
+    fn adaptive_deadline_config_debug() {
+        init_test("adaptive_deadline_config_debug");
+        let cfg = AdaptiveDeadlineConfig::default();
+        let dbg = format!("{cfg:?}");
+        assert!(dbg.contains("AdaptiveDeadlineConfig"));
+        crate::test_complete!("adaptive_deadline_config_debug");
+    }
+
+    #[test]
+    fn adaptive_deadline_config_clone() {
+        init_test("adaptive_deadline_config_clone");
+        let cfg = AdaptiveDeadlineConfig {
+            adaptive_enabled: true,
+            warning_percentile: 0.95,
+            min_samples: 20,
+            max_history: 500,
+            fallback_threshold: Duration::from_secs(60),
+        };
+        let cfg2 = cfg.clone();
+        assert!(cfg2.adaptive_enabled);
+        assert!((cfg2.warning_percentile - 0.95).abs() < f64::EPSILON);
+        assert_eq!(cfg2.min_samples, 20);
+        assert_eq!(cfg2.max_history, 500);
+        assert_eq!(cfg2.fallback_threshold, Duration::from_secs(60));
+        crate::test_complete!("adaptive_deadline_config_clone");
+    }
+
+    #[test]
+    fn adaptive_deadline_config_default_values() {
+        init_test("adaptive_deadline_config_default_values");
+        let cfg = AdaptiveDeadlineConfig::default();
+        assert!(!cfg.adaptive_enabled);
+        assert!((cfg.warning_percentile - 0.90).abs() < f64::EPSILON);
+        assert_eq!(cfg.min_samples, 10);
+        assert_eq!(cfg.max_history, 1000);
+        assert_eq!(cfg.fallback_threshold, Duration::from_secs(30));
+        crate::test_complete!("adaptive_deadline_config_default_values");
+    }
+
+    #[test]
+    fn monitor_config_debug() {
+        init_test("monitor_config_debug");
+        let cfg = MonitorConfig::default();
+        let dbg = format!("{cfg:?}");
+        assert!(dbg.contains("MonitorConfig"));
+        crate::test_complete!("monitor_config_debug");
+    }
+
+    #[test]
+    fn monitor_config_clone() {
+        init_test("monitor_config_clone");
+        let cfg = MonitorConfig {
+            check_interval: Duration::from_millis(500),
+            warning_threshold_fraction: 0.1,
+            checkpoint_timeout: Duration::from_secs(10),
+            adaptive: AdaptiveDeadlineConfig::default(),
+            enabled: false,
+        };
+        let cfg2 = cfg.clone();
+        assert_eq!(cfg2.check_interval, Duration::from_millis(500));
+        assert!((cfg2.warning_threshold_fraction - 0.1).abs() < f64::EPSILON);
+        assert_eq!(cfg2.checkpoint_timeout, Duration::from_secs(10));
+        assert!(!cfg2.enabled);
+        crate::test_complete!("monitor_config_clone");
+    }
+
+    #[test]
+    fn monitor_config_default_values() {
+        init_test("monitor_config_default_values");
+        let cfg = MonitorConfig::default();
+        assert_eq!(cfg.check_interval, Duration::from_secs(1));
+        assert!((cfg.warning_threshold_fraction - 0.2).abs() < f64::EPSILON);
+        assert_eq!(cfg.checkpoint_timeout, Duration::from_secs(30));
+        assert!(cfg.enabled);
+        crate::test_complete!("monitor_config_default_values");
+    }
+
+    #[test]
+    fn warning_reason_debug() {
+        init_test("warning_reason_debug");
+        let dbg = format!("{:?}", WarningReason::ApproachingDeadline);
+        assert_eq!(dbg, "ApproachingDeadline");
+        let dbg = format!("{:?}", WarningReason::NoProgress);
+        assert_eq!(dbg, "NoProgress");
+        let dbg = format!("{:?}", WarningReason::ApproachingDeadlineNoProgress);
+        assert_eq!(dbg, "ApproachingDeadlineNoProgress");
+        crate::test_complete!("warning_reason_debug");
+    }
+
+    #[test]
+    fn warning_reason_clone_copy_eq() {
+        init_test("warning_reason_clone_copy_eq");
+        let r = WarningReason::NoProgress;
+        let r2 = r;
+        let r3 = r;
+        assert_eq!(r2, r3);
+        assert_ne!(WarningReason::NoProgress, WarningReason::ApproachingDeadline);
+        crate::test_complete!("warning_reason_clone_copy_eq");
+    }
+
+    #[test]
+    fn deadline_monitor_debug() {
+        init_test("deadline_monitor_debug");
+        let monitor = DeadlineMonitor::new(MonitorConfig::default());
+        let dbg = format!("{monitor:?}");
+        assert!(dbg.contains("DeadlineMonitor"));
+        crate::test_complete!("deadline_monitor_debug");
+    }
+
+    #[test]
+    fn deadline_monitor_config_accessor() {
+        init_test("deadline_monitor_config_accessor");
+        let cfg = MonitorConfig {
+            check_interval: Duration::from_millis(250),
+            ..MonitorConfig::default()
+        };
+        let monitor = DeadlineMonitor::new(cfg);
+        assert_eq!(monitor.config().check_interval, Duration::from_millis(250));
+        crate::test_complete!("deadline_monitor_config_accessor");
+    }
+
+    #[test]
+    fn deadline_monitor_on_warning_callback() {
+        init_test("deadline_monitor_on_warning_callback");
+        let mut monitor = DeadlineMonitor::new(MonitorConfig::default());
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called_ref = called.clone();
+        monitor.on_warning(move |_| {
+            called_ref.store(true, Ordering::Relaxed);
+        });
+        // Callback registered without panic
+        let dbg = format!("{monitor:?}");
+        assert!(dbg.contains("DeadlineMonitor"));
+        crate::test_complete!("deadline_monitor_on_warning_callback");
+    }
 }

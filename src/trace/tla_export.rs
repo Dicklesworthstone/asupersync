@@ -570,4 +570,192 @@ mod tests {
         let module = TlaExporter::export_spec_skeleton("Test");
         assert_eq!(format!("{module}"), module.source);
     }
+
+    #[test]
+    fn tla_task_state_debug() {
+        let dbg = format!("{:?}", TlaTaskState::Spawned);
+        assert_eq!(dbg, "Spawned");
+        let dbg = format!("{:?}", TlaTaskState::Scheduled);
+        assert_eq!(dbg, "Scheduled");
+        let dbg = format!("{:?}", TlaTaskState::Polling);
+        assert_eq!(dbg, "Polling");
+        let dbg = format!("{:?}", TlaTaskState::Yielded);
+        assert_eq!(dbg, "Yielded");
+        let dbg = format!("{:?}", TlaTaskState::Completed);
+        assert_eq!(dbg, "Completed");
+        let dbg = format!("{:?}", TlaTaskState::Cancelled);
+        assert_eq!(dbg, "Cancelled");
+    }
+
+    #[test]
+    fn tla_task_state_clone_copy_eq() {
+        let s = TlaTaskState::Polling;
+        let s2 = s;
+        let s3 = s;
+        assert_eq!(s2, s3);
+        assert_ne!(TlaTaskState::Spawned, TlaTaskState::Completed);
+    }
+
+    #[test]
+    fn tla_task_state_display_all_variants() {
+        assert_eq!(format!("{}", TlaTaskState::Spawned), "\"Spawned\"");
+        assert_eq!(format!("{}", TlaTaskState::Scheduled), "\"Scheduled\"");
+        assert_eq!(format!("{}", TlaTaskState::Polling), "\"Polling\"");
+        assert_eq!(format!("{}", TlaTaskState::Yielded), "\"Yielded\"");
+        assert_eq!(format!("{}", TlaTaskState::Completed), "\"Completed\"");
+        assert_eq!(format!("{}", TlaTaskState::Cancelled), "\"Cancelled\"");
+    }
+
+    #[test]
+    fn tla_region_state_debug() {
+        let dbg = format!("{:?}", TlaRegionState::Open);
+        assert_eq!(dbg, "Open");
+        let dbg = format!("{:?}", TlaRegionState::Closing);
+        assert_eq!(dbg, "Closing");
+        let dbg = format!("{:?}", TlaRegionState::Closed);
+        assert_eq!(dbg, "Closed");
+        let dbg = format!("{:?}", TlaRegionState::Cancelled);
+        assert_eq!(dbg, "Cancelled");
+    }
+
+    #[test]
+    fn tla_region_state_clone_copy_eq() {
+        let s = TlaRegionState::Open;
+        let s2 = s;
+        let s3 = s;
+        assert_eq!(s2, s3);
+        assert_ne!(TlaRegionState::Open, TlaRegionState::Closed);
+    }
+
+    #[test]
+    fn tla_region_state_display_all_variants() {
+        assert_eq!(format!("{}", TlaRegionState::Open), "\"Open\"");
+        assert_eq!(format!("{}", TlaRegionState::Closing), "\"Closing\"");
+        assert_eq!(format!("{}", TlaRegionState::Closed), "\"Closed\"");
+        assert_eq!(format!("{}", TlaRegionState::Cancelled), "\"Cancelled\"");
+    }
+
+    #[test]
+    fn tla_obligation_state_debug() {
+        let dbg = format!("{:?}", TlaObligationState::Reserved);
+        assert_eq!(dbg, "Reserved");
+        let dbg = format!("{:?}", TlaObligationState::Committed);
+        assert_eq!(dbg, "Committed");
+        let dbg = format!("{:?}", TlaObligationState::Aborted);
+        assert_eq!(dbg, "Aborted");
+        let dbg = format!("{:?}", TlaObligationState::Leaked);
+        assert_eq!(dbg, "Leaked");
+    }
+
+    #[test]
+    fn tla_obligation_state_clone_copy_eq() {
+        let s = TlaObligationState::Reserved;
+        let s2 = s;
+        let s3 = s;
+        assert_eq!(s2, s3);
+        assert_ne!(TlaObligationState::Reserved, TlaObligationState::Leaked);
+    }
+
+    #[test]
+    fn tla_obligation_state_display_all_variants() {
+        assert_eq!(format!("{}", TlaObligationState::Reserved), "\"Reserved\"");
+        assert_eq!(format!("{}", TlaObligationState::Committed), "\"Committed\"");
+        assert_eq!(format!("{}", TlaObligationState::Aborted), "\"Aborted\"");
+        assert_eq!(format!("{}", TlaObligationState::Leaked), "\"Leaked\"");
+    }
+
+    #[test]
+    fn tla_state_snapshot_debug_clone() {
+        let snap = TlaStateSnapshot::new();
+        let dbg = format!("{snap:?}");
+        assert!(dbg.contains("TlaStateSnapshot"));
+        let snap2 = snap.clone();
+        assert_eq!(snap2.step, 0);
+        assert_eq!(snap2.time_nanos, 0);
+        assert!(snap2.tasks.is_empty());
+        assert!(snap2.regions.is_empty());
+        assert!(snap2.obligations.is_empty());
+    }
+
+    #[test]
+    fn tla_state_snapshot_apply_updates_step() {
+        let mut snap = TlaStateSnapshot::new();
+        let event = TraceEvent::spawn(42, Time::from_nanos(100), tid(1), rid(1));
+        snap.apply(&event);
+        assert_eq!(snap.step, 42);
+        assert_eq!(snap.time_nanos, 100);
+        assert!(snap.tasks.contains_key(&1));
+    }
+
+    #[test]
+    fn tla_module_debug() {
+        let module = TlaExporter::export_spec_skeleton("DebugTest");
+        let dbg = format!("{module:?}");
+        assert!(dbg.contains("TlaModule"));
+    }
+
+    #[test]
+    fn tla_exporter_snapshot_count_with_events() {
+        let events = [
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::spawn(2, Time::ZERO, tid(2), rid(1)),
+        ];
+        let exporter = TlaExporter::from_trace(&events);
+        // initial + 2 events = 3 snapshots
+        assert_eq!(exporter.snapshot_count(), 3);
+    }
+
+    #[test]
+    fn format_tla_task_map_empty() {
+        let map = BTreeMap::new();
+        assert_eq!(format_tla_task_map(&map), "<<>>");
+    }
+
+    #[test]
+    fn format_tla_task_map_with_entries() {
+        let mut map = BTreeMap::new();
+        map.insert(1, (TlaTaskState::Spawned, 0));
+        let result = format_tla_task_map(&map);
+        assert!(result.contains("1 :>"));
+        assert!(result.contains("\"Spawned\""));
+    }
+
+    #[test]
+    fn format_tla_region_map_empty() {
+        let map = BTreeMap::new();
+        assert_eq!(format_tla_region_map(&map), "<<>>");
+    }
+
+    #[test]
+    fn format_tla_region_map_with_parent() {
+        let mut map = BTreeMap::new();
+        map.insert(1, (TlaRegionState::Open, Some(0)));
+        let result = format_tla_region_map(&map);
+        assert!(result.contains("\"Open\""));
+        assert!(result.contains("0"));
+    }
+
+    #[test]
+    fn format_tla_region_map_without_parent() {
+        let mut map = BTreeMap::new();
+        map.insert(1, (TlaRegionState::Closed, None));
+        let result = format_tla_region_map(&map);
+        assert!(result.contains("\"NONE\""));
+    }
+
+    #[test]
+    fn format_tla_obligation_map_empty() {
+        let map = BTreeMap::new();
+        assert_eq!(format_tla_obligation_map(&map), "<<>>");
+    }
+
+    #[test]
+    fn format_tla_obligation_map_with_entries() {
+        let mut map = BTreeMap::new();
+        map.insert(1, (TlaObligationState::Committed, 2, 3));
+        let result = format_tla_obligation_map(&map);
+        assert!(result.contains("\"Committed\""));
+        assert!(result.contains("2"));
+        assert!(result.contains("3"));
+    }
 }
