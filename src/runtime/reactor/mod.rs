@@ -1232,4 +1232,32 @@ mod tests {
 
         crate::test_complete!("reactor_arc_shared_access");
     }
+
+    #[test]
+    fn token_debug_clone_copy_hash_ord_eq() {
+        use std::collections::HashSet;
+        let t = Token::new(42);
+        let dbg = format!("{t:?}");
+        assert!(dbg.contains("42"), "{dbg}");
+        let copied: Token = t;
+        let cloned = t.clone();
+        assert_eq!(copied, cloned);
+        assert!(Token::new(1) < Token::new(2));
+
+        let mut set = HashSet::new();
+        set.insert(Token::new(1));
+        set.insert(Token::new(2));
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn event_debug_clone_copy_eq() {
+        let e = Event::new(Token::new(1), Interest::READABLE);
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("Event"), "{dbg}");
+        let copied: Event = e;
+        let cloned = e.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(e, Event::new(Token::new(2), Interest::WRITABLE));
+    }
 }

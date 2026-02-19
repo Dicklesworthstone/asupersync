@@ -1610,6 +1610,72 @@ mod tests {
     }
 
     #[test]
+    fn region_mode_debug_clone_copy_default_eq() {
+        let m = RegionMode::default();
+        assert_eq!(m, RegionMode::Local);
+        let dbg = format!("{m:?}");
+        assert!(dbg.contains("Local"), "{dbg}");
+
+        let dist = RegionMode::distributed(3);
+        let copied: RegionMode = dist;
+        let cloned = dist.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(dist, RegionMode::Local);
+    }
+
+    #[test]
+    fn sync_mode_debug_clone_copy_eq() {
+        let s = SyncMode::Synchronous;
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("Synchronous"), "{dbg}");
+        let copied: SyncMode = s;
+        let cloned = s.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(s, SyncMode::Asynchronous);
+    }
+
+    #[test]
+    fn conflict_resolution_debug_clone_copy_eq() {
+        let c = ConflictResolution::DistributedWins;
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("DistributedWins"), "{dbg}");
+        let copied: ConflictResolution = c;
+        let cloned = c.clone();
+        assert_eq!(copied, cloned);
+    }
+
+    #[test]
+    fn bridge_config_debug_clone_default() {
+        let c = BridgeConfig::default();
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("BridgeConfig"), "{dbg}");
+        assert!(c.allow_upgrade);
+        let cloned = c.clone();
+        assert_eq!(format!("{cloned:?}"), dbg);
+    }
+
+    #[test]
+    fn effective_state_debug_clone_copy_eq() {
+        let e = EffectiveState::Open;
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("Open"), "{dbg}");
+        let copied: EffectiveState = e;
+        let cloned = e.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(e, EffectiveState::Closed);
+    }
+
+    #[test]
+    fn sync_state_debug_clone_default() {
+        let s = SyncState::default();
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("SyncState"), "{dbg}");
+        assert_eq!(s.pending_ops, 0);
+        let cloned = s.clone();
+        assert_eq!(format!("{cloned:?}"), dbg);
+    }
+
+    #[test]
     fn distributed_close_full_lifecycle() {
         let mut bridge = create_distributed_bridge();
         // Activate distributed record.

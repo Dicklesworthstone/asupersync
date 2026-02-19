@@ -130,4 +130,20 @@ mod tests {
         let io_err: io::Error = err.into();
         assert_eq!(io_err.kind(), io::ErrorKind::Unsupported);
     }
+
+    #[test]
+    fn io_not_available_debug_clone_eq() {
+        let e = IoNotAvailable;
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("IoNotAvailable"), "{dbg}");
+        let cloned = e.clone();
+        assert_eq!(e, cloned);
+    }
+
+    #[test]
+    fn lab_io_cap_debug_default() {
+        let c = LabIoCap::default();
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("LabIoCap"), "{dbg}");
+    }
 }

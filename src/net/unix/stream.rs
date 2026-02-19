@@ -1006,4 +1006,26 @@ mod tests {
         });
         crate::test_complete!("test_send_recv_with_ancillary");
     }
+
+    #[test]
+    fn ucred_debug_clone_copy_eq() {
+        let c = UCred {
+            uid: 1000,
+            gid: 1000,
+            pid: Some(42),
+        };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("1000"), "{dbg}");
+        let copied: UCred = c;
+        let cloned = c.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(
+            c,
+            UCred {
+                uid: 0,
+                gid: 0,
+                pid: None
+            }
+        );
+    }
 }

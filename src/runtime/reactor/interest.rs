@@ -690,4 +690,22 @@ mod tests {
         );
         crate::test_complete!("interest_helpers");
     }
+
+    #[test]
+    fn interest_debug_clone_copy_hash_default_eq() {
+        use std::collections::HashSet;
+        let i = Interest::READABLE;
+        let dbg = format!("{i:?}");
+        assert!(dbg.contains("Interest"), "{dbg}");
+        let copied: Interest = i;
+        let cloned = i.clone();
+        assert_eq!(copied, cloned);
+        assert_eq!(Interest::default(), Interest(0));
+
+        let mut set = HashSet::new();
+        set.insert(Interest::READABLE);
+        set.insert(Interest::WRITABLE);
+        set.insert(Interest::both());
+        assert_eq!(set.len(), 3);
+    }
 }
