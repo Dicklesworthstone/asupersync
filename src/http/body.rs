@@ -844,4 +844,358 @@ mod tests {
         let name = HeaderName::from_static("Content-Type");
         assert_eq!(name.as_str(), "content-type");
     }
+
+    // ========================================================================
+    // Pure data-type tests (wave 9 – CyanBarn)
+    // ========================================================================
+
+    #[test]
+    fn frame_into_data_some() {
+        let frame: Frame<Vec<u8>> = Frame::data(vec![1, 2, 3]);
+        let data = frame.into_data();
+        assert_eq!(data, Some(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn frame_into_data_none_for_trailers() {
+        let frame: Frame<Vec<u8>> = Frame::trailers(HeaderMap::new());
+        assert!(frame.into_data().is_none());
+    }
+
+    #[test]
+    fn frame_into_trailers_some() {
+        let mut hm = HeaderMap::new();
+        hm.insert(
+            HeaderName::from_static("x-foo"),
+            HeaderValue::from_static("bar"),
+        );
+        let frame: Frame<Vec<u8>> = Frame::trailers(hm);
+        let trailers = frame.into_trailers().expect("should be trailers");
+        assert_eq!(trailers.len(), 1);
+    }
+
+    #[test]
+    fn frame_into_trailers_none_for_data() {
+        let frame: Frame<Vec<u8>> = Frame::data(vec![]);
+        assert!(frame.into_trailers().is_none());
+    }
+
+    #[test]
+    fn frame_data_mut() {
+        let mut frame: Frame<Vec<u8>> = Frame::data(vec![1]);
+        if let Some(data) = frame.data_mut() {
+            data.push(2);
+        }
+        assert_eq!(frame.data_ref(), Some(&vec![1, 2]));
+    }
+
+    #[test]
+    fn frame_data_mut_none_for_trailers() {
+        let mut frame: Frame<Vec<u8>> = Frame::trailers(HeaderMap::new());
+        assert!(frame.data_mut().is_none());
+    }
+
+    #[test]
+    fn frame_map_data() {
+        let frame: Frame<u32> = Frame::data(5);
+        let mapped = frame.map_data(|n| n * 2);
+        assert_eq!(mapped.into_data(), Some(10));
+    }
+
+    #[test]
+    fn frame_map_data_preserves_trailers() {
+        let frame: Frame<u32> = Frame::trailers(HeaderMap::new());
+        let mapped = frame.map_data(|n: u32| n * 2);
+        assert!(mapped.is_trailers());
+    }
+
+    #[test]
+    fn frame_debug() {
+        let frame: Frame<u32> = Frame::data(42);
+        let dbg = format!("{frame:?}");
+        assert!(dbg.contains("Data"), "{dbg}");
+    }
+
+    #[test]
+    fn header_map_with_capacity() {
+        let hm = HeaderMap::with_capacity(10);
+        assert!(hm.is_empty());
+        assert_eq!(hm.len(), 0);
+    }
+
+    #[test]
+    fn header_map_insert_replaces() {
+        let mut hm = HeaderMap::new();
+        let name = HeaderName::from_static("x-key");
+        hm.insert(name.clone(), HeaderValue::from_static("v1"));
+        hm.insert(name.clone(), HeaderValue::from_static("v2"));
+        assert_eq!(hm.len(), 1);
+        assert_eq!(hm.get(&name).unwrap().to_str().unwrap(), "v2");
+    }
+
+    #[test]
+    fn header_map_append_allows_duplicates() {
+        let mut hm = HeaderMap::new();
+        let name = HeaderName::from_static("x-multi");
+        hm.append(name.clone(), HeaderValue::from_static("a"));
+        hm.append(name.clone(), HeaderValue::from_static("b"));
+        assert_eq!(hm.len(), 2);
+    }
+
+    #[test]
+    fn header_map_iter() {
+        let mut hm = HeaderMap::new();
+        hm.insert(
+            HeaderName::from_static("a"),
+            HeaderValue::from_static("1"),
+        );
+        hm.insert(
+            HeaderName::from_static("b"),
+            HeaderValue::from_static("2"),
+        );
+        let count = hm.iter().count();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn header_map_get_missing() {
+        let hm = HeaderMap::new();
+        let name = HeaderName::from_static("missing");
+        assert!(hm.get(&name).is_none());
+    }
+
+    #[test]
+    fn header_map_debug_clone_default() {
+        let hm = HeaderMap::default();
+        assert!(hm.is_empty());
+        let dbg = format!("{hm:?}");
+        assert!(dbg.contains("HeaderMap"), "{dbg}");
+
+        let mut hm2 = hm.clone();
+        hm2.insert(
+            HeaderName::from_static("x"),
+            HeaderValue::from_static("y"),
+        );
+        assert_eq!(hm2.len(), 1);
+    }
+
+    #[test]
+    fn header_name_from_string() {
+        let name = HeaderName::from_string("X-Custom");
+        assert_eq!(name.as_str(), "x-custom");
+    }
+
+    #[test]
+    fn header_name_display() {
+        let name = HeaderName::from_static("content-type");
+        assert_eq!(format!("{name}"), "content-type");
+    }
+
+    #[test]
+    fn header_name_eq_hash() {
+        let a = HeaderName::from_static("x-foo");
+        let b = HeaderName::from_string("X-Foo");
+        assert_eq!(a, b);
+
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(a.clone());
+        assert!(set.contains(&b));
+    }
+
+    #[test]
+    fn header_value_from_bytes() {
+        let v = HeaderValue::from_bytes(b"hello");
+        assert_eq!(v.as_bytes(), b"hello");
+        assert_eq!(v.to_str().unwrap(), "hello");
+    }
+
+    #[test]
+    fn header_value_from_string() {
+        let v = HeaderValue::from_string("world".to_string());
+        assert_eq!(v.as_bytes(), b"world");
+    }
+
+    #[test]
+    fn header_value_display_utf8() {
+        let v = HeaderValue::from_static("text/plain");
+        assert_eq!(format!("{v}"), "text/plain");
+    }
+
+    #[test]
+    fn header_value_display_non_utf8() {
+        let v = HeaderValue::from_bytes(&[0xFF, 0xFE]);
+        let disp = format!("{v}");
+        // Non-UTF8 goes through Debug path
+        assert!(disp.contains("255"), "{disp}");
+    }
+
+    #[test]
+    fn header_value_eq_clone() {
+        let a = HeaderValue::from_static("x");
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn size_hint_set_lower_upper() {
+        let mut hint = SizeHint::new();
+        hint.set_lower(10);
+        hint.set_upper(100);
+        assert_eq!(hint.lower(), 10);
+        assert_eq!(hint.upper(), Some(100));
+        assert_eq!(hint.exact(), None); // lower != upper
+    }
+
+    #[test]
+    fn size_hint_exact_mismatch() {
+        let mut hint = SizeHint::new();
+        hint.set_lower(5);
+        hint.set_upper(10);
+        assert_eq!(hint.exact(), None);
+    }
+
+    #[test]
+    fn size_hint_debug_clone_copy() {
+        let hint = SizeHint::with_exact(42);
+        let dbg = format!("{hint:?}");
+        assert!(dbg.contains("SizeHint"), "{dbg}");
+        let copied = hint; // Copy
+        let cloned = hint.clone();
+        assert_eq!(copied.exact(), cloned.exact());
+    }
+
+    #[test]
+    fn empty_debug_clone_copy_default() {
+        let e = Empty::new();
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("Empty"), "{dbg}");
+        let copied = e; // Copy
+        let cloned = e.clone();
+        let defaulted = Empty::default();
+        // All are the unit struct
+        let _ = (copied, cloned, defaulted);
+    }
+
+    #[test]
+    fn full_debug_clone() {
+        let cursor = BytesCursor::new(Bytes::from_static(b"abc"));
+        let body = Full::new(cursor);
+        let dbg = format!("{body:?}");
+        assert!(dbg.contains("Full"), "{dbg}");
+        let cloned = body.clone();
+        assert_eq!(cloned.size_hint().exact(), Some(3));
+    }
+
+    #[test]
+    fn full_from_static_str() {
+        let body: Full<BytesCursor> = Full::from("hello");
+        assert_eq!(body.size_hint().exact(), Some(5));
+    }
+
+    #[test]
+    fn full_from_string_conversion() {
+        let body: Full<BytesCursor> = Full::from("world".to_string());
+        assert_eq!(body.size_hint().exact(), Some(5));
+    }
+
+    #[test]
+    fn full_from_vec() {
+        let body: Full<BytesCursor> = Full::from(vec![1u8, 2, 3]);
+        assert_eq!(body.size_hint().exact(), Some(3));
+    }
+
+    #[test]
+    fn full_empty_data_is_end_stream() {
+        let cursor = BytesCursor::new(Bytes::from_static(b""));
+        let body = Full::new(cursor);
+        assert!(body.is_end_stream());
+    }
+
+    #[test]
+    fn stream_body_debug_and_into_inner() {
+        let stream = vec![1, 2, 3];
+        let body = StreamBody::new(stream);
+        let dbg = format!("{body:?}");
+        assert!(dbg.contains("StreamBody"), "{dbg}");
+        let inner = body.into_inner();
+        assert_eq!(inner, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn length_limit_error_display() {
+        let err = LengthLimitError;
+        assert_eq!(format!("{err}"), "body length limit exceeded");
+    }
+
+    #[test]
+    fn length_limit_error_debug_clone_copy() {
+        let err = LengthLimitError;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("LengthLimitError"), "{dbg}");
+        let copied = err; // Copy
+        let cloned = err.clone();
+        let _ = (copied, cloned);
+    }
+
+    #[test]
+    fn length_limit_error_is_std_error() {
+        let err = LengthLimitError;
+        let _: &dyn std::error::Error = &err;
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn limited_error_display() {
+        let err: LimitedError<std::io::Error> = LimitedError::LengthLimit;
+        assert_eq!(format!("{err}"), "body length limit exceeded");
+
+        let inner_err = LimitedError::Inner(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "inner",
+        ));
+        let disp = format!("{inner_err}");
+        assert!(disp.contains("inner"), "{disp}");
+    }
+
+    #[test]
+    fn limited_error_debug() {
+        let err: LimitedError<&str> = LimitedError::LengthLimit;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("LengthLimit"), "{dbg}");
+    }
+
+    #[test]
+    fn limited_error_source() {
+        let err: LimitedError<std::io::Error> = LimitedError::LengthLimit;
+        assert!(std::error::Error::source(&err).is_none());
+
+        let inner = LimitedError::Inner(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "cause",
+        ));
+        assert!(std::error::Error::source(&inner).is_some());
+    }
+
+    #[test]
+    fn collected_body_initial_state() {
+        let body = Collected::new(Empty::new());
+        assert!(body.data().is_empty());
+        assert!(body.trailers().is_none());
+    }
+
+    #[test]
+    fn collected_body_into_data() {
+        let body = Collected::new(Empty::new());
+        let data = body.into_data();
+        assert!(data.is_empty());
+    }
+
+    #[test]
+    fn limited_body_new() {
+        let inner = Empty::new();
+        let limited = Limited::new(inner, 1024);
+        let dbg = format!("{limited:?}");
+        assert!(dbg.contains("Limited"), "{dbg}");
+    }
 }

@@ -5109,4 +5109,390 @@ mod tests {
 
         crate::test_complete!("named_start_helper_crash_then_stop_cleans_registry");
     }
+
+    // ========================================================================
+    // Pure data-type tests (wave 9 – CyanBarn)
+    // ========================================================================
+
+    #[test]
+    fn cast_overflow_policy_default_is_reject() {
+        let policy: CastOverflowPolicy = Default::default();
+        assert!(matches!(policy, CastOverflowPolicy::Reject));
+    }
+
+    #[test]
+    fn cast_overflow_policy_debug() {
+        let dbg = format!("{:?}", CastOverflowPolicy::Reject);
+        assert!(dbg.contains("Reject"), "{dbg}");
+        let dbg2 = format!("{:?}", CastOverflowPolicy::DropOldest);
+        assert!(dbg2.contains("DropOldest"), "{dbg2}");
+    }
+
+    #[test]
+    fn cast_overflow_policy_eq_clone_copy() {
+        let a = CastOverflowPolicy::Reject;
+        let b = a; // Copy
+        let c = a.clone();
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+        assert_ne!(CastOverflowPolicy::Reject, CastOverflowPolicy::DropOldest);
+    }
+
+    #[test]
+    fn down_msg_constructor_and_debug() {
+        let mut monitors = crate::monitor::MonitorSet::new();
+        let mref = monitors.establish(tid(50), rid(0), tid(51));
+        let msg = DownMsg::new(
+            Time::from_secs(7),
+            DownNotification {
+                monitored: tid(51),
+                reason: DownReason::Normal,
+                monitor_ref: mref,
+            },
+        );
+        assert_eq!(msg.completion_vt, Time::from_secs(7));
+        assert_eq!(msg.notification.monitored, tid(51));
+        let dbg = format!("{msg:?}");
+        assert!(dbg.contains("DownMsg"), "{dbg}");
+    }
+
+    #[test]
+    fn down_msg_clone() {
+        let mut monitors = crate::monitor::MonitorSet::new();
+        let mref = monitors.establish(tid(60), rid(0), tid(61));
+        let msg = DownMsg::new(
+            Time::from_secs(8),
+            DownNotification {
+                monitored: tid(61),
+                reason: DownReason::Normal,
+                monitor_ref: mref,
+            },
+        );
+        let cloned = msg.clone();
+        assert_eq!(cloned.completion_vt, msg.completion_vt);
+        assert_eq!(cloned.notification.monitored, msg.notification.monitored);
+    }
+
+    #[test]
+    fn exit_msg_constructor_and_eq() {
+        let a = ExitMsg::new(Time::from_secs(5), tid(10), DownReason::Normal);
+        let b = ExitMsg::new(Time::from_secs(5), tid(10), DownReason::Normal);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn exit_msg_debug_and_clone() {
+        let msg = ExitMsg::new(
+            Time::from_secs(6),
+            tid(11),
+            DownReason::Error("oops".into()),
+        );
+        let dbg = format!("{msg:?}");
+        assert!(dbg.contains("ExitMsg"), "{dbg}");
+        let cloned = msg.clone();
+        assert_eq!(cloned, msg);
+    }
+
+    #[test]
+    fn exit_msg_inequality() {
+        let a = ExitMsg::new(Time::from_secs(1), tid(1), DownReason::Normal);
+        let b = ExitMsg::new(Time::from_secs(2), tid(1), DownReason::Normal);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn timeout_msg_constructor_eq_copy() {
+        let a = TimeoutMsg::new(Time::from_secs(10), 42);
+        let b = a; // Copy
+        let c = a.clone();
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+        assert_eq!(a.tick_vt, Time::from_secs(10));
+        assert_eq!(a.id, 42);
+    }
+
+    #[test]
+    fn timeout_msg_debug() {
+        let msg = TimeoutMsg::new(Time::from_secs(1), 99);
+        let dbg = format!("{msg:?}");
+        assert!(dbg.contains("TimeoutMsg"), "{dbg}");
+    }
+
+    #[test]
+    fn timeout_msg_inequality() {
+        let a = TimeoutMsg::new(Time::from_secs(1), 1);
+        let b = TimeoutMsg::new(Time::from_secs(1), 2);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn system_msg_debug_all_variants() {
+        let mut monitors = crate::monitor::MonitorSet::new();
+        let mref = monitors.establish(tid(70), rid(0), tid(71));
+
+        let down = SystemMsg::Down {
+            completion_vt: Time::from_secs(1),
+            notification: DownNotification {
+                monitored: tid(71),
+                reason: DownReason::Normal,
+                monitor_ref: mref,
+            },
+        };
+        let exit = SystemMsg::Exit {
+            exit_vt: Time::from_secs(2),
+            from: tid(72),
+            reason: DownReason::Normal,
+        };
+        let timeout = SystemMsg::Timeout {
+            tick_vt: Time::from_secs(3),
+            id: 55,
+        };
+
+        let d = format!("{down:?}");
+        assert!(d.contains("Down"), "{d}");
+        let e = format!("{exit:?}");
+        assert!(e.contains("Exit"), "{e}");
+        let t = format!("{timeout:?}");
+        assert!(t.contains("Timeout"), "{t}");
+    }
+
+    #[test]
+    fn system_msg_clone() {
+        let msg = SystemMsg::Timeout {
+            tick_vt: Time::from_secs(5),
+            id: 7,
+        };
+        let cloned = msg.clone();
+        assert_eq!(cloned.sort_key(), msg.sort_key());
+    }
+
+    #[test]
+    fn system_msg_convenience_constructors() {
+        let mut monitors = crate::monitor::MonitorSet::new();
+        let mref = monitors.establish(tid(80), rid(0), tid(81));
+
+        let down_payload = DownMsg::new(
+            Time::from_secs(1),
+            DownNotification {
+                monitored: tid(81),
+                reason: DownReason::Normal,
+                monitor_ref: mref,
+            },
+        );
+        let msg = SystemMsg::down(down_payload);
+        assert!(matches!(msg, SystemMsg::Down { .. }));
+
+        let exit_payload = ExitMsg::new(Time::from_secs(2), tid(82), DownReason::Normal);
+        let msg = SystemMsg::exit(exit_payload);
+        assert!(matches!(msg, SystemMsg::Exit { .. }));
+
+        let timeout_payload = TimeoutMsg::new(Time::from_secs(3), 44);
+        let msg = SystemMsg::timeout(timeout_payload);
+        assert!(matches!(msg, SystemMsg::Timeout { .. }));
+    }
+
+    #[test]
+    fn system_msg_sort_key_kind_rank_ordering() {
+        let mut monitors = crate::monitor::MonitorSet::new();
+        let mref = monitors.establish(tid(85), rid(0), tid(86));
+
+        let same_vt = Time::from_secs(100);
+        let down = SystemMsg::Down {
+            completion_vt: same_vt,
+            notification: DownNotification {
+                monitored: tid(86),
+                reason: DownReason::Normal,
+                monitor_ref: mref,
+            },
+        };
+        let exit = SystemMsg::Exit {
+            exit_vt: same_vt,
+            from: tid(86),
+            reason: DownReason::Normal,
+        };
+        let timeout = SystemMsg::Timeout {
+            tick_vt: same_vt,
+            id: 1,
+        };
+
+        // Down < Exit < Timeout (kind ranks 0, 1, 2)
+        assert!(down.sort_key() < exit.sort_key());
+        assert!(exit.sort_key() < timeout.sort_key());
+    }
+
+    #[test]
+    fn system_msg_subject_key_debug_eq_ord() {
+        let a = SystemMsgSubjectKey::Task(tid(1));
+        let b = SystemMsgSubjectKey::Task(tid(1));
+        let c = SystemMsgSubjectKey::TimeoutId(1);
+
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("Task"), "{dbg}");
+        let dbg2 = format!("{c:?}");
+        assert!(dbg2.contains("TimeoutId"), "{dbg2}");
+
+        // Copy + Clone
+        let copied = a;
+        let cloned = a.clone();
+        assert_eq!(copied, cloned);
+
+        // Ord consistency
+        assert!(a <= b);
+    }
+
+    #[test]
+    fn system_msg_batch_default_and_empty() {
+        let batch = SystemMsgBatch::new();
+        let sorted = batch.into_sorted();
+        assert!(sorted.is_empty());
+    }
+
+    #[test]
+    fn system_msg_batch_debug() {
+        let batch = SystemMsgBatch::new();
+        let dbg = format!("{batch:?}");
+        assert!(dbg.contains("SystemMsgBatch"), "{dbg}");
+    }
+
+    #[test]
+    fn system_msg_batch_single_element() {
+        let mut batch = SystemMsgBatch::new();
+        batch.push(SystemMsg::Timeout {
+            tick_vt: Time::from_secs(42),
+            id: 1,
+        });
+        let sorted = batch.into_sorted();
+        assert_eq!(sorted.len(), 1);
+        assert!(matches!(sorted[0], SystemMsg::Timeout { id: 1, .. }));
+    }
+
+    #[test]
+    fn call_error_display_server_stopped() {
+        let err = CallError::ServerStopped;
+        let disp = format!("{err}");
+        assert_eq!(disp, "GenServer has stopped");
+    }
+
+    #[test]
+    fn call_error_display_no_reply() {
+        let err = CallError::NoReply;
+        let disp = format!("{err}");
+        assert_eq!(disp, "GenServer did not reply");
+    }
+
+    #[test]
+    fn call_error_display_cancelled() {
+        let reason = CancelReason::user("test cancel");
+        let err = CallError::Cancelled(reason);
+        let disp = format!("{err}");
+        assert!(disp.contains("cancelled"), "{disp}");
+    }
+
+    #[test]
+    fn call_error_debug_all_variants() {
+        let dbg1 = format!("{:?}", CallError::ServerStopped);
+        assert!(dbg1.contains("ServerStopped"), "{dbg1}");
+        let dbg2 = format!("{:?}", CallError::NoReply);
+        assert!(dbg2.contains("NoReply"), "{dbg2}");
+        let dbg3 = format!("{:?}", CallError::Cancelled(CancelReason::user("x")));
+        assert!(dbg3.contains("Cancelled"), "{dbg3}");
+    }
+
+    #[test]
+    fn call_error_is_std_error() {
+        let err = CallError::ServerStopped;
+        let _: &dyn std::error::Error = &err;
+        // source() defaults to None
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn cast_error_display_all_variants() {
+        assert_eq!(
+            format!("{}", CastError::ServerStopped),
+            "GenServer has stopped"
+        );
+        assert_eq!(format!("{}", CastError::Full), "GenServer mailbox full");
+        let cancelled = CastError::Cancelled(CancelReason::user("t"));
+        let disp = format!("{cancelled}");
+        assert!(disp.contains("cancelled"), "{disp}");
+    }
+
+    #[test]
+    fn cast_error_debug_all_variants() {
+        let dbg1 = format!("{:?}", CastError::ServerStopped);
+        assert!(dbg1.contains("ServerStopped"), "{dbg1}");
+        let dbg2 = format!("{:?}", CastError::Full);
+        assert!(dbg2.contains("Full"), "{dbg2}");
+    }
+
+    #[test]
+    fn cast_error_is_std_error() {
+        let err = CastError::Full;
+        let _: &dyn std::error::Error = &err;
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn info_error_display_all_variants() {
+        assert_eq!(
+            format!("{}", InfoError::ServerStopped),
+            "GenServer has stopped"
+        );
+        assert_eq!(format!("{}", InfoError::Full), "GenServer mailbox full");
+        let cancelled = InfoError::Cancelled(CancelReason::user("u"));
+        let disp = format!("{cancelled}");
+        assert!(disp.contains("cancelled"), "{disp}");
+    }
+
+    #[test]
+    fn info_error_debug_all_variants() {
+        let dbg1 = format!("{:?}", InfoError::ServerStopped);
+        assert!(dbg1.contains("ServerStopped"), "{dbg1}");
+        let dbg2 = format!("{:?}", InfoError::Full);
+        assert!(dbg2.contains("Full"), "{dbg2}");
+    }
+
+    #[test]
+    fn info_error_is_std_error() {
+        let err = InfoError::ServerStopped;
+        let _: &dyn std::error::Error = &err;
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn system_msg_try_from_exit_rejects_timeout() {
+        let timeout = SystemMsg::Timeout {
+            tick_vt: Time::from_secs(1),
+            id: 7,
+        };
+        let err = ExitMsg::try_from(timeout).expect_err("timeout is not exit");
+        assert!(matches!(err, SystemMsg::Timeout { id: 7, .. }));
+    }
+
+    #[test]
+    fn system_msg_try_from_exit_succeeds() {
+        let exit = SystemMsg::Exit {
+            exit_vt: Time::from_secs(3),
+            from: tid(15),
+            reason: DownReason::Normal,
+        };
+        let result = ExitMsg::try_from(exit).expect("exit conversion");
+        assert_eq!(result.exit_vt, Time::from_secs(3));
+        assert_eq!(result.from, tid(15));
+    }
+
+    #[test]
+    fn system_msg_try_from_timeout_rejects_exit() {
+        let exit = SystemMsg::Exit {
+            exit_vt: Time::from_secs(1),
+            from: tid(1),
+            reason: DownReason::Normal,
+        };
+        let err = TimeoutMsg::try_from(exit).expect_err("exit is not timeout");
+        assert!(matches!(err, SystemMsg::Exit { .. }));
+    }
 }
