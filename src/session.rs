@@ -701,4 +701,40 @@ mod tests {
 
         crate::test_complete!("session_deterministic");
     }
+
+    // Pure data-type tests (wave 36 – CyanBarn)
+
+    #[test]
+    fn session_error_debug() {
+        let e1 = SessionError::Disconnected;
+        let e2 = SessionError::TypeMismatch;
+        let e3 = SessionError::Cancelled;
+
+        let dbg1 = format!("{e1:?}");
+        let dbg2 = format!("{e2:?}");
+        let dbg3 = format!("{e3:?}");
+
+        assert!(dbg1.contains("Disconnected"));
+        assert!(dbg2.contains("TypeMismatch"));
+        assert!(dbg3.contains("Cancelled"));
+    }
+
+    #[test]
+    fn branch_debug_copy() {
+        let left = Branch::Left;
+        let right = Branch::Right;
+
+        let dbg_l = format!("{left:?}");
+        let dbg_r = format!("{right:?}");
+        assert!(dbg_l.contains("Left"));
+        assert!(dbg_r.contains("Right"));
+
+        // Copy semantics
+        let left2 = left;
+        assert_eq!(left, left2);
+
+        // Clone
+        let right2 = right.clone();
+        assert_eq!(right, right2);
+    }
 }

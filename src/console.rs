@@ -1142,4 +1142,135 @@ mod tests {
         );
         crate::test_complete!("integration_clear_screen");
     }
+
+    // Pure data-type tests (wave 36 – CyanBarn)
+
+    #[test]
+    fn capabilities_debug_copy() {
+        let caps = Capabilities {
+            is_tty: false,
+            color_support: ColorSupport::Extended,
+            width: 120,
+            height: 40,
+            unicode: true,
+        };
+        let dbg = format!("{caps:?}");
+        assert!(dbg.contains("Capabilities"));
+
+        // Copy
+        let caps2 = caps;
+        assert_eq!(caps, caps2);
+        assert_eq!(caps2.width, 120);
+        assert_eq!(caps2.height, 40);
+
+        // Clone
+        let caps3 = caps.clone();
+        assert_eq!(caps, caps3);
+    }
+
+    #[test]
+    fn color_mode_debug_copy_eq() {
+        let modes = [ColorMode::Auto, ColorMode::Always, ColorMode::Never];
+        for mode in &modes {
+            let dbg = format!("{mode:?}");
+            assert!(!dbg.is_empty());
+
+            // Copy
+            let m2 = *mode;
+            assert_eq!(*mode, m2);
+        }
+        assert_ne!(ColorMode::Auto, ColorMode::Always);
+        assert_ne!(ColorMode::Always, ColorMode::Never);
+    }
+
+    #[test]
+    fn color_support_debug_copy_eq() {
+        let variants = [
+            ColorSupport::None,
+            ColorSupport::Basic,
+            ColorSupport::Extended,
+            ColorSupport::TrueColor,
+        ];
+        for v in &variants {
+            let dbg = format!("{v:?}");
+            assert!(!dbg.is_empty());
+            let v2 = *v;
+            assert_eq!(*v, v2);
+        }
+        assert_ne!(ColorSupport::None, ColorSupport::Basic);
+        assert_ne!(ColorSupport::Extended, ColorSupport::TrueColor);
+    }
+
+    #[test]
+    fn color_debug_copy() {
+        let colors = [
+            Color::Black, Color::Red, Color::Green, Color::Blue,
+            Color::BrightCyan, Color::Index(42), Color::Rgb(10, 20, 30),
+        ];
+        for color in &colors {
+            let dbg = format!("{color:?}");
+            assert!(!dbg.is_empty());
+            let c2 = *color;
+            assert_eq!(*color, c2);
+        }
+    }
+
+    #[test]
+    fn style_debug_clone_copy_default() {
+        let default_style = Style::default();
+        assert!(default_style.fg.is_none());
+        assert!(default_style.bg.is_none());
+        assert!(!default_style.bold);
+        assert!(!default_style.italic);
+        assert!(!default_style.underline);
+        assert!(!default_style.dim);
+
+        let dbg = format!("{default_style:?}");
+        assert!(dbg.contains("Style"));
+
+        // Builder
+        let styled = Style::new().fg(Color::Red).bold().italic().underline().dim();
+        assert_eq!(styled.fg, Some(Color::Red));
+        assert!(styled.bold);
+        assert!(styled.italic);
+        assert!(styled.underline);
+        assert!(styled.dim);
+
+        // Copy
+        let styled2 = styled;
+        assert_eq!(styled, styled2);
+
+        // Clone
+        let styled3 = styled.clone();
+        assert_eq!(styled, styled3);
+    }
+
+    #[test]
+    fn text_debug_clone_eq() {
+        let text = Text::new("hello").fg(Color::Green).bold();
+        let dbg = format!("{text:?}");
+        assert!(dbg.contains("Text"));
+
+        assert_eq!(text.content(), "hello");
+        assert_eq!(text.style().fg, Some(Color::Green));
+        assert!(text.style().bold);
+
+        let cloned = text.clone();
+        assert_eq!(text, cloned);
+        assert_eq!(cloned.content(), "hello");
+    }
+
+    #[test]
+    fn console_debug() {
+        let caps = Capabilities {
+            is_tty: false,
+            color_support: ColorSupport::None,
+            width: 80,
+            height: 24,
+            unicode: false,
+        };
+        let console = Console::with_caps(SharedWriter::new(), caps, ColorMode::Never);
+        let dbg = format!("{console:?}");
+        assert!(dbg.contains("Console"));
+    }
 }
