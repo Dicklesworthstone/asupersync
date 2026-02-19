@@ -20,6 +20,7 @@ use crate::raptorq::systematic::{ConstraintMatrix, SystematicParams};
 use crate::types::ObjectId;
 
 use std::collections::{BTreeSet, VecDeque};
+use std::hash::{Hash, Hasher};
 
 // ============================================================================
 // Decoder types
@@ -198,6 +199,26 @@ pub struct DecodeStats {
     pub policy_high_support_loss: u32,
     /// Expected-loss term for block-schur mode.
     pub policy_block_schur_loss: u32,
+    /// Number of dense-factor cache hits during this decode.
+    pub factor_cache_hits: usize,
+    /// Number of dense-factor cache misses during this decode.
+    pub factor_cache_misses: usize,
+    /// Number of dense-factor cache insertions during this decode.
+    pub factor_cache_inserts: usize,
+    /// Number of dense-factor cache evictions during this decode.
+    pub factor_cache_evictions: usize,
+    /// Number of fingerprint collisions observed while probing cache keys.
+    pub factor_cache_lookup_collisions: usize,
+    /// Last dense-factor cache key fingerprint consulted by the decoder.
+    pub factor_cache_last_key: Option<u64>,
+    /// Deterministic reason for the most recent dense-factor cache decision.
+    pub factor_cache_last_reason: Option<&'static str>,
+    /// Whether the most recent cache probe was eligible for artifact reuse.
+    pub factor_cache_last_reuse_eligible: Option<bool>,
+    /// Number of entries resident in the dense-factor cache after the last operation.
+    pub factor_cache_entries: usize,
+    /// Bounded capacity used by the dense-factor cache policy.
+    pub factor_cache_capacity: usize,
 }
 
 /// Result of successful decoding.
@@ -240,6 +261,148 @@ struct DecoderState {
     inactive_cols: BTreeSet<usize>,
     /// Statistics.
     stats: DecodeStats,
+}
+
+const DENSE_FACTOR_CACHE_CAPACITY: usize = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DenseFactorCacheResult {
+    Hit,
+    MissInserted,
+    MissEvicted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DenseFactorCacheLookup {
+    Hit(DenseFactorArtifact),
+    MissNoEntry,
+    MissFingerprintCollision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DenseFactorArtifact {
+    dense_cols: Vec<usize>,
+    col_to_dense: Vec<usize>,
+}
+
+impl DenseFactorArtifact {
+    fn new(dense_cols: Vec<usize>) -> Self {
+        let col_to_dense = build_dense_col_index_map(&dense_cols);
+        Self {
+            dense_cols,
+            col_to_dense,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DenseFactorSignature {
+    fingerprint: u64,
+    unsolved: Vec<usize>,
+    row_terms: Vec<Vec<(usize, u8)>>,
+}
+
+impl DenseFactorSignature {
+    fn from_equations(equations: &[Equation], dense_rows: &[usize], unsolved: &[usize]) -> Self {
+        let mut unsolved_mask = Vec::new();
+        if let Some(max_col) = unsolved.iter().copied().max() {
+            unsolved_mask = vec![false; max_col.saturating_add(1)];
+            for &col in unsolved {
+                unsolved_mask[col] = true;
+            }
+        }
+
+        let row_terms: Vec<Vec<(usize, u8)>> = dense_rows
+            .iter()
+            .map(|&eq_idx| {
+                equations[eq_idx]
+                    .terms
+                    .iter()
+                    .filter_map(|(col, coef)| {
+                        let is_unsolved = unsolved_mask.get(*col).copied().unwrap_or(false);
+                        if !is_unsolved || coef.is_zero() {
+                            return None;
+                        }
+                        Some((*col, coef.raw()))
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let mut hasher = crate::util::DetHasher::default();
+        unsolved.hash(&mut hasher);
+        row_terms.hash(&mut hasher);
+        let fingerprint = hasher.finish();
+
+        Self {
+            fingerprint,
+            unsolved: unsolved.to_vec(),
+            row_terms,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DenseFactorCacheEntry {
+    signature: DenseFactorSignature,
+    artifact: DenseFactorArtifact,
+}
+
+#[derive(Debug, Default)]
+struct DenseFactorCache {
+    entries: VecDeque<DenseFactorCacheEntry>,
+}
+
+impl DenseFactorCache {
+    fn lookup(&self, signature: &DenseFactorSignature) -> DenseFactorCacheLookup {
+        let mut saw_fingerprint_collision = false;
+        for entry in &self.entries {
+            if entry.signature.fingerprint != signature.fingerprint {
+                continue;
+            }
+            if entry.signature == *signature {
+                return DenseFactorCacheLookup::Hit(entry.artifact.clone());
+            }
+            saw_fingerprint_collision = true;
+        }
+
+        if saw_fingerprint_collision {
+            DenseFactorCacheLookup::MissFingerprintCollision
+        } else {
+            DenseFactorCacheLookup::MissNoEntry
+        }
+    }
+
+    fn insert(
+        &mut self,
+        signature: DenseFactorSignature,
+        artifact: DenseFactorArtifact,
+    ) -> DenseFactorCacheResult {
+        if let Some(existing) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.signature == signature)
+        {
+            existing.artifact = artifact;
+            return DenseFactorCacheResult::MissInserted;
+        }
+
+        let result = if self.entries.len() >= DENSE_FACTOR_CACHE_CAPACITY {
+            let _ = self.entries.pop_front();
+            DenseFactorCacheResult::MissEvicted
+        } else {
+            DenseFactorCacheResult::MissInserted
+        };
+        self.entries.push_back(DenseFactorCacheEntry {
+            signature,
+            artifact,
+        });
+        result
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 /// A sparse equation over GF(256).
@@ -657,6 +820,46 @@ fn apply_policy_decision_to_stats(stats: &mut DecodeStats, decision: DecoderPoli
     stats.policy_block_schur_loss = decision.block_schur_loss;
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DenseFactorCacheObservation {
+    key: u64,
+    result: DenseFactorCacheResult,
+    reason: &'static str,
+    reuse_eligible: bool,
+    fingerprint_collision: bool,
+    cache_entries: usize,
+    cache_capacity: usize,
+}
+
+fn apply_dense_factor_cache_observation(
+    stats: &mut DecodeStats,
+    observation: DenseFactorCacheObservation,
+) {
+    stats.factor_cache_last_key = Some(observation.key);
+    stats.factor_cache_last_reason = Some(observation.reason);
+    stats.factor_cache_last_reuse_eligible = Some(observation.reuse_eligible);
+    stats.factor_cache_entries = observation.cache_entries;
+    stats.factor_cache_capacity = observation.cache_capacity;
+    if observation.fingerprint_collision {
+        stats.factor_cache_lookup_collisions += 1;
+    }
+
+    match observation.result {
+        DenseFactorCacheResult::Hit => {
+            stats.factor_cache_hits += 1;
+        }
+        DenseFactorCacheResult::MissInserted => {
+            stats.factor_cache_misses += 1;
+            stats.factor_cache_inserts += 1;
+        }
+        DenseFactorCacheResult::MissEvicted => {
+            stats.factor_cache_misses += 1;
+            stats.factor_cache_inserts += 1;
+            stats.factor_cache_evictions += 1;
+        }
+    }
+}
+
 fn row_nonzero_count(a: &[Gf256], n_cols: usize, row: usize) -> usize {
     let row_off = row * n_cols;
     a[row_off..row_off + n_cols]
@@ -848,6 +1051,7 @@ fn select_pivot_row(
 pub struct InactivationDecoder {
     params: SystematicParams,
     seed: u64,
+    dense_factor_cache: parking_lot::Mutex<DenseFactorCache>,
 }
 
 impl InactivationDecoder {
@@ -855,7 +1059,11 @@ impl InactivationDecoder {
     #[must_use]
     pub fn new(k: usize, symbol_size: usize, seed: u64) -> Self {
         let params = SystematicParams::for_source_block(k, symbol_size);
-        Self { params, seed }
+        Self {
+            params,
+            seed,
+            dense_factor_cache: parking_lot::Mutex::new(DenseFactorCache::default()),
+        }
     }
 
     /// Returns the encoding parameters.
@@ -1106,6 +1314,66 @@ impl InactivationDecoder {
         }
     }
 
+    fn dense_factor_with_cache(
+        &self,
+        equations: &[Equation],
+        dense_rows: &[usize],
+        unsolved: &[usize],
+    ) -> (DenseFactorArtifact, DenseFactorCacheObservation) {
+        let signature = DenseFactorSignature::from_equations(equations, dense_rows, unsolved);
+        let cache_key = signature.fingerprint;
+        let (lookup, cache_entries_at_lookup) = {
+            let cache = self.dense_factor_cache.lock();
+            (cache.lookup(&signature), cache.len())
+        };
+
+        if let DenseFactorCacheLookup::Hit(artifact) = lookup {
+            return (
+                artifact,
+                DenseFactorCacheObservation {
+                    key: cache_key,
+                    result: DenseFactorCacheResult::Hit,
+                    reason: "signature_match_reuse",
+                    reuse_eligible: true,
+                    fingerprint_collision: false,
+                    cache_entries: cache_entries_at_lookup,
+                    cache_capacity: DENSE_FACTOR_CACHE_CAPACITY,
+                },
+            );
+        }
+
+        let saw_fingerprint_collision =
+            matches!(lookup, DenseFactorCacheLookup::MissFingerprintCollision);
+        let artifact =
+            DenseFactorArtifact::new(sparse_first_dense_columns(equations, dense_rows, unsolved));
+        let (result, cache_entries) = {
+            let mut cache = self.dense_factor_cache.lock();
+            let result = cache.insert(signature, artifact.clone());
+            (result, cache.len())
+        };
+        let reason = if saw_fingerprint_collision {
+            "fingerprint_collision_rebuild"
+        } else {
+            match result {
+                DenseFactorCacheResult::Hit => "signature_match_reuse",
+                DenseFactorCacheResult::MissInserted => "cache_miss_rebuild",
+                DenseFactorCacheResult::MissEvicted => "cache_miss_evicted_oldest",
+            }
+        };
+        (
+            artifact,
+            DenseFactorCacheObservation {
+                key: cache_key,
+                result,
+                reason,
+                reuse_eligible: false,
+                fingerprint_collision: saw_fingerprint_collision,
+                cache_entries,
+                cache_capacity: DENSE_FACTOR_CACHE_CAPACITY,
+            },
+        )
+    }
+
     /// Generate constraint symbols (LDPC + HDPC) with zero data.
     ///
     /// These should be included in the received symbols when decoding.
@@ -1281,8 +1549,15 @@ impl InactivationDecoder {
             state.stats.inactivated += 1;
         }
 
-        // Reorder dense elimination columns deterministically by sparse support.
-        let dense_cols = sparse_first_dense_columns(&state.equations, &dense_rows, &unsolved);
+        // Reorder dense elimination columns deterministically and reuse cached
+        // dense skeleton metadata when signatures match.
+        let (dense_factor, cache_observation) =
+            self.dense_factor_with_cache(&state.equations, &dense_rows, &unsolved);
+        apply_dense_factor_cache_observation(&mut state.stats, cache_observation);
+        let DenseFactorArtifact {
+            dense_cols,
+            col_to_dense,
+        } = dense_factor;
 
         // Build dense submatrix for Gaussian elimination
         // Rows = unused equations, Columns = unsolved columns
@@ -1299,10 +1574,6 @@ impl InactivationDecoder {
                 required: n_cols,
             });
         }
-
-        // Column index mapping: unsolved column -> dense index.
-        // Dense vector lookup avoids per-term HashMap probes in this hot path.
-        let col_to_dense = build_dense_col_index_map(&dense_cols);
 
         // Build flat row-major dense matrix A and RHS vector b.
         // Flat layout avoids per-row heap allocation and improves cache locality.
@@ -1521,8 +1792,15 @@ impl InactivationDecoder {
             trace.record_inactivation(col);
         }
 
-        // Reorder dense elimination columns deterministically by sparse support.
-        let dense_cols = sparse_first_dense_columns(&state.equations, &dense_rows, &unsolved);
+        // Reorder dense elimination columns deterministically and reuse cached
+        // dense skeleton metadata when signatures match.
+        let (dense_factor, cache_observation) =
+            self.dense_factor_with_cache(&state.equations, &dense_rows, &unsolved);
+        apply_dense_factor_cache_observation(&mut state.stats, cache_observation);
+        let DenseFactorArtifact {
+            dense_cols,
+            col_to_dense,
+        } = dense_factor;
 
         // Build dense submatrix for Gaussian elimination
         // Rows = unused equations, Columns = unsolved columns
@@ -1539,10 +1817,6 @@ impl InactivationDecoder {
                 required: n_cols,
             });
         }
-
-        // Column index mapping: unsolved column -> dense index.
-        // Dense vector lookup avoids per-term HashMap probes in this hot path.
-        let col_to_dense = build_dense_col_index_map(&dense_cols);
 
         // Build flat row-major dense matrix A and RHS vector b.
         // Move (take) RHS data from state instead of cloning to avoid O(n_rows * symbol_size)
@@ -1967,6 +2241,95 @@ mod tests {
     }
 
     #[test]
+    fn dense_factor_signature_detects_equation_changes() {
+        let equations_a = vec![Equation::new(vec![0, 1], vec![Gf256::ONE, Gf256::new(7)])];
+        let equations_b = vec![Equation::new(vec![0, 1], vec![Gf256::ONE, Gf256::new(9)])];
+        let dense_rows = vec![0];
+        let unsolved = vec![0, 1];
+
+        let sig_a = DenseFactorSignature::from_equations(&equations_a, &dense_rows, &unsolved);
+        let sig_b = DenseFactorSignature::from_equations(&equations_b, &dense_rows, &unsolved);
+
+        assert_ne!(sig_a, sig_b);
+    }
+
+    #[test]
+    fn dense_factor_cache_requires_strict_signature_match() {
+        let equations_a = vec![Equation::new(vec![0, 1], vec![Gf256::ONE, Gf256::new(7)])];
+        let equations_b = vec![Equation::new(vec![0, 1], vec![Gf256::ONE, Gf256::new(9)])];
+        let dense_rows = vec![0];
+        let unsolved = vec![0, 1];
+
+        let sig_a = DenseFactorSignature::from_equations(&equations_a, &dense_rows, &unsolved);
+        let sig_b = DenseFactorSignature::from_equations(&equations_b, &dense_rows, &unsolved);
+
+        let mut cache = DenseFactorCache::default();
+        assert_eq!(
+            cache.insert(sig_a.clone(), DenseFactorArtifact::new(vec![1, 0])),
+            DenseFactorCacheResult::MissInserted
+        );
+        assert_eq!(
+            cache.lookup(&sig_a),
+            DenseFactorCacheLookup::Hit(DenseFactorArtifact::new(vec![1, 0]))
+        );
+        assert_eq!(cache.lookup(&sig_b), DenseFactorCacheLookup::MissNoEntry);
+    }
+
+    #[test]
+    fn dense_factor_cache_detects_fingerprint_collision() {
+        let equations_a = vec![Equation::new(vec![0, 1], vec![Gf256::ONE, Gf256::new(7)])];
+        let equations_b = vec![Equation::new(vec![0, 1], vec![Gf256::ONE, Gf256::new(9)])];
+        let dense_rows = vec![0];
+        let unsolved = vec![0, 1];
+
+        let sig_a = DenseFactorSignature::from_equations(&equations_a, &dense_rows, &unsolved);
+        let mut sig_b = DenseFactorSignature::from_equations(&equations_b, &dense_rows, &unsolved);
+        sig_b.fingerprint = sig_a.fingerprint;
+
+        let mut cache = DenseFactorCache::default();
+        assert_eq!(
+            cache.insert(sig_a, DenseFactorArtifact::new(vec![1, 0])),
+            DenseFactorCacheResult::MissInserted
+        );
+        assert_eq!(
+            cache.lookup(&sig_b),
+            DenseFactorCacheLookup::MissFingerprintCollision
+        );
+    }
+
+    #[test]
+    fn dense_factor_cache_evicts_oldest_entry_at_capacity() {
+        let mut cache = DenseFactorCache::default();
+        let mut first_signature = None;
+
+        for idx in 0..=DENSE_FACTOR_CACHE_CAPACITY {
+            let signature = DenseFactorSignature {
+                fingerprint: idx as u64,
+                unsolved: vec![idx],
+                row_terms: vec![vec![(idx, 1)]],
+            };
+            if idx == 0 {
+                first_signature = Some(signature.clone());
+            }
+            let expected = if idx + 1 > DENSE_FACTOR_CACHE_CAPACITY {
+                DenseFactorCacheResult::MissEvicted
+            } else {
+                DenseFactorCacheResult::MissInserted
+            };
+            assert_eq!(
+                cache.insert(signature, DenseFactorArtifact::new(vec![idx])),
+                expected
+            );
+        }
+
+        assert_eq!(cache.len(), DENSE_FACTOR_CACHE_CAPACITY);
+        assert_eq!(
+            cache.lookup(&first_signature.expect("first signature recorded")),
+            DenseFactorCacheLookup::MissNoEntry
+        );
+    }
+
+    #[test]
     fn hybrid_cost_model_prefers_sparse_for_low_support() {
         assert!(should_use_sparse_row_update(3, 8));
         assert!(should_use_sparse_row_update(6, 10));
@@ -2170,6 +2533,63 @@ mod tests {
         for (i, original) in source.iter().enumerate() {
             assert_eq!(&result.source[i], original, "source symbol {i} mismatch");
         }
+    }
+
+    #[test]
+    fn decode_repair_only_hits_dense_factor_cache_on_second_run() {
+        let k = 4;
+        let symbol_size = 16;
+        let seed = 99u64;
+
+        let source = make_source_data(k, symbol_size);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        let mut received = decoder.constraint_symbols();
+        for esi in (k as u32)..(k as u32 + l as u32) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        let first = decoder
+            .decode(&received)
+            .expect("first decode should succeed");
+        let second = decoder
+            .decode(&received)
+            .expect("second decode should succeed");
+
+        assert!(
+            first.stats.factor_cache_misses >= 1,
+            "first decode should populate dense-factor cache"
+        );
+        assert!(
+            second.stats.factor_cache_hits >= 1,
+            "second decode should hit dense-factor cache"
+        );
+        assert_eq!(
+            first.stats.factor_cache_last_reason,
+            Some("cache_miss_rebuild")
+        );
+        assert_eq!(
+            second.stats.factor_cache_last_reason,
+            Some("signature_match_reuse")
+        );
+        assert_eq!(first.stats.factor_cache_last_reuse_eligible, Some(false));
+        assert_eq!(second.stats.factor_cache_last_reuse_eligible, Some(true));
+        assert_eq!(
+            first.stats.factor_cache_last_key, second.stats.factor_cache_last_key,
+            "repeated burst decode should probe the same structural cache key",
+        );
+        assert_eq!(
+            second.stats.factor_cache_capacity,
+            DENSE_FACTOR_CACHE_CAPACITY
+        );
+        assert!(
+            second.stats.factor_cache_entries <= second.stats.factor_cache_capacity,
+            "cache occupancy must remain bounded by configured capacity"
+        );
     }
 
     #[test]

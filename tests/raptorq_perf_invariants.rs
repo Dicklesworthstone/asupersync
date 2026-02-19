@@ -29,6 +29,7 @@ const RAPTORQ_OPT_DECISIONS_MD: &str =
     include_str!("../docs/raptorq_optimization_decision_records.md");
 const RAPTORQ_OPT_DECISIONS_JSON: &str =
     include_str!("../artifacts/raptorq_optimization_decision_records_v1.json");
+const RAPTORQ_BENCH_RS: &str = include_str!("../benches/raptorq_benchmark.rs");
 const REPLAY_CATALOG_ARTIFACT_PATH: &str = "artifacts/raptorq_replay_catalog_v1.json";
 const REPLAY_FIXTURE_REF: &str = "RQ-D9-REPLAY-CATALOG-V1";
 const REPLAY_SEED_SWEEP_ID: &str = "replay:rq-u-seed-sweep-structured-v1";
@@ -1811,4 +1812,21 @@ fn d7_e2e_runner_script_schema_contract_surface() {
         !script.contains("\"repro_cmd\":"),
         "legacy scenario field repro_cmd should not be emitted by D7 v2 schema"
     );
+}
+
+/// F4 guardrail: benchmark campaign must keep repair-heavy and near-rank-deficient
+/// decode surfaces in the Criterion bench suite.
+#[test]
+fn f4_benchmark_surface_includes_repair_heavy_and_near_rank_cases() {
+    for required in [
+        "BenchmarkId::new(\"decode_repair_heavy\", &label)",
+        "BenchmarkId::new(\"decode_near_rank_deficient\", &label)",
+        "let heavy_drop: Vec<usize> = (0..k).filter(|i| i % 4 != 0).collect();",
+        "let near_rank_drop: Vec<usize> = (0..(k / 2)).collect();",
+    ] {
+        assert!(
+            RAPTORQ_BENCH_RS.contains(required),
+            "missing F4 benchmark surface token in benches/raptorq_benchmark.rs: {required}"
+        );
+    }
 }

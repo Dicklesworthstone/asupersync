@@ -469,6 +469,43 @@ fn bench_gaussian_elimination(c: &mut Criterion) {
 // End-to-end encode/decode benchmarks
 // ============================================================================
 
+fn build_decode_received(
+    source: &[Vec<u8>],
+    encoder: &SystematicEncoder,
+    decoder: &InactivationDecoder,
+    drop_source_indices: &[usize],
+    extra_repair: usize,
+) -> Vec<ReceivedSymbol> {
+    let k = source.len();
+    let l = decoder.params().l;
+
+    let mut dropped = vec![false; k];
+    for &idx in drop_source_indices {
+        if idx < k {
+            dropped[idx] = true;
+        }
+    }
+
+    let mut received = Vec::with_capacity(l.saturating_add(extra_repair));
+    for (idx, data) in source.iter().enumerate() {
+        if !dropped[idx] {
+            received.push(ReceivedSymbol::source(idx as u32, data.clone()));
+        }
+    }
+
+    let required_repairs = l.saturating_sub(received.len());
+    let total_repairs = required_repairs.saturating_add(extra_repair);
+    let repair_start = k as u32;
+    let repair_end = repair_start.saturating_add(total_repairs as u32);
+    for esi in repair_start..repair_end {
+        let (cols, coefs) = decoder.repair_equation(esi);
+        let data = encoder.repair_symbol(esi);
+        received.push(ReceivedSymbol::repair(esi, cols, coefs, data));
+    }
+
+    received
+}
+
 fn bench_encode_decode(c: &mut Criterion) {
     let mut group = c.benchmark_group("raptorq_e2e");
 
@@ -512,19 +549,7 @@ fn bench_encode_decode(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("decode_source_only", &label), |b| {
             let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
             let decoder = InactivationDecoder::new(k, symbol_size, seed);
-            let l = decoder.params().l;
-
-            // Build received symbols (all source + enough repair to reach L)
-            let received: Vec<ReceivedSymbol> = source
-                .iter()
-                .enumerate()
-                .map(|(i, data)| ReceivedSymbol::source(i as u32, data.clone()))
-                .chain((k as u32..(l as u32)).map(|esi| {
-                    let (cols, coefs) = decoder.repair_equation(esi);
-                    let data = encoder.repair_symbol(esi);
-                    ReceivedSymbol::repair(esi, cols, coefs, data)
-                }))
-                .collect();
+            let received = build_decode_received(&source, &encoder, &decoder, &[], 0);
 
             b.iter(|| {
                 let result = decoder.decode(std::hint::black_box(&received));
@@ -536,22 +561,45 @@ fn bench_encode_decode(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("decode_repair_only", &label), |b| {
             let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
             let decoder = InactivationDecoder::new(k, symbol_size, seed);
-            let l = decoder.params().l;
-
-            // Build received symbols (only repair symbols)
-            let received: Vec<ReceivedSymbol> = (k as u32..(k as u32 + l as u32))
-                .map(|esi| {
-                    let (cols, coefs) = decoder.repair_equation(esi);
-                    let data = encoder.repair_symbol(esi);
-                    ReceivedSymbol::repair(esi, cols, coefs, data)
-                })
-                .collect();
+            let all_source_dropped: Vec<usize> = (0..k).collect();
+            let received =
+                build_decode_received(&source, &encoder, &decoder, &all_source_dropped, 0);
 
             b.iter(|| {
                 let result = decoder.decode(std::hint::black_box(&received));
                 std::hint::black_box(result)
             });
         });
+
+        // Repair-heavy decode benchmark (drops 75% of source symbols, then adds repair margin).
+        group.bench_function(BenchmarkId::new("decode_repair_heavy", &label), |b| {
+            let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+            let decoder = InactivationDecoder::new(k, symbol_size, seed);
+            let heavy_drop: Vec<usize> = (0..k).filter(|i| i % 4 != 0).collect();
+            let received = build_decode_received(&source, &encoder, &decoder, &heavy_drop, 3);
+
+            b.iter(|| {
+                let result = decoder.decode(std::hint::black_box(&received));
+                std::hint::black_box(result)
+            });
+        });
+
+        // Near-rank-deficient decode benchmark: clustered 50% source loss with minimal overhead.
+        group.bench_function(
+            BenchmarkId::new("decode_near_rank_deficient", &label),
+            |b| {
+                let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+                let decoder = InactivationDecoder::new(k, symbol_size, seed);
+                let near_rank_drop: Vec<usize> = (0..(k / 2)).collect();
+                let received =
+                    build_decode_received(&source, &encoder, &decoder, &near_rank_drop, 1);
+
+                b.iter(|| {
+                    let result = decoder.decode(std::hint::black_box(&received));
+                    std::hint::black_box(result)
+                });
+            },
+        );
     }
 
     group.finish();
