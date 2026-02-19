@@ -696,6 +696,48 @@ mod tests {
         assert_eq!(t, Time::from_millis(100));
     }
 
+    // =========================================================================
+    // Pure data-type tests (wave 42 – CyanBarn)
+    // =========================================================================
+
+    #[test]
+    fn clock_skew_stats_snapshot_debug_clone_eq() {
+        let snap = ClockSkewStatsSnapshot {
+            reads: 100,
+            skewed_reads: 50,
+            jitter_count: 10,
+            jump_fired: false,
+            max_abs_skew_ns: 5000,
+        };
+        let cloned = snap.clone();
+        assert_eq!(cloned, snap);
+        let dbg = format!("{snap:?}");
+        assert!(dbg.contains("ClockSkewStatsSnapshot"));
+        assert_ne!(
+            snap,
+            ClockSkewStatsSnapshot {
+                reads: 0,
+                skewed_reads: 0,
+                jitter_count: 0,
+                jump_fired: false,
+                max_abs_skew_ns: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn clock_skew_config_debug_clone() {
+        let config = ClockSkewConfig::new(42)
+            .with_static_offset_ms(1)
+            .with_drift_rate(500);
+        let cloned = config.clone();
+        assert_eq!(cloned.seed, 42);
+        assert_eq!(cloned.static_offset_ns, 1_000_000);
+        assert_eq!(cloned.drift_rate_ns_per_sec, 500);
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("ClockSkewConfig"));
+    }
+
     #[test]
     fn drift_precision_is_stable_at_large_timestamps() {
         let base = make_base_clock();

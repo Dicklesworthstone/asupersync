@@ -838,6 +838,37 @@ mod tests {
         }
     }
 
+    // =========================================================================
+    // Pure data-type tests (wave 42 – CyanBarn)
+    // =========================================================================
+
+    #[test]
+    fn fault_channel_config_debug_clone() {
+        let config = FaultChannelConfig::new(42)
+            .with_reorder(0.3, 8)
+            .with_duplication(0.1);
+        let cloned = config.clone();
+        assert_eq!(cloned.seed, 42);
+        assert_eq!(cloned.reorder_buffer_size, 8);
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("FaultChannelConfig"));
+    }
+
+    #[test]
+    fn fault_channel_stats_debug_clone_default_display() {
+        let def = FaultChannelStats::default();
+        assert_eq!(def.messages_sent, 0);
+        assert_eq!(def.messages_reordered, 0);
+        assert_eq!(def.messages_duplicated, 0);
+        assert_eq!(def.reorder_flushes, 0);
+        let cloned = def.clone();
+        assert_eq!(cloned.messages_sent, 0);
+        let dbg = format!("{def:?}");
+        assert!(dbg.contains("FaultChannelStats"));
+        let display = format!("{def}");
+        assert!(display.contains("sent: 0"));
+    }
+
     #[test]
     fn fault_channel_convenience_constructor() {
         let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());

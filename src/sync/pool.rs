@@ -3405,6 +3405,53 @@ mod tests {
         crate::test_complete!("pool_factory_error_releases_create_slot");
     }
 
+    // =========================================================================
+    // Pure data-type tests (wave 42 – CyanBarn)
+    // =========================================================================
+
+    #[test]
+    fn warmup_strategy_debug_clone_copy_eq_default() {
+        let def = WarmupStrategy::default();
+        assert_eq!(def, WarmupStrategy::BestEffort);
+        for s in [WarmupStrategy::BestEffort, WarmupStrategy::FailFast, WarmupStrategy::RequireMinimum] {
+            let copied = s;
+            let cloned = s.clone();
+            assert_eq!(copied, cloned);
+            let dbg = format!("{s:?}");
+            assert!(!dbg.is_empty());
+        }
+        assert_ne!(WarmupStrategy::BestEffort, WarmupStrategy::FailFast);
+        assert_ne!(WarmupStrategy::FailFast, WarmupStrategy::RequireMinimum);
+    }
+
+    #[test]
+    fn destroy_reason_debug_clone_copy_eq() {
+        for r in [DestroyReason::Unhealthy, DestroyReason::IdleTimeout, DestroyReason::MaxLifetime] {
+            let copied = r;
+            let cloned = r.clone();
+            assert_eq!(copied, cloned);
+            let dbg = format!("{r:?}");
+            assert!(!dbg.is_empty());
+        }
+        assert_ne!(DestroyReason::Unhealthy, DestroyReason::IdleTimeout);
+        assert_eq!(DestroyReason::Unhealthy.as_label(), "unhealthy");
+        assert_eq!(DestroyReason::IdleTimeout.as_label(), "idle_timeout");
+        assert_eq!(DestroyReason::MaxLifetime.as_label(), "max_lifetime");
+    }
+
+    #[test]
+    fn pool_stats_debug_clone_default() {
+        let def = PoolStats::default();
+        assert_eq!(def.active, 0);
+        assert_eq!(def.idle, 0);
+        assert_eq!(def.total, 0);
+        assert_eq!(def.total_acquisitions, 0);
+        let cloned = def.clone();
+        assert_eq!(cloned.active, 0);
+        let dbg = format!("{def:?}");
+        assert!(dbg.contains("PoolStats"));
+    }
+
     fn noop_pool_waker() -> Waker {
         struct NoopPoolWaker;
 

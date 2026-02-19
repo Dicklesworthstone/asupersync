@@ -1188,4 +1188,22 @@ mod tests {
 
         crate::test_complete!("get_or_try_init_error_resets_state");
     }
+
+    // =========================================================================
+    // Pure data-type tests (wave 42 – CyanBarn)
+    // =========================================================================
+
+    #[test]
+    fn once_cell_error_debug_clone_copy_eq_display() {
+        let already = OnceCellError::AlreadyInitialized;
+        let cancelled = OnceCellError::Cancelled;
+        let copied = already;
+        let cloned = already.clone();
+        assert_eq!(copied, cloned);
+        assert_eq!(copied, OnceCellError::AlreadyInitialized);
+        assert_ne!(already, cancelled);
+        assert!(format!("{already:?}").contains("AlreadyInitialized"));
+        assert!(already.to_string().contains("already initialized"));
+        assert!(cancelled.to_string().contains("cancelled"));
+    }
 }
