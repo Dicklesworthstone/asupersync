@@ -1,0 +1,333 @@
+{
+  "schema_id": "quic-h3-forensic-log.v1",
+  "schema_version": 1,
+  "description": "Forensic structured log schema for native QUIC/H3 E2E test scenarios. Aligns with repro-manifest.v1, trace-event.v1, and NDJSON event envelope conventions.",
+  "generated_at": "2026-02-19T14:18:00Z",
+  "owner_bead": "asupersync-3narc.5.3.1",
+
+  "envelope": {
+    "description": "Each NDJSON line follows the existing NdjsonEvent envelope format.",
+    "fields": {
+      "v": { "type": "u32", "value": 1, "description": "Schema version, matches TRACE_EVENT_SCHEMA_VERSION." },
+      "ts_us": { "type": "u64", "description": "Microseconds since test start (deterministic virtual time)." },
+      "level": { "type": "string", "enum": ["ERROR", "WARN", "INFO", "DEBUG", "TRACE"], "description": "Log severity." },
+      "category": { "type": "string", "description": "Event category: quic_transport | quic_stream | quic_connection | h3_control | h3_request | h3_frame | tls | test_harness." },
+      "event": { "type": "string", "description": "Event type name, matching stable snake_case convention from TraceEventKind." },
+      "test_id": { "type": "string", "description": "Unique test function name, e.g. 'handshake_lifecycle_with_packet_exchange'." },
+      "seed": { "type": "u64", "description": "Root DetRng seed for the test, hex-printed as 0x{SEED:X}." },
+      "subsystem": { "type": "string", "value": "quic_h3_native", "description": "Always 'quic_h3_native' for this schema." },
+      "invariant": { "type": "string|null", "description": "Invariant ID being checked, if applicable." },
+      "thread_id": { "type": "u64", "description": "OS thread ID." },
+      "message": { "type": "string", "description": "Human-readable log message." },
+      "data": { "type": "object", "description": "Event-specific structured payload (see event_types)." }
+    }
+  },
+
+  "event_categories": {
+    "quic_transport": {
+      "description": "Transport-level events: packet send/recv, ACK, loss, PTO, congestion.",
+      "events": {
+        "packet_sent": {
+          "fields": ["pn_space", "packet_number", "size_bytes", "ack_eliciting", "in_flight", "send_time_us"],
+          "level": "DEBUG"
+        },
+        "ack_received": {
+          "fields": ["pn_space", "acked_ranges", "ack_delay_us", "acked_packets", "acked_bytes"],
+          "level": "DEBUG"
+        },
+        "loss_detected": {
+          "fields": ["pn_space", "lost_packets", "lost_bytes", "detection_method"],
+          "level": "INFO",
+          "notes": "detection_method: 'time_threshold' | 'packet_threshold'"
+        },
+        "pto_fired": {
+          "fields": ["pto_count", "backoff_multiplier", "deadline_us", "probe_space"],
+          "level": "INFO"
+        },
+        "cwnd_updated": {
+          "fields": ["old_cwnd", "new_cwnd", "ssthresh", "bytes_in_flight", "reason"],
+          "level": "INFO",
+          "notes": "reason: 'slow_start' | 'congestion_avoidance' | 'loss_reduction' | 'pto'"
+        },
+        "rtt_updated": {
+          "fields": ["latest_rtt_us", "smoothed_rtt_us", "rttvar_us", "min_rtt_us", "ack_delay_us"],
+          "level": "DEBUG"
+        }
+      }
+    },
+    "quic_stream": {
+      "description": "Stream-level events: open, write, receive, reset, stop.",
+      "events": {
+        "stream_opened": {
+          "fields": ["stream_id", "direction", "role", "is_local"],
+          "level": "DEBUG",
+          "notes": "direction: 'bidi' | 'uni'; role: 'client' | 'server'"
+        },
+        "stream_data_sent": {
+          "fields": ["stream_id", "offset", "length", "is_fin"],
+          "level": "TRACE"
+        },
+        "stream_data_received": {
+          "fields": ["stream_id", "offset", "length", "is_fin", "contiguous_offset"],
+          "level": "TRACE"
+        },
+        "stream_reset": {
+          "fields": ["stream_id", "error_code", "final_size"],
+          "level": "INFO"
+        },
+        "stream_stop_sending": {
+          "fields": ["stream_id", "error_code"],
+          "level": "INFO"
+        },
+        "flow_control_updated": {
+          "fields": ["stream_id", "send_credit", "recv_credit", "connection_send_remaining", "connection_recv_remaining"],
+          "level": "DEBUG"
+        }
+      }
+    },
+    "quic_connection": {
+      "description": "Connection lifecycle events: handshake, state transitions, close, drain.",
+      "events": {
+        "state_changed": {
+          "fields": ["from_state", "to_state", "trigger"],
+          "level": "INFO",
+          "notes": "states: 'idle' | 'handshaking' | 'established' | 'draining' | 'closed'"
+        },
+        "handshake_step": {
+          "fields": ["step", "role"],
+          "level": "DEBUG",
+          "notes": "step: 'begin' | 'hs_keys' | '1rtt_keys' | 'confirmed'"
+        },
+        "close_initiated": {
+          "fields": ["close_code", "close_method", "drain_timeout_us"],
+          "level": "INFO",
+          "notes": "close_method: 'begin_close' | 'close_immediately' | 'cancelled'"
+        },
+        "key_update": {
+          "fields": ["generation", "old_phase", "new_phase", "initiator"],
+          "level": "INFO"
+        }
+      }
+    },
+    "h3_control": {
+      "description": "HTTP/3 control-stream events: SETTINGS, GOAWAY.",
+      "events": {
+        "settings_exchanged": {
+          "fields": ["direction", "max_field_section_size", "qpack_max_table_capacity", "qpack_blocked_streams"],
+          "level": "INFO",
+          "notes": "direction: 'sent' | 'received'"
+        },
+        "goaway_received": {
+          "fields": ["stream_id", "direction"],
+          "level": "INFO"
+        }
+      }
+    },
+    "h3_request": {
+      "description": "HTTP/3 request-stream events: request/response lifecycle.",
+      "events": {
+        "request_started": {
+          "fields": ["stream_id", "method", "scheme", "authority", "path"],
+          "level": "INFO"
+        },
+        "request_headers_sent": {
+          "fields": ["stream_id", "header_count", "qpack_indexed_count", "wire_bytes"],
+          "level": "DEBUG"
+        },
+        "request_data_sent": {
+          "fields": ["stream_id", "body_bytes", "is_end_stream"],
+          "level": "DEBUG"
+        },
+        "response_received": {
+          "fields": ["stream_id", "status_code", "header_count", "body_bytes"],
+          "level": "INFO"
+        },
+        "request_stream_state_changed": {
+          "fields": ["stream_id", "from_state", "to_state"],
+          "level": "DEBUG",
+          "notes": "states: 'idle' | 'headers' | 'data' | 'trailers' | 'complete' | 'error'"
+        }
+      }
+    },
+    "h3_frame": {
+      "description": "HTTP/3 frame-level encode/decode events.",
+      "events": {
+        "frame_encoded": {
+          "fields": ["frame_type", "wire_bytes", "stream_id"],
+          "level": "TRACE"
+        },
+        "frame_decoded": {
+          "fields": ["frame_type", "wire_bytes", "stream_id"],
+          "level": "TRACE"
+        },
+        "frame_error": {
+          "fields": ["frame_type", "error_kind", "error_message", "stream_id"],
+          "level": "WARN"
+        }
+      }
+    },
+    "tls": {
+      "description": "TLS/key events for the QUIC connection.",
+      "events": {
+        "crypto_level_advanced": {
+          "fields": ["from_level", "to_level"],
+          "level": "DEBUG",
+          "notes": "levels: 'initial' | 'handshake' | 'one_rtt'"
+        },
+        "key_phase_changed": {
+          "fields": ["generation", "old_phase", "new_phase"],
+          "level": "INFO"
+        }
+      }
+    },
+    "test_harness": {
+      "description": "Test lifecycle events for forensic bookkeeping.",
+      "events": {
+        "scenario_started": {
+          "fields": ["scenario_id", "seed", "config_hash", "test_file", "test_function"],
+          "level": "INFO"
+        },
+        "invariant_checkpoint": {
+          "fields": ["invariant_id", "verdict", "details"],
+          "level": "INFO",
+          "notes": "verdict: 'pass' | 'fail' | 'skip'"
+        },
+        "scenario_completed": {
+          "fields": ["scenario_id", "seed", "passed", "duration_us", "event_count", "failure_class"],
+          "level": "INFO",
+          "notes": "failure_class: 'passed' | 'assertion_failure' | 'panic' | 'timeout'"
+        }
+      }
+    }
+  },
+
+  "scenario_manifest": {
+    "description": "Per-scenario artifact emitted at test completion. Extends ReproManifest with QUIC/H3-specific fields.",
+    "file_pattern": "{artifacts_dir}/{scenario_id}/0x{SEED:016X}/manifest.json",
+    "fields": {
+      "schema_id": { "type": "string", "value": "quic-h3-forensic-manifest.v1" },
+      "schema_version": { "type": "u32", "value": 1 },
+      "scenario_id": { "type": "string", "description": "SCREAMING-KEBAB, e.g. 'QH3-E2-HANDSHAKE-BIDI'" },
+      "seed": { "type": "u64", "description": "Root seed in hex." },
+      "config_hash": { "type": "string", "description": "FNV-1a hash of NativeQuicConnectionConfig serialized." },
+      "trace_fingerprint": { "type": "string", "description": "Deterministic hash of event timeline." },
+      "replay_command": { "type": "string", "description": "Shell command: ASUPERSYNC_SEED=0x{SEED:X} cargo test {test_function} -- --nocapture" },
+      "failure_class": { "type": "string", "enum": ["passed", "assertion_failure", "panic", "timeout"] },
+      "invariant_ids": { "type": "array<string>", "description": "Sorted, deduped invariant IDs checked." },
+      "invariant_verdicts": {
+        "type": "array<object>",
+        "description": "Per-invariant pass/fail/skip with details.",
+        "item_fields": ["invariant_id", "verdict", "details"]
+      },
+      "artifact_paths": { "type": "array<string>", "description": "Sorted, deduped paths to generated artifacts." },
+      "event_timeline": {
+        "type": "object",
+        "description": "Summary of event counts by category.",
+        "fields": {
+          "total_events": "u64",
+          "by_category": "map<string, u64>",
+          "by_level": "map<string, u64>"
+        }
+      },
+      "transport_summary": {
+        "type": "object",
+        "description": "QUIC transport metrics snapshot at scenario end.",
+        "fields": {
+          "packets_sent": "u64",
+          "packets_acked": "u64",
+          "packets_lost": "u64",
+          "bytes_sent": "u64",
+          "bytes_acked": "u64",
+          "bytes_lost": "u64",
+          "smoothed_rtt_us": "u64|null",
+          "min_rtt_us": "u64|null",
+          "cwnd": "u64",
+          "ssthresh": "u64",
+          "pto_count": "u32",
+          "final_state": "string"
+        }
+      },
+      "h3_summary": {
+        "type": "object",
+        "description": "H3-level metrics at scenario end.",
+        "fields": {
+          "requests_sent": "u32",
+          "responses_received": "u32",
+          "streams_opened": "u32",
+          "streams_reset": "u32",
+          "goaway_id": "u64|null",
+          "settings_exchanged": "bool",
+          "protocol_errors": "u32"
+        }
+      },
+      "connection_lifecycle": {
+        "type": "array<object>",
+        "description": "Ordered state transitions with timestamps.",
+        "item_fields": ["from_state", "to_state", "ts_us", "trigger"]
+      },
+      "failure_fingerprint": {
+        "type": "object|null",
+        "description": "Populated only on failure. Contains root-cause bucket and assertion details.",
+        "fields": {
+          "bucket": "string",
+          "assertion": "string|null",
+          "backtrace_hash": "string|null",
+          "last_event_before_failure": "object|null"
+        }
+      },
+      "passed": { "type": "bool" },
+      "duration_us": { "type": "u64" },
+      "profile_tags": { "type": "array<string>", "description": "e.g. ['fast', 'happy-path'] or ['full', 'adversarial']." }
+    }
+  },
+
+  "artifact_bundle_layout": {
+    "description": "Directory structure for per-scenario artifacts, following existing ASUPERSYNC_TEST_ARTIFACTS_DIR convention.",
+    "structure": {
+      "{artifacts_dir}/{scenario_id}/0x{SEED:016X}/": {
+        "manifest.json": "Scenario manifest (quic-h3-forensic-manifest.v1).",
+        "events.ndjson": "NDJSON event log with all structured events.",
+        "transport_state.json": "Final transport machine state snapshot.",
+        "stream_state.json": "Final stream manager state snapshot.",
+        "h3_state.json": "Final H3 connection state snapshot.",
+        "summary.json": "TestSummary (existing format from TestHarness).",
+        "environment.json": "EnvironmentMetadata (existing format)."
+      }
+    }
+  },
+
+  "invariant_ids": {
+    "description": "QUIC/H3-specific invariant identifiers for the invariant_checkpoint events.",
+    "items": [
+      { "id": "inv.quic.handshake_completes", "description": "Handshake reaches Established state on both endpoints." },
+      { "id": "inv.quic.rtt_positive", "description": "Smoothed RTT is positive after first ACK." },
+      { "id": "inv.quic.bytes_in_flight_consistent", "description": "bytes_in_flight == sum(in-flight packet sizes)." },
+      { "id": "inv.quic.cwnd_never_below_minimum", "description": "Congestion window never drops below 2 * max_datagram_size." },
+      { "id": "inv.quic.pto_backoff_bounded", "description": "PTO backoff multiplier capped at 2^10." },
+      { "id": "inv.quic.loss_detection_monotonic", "description": "Loss detection never marks already-acked packets as lost." },
+      { "id": "inv.quic.stream_offsets_monotonic", "description": "Stream send/recv offsets never decrease." },
+      { "id": "inv.quic.flow_control_respected", "description": "Send never exceeds granted flow control credit." },
+      { "id": "inv.quic.drain_to_closed", "description": "Draining state always transitions to Closed after timeout." },
+      { "id": "inv.quic.close_idempotent", "description": "Multiple close calls don't panic or corrupt state." },
+      { "id": "inv.h3.settings_before_other_frames", "description": "SETTINGS is the first frame on control stream." },
+      { "id": "inv.h3.goaway_rejects_above_threshold", "description": "Streams at/above GOAWAY ID are rejected." },
+      { "id": "inv.h3.no_panic_on_invalid_input", "description": "Invalid protocol inputs return Err, never panic." },
+      { "id": "inv.h3.request_state_machine_valid", "description": "Request stream state transitions follow the valid FSM." },
+      { "id": "inv.h3.frame_roundtrip_identity", "description": "encode(frame) |> decode == original frame." }
+    ]
+  },
+
+  "replay_catalog_entry": {
+    "description": "Format for entries in the QUIC/H3 replay catalog, aligned with raptorq_replay_catalog_v1.",
+    "fields": {
+      "replay_ref": { "type": "string", "pattern": "replay:qh3-{scenario}-v{N}" },
+      "scenario_id": { "type": "string" },
+      "seed": { "type": "u64|string", "description": "Single seed, 'range:N-M', or 'set:[...]'." },
+      "expected_outcome": { "type": "string", "enum": ["pass", "assertion_failure", "protocol_error"] },
+      "profile_tags": { "type": "array<string>" },
+      "test_files": { "type": "array<string>", "description": "Test file paths." },
+      "test_functions": { "type": "array<string>", "description": "Test function names." },
+      "repro_cmd": { "type": "string" }
+    }
+  }
+}
