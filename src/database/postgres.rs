@@ -2859,4 +2859,38 @@ mod tests {
     fn hex_decode_single_byte() {
         assert_eq!(hex::decode("FF").unwrap(), vec![0xFF]);
     }
+
+    #[test]
+    fn ssl_mode_debug_clone_copy_default_eq() {
+        let s = SslMode::default();
+        assert_eq!(s, SslMode::Prefer);
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("Prefer"), "{dbg}");
+        let copied: SslMode = s;
+        let cloned = s.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(s, SslMode::Disable);
+    }
+
+    #[test]
+    fn frontend_message_debug_clone_copy_eq() {
+        let m = FrontendMessage::Query;
+        let dbg = format!("{m:?}");
+        assert!(dbg.contains("Query"), "{dbg}");
+        let copied: FrontendMessage = m;
+        let cloned = m.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(m, FrontendMessage::Terminate);
+    }
+
+    #[test]
+    fn backend_message_debug_clone_copy_eq() {
+        let m = BackendMessage::ReadyForQuery;
+        let dbg = format!("{m:?}");
+        assert!(dbg.contains("ReadyForQuery"), "{dbg}");
+        let copied: BackendMessage = m;
+        let cloned = m.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(m, BackendMessage::DataRow);
+    }
 }

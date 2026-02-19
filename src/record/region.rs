@@ -2176,4 +2176,44 @@ mod tests {
         let len = rref_with_witness_via_trait(&region, &rref, witness, String::len);
         assert_eq!(len, 7);
     }
+
+    #[test]
+    fn admission_kind_debug_clone_copy_eq() {
+        let k = AdmissionKind::Task;
+        let dbg = format!("{k:?}");
+        assert!(dbg.contains("Task"), "{dbg}");
+        let copied: AdmissionKind = k;
+        let cloned = k.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(k, AdmissionKind::Child);
+    }
+
+    #[test]
+    fn admission_error_debug_clone_copy_eq() {
+        let e = AdmissionError::Closed;
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("Closed"), "{dbg}");
+        let copied: AdmissionError = e;
+        let cloned = e.clone();
+        assert_eq!(copied, cloned);
+
+        let e2 = AdmissionError::LimitReached {
+            kind: AdmissionKind::HeapBytes,
+            limit: 1024,
+            live: 1024,
+        };
+        let dbg2 = format!("{e2:?}");
+        assert!(dbg2.contains("LimitReached"), "{dbg2}");
+        assert_ne!(e, e2);
+    }
+
+    #[test]
+    fn region_limits_debug_clone_default_eq() {
+        let l = RegionLimits::default();
+        assert_eq!(l, RegionLimits::UNLIMITED);
+        let dbg = format!("{l:?}");
+        assert!(dbg.contains("RegionLimits"), "{dbg}");
+        let cloned = l.clone();
+        assert_eq!(l, cloned);
+    }
 }

@@ -1510,4 +1510,50 @@ mod tests {
         let cloned = info;
         assert_eq!(cloned.config.name, "S");
     }
+
+    #[test]
+    fn retention_policy_debug_clone_copy_default_eq() {
+        let r = RetentionPolicy::default();
+        assert_eq!(r, RetentionPolicy::Limits);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("Limits"), "{dbg}");
+        let copied: RetentionPolicy = r;
+        let cloned = r.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(r, RetentionPolicy::WorkQueue);
+    }
+
+    #[test]
+    fn storage_type_debug_clone_copy_default_eq() {
+        let s = StorageType::default();
+        assert_eq!(s, StorageType::File);
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("File"), "{dbg}");
+        let copied: StorageType = s;
+        let cloned = s.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(s, StorageType::Memory);
+    }
+
+    #[test]
+    fn discard_policy_debug_clone_copy_default_eq() {
+        let d = DiscardPolicy::default();
+        assert_eq!(d, DiscardPolicy::Old);
+        let dbg = format!("{d:?}");
+        assert!(dbg.contains("Old"), "{dbg}");
+        let copied: DiscardPolicy = d;
+        let cloned = d.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(d, DiscardPolicy::New);
+    }
+
+    #[test]
+    fn stream_state_debug_clone_default() {
+        let s = StreamState::default();
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("StreamState"), "{dbg}");
+        assert_eq!(s.messages, 0);
+        let cloned = s.clone();
+        assert_eq!(format!("{cloned:?}"), dbg);
+    }
 }

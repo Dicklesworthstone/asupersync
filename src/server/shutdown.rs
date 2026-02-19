@@ -846,4 +846,28 @@ mod tests {
         );
         crate::test_complete!("mark_stopped_from_draining_skips_force_close");
     }
+
+    #[test]
+    fn shutdown_phase_debug_clone_copy_eq() {
+        let p = ShutdownPhase::Draining;
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("Draining"), "{dbg}");
+        let copied: ShutdownPhase = p;
+        let cloned = p.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(p, ShutdownPhase::Running);
+    }
+
+    #[test]
+    fn shutdown_stats_debug_clone() {
+        let s = ShutdownStats {
+            drained: 5,
+            force_closed: 1,
+            duration: Duration::from_secs(3),
+        };
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("ShutdownStats"), "{dbg}");
+        let cloned = s.clone();
+        assert_eq!(format!("{cloned:?}"), dbg);
+    }
 }
