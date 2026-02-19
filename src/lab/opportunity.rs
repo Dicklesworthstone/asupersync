@@ -417,4 +417,46 @@ mod tests {
         assert!(s.score() < 0.05);
         assert_eq!(s.evaluate().decision, GateDecision::Reject);
     }
+
+    #[test]
+    fn opportunity_score_debug_clone_copy_eq() {
+        let s = OpportunityScore::new(3.0, 0.8, 2.0).unwrap();
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("OpportunityScore"), "{dbg}");
+        let copied: OpportunityScore = s;
+        let cloned = s.clone();
+        assert_eq!(copied, cloned);
+    }
+
+    #[test]
+    fn gate_decision_debug_clone_copy_eq() {
+        let d = GateDecision::Implement;
+        let dbg = format!("{d:?}");
+        assert!(dbg.contains("Implement"), "{dbg}");
+        let copied: GateDecision = d;
+        let cloned = d.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(d, GateDecision::Reject);
+    }
+
+    #[test]
+    fn gate_result_debug_clone_eq() {
+        let s = OpportunityScore::new(4.0, 0.9, 1.0).unwrap();
+        let r = s.evaluate();
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("GateResult"), "{dbg}");
+        let cloned = r.clone();
+        assert_eq!(r, cloned);
+    }
+
+    #[test]
+    fn score_error_debug_clone_copy_eq() {
+        let e = ScoreError::ImpactOutOfRange;
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ImpactOutOfRange"), "{dbg}");
+        let copied: ScoreError = e;
+        let cloned = e.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(e, ScoreError::ZeroEffort);
+    }
 }

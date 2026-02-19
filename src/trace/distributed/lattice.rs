@@ -617,4 +617,52 @@ mod tests {
         let lat = ObligationLattice::new();
         assert_eq!(lat.get(&oid(99)), LatticeState::Unknown);
     }
+
+    #[test]
+    fn lattice_state_debug_clone_copy_hash() {
+        use std::collections::HashSet;
+        let s = LatticeState::Committed;
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("Committed"), "{dbg}");
+        let copied: LatticeState = s;
+        let cloned = s.clone();
+        assert_eq!(copied, cloned);
+
+        let mut set = HashSet::new();
+        set.insert(LatticeState::Unknown);
+        set.insert(LatticeState::Reserved);
+        set.insert(LatticeState::Committed);
+        set.insert(LatticeState::Aborted);
+        set.insert(LatticeState::Conflict);
+        assert_eq!(set.len(), 5);
+    }
+
+    #[test]
+    fn lease_lattice_state_debug_clone_copy_hash() {
+        use std::collections::HashSet;
+        let s = LeaseLatticeState::Active;
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("Active"), "{dbg}");
+        let copied: LeaseLatticeState = s;
+        let cloned = s.clone();
+        assert_eq!(copied, cloned);
+
+        let mut set = HashSet::new();
+        set.insert(LeaseLatticeState::Unknown);
+        set.insert(LeaseLatticeState::Active);
+        set.insert(LeaseLatticeState::Released);
+        set.insert(LeaseLatticeState::Expired);
+        set.insert(LeaseLatticeState::Conflict);
+        assert_eq!(set.len(), 5);
+    }
+
+    #[test]
+    fn obligation_lattice_debug_clone() {
+        let mut lat = ObligationLattice::new();
+        lat.observe(oid(1), node("n1"), LatticeState::Reserved);
+        let dbg = format!("{lat:?}");
+        assert!(dbg.contains("ObligationLattice"), "{dbg}");
+        let cloned = lat.clone();
+        assert_eq!(cloned.get(&oid(1)), LatticeState::Reserved);
+    }
 }

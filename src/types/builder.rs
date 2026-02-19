@@ -910,4 +910,24 @@ mod tests {
         assert!(validate::required("x", Some(42)).is_ok());
         assert!(validate::required::<i32>("x", None).is_err());
     }
+
+    #[test]
+    fn build_error_debug_clone_eq() {
+        let e = BuildError::missing_required("name");
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("MissingRequired"), "{dbg}");
+        let cloned = e.clone();
+        assert_eq!(e, cloned);
+
+        let e2 = BuildError::invalid_value("port", "must be > 0");
+        assert_ne!(e, e2);
+        let dbg2 = format!("{e2:?}");
+        assert!(dbg2.contains("InvalidValue"), "{dbg2}");
+
+        let e3 = BuildError::conflicting_options("a", "b");
+        let dbg3 = format!("{e3:?}");
+        assert!(dbg3.contains("ConflictingOptions"), "{dbg3}");
+        let cloned3 = e3.clone();
+        assert_eq!(e3, cloned3);
+    }
 }

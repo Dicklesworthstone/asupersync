@@ -568,4 +568,42 @@ mod tests {
         // Fallback to global default
         assert_eq!(config.mode_for("op_c"), MigrationMode::PreferTraditional);
     }
+
+    #[test]
+    fn migration_mode_debug_clone_copy_default_eq() {
+        let m = MigrationMode::Adaptive;
+        let dbg = format!("{m:?}");
+        assert!(dbg.contains("Adaptive"), "{dbg}");
+        let copied: MigrationMode = m;
+        let cloned = m.clone();
+        assert_eq!(copied, cloned);
+        assert_eq!(MigrationMode::default(), MigrationMode::PreferTraditional);
+        assert_ne!(m, MigrationMode::TraditionalOnly);
+    }
+
+    #[test]
+    fn migration_feature_debug_clone_copy_hash_eq() {
+        use std::collections::HashSet;
+        let f = MigrationFeature::JoinEncoding;
+        let dbg = format!("{f:?}");
+        assert!(dbg.contains("JoinEncoding"), "{dbg}");
+        let copied: MigrationFeature = f;
+        let cloned = f.clone();
+        assert_eq!(copied, cloned);
+
+        let mut set = HashSet::new();
+        set.insert(MigrationFeature::JoinEncoding);
+        set.insert(MigrationFeature::RaceEncoding);
+        set.insert(MigrationFeature::DistributedRegions);
+        assert_eq!(set.len(), 3);
+    }
+
+    #[test]
+    fn migration_config_debug_clone_default() {
+        let c = MigrationConfig::default();
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("MigrationConfig"), "{dbg}");
+        let cloned = c.clone();
+        assert_eq!(format!("{cloned:?}"), dbg);
+    }
 }
