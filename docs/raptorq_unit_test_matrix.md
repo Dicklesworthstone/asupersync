@@ -130,6 +130,113 @@ Profile coverage in the script suite:
 - `full`: complete happy/boundary/failure matrix + deterministic report contract
 - `forensics`: heavy-loss/hard-failure surfaces + deterministic report contract
 
+## G6 Validation Report + Failure Triage Playbook
+
+### Canonical one-command wrapper
+
+```bash
+# Fast smoke (recommended first pass)
+NO_PREFLIGHT=1 ./scripts/run_raptorq_e2e.sh --profile fast --bundle
+
+# Full validation
+NO_PREFLIGHT=1 ./scripts/run_raptorq_e2e.sh --profile full --bundle
+
+# Forensics validation
+NO_PREFLIGHT=1 ./scripts/run_raptorq_e2e.sh --profile forensics --bundle
+```
+
+Expected runtime guidance (with `rch` available; highly workload-dependent):
+
+| Profile | Typical Runtime | Intended Use |
+|---|---|---|
+| `fast` | ~6-12 min | PR smoke gate and local confidence loop |
+| `full` | ~12-25 min | pre-merge validation and deeper scenario coverage |
+| `forensics` | ~18-35 min | incident triage, hard-loss/failure investigation |
+
+### Human-friendly validation report template
+
+Use this template for CI summaries, issue comments, or handoff notes.
+
+```markdown
+# RaptorQ Validation Report
+
+- run_id: <profile_timestamp>
+- profile: <fast|full|forensics>
+- overall_status: <pass|fail|validation_failed>
+- user_impact_summary: <one sentence: who is affected and how severe>
+
+## Suite Summary
+| Suite | Result | Notes |
+|---|---|---|
+| bundle-unit | <pass/fail/na> | stage_id=<...> |
+| bundle-perf-smoke | <pass/fail/na> | stage_id=<...> |
+| deterministic-e2e | <pass/fail> | passed=<n>, failed=<n> |
+| conformance-path | <pass/fail> | scenario classes covered: happy/boundary/failure/composite |
+
+## Artifacts
+- summary: `target/e2e-results/raptorq/<run>/summary.json`
+- scenarios: `target/e2e-results/raptorq/<run>/scenarios.ndjson`
+- bundle stages: `target/e2e-results/raptorq/<run>/validation_stages.ndjson` (if bundled)
+- failing scenario logs: `target/e2e-results/raptorq/<run>/<SCENARIO_ID>.log`
+
+## Repro Commands
+- full rerun: `NO_PREFLIGHT=1 ./scripts/run_raptorq_e2e.sh --profile <profile> --bundle`
+- focused rerun: `NO_PREFLIGHT=1 ./scripts/run_raptorq_e2e.sh --profile <profile> --scenario <SCENARIO_ID> --bundle`
+- CI gate replay: `rch exec -- cargo test --test ci_regression_gates -- --nocapture`
+
+## First-response triage decision
+- suspected class: <config|loss envelope|decode policy|kernel dispatch|cache/regime|infrastructure>
+- first response action: <single action taken>
+- next owner / follow-up bead: <id>
+```
+
+### Failure signature map (first-response)
+
+| Signature | Likely Root-cause Class | First Response |
+|---|---|---|
+| `summary.status=validation_failed` with `failed_stage_id=unit-*` | deterministic unit regression | run failing stage `repro_command` from `validation_stages.ndjson`, then inspect `src/raptorq/tests.rs` and linked sentinel |
+| `summary.status=validation_failed` with `failed_stage_id=bench-*` | perf-smoke tooling or kernel-path regression | run stage `repro_command`, inspect bench output for `profile_pack`, `mode`, fallback labels |
+| scenario line has `status=fail` and `category=failure` but expected happy/boundary case failed | decode correctness regression | replay scenario `repro_command`, inspect scenario `seed`, `parameter_set`, `replay_ref` |
+| repeated `policy_mode=conservative_baseline` under dense/high-loss runs | policy/feature extraction drift (F5/F6) | inspect `policy_*` and `regime_*` fields in decode stats; verify budget/fallback reasons |
+| `factor_cache_hits=0` across repeated identical decodes | cache-key mismatch or disabled reuse (F7) | inspect `factor_cache_last_reason`, `factor_cache_last_reuse_eligible`, `factor_cache_last_key` |
+| `hard_regime_fallbacks` spikes with `hard_regime_branch=block_schur_low_rank` | hard-regime branch instability (C5/C6/F8) | inspect `hard_regime_conservative_fallback_reason` and dense-core stats before tuning |
+
+### Structured logging keys + replay lookup
+
+Primary keys for triage:
+
+- `summary.json`: `status`, `profile`, `validation_bundle`, `validation_stage_log`, `scenario_log`
+- `scenarios.ndjson`: `scenario_id`, `category`, `status`, `seed`, `parameter_set`, `replay_ref`, `unit_sentinel`, `repro_command`, `artifact_path`
+- `validation_stages.ndjson`: `stage_id`, `status`, `exit_code`, `duration_ms`, `artifact_path`, `repro_command`
+- unit/e2e schema anchors: `src/raptorq/test_log_schema.rs` (`raptorq-unit-log-v1`, `raptorq-e2e-log-v1`)
+
+Replay lookup workflow:
+
+```bash
+RUN_DIR=target/e2e-results/raptorq/<profile_timestamp>
+
+# 1) list failing scenarios
+jq -c 'select(.status=="fail") | {scenario_id, replay_ref, repro_command}' "$RUN_DIR/scenarios.ndjson"
+
+# 2) resolve replay reference into D9 catalog metadata
+REPLAY_REF="$(jq -r 'select(.status=="fail") | .replay_ref' "$RUN_DIR/scenarios.ndjson" | head -n1)"
+jq -c --arg replay "$REPLAY_REF" '.entries[] | select(.replay_ref==$replay)' artifacts/raptorq_replay_catalog_v1.json
+```
+
+### Runtime-optimization diagnostics (E4/E5/C5/C6/F5/F6/F7/F8)
+
+Use these signal keys during triage, especially when CI gate logs (`tests/ci_regression_gates.rs`) flag regressions.
+
+| Lever | Primary Signal Keys | Interpretation |
+|---|---|---|
+| `E4` / `E5` | `profile_pack`, `architecture_class`, `profile_fallback_reason`, `mode` | verifies deterministic GF256 dispatch and fallback behavior |
+| `C5` | `hard_regime_activated`, `hard_regime_branch`, `hard_regime_fallbacks` | verifies hard-regime activation and branch stability |
+| `C6` | `dense_core_rows`, `dense_core_cols`, `gauss_ops`, `peeling_fallback_reason` | verifies dense-core path engagement under loss pressure |
+| `F5` | `policy_mode`, `policy_reason`, `policy_baseline_loss`, `policy_high_support_loss`, `policy_block_schur_loss` | explains policy selection and expected-loss tradeoff |
+| `F6` | `regime_state`, `regime_score`, `regime_retune_count`, `regime_rollback_count`, `regime_replay_ref` | verifies regime-shift detector dynamics and replayability |
+| `F7` | `factor_cache_hits`, `factor_cache_misses`, `factor_cache_entries`, `factor_cache_capacity`, `factor_cache_last_reason` | verifies factor-cache effectiveness and boundedness |
+| `F8` | combined view of `policy_*`, `hard_regime_*`, `factor_cache_*`, `regime_*` | verifies cross-lever composition and fallback safety |
+
 ## Gaps and Follow-ups
 
 Open gaps identified during matrix pass:
@@ -175,11 +282,11 @@ rch exec -- cargo test --lib raptorq -- --nocapture
 # Deterministic conformance scenario suite
 rch exec -- cargo test --test raptorq_conformance e2e_pipeline_reports_are_deterministic -- --nocapture
 
-# Deterministic D6 profile suite (happy + boundary + failure)
-rch exec -- ./scripts/run_raptorq_e2e.sh --profile full
+# Deterministic D6 profile suite (staged unit + perf-smoke + E2E)
+rch exec -- ./scripts/run_raptorq_e2e.sh --profile full --bundle
 
 # Focused failure reproduction with stable replay linkage
-rch exec -- ./scripts/run_raptorq_e2e.sh --profile forensics --scenario RQ-E2E-FAILURE-INSUFFICIENT
+rch exec -- ./scripts/run_raptorq_e2e.sh --profile forensics --scenario RQ-E2E-FAILURE-INSUFFICIENT --bundle
 
 # Structured logging sentinel in perf invariants
 rch exec -- cargo test --test raptorq_perf_invariants seed_sweep_structured_logging -- --nocapture

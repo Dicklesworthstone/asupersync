@@ -86,11 +86,17 @@ Current artifact summary (`coverage_summary` in JSON):
 
 - `cards_total = 8`
 - `cards_with_replay_commands = 8`
-- `cards_with_measured_comparator_evidence = 3`
-- `cards_pending_measured_evidence = 5`
+- `cards_with_measured_comparator_evidence = 5`
+- `cards_pending_measured_evidence = 3`
 
 Closure blockers for `asupersync-3ltrv` remain:
 
-1. Fill measured comparator evidence for open/planned levers (`E5` offline pack, `F6`, `F7`, `F8`).
-2. Record completed rollback rehearsal outcomes per card.
-3. Link final passing comprehensive unit + deterministic E2E evidence for all approved cards.
+1. Finalize offline profile-pack comparator evidence for `E5` (`asupersync-36m6p`) with p95/p99 links.
+2. Promote `F7` from proposed to approved_guarded only after burst comparator evidence + rollback rehearsal outcomes are recorded.
+3. Keep `F8` as proposed/template until implementation exists, then attach overlap-vs-sequential evidence and rollback outcomes.
+
+Recent evidence alignment updates (2026-02-19):
+
+- `F6` (`asupersync-j96j4`) moved from template/proposed to approved_guarded in the decision artifact based on closed-bead implementation evidence.
+- `E5` card now points to active offline profile-pack bead (`asupersync-36m6p`) and uses deterministic profile-pack replay commands.
+- Stale non-existent command flags (`--mode`, `--policy`, `--cache`, `--pipeline`) were replaced with valid deterministic `rch exec -- ...` commands.

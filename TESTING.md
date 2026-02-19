@@ -204,11 +204,16 @@ Run the following for a maintenance pass:
 ```bash
 python3 scripts/check_no_mock_policy.py --policy .github/no_mock_policy.json
 scripts/run_all_e2e.sh --verify-matrix
-NO_PREFLIGHT=1 bash ./scripts/run_raptorq_e2e.sh --profile forensics --scenario RQ-E2E-FAILURE-INSUFFICIENT
+NO_PREFLIGHT=1 ./scripts/run_raptorq_e2e.sh --profile forensics --bundle
 cargo llvm-cov --lib --all-features \
   --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/' \
   --text --output-path coverage/coverage.txt
 ```
+
+RaptorQ one-command validation notes:
+- `./scripts/run_raptorq_e2e.sh --profile <fast|full|forensics> --bundle` is the canonical wrapper for staged unit + perf-smoke + deterministic E2E runs.
+- The wrapper auto-uses `rch` when available for cargo-heavy stages and emits `summary.json`, `scenarios.ndjson`, and `validation_stages.ndjson`.
+- For slow workers, raise `VALIDATION_TIMEOUT` (bundle stages) and/or `E2E_TIMEOUT` (scenario runs) before re-running.
 
 If any command fails, open/refresh a bead under `[TEST-COVERAGE][Track-D]`,
 link the failing artifact, and do not mark maintenance pass as complete.

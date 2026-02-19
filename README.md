@@ -690,6 +690,27 @@ On the decode side, the runtime uses a policy-driven deterministic planner inste
 - Dense-factor artifacts are cached with bounded capacity and explicit hit/miss/eviction telemetry in decode stats (`src/raptorq/decoder.rs`).
 - GF(256) kernels are selected deterministically per process, with policy snapshots for dual-lane fused operations and optional SIMD acceleration behind `simd-intrinsics` (`src/raptorq/gf256.rs`).
 
+### One-Command RaptorQ Validation
+
+Use the deterministic E2E wrapper with `--bundle` to run staged unit/perf-smoke gates plus scenario coverage with a single command:
+
+```bash
+# Fast smoke (unit sentinel + perf smoke + fast scenario profile)
+NO_PREFLIGHT=1 ./scripts/run_raptorq_e2e.sh --profile fast --bundle
+
+# Full profile
+NO_PREFLIGHT=1 ./scripts/run_raptorq_e2e.sh --profile full --bundle
+
+# Forensics profile (includes additional repair_campaign perf smoke)
+NO_PREFLIGHT=1 ./scripts/run_raptorq_e2e.sh --profile forensics --bundle
+```
+
+Operational notes:
+- The wrapper auto-uses `rch` when available for cargo-heavy stages (`cargo test`, `cargo bench`, scenario tests).
+- `--profile` supports `fast|full|forensics`; `--scenario <ID>` can target one deterministic scenario.
+- Artifact outputs include `summary.json`, `scenarios.ndjson`, and (when bundled) `validation_stages.ndjson`.
+- Increase `VALIDATION_TIMEOUT` or `E2E_TIMEOUT` if your environment is slower than expected.
+
 ---
 
 ## Stream Combinators
