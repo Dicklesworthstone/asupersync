@@ -965,4 +965,31 @@ mod tests {
         assert!(oracle.check().is_ok());
         crate::test_complete!("valid_subregion_add_passes");
     }
+
+    // =========================================================================
+    // Wave 49 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn region_tree_violation_debug_clone() {
+        let v = RegionTreeViolation::NoRoot;
+        let dbg = format!("{v:?}");
+        assert!(dbg.contains("NoRoot"), "{dbg}");
+        let cloned = v.clone();
+        assert!(format!("{cloned:?}").contains("NoRoot"));
+
+        let v2 = RegionTreeViolation::MultipleRoots {
+            roots: vec![region(0), region(1)],
+        };
+        let cloned2 = v2.clone();
+        assert!(format!("{cloned2:?}").contains("MultipleRoots"));
+    }
+
+    #[test]
+    fn region_tree_oracle_default() {
+        let def = RegionTreeOracle::default();
+        let dbg = format!("{def:?}");
+        assert!(dbg.contains("RegionTreeOracle"), "{dbg}");
+        assert!(def.check().is_ok());
+    }
 }

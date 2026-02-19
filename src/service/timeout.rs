@@ -445,4 +445,34 @@ mod tests {
         let display = format!("{err}");
         assert!(display.contains("inner service error"));
     }
+
+    // =========================================================================
+    // Wave 49 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn timeout_layer_debug_clone_copy() {
+        let layer = TimeoutLayer::new(Duration::from_secs(10));
+        let dbg = format!("{layer:?}");
+        assert!(dbg.contains("TimeoutLayer"), "{dbg}");
+        let copied = layer;
+        let cloned = layer.clone();
+        assert_eq!(copied.timeout(), cloned.timeout());
+    }
+
+    #[test]
+    fn timeout_service_accessors() {
+        let svc = Timeout::new(EchoService, Duration::from_secs(5));
+        assert_eq!(svc.timeout(), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn timeout_error_debug() {
+        let err: TimeoutError<&str> = TimeoutError::Elapsed(Elapsed::new(Time::from_secs(5)));
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Elapsed"), "{dbg}");
+        let err2: TimeoutError<&str> = TimeoutError::Inner("fail");
+        let dbg2 = format!("{err2:?}");
+        assert!(dbg2.contains("Inner"), "{dbg2}");
+    }
 }

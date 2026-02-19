@@ -745,4 +745,32 @@ mod tests {
             );
         }
     }
+
+    // =========================================================================
+    // Wave 49 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn priority_task_debug_clone_copy() {
+        let pt = PriorityTask {
+            task: task(1),
+            priority: 5,
+        };
+        let dbg = format!("{pt:?}");
+        assert!(dbg.contains("PriorityTask"), "{dbg}");
+        let copied = pt;
+        let cloned = pt.clone();
+        assert_eq!(copied.task, cloned.task);
+        assert_eq!(copied.priority, cloned.priority);
+    }
+
+    #[test]
+    fn timed_task_debug_clone_copy_eq() {
+        let tt = TimedTask::new(task(1), Time::from_nanos(1000), 0);
+        let dbg = format!("{tt:?}");
+        assert!(dbg.contains("TimedTask"), "{dbg}");
+        let copied = tt;
+        let cloned = tt.clone();
+        assert_eq!(copied, cloned);
+    }
 }

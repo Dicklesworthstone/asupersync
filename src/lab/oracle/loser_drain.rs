@@ -471,4 +471,31 @@ mod tests {
         crate::assert_with_log!(ok, "ok", true, ok);
         crate::test_complete!("nested_race_tracking");
     }
+
+    // =========================================================================
+    // Wave 49 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn loser_drain_violation_debug_clone() {
+        let v = LoserDrainViolation {
+            race_id: 1,
+            winner: task(1),
+            undrained_losers: vec![task(2), task(3)],
+            race_complete_time: t(100),
+        };
+        let dbg = format!("{v:?}");
+        assert!(dbg.contains("LoserDrainViolation"), "{dbg}");
+        let cloned = v.clone();
+        assert_eq!(cloned.race_id, 1);
+        assert_eq!(cloned.undrained_losers.len(), 2);
+    }
+
+    #[test]
+    fn loser_drain_oracle_default() {
+        let def = LoserDrainOracle::default();
+        let dbg = format!("{def:?}");
+        assert!(dbg.contains("LoserDrainOracle"), "{dbg}");
+        assert!(def.check().is_ok());
+    }
 }
