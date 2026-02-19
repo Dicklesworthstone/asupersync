@@ -709,4 +709,185 @@ mod tests {
         crate::assert_with_log!(neq, "not equal", true, neq);
         crate::test_complete!("trace_event_summary_equality");
     }
+
+    #[test]
+    fn determinism_violation_debug_clone() {
+        init_test("determinism_violation_debug_clone");
+        let v = DeterminismViolation {
+            divergence_index: 5,
+            expected: None,
+            actual: None,
+            context_before: vec![],
+            trace1_len: 10,
+            trace2_len: 8,
+        };
+        let dbg = format!("{v:?}");
+        assert!(dbg.contains("DeterminismViolation"));
+        let v2 = v.clone();
+        assert_eq!(v2.divergence_index, 5);
+        assert_eq!(v2.trace1_len, 10);
+        assert_eq!(v2.trace2_len, 8);
+        crate::test_complete!("determinism_violation_debug_clone");
+    }
+
+    #[test]
+    fn determinism_violation_display_both_none() {
+        init_test("determinism_violation_display_both_none");
+        let v = DeterminismViolation {
+            divergence_index: 0,
+            expected: None,
+            actual: None,
+            context_before: vec![],
+            trace1_len: 0,
+            trace2_len: 0,
+        };
+        let display = format!("{v}");
+        assert!(display.contains("Determinism violation at index 0"));
+        assert!(display.contains("<end of trace>"));
+        crate::test_complete!("determinism_violation_display_both_none");
+    }
+
+    #[test]
+    fn determinism_violation_display_with_events() {
+        init_test("determinism_violation_display_with_events");
+        let v = DeterminismViolation {
+            divergence_index: 3,
+            expected: Some(TraceEventSummary {
+                seq: 3,
+                time_nanos: 300,
+                kind: TraceEventKind::UserTrace,
+                data_summary: "msg=expected".into(),
+            }),
+            actual: Some(TraceEventSummary {
+                seq: 3,
+                time_nanos: 300,
+                kind: TraceEventKind::UserTrace,
+                data_summary: "msg=actual".into(),
+            }),
+            context_before: vec![TraceEventSummary {
+                seq: 2,
+                time_nanos: 200,
+                kind: TraceEventKind::UserTrace,
+                data_summary: "msg=context".into(),
+            }],
+            trace1_len: 5,
+            trace2_len: 5,
+        };
+        let display = format!("{v}");
+        assert!(display.contains("index 3"));
+        assert!(display.contains("Expected:"));
+        assert!(display.contains("Actual:"));
+        assert!(display.contains("Context"));
+        crate::test_complete!("determinism_violation_display_with_events");
+    }
+
+    #[test]
+    fn determinism_violation_is_error() {
+        init_test("determinism_violation_is_error");
+        let v = DeterminismViolation {
+            divergence_index: 0,
+            expected: None,
+            actual: None,
+            context_before: vec![],
+            trace1_len: 0,
+            trace2_len: 0,
+        };
+        // Verify it implements std::error::Error
+        let err: &dyn std::error::Error = &v;
+        let display = format!("{err}");
+        assert!(display.contains("Determinism violation"));
+        crate::test_complete!("determinism_violation_is_error");
+    }
+
+    #[test]
+    fn trace_event_summary_debug_clone() {
+        init_test("trace_event_summary_debug_clone");
+        let s = TraceEventSummary {
+            seq: 42,
+            time_nanos: 1000,
+            kind: TraceEventKind::Spawn,
+            data_summary: "task=Task(0)".into(),
+        };
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("TraceEventSummary"));
+        let s2 = s.clone();
+        assert_eq!(s2.seq, 42);
+        assert_eq!(s2.time_nanos, 1000);
+        assert_eq!(s2.data_summary, "task=Task(0)");
+        crate::test_complete!("trace_event_summary_debug_clone");
+    }
+
+    #[test]
+    fn trace_event_summary_display() {
+        init_test("trace_event_summary_display");
+        let s = TraceEventSummary {
+            seq: 0,
+            time_nanos: 100,
+            kind: TraceEventKind::UserTrace,
+            data_summary: "msg=hello".into(),
+        };
+        let display = format!("{s}");
+        assert!(display.contains("seq=0"));
+        assert!(display.contains("time=100"));
+        assert!(display.contains("msg=hello"));
+        crate::test_complete!("trace_event_summary_display");
+    }
+
+    #[test]
+    fn trace_event_summary_display_empty_data() {
+        init_test("trace_event_summary_display_empty_data");
+        let s = TraceEventSummary {
+            seq: 0,
+            time_nanos: 0,
+            kind: TraceEventKind::UserTrace,
+            data_summary: String::new(),
+        };
+        let display = format!("{s}");
+        assert!(display.contains("seq=0"));
+        // Empty data should not add extra content
+        assert!(!display.contains("  "));
+        crate::test_complete!("trace_event_summary_display_empty_data");
+    }
+
+    #[test]
+    fn determinism_oracle_debug_default() {
+        init_test("determinism_oracle_debug_default");
+        let oracle = DeterminismOracle::default();
+        let dbg = format!("{oracle:?}");
+        assert!(dbg.contains("DeterminismOracle"));
+        crate::test_complete!("determinism_oracle_debug_default");
+    }
+
+    #[test]
+    fn determinism_oracle_context_window_builder() {
+        init_test("determinism_oracle_context_window_builder");
+        let oracle = DeterminismOracle::new().context_window(10);
+        let dbg = format!("{oracle:?}");
+        assert!(dbg.contains("10"));
+        crate::test_complete!("determinism_oracle_context_window_builder");
+    }
+
+    #[test]
+    fn determinism_oracle_identical_traces_ok() {
+        init_test("determinism_oracle_identical_traces_ok");
+        let oracle = DeterminismOracle::new();
+        let trace = vec![TraceEventSummary {
+            seq: 0,
+            time_nanos: 0,
+            kind: TraceEventKind::UserTrace,
+            data_summary: "msg=test".into(),
+        }];
+        let result = oracle.compare_traces(&trace, &trace);
+        assert!(result.is_ok());
+        crate::test_complete!("determinism_oracle_identical_traces_ok");
+    }
+
+    #[test]
+    fn determinism_oracle_empty_traces_ok() {
+        init_test("determinism_oracle_empty_traces_ok");
+        let oracle = DeterminismOracle::new();
+        let result = oracle.compare_traces(&[], &[]);
+        assert!(result.is_ok());
+        crate::test_complete!("determinism_oracle_empty_traces_ok");
+    }
 }

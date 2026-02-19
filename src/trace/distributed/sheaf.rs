@@ -578,4 +578,160 @@ mod tests {
         let report = checker.check();
         assert!(!report.has_issues());
     }
+
+    #[test]
+    fn node_snapshot_debug_clone() {
+        let snap = NodeSnapshot::new(node("X"));
+        let dbg = format!("{snap:?}");
+        assert!(dbg.contains("NodeSnapshot"));
+        let snap2 = snap.clone();
+        assert!(snap2.states.is_empty());
+    }
+
+    #[test]
+    fn node_snapshot_observe_inserts() {
+        let mut snap = NodeSnapshot::new(node("A"));
+        snap.observe(oid(1), LatticeState::Reserved);
+        snap.observe(oid(2), LatticeState::Committed);
+        assert_eq!(snap.states.len(), 2);
+        assert_eq!(snap.states[&oid(1)], LatticeState::Reserved);
+        assert_eq!(snap.states[&oid(2)], LatticeState::Committed);
+    }
+
+    #[test]
+    fn node_snapshot_observe_overwrites() {
+        let mut snap = NodeSnapshot::new(node("A"));
+        snap.observe(oid(1), LatticeState::Reserved);
+        snap.observe(oid(1), LatticeState::Committed);
+        assert_eq!(snap.states.len(), 1);
+        assert_eq!(snap.states[&oid(1)], LatticeState::Committed);
+    }
+
+    #[test]
+    fn saga_constraint_debug_clone() {
+        let c = SagaConstraint::AllOrNothing {
+            name: "test".into(),
+            obligations: [oid(1), oid(2)].into_iter().collect(),
+        };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("AllOrNothing"));
+        let c2 = c.clone();
+        let dbg2 = format!("{c2:?}");
+        assert!(dbg2.contains("test"));
+    }
+
+    #[test]
+    fn consistency_report_debug_clone() {
+        let report = ConsistencyReport {
+            pairwise_conflicts: vec![],
+            phantom_states: vec![],
+            constraint_violations: vec![],
+        };
+        let dbg = format!("{report:?}");
+        assert!(dbg.contains("ConsistencyReport"));
+        let r2 = report.clone();
+        assert!(!r2.has_issues());
+        assert!(!r2.has_sheaf_issues());
+    }
+
+    #[test]
+    fn consistency_report_has_issues_with_pairwise() {
+        let report = ConsistencyReport {
+            pairwise_conflicts: vec![PairwiseConflict {
+                obligation: oid(1),
+                node_a: node("A"),
+                state_a: LatticeState::Committed,
+                node_b: node("B"),
+                state_b: LatticeState::Aborted,
+            }],
+            phantom_states: vec![],
+            constraint_violations: vec![],
+        };
+        assert!(report.has_issues());
+        assert!(!report.has_sheaf_issues());
+    }
+
+    #[test]
+    fn pairwise_conflict_debug_clone() {
+        let c = PairwiseConflict {
+            obligation: oid(1),
+            node_a: node("A"),
+            state_a: LatticeState::Committed,
+            node_b: node("B"),
+            state_b: LatticeState::Aborted,
+        };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("PairwiseConflict"));
+        let c2 = c.clone();
+        assert_eq!(c2.state_a, LatticeState::Committed);
+    }
+
+    #[test]
+    fn phantom_state_debug_clone() {
+        let p = PhantomState {
+            obligation: oid(1),
+            merged_state: LatticeState::Committed,
+            node_observations: BTreeMap::new(),
+        };
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("PhantomState"));
+        let p2 = p.clone();
+        assert!(p2.node_observations.is_empty());
+    }
+
+    #[test]
+    fn constraint_violation_debug_clone() {
+        let cv = ConstraintViolation {
+            constraint_name: "saga-1".into(),
+            obligation_states: BTreeMap::new(),
+            explanation: "test violation".into(),
+        };
+        let dbg = format!("{cv:?}");
+        assert!(dbg.contains("ConstraintViolation"));
+        let cv2 = cv.clone();
+        assert_eq!(cv2.constraint_name, "saga-1");
+        assert_eq!(cv2.explanation, "test violation");
+    }
+
+    #[test]
+    fn obligation_detail_debug_clone() {
+        let od = ObligationDetail {
+            merged: LatticeState::Reserved,
+            per_node: BTreeMap::new(),
+        };
+        let dbg = format!("{od:?}");
+        assert!(dbg.contains("ObligationDetail"));
+        let od2 = od.clone();
+        assert_eq!(od2.merged, LatticeState::Reserved);
+    }
+
+    #[test]
+    fn consistency_report_has_sheaf_issues_with_phantom() {
+        let report = ConsistencyReport {
+            pairwise_conflicts: vec![],
+            phantom_states: vec![PhantomState {
+                obligation: oid(1),
+                merged_state: LatticeState::Committed,
+                node_observations: BTreeMap::new(),
+            }],
+            constraint_violations: vec![],
+        };
+        assert!(report.has_issues());
+        assert!(report.has_sheaf_issues());
+    }
+
+    #[test]
+    fn consistency_report_has_sheaf_issues_with_violation() {
+        let report = ConsistencyReport {
+            pairwise_conflicts: vec![],
+            phantom_states: vec![],
+            constraint_violations: vec![ConstraintViolation {
+                constraint_name: "test".into(),
+                obligation_states: BTreeMap::new(),
+                explanation: "broken".into(),
+            }],
+        };
+        assert!(report.has_issues());
+        assert!(report.has_sheaf_issues());
+    }
 }
