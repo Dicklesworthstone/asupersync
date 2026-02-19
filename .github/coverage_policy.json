@@ -1,5 +1,5 @@
 {
-  "schema_version": "coverage-ratchet-policy-v1",
+  "schema_version": "coverage-ratchet-policy-v2",
   "global_line_floor_pct": 5.0,
   "subsystems": [
     {
@@ -73,6 +73,62 @@
       "label": "Config + CLI + observability",
       "min_line_pct": 10.0,
       "include_prefixes": ["src/config.rs", "src/cli/", "src/observability/"]
+    }
+  ],
+  "ratchet_schedule": [
+    {
+      "stage": "S0-baseline",
+      "effective_date": "2026-02-19",
+      "description": "Initial enforceable baseline: thresholds match current measured coverage minus 5% safety margin.",
+      "global_line_floor_pct": 5.0,
+      "overrides": {}
+    },
+    {
+      "stage": "S1-raise",
+      "effective_date": "2026-03-15",
+      "description": "First staged raise: lift low subsystems to 25%, maintain high performers.",
+      "global_line_floor_pct": 8.0,
+      "overrides": {
+        "runtime_scheduler": 25.0,
+        "cancel_obligation": 25.0,
+        "channel_sync": 20.0,
+        "io_reactor_time": 20.0,
+        "net_http_protocols": 15.0,
+        "raptorq_codec": 20.0,
+        "distributed_remote": 15.0,
+        "trace_record_replay": 20.0,
+        "security_capabilities": 15.0,
+        "lab_testing": 25.0,
+        "config_cli_observability": 15.0
+      }
+    },
+    {
+      "stage": "S2-enforce",
+      "effective_date": "2026-04-15",
+      "description": "Second raise: lift all subsystems to 30%+ floor, QUIC/H3 stays at 90%.",
+      "global_line_floor_pct": 10.0,
+      "overrides": {
+        "runtime_scheduler": 30.0,
+        "cancel_obligation": 30.0,
+        "channel_sync": 25.0,
+        "io_reactor_time": 25.0,
+        "net_http_protocols": 20.0,
+        "raptorq_codec": 25.0,
+        "distributed_remote": 20.0,
+        "trace_record_replay": 25.0,
+        "security_capabilities": 20.0,
+        "lab_testing": 30.0,
+        "config_cli_observability": 20.0
+      }
+    }
+  ],
+  "waivers": [
+    {
+      "subsystem_id": "config_cli_observability",
+      "owner": "test-infra",
+      "reason": "CLI entry points are integration-tested via snapshot tests, not unit-level line coverage. Coverage measured at 10% reflects intentional test strategy.",
+      "override_min_line_pct": 10.0,
+      "expires_at_utc": "2026-06-01T00:00:00Z"
     }
   ],
   "required_invariants": [
