@@ -617,6 +617,104 @@ mod tests {
         assert!(display.contains("3 bytes"));
     }
 
+    // =========================================================================
+    // Wave 31: Data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn object_id_ord() {
+        let a = ObjectId::new(0, 1);
+        let b = ObjectId::new(0, 2);
+        let c = ObjectId::new(1, 0);
+        assert!(a < b);
+        assert!(b < c);
+    }
+
+    #[test]
+    fn object_id_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(ObjectId::new_for_test(1));
+        set.insert(ObjectId::new_for_test(2));
+        set.insert(ObjectId::new_for_test(1));
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn symbol_id_ord_hash() {
+        use std::collections::HashSet;
+        let a = SymbolId::new_for_test(1, 0, 0);
+        let b = SymbolId::new_for_test(1, 0, 1);
+        assert!(a < b);
+        let mut set = HashSet::new();
+        set.insert(a);
+        set.insert(b);
+        set.insert(a);
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn symbol_kind_clone_copy_hash_display() {
+        use std::collections::HashSet;
+        let src = SymbolKind::Source;
+        let rep = SymbolKind::Repair;
+        let _cloned = src.clone();
+        let _copied = src; // Copy
+        assert_eq!(format!("{src}"), "source");
+        assert_eq!(format!("{rep}"), "repair");
+        let mut set = HashSet::new();
+        set.insert(src);
+        set.insert(rep);
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn symbol_clone_hash() {
+        use std::collections::HashSet;
+        let sym = Symbol::new_for_test(1, 0, 0, &[1, 2, 3]);
+        let cloned = sym.clone();
+        assert_eq!(sym, cloned);
+        let mut set = HashSet::new();
+        set.insert(sym);
+        set.insert(cloned);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn symbol_data_mut() {
+        let id = SymbolId::new_for_test(1, 0, 0);
+        let mut symbol = Symbol::new(id, vec![1, 2, 3], SymbolKind::Source);
+        symbol.data_mut()[0] = 99;
+        assert_eq!(symbol.data()[0], 99);
+    }
+
+    #[test]
+    fn symbol_empty_is_empty() {
+        let id = SymbolId::new_for_test(1, 0, 0);
+        let symbol = Symbol::empty(id, 0, SymbolKind::Source);
+        assert!(symbol.is_empty());
+        assert_eq!(symbol.len(), 0);
+    }
+
+    #[test]
+    fn symbol_convenience_accessors() {
+        let sym = Symbol::new_for_test(42, 3, 7, &[10, 20]);
+        assert_eq!(sym.object_id(), ObjectId::new_for_test(42));
+        assert_eq!(sym.sbn(), 3);
+        assert_eq!(sym.esi(), 7);
+    }
+
+    #[test]
+    fn object_params_clone_copy_display() {
+        let params = ObjectParams::new_for_test(1, 5000);
+        let cloned = params.clone();
+        let copied = params; // Copy
+        assert_eq!(cloned, copied);
+        let display = format!("{params}");
+        assert!(display.contains("ObjectParams"));
+        assert!(display.contains("5000"));
+    }
+
     #[test]
     fn debug_formatting() {
         let object_id = ObjectId::new_for_test(42);

@@ -652,6 +652,82 @@ mod tests {
         crate::test_complete!("zero_period_keeps_bucket_full");
     }
 
+    // =========================================================================
+    // Wave 31: Data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn rate_limit_layer_debug_clone() {
+        let layer = RateLimitLayer::new(10, Duration::from_secs(1));
+        let dbg = format!("{layer:?}");
+        assert!(dbg.contains("RateLimitLayer"));
+        let cloned = layer.clone();
+        assert_eq!(cloned.rate(), 10);
+        assert_eq!(cloned.period(), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn rate_limit_layer_with_time_getter() {
+        let layer = RateLimitLayer::with_time_getter(5, Duration::from_millis(500), test_time);
+        assert_eq!(layer.rate(), 5);
+        assert_eq!(layer.period(), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn rate_limit_service_debug() {
+        let svc = RateLimit::new(42_i32, 10, Duration::from_secs(1));
+        let dbg = format!("{svc:?}");
+        assert!(dbg.contains("RateLimit"));
+    }
+
+    #[test]
+    fn rate_limit_service_clone() {
+        let svc = RateLimit::new(42_i32, 10, Duration::from_secs(1));
+        let cloned = svc.clone();
+        assert_eq!(*cloned.inner(), 42);
+        assert_eq!(cloned.rate(), 10);
+        assert_eq!(cloned.available_tokens(), 10);
+    }
+
+    #[test]
+    fn rate_limit_service_accessors() {
+        let mut svc = RateLimit::new(42_i32, 10, Duration::from_secs(1));
+        assert_eq!(*svc.inner(), 42);
+        assert_eq!(svc.rate(), 10);
+        assert_eq!(svc.period(), Duration::from_secs(1));
+        *svc.inner_mut() = 99;
+        assert_eq!(svc.into_inner(), 99);
+    }
+
+    #[test]
+    fn rate_limit_error_debug() {
+        let err: RateLimitError<&str> = RateLimitError::RateLimitExceeded;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("RateLimitExceeded"));
+
+        let err: RateLimitError<&str> = RateLimitError::Inner("fail");
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Inner"));
+    }
+
+    #[test]
+    fn rate_limit_error_source() {
+        use std::error::Error;
+        let err: RateLimitError<std::io::Error> = RateLimitError::RateLimitExceeded;
+        assert!(err.source().is_none());
+
+        let inner = std::io::Error::new(std::io::ErrorKind::Other, "test");
+        let err = RateLimitError::Inner(inner);
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn rate_limit_future_debug() {
+        let future = RateLimitFuture::new(std::future::ready(Ok::<i32, &str>(42)));
+        let dbg = format!("{future:?}");
+        assert!(dbg.contains("RateLimitFuture"));
+    }
+
     #[test]
     fn error_display() {
         init_test("error_display");
