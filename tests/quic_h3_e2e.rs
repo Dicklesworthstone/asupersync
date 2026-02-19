@@ -488,7 +488,7 @@ fn h3_request_response_lifecycle() {
     assert!(!req_plan.is_empty(), "plan should have entries");
 
     // Encode a HEADERS frame (simulated QPACK-encoded block).
-    let headers_frame = H3Frame::Headers(vec![0x00, 0x00, 0x80, 0x17]); // mock QPACK
+    let headers_frame = H3Frame::Headers(vec![0x00, 0x00, 0x80, 0x17]); // minimal QPACK-encoded block
     let mut request_stream_state = H3RequestStreamState::new();
     request_stream_state
         .on_frame(&headers_frame)
@@ -530,7 +530,7 @@ fn h3_request_response_lifecycle() {
     assert!(!resp_plan.is_empty());
 
     // Encode response frames.
-    let resp_headers = H3Frame::Headers(vec![0x00, 0x00, 0xD9]); // mock QPACK
+    let resp_headers = H3Frame::Headers(vec![0x00, 0x00, 0xD9]); // minimal QPACK-encoded block
     let resp_data = H3Frame::Data(b"Hello, world!".to_vec());
 
     let mut resp_wire = Vec::new();

@@ -243,13 +243,13 @@ fn write_to_nonexistent_stream_returns_error() {
     let cx = &pair.cx;
 
     // Construct a StreamId that was never opened.
-    let fake_stream = StreamId(0xDEAD);
+    let nonexistent_stream = StreamId(0xDEAD);
 
     // Attempt to write to it -- must return Err.
     let err = pair
         .client
-        .write_stream(cx, fake_stream, 100)
-        .expect_err("write to fake stream must fail");
+        .write_stream(cx, nonexistent_stream, 100)
+        .expect_err("write to nonexistent stream must fail");
 
     // Should be a StreamTable error (UnknownStream).
     assert!(
