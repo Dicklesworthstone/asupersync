@@ -1601,4 +1601,417 @@ mod tests {
         let resp_plan = qpack_static_plan_for_response(&resp);
         assert_eq!(resp_plan.first(), Some(&QpackFieldPlan::StaticIndex(25)));
     }
+
+    // ========================================================================
+    // QH3-U1 gap-filling tests
+    // ========================================================================
+
+    // --- 1. Frame roundtrips ---
+
+    #[test]
+    fn frame_roundtrip_data() {
+        let frame = H3Frame::Data(vec![0xCA, 0xFE]);
+        let mut buf = Vec::new();
+        frame.encode(&mut buf).expect("encode");
+        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        assert_eq!(decoded, frame);
+        assert_eq!(consumed, buf.len());
+    }
+
+    #[test]
+    fn frame_roundtrip_headers() {
+        let frame = H3Frame::Headers(vec![0x80, 0x81, 0x82]);
+        let mut buf = Vec::new();
+        frame.encode(&mut buf).expect("encode");
+        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        assert_eq!(decoded, frame);
+        assert_eq!(consumed, buf.len());
+    }
+
+    #[test]
+    fn frame_roundtrip_cancel_push() {
+        let frame = H3Frame::CancelPush(42);
+        let mut buf = Vec::new();
+        frame.encode(&mut buf).expect("encode");
+        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        assert_eq!(decoded, frame);
+        assert_eq!(consumed, buf.len());
+    }
+
+    #[test]
+    fn frame_roundtrip_goaway() {
+        let frame = H3Frame::Goaway(1000);
+        let mut buf = Vec::new();
+        frame.encode(&mut buf).expect("encode");
+        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        assert_eq!(decoded, frame);
+        assert_eq!(consumed, buf.len());
+    }
+
+    #[test]
+    fn frame_roundtrip_max_push_id() {
+        let frame = H3Frame::MaxPushId(255);
+        let mut buf = Vec::new();
+        frame.encode(&mut buf).expect("encode");
+        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        assert_eq!(decoded, frame);
+        assert_eq!(consumed, buf.len());
+    }
+
+    #[test]
+    fn frame_roundtrip_unknown() {
+        let frame = H3Frame::Unknown {
+            frame_type: 0x1F,
+            payload: vec![0xDE, 0xAD],
+        };
+        let mut buf = Vec::new();
+        frame.encode(&mut buf).expect("encode");
+        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        assert_eq!(decoded, frame);
+        assert_eq!(consumed, buf.len());
+    }
+
+    #[test]
+    fn frame_roundtrip_settings() {
+        let settings = H3Settings {
+            qpack_max_table_capacity: Some(4096),
+            max_field_section_size: Some(8192),
+            qpack_blocked_streams: None,
+            enable_connect_protocol: Some(true),
+            h3_datagram: None,
+            unknown: vec![],
+        };
+        let frame = H3Frame::Settings(settings);
+        let mut buf = Vec::new();
+        frame.encode(&mut buf).expect("encode");
+        let (decoded, consumed) = H3Frame::decode(&buf).expect("decode");
+        assert_eq!(decoded, frame);
+        assert_eq!(consumed, buf.len());
+    }
+
+    // --- 2. Frame decode edge cases ---
+
+    #[test]
+    fn frame_decode_empty_input_error() {
+        let err = H3Frame::decode(&[]).expect_err("must fail on empty input");
+        assert_eq!(err, H3NativeError::InvalidFrame("frame type varint"));
+    }
+
+    #[test]
+    fn frame_decode_truncated_payload_unexpected_eof() {
+        // Encode a Data frame with 4 bytes of payload, then truncate.
+        let frame = H3Frame::Data(vec![1, 2, 3, 4]);
+        let mut buf = Vec::new();
+        frame.encode(&mut buf).expect("encode");
+        // Truncate: remove the last 2 payload bytes.
+        let truncated = &buf[..buf.len() - 2];
+        let err = H3Frame::decode(truncated).expect_err("must fail on truncated payload");
+        assert_eq!(err, H3NativeError::UnexpectedEof);
+    }
+
+    #[test]
+    fn frame_decode_cancel_push_trailing_bytes_invalid_frame() {
+        // Build a CancelPush frame manually with trailing bytes in the payload.
+        let mut payload = Vec::new();
+        encode_varint(7, &mut payload).expect("varint");
+        payload.push(0xFF); // trailing garbage
+
+        let mut buf = Vec::new();
+        encode_varint(H3_FRAME_CANCEL_PUSH, &mut buf).expect("type");
+        encode_varint(payload.len() as u64, &mut buf).expect("len");
+        buf.extend_from_slice(&payload);
+
+        let err = H3Frame::decode(&buf).expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("cancel_push trailing bytes")
+        );
+    }
+
+    #[test]
+    fn frame_decode_goaway_trailing_bytes_invalid_frame() {
+        let mut payload = Vec::new();
+        encode_varint(50, &mut payload).expect("varint");
+        payload.push(0xAA); // trailing garbage
+
+        let mut buf = Vec::new();
+        encode_varint(H3_FRAME_GOAWAY, &mut buf).expect("type");
+        encode_varint(payload.len() as u64, &mut buf).expect("len");
+        buf.extend_from_slice(&payload);
+
+        let err = H3Frame::decode(&buf).expect_err("must fail");
+        assert_eq!(err, H3NativeError::InvalidFrame("goaway trailing bytes"));
+    }
+
+    #[test]
+    fn frame_decode_max_push_id_trailing_bytes_invalid_frame() {
+        let mut payload = Vec::new();
+        encode_varint(99, &mut payload).expect("varint");
+        payload.push(0xBB); // trailing garbage
+
+        let mut buf = Vec::new();
+        encode_varint(H3_FRAME_MAX_PUSH_ID, &mut buf).expect("type");
+        encode_varint(payload.len() as u64, &mut buf).expect("len");
+        buf.extend_from_slice(&payload);
+
+        let err = H3Frame::decode(&buf).expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("max_push_id trailing bytes")
+        );
+    }
+
+    // --- 3. Request stream state gaps ---
+
+    #[test]
+    fn request_stream_second_headers_without_data_error() {
+        let mut st = H3RequestStreamState::new();
+        st.on_frame(&H3Frame::Headers(vec![0x80]))
+            .expect("first HEADERS");
+        // Second HEADERS without any intervening DATA.
+        let err = st
+            .on_frame(&H3Frame::Headers(vec![0x81]))
+            .expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::ControlProtocol("invalid HEADERS ordering on request stream")
+        );
+    }
+
+    #[test]
+    fn request_stream_mark_end_stream_after_headers_only() {
+        let mut st = H3RequestStreamState::new();
+        st.on_frame(&H3Frame::Headers(vec![0x80]))
+            .expect("first HEADERS");
+        // Headers-only request: end stream immediately after initial HEADERS.
+        st.mark_end_stream().expect("valid headers-only end");
+    }
+
+    #[test]
+    fn request_stream_mark_end_stream_before_headers_error() {
+        let mut st = H3RequestStreamState::new();
+        let err = st.mark_end_stream().expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::ControlProtocol("request stream ended before initial HEADERS")
+        );
+    }
+
+    #[test]
+    fn request_stream_on_frame_after_end_stream_error() {
+        let mut st = H3RequestStreamState::new();
+        st.on_frame(&H3Frame::Headers(vec![0x80]))
+            .expect("HEADERS");
+        st.mark_end_stream().expect("end");
+        let err = st
+            .on_frame(&H3Frame::Data(vec![1]))
+            .expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::ControlProtocol("request stream already finished")
+        );
+    }
+
+    // --- 4. Connection state gaps ---
+
+    #[test]
+    fn finish_request_stream_unknown_stream_id_error() {
+        let mut c = H3ConnectionState::new();
+        let err = c.finish_request_stream(999).expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::ControlProtocol("unknown request stream on finish")
+        );
+    }
+
+    #[test]
+    fn duplicate_qpack_encoder_stream_error() {
+        let mut c = H3ConnectionState::new();
+        c.on_remote_uni_stream_type(2, H3_STREAM_TYPE_QPACK_ENCODER)
+            .expect("first encoder");
+        let err = c
+            .on_remote_uni_stream_type(6, H3_STREAM_TYPE_QPACK_ENCODER)
+            .expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::StreamProtocol("duplicate remote qpack encoder stream")
+        );
+    }
+
+    #[test]
+    fn duplicate_qpack_decoder_stream_error() {
+        let mut c = H3ConnectionState::new();
+        c.on_remote_uni_stream_type(2, H3_STREAM_TYPE_QPACK_DECODER)
+            .expect("first decoder");
+        let err = c
+            .on_remote_uni_stream_type(6, H3_STREAM_TYPE_QPACK_DECODER)
+            .expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::StreamProtocol("duplicate remote qpack decoder stream")
+        );
+    }
+
+    #[test]
+    fn uni_stream_type_already_set_for_same_id_error() {
+        let mut c = H3ConnectionState::new();
+        c.on_remote_uni_stream_type(2, H3_STREAM_TYPE_CONTROL)
+            .expect("first set");
+        let err = c
+            .on_remote_uni_stream_type(2, H3_STREAM_TYPE_PUSH)
+            .expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::StreamProtocol("unidirectional stream type already set")
+        );
+    }
+
+    #[test]
+    fn goaway_decreasing_is_allowed() {
+        let mut c = H3ConnectionState::new();
+        c.on_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect("settings");
+        c.on_control_frame(&H3Frame::Goaway(100)).expect("first goaway=100");
+        assert_eq!(c.goaway_id(), Some(100));
+        c.on_control_frame(&H3Frame::Goaway(50)).expect("second goaway=50");
+        assert_eq!(c.goaway_id(), Some(50));
+    }
+
+    #[test]
+    fn goaway_zero_blocks_all_request_streams() {
+        let mut c = H3ConnectionState::new();
+        c.on_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect("settings");
+        c.on_control_frame(&H3Frame::Goaway(0)).expect("goaway=0");
+        assert_eq!(c.goaway_id(), Some(0));
+        // Stream ID 0 is the smallest bidirectional stream; it should be rejected.
+        let err = c
+            .on_request_stream_frame(0, &H3Frame::Headers(vec![1]))
+            .expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::ControlProtocol("request stream id rejected after GOAWAY")
+        );
+    }
+
+    // --- 5. QPACK/settings gaps ---
+
+    #[test]
+    fn dynamic_table_allowed_accepts_nonzero_capacity() {
+        let config = H3ConnectionConfig {
+            qpack_mode: H3QpackMode::DynamicTableAllowed,
+        };
+        let mut c = H3ConnectionState::with_config(config);
+        let settings = H3Settings {
+            qpack_max_table_capacity: Some(4096),
+            qpack_blocked_streams: Some(100),
+            ..H3Settings::default()
+        };
+        c.on_control_frame(&H3Frame::Settings(settings))
+            .expect("dynamic table settings accepted");
+    }
+
+    #[test]
+    fn qpack_static_plan_request_non_static_method_produces_literal() {
+        let req = H3RequestHead::new(
+            H3PseudoHeaders {
+                method: Some("PATCH".to_string()),
+                scheme: Some("https".to_string()),
+                authority: Some("example.com".to_string()),
+                path: Some("/resource".to_string()),
+                status: None,
+            },
+            vec![],
+        )
+        .expect("valid request");
+        let plan = qpack_static_plan_for_request(&req);
+        // PATCH is not in the QPACK static table, so the first entry must be Literal.
+        assert_eq!(
+            plan[0],
+            QpackFieldPlan::Literal {
+                name: ":method".to_string(),
+                value: "PATCH".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn qpack_static_plan_response_non_indexed_status_produces_literal() {
+        let resp = H3ResponseHead::new(201, vec![]).expect("valid response");
+        let plan = qpack_static_plan_for_response(&resp);
+        // 201 is not in the QPACK static table, so the first entry must be Literal.
+        assert_eq!(
+            plan[0],
+            QpackFieldPlan::Literal {
+                name: ":status".to_string(),
+                value: "201".to_string(),
+            }
+        );
+    }
+
+    // --- 6. Validation gaps ---
+
+    #[test]
+    fn request_missing_scheme_error() {
+        let pseudo = H3PseudoHeaders {
+            method: Some("GET".to_string()),
+            scheme: None,
+            authority: Some("example.com".to_string()),
+            path: Some("/".to_string()),
+            status: None,
+        };
+        let err = validate_request_pseudo_headers(&pseudo).expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidRequestPseudoHeader("missing :scheme")
+        );
+    }
+
+    #[test]
+    fn request_missing_path_error() {
+        let pseudo = H3PseudoHeaders {
+            method: Some("GET".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("example.com".to_string()),
+            path: None,
+            status: None,
+        };
+        let err = validate_request_pseudo_headers(&pseudo).expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidRequestPseudoHeader("missing :path")
+        );
+    }
+
+    #[test]
+    fn response_with_method_contaminant_error() {
+        let pseudo = H3PseudoHeaders {
+            status: Some(200),
+            method: Some("GET".to_string()),
+            ..H3PseudoHeaders::default()
+        };
+        let err = validate_response_pseudo_headers(&pseudo).expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidResponsePseudoHeader(
+                "response must not include request pseudo headers"
+            )
+        );
+    }
+
+    #[test]
+    fn response_with_scheme_contaminant_error() {
+        let pseudo = H3PseudoHeaders {
+            status: Some(200),
+            scheme: Some("https".to_string()),
+            ..H3PseudoHeaders::default()
+        };
+        let err = validate_response_pseudo_headers(&pseudo).expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidResponsePseudoHeader(
+                "response must not include request pseudo headers"
+            )
+        );
+    }
 }
