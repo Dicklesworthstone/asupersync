@@ -694,4 +694,20 @@ mod tests {
         let b = ResourceAccess::write(Resource::Task(tid(2)));
         assert!(!accesses_conflict(&a, &b));
     }
+
+    #[test]
+    fn access_mode_debug_clone_copy_eq_hash() {
+        use std::collections::HashSet;
+        let a = AccessMode::Read;
+        let b = a; // Copy
+        let c = a.clone();
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+        assert_ne!(a, AccessMode::Write);
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("Read"));
+        let mut set = HashSet::new();
+        set.insert(a);
+        assert!(set.contains(&b));
+    }
 }

@@ -614,4 +614,21 @@ mod tests {
         assert_eq!(expired[3].deadline, 200);
         assert_eq!(expired[3].timer_id, 3);
     }
+
+    #[test]
+    fn virtual_timer_handle_debug_clone_copy_eq_hash() {
+        use std::collections::HashSet;
+        let mut wheel = VirtualTimerWheel::new();
+        let (_counter, waker) = counting_waker();
+        let handle = wheel.insert(100, waker);
+        let b = handle; // Copy
+        let c = handle.clone();
+        assert_eq!(handle, b);
+        assert_eq!(handle, c);
+        let dbg = format!("{handle:?}");
+        assert!(dbg.contains("VirtualTimerHandle"));
+        let mut set = HashSet::new();
+        set.insert(handle);
+        assert!(set.contains(&b));
+    }
 }

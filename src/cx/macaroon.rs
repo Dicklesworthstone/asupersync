@@ -2444,4 +2444,18 @@ mod tests {
         };
         assert!(format!("{e4}").contains("discharge"));
     }
+
+    #[test]
+    fn macaroon_signature_clone_copy_eq_hash() {
+        use std::collections::HashSet;
+        let a = MacaroonSignature::from_bytes([1u8; 32]);
+        let b = a; // Copy
+        let c = a.clone();
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+        assert_ne!(a, MacaroonSignature::from_bytes([2u8; 32]));
+        let mut set = HashSet::new();
+        set.insert(a);
+        assert!(set.contains(&b));
+    }
 }

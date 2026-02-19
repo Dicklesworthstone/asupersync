@@ -779,4 +779,20 @@ mod tests {
         assert!(sleep.contains(&bp, &events));
         assert_eq!(sleep.len(), 1);
     }
+
+    #[test]
+    fn detected_race_debug_clone_eq() {
+        let race = DetectedRace {
+            race: Race { earlier: 0, later: 1 },
+            kind: RaceKind::Resource(Resource::GlobalClock),
+            earlier_task: None,
+            later_task: None,
+            earlier_kind: TraceEventKind::Spawn,
+            later_kind: TraceEventKind::Spawn,
+        };
+        let cloned = race.clone();
+        assert_eq!(race, cloned);
+        let dbg = format!("{race:?}");
+        assert!(dbg.contains("DetectedRace"));
+    }
 }
