@@ -1,0 +1,738 @@
+{
+  "schema_version": "quic-h3-replay-catalog-v1",
+  "owner_bead": "asupersync-3narc.5.3.1",
+  "fixture_ref": "QH3-L3-REPLAY-CATALOG-V1",
+  "generated_at_utc": "2026-02-19T18:00:00Z",
+  "catalog_notes": [
+    "Stable replay identifiers must never be rotated or reused without migration notes.",
+    "Each replay entry links to a deterministic E2E test with a fixed seed.",
+    "All repro commands are remote-first and use rch for CPU-intensive execution.",
+    "Seeds are hex-encoded as used in DetRng::new() calls."
+  ],
+  "entries": [
+    {
+      "replay_ref": "replay:qh3-handshake-lifecycle-with-packet-exchange-v1",
+      "scenario_id": "QH3-E1-HANDSHAKE-LIFECYCLE",
+      "seed": "0xCAFEBABE",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["handshake_lifecycle_with_packet_exchange"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e handshake_lifecycle_with_packet_exchange -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-bidirectional-stream-data-exchange-v1",
+      "scenario_id": "QH3-E1-BIDI-STREAM-DATA-EXCHANGE",
+      "seed": "0xDEADBEEF",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["bidirectional_stream_data_exchange"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e bidirectional_stream_data_exchange -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-multiple-streams-round-robin-scheduling-v1",
+      "scenario_id": "QH3-E1-MULTIPLE-STREAMS-ROUND-ROBIN",
+      "seed": "0x12345678",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["multiple_streams_round_robin_scheduling"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e multiple_streams_round_robin_scheduling -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-h3-frame-encode-decode-over-stream-v1",
+      "scenario_id": "QH3-E1-H3-FRAME-ENCODE-DECODE",
+      "seed": "0xABCDEF01",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["h3_frame_encode_decode_over_stream"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e h3_frame_encode_decode_over_stream -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-h3-request-response-lifecycle-v1",
+      "scenario_id": "QH3-E1-H3-REQUEST-RESPONSE-LIFECYCLE",
+      "seed": "0xFACEF00D",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["h3_request_response_lifecycle"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e h3_request_response_lifecycle -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-graceful-close-drain-transition-v1",
+      "scenario_id": "QH3-E1-GRACEFUL-CLOSE-DRAIN",
+      "seed": "0x98765432",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["graceful_close_drain_transition"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e graceful_close_drain_transition -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-key-update-lifecycle-v1",
+      "scenario_id": "QH3-E1-KEY-UPDATE-LIFECYCLE",
+      "seed": "0xAAAABBBB",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["key_update_lifecycle"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e key_update_lifecycle -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-out-of-order-receive-reassembly-v1",
+      "scenario_id": "QH3-E1-OUT-OF-ORDER-REASSEMBLY",
+      "seed": "0x55556666",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["out_of_order_receive_reassembly"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e out_of_order_receive_reassembly -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-transport-parameter-and-packet-header-roundtrips-v1",
+      "scenario_id": "QH3-E1-TRANSPORT-PARAM-HEADER-ROUNDTRIP",
+      "seed": "0x77778888",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["transport_parameter_and_packet_header_roundtrips"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e transport_parameter_and_packet_header_roundtrips -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-h3-goaway-and-connection-drain-v1",
+      "scenario_id": "QH3-E1-H3-GOAWAY-DRAIN",
+      "seed": "0xBEEFCAFE",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["h3_goaway_and_connection_drain"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e h3_goaway_and_connection_drain -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-deterministic-rng-reproducibility-v1",
+      "scenario_id": "QH3-E1-DETERMINISTIC-RNG",
+      "seed": "0xDECAFC0FFEE",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["deterministic_rng_reproducibility"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e deterministic_rng_reproducibility -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-deterministic-time-progression-v1",
+      "scenario_id": "QH3-E1-DETERMINISTIC-TIME",
+      "seed": "0x2A",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["deterministic_time_progression"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e deterministic_time_progression -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-uni-stream-client-to-server-v1",
+      "scenario_id": "QH3-E2-UNI-STREAM-CLIENT-SERVER",
+      "seed": "0xE20001",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["uni_stream_client_to_server"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e uni_stream_client_to_server -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-uni-stream-server-to-client-v1",
+      "scenario_id": "QH3-E2-UNI-STREAM-SERVER-CLIENT",
+      "seed": "0xE20002",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["uni_stream_server_to_client"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e uni_stream_server_to_client -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-large-data-transfer-multi-segment-v1",
+      "scenario_id": "QH3-E2-LARGE-DATA-TRANSFER",
+      "seed": "0xE20003",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["large_data_transfer_multi_segment"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e large_data_transfer_multi_segment -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-multiple-concurrent-bidi-streams-v1",
+      "scenario_id": "QH3-E2-MULTIPLE-CONCURRENT-BIDI",
+      "seed": "0xE20004",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["multiple_concurrent_bidi_streams"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e multiple_concurrent_bidi_streams -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-stream-fin-sets-final-size-v1",
+      "scenario_id": "QH3-E2-STREAM-FIN-FINAL-SIZE",
+      "seed": "0xE20005",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["stream_fin_sets_final_size"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e stream_fin_sets_final_size -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-stream-fin-zero-length-segment-v1",
+      "scenario_id": "QH3-E2-STREAM-FIN-ZERO-LENGTH",
+      "seed": "0xE20006",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["stream_fin_zero_length_segment"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e stream_fin_zero_length_segment -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-graceful-close-with-in-flight-data-v1",
+      "scenario_id": "QH3-E2-GRACEFUL-CLOSE-IN-FLIGHT",
+      "seed": "0xE20007",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["graceful_close_with_in_flight_data"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e graceful_close_with_in_flight_data -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-connection-flow-control-send-credit-v1",
+      "scenario_id": "QH3-E2-FLOW-CONTROL-SEND-CREDIT",
+      "seed": "0xE20008",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["connection_flow_control_send_credit"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e connection_flow_control_send_credit -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-connection-flow-control-recv-credit-v1",
+      "scenario_id": "QH3-E2-FLOW-CONTROL-RECV-CREDIT",
+      "seed": "0xE20009",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["connection_flow_control_recv_credit"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e connection_flow_control_recv_credit -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-interleaved-uni-and-bidi-streams-v1",
+      "scenario_id": "QH3-E2-INTERLEAVED-UNI-BIDI",
+      "seed": "0xE2000A",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["interleaved_uni_and_bidi_streams"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e interleaved_uni_and_bidi_streams -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-out-of-order-segments-with-fin-v1",
+      "scenario_id": "QH3-E2-OUT-OF-ORDER-SEGMENTS-FIN",
+      "seed": "0xE2000B",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["out_of_order_segments_with_fin"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e out_of_order_segments_with_fin -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-both-sides-drain-to-closed-v1",
+      "scenario_id": "QH3-E2-BOTH-SIDES-DRAIN-CLOSED",
+      "seed": "0xE2000C",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e.rs"],
+      "test_functions": ["both_sides_drain_to_closed"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e both_sides_drain_to_closed -- --nocapture"
+    },
+
+    {
+      "replay_ref": "replay:qh3-selective-ack-with-gaps-odd-only-v1",
+      "scenario_id": "QH3-E3-SELECTIVE-ACK-GAPS-ODD",
+      "seed": "0xE30001",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_loss.rs"],
+      "test_functions": ["selective_ack_with_gaps_odd_only"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_loss selective_ack_with_gaps_odd_only -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-selective-ack-via-explicit-ranges-v1",
+      "scenario_id": "QH3-E3-SELECTIVE-ACK-EXPLICIT-RANGES",
+      "seed": "0xE30002",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_loss.rs"],
+      "test_functions": ["selective_ack_via_explicit_ranges"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_loss selective_ack_via_explicit_ranges -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-loss-detection-via-time-threshold-v1",
+      "scenario_id": "QH3-E3-LOSS-DETECTION-TIME-THRESHOLD",
+      "seed": "0xE30003",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_loss.rs"],
+      "test_functions": ["loss_detection_via_time_threshold"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_loss loss_detection_via_time_threshold -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-pto-fire-after-timeout-v1",
+      "scenario_id": "QH3-E3-PTO-FIRE-AFTER-TIMEOUT",
+      "seed": "0xE30004",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_loss.rs"],
+      "test_functions": ["pto_fire_after_timeout"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_loss pto_fire_after_timeout -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-pto-backoff-capping-v1",
+      "scenario_id": "QH3-E3-PTO-BACKOFF-CAPPING",
+      "seed": "0xE30005",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_loss.rs"],
+      "test_functions": ["pto_backoff_capping"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_loss pto_backoff_capping -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-congestion-window-reduction-on-loss-v1",
+      "scenario_id": "QH3-E3-CWND-REDUCTION-ON-LOSS",
+      "seed": "0xE30006",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_loss.rs"],
+      "test_functions": ["congestion_window_reduction_on_loss"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_loss congestion_window_reduction_on_loss -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-rtt-estimation-with-variable-delays-v1",
+      "scenario_id": "QH3-E3-RTT-ESTIMATION-VARIABLE",
+      "seed": "0xE30007",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_loss.rs"],
+      "test_functions": ["rtt_estimation_with_variable_delays"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_loss rtt_estimation_with_variable_delays -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-rtt-estimation-with-ack-delay-v1",
+      "scenario_id": "QH3-E3-RTT-ESTIMATION-ACK-DELAY",
+      "seed": "0xE30008",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_loss.rs"],
+      "test_functions": ["rtt_estimation_with_ack_delay"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_loss rtt_estimation_with_ack_delay -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-bytes-in-flight-across-spaces-v1",
+      "scenario_id": "QH3-E3-BYTES-IN-FLIGHT-SPACES",
+      "seed": "0xE30009",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_loss.rs"],
+      "test_functions": ["bytes_in_flight_across_spaces"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_loss bytes_in_flight_across_spaces -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-recovery-from-sustained-loss-v1",
+      "scenario_id": "QH3-E3-RECOVERY-SUSTAINED-LOSS",
+      "seed": "0xE3000A",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_loss.rs"],
+      "test_functions": ["recovery_from_sustained_loss"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_loss recovery_from_sustained_loss -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-pto-counter-resets-on-ack-v1",
+      "scenario_id": "QH3-E3-PTO-COUNTER-RESETS-ON-ACK",
+      "seed": "0xE3000B",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_loss.rs"],
+      "test_functions": ["pto_counter_resets_on_ack"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_loss pto_counter_resets_on_ack -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-non-in-flight-packets-excluded-v1",
+      "scenario_id": "QH3-E3-NON-IN-FLIGHT-EXCLUDED",
+      "seed": "0xE3000C",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_loss.rs"],
+      "test_functions": ["non_in_flight_packets_excluded_from_tracking"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_loss non_in_flight_packets_excluded_from_tracking -- --nocapture"
+    },
+
+    {
+      "replay_ref": "replay:qh3-full-request-response-cycle-v1",
+      "scenario_id": "QH3-E4-FULL-REQUEST-RESPONSE-CYCLE",
+      "seed": "0xE40001",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e_h3.rs"],
+      "test_functions": ["full_request_response_cycle"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_h3 full_request_response_cycle -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-multiple-concurrent-requests-v1",
+      "scenario_id": "QH3-E4-MULTIPLE-CONCURRENT-REQUESTS",
+      "seed": "0xE40002",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e_h3.rs"],
+      "test_functions": ["multiple_concurrent_requests"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_h3 multiple_concurrent_requests -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-control-stream-settings-exchange-v1",
+      "scenario_id": "QH3-E4-CONTROL-STREAM-SETTINGS",
+      "seed": "0xE40003",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e_h3.rs"],
+      "test_functions": ["control_stream_settings_exchange"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_h3 control_stream_settings_exchange -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-goaway-stream-acceptance-boundary-v1",
+      "scenario_id": "QH3-E4-GOAWAY-STREAM-ACCEPTANCE-BOUNDARY",
+      "seed": "0xE40004",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_h3.rs"],
+      "test_functions": ["goaway_stream_acceptance_boundary"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_h3 goaway_stream_acceptance_boundary -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-cancel-push-frame-handling-v1",
+      "scenario_id": "QH3-E4-CANCEL-PUSH-FRAME",
+      "seed": "0xE40005",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e_h3.rs"],
+      "test_functions": ["cancel_push_frame_handling"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_h3 cancel_push_frame_handling -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-max-push-id-frame-handling-v1",
+      "scenario_id": "QH3-E4-MAX-PUSH-ID-FRAME",
+      "seed": "0xE40006",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e_h3.rs"],
+      "test_functions": ["max_push_id_frame_handling"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_h3 max_push_id_frame_handling -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-h3-error-handling-invalid-frames-v1",
+      "scenario_id": "QH3-E4-H3-ERROR-HANDLING-INVALID-FRAMES",
+      "seed": "0xE40007",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_h3.rs"],
+      "test_functions": ["h3_error_handling_invalid_frames"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_h3 h3_error_handling_invalid_frames -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-request-stream-state-transitions-v1",
+      "scenario_id": "QH3-E4-REQUEST-STREAM-STATE-TRANSITIONS",
+      "seed": "0xE40008",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e_h3.rs"],
+      "test_functions": ["request_stream_state_transitions"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_h3 request_stream_state_transitions -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-qpack-static-table-plan-coverage-v1",
+      "scenario_id": "QH3-E4-QPACK-STATIC-TABLE-PLAN",
+      "seed": "0xE40009",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e_h3.rs"],
+      "test_functions": ["qpack_static_table_plan_coverage"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_h3 qpack_static_table_plan_coverage -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-goaway-zero-and-quic-drain-v1",
+      "scenario_id": "QH3-E4-GOAWAY-ZERO-QUIC-DRAIN",
+      "seed": "0xE4000A",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_h3.rs"],
+      "test_functions": ["goaway_zero_and_quic_drain"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_h3 goaway_zero_and_quic_drain -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-multi-frame-wire-sequential-decode-v1",
+      "scenario_id": "QH3-E4-MULTI-FRAME-SEQUENTIAL-DECODE",
+      "seed": "0xE4000B",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e_h3.rs"],
+      "test_functions": ["multi_frame_wire_sequential_decode"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_h3 multi_frame_wire_sequential_decode -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-full-h3-lifecycle-over-quic-streams-v1",
+      "scenario_id": "QH3-E4-FULL-H3-LIFECYCLE-OVER-QUIC",
+      "seed": "0xE4000C",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "happy-path"],
+      "test_files": ["tests/quic_h3_e2e_h3.rs"],
+      "test_functions": ["full_h3_lifecycle_over_quic_streams"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_h3 full_h3_lifecycle_over_quic_streams -- --nocapture"
+    },
+
+    {
+      "replay_ref": "replay:qh3-cancel-via-cx-blocks-all-v1",
+      "scenario_id": "QH3-E5-CANCEL-VIA-CX-BLOCKS-ALL",
+      "seed": "0xE50001",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_cancel.rs"],
+      "test_functions": ["cancel_via_cx_blocks_all_connection_operations"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_cancel cancel_via_cx_blocks_all_connection_operations -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-close-immediately-skips-drain-v1",
+      "scenario_id": "QH3-E5-CLOSE-IMMEDIATELY-SKIPS-DRAIN",
+      "seed": "0xE50002",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_cancel.rs"],
+      "test_functions": ["close_immediately_skips_drain_phase"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_cancel close_immediately_skips_drain_phase -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-drain-with-in-flight-streams-v1",
+      "scenario_id": "QH3-E5-DRAIN-WITH-IN-FLIGHT-STREAMS",
+      "seed": "0xE50003",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_cancel.rs"],
+      "test_functions": ["drain_with_in_flight_streams"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_cancel drain_with_in_flight_streams -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-reset-stream-send-during-active-transfer-v1",
+      "scenario_id": "QH3-E5-RESET-STREAM-SEND-ACTIVE",
+      "seed": "0xE50004",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_cancel.rs"],
+      "test_functions": ["reset_stream_send_during_active_transfer"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_cancel reset_stream_send_during_active_transfer -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-stop-receiving-blocks-future-receives-v1",
+      "scenario_id": "QH3-E5-STOP-RECEIVING-BLOCKS-FUTURE",
+      "seed": "0xE50005",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_cancel.rs"],
+      "test_functions": ["stop_receiving_blocks_future_receives"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_cancel stop_receiving_blocks_future_receives -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-double-begin-close-is-idempotent-v1",
+      "scenario_id": "QH3-E5-DOUBLE-BEGIN-CLOSE-IDEMPOTENT",
+      "seed": "0xE50006",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_cancel.rs"],
+      "test_functions": ["double_begin_close_is_idempotent"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_cancel double_begin_close_is_idempotent -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-drain-timeout-boundary-exact-microsecond-v1",
+      "scenario_id": "QH3-E5-DRAIN-TIMEOUT-BOUNDARY-EXACT",
+      "seed": "0xE50007",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_cancel.rs"],
+      "test_functions": ["drain_timeout_boundary_exact_microsecond"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_cancel drain_timeout_boundary_exact_microsecond -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-finalize-after-begin-close-via-poll-v1",
+      "scenario_id": "QH3-E5-FINALIZE-AFTER-BEGIN-CLOSE",
+      "seed": "0xE50008",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_cancel.rs"],
+      "test_functions": ["finalize_after_begin_close_via_poll"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_cancel finalize_after_begin_close_via_poll -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-accept-remote-stream-while-draining-v1",
+      "scenario_id": "QH3-E5-ACCEPT-REMOTE-WHILE-DRAINING",
+      "seed": "0xE50009",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_cancel.rs"],
+      "test_functions": ["accept_remote_stream_while_draining_returns_error"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_cancel accept_remote_stream_while_draining_returns_error -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-server-close-immediately-while-client-drains-v1",
+      "scenario_id": "QH3-E5-SERVER-CLOSE-IMMEDIATE-CLIENT-DRAINS",
+      "seed": "0xE5000A",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_cancel.rs"],
+      "test_functions": ["server_close_immediately_while_client_drains"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_cancel server_close_immediately_while_client_drains -- --nocapture"
+    },
+
+    {
+      "replay_ref": "replay:qh3-write-after-close-returns-error-v1",
+      "scenario_id": "QH3-E6-WRITE-AFTER-CLOSE",
+      "seed": "0xE60001",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_violations.rs"],
+      "test_functions": ["write_after_close_returns_error"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_violations write_after_close_returns_error -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-open-stream-after-close-returns-error-v1",
+      "scenario_id": "QH3-E6-OPEN-STREAM-AFTER-CLOSE",
+      "seed": "0xE60002",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_violations.rs"],
+      "test_functions": ["open_stream_after_close_returns_error"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_violations open_stream_after_close_returns_error -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-begin-handshake-on-established-returns-error-v1",
+      "scenario_id": "QH3-E6-BEGIN-HANDSHAKE-ON-ESTABLISHED",
+      "seed": "0xE60003",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_violations.rs"],
+      "test_functions": ["begin_handshake_on_established_connection_returns_error"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_violations begin_handshake_on_established_connection_returns_error -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-write-to-nonexistent-stream-returns-error-v1",
+      "scenario_id": "QH3-E6-WRITE-TO-NONEXISTENT-STREAM",
+      "seed": "0xE60004",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_violations.rs"],
+      "test_functions": ["write_to_nonexistent_stream_returns_error"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_violations write_to_nonexistent_stream_returns_error -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-h3-invalid-frame-on-control-stream-v1",
+      "scenario_id": "QH3-E6-H3-INVALID-FRAME-CONTROL-STREAM",
+      "seed": "0xE60005",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_violations.rs"],
+      "test_functions": ["h3_invalid_frame_on_control_stream"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_violations h3_invalid_frame_on_control_stream -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-h3-duplicate-settings-on-control-stream-v1",
+      "scenario_id": "QH3-E6-H3-DUPLICATE-SETTINGS",
+      "seed": "0xE60006",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_violations.rs"],
+      "test_functions": ["h3_duplicate_settings_on_control_stream"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_violations h3_duplicate_settings_on_control_stream -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-h3-frame-decode-truncated-data-v1",
+      "scenario_id": "QH3-E6-H3-FRAME-DECODE-TRUNCATED",
+      "seed": "0xE60007",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_violations.rs"],
+      "test_functions": ["h3_frame_decode_truncated_data"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_violations h3_frame_decode_truncated_data -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-h3-goaway-increasing-stream-id-rejected-v1",
+      "scenario_id": "QH3-E6-H3-GOAWAY-INCREASING-REJECTED",
+      "seed": "0xE60008",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_violations.rs"],
+      "test_functions": ["h3_goaway_increasing_stream_id_rejected"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_violations h3_goaway_increasing_stream_id_rejected -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-transport-parameter-decode-invalid-v1",
+      "scenario_id": "QH3-E6-TRANSPORT-PARAM-DECODE-INVALID",
+      "seed": "0xE60009",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_violations.rs"],
+      "test_functions": ["transport_parameter_decode_invalid_encoding"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_violations transport_parameter_decode_invalid_encoding -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-packet-header-decode-truncated-v1",
+      "scenario_id": "QH3-E6-PACKET-HEADER-DECODE-TRUNCATED",
+      "seed": "0xE6000A",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_violations.rs"],
+      "test_functions": ["packet_header_decode_truncated_buffer"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_violations packet_header_decode_truncated_buffer -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-connection-id-too-long-returns-error-v1",
+      "scenario_id": "QH3-E6-CONNECTION-ID-TOO-LONG",
+      "seed": "0xE6000B",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_violations.rs"],
+      "test_functions": ["connection_id_too_long_returns_error"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_violations connection_id_too_long_returns_error -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-send-on-reset-stream-returns-error-v1",
+      "scenario_id": "QH3-E6-SEND-ON-RESET-STREAM",
+      "seed": "0xE6000C",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_violations.rs"],
+      "test_functions": ["send_on_reset_stream_returns_error"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_violations send_on_reset_stream_returns_error -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-h3-disallowed-frames-on-control-after-settings-v1",
+      "scenario_id": "QH3-E6-H3-DISALLOWED-FRAMES-AFTER-SETTINGS",
+      "seed": "0xE6000D",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_violations.rs"],
+      "test_functions": ["h3_disallowed_frames_on_control_stream_after_settings"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_violations h3_disallowed_frames_on_control_stream_after_settings -- --nocapture"
+    },
+    {
+      "replay_ref": "replay:qh3-write-and-open-on-draining-connection-v1",
+      "scenario_id": "QH3-E6-WRITE-OPEN-ON-DRAINING",
+      "seed": "0xE6000E",
+      "expected_outcome": "pass",
+      "profile_tags": ["fast", "adversarial"],
+      "test_files": ["tests/quic_h3_e2e_violations.rs"],
+      "test_functions": ["write_and_open_on_draining_connection"],
+      "repro_cmd": "rch exec -- cargo test --test quic_h3_e2e_violations write_and_open_on_draining_connection -- --nocapture"
+    }
+  ]
+}
