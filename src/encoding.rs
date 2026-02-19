@@ -711,4 +711,198 @@ mod tests {
             assert_eq!(sym.symbol().data(), expected.as_slice());
         }
     }
+
+    // ========================================================================
+    // Pure data-type trait coverage (wave 25)
+    // ========================================================================
+
+    #[test]
+    fn encoding_error_debug_display_data_too_large() {
+        let err = EncodingError::DataTooLarge {
+            size: 1024,
+            limit: 512,
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("DataTooLarge"));
+        let disp = format!("{err}");
+        assert!(disp.contains("1024"));
+        assert!(disp.contains("512"));
+    }
+
+    #[test]
+    fn encoding_error_display_pool_exhausted() {
+        let err = EncodingError::PoolExhausted;
+        let disp = format!("{err}");
+        assert!(disp.contains("pool") || disp.contains("exhausted"));
+    }
+
+    #[test]
+    fn encoding_error_display_invalid_config() {
+        let err = EncodingError::InvalidConfig {
+            reason: "symbol_size must be non-zero".into(),
+        };
+        let disp = format!("{err}");
+        assert!(disp.contains("symbol_size"));
+    }
+
+    #[test]
+    fn encoding_error_display_computation_failed() {
+        let err = EncodingError::ComputationFailed {
+            details: "singular matrix".into(),
+        };
+        let disp = format!("{err}");
+        assert!(disp.contains("singular matrix"));
+    }
+
+    #[test]
+    fn encoding_error_is_std_error() {
+        let err = EncodingError::PoolExhausted;
+        let dyn_err: &dyn std::error::Error = &err;
+        assert!(!dyn_err.to_string().is_empty());
+    }
+
+    #[test]
+    fn encoding_error_from_pool_exhausted() {
+        let pool_err = PoolExhausted;
+        let encoding_err: EncodingError = pool_err.into();
+        assert!(matches!(encoding_err, EncodingError::PoolExhausted));
+    }
+
+    #[test]
+    fn encoding_error_into_error() {
+        let err = EncodingError::DataTooLarge {
+            size: 100,
+            limit: 50,
+        };
+        let generic: Error = err.into();
+        let msg = format!("{generic}");
+        assert!(!msg.is_empty());
+
+        let err2 = EncodingError::PoolExhausted;
+        let generic2: Error = err2.into();
+        assert!(!format!("{generic2}").is_empty());
+
+        let err3 = EncodingError::InvalidConfig {
+            reason: "bad".into(),
+        };
+        let generic3: Error = err3.into();
+        assert!(!format!("{generic3}").is_empty());
+
+        let err4 = EncodingError::ComputationFailed {
+            details: "fail".into(),
+        };
+        let generic4: Error = err4.into();
+        assert!(!format!("{generic4}").is_empty());
+    }
+
+    #[test]
+    fn encoding_stats_debug_clone_copy_default() {
+        let stats = EncodingStats::default();
+        assert_eq!(stats.bytes_in, 0);
+        assert_eq!(stats.blocks, 0);
+        assert_eq!(stats.source_symbols, 0);
+        assert_eq!(stats.repair_symbols, 0);
+        let dbg = format!("{stats:?}");
+        assert!(dbg.contains("EncodingStats"));
+        let s2 = stats; // Copy
+        assert_eq!(s2.bytes_in, stats.bytes_in);
+    }
+
+    #[test]
+    fn encoding_stats_reset_for() {
+        let mut stats = EncodingStats::default();
+        stats.source_symbols = 10;
+        stats.repair_symbols = 5;
+        stats.reset_for(1024, 4);
+        assert_eq!(stats.bytes_in, 1024);
+        assert_eq!(stats.blocks, 4);
+        assert_eq!(stats.source_symbols, 0);
+        assert_eq!(stats.repair_symbols, 0);
+    }
+
+    #[test]
+    fn encoded_symbol_debug_clone_accessors() {
+        let sym = Symbol::new(
+            SymbolId::new(ObjectId::new_for_test(1), 0, 0),
+            vec![1, 2, 3, 4],
+            SymbolKind::Source,
+        );
+        let encoded = EncodedSymbol::new(sym);
+        let dbg = format!("{encoded:?}");
+        assert!(dbg.contains("EncodedSymbol"));
+        assert_eq!(encoded.kind(), SymbolKind::Source);
+
+        let cloned = encoded.clone();
+        assert_eq!(cloned.symbol().data(), encoded.symbol().data());
+
+        let id = encoded.id();
+        assert_eq!(id.sbn(), 0);
+        assert_eq!(id.esi(), 0);
+
+        let sym_back = encoded.into_symbol();
+        assert_eq!(sym_back.data(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn block_plan_debug_clone_end() {
+        let plan = BlockPlan {
+            sbn: 0,
+            start: 100,
+            len: 50,
+            k: 5,
+        };
+        let dbg = format!("{plan:?}");
+        assert!(dbg.contains("BlockPlan"));
+        let plan2 = plan.clone();
+        assert_eq!(plan2.end(), 150);
+        assert_eq!(plan2.sbn, 0);
+        assert_eq!(plan2.k, 5);
+    }
+
+    #[test]
+    fn compute_repair_count_cases() {
+        // overhead 1.0 means 0 repair
+        assert_eq!(compute_repair_count(10, 1.0), 0);
+        // overhead 1.5 means ceil(10*1.5)=15, so 5 repair
+        assert_eq!(compute_repair_count(10, 1.5), 5);
+        // overhead 2.0 means ceil(10*2.0)=20, so 10 repair
+        assert_eq!(compute_repair_count(10, 2.0), 10);
+        // k=1 with overhead 1.5 means ceil(1.5)=2, so 1 repair
+        assert_eq!(compute_repair_count(1, 1.5), 1);
+    }
+
+    #[test]
+    fn seed_for_block_deterministic() {
+        let id = ObjectId::new_for_test(42);
+        let s1 = seed_for_block(id, 0);
+        let s2 = seed_for_block(id, 0);
+        assert_eq!(s1, s2);
+        // Different blocks should (almost certainly) yield different seeds
+        let s3 = seed_for_block(id, 1);
+        assert_ne!(s1, s3);
+    }
+
+    #[test]
+    fn encoding_pipeline_stats_and_reset() {
+        let mut pipeline = EncodingPipeline::new(
+            test_config(4, 16, 1.0),
+            SymbolPool::new(PoolConfig::default()),
+        );
+
+        let stats = pipeline.stats();
+        assert_eq!(stats.bytes_in, 0);
+
+        let _: Vec<_> = pipeline
+            .encode(ObjectId::new_for_test(99), b"test")
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        let stats = pipeline.stats();
+        assert!(stats.source_symbols > 0);
+
+        pipeline.reset();
+        let stats = pipeline.stats();
+        assert_eq!(stats.bytes_in, 0);
+        assert_eq!(stats.source_symbols, 0);
+    }
 }

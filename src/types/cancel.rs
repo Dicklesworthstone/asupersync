@@ -2204,4 +2204,234 @@ mod tests {
         );
         crate::test_complete!("stress_incremental_chain_growth");
     }
+
+    // ========================================================================
+    // Pure data-type trait coverage (wave 25)
+    // ========================================================================
+
+    #[test]
+    fn cancel_kind_debug_clone_copy() {
+        let k = CancelKind::Timeout;
+        let k2 = k; // Copy
+        let k3 = k; // Copy again
+        assert_eq!(k2, k3);
+        let dbg = format!("{k:?}");
+        assert!(dbg.contains("Timeout"));
+    }
+
+    #[test]
+    fn cancel_kind_hash_consistency() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(CancelKind::User);
+        set.insert(CancelKind::Shutdown);
+        set.insert(CancelKind::User); // dup
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn cancel_kind_as_str_all_variants() {
+        assert_eq!(CancelKind::User.as_str(), "User");
+        assert_eq!(CancelKind::Timeout.as_str(), "Timeout");
+        assert_eq!(CancelKind::Deadline.as_str(), "Deadline");
+        assert_eq!(CancelKind::PollQuota.as_str(), "PollQuota");
+        assert_eq!(CancelKind::CostBudget.as_str(), "CostBudget");
+        assert_eq!(CancelKind::FailFast.as_str(), "FailFast");
+        assert_eq!(CancelKind::RaceLost.as_str(), "RaceLost");
+        assert_eq!(CancelKind::ParentCancelled.as_str(), "ParentCancelled");
+        assert_eq!(CancelKind::ResourceUnavailable.as_str(), "ResourceUnavailable");
+        assert_eq!(CancelKind::Shutdown.as_str(), "Shutdown");
+        assert_eq!(CancelKind::LinkedExit.as_str(), "LinkedExit");
+    }
+
+    #[test]
+    fn cancel_kind_display_all_variants() {
+        assert_eq!(format!("{}", CancelKind::User), "user");
+        assert_eq!(format!("{}", CancelKind::Timeout), "timeout");
+        assert_eq!(format!("{}", CancelKind::Deadline), "deadline");
+        assert_eq!(format!("{}", CancelKind::PollQuota), "poll quota");
+        assert_eq!(format!("{}", CancelKind::CostBudget), "cost budget");
+        assert_eq!(format!("{}", CancelKind::FailFast), "fail-fast");
+        assert_eq!(format!("{}", CancelKind::RaceLost), "race lost");
+        assert_eq!(format!("{}", CancelKind::ParentCancelled), "parent cancelled");
+        assert_eq!(format!("{}", CancelKind::ResourceUnavailable), "resource unavailable");
+        assert_eq!(format!("{}", CancelKind::Shutdown), "shutdown");
+        assert_eq!(format!("{}", CancelKind::LinkedExit), "linked exit");
+    }
+
+    #[test]
+    fn cancel_kind_ord() {
+        // Ord should be consistent (derive order matches declaration order)
+        assert!(CancelKind::User < CancelKind::Timeout);
+        assert!(CancelKind::Shutdown > CancelKind::User);
+    }
+
+    #[test]
+    fn cancel_phase_debug_clone_copy_eq() {
+        let p = CancelPhase::Requested;
+        let p2 = p; // Copy
+        assert_eq!(p, p2);
+        assert!(format!("{p:?}").contains("Requested"));
+    }
+
+    #[test]
+    fn cancel_phase_ord() {
+        assert!(CancelPhase::Requested < CancelPhase::Cancelling);
+        assert!(CancelPhase::Cancelling < CancelPhase::Finalizing);
+        assert!(CancelPhase::Finalizing < CancelPhase::Completed);
+    }
+
+    #[test]
+    fn cancel_witness_error_debug_clone_copy_eq() {
+        let e = CancelWitnessError::TaskMismatch;
+        let e2 = e; // Copy
+        assert_eq!(e, e2);
+        assert!(format!("{e:?}").contains("TaskMismatch"));
+
+        let e3 = CancelWitnessError::RegionMismatch;
+        assert_ne!(e, e3);
+
+        let e4 = CancelWitnessError::EpochMismatch;
+        assert!(format!("{e4:?}").contains("EpochMismatch"));
+
+        let e5 = CancelWitnessError::PhaseRegression {
+            from: CancelPhase::Cancelling,
+            to: CancelPhase::Requested,
+        };
+        assert!(format!("{e5:?}").contains("PhaseRegression"));
+
+        let e6 = CancelWitnessError::ReasonWeakened {
+            from: CancelKind::Shutdown,
+            to: CancelKind::User,
+        };
+        assert!(format!("{e6:?}").contains("ReasonWeakened"));
+    }
+
+    #[test]
+    fn cancel_reason_debug_clone_eq() {
+        let r = CancelReason::timeout();
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("CancelReason"));
+        let r2 = r.clone();
+        assert_eq!(r, r2);
+    }
+
+    #[test]
+    fn cancel_reason_default() {
+        let r = CancelReason::default();
+        assert_eq!(r.kind, CancelKind::User);
+        assert!(r.cause.is_none());
+        assert!(!r.truncated);
+    }
+
+    #[test]
+    fn cancel_reason_display_normal() {
+        let r = CancelReason::timeout();
+        assert_eq!(format!("{r}"), "timeout");
+
+        let r2 = CancelReason::user("custom msg");
+        assert_eq!(format!("{r2}"), "user: custom msg");
+    }
+
+    #[test]
+    fn cancel_reason_display_alternate() {
+        let r = CancelReason::shutdown();
+        let alt = format!("{r:#}");
+        assert!(alt.contains("shutdown"));
+        assert!(alt.contains("from"));
+    }
+
+    #[test]
+    fn cancel_reason_root_cause_no_chain() {
+        let r = CancelReason::timeout();
+        assert_eq!(r.root_cause().kind, CancelKind::Timeout);
+    }
+
+    #[test]
+    fn cancel_reason_root_cause_with_chain() {
+        let root = CancelReason::shutdown();
+        let child = CancelReason::parent_cancelled().with_cause(root);
+        assert_eq!(child.root_cause().kind, CancelKind::Shutdown);
+    }
+
+    #[test]
+    fn cancel_reason_chain_depth() {
+        let r1 = CancelReason::user("a");
+        assert_eq!(r1.chain_depth(), 1);
+
+        let r2 = CancelReason::timeout().with_cause(r1);
+        assert_eq!(r2.chain_depth(), 2);
+
+        let r3 = CancelReason::shutdown().with_cause(r2);
+        assert_eq!(r3.chain_depth(), 3);
+    }
+
+    #[test]
+    fn cancel_reason_estimated_memory_cost() {
+        let r = CancelReason::user("x");
+        let cost = r.estimated_memory_cost();
+        assert_eq!(cost, CancelAttributionConfig::estimated_chain_cost(1));
+    }
+
+    #[test]
+    fn cancel_attribution_config_estimated_chain_cost() {
+        assert_eq!(CancelAttributionConfig::estimated_chain_cost(0), 0);
+        assert_eq!(
+            CancelAttributionConfig::estimated_chain_cost(1),
+            CancelAttributionConfig::single_reason_cost()
+        );
+        // depth 2: 80*2 + 8*1 = 168
+        assert_eq!(CancelAttributionConfig::estimated_chain_cost(2), 168);
+    }
+
+    #[test]
+    fn cancel_witness_validate_transition_ok() {
+        let w1 = CancelWitness::new(
+            TaskId::testing_default(),
+            RegionId::testing_default(),
+            1,
+            CancelPhase::Requested,
+            CancelReason::timeout(),
+        );
+        let w2 = CancelWitness::new(
+            TaskId::testing_default(),
+            RegionId::testing_default(),
+            1,
+            CancelPhase::Cancelling,
+            CancelReason::timeout(),
+        );
+        assert!(CancelWitness::validate_transition(Some(&w1), &w2).is_ok());
+    }
+
+    #[test]
+    fn cancel_witness_validate_transition_none_prev() {
+        let w = CancelWitness::new(
+            TaskId::testing_default(),
+            RegionId::testing_default(),
+            1,
+            CancelPhase::Requested,
+            CancelReason::timeout(),
+        );
+        assert!(CancelWitness::validate_transition(None, &w).is_ok());
+    }
+
+    #[test]
+    fn cancel_witness_validate_phase_regression() {
+        let w1 = CancelWitness::new(
+            TaskId::testing_default(),
+            RegionId::testing_default(),
+            1,
+            CancelPhase::Cancelling,
+            CancelReason::timeout(),
+        );
+        let w2 = CancelWitness::new(
+            TaskId::testing_default(),
+            RegionId::testing_default(),
+            1,
+            CancelPhase::Requested,
+            CancelReason::timeout(),
+        );
+        let err = CancelWitness::validate_transition(Some(&w1), &w2).unwrap_err();
+        assert!(matches!(err, CancelWitnessError::PhaseRegression { .. }));
+    }
 }
