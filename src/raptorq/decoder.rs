@@ -11,7 +11,7 @@
 //! - Tie-breaking rules are explicit (lowest column index wins)
 //! - Same received symbols in same order produce identical decode results
 
-use crate::raptorq::gf256::{Gf256, gf256_addmul_slice};
+use crate::raptorq::gf256::{gf256_addmul_slice, Gf256};
 use crate::raptorq::proof::{
     DecodeConfig, DecodeProof, EliminationTrace, FailureReason, InactivationStrategy, PeelingTrace,
     ReceivedSummary,
@@ -1353,8 +1353,22 @@ fn pivot_nonzero_columns(pivot_row: &[Gf256], n_cols: usize) -> Vec<usize> {
 }
 
 fn sparse_update_columns_if_beneficial(pivot_row: &[Gf256], n_cols: usize) -> Option<Vec<usize>> {
+    let mut cols = Vec::with_capacity(n_cols.clamp(1, 32));
+    if sparse_update_columns_if_beneficial_into(pivot_row, n_cols, &mut cols) {
+        Some(cols)
+    } else {
+        None
+    }
+}
+
+fn sparse_update_columns_if_beneficial_into(
+    pivot_row: &[Gf256],
+    n_cols: usize,
+    cols: &mut Vec<usize>,
+) -> bool {
+    cols.clear();
     if n_cols == 0 {
-        return None;
+        return false;
     }
 
     // Equivalent threshold to should_use_sparse_row_update(pivot_nnz, n_cols).
@@ -1363,41 +1377,49 @@ fn sparse_update_columns_if_beneficial(pivot_row: &[Gf256], n_cols: usize) -> Op
 
     if n_cols <= SMALL_ROW_DENSE_FASTPATH_COLS {
         // Very small rows are sensitive to per-pivot heap allocation overhead.
-        // Use an allocation-free density pass; collect columns only if sparse.
+        // Track sparse indices in a fixed stack buffer and copy once.
+        let mut small_cols = [0usize; SMALL_ROW_DENSE_FASTPATH_COLS];
         let mut sparse_nnz = 0usize;
-        for coef in pivot_row.iter().take(n_cols) {
+        for (idx, coef) in pivot_row.iter().take(n_cols).enumerate() {
             if coef.is_zero() {
                 continue;
             }
+            if sparse_nnz == threshold {
+                return false;
+            }
+            small_cols[sparse_nnz] = idx;
             sparse_nnz += 1;
-            if sparse_nnz > threshold {
-                return None;
-            }
         }
-
-        let mut cols = Vec::with_capacity(sparse_nnz.max(1));
-        for (idx, coef) in pivot_row.iter().take(n_cols).enumerate() {
-            if !coef.is_zero() {
-                cols.push(idx);
-            }
-        }
-        return Some(cols);
+        cols.reserve(sparse_nnz.saturating_sub(cols.len()));
+        cols.extend_from_slice(&small_cols[..sparse_nnz]);
+        return true;
     }
 
     // For larger rows, one-pass collection avoids an extra scan on sparse pivots.
-    let mut seen = 0usize;
-    let mut cols = Vec::with_capacity((threshold + 1).min(n_cols).max(1));
     for (idx, coef) in pivot_row.iter().take(n_cols).enumerate() {
         if coef.is_zero() {
             continue;
         }
-        seen += 1;
-        if seen > threshold {
-            return None;
+        if cols.len() == threshold {
+            cols.clear();
+            return false;
         }
         cols.push(idx);
     }
-    Some(cols)
+    true
+}
+
+#[inline]
+fn dense_update_start_col(pivot_row: &[Gf256], pivot_col: usize) -> usize {
+    if pivot_row
+        .iter()
+        .take(pivot_col.min(pivot_row.len()))
+        .any(|coef| !coef.is_zero())
+    {
+        0
+    } else {
+        pivot_col.min(pivot_row.len())
+    }
 }
 
 fn should_activate_hard_regime(n_rows: usize, n_cols: usize, a: &[Gf256]) -> bool {
@@ -2156,6 +2178,7 @@ impl InactivationDecoder {
             let mut row_used = vec![false; n_rows];
             let mut pivot_buf = vec![Gf256::ZERO; n_cols];
             let mut pivot_rhs = vec![0u8; symbol_size];
+            let mut sparse_cols = Vec::with_capacity(n_cols.clamp(1, 32));
             let mut gauss_ops = 0usize;
             let mut pivots_selected = 0usize;
             let mut markowitz_pivots = 0usize;
@@ -2188,7 +2211,12 @@ impl InactivationDecoder {
                 // Copy pivot row into reusable buffers (no heap allocation)
                 pivot_buf[..n_cols].copy_from_slice(&a[prow_off..prow_off + n_cols]);
                 pivot_rhs[..symbol_size].copy_from_slice(&b[prow]);
-                let sparse_cols = sparse_update_columns_if_beneficial(&pivot_buf[..n_cols], n_cols);
+                let use_sparse = sparse_update_columns_if_beneficial_into(
+                    &pivot_buf[..n_cols],
+                    n_cols,
+                    &mut sparse_cols,
+                );
+                let dense_start_col = dense_update_start_col(&pivot_buf[..n_cols], col);
 
                 // Eliminate column in all other rows.
                 for (row, rhs) in b.iter_mut().enumerate().take(n_rows) {
@@ -2200,12 +2228,12 @@ impl InactivationDecoder {
                     if factor.is_zero() {
                         continue;
                     }
-                    if let Some(cols) = sparse_cols.as_ref() {
-                        for &c in cols {
+                    if use_sparse {
+                        for &c in &sparse_cols {
                             a[row_off + c] += factor * pivot_buf[c];
                         }
                     } else {
-                        for c in 0..n_cols {
+                        for c in dense_start_col..n_cols {
                             a[row_off + c] += factor * pivot_buf[c];
                         }
                     }
@@ -2404,6 +2432,7 @@ impl InactivationDecoder {
             let mut row_used = vec![false; n_rows];
             let mut pivot_buf = vec![Gf256::ZERO; n_cols];
             let mut pivot_rhs = vec![0u8; symbol_size];
+            let mut sparse_cols = Vec::with_capacity(n_cols.clamp(1, 32));
             let mut gauss_ops = 0usize;
             let mut pivots_selected = 0usize;
             let mut markowitz_pivots = 0usize;
@@ -2438,7 +2467,12 @@ impl InactivationDecoder {
                 // Copy pivot row into reusable buffers
                 pivot_buf[..n_cols].copy_from_slice(&a[prow_off..prow_off + n_cols]);
                 pivot_rhs[..symbol_size].copy_from_slice(&b[prow]);
-                let sparse_cols = sparse_update_columns_if_beneficial(&pivot_buf[..n_cols], n_cols);
+                let use_sparse = sparse_update_columns_if_beneficial_into(
+                    &pivot_buf[..n_cols],
+                    n_cols,
+                    &mut sparse_cols,
+                );
+                let dense_start_col = dense_update_start_col(&pivot_buf[..n_cols], col);
 
                 // Eliminate column in all other rows.
                 for (row, rhs) in b.iter_mut().enumerate().take(n_rows) {
@@ -2450,12 +2484,12 @@ impl InactivationDecoder {
                     if factor.is_zero() {
                         continue;
                     }
-                    if let Some(cols) = sparse_cols.as_ref() {
-                        for &c in cols {
+                    if use_sparse {
+                        for &c in &sparse_cols {
                             a[row_off + c] += factor * pivot_buf[c];
                         }
                     } else {
-                        for c in 0..n_cols {
+                        for c in dense_start_col..n_cols {
                             a[row_off + c] += factor * pivot_buf[c];
                         }
                     }
@@ -2653,7 +2687,7 @@ impl ReceivedSymbol {
 mod tests {
     use super::*;
     use crate::raptorq::systematic::SystematicEncoder;
-    use crate::raptorq::test_log_schema::{UnitDecodeStats, UnitLogEntry, validate_unit_log_json};
+    use crate::raptorq::test_log_schema::{validate_unit_log_json, UnitDecodeStats, UnitLogEntry};
 
     fn rfc_eq_context(
         scenario_id: &str,
@@ -2906,6 +2940,174 @@ mod tests {
             .expect("row_sparse should take sparse update path");
         assert_eq!(sparse_cols, vec![0, 1, 3, 5, 6, 7]);
         assert!(sparse_update_columns_if_beneficial(&row_dense, 10).is_none());
+    }
+
+    #[test]
+    fn sparse_update_columns_into_reuses_and_clears_buffer() {
+        let row_sparse = vec![
+            Gf256::ONE,
+            Gf256::ZERO,
+            Gf256::ONE,
+            Gf256::ZERO,
+            Gf256::ONE,
+            Gf256::ZERO,
+            Gf256::ONE,
+            Gf256::ZERO,
+            Gf256::ZERO,
+            Gf256::ZERO,
+        ];
+        let row_dense = vec![
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ZERO,
+            Gf256::ZERO,
+            Gf256::ZERO,
+        ];
+
+        let mut cols = vec![42, 99];
+        assert!(sparse_update_columns_if_beneficial_into(
+            &row_sparse,
+            10,
+            &mut cols
+        ));
+        assert_eq!(cols, vec![0, 2, 4, 6]);
+
+        assert!(!sparse_update_columns_if_beneficial_into(
+            &row_dense, 10, &mut cols
+        ));
+        assert!(
+            cols.is_empty(),
+            "dense path must clear stale sparse indices"
+        );
+    }
+
+    #[test]
+    fn sparse_update_columns_branch_boundary_consistent() {
+        // n=32 uses the small-row stack-buffer path.
+        let mut row_32_sparse = vec![Gf256::ZERO; 32];
+        for coef in row_32_sparse.iter_mut().take(19) {
+            *coef = Gf256::ONE;
+        }
+        let mut cols = Vec::new();
+        assert!(sparse_update_columns_if_beneficial_into(
+            &row_32_sparse,
+            32,
+            &mut cols
+        ));
+        assert_eq!(cols.len(), 19);
+
+        let mut row_32_dense = row_32_sparse.clone();
+        row_32_dense[19] = Gf256::ONE;
+        assert!(!sparse_update_columns_if_beneficial_into(
+            &row_32_dense,
+            32,
+            &mut cols
+        ));
+        assert!(
+            cols.is_empty(),
+            "dense path must clear stale sparse indices at boundary"
+        );
+
+        // n=33 uses the large-row path and should preserve the same threshold semantics.
+        let mut row_33_sparse = vec![Gf256::ZERO; 33];
+        for coef in row_33_sparse.iter_mut().take(19) {
+            *coef = Gf256::ONE;
+        }
+        assert!(sparse_update_columns_if_beneficial_into(
+            &row_33_sparse,
+            33,
+            &mut cols
+        ));
+        assert_eq!(cols.len(), 19);
+
+        let mut row_33_dense = row_33_sparse.clone();
+        row_33_dense[19] = Gf256::ONE;
+        assert!(!sparse_update_columns_if_beneficial_into(
+            &row_33_dense,
+            33,
+            &mut cols
+        ));
+        assert!(
+            cols.is_empty(),
+            "dense path must clear stale sparse indices beyond boundary"
+        );
+    }
+
+    #[test]
+    fn dense_update_start_col_prefers_suffix_when_prefix_zero() {
+        let mut pivot = vec![Gf256::ZERO; 12];
+        for coef in pivot.iter_mut().skip(5) {
+            *coef = Gf256::ONE;
+        }
+        assert_eq!(dense_update_start_col(&pivot, 5), 5);
+    }
+
+    #[test]
+    fn dense_update_start_col_falls_back_to_zero_when_prefix_has_signal() {
+        let mut pivot = vec![Gf256::ZERO; 12];
+        pivot[2] = Gf256::ONE;
+        pivot[5] = Gf256::ONE;
+        assert_eq!(dense_update_start_col(&pivot, 5), 0);
+    }
+
+    #[test]
+    fn dense_row_update_suffix_matches_full_manual_when_prefix_zero() {
+        let pivot_row = vec![
+            Gf256::ZERO,
+            Gf256::ZERO,
+            Gf256::ZERO,
+            Gf256::ZERO,
+            Gf256::ZERO,
+            Gf256::new(0x55),
+            Gf256::new(0x66),
+            Gf256::new(0x77),
+            Gf256::new(0x88),
+            Gf256::new(0x99),
+            Gf256::new(0xaa),
+            Gf256::new(0xbb),
+        ];
+        let n_cols = pivot_row.len();
+        assert!(
+            sparse_update_columns_if_beneficial(&pivot_row, n_cols).is_none(),
+            "test requires dense branch eligibility"
+        );
+
+        let factor = Gf256::new(0x5d);
+        let base_row = vec![
+            Gf256::new(0x0f),
+            Gf256::new(0x10),
+            Gf256::new(0x20),
+            Gf256::new(0x30),
+            Gf256::new(0x40),
+            Gf256::new(0x50),
+            Gf256::new(0x60),
+            Gf256::new(0x70),
+            Gf256::new(0x80),
+            Gf256::new(0x90),
+            Gf256::new(0xa0),
+            Gf256::new(0xb0),
+        ];
+
+        let mut manual = base_row.clone();
+        for c in 0..n_cols {
+            manual[c] += factor * pivot_row[c];
+        }
+
+        let dense_start_col = dense_update_start_col(&pivot_row, 5);
+        let mut suffix_only = base_row;
+        for c in dense_start_col..n_cols {
+            suffix_only[c] += factor * pivot_row[c];
+        }
+
+        assert_eq!(
+            suffix_only, manual,
+            "suffix-only dense update must match full-row elimination math when prefix is zero"
+        );
     }
 
     fn make_source_data(k: usize, symbol_size: usize) -> Vec<Vec<u8>> {
@@ -3781,38 +3983,30 @@ mod tests {
 
     #[test]
     fn failure_classification_is_explicit() {
-        assert!(
-            DecodeError::InsufficientSymbols {
-                received: 1,
-                required: 2
-            }
-            .is_recoverable()
-        );
+        assert!(DecodeError::InsufficientSymbols {
+            received: 1,
+            required: 2
+        }
+        .is_recoverable());
         assert!(DecodeError::SingularMatrix { row: 3 }.is_recoverable());
-        assert!(
-            DecodeError::SymbolSizeMismatch {
-                expected: 8,
-                actual: 7
-            }
-            .is_unrecoverable()
-        );
-        assert!(
-            DecodeError::ColumnIndexOutOfRange {
-                esi: 1,
-                column: 99,
-                max_valid: 12
-            }
-            .is_unrecoverable()
-        );
-        assert!(
-            DecodeError::CorruptDecodedOutput {
-                esi: 1,
-                byte_index: 0,
-                expected: 1,
-                actual: 2
-            }
-            .is_unrecoverable()
-        );
+        assert!(DecodeError::SymbolSizeMismatch {
+            expected: 8,
+            actual: 7
+        }
+        .is_unrecoverable());
+        assert!(DecodeError::ColumnIndexOutOfRange {
+            esi: 1,
+            column: 99,
+            max_valid: 12
+        }
+        .is_unrecoverable());
+        assert!(DecodeError::CorruptDecodedOutput {
+            esi: 1,
+            byte_index: 0,
+            expected: 1,
+            actual: 2
+        }
+        .is_unrecoverable());
     }
 
     fn make_rank_deficient_state(
@@ -4831,8 +5025,7 @@ mod tests {
         assert_eq!(
             detector.phase,
             RegimePhase::LockedConservative,
-            "should lock to conservative after {} oscillations",
-            REGIME_ROLLBACK_OSCILLATION_LIMIT
+            "should lock to conservative after {REGIME_ROLLBACK_OSCILLATION_LIMIT} oscillations"
         );
 
         // Further observations should return zero deltas.
@@ -4899,9 +5092,7 @@ mod tests {
 
         assert!(
             retuned_bl < static_bl,
-            "retuning with negative bias should lower baseline loss: {} vs {}",
-            retuned_bl,
-            static_bl
+            "retuning with negative bias should lower baseline loss: {retuned_bl} vs {static_bl}"
         );
         // Aggressive modes should remain unchanged.
         assert_eq!(retuned_hs, static_hs);

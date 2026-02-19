@@ -792,10 +792,23 @@ impl GaussianSolver {
             if self.matrix[row][col] == 0 {
                 continue;
             }
-            let nnz = self.matrix[row].iter().filter(|&&b| b != 0).count();
+            let nnz = match best {
+                None => self.matrix[row].iter().filter(|&&b| b != 0).count(),
+                Some((_, current_best)) => count_nonzero_capped(self.matrix[row].as_slice(), current_best),
+            };
             match &best {
-                None => best = Some((row, nnz)),
-                Some((_, best_nnz)) if nnz < *best_nnz => best = Some((row, nnz)),
+                None => {
+                    best = Some((row, nnz));
+                    if nnz == 1 {
+                        break;
+                    }
+                }
+                Some((_, best_nnz)) if nnz < *best_nnz => {
+                    best = Some((row, nnz));
+                    if nnz == 1 {
+                        break;
+                    }
+                }
                 Some((best_row, best_nnz)) if nnz == *best_nnz && row < *best_row => {
                     best = Some((row, nnz));
                 }
@@ -838,6 +851,11 @@ impl GaussianSolver {
             let (lo, hi) = self.matrix.split_at_mut(target);
             (&mut hi[0], lo[pivot].as_slice())
         };
+        let cols = target_row.len();
+        // Columns left of `pivot` are already structurally zero for both rows.
+        // Skip that prefix and only operate on the tail; set pivot directly.
+        target_row[pivot] = 0;
+        let tail_start = (pivot + 1).min(cols);
 
         // Eliminate in RHS - use split_at_mut to satisfy borrow checker
         let rhs_len = self.rhs[pivot].len();
@@ -855,17 +873,42 @@ impl GaussianSolver {
                 (&mut hi[0], &lo[pivot])
             };
 
-            gf256_addmul_slices2(
-                target_row,
-                pivot_row,
-                &mut lower.as_mut_slice()[..rhs_len],
-                &upper.as_slice()[..rhs_len],
+            let rhs_target = &mut lower.as_mut_slice()[..rhs_len];
+            let rhs_pivot = &upper.as_slice()[..rhs_len];
+            if tail_start < cols {
+                gf256_addmul_slices2(
+                    &mut target_row[tail_start..],
+                    &pivot_row[tail_start..],
+                    rhs_target,
+                    rhs_pivot,
+                    factor,
+                );
+            } else {
+                gf256_addmul_slice(rhs_target, rhs_pivot, factor);
+            }
+        } else if tail_start < cols {
+            gf256_addmul_slice(
+                &mut target_row[tail_start..],
+                &pivot_row[tail_start..],
                 factor,
             );
-        } else {
-            gf256_addmul_slice(target_row, pivot_row, factor);
         }
     }
+}
+
+/// Counts non-zero coefficients in `row`, stopping once the count exceeds
+/// `cap`. This keeps Markowitz scans bounded once a good candidate exists.
+fn count_nonzero_capped(row: &[u8], cap: usize) -> usize {
+    let mut count = 0usize;
+    for &coef in row {
+        if coef != 0 {
+            count += 1;
+            if count > cap {
+                break;
+            }
+        }
+    }
+    count
 }
 
 // ============================================================================
@@ -1315,6 +1358,60 @@ mod tests {
     }
 
     #[test]
+    fn gaussian_single_column_inconsistent_rhs_detected() {
+        // Two contradictory equations in one variable: x = 5, x = 7.
+        // This exercises elimination where `pivot` is the last column and
+        // coefficient-tail updates are empty (RHS-only update path).
+        let mut basic = GaussianSolver::new(2, 1);
+        basic.set_row(0, &[1], DenseRow::new(vec![5]));
+        basic.set_row(1, &[1], DenseRow::new(vec![7]));
+
+        let mut markowitz = GaussianSolver::new(2, 1);
+        markowitz.set_row(0, &[1], DenseRow::new(vec![5]));
+        markowitz.set_row(1, &[1], DenseRow::new(vec![7]));
+
+        assert_eq!(
+            basic.solve(),
+            GaussianResult::Inconsistent { row: 1 },
+            "basic solver should detect inconsistent RHS after eliminating the only column"
+        );
+        assert_eq!(
+            markowitz.solve_markowitz(),
+            GaussianResult::Inconsistent { row: 1 },
+            "markowitz solver should detect the same inconsistency"
+        );
+    }
+
+    #[test]
+    fn markowitz_prefers_singleton_candidate() {
+        let mut solver = GaussianSolver::new(4, 4);
+        solver.set_row(0, &[1, 1, 1, 1], DenseRow::zeros(0));
+        solver.set_row(1, &[1, 0, 1, 0], DenseRow::zeros(0));
+        solver.set_row(2, &[1, 0, 0, 0], DenseRow::zeros(0));
+        solver.set_row(3, &[1, 1, 0, 0], DenseRow::zeros(0));
+
+        assert_eq!(
+            solver.find_pivot_markowitz(0, 0),
+            Some((2, 1)),
+            "singleton candidate should be selected as soon as observed"
+        );
+    }
+
+    #[test]
+    fn markowitz_tie_breaks_to_lower_row_index() {
+        let mut solver = GaussianSolver::new(3, 4);
+        solver.set_row(0, &[0, 1, 0, 1], DenseRow::zeros(0));
+        solver.set_row(1, &[0, 1, 1, 0], DenseRow::zeros(0));
+        solver.set_row(2, &[0, 0, 1, 1], DenseRow::zeros(0));
+
+        assert_eq!(
+            solver.find_pivot_markowitz(1, 0),
+            Some((0, 2)),
+            "equal-nnz candidates should retain lowest row index"
+        );
+    }
+
+    #[test]
     fn dense_row_debug_clone_eq() {
         let r = DenseRow::new(vec![1, 2, 3]);
         let dbg = format!("{r:?}");
@@ -1350,7 +1447,7 @@ mod tests {
         let dbg = format!("{s:?}");
         assert!(dbg.contains("GaussianStats"), "{dbg}");
         assert_eq!(s.swaps, 0);
-        let cloned = s.clone();
+        let cloned = s;
         assert_eq!(format!("{cloned:?}"), dbg);
     }
 }

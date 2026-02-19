@@ -34,6 +34,18 @@
 //! - Determinism:
 //!   - dispatch decision is memoized in `OnceLock`, so kernel selection is stable
 //!     for process lifetime.
+//!
+//! # Profile Packs
+//!
+//! Dual-lane fused-kernel thresholds are selected from deterministic
+//! architecture profile packs:
+//! - `scalar-conservative-v1`
+//! - `x86-avx2-balanced-v1`
+//! - `aarch64-neon-balanced-v1`
+//!
+//! Runtime can request a specific pack via `ASUPERSYNC_GF256_PROFILE_PACK`.
+//! Unsupported requests fail closed to the host default pack with an explicit
+//! fallback reason surfaced in [`DualKernelPolicySnapshot`].
 
 #![cfg_attr(
     feature = "simd-intrinsics",
@@ -46,15 +58,15 @@ use core::arch::aarch64::{
 };
 #[cfg(all(feature = "simd-intrinsics", target_arch = "x86"))]
 use core::arch::x86::{
-    __m128i, __m256i, _mm_loadu_si128, _mm256_and_si256, _mm256_broadcastsi128_si256,
-    _mm256_loadu_si256, _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16,
-    _mm256_storeu_si256, _mm256_xor_si256,
+    __m128i, __m256i, _mm256_and_si256, _mm256_broadcastsi128_si256, _mm256_loadu_si256,
+    _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16, _mm256_storeu_si256,
+    _mm256_xor_si256, _mm_loadu_si128,
 };
 #[cfg(all(feature = "simd-intrinsics", target_arch = "x86_64"))]
 use core::arch::x86_64::{
-    __m128i, __m256i, _mm_loadu_si128, _mm256_and_si256, _mm256_broadcastsi128_si256,
-    _mm256_loadu_si256, _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16,
-    _mm256_storeu_si256, _mm256_xor_si256,
+    __m128i, __m256i, _mm256_and_si256, _mm256_broadcastsi128_si256, _mm256_loadu_si256,
+    _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16, _mm256_storeu_si256,
+    _mm256_xor_si256, _mm_loadu_si128,
 };
 
 /// The irreducible polynomial x^8 + x^4 + x^3 + x^2 + 1.
@@ -238,6 +250,11 @@ struct Gf256Dispatch {
 
 static DISPATCH: std::sync::OnceLock<Gf256Dispatch> = std::sync::OnceLock::new();
 static DUAL_POLICY: std::sync::OnceLock<DualKernelPolicy> = std::sync::OnceLock::new();
+const GF256_PROFILE_PACK_SCHEMA_VERSION: &str = "raptorq-gf256-profile-pack-v1";
+const GF256_PROFILE_PACK_REPLAY_POINTER: &str = "replay:rq-e-gf256-profile-pack-v1";
+const GF256_PROFILE_PACK_COMMAND_BUNDLE: &str =
+    "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives";
+const GF256_PROFILE_TUNING_CORPUS_ID: &str = "raptorq-gf256-profile-corpus-v1";
 
 fn dispatch() -> &'static Gf256Dispatch {
     DISPATCH.get_or_init(detect_dispatch)
@@ -318,8 +335,28 @@ impl DualKernelDecision {
 /// Snapshot of the active deterministic dual-kernel policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DualKernelPolicySnapshot {
+    /// Version marker for the profile-pack snapshot schema.
+    pub profile_schema_version: &'static str,
+    /// Selected architecture profile pack.
+    pub profile_pack: Gf256ProfilePackId,
+    /// Architecture class used for deterministic profile selection.
+    pub architecture_class: Gf256ArchitectureClass,
     /// Runtime-selected kernel kind.
     pub kernel: Gf256Kernel,
+    /// Pinned tuning corpus identifier used by offline profile-pack exploration.
+    pub tuning_corpus_id: &'static str,
+    /// Selected offline-tuning candidate identifier for active profile pack.
+    pub selected_tuning_candidate_id: &'static str,
+    /// Deterministically rejected tuning candidate identifiers for active profile pack.
+    pub rejected_tuning_candidate_ids: &'static [&'static str],
+    /// Fallback reason when requested profile is unavailable on this host.
+    pub fallback_reason: Option<Gf256ProfileFallbackReason>,
+    /// Deterministically rejected profile-pack candidates for this host class.
+    pub rejected_candidates: &'static [Gf256ProfilePackId],
+    /// Stable replay pointer for policy-tuning provenance and forensics.
+    pub replay_pointer: &'static str,
+    /// Repro command bundle for profile-pack validation and rollback rehearsal.
+    pub command_bundle: &'static str,
     /// Effective policy mode.
     pub mode: DualKernelMode,
     /// Inclusive minimum total lane bytes for fused dual-mul path in auto mode.
@@ -334,8 +371,309 @@ pub struct DualKernelPolicySnapshot {
     pub max_lane_ratio: usize,
 }
 
+/// Architecture class used to map profile-pack defaults.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gf256ArchitectureClass {
+    /// No ISA acceleration available; conservative scalar profile.
+    GenericScalar,
+    /// AVX2-capable x86/x86_64 host class.
+    X86Avx2,
+    /// NEON-capable aarch64 host class.
+    Aarch64Neon,
+}
+
+impl Gf256ArchitectureClass {
+    /// Stable machine-readable identifier for structured logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GenericScalar => "generic-scalar",
+            Self::X86Avx2 => "x86-avx2",
+            Self::Aarch64Neon => "aarch64-neon",
+        }
+    }
+}
+
+/// Deterministic profile-pack identifier for dual-kernel policy windows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gf256ProfilePackId {
+    /// Conservative scalar profile (fused dual paths effectively disabled).
+    ScalarConservativeV1,
+    /// Balanced AVX2 profile tuned from benchmark evidence.
+    X86Avx2BalancedV1,
+    /// Balanced NEON profile tuned from benchmark evidence.
+    Aarch64NeonBalancedV1,
+}
+
+impl Gf256ProfilePackId {
+    /// Stable machine-readable identifier for structured logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ScalarConservativeV1 => "scalar-conservative-v1",
+            Self::X86Avx2BalancedV1 => "x86-avx2-balanced-v1",
+            Self::Aarch64NeonBalancedV1 => "aarch64-neon-balanced-v1",
+        }
+    }
+}
+
+/// Reason why requested profile-pack selection fell back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gf256ProfileFallbackReason {
+    /// Environment requested an unknown profile pack.
+    UnknownRequestedProfile,
+    /// Requested profile pack is not valid for detected host architecture.
+    UnsupportedProfileForHost,
+}
+
+impl Gf256ProfileFallbackReason {
+    /// Stable machine-readable identifier for structured logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnknownRequestedProfile => "unknown-requested-profile",
+            Self::UnsupportedProfileForHost => "unsupported-profile-for-host",
+        }
+    }
+}
+
+/// Deterministic metadata for a runtime-eligible profile pack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Gf256ProfilePackMetadata {
+    /// Version marker for serialized/structured profile-pack metadata.
+    pub schema_version: &'static str,
+    /// Stable profile identifier.
+    pub profile_pack: Gf256ProfilePackId,
+    /// Host architecture class this pack is tuned for.
+    pub architecture_class: Gf256ArchitectureClass,
+    /// Pinned corpus identifier used for deterministic offline tuning.
+    pub tuning_corpus_id: &'static str,
+    /// Selected candidate identifier emitted by offline tuner for this pack.
+    pub selected_tuning_candidate_id: &'static str,
+    /// Rejected candidate identifiers evaluated during offline tuning for this pack.
+    pub rejected_tuning_candidate_ids: &'static [&'static str],
+    /// Inclusive minimum total lane bytes for fused dual-mul path in auto mode.
+    pub mul_min_total: usize,
+    /// Inclusive maximum total lane bytes for fused dual-mul path in auto mode.
+    pub mul_max_total: usize,
+    /// Inclusive minimum total lane bytes for fused dual-addmul path in auto mode.
+    pub addmul_min_total: usize,
+    /// Inclusive maximum total lane bytes for fused dual-addmul path in auto mode.
+    pub addmul_max_total: usize,
+    /// Maximum allowed lane length ratio (`max(len_a,len_b)/min(...)`) in auto mode.
+    pub max_lane_ratio: usize,
+    /// Stable replay pointer used for traceability and deterministic replays.
+    pub replay_pointer: &'static str,
+    /// Repro command bundle for validating this profile pack.
+    pub command_bundle: &'static str,
+}
+
+/// Deterministic metadata for a single offline tuning candidate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Gf256TuningCandidateMetadata {
+    /// Stable candidate identifier.
+    pub candidate_id: &'static str,
+    /// Target architecture class for this candidate.
+    pub architecture_class: Gf256ArchitectureClass,
+    /// Target profile pack for this candidate.
+    pub profile_pack: Gf256ProfilePackId,
+    /// Tile size explored by this candidate.
+    pub tile_bytes: usize,
+    /// Unroll factor explored by this candidate.
+    pub unroll: usize,
+    /// Prefetch distance explored by this candidate.
+    pub prefetch_distance: usize,
+    /// Fusion shape explored by this candidate.
+    pub fusion_shape: &'static str,
+}
+
+const SCALAR_SELECTED_TUNING_CANDIDATE: &str = "scalar-t16-u1-pf0-fused-off-v1";
+const X86_SELECTED_TUNING_CANDIDATE: &str = "x86-avx2-t32-u2-pf64-fused-balanced-v1";
+const AARCH64_SELECTED_TUNING_CANDIDATE: &str = "aarch64-neon-t32-u2-pf32-fused-balanced-v1";
+
+const SCALAR_REJECTED_TUNING_CANDIDATES: &[&str] = &["scalar-t8-u1-pf0-fused-off-v1"];
+const X86_REJECTED_TUNING_CANDIDATES: &[&str] = &[
+    "x86-avx2-t16-u2-pf32-fused-balanced-v1",
+    "x86-avx2-t32-u4-pf64-split-balanced-v1",
+];
+const AARCH64_REJECTED_TUNING_CANDIDATES: &[&str] = &[
+    "aarch64-neon-t16-u2-pf16-fused-balanced-v1",
+    "aarch64-neon-t32-u4-pf32-split-balanced-v1",
+];
+
+const REJECTED_PROFILE_GENERIC_SCALAR: &[Gf256ProfilePackId] = &[
+    Gf256ProfilePackId::X86Avx2BalancedV1,
+    Gf256ProfilePackId::Aarch64NeonBalancedV1,
+];
+const REJECTED_PROFILE_X86_AVX2: &[Gf256ProfilePackId] =
+    &[Gf256ProfilePackId::Aarch64NeonBalancedV1];
+const REJECTED_PROFILE_AARCH64_NEON: &[Gf256ProfilePackId] =
+    &[Gf256ProfilePackId::X86Avx2BalancedV1];
+
+const GF256_PROFILE_PACK_CATALOG: [Gf256ProfilePackMetadata; 3] = [
+    Gf256ProfilePackMetadata {
+        schema_version: GF256_PROFILE_PACK_SCHEMA_VERSION,
+        profile_pack: Gf256ProfilePackId::ScalarConservativeV1,
+        architecture_class: Gf256ArchitectureClass::GenericScalar,
+        tuning_corpus_id: GF256_PROFILE_TUNING_CORPUS_ID,
+        selected_tuning_candidate_id: SCALAR_SELECTED_TUNING_CANDIDATE,
+        rejected_tuning_candidate_ids: SCALAR_REJECTED_TUNING_CANDIDATES,
+        mul_min_total: usize::MAX,
+        mul_max_total: 0,
+        addmul_min_total: usize::MAX,
+        addmul_max_total: 0,
+        max_lane_ratio: 1,
+        replay_pointer: GF256_PROFILE_PACK_REPLAY_POINTER,
+        command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
+    },
+    Gf256ProfilePackMetadata {
+        schema_version: GF256_PROFILE_PACK_SCHEMA_VERSION,
+        profile_pack: Gf256ProfilePackId::X86Avx2BalancedV1,
+        architecture_class: Gf256ArchitectureClass::X86Avx2,
+        tuning_corpus_id: GF256_PROFILE_TUNING_CORPUS_ID,
+        selected_tuning_candidate_id: X86_SELECTED_TUNING_CANDIDATE,
+        rejected_tuning_candidate_ids: X86_REJECTED_TUNING_CANDIDATES,
+        // Conservative tuned windows from Track-E benchmark evidence.
+        mul_min_total: 8 * 1024,
+        mul_max_total: 24 * 1024,
+        addmul_min_total: 8 * 1024,
+        addmul_max_total: 16 * 1024,
+        max_lane_ratio: 8,
+        replay_pointer: GF256_PROFILE_PACK_REPLAY_POINTER,
+        command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
+    },
+    Gf256ProfilePackMetadata {
+        schema_version: GF256_PROFILE_PACK_SCHEMA_VERSION,
+        profile_pack: Gf256ProfilePackId::Aarch64NeonBalancedV1,
+        architecture_class: Gf256ArchitectureClass::Aarch64Neon,
+        tuning_corpus_id: GF256_PROFILE_TUNING_CORPUS_ID,
+        selected_tuning_candidate_id: AARCH64_SELECTED_TUNING_CANDIDATE,
+        rejected_tuning_candidate_ids: AARCH64_REJECTED_TUNING_CANDIDATES,
+        // Conservative tuned windows from Track-E benchmark evidence.
+        mul_min_total: 8 * 1024,
+        mul_max_total: 24 * 1024,
+        addmul_min_total: 8 * 1024,
+        addmul_max_total: 16 * 1024,
+        max_lane_ratio: 8,
+        replay_pointer: GF256_PROFILE_PACK_REPLAY_POINTER,
+        command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
+    },
+];
+
+/// Returns deterministic profile-pack metadata entries used for runtime dispatch policy.
+#[must_use]
+pub const fn gf256_profile_pack_catalog() -> &'static [Gf256ProfilePackMetadata] {
+    &GF256_PROFILE_PACK_CATALOG
+}
+
+const GF256_TUNING_CANDIDATE_CATALOG: [Gf256TuningCandidateMetadata; 8] = [
+    Gf256TuningCandidateMetadata {
+        candidate_id: SCALAR_SELECTED_TUNING_CANDIDATE,
+        architecture_class: Gf256ArchitectureClass::GenericScalar,
+        profile_pack: Gf256ProfilePackId::ScalarConservativeV1,
+        tile_bytes: 16,
+        unroll: 1,
+        prefetch_distance: 0,
+        fusion_shape: "fused-off",
+    },
+    Gf256TuningCandidateMetadata {
+        candidate_id: SCALAR_REJECTED_TUNING_CANDIDATES[0],
+        architecture_class: Gf256ArchitectureClass::GenericScalar,
+        profile_pack: Gf256ProfilePackId::ScalarConservativeV1,
+        tile_bytes: 8,
+        unroll: 1,
+        prefetch_distance: 0,
+        fusion_shape: "fused-off",
+    },
+    Gf256TuningCandidateMetadata {
+        candidate_id: X86_SELECTED_TUNING_CANDIDATE,
+        architecture_class: Gf256ArchitectureClass::X86Avx2,
+        profile_pack: Gf256ProfilePackId::X86Avx2BalancedV1,
+        tile_bytes: 32,
+        unroll: 2,
+        prefetch_distance: 64,
+        fusion_shape: "fused-balanced",
+    },
+    Gf256TuningCandidateMetadata {
+        candidate_id: X86_REJECTED_TUNING_CANDIDATES[0],
+        architecture_class: Gf256ArchitectureClass::X86Avx2,
+        profile_pack: Gf256ProfilePackId::X86Avx2BalancedV1,
+        tile_bytes: 16,
+        unroll: 2,
+        prefetch_distance: 32,
+        fusion_shape: "fused-balanced",
+    },
+    Gf256TuningCandidateMetadata {
+        candidate_id: X86_REJECTED_TUNING_CANDIDATES[1],
+        architecture_class: Gf256ArchitectureClass::X86Avx2,
+        profile_pack: Gf256ProfilePackId::X86Avx2BalancedV1,
+        tile_bytes: 32,
+        unroll: 4,
+        prefetch_distance: 64,
+        fusion_shape: "split-balanced",
+    },
+    Gf256TuningCandidateMetadata {
+        candidate_id: AARCH64_SELECTED_TUNING_CANDIDATE,
+        architecture_class: Gf256ArchitectureClass::Aarch64Neon,
+        profile_pack: Gf256ProfilePackId::Aarch64NeonBalancedV1,
+        tile_bytes: 32,
+        unroll: 2,
+        prefetch_distance: 32,
+        fusion_shape: "fused-balanced",
+    },
+    Gf256TuningCandidateMetadata {
+        candidate_id: AARCH64_REJECTED_TUNING_CANDIDATES[0],
+        architecture_class: Gf256ArchitectureClass::Aarch64Neon,
+        profile_pack: Gf256ProfilePackId::Aarch64NeonBalancedV1,
+        tile_bytes: 16,
+        unroll: 2,
+        prefetch_distance: 16,
+        fusion_shape: "fused-balanced",
+    },
+    Gf256TuningCandidateMetadata {
+        candidate_id: AARCH64_REJECTED_TUNING_CANDIDATES[1],
+        architecture_class: Gf256ArchitectureClass::Aarch64Neon,
+        profile_pack: Gf256ProfilePackId::Aarch64NeonBalancedV1,
+        tile_bytes: 32,
+        unroll: 4,
+        prefetch_distance: 32,
+        fusion_shape: "split-balanced",
+    },
+];
+
+/// Returns deterministic candidate catalog explored during offline profile tuning.
+#[must_use]
+pub const fn gf256_tuning_candidate_catalog() -> &'static [Gf256TuningCandidateMetadata] {
+    &GF256_TUNING_CANDIDATE_CATALOG
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProfilePackRequest {
+    Auto,
+    ScalarConservativeV1,
+    X86Avx2BalancedV1,
+    Aarch64NeonBalancedV1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProfilePackSelection {
+    profile_pack: Gf256ProfilePackId,
+    architecture_class: Gf256ArchitectureClass,
+    fallback_reason: Option<Gf256ProfileFallbackReason>,
+    rejected_candidates: &'static [Gf256ProfilePackId],
+}
+
 #[derive(Clone, Copy, Debug)]
 struct DualKernelPolicy {
+    profile_pack: Gf256ProfilePackId,
+    architecture_class: Gf256ArchitectureClass,
+    tuning_corpus_id: &'static str,
+    selected_tuning_candidate_id: &'static str,
+    rejected_tuning_candidate_ids: &'static [&'static str],
+    fallback_reason: Option<Gf256ProfileFallbackReason>,
+    rejected_candidates: &'static [Gf256ProfilePackId],
+    replay_pointer: &'static str,
+    command_bundle: &'static str,
     mode: DualKernelOverride,
     mul_min_total: usize,
     mul_max_total: usize,
@@ -348,6 +686,94 @@ fn dual_policy() -> &'static DualKernelPolicy {
     DUAL_POLICY.get_or_init(detect_dual_policy)
 }
 
+fn parse_profile_pack_request(raw: &str) -> Option<ProfilePackRequest> {
+    match raw {
+        "auto" => Some(ProfilePackRequest::Auto),
+        "scalar-conservative-v1" | "scalar" => Some(ProfilePackRequest::ScalarConservativeV1),
+        "x86-avx2-balanced-v1" | "x86-avx2" => Some(ProfilePackRequest::X86Avx2BalancedV1),
+        "aarch64-neon-balanced-v1" | "aarch64-neon" => {
+            Some(ProfilePackRequest::Aarch64NeonBalancedV1)
+        }
+        _ => None,
+    }
+}
+
+fn architecture_class_for_kernel(kernel: Gf256Kernel) -> Gf256ArchitectureClass {
+    match kernel {
+        Gf256Kernel::Scalar => Gf256ArchitectureClass::GenericScalar,
+        #[cfg(all(
+            feature = "simd-intrinsics",
+            any(target_arch = "x86", target_arch = "x86_64")
+        ))]
+        Gf256Kernel::X86Avx2 => Gf256ArchitectureClass::X86Avx2,
+        #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
+        Gf256Kernel::Aarch64Neon => Gf256ArchitectureClass::Aarch64Neon,
+    }
+}
+
+fn default_profile_pack_for_arch(class: Gf256ArchitectureClass) -> Gf256ProfilePackId {
+    match class {
+        Gf256ArchitectureClass::GenericScalar => Gf256ProfilePackId::ScalarConservativeV1,
+        Gf256ArchitectureClass::X86Avx2 => Gf256ProfilePackId::X86Avx2BalancedV1,
+        Gf256ArchitectureClass::Aarch64Neon => Gf256ProfilePackId::Aarch64NeonBalancedV1,
+    }
+}
+
+const fn rejected_profile_candidates_for_arch(
+    class: Gf256ArchitectureClass,
+) -> &'static [Gf256ProfilePackId] {
+    match class {
+        Gf256ArchitectureClass::GenericScalar => REJECTED_PROFILE_GENERIC_SCALAR,
+        Gf256ArchitectureClass::X86Avx2 => REJECTED_PROFILE_X86_AVX2,
+        Gf256ArchitectureClass::Aarch64Neon => REJECTED_PROFILE_AARCH64_NEON,
+    }
+}
+
+fn profile_pack_metadata(profile_pack: Gf256ProfilePackId) -> &'static Gf256ProfilePackMetadata {
+    GF256_PROFILE_PACK_CATALOG
+        .iter()
+        .find(|metadata| metadata.profile_pack == profile_pack)
+        .unwrap_or(&GF256_PROFILE_PACK_CATALOG[0])
+}
+
+fn select_profile_pack(
+    kernel: Gf256Kernel,
+    requested: Option<ProfilePackRequest>,
+) -> ProfilePackSelection {
+    let architecture_class = architecture_class_for_kernel(kernel);
+    let default_pack = default_profile_pack_for_arch(architecture_class);
+    let mut fallback_reason = None;
+    let rejected_candidates = rejected_profile_candidates_for_arch(architecture_class);
+
+    let profile_pack = match requested.unwrap_or(ProfilePackRequest::Auto) {
+        ProfilePackRequest::Auto => default_pack,
+        ProfilePackRequest::ScalarConservativeV1 => Gf256ProfilePackId::ScalarConservativeV1,
+        ProfilePackRequest::X86Avx2BalancedV1 => {
+            if matches!(architecture_class, Gf256ArchitectureClass::X86Avx2) {
+                Gf256ProfilePackId::X86Avx2BalancedV1
+            } else {
+                fallback_reason = Some(Gf256ProfileFallbackReason::UnsupportedProfileForHost);
+                default_pack
+            }
+        }
+        ProfilePackRequest::Aarch64NeonBalancedV1 => {
+            if matches!(architecture_class, Gf256ArchitectureClass::Aarch64Neon) {
+                Gf256ProfilePackId::Aarch64NeonBalancedV1
+            } else {
+                fallback_reason = Some(Gf256ProfileFallbackReason::UnsupportedProfileForHost);
+                default_pack
+            }
+        }
+    };
+
+    ProfilePackSelection {
+        profile_pack,
+        architecture_class,
+        fallback_reason,
+        rejected_candidates,
+    }
+}
+
 fn detect_dual_policy() -> DualKernelPolicy {
     let mode = match std::env::var("ASUPERSYNC_GF256_DUAL_POLICY")
         .ok()
@@ -358,39 +784,37 @@ fn detect_dual_policy() -> DualKernelPolicy {
         _ => DualKernelOverride::Auto,
     };
 
-    let mut policy = match dispatch().kind {
-        Gf256Kernel::Scalar => DualKernelPolicy {
-            mode,
-            mul_min_total: usize::MAX,
-            mul_max_total: 0,
-            addmul_min_total: usize::MAX,
-            addmul_max_total: 0,
-            max_lane_ratio: 1,
-        },
-        #[cfg(all(
-            feature = "simd-intrinsics",
-            any(target_arch = "x86", target_arch = "x86_64")
-        ))]
-        Gf256Kernel::X86Avx2 => DualKernelPolicy {
-            mode,
-            // Conservative default: prefer fused dual mul on medium-size windows
-            // and disable on large windows where some workers regress.
-            mul_min_total: 8 * 1024,
-            mul_max_total: 24 * 1024,
-            // Addmul has thinner margins; keep fused window narrower.
-            addmul_min_total: 8 * 1024,
-            addmul_max_total: 16 * 1024,
-            max_lane_ratio: 8,
-        },
-        #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
-        Gf256Kernel::Aarch64Neon => DualKernelPolicy {
-            mode,
-            mul_min_total: 8 * 1024,
-            mul_max_total: 24 * 1024,
-            addmul_min_total: 8 * 1024,
-            addmul_max_total: 16 * 1024,
-            max_lane_ratio: 8,
-        },
+    let requested_profile_raw = std::env::var("ASUPERSYNC_GF256_PROFILE_PACK").ok();
+    let requested_profile = requested_profile_raw
+        .as_deref()
+        .and_then(parse_profile_pack_request);
+    let parse_fallback = requested_profile_raw.as_deref().and_then(|raw| {
+        if parse_profile_pack_request(raw).is_some() {
+            None
+        } else {
+            Some(Gf256ProfileFallbackReason::UnknownRequestedProfile)
+        }
+    });
+
+    let selection = select_profile_pack(dispatch().kind, requested_profile);
+    let metadata = profile_pack_metadata(selection.profile_pack);
+
+    let mut policy = DualKernelPolicy {
+        profile_pack: metadata.profile_pack,
+        architecture_class: selection.architecture_class,
+        tuning_corpus_id: metadata.tuning_corpus_id,
+        selected_tuning_candidate_id: metadata.selected_tuning_candidate_id,
+        rejected_tuning_candidate_ids: metadata.rejected_tuning_candidate_ids,
+        fallback_reason: selection.fallback_reason.or(parse_fallback),
+        rejected_candidates: selection.rejected_candidates,
+        replay_pointer: metadata.replay_pointer,
+        command_bundle: metadata.command_bundle,
+        mode,
+        mul_min_total: metadata.mul_min_total,
+        mul_max_total: metadata.mul_max_total,
+        addmul_min_total: metadata.addmul_min_total,
+        addmul_max_total: metadata.addmul_max_total,
+        max_lane_ratio: metadata.max_lane_ratio,
     };
 
     if let Some(v) = parse_usize_env("ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL") {
@@ -490,7 +914,17 @@ fn dual_addmul_decision_with_policy(
 pub fn dual_kernel_policy_snapshot() -> DualKernelPolicySnapshot {
     let policy = dual_policy();
     DualKernelPolicySnapshot {
+        profile_schema_version: GF256_PROFILE_PACK_SCHEMA_VERSION,
+        profile_pack: policy.profile_pack,
+        architecture_class: policy.architecture_class,
         kernel: dispatch().kind,
+        tuning_corpus_id: policy.tuning_corpus_id,
+        selected_tuning_candidate_id: policy.selected_tuning_candidate_id,
+        rejected_tuning_candidate_ids: policy.rejected_tuning_candidate_ids,
+        fallback_reason: policy.fallback_reason,
+        rejected_candidates: policy.rejected_candidates,
+        replay_pointer: policy.replay_pointer,
+        command_bundle: policy.command_bundle,
         mode: to_public_mode(policy.mode),
         mul_min_total: policy.mul_min_total,
         mul_max_total: policy.mul_max_total,
@@ -2201,7 +2635,7 @@ mod tests {
         use std::collections::HashSet;
         let a = Gf256(100);
         let b = a; // Copy
-        let c = a.clone();
+        let c = a;
         assert_eq!(a, b);
         assert_eq!(a, c);
         assert_ne!(a, Gf256(101));
@@ -2217,7 +2651,7 @@ mod tests {
     fn gf256_kernel_debug_clone_copy_eq() {
         let k = Gf256Kernel::Scalar;
         let copied = k;
-        let cloned = k.clone();
+        let cloned = k;
         assert_eq!(copied, cloned);
         assert_eq!(copied, Gf256Kernel::Scalar);
         let dbg = format!("{k:?}");
@@ -2232,7 +2666,7 @@ mod tests {
             DualKernelMode::Fused,
         ] {
             let copied = mode;
-            let cloned = mode.clone();
+            let cloned = mode;
             assert_eq!(copied, cloned);
             let dbg = format!("{mode:?}");
             assert!(!dbg.is_empty());
@@ -2256,7 +2690,17 @@ mod tests {
     #[test]
     fn dual_kernel_policy_snapshot_debug_clone_copy_eq() {
         let snap = DualKernelPolicySnapshot {
+            profile_schema_version: GF256_PROFILE_PACK_SCHEMA_VERSION,
+            profile_pack: Gf256ProfilePackId::ScalarConservativeV1,
+            architecture_class: Gf256ArchitectureClass::GenericScalar,
             kernel: Gf256Kernel::Scalar,
+            tuning_corpus_id: GF256_PROFILE_TUNING_CORPUS_ID,
+            selected_tuning_candidate_id: SCALAR_SELECTED_TUNING_CANDIDATE,
+            rejected_tuning_candidate_ids: SCALAR_REJECTED_TUNING_CANDIDATES,
+            fallback_reason: None,
+            rejected_candidates: &[],
+            replay_pointer: GF256_PROFILE_PACK_REPLAY_POINTER,
+            command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
             mode: DualKernelMode::Auto,
             mul_min_total: 8192,
             mul_max_total: 24576,
@@ -2265,10 +2709,141 @@ mod tests {
             max_lane_ratio: 8,
         };
         let copied = snap;
-        let cloned = snap.clone();
+        let cloned = snap;
         assert_eq!(copied, cloned);
         let dbg = format!("{snap:?}");
         assert!(dbg.contains("DualKernelPolicySnapshot"));
+    }
+
+    #[test]
+    fn profile_pack_request_parser_handles_known_and_unknown_values() {
+        assert_eq!(
+            parse_profile_pack_request("auto"),
+            Some(ProfilePackRequest::Auto)
+        );
+        assert_eq!(
+            parse_profile_pack_request("scalar-conservative-v1"),
+            Some(ProfilePackRequest::ScalarConservativeV1)
+        );
+        assert_eq!(
+            parse_profile_pack_request("x86-avx2-balanced-v1"),
+            Some(ProfilePackRequest::X86Avx2BalancedV1)
+        );
+        assert_eq!(
+            parse_profile_pack_request("aarch64-neon-balanced-v1"),
+            Some(ProfilePackRequest::Aarch64NeonBalancedV1)
+        );
+        assert_eq!(parse_profile_pack_request("unknown-pack"), None);
+    }
+
+    #[test]
+    fn profile_pack_catalog_is_deterministic_and_versioned() {
+        let catalog = gf256_profile_pack_catalog();
+        assert_eq!(catalog.len(), 3);
+        assert_eq!(
+            catalog[0].profile_pack,
+            Gf256ProfilePackId::ScalarConservativeV1
+        );
+        assert_eq!(
+            catalog[1].profile_pack,
+            Gf256ProfilePackId::X86Avx2BalancedV1
+        );
+        assert_eq!(
+            catalog[2].profile_pack,
+            Gf256ProfilePackId::Aarch64NeonBalancedV1
+        );
+        for metadata in catalog {
+            assert_eq!(metadata.schema_version, GF256_PROFILE_PACK_SCHEMA_VERSION);
+            assert_eq!(metadata.replay_pointer, GF256_PROFILE_PACK_REPLAY_POINTER);
+            assert_eq!(metadata.tuning_corpus_id, GF256_PROFILE_TUNING_CORPUS_ID);
+            assert!(!metadata.selected_tuning_candidate_id.is_empty());
+            for rejected_id in metadata.rejected_tuning_candidate_ids {
+                assert_ne!(metadata.selected_tuning_candidate_id, *rejected_id);
+                assert!(!rejected_id.is_empty());
+            }
+            assert!(!metadata.command_bundle.is_empty());
+            assert!(metadata.command_bundle.contains("rch exec --"));
+        }
+    }
+
+    #[test]
+    fn tuning_candidate_catalog_is_deterministic_and_profile_aligned() {
+        let catalog = gf256_tuning_candidate_catalog();
+        assert_eq!(catalog.len(), 8);
+        for candidate in catalog {
+            assert!(!candidate.candidate_id.is_empty());
+            assert!(candidate.tile_bytes > 0);
+            assert!(candidate.unroll > 0);
+            assert!(
+                gf256_profile_pack_catalog()
+                    .iter()
+                    .any(|pack| pack.profile_pack == candidate.profile_pack),
+                "candidate {} references unknown profile pack",
+                candidate.candidate_id
+            );
+        }
+    }
+
+    #[test]
+    fn profile_pack_selection_exposes_arch_rejected_candidates() {
+        let selected = select_profile_pack(Gf256Kernel::Scalar, None);
+        assert_eq!(
+            selected.rejected_candidates,
+            REJECTED_PROFILE_GENERIC_SCALAR
+        );
+    }
+
+    #[test]
+    fn profile_pack_selection_falls_back_when_host_does_not_support_request() {
+        let selected = select_profile_pack(
+            Gf256Kernel::Scalar,
+            Some(ProfilePackRequest::X86Avx2BalancedV1),
+        );
+        assert_eq!(
+            selected.profile_pack,
+            Gf256ProfilePackId::ScalarConservativeV1
+        );
+        assert_eq!(
+            selected.architecture_class,
+            Gf256ArchitectureClass::GenericScalar
+        );
+        assert_eq!(
+            selected.fallback_reason,
+            Some(Gf256ProfileFallbackReason::UnsupportedProfileForHost)
+        );
+        assert_eq!(
+            selected.rejected_candidates,
+            REJECTED_PROFILE_GENERIC_SCALAR
+        );
+    }
+
+    #[test]
+    fn dual_policy_snapshot_exposes_profile_pack_metadata() {
+        let snapshot = dual_kernel_policy_snapshot();
+        assert_eq!(
+            snapshot.profile_schema_version,
+            GF256_PROFILE_PACK_SCHEMA_VERSION
+        );
+        assert_eq!(
+            snapshot.architecture_class,
+            architecture_class_for_kernel(snapshot.kernel)
+        );
+        assert_eq!(snapshot.tuning_corpus_id, GF256_PROFILE_TUNING_CORPUS_ID);
+        assert!(!snapshot.selected_tuning_candidate_id.is_empty());
+        assert!(!snapshot.command_bundle.is_empty());
+        assert_eq!(snapshot.replay_pointer, GF256_PROFILE_PACK_REPLAY_POINTER);
+        assert!(!snapshot.profile_pack.as_str().is_empty());
+        for rejected_id in snapshot.rejected_tuning_candidate_ids {
+            assert_ne!(snapshot.selected_tuning_candidate_id, *rejected_id);
+            assert!(!rejected_id.is_empty());
+        }
+        for rejected in snapshot.rejected_candidates {
+            assert_ne!(*rejected, snapshot.profile_pack);
+            assert!(!rejected.as_str().is_empty());
+        }
+        if let Some(reason) = snapshot.fallback_reason {
+            assert!(!reason.as_str().is_empty());
+        }
     }
 
     #[test]

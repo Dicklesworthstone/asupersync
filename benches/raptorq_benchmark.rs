@@ -9,14 +9,15 @@
 
 #![allow(missing_docs)]
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use asupersync::raptorq::decoder::{DecodeStats, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::{
-    Gf256, dual_addmul_kernel_decision, dual_kernel_policy_snapshot, dual_mul_kernel_decision,
+    dual_addmul_kernel_decision, dual_kernel_policy_snapshot, dual_mul_kernel_decision,
     gf256_add_slice, gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slice, gf256_mul_slices2,
+    Gf256, Gf256ProfilePackId,
 };
-use asupersync::raptorq::linalg::{DenseRow, GaussianSolver, row_scale_add, row_xor};
+use asupersync::raptorq::linalg::{row_scale_add, row_xor, DenseRow, GaussianSolver};
 use asupersync::raptorq::systematic::SystematicEncoder;
 
 const TRACK_E_ARTIFACT_PATH: &str = "artifacts/raptorq_track_e_gf256_bench_v1.json";
@@ -80,11 +81,24 @@ fn emit_track_e_policy_log(scenario: &Gf256BenchScenario) {
     let mul_decision = dual_mul_kernel_decision(scenario.len, scenario.len);
     let addmul_decision = dual_addmul_kernel_decision(scenario.len, scenario.len);
     eprintln!(
-        "{{\"schema_version\":\"{}\",\"scenario_id\":\"{}\",\"seed\":{},\"kernel\":\"{:?}\",\"mode\":\"{:?}\",\"mul_window_min\":{},\"mul_window_max\":{},\"addmul_window_min\":{},\"addmul_window_max\":{},\"max_lane_ratio\":{},\"lane_len_a\":{},\"lane_len_b\":{},\"total_len\":{},\"mul_decision\":\"{:?}\",\"addmul_decision\":\"{:?}\",\"artifact_path\":\"{}\",\"repro_command\":\"{}\"}}",
+        "{{\"schema_version\":\"{}\",\"profile_schema_version\":\"{}\",\"scenario_id\":\"{}\",\"seed\":{},\"kernel\":\"{:?}\",\"architecture_class\":\"{}\",\"profile_pack\":\"{}\",\"profile_fallback_reason\":\"{}\",\"rejected_profile_packs\":\"{}\",\"tuning_corpus_id\":\"{}\",\"selected_tuning_candidate_id\":\"{}\",\"rejected_tuning_candidate_ids\":\"{}\",\"replay_pointer\":\"{}\",\"command_bundle\":\"{}\",\"mode\":\"{:?}\",\"mul_window_min\":{},\"mul_window_max\":{},\"addmul_window_min\":{},\"addmul_window_max\":{},\"max_lane_ratio\":{},\"lane_len_a\":{},\"lane_len_b\":{},\"total_len\":{},\"mul_decision\":\"{:?}\",\"addmul_decision\":\"{:?}\",\"artifact_path\":\"{}\",\"repro_command\":\"{}\"}}",
         TRACK_E_POLICY_SCHEMA_VERSION,
+        policy.profile_schema_version,
         scenario.scenario_id,
         scenario.seed,
         policy.kernel,
+        policy.architecture_class.as_str(),
+        policy.profile_pack.as_str(),
+        policy
+            .fallback_reason
+            .map(|reason| reason.as_str())
+            .unwrap_or("none"),
+        csv_profile_pack_ids(policy.rejected_candidates),
+        policy.tuning_corpus_id,
+        policy.selected_tuning_candidate_id,
+        csv_str_ids(policy.rejected_tuning_candidate_ids),
+        policy.replay_pointer,
+        policy.command_bundle,
         policy.mode,
         policy.mul_min_total,
         policy.mul_max_total,
@@ -121,11 +135,24 @@ fn emit_track_e_policy_probe_log(
     let total = scenario.lane_a_len.saturating_add(scenario.lane_b_len);
     let lane_ratio = lane_ratio_string(scenario.lane_a_len, scenario.lane_b_len);
     eprintln!(
-        "{{\"schema_version\":\"{}\",\"scenario_id\":\"{}\",\"seed\":{},\"kernel\":\"{:?}\",\"mode\":\"{:?}\",\"lane_len_a\":{},\"lane_len_b\":{},\"total_len\":{},\"lane_ratio\":\"{}\",\"mul_window_min\":{},\"mul_window_max\":{},\"addmul_window_min\":{},\"addmul_window_max\":{},\"max_lane_ratio\":{},\"mul_decision\":\"{}\",\"addmul_decision\":\"{}\",\"artifact_path\":\"{}\",\"repro_command\":\"{}\"}}",
+        "{{\"schema_version\":\"{}\",\"profile_schema_version\":\"{}\",\"scenario_id\":\"{}\",\"seed\":{},\"kernel\":\"{:?}\",\"architecture_class\":\"{}\",\"profile_pack\":\"{}\",\"profile_fallback_reason\":\"{}\",\"rejected_profile_packs\":\"{}\",\"tuning_corpus_id\":\"{}\",\"selected_tuning_candidate_id\":\"{}\",\"rejected_tuning_candidate_ids\":\"{}\",\"replay_pointer\":\"{}\",\"command_bundle\":\"{}\",\"mode\":\"{:?}\",\"lane_len_a\":{},\"lane_len_b\":{},\"total_len\":{},\"lane_ratio\":\"{}\",\"mul_window_min\":{},\"mul_window_max\":{},\"addmul_window_min\":{},\"addmul_window_max\":{},\"max_lane_ratio\":{},\"mul_decision\":\"{}\",\"addmul_decision\":\"{}\",\"artifact_path\":\"{}\",\"repro_command\":\"{}\"}}",
         TRACK_E_POLICY_PROBE_SCHEMA_VERSION,
+        policy.profile_schema_version,
         scenario.scenario_id,
         scenario.seed,
         policy.kernel,
+        policy.architecture_class.as_str(),
+        policy.profile_pack.as_str(),
+        policy
+            .fallback_reason
+            .map(|reason| reason.as_str())
+            .unwrap_or("none"),
+        csv_profile_pack_ids(policy.rejected_candidates),
+        policy.tuning_corpus_id,
+        policy.selected_tuning_candidate_id,
+        csv_str_ids(policy.rejected_tuning_candidate_ids),
+        policy.replay_pointer,
+        policy.command_bundle,
         policy.mode,
         scenario.lane_a_len,
         scenario.lane_b_len,
@@ -141,6 +168,23 @@ fn emit_track_e_policy_probe_log(
         TRACK_E_ARTIFACT_PATH,
         TRACK_E_POLICY_PROBE_REPRO_CMD,
     );
+}
+
+fn csv_profile_pack_ids(ids: &[Gf256ProfilePackId]) -> String {
+    if ids.is_empty() {
+        return "none".to_owned();
+    }
+    ids.iter()
+        .map(|id| id.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn csv_str_ids(ids: &[&str]) -> String {
+    if ids.is_empty() {
+        return "none".to_owned();
+    }
+    ids.join(",")
 }
 
 fn reference_mul_slice(dst: &mut [u8], c: Gf256) {
