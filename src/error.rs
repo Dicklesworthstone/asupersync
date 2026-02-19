@@ -505,7 +505,7 @@ impl Error {
     /// Creates a cancellation error from a structured reason.
     #[must_use]
     pub fn cancelled(reason: &CancelReason) -> Self {
-        Self::new(ErrorKind::Cancelled).with_message(format!("{reason}"))
+        Self::new(ErrorKind::Cancelled).with_message(reason.to_string())
     }
 
     /// Returns the error category.
@@ -1107,7 +1107,7 @@ mod tests {
     #[test]
     fn cancelled_struct_into_error() {
         let reason = CancelReason::user("test cancel");
-        let cancelled = Cancelled { reason: reason };
+        let cancelled = Cancelled { reason };
         let err: Error = cancelled.into();
         assert_eq!(err.kind(), ErrorKind::Cancelled);
         assert!(err.to_string().contains("Cancelled"));
@@ -1224,7 +1224,7 @@ mod tests {
         use std::collections::HashSet;
         let cat = ErrorCategory::Transport;
         let copied = cat;
-        let cloned = cat.clone();
+        let cloned = cat;
         assert_eq!(copied, cloned);
 
         let mut set = HashSet::new();
@@ -1258,7 +1258,7 @@ mod tests {
         let copied = err;
         assert_eq!(copied, RecvError::Disconnected);
 
-        let cloned = err.clone();
+        let cloned = err;
         assert_eq!(cloned, err);
     }
 

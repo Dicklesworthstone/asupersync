@@ -1270,7 +1270,7 @@ mod tests {
 
         let cid = ConnectionId::new(&[0xab, 0xcd]).unwrap();
         let copied = cid;
-        let cloned = cid.clone();
+        let cloned = cid;
         assert_eq!(copied, cloned);
         assert_ne!(cid, def);
 

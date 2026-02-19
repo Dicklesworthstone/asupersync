@@ -549,7 +549,7 @@ mod tests {
     #[test]
     fn request_debug_clone() {
         let r = Request::new("GET", "/api/v1");
-        let dbg = format!("{:?}", r);
+        let dbg = format!("{r:?}");
         assert!(dbg.contains("Request"));
         assert!(dbg.contains("GET"));
 
@@ -561,7 +561,7 @@ mod tests {
     #[test]
     fn extensions_debug_clone_default() {
         let e = Extensions::default();
-        let dbg = format!("{:?}", e);
+        let dbg = format!("{e:?}");
         assert!(dbg.contains("Extensions"));
 
         let e2 = e.clone();
@@ -571,7 +571,7 @@ mod tests {
     #[test]
     fn extraction_error_debug_clone() {
         let e = ExtractionError::bad_request("missing field");
-        let dbg = format!("{:?}", e);
+        let dbg = format!("{e:?}");
         assert!(dbg.contains("ExtractionError"));
         assert!(dbg.contains("missing field"));
 

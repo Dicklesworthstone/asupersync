@@ -423,7 +423,7 @@ mod tests {
         assert!(dbg.contains("StatusCode"), "{dbg}");
         assert!(dbg.contains("200"), "{dbg}");
         let copied = sc;
-        let cloned = sc.clone();
+        let cloned = sc;
         assert_eq!(copied, cloned);
         let display = format!("{sc}");
         assert_eq!(display, "200");

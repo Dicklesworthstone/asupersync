@@ -1464,7 +1464,7 @@ mod tests {
         let closed = AcquireError::Closed;
         let cancelled = AcquireError::Cancelled;
         let copied = closed;
-        let cloned = closed.clone();
+        let cloned = closed;
         assert_eq!(copied, cloned);
         assert_eq!(copied, AcquireError::Closed);
         assert_ne!(closed, cancelled);
