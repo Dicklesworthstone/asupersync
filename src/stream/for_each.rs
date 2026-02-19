@@ -194,4 +194,24 @@ mod tests {
         crate::assert_with_log!(ok, "collected", vec![1, 2, 3], collected);
         crate::test_complete!("for_each_async");
     }
+
+    /// Invariant: ForEachAsync with empty stream completes without calling the closure.
+    #[test]
+    fn for_each_async_empty() {
+        init_test("for_each_async_empty");
+        let mut called = false;
+        let mut future = ForEachAsync::new(iter(Vec::<i32>::new()), |_x| {
+            called = true;
+            Box::pin(async {})
+        });
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut future).poll(&mut cx);
+        let completed = matches!(poll, Poll::Ready(()));
+        crate::assert_with_log!(completed, "async empty completes", true, completed);
+        crate::assert_with_log!(!called, "closure not called", false, called);
+
+        crate::test_complete!("for_each_async_empty");
+    }
 }

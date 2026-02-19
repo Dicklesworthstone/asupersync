@@ -195,4 +195,48 @@ mod tests {
         crate::assert_with_log!(ok, "poll boxed", "Poll::Ready(Some(42))", poll);
         crate::test_complete!("boxed_stream");
     }
+
+    /// Invariant: `&mut S` implements Stream by forwarding to the underlying stream.
+    #[test]
+    fn ref_mut_stream() {
+        init_test("ref_mut_stream");
+        let mut stream = TestStream::new(vec![7, 8]);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Poll via &mut reference.
+        let stream_ref: &mut TestStream = &mut stream;
+        let poll = Pin::new(stream_ref).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some(7)));
+        crate::assert_with_log!(ok, "ref_mut poll 1", true, ok);
+
+        // size_hint forwarding via &mut.
+        let stream_ref: &mut TestStream = &mut stream;
+        let hint = Stream::size_hint(stream_ref);
+        let ok = hint == (1, Some(1));
+        crate::assert_with_log!(ok, "ref_mut size_hint", (1, Some(1)), hint);
+
+        crate::test_complete!("ref_mut_stream");
+    }
+
+    /// Invariant: default size_hint returns (0, None).
+    #[test]
+    fn default_size_hint() {
+        init_test("default_size_hint");
+
+        struct NoHint;
+        impl Stream for NoHint {
+            type Item = ();
+            fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<()>> {
+                Poll::Ready(None)
+            }
+        }
+
+        let stream = NoHint;
+        let hint = stream.size_hint();
+        let ok = hint == (0, None);
+        crate::assert_with_log!(ok, "default size_hint", (0, None::<usize>), hint);
+
+        crate::test_complete!("default_size_hint");
+    }
 }

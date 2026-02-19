@@ -128,4 +128,22 @@ mod tests {
         }
         crate::test_complete!("collect_empty");
     }
+
+    /// Invariant: collect works with String (via Extend<char>).
+    #[test]
+    fn collect_to_string() {
+        init_test("collect_to_string");
+        let mut future = Collect::new(iter(vec!['h', 'i', '!']), String::new());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        match Pin::new(&mut future).poll(&mut cx) {
+            Poll::Ready(collected) => {
+                let ok = collected == "hi!";
+                crate::assert_with_log!(ok, "collected string", "hi!", collected);
+            }
+            Poll::Pending => panic!("expected Ready"),
+        }
+        crate::test_complete!("collect_to_string");
+    }
 }
