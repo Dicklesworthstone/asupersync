@@ -616,6 +616,103 @@ mod tests {
         let _bad = b.split_off(100);
     }
 
+    // =========================================================================
+    // Wave 32: Data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn bytes_debug() {
+        let b = Bytes::from_static(b"hi");
+        let dbg = format!("{b:?}");
+        assert!(dbg.contains("Bytes"));
+        assert!(dbg.contains("len"));
+    }
+
+    #[test]
+    fn bytes_default() {
+        let b = Bytes::default();
+        assert!(b.is_empty());
+        assert_eq!(b.len(), 0);
+    }
+
+    #[test]
+    fn bytes_hash() {
+        use std::collections::HashSet;
+        let a = Bytes::from_static(b"hello");
+        let b = Bytes::copy_from_slice(b"hello");
+        let c = Bytes::from_static(b"world");
+        let mut set = HashSet::new();
+        set.insert(a);
+        set.insert(b);
+        set.insert(c);
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn bytes_partial_eq_vec() {
+        let b = Bytes::from_static(b"hello");
+        let v = b"hello".to_vec();
+        assert!(b == v);
+    }
+
+    #[test]
+    fn bytes_as_ref() {
+        let b = Bytes::from_static(b"hello");
+        let r: &[u8] = b.as_ref();
+        assert_eq!(r, b"hello");
+    }
+
+    #[test]
+    fn bytes_from_static_slice() {
+        let b: Bytes = (b"test" as &'static [u8]).into();
+        assert_eq!(&b[..], b"test");
+    }
+
+    #[test]
+    fn bytes_from_str() {
+        let b: Bytes = "hello".into();
+        assert_eq!(&b[..], b"hello");
+    }
+
+    #[test]
+    fn bytes_cursor_debug_clone() {
+        let b = Bytes::from_static(b"hello");
+        let cursor = BytesCursor::new(b);
+        let dbg = format!("{cursor:?}");
+        assert!(dbg.contains("BytesCursor"));
+        let cloned = cursor.clone();
+        assert_eq!(cloned.position(), 0);
+    }
+
+    #[test]
+    fn bytes_cursor_position() {
+        let b = Bytes::from_static(b"hello");
+        let mut cursor = BytesCursor::new(b);
+        assert_eq!(cursor.position(), 0);
+        cursor.set_position(3);
+        assert_eq!(cursor.position(), 3);
+    }
+
+    #[test]
+    fn bytes_cursor_get_ref_into_inner() {
+        let b = Bytes::from_static(b"hello");
+        let cursor = BytesCursor::new(b.clone());
+        assert_eq!(cursor.get_ref(), &b);
+        let inner = cursor.into_inner();
+        assert_eq!(&inner[..], b"hello");
+    }
+
+    #[test]
+    fn bytes_cursor_buf_trait() {
+        let b = Bytes::from_static(b"hello");
+        let mut cursor = b.reader();
+        assert_eq!(cursor.remaining(), 5);
+        assert_eq!(cursor.chunk(), b"hello");
+        cursor.advance(3);
+        assert_eq!(cursor.remaining(), 2);
+        assert_eq!(cursor.chunk(), b"lo");
+    }
+
     #[test]
     fn test_bytes_equality() {
         init_test("test_bytes_equality");

@@ -749,6 +749,73 @@ mod tests {
         assert_eq!(ctrl.stats().partitions_healed, 1);
     }
 
+    // =========================================================================
+    // Wave 32: Data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn actor_id_debug_clone_copy_ord_hash() {
+        use std::collections::HashSet;
+        let a = ActorId::new(1);
+        let b = ActorId::new(2);
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("ActorId"));
+        let _cloned = a.clone();
+        let _copied = a; // Copy
+        assert_eq!(a, a);
+        assert_ne!(a, b);
+        assert!(a < b);
+        let mut set = HashSet::new();
+        set.insert(a);
+        set.insert(b);
+        set.insert(a);
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn actor_id_raw_accessor() {
+        let a = ActorId::new(42);
+        assert_eq!(a.raw(), 42);
+    }
+
+    #[test]
+    fn partition_stats_debug_clone_default_display() {
+        let stats = PartitionStats::default();
+        assert_eq!(stats.partitions_created, 0);
+        assert_eq!(stats.partitions_healed, 0);
+        let dbg = format!("{stats:?}");
+        assert!(dbg.contains("PartitionStats"));
+        let display = format!("{stats}");
+        assert!(display.contains("created: 0"));
+        let cloned = stats.clone();
+        assert_eq!(cloned.partitions_created, 0);
+    }
+
+    #[test]
+    fn partition_behavior_debug_clone_copy_eq() {
+        let drop_b = PartitionBehavior::Drop;
+        let err_b = PartitionBehavior::Error;
+        let dbg = format!("{drop_b:?}");
+        assert!(dbg.contains("Drop"));
+        let _cloned = drop_b.clone();
+        let _copied = drop_b; // Copy
+        assert_eq!(drop_b, PartitionBehavior::Drop);
+        assert_ne!(drop_b, err_b);
+    }
+
+    #[test]
+    fn partition_controller_debug() {
+        let (ctrl, _) = make_controller(PartitionBehavior::Drop);
+        let dbg = format!("{ctrl:?}");
+        assert!(dbg.contains("PartitionController"));
+    }
+
+    #[test]
+    fn partition_controller_behavior_accessor() {
+        let (ctrl, _) = make_controller(PartitionBehavior::Error);
+        assert_eq!(ctrl.behavior(), PartitionBehavior::Error);
+    }
+
     #[test]
     fn actor_id_display() {
         let id = ActorId::new(42);
