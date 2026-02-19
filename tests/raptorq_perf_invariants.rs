@@ -2118,3 +2118,208 @@ fn f4_campaign_covers_required_lever_observability() {
         );
     }
 }
+
+// ============================================================================
+// F6: Regime-shift detector regression invariants
+// ============================================================================
+
+/// F6 invariant: regime stats are populated after a successful decode.
+#[test]
+fn f6_regime_stats_populated_after_decode() {
+    let k = 16;
+    let symbol_size = 64;
+    let seed = 0xF6_01_0001u64;
+
+    let source = make_source_data(k, symbol_size, seed);
+    let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+    let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+    let drop: Vec<usize> = vec![0, 3, 7];
+    let received = build_decode_received(&source, &encoder, &decoder, &drop, 4);
+
+    let result = decoder.decode(&received).expect("decode should succeed");
+
+    // Regime state must always be populated after decode.
+    assert!(
+        result.stats.regime_state.is_some(),
+        "f6: regime_state must be populated after decode"
+    );
+    // Regime replay ref must always be set.
+    assert_eq!(
+        result.stats.regime_replay_ref,
+        Some("replay:rq-track-f-regime-shift-v1"),
+        "f6: regime_replay_ref must match schema"
+    );
+}
+
+/// F6 invariant: first decode has window_len=1, stable phase, zero deltas.
+#[test]
+fn f6_first_decode_is_stable_with_zero_deltas() {
+    let k = 8;
+    let symbol_size = 32;
+    let seed = 0xF6_01_0002u64;
+
+    let source = make_source_data(k, symbol_size, seed);
+    let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+    let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+    let received = build_decode_received(&source, &encoder, &decoder, &[], 0);
+    let result = decoder.decode(&received).expect("decode should succeed");
+
+    assert_eq!(
+        result.stats.regime_state,
+        Some("stable"),
+        "f6: first decode should be stable"
+    );
+    assert_eq!(
+        result.stats.regime_window_len, 1,
+        "f6: first decode should have window_len=1"
+    );
+    assert_eq!(
+        result.stats.regime_delta_density_bias, 0,
+        "f6: first decode should have zero density bias delta"
+    );
+    assert_eq!(
+        result.stats.regime_delta_pressure_bias, 0,
+        "f6: first decode should have zero pressure bias delta"
+    );
+    assert_eq!(
+        result.stats.regime_retune_count, 0,
+        "f6: first decode should have zero retune count"
+    );
+    assert_eq!(
+        result.stats.regime_rollback_count, 0,
+        "f6: first decode should have zero rollback count"
+    );
+}
+
+/// F6 invariant: multiple successive decodes on the same decoder
+/// accumulate window entries without exceeding capacity.
+#[test]
+fn f6_window_bounded_across_decodes() {
+    let k = 8;
+    let symbol_size = 32;
+    let seed = 0xF6_01_0003u64;
+
+    let source = make_source_data(k, symbol_size, seed);
+    let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+    let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+    let received = build_decode_received(&source, &encoder, &decoder, &[], 0);
+
+    let mut last_window_len = 0;
+    // Decode 50 times on the same decoder instance.
+    for i in 0..50 {
+        let result = decoder
+            .decode(&received)
+            .unwrap_or_else(|e| panic!("f6: decode {i} should succeed: {e:?}"));
+        last_window_len = result.stats.regime_window_len;
+        assert!(
+            last_window_len <= 32,
+            "f6: window_len({last_window_len}) must not exceed capacity(32) at decode {i}"
+        );
+    }
+
+    // After 50 decodes, window should be saturated at capacity.
+    assert_eq!(
+        last_window_len, 32,
+        "f6: window should be at capacity after 50 decodes"
+    );
+}
+
+/// F6 invariant: retuning deltas are always within bounded caps.
+#[test]
+fn f6_retuning_deltas_always_bounded() {
+    let k = 8;
+    let symbol_size = 32;
+    let seed = 0xF6_01_0004u64;
+
+    let source = make_source_data(k, symbol_size, seed);
+    let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+    let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+    let received = build_decode_received(&source, &encoder, &decoder, &[], 0);
+
+    // Repeated decodes — verify delta bounds after each.
+    for i in 0..100 {
+        let result = decoder
+            .decode(&received)
+            .unwrap_or_else(|e| panic!("f6: decode {i} should succeed: {e:?}"));
+        let cap = 200i32;
+        assert!(
+            result.stats.regime_delta_density_bias.abs() <= cap,
+            "f6: density bias delta {} out of bounds at decode {i}",
+            result.stats.regime_delta_density_bias
+        );
+        assert!(
+            result.stats.regime_delta_pressure_bias.abs() <= cap,
+            "f6: pressure bias delta {} out of bounds at decode {i}",
+            result.stats.regime_delta_pressure_bias
+        );
+    }
+}
+
+/// F6 invariant: deterministic replay — same inputs produce same regime state.
+#[test]
+fn f6_deterministic_replay_across_decoders() {
+    let k = 16;
+    let symbol_size = 64;
+    let seed = 0xF6_01_0005u64;
+
+    let source = make_source_data(k, symbol_size, seed);
+    let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+
+    // Two independent decoders fed identical sequences.
+    let decoder_a = InactivationDecoder::new(k, symbol_size, seed);
+    let decoder_b = InactivationDecoder::new(k, symbol_size, seed);
+
+    let received = build_decode_received(&source, &encoder, &decoder_a, &[1, 5, 9], 4);
+
+    for i in 0..40 {
+        let result_a = decoder_a
+            .decode(&received)
+            .unwrap_or_else(|e| panic!("f6: decode_a {i} failed: {e:?}"));
+        let result_b = decoder_b
+            .decode(&received)
+            .unwrap_or_else(|e| panic!("f6: decode_b {i} failed: {e:?}"));
+
+        assert_eq!(
+            result_a.stats.regime_score, result_b.stats.regime_score,
+            "f6: regime_score mismatch at decode {i}"
+        );
+        assert_eq!(
+            result_a.stats.regime_state, result_b.stats.regime_state,
+            "f6: regime_state mismatch at decode {i}"
+        );
+        assert_eq!(
+            result_a.stats.regime_retune_count, result_b.stats.regime_retune_count,
+            "f6: retune_count mismatch at decode {i}"
+        );
+        assert_eq!(
+            result_a.stats.regime_delta_density_bias, result_b.stats.regime_delta_density_bias,
+            "f6: density_bias mismatch at decode {i}"
+        );
+        assert_eq!(
+            result_a.stats.regime_delta_pressure_bias, result_b.stats.regime_delta_pressure_bias,
+            "f6: pressure_bias mismatch at decode {i}"
+        );
+    }
+}
+
+/// F6 observability: benchmark file must reference regime stat fields.
+#[test]
+fn f6_benchmark_covers_regime_observability() {
+    for required in [
+        "regime_score",
+        "regime_state",
+        "regime_retune_count",
+        "regime_rollback_count",
+        "regime_delta_density_bias",
+        "regime_delta_pressure_bias",
+    ] {
+        assert!(
+            RAPTORQ_BENCH_RS.contains(required),
+            "f6: benchmark must emit regime observability field: {required}"
+        );
+    }
+}

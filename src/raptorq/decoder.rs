@@ -219,6 +219,22 @@ pub struct DecodeStats {
     pub factor_cache_entries: usize,
     /// Bounded capacity used by the dense-factor cache policy.
     pub factor_cache_capacity: usize,
+    /// F6 regime-shift detector: current CUSUM score (signed, bounded).
+    pub regime_score: i64,
+    /// F6 regime-shift detector: current regime state label.
+    pub regime_state: Option<&'static str>,
+    /// F6 regime-shift detector: number of retuning events applied.
+    pub regime_retune_count: usize,
+    /// F6 regime-shift detector: number of rollbacks to conservative defaults.
+    pub regime_rollback_count: usize,
+    /// F6 regime-shift detector: current window occupancy.
+    pub regime_window_len: usize,
+    /// F6 regime-shift detector: current density bias delta (permille adjustment).
+    pub regime_delta_density_bias: i32,
+    /// F6 regime-shift detector: current pressure bias delta (permille adjustment).
+    pub regime_delta_pressure_bias: i32,
+    /// F6 regime-shift detector: replay pointer for retuning forensics.
+    pub regime_replay_ref: Option<&'static str>,
 }
 
 /// Result of successful decoding.
@@ -402,6 +418,452 @@ impl DenseFactorCache {
 
     fn len(&self) -> usize {
         self.entries.len()
+    }
+}
+
+// ============================================================================
+// F6: Regime-shift detector
+// ============================================================================
+
+/// Maximum number of observations in the regime detector window.
+const REGIME_WINDOW_CAPACITY: usize = 32;
+
+/// CUSUM threshold for declaring a regime shift (in permille-scaled score units).
+/// A score that exceeds this indicates the workload has drifted far enough from
+/// baseline that retuning should be considered.
+const REGIME_SHIFT_THRESHOLD: i64 = 500;
+
+/// Maximum absolute adjustment to any loss-model bias term (permille).
+/// Retuning deltas are clamped to [-cap, +cap] to satisfy the "no unbounded
+/// online learning" safety constraint.
+const REGIME_MAX_RETUNE_DELTA: i32 = 200;
+
+/// Number of consecutive oscillations (shift→rollback→shift) before the detector
+/// permanently locks to conservative defaults for this decoder instance.
+const REGIME_ROLLBACK_OSCILLATION_LIMIT: usize = 3;
+
+/// Replay pointer for F6 regime-shift retuning events.
+const REGIME_REPLAY_REF: &str = "replay:rq-track-f-regime-shift-v1";
+
+/// Labels for the regime detector state machine.
+const REGIME_STATE_STABLE: &str = "stable";
+const REGIME_STATE_SHIFTING: &str = "shifting";
+const REGIME_STATE_RETUNED: &str = "retuned";
+const REGIME_STATE_ROLLBACK: &str = "rollback";
+const REGIME_STATE_LOCKED: &str = "locked_conservative";
+
+/// A single observation fed to the regime detector after each decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RegimeObservation {
+    /// Policy features observed during the decode.
+    features: DecoderPolicyFeatures,
+    /// Whether the decode succeeded.
+    decode_success: bool,
+    /// The policy mode that was selected.
+    policy_mode: DecoderPolicyMode,
+}
+
+/// Bounded retuning deltas applied to the loss-model bias terms.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(clippy::struct_field_names)]
+struct RetuningDeltas {
+    /// Adjustment to the conservative baseline intercept (added to 400).
+    baseline_intercept_delta: i32,
+    /// Adjustment to the density coefficient for baseline (multiplied by 3 + delta).
+    density_bias_delta: i32,
+    /// Adjustment to the inactivation pressure coefficient (multiplied by 2 + delta).
+    pressure_bias_delta: i32,
+}
+
+impl RetuningDeltas {
+    /// Clamp all deltas to the allowed cap range.
+    fn clamped(self) -> Self {
+        Self {
+            baseline_intercept_delta: self
+                .baseline_intercept_delta
+                .clamp(-REGIME_MAX_RETUNE_DELTA, REGIME_MAX_RETUNE_DELTA),
+            density_bias_delta: self
+                .density_bias_delta
+                .clamp(-REGIME_MAX_RETUNE_DELTA, REGIME_MAX_RETUNE_DELTA),
+            pressure_bias_delta: self
+                .pressure_bias_delta
+                .clamp(-REGIME_MAX_RETUNE_DELTA, REGIME_MAX_RETUNE_DELTA),
+        }
+    }
+
+    /// True when all deltas are zero (conservative defaults).
+    fn is_zero(&self) -> bool {
+        self.baseline_intercept_delta == 0
+            && self.density_bias_delta == 0
+            && self.pressure_bias_delta == 0
+    }
+}
+
+/// The regime detector's internal state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegimePhase {
+    /// Accumulating baseline statistics, no retuning active.
+    Stable,
+    /// A shift has been detected but not yet acted upon (needs confirmation).
+    Shifting,
+    /// Retuning deltas are active.
+    Retuned,
+    /// Rolled back to conservative defaults after instability.
+    Rollback,
+    /// Permanently locked to conservative defaults (oscillation limit hit).
+    LockedConservative,
+}
+
+impl RegimePhase {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Stable => REGIME_STATE_STABLE,
+            Self::Shifting => REGIME_STATE_SHIFTING,
+            Self::Retuned => REGIME_STATE_RETUNED,
+            Self::Rollback => REGIME_STATE_ROLLBACK,
+            Self::LockedConservative => REGIME_STATE_LOCKED,
+        }
+    }
+}
+
+/// Bounded windowed regime-shift detector.
+///
+/// Maintains a fixed-size ring buffer of recent policy feature observations.
+/// Uses a deterministic CUSUM (cumulative sum control chart) to detect when
+/// the workload regime has shifted significantly. On shift detection, computes
+/// bounded retuning deltas to adjust the policy engine's loss-model biases.
+///
+/// Safety invariants:
+/// - Window is bounded to `REGIME_WINDOW_CAPACITY` entries.
+/// - Retuning deltas never exceed `REGIME_MAX_RETUNE_DELTA` in any dimension.
+/// - After `REGIME_ROLLBACK_OSCILLATION_LIMIT` oscillations, locks to conservative.
+/// - Deterministic for fixed input sequences (no floating point, no randomness).
+#[derive(Debug)]
+struct RegimeDetector {
+    /// Ring buffer of recent observations. Front = oldest, back = newest.
+    window: VecDeque<RegimeObservation>,
+    /// Running sum of density permille values in the window.
+    density_sum: i64,
+    /// Running sum of inactivation pressure permille values in the window.
+    pressure_sum: i64,
+    /// Baseline density mean (permille), established from first REGIME_WINDOW_CAPACITY observations.
+    baseline_density: i64,
+    /// Baseline pressure mean (permille), established similarly.
+    baseline_pressure: i64,
+    /// Whether the baseline has been established (window filled at least once).
+    baseline_established: bool,
+    /// Current CUSUM score for density drift.
+    cusum_density: i64,
+    /// Current CUSUM score for pressure drift.
+    cusum_pressure: i64,
+    /// Current phase of the detector state machine.
+    phase: RegimePhase,
+    /// Active retuning deltas (zero when not retuned).
+    deltas: RetuningDeltas,
+    /// Total number of retuning events applied.
+    retune_count: usize,
+    /// Total number of rollbacks performed.
+    rollback_count: usize,
+    /// Consecutive oscillation count (shift→rollback→shift cycles).
+    oscillation_count: usize,
+}
+
+impl Default for RegimeDetector {
+    fn default() -> Self {
+        Self {
+            window: VecDeque::with_capacity(REGIME_WINDOW_CAPACITY),
+            density_sum: 0,
+            pressure_sum: 0,
+            baseline_density: 0,
+            baseline_pressure: 0,
+            baseline_established: false,
+            cusum_density: 0,
+            cusum_pressure: 0,
+            phase: RegimePhase::Stable,
+            deltas: RetuningDeltas::default(),
+            retune_count: 0,
+            rollback_count: 0,
+            oscillation_count: 0,
+        }
+    }
+}
+
+impl RegimeDetector {
+    /// Record a new observation and update the detector state.
+    ///
+    /// Returns the current retuning deltas (may be zero if stable or locked).
+    #[allow(clippy::cast_possible_wrap)] // permille values (<=1000) and window len (<=32) never wrap
+    fn observe(&mut self, obs: RegimeObservation) -> RetuningDeltas {
+        // Permanently locked — no further adaptation.
+        if self.phase == RegimePhase::LockedConservative {
+            return RetuningDeltas::default();
+        }
+
+        // Maintain bounded window.
+        let density_val = obs.features.density_permille as i64;
+        let pressure_val = obs.features.inactivation_pressure_permille as i64;
+
+        if self.window.len() >= REGIME_WINDOW_CAPACITY {
+            if let Some(evicted) = self.window.pop_front() {
+                self.density_sum -= evicted.features.density_permille as i64;
+                self.pressure_sum -= evicted.features.inactivation_pressure_permille as i64;
+            }
+        }
+        self.window.push_back(obs);
+        self.density_sum += density_val;
+        self.pressure_sum += pressure_val;
+
+        let window_len = self.window.len() as i64;
+
+        // Establish baseline once the window fills for the first time.
+        if !self.baseline_established {
+            if self.window.len() >= REGIME_WINDOW_CAPACITY {
+                self.baseline_density = self.density_sum / window_len;
+                self.baseline_pressure = self.pressure_sum / window_len;
+                self.baseline_established = true;
+            }
+            return self.deltas;
+        }
+
+        // Compute current window means.
+        let current_density_mean = self.density_sum / window_len;
+        let current_pressure_mean = self.pressure_sum / window_len;
+
+        // CUSUM update: accumulate drift from baseline.
+        // Use two-sided CUSUM (absolute deviation) for simplicity and determinism.
+        let density_deviation = (current_density_mean - self.baseline_density).abs();
+        let pressure_deviation = (current_pressure_mean - self.baseline_pressure).abs();
+
+        // CUSUM with reset-to-zero when below zero (one-sided positive CUSUM).
+        self.cusum_density = (self.cusum_density + density_deviation - 50).max(0);
+        self.cusum_pressure = (self.cusum_pressure + pressure_deviation - 30).max(0);
+
+        let combined_score = self.cusum_density + self.cusum_pressure;
+
+        match self.phase {
+            RegimePhase::Stable => {
+                if combined_score >= REGIME_SHIFT_THRESHOLD {
+                    self.phase = RegimePhase::Shifting;
+                }
+            }
+            RegimePhase::Shifting => {
+                // Confirm the shift: if score is still above threshold, retune.
+                if combined_score >= REGIME_SHIFT_THRESHOLD {
+                    self.apply_retuning(current_density_mean, current_pressure_mean);
+                } else {
+                    // Transient spike, return to stable.
+                    self.phase = RegimePhase::Stable;
+                    self.cusum_density = 0;
+                    self.cusum_pressure = 0;
+                }
+            }
+            RegimePhase::Retuned => {
+                // Monitor for instability: if a retuned decode fails, roll back.
+                if !obs.decode_success {
+                    self.rollback();
+                }
+                // Also rollback if the regime shifted again (score back above threshold
+                // relative to the *new* baseline would mean the retuning didn't help).
+                if combined_score >= REGIME_SHIFT_THRESHOLD * 2 {
+                    self.rollback();
+                }
+            }
+            RegimePhase::Rollback => {
+                // After rollback, re-establish baseline from scratch.
+                self.baseline_established = false;
+                self.cusum_density = 0;
+                self.cusum_pressure = 0;
+                self.phase = RegimePhase::Stable;
+            }
+            RegimePhase::LockedConservative => {
+                // Unreachable due to early return above.
+            }
+        }
+
+        self.deltas
+    }
+
+    /// Compute and apply bounded retuning deltas based on the observed drift.
+    fn apply_retuning(&mut self, current_density_mean: i64, current_pressure_mean: i64) {
+        let density_drift = current_density_mean - self.baseline_density;
+        let pressure_drift = current_pressure_mean - self.baseline_pressure;
+
+        // Compute deltas: if density increased, lower baseline intercept to make
+        // aggressive modes more accessible; if pressure increased, adjust pressure
+        // sensitivity.
+        let raw_deltas = RetuningDeltas {
+            baseline_intercept_delta: -(density_drift as i32 / 5),
+            density_bias_delta: -(density_drift as i32 / 10),
+            pressure_bias_delta: -(pressure_drift as i32 / 10),
+        };
+
+        self.deltas = raw_deltas.clamped();
+        self.phase = RegimePhase::Retuned;
+        self.retune_count += 1;
+
+        // Update baseline to current means to prevent repeated re-triggering.
+        self.baseline_density = current_density_mean;
+        self.baseline_pressure = current_pressure_mean;
+
+        // Reset CUSUM accumulators after successful retuning.
+        self.cusum_density = 0;
+        self.cusum_pressure = 0;
+    }
+
+    /// Roll back to conservative defaults (zero deltas).
+    fn rollback(&mut self) {
+        self.deltas = RetuningDeltas::default();
+        self.rollback_count += 1;
+        self.oscillation_count += 1;
+
+        if self.oscillation_count >= REGIME_ROLLBACK_OSCILLATION_LIMIT {
+            self.phase = RegimePhase::LockedConservative;
+        } else {
+            self.phase = RegimePhase::Rollback;
+        }
+    }
+
+    /// Get the current combined CUSUM score.
+    fn combined_score(&self) -> i64 {
+        self.cusum_density + self.cusum_pressure
+    }
+
+    /// Get the current retuning deltas.
+    fn current_deltas(&self) -> RetuningDeltas {
+        self.deltas
+    }
+
+    /// Apply regime detector state to decode stats for observability.
+    fn apply_to_stats(&self, stats: &mut DecodeStats) {
+        stats.regime_score = self.combined_score();
+        stats.regime_state = Some(self.phase.label());
+        stats.regime_retune_count = self.retune_count;
+        stats.regime_rollback_count = self.rollback_count;
+        stats.regime_window_len = self.window.len();
+        stats.regime_delta_density_bias = self.deltas.density_bias_delta;
+        stats.regime_delta_pressure_bias = self.deltas.pressure_bias_delta;
+        stats.regime_replay_ref = Some(REGIME_REPLAY_REF);
+    }
+}
+
+/// Apply retuning deltas to the policy loss computation.
+///
+/// The deltas adjust the loss-model coefficients within bounded caps,
+/// allowing the policy engine to adapt to workload regime shifts while
+/// preserving deterministic replay semantics.
+fn policy_losses_with_retuning(
+    features: DecoderPolicyFeatures,
+    n_cols: usize,
+    deltas: RetuningDeltas,
+) -> (u32, u32, u32) {
+    if deltas.is_zero() {
+        return policy_losses(features, n_cols);
+    }
+
+    let density = clamp_usize_to_u32(features.density_permille);
+    let rank_deficit = clamp_usize_to_u32(features.rank_deficit_permille);
+    let inactivation_pressure = clamp_usize_to_u32(features.inactivation_pressure_permille);
+    let overhead = clamp_usize_to_u32(features.overhead_ratio_permille);
+
+    // Apply bounded deltas to the baseline loss intercept and coefficients.
+    // .max() calls guarantee non-negative values before unsigned conversion.
+    let baseline_intercept = (400i32 + deltas.baseline_intercept_delta)
+        .max(200)
+        .unsigned_abs();
+    let density_coeff = (3i32 + deltas.density_bias_delta).max(1).unsigned_abs();
+    let pressure_coeff = (2i32 + deltas.pressure_bias_delta).max(1).unsigned_abs();
+
+    let baseline_loss = baseline_intercept
+        .saturating_add(density.saturating_mul(density_coeff))
+        .saturating_add(rank_deficit.saturating_mul(4))
+        .saturating_add(inactivation_pressure.saturating_mul(pressure_coeff))
+        .saturating_add(overhead);
+
+    // Aggressive modes use the same static model (retuning only adjusts the
+    // conservative baseline to make mode selection more or less aggressive).
+    let high_support_loss = 700u32
+        .saturating_add(density)
+        .saturating_add(rank_deficit.saturating_mul(3))
+        .saturating_add(inactivation_pressure)
+        .saturating_add(overhead / 2);
+
+    let block_schur_loss = if n_cols < BLOCK_SCHUR_MIN_COLS {
+        u32::MAX
+    } else {
+        750u32
+            .saturating_add(density / 2)
+            .saturating_add(rank_deficit.saturating_mul(2))
+            .saturating_add(inactivation_pressure)
+            .saturating_add(overhead / 3)
+    };
+
+    (baseline_loss, high_support_loss, block_schur_loss)
+}
+
+/// Choose runtime decoder policy with optional regime-shift retuning deltas.
+fn choose_runtime_decoder_policy_retuned(
+    n_rows: usize,
+    n_cols: usize,
+    dense_nonzeros: usize,
+    unsupported_cols: usize,
+    inactivation_pressure_permille: usize,
+    deltas: RetuningDeltas,
+) -> DecoderPolicyDecision {
+    let features = compute_decoder_policy_features(
+        n_rows,
+        n_cols,
+        dense_nonzeros,
+        unsupported_cols,
+        inactivation_pressure_permille,
+    );
+
+    let (baseline_loss, high_support_loss, mut block_schur_loss) =
+        policy_losses_with_retuning(features, n_cols, deltas);
+
+    if features.budget_exhausted {
+        return DecoderPolicyDecision {
+            mode: DecoderPolicyMode::ConservativeBaseline,
+            features,
+            baseline_loss,
+            high_support_loss,
+            block_schur_loss,
+            reason: "policy_budget_exhausted_conservative",
+        };
+    }
+
+    let hard_gate = n_cols >= HARD_REGIME_MIN_COLS
+        && (features.density_permille >= HARD_REGIME_DENSITY_PERCENT.saturating_mul(10)
+            || n_rows <= n_cols.saturating_add(HARD_REGIME_NEAR_SQUARE_EXTRA_ROWS));
+    if !hard_gate {
+        return DecoderPolicyDecision {
+            mode: DecoderPolicyMode::ConservativeBaseline,
+            features,
+            baseline_loss,
+            high_support_loss,
+            block_schur_loss,
+            reason: "expected_loss_conservative_gate",
+        };
+    }
+
+    let block_gate = n_cols >= BLOCK_SCHUR_MIN_COLS
+        && features.density_permille >= BLOCK_SCHUR_MIN_DENSITY_PERCENT.saturating_mul(10)
+        && n_cols > BLOCK_SCHUR_TRAILING_COLS;
+    if !block_gate {
+        block_schur_loss = u32::MAX;
+    }
+    let mode = if block_schur_loss < high_support_loss {
+        DecoderPolicyMode::BlockSchurLowRank
+    } else {
+        DecoderPolicyMode::HighSupportFirst
+    };
+
+    DecoderPolicyDecision {
+        mode,
+        features,
+        baseline_loss,
+        high_support_loss,
+        block_schur_loss,
+        reason: "expected_loss_minimum",
     }
 }
 
@@ -1052,6 +1514,7 @@ pub struct InactivationDecoder {
     params: SystematicParams,
     seed: u64,
     dense_factor_cache: parking_lot::Mutex<DenseFactorCache>,
+    regime_detector: parking_lot::Mutex<RegimeDetector>,
 }
 
 impl InactivationDecoder {
@@ -1063,6 +1526,7 @@ impl InactivationDecoder {
             params,
             seed,
             dense_factor_cache: parking_lot::Mutex::new(DenseFactorCache::default()),
+            regime_detector: parking_lot::Mutex::new(RegimeDetector::default()),
         }
     }
 
@@ -1179,7 +1643,35 @@ impl InactivationDecoder {
         Self::peel(&mut state);
 
         // Phase 2: Inactivation + Gaussian elimination
-        self.inactivate_and_solve(&mut state)?;
+        let solve_result = self.inactivate_and_solve(&mut state);
+
+        // F6: Feed observation to regime detector and apply stats.
+        // The observation is recorded regardless of decode success/failure.
+        {
+            let features = DecoderPolicyFeatures {
+                density_permille: state.stats.policy_density_permille,
+                rank_deficit_permille: state.stats.policy_rank_deficit_permille,
+                inactivation_pressure_permille: state.stats.policy_inactivation_pressure_permille,
+                overhead_ratio_permille: state.stats.policy_overhead_ratio_permille,
+                budget_exhausted: state.stats.policy_budget_exhausted,
+            };
+            let policy_mode = match state.stats.policy_mode {
+                Some("high_support_first") => DecoderPolicyMode::HighSupportFirst,
+                Some("block_schur_low_rank") => DecoderPolicyMode::BlockSchurLowRank,
+                _ => DecoderPolicyMode::ConservativeBaseline,
+            };
+            let obs = RegimeObservation {
+                features,
+                decode_success: solve_result.is_ok(),
+                policy_mode,
+            };
+            let mut detector = self.regime_detector.lock();
+            let _deltas = detector.observe(obs);
+            detector.apply_to_stats(&mut state.stats);
+        }
+
+        // Propagate solve failure after regime observation.
+        solve_result?;
 
         // Extract results
         let intermediate: Vec<Vec<u8>> = state
@@ -1248,9 +1740,34 @@ impl InactivationDecoder {
         Self::peel_with_proof(&mut state, proof_builder.peeling_mut());
 
         // Phase 2: Inactivation + Gaussian elimination with proof capture
-        if let Err(err) =
-            self.inactivate_and_solve_with_proof(&mut state, proof_builder.elimination_mut())
+        let solve_result =
+            self.inactivate_and_solve_with_proof(&mut state, proof_builder.elimination_mut());
+
+        // F6: Feed observation to regime detector and apply stats.
         {
+            let features = DecoderPolicyFeatures {
+                density_permille: state.stats.policy_density_permille,
+                rank_deficit_permille: state.stats.policy_rank_deficit_permille,
+                inactivation_pressure_permille: state.stats.policy_inactivation_pressure_permille,
+                overhead_ratio_permille: state.stats.policy_overhead_ratio_permille,
+                budget_exhausted: state.stats.policy_budget_exhausted,
+            };
+            let policy_mode = match state.stats.policy_mode {
+                Some("high_support_first") => DecoderPolicyMode::HighSupportFirst,
+                Some("block_schur_low_rank") => DecoderPolicyMode::BlockSchurLowRank,
+                _ => DecoderPolicyMode::ConservativeBaseline,
+            };
+            let obs = RegimeObservation {
+                features,
+                decode_success: solve_result.is_ok(),
+                policy_mode,
+            };
+            let mut detector = self.regime_detector.lock();
+            let _deltas = detector.observe(obs);
+            detector.apply_to_stats(&mut state.stats);
+        }
+
+        if let Err(err) = solve_result {
             let reason = failure_reason_with_trace(&err, proof_builder.elimination_mut());
             proof_builder.set_failure(reason);
             return Err((err, proof_builder.build()));
@@ -1602,12 +2119,15 @@ impl InactivationDecoder {
             .filter(|&&support| support == 0)
             .count();
 
-        let decision = choose_runtime_decoder_policy(
+        // F6: Apply regime-shift retuning deltas to the policy decision.
+        let regime_deltas = self.regime_detector.lock().current_deltas();
+        let decision = choose_runtime_decoder_policy_retuned(
             n_rows,
             n_cols,
             dense_nonzeros,
             unsupported_cols,
             inactivation_pressure_permille,
+            regime_deltas,
         );
         apply_policy_decision_to_stats(&mut state.stats, decision);
         let mut hard_regime = !matches!(decision.mode, DecoderPolicyMode::ConservativeBaseline);
@@ -1845,12 +2365,15 @@ impl InactivationDecoder {
             .count();
 
         trace.set_strategy(InactivationStrategy::AllAtOnce);
-        let decision = choose_runtime_decoder_policy(
+        // F6: Apply regime-shift retuning deltas to the policy decision.
+        let regime_deltas = self.regime_detector.lock().current_deltas();
+        let decision = choose_runtime_decoder_policy_retuned(
             n_rows,
             n_cols,
             dense_nonzeros,
             unsupported_cols,
             inactivation_pressure_permille,
+            regime_deltas,
         );
         apply_policy_decision_to_stats(&mut state.stats, decision);
         let mut hard_regime = !matches!(decision.mode, DecoderPolicyMode::ConservativeBaseline);
@@ -4110,5 +4633,324 @@ mod tests {
             l,
             "peeled + inactivated must equal L ({l})"
         );
+    }
+
+    // ── F6: Regime-shift detector unit tests ──
+
+    fn make_regime_observation(
+        density: usize,
+        pressure: usize,
+        success: bool,
+    ) -> RegimeObservation {
+        RegimeObservation {
+            features: DecoderPolicyFeatures {
+                density_permille: density,
+                rank_deficit_permille: 0,
+                inactivation_pressure_permille: pressure,
+                overhead_ratio_permille: 0,
+                budget_exhausted: false,
+            },
+            decode_success: success,
+            policy_mode: DecoderPolicyMode::ConservativeBaseline,
+        }
+    }
+
+    #[test]
+    fn regime_detector_starts_stable_with_zero_deltas() {
+        let detector = RegimeDetector::default();
+        assert_eq!(detector.phase, RegimePhase::Stable);
+        assert!(detector.current_deltas().is_zero());
+        assert_eq!(detector.combined_score(), 0);
+        assert!(!detector.baseline_established);
+    }
+
+    #[test]
+    fn regime_detector_establishes_baseline_after_window_fills() {
+        let mut detector = RegimeDetector::default();
+
+        // Feed REGIME_WINDOW_CAPACITY observations with constant features.
+        for _ in 0..REGIME_WINDOW_CAPACITY {
+            detector.observe(make_regime_observation(200, 100, true));
+        }
+
+        assert!(
+            detector.baseline_established,
+            "baseline should be established after window fills"
+        );
+        assert_eq!(detector.baseline_density, 200);
+        assert_eq!(detector.baseline_pressure, 100);
+        assert_eq!(detector.phase, RegimePhase::Stable);
+    }
+
+    #[test]
+    fn regime_detector_stays_stable_under_constant_workload() {
+        let mut detector = RegimeDetector::default();
+
+        // Fill window to establish baseline.
+        for _ in 0..REGIME_WINDOW_CAPACITY {
+            detector.observe(make_regime_observation(200, 100, true));
+        }
+
+        // Feed more constant observations.
+        for _ in 0..REGIME_WINDOW_CAPACITY * 2 {
+            let deltas = detector.observe(make_regime_observation(200, 100, true));
+            assert!(
+                deltas.is_zero(),
+                "stable workload should produce zero deltas"
+            );
+        }
+
+        assert_eq!(detector.phase, RegimePhase::Stable);
+        assert_eq!(detector.retune_count, 0);
+        assert_eq!(detector.rollback_count, 0);
+    }
+
+    #[test]
+    fn regime_detector_detects_shift_on_large_drift() {
+        let mut detector = RegimeDetector::default();
+
+        // Establish baseline at low density/pressure.
+        for _ in 0..REGIME_WINDOW_CAPACITY {
+            detector.observe(make_regime_observation(100, 50, true));
+        }
+        assert!(detector.baseline_established);
+
+        // Inject a large drift: density jumps from 100 to 800.
+        // This should accumulate CUSUM score and eventually trigger a shift.
+        let mut shifted = false;
+        for _ in 0..REGIME_WINDOW_CAPACITY * 2 {
+            detector.observe(make_regime_observation(800, 400, true));
+            if detector.retune_count > 0 {
+                shifted = true;
+                break;
+            }
+        }
+
+        assert!(
+            shifted,
+            "large drift should trigger at least one retuning event"
+        );
+        assert!(
+            !detector.current_deltas().is_zero(),
+            "retuning should produce non-zero deltas"
+        );
+    }
+
+    #[test]
+    fn regime_retuning_deltas_are_bounded() {
+        let mut detector = RegimeDetector::default();
+
+        // Establish baseline.
+        for _ in 0..REGIME_WINDOW_CAPACITY {
+            detector.observe(make_regime_observation(100, 50, true));
+        }
+
+        // Force a massive drift.
+        for _ in 0..REGIME_WINDOW_CAPACITY * 3 {
+            detector.observe(make_regime_observation(999, 999, true));
+        }
+
+        let deltas = detector.current_deltas();
+        let cap = REGIME_MAX_RETUNE_DELTA;
+        assert!(
+            deltas.baseline_intercept_delta.abs() <= cap,
+            "baseline intercept delta {} should be within [-{}, {}]",
+            deltas.baseline_intercept_delta,
+            cap,
+            cap
+        );
+        assert!(
+            deltas.density_bias_delta.abs() <= cap,
+            "density bias delta {} should be within [-{}, {}]",
+            deltas.density_bias_delta,
+            cap,
+            cap
+        );
+        assert!(
+            deltas.pressure_bias_delta.abs() <= cap,
+            "pressure bias delta {} should be within [-{}, {}]",
+            deltas.pressure_bias_delta,
+            cap,
+            cap
+        );
+    }
+
+    #[test]
+    fn regime_detector_rolls_back_on_decode_failure_after_retuning() {
+        let mut detector = RegimeDetector::default();
+
+        // Establish baseline.
+        for _ in 0..REGIME_WINDOW_CAPACITY {
+            detector.observe(make_regime_observation(100, 50, true));
+        }
+
+        // Trigger a shift.
+        for _ in 0..REGIME_WINDOW_CAPACITY * 2 {
+            detector.observe(make_regime_observation(800, 400, true));
+            if detector.retune_count > 0 {
+                break;
+            }
+        }
+        assert!(detector.retune_count > 0, "should have retuned");
+        assert_eq!(detector.phase, RegimePhase::Retuned);
+
+        // Now a decode failure should trigger rollback.
+        detector.observe(make_regime_observation(800, 400, false));
+        assert!(
+            detector.current_deltas().is_zero(),
+            "rollback should zero all deltas"
+        );
+        assert!(detector.rollback_count > 0, "rollback should be counted");
+    }
+
+    #[test]
+    fn regime_detector_locks_conservative_after_oscillation_limit() {
+        let mut detector = RegimeDetector::default();
+
+        for cycle in 0..REGIME_ROLLBACK_OSCILLATION_LIMIT {
+            // Establish baseline.
+            detector.baseline_established = false;
+            for _ in 0..REGIME_WINDOW_CAPACITY {
+                detector.observe(make_regime_observation(100, 50, true));
+            }
+
+            // Trigger shift.
+            for _ in 0..REGIME_WINDOW_CAPACITY * 2 {
+                detector.observe(make_regime_observation(800, 400, true));
+                if detector.retune_count > cycle {
+                    break;
+                }
+            }
+
+            // Trigger rollback.
+            if detector.phase == RegimePhase::Retuned {
+                detector.observe(make_regime_observation(800, 400, false));
+            }
+        }
+
+        assert_eq!(
+            detector.phase,
+            RegimePhase::LockedConservative,
+            "should lock to conservative after {} oscillations",
+            REGIME_ROLLBACK_OSCILLATION_LIMIT
+        );
+
+        // Further observations should return zero deltas.
+        let deltas = detector.observe(make_regime_observation(999, 999, true));
+        assert!(
+            deltas.is_zero(),
+            "locked conservative should always return zero deltas"
+        );
+    }
+
+    #[test]
+    fn regime_detector_window_bounded_to_capacity() {
+        let mut detector = RegimeDetector::default();
+
+        // Feed more observations than window capacity.
+        for _ in 0..(REGIME_WINDOW_CAPACITY * 3) {
+            detector.observe(make_regime_observation(200, 100, true));
+        }
+
+        assert!(
+            detector.window.len() <= REGIME_WINDOW_CAPACITY,
+            "window should never exceed capacity: got {} vs max {}",
+            detector.window.len(),
+            REGIME_WINDOW_CAPACITY
+        );
+    }
+
+    #[test]
+    fn regime_detector_stats_applied_to_decode_stats() {
+        let mut detector = RegimeDetector::default();
+        for _ in 0..REGIME_WINDOW_CAPACITY {
+            detector.observe(make_regime_observation(200, 100, true));
+        }
+
+        let mut stats = DecodeStats::default();
+        detector.apply_to_stats(&mut stats);
+
+        assert_eq!(stats.regime_state, Some(REGIME_STATE_STABLE));
+        assert_eq!(stats.regime_replay_ref, Some(REGIME_REPLAY_REF));
+        assert_eq!(stats.regime_retune_count, 0);
+        assert_eq!(stats.regime_rollback_count, 0);
+        assert_eq!(stats.regime_window_len, REGIME_WINDOW_CAPACITY);
+    }
+
+    #[test]
+    fn regime_retuned_policy_losses_differ_from_static() {
+        let features = DecoderPolicyFeatures {
+            density_permille: 500,
+            rank_deficit_permille: 100,
+            inactivation_pressure_permille: 300,
+            overhead_ratio_permille: 50,
+            budget_exhausted: false,
+        };
+        let n_cols = 16;
+
+        let (static_bl, static_hs, static_bs) = policy_losses(features, n_cols);
+        let deltas = RetuningDeltas {
+            baseline_intercept_delta: -100,
+            density_bias_delta: -1,
+            pressure_bias_delta: -1,
+        };
+        let (retuned_bl, retuned_hs, retuned_bs) =
+            policy_losses_with_retuning(features, n_cols, deltas);
+
+        assert!(
+            retuned_bl < static_bl,
+            "retuning with negative bias should lower baseline loss: {} vs {}",
+            retuned_bl,
+            static_bl
+        );
+        // Aggressive modes should remain unchanged.
+        assert_eq!(retuned_hs, static_hs);
+        assert_eq!(retuned_bs, static_bs);
+    }
+
+    #[test]
+    fn regime_retuned_policy_zero_deltas_matches_static() {
+        let features = DecoderPolicyFeatures {
+            density_permille: 400,
+            rank_deficit_permille: 200,
+            inactivation_pressure_permille: 150,
+            overhead_ratio_permille: 80,
+            budget_exhausted: false,
+        };
+        let n_cols = 20;
+
+        let (static_bl, static_hs, static_bs) = policy_losses(features, n_cols);
+        let (retuned_bl, retuned_hs, retuned_bs) =
+            policy_losses_with_retuning(features, n_cols, RetuningDeltas::default());
+
+        assert_eq!(static_bl, retuned_bl);
+        assert_eq!(static_hs, retuned_hs);
+        assert_eq!(static_bs, retuned_bs);
+    }
+
+    #[test]
+    fn regime_detector_deterministic_replay() {
+        // Two detectors fed identical sequences must produce identical state.
+        let observations: Vec<RegimeObservation> = (0..REGIME_WINDOW_CAPACITY * 2)
+            .map(|i| {
+                let density = 100 + (i % 10) * 80;
+                let pressure = 50 + (i % 7) * 60;
+                make_regime_observation(density, pressure, i % 5 != 0)
+            })
+            .collect();
+
+        let mut det_a = RegimeDetector::default();
+        let mut det_b = RegimeDetector::default();
+
+        for obs in &observations {
+            let da = det_a.observe(*obs);
+            let db = det_b.observe(*obs);
+            assert_eq!(da, db, "deterministic replay violated at observation");
+        }
+
+        assert_eq!(det_a.combined_score(), det_b.combined_score());
+        assert_eq!(det_a.phase, det_b.phase);
+        assert_eq!(det_a.retune_count, det_b.retune_count);
+        assert_eq!(det_a.rollback_count, det_b.rollback_count);
     }
 }
