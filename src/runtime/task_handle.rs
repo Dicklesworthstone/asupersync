@@ -523,4 +523,86 @@ mod tests {
         );
         crate::test_complete!("drop_join_does_not_abort_if_channel_already_closed");
     }
+
+    // =========================================================================
+    // Wave 27: Data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn join_error_debug_cancelled() {
+        let err = JoinError::Cancelled(CancelReason::user("test"));
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Cancelled"));
+    }
+
+    #[test]
+    fn join_error_debug_panicked() {
+        let err = JoinError::Panicked(PanicPayload::new("oops"));
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Panicked"));
+    }
+
+    #[test]
+    fn join_error_clone() {
+        let err = JoinError::Cancelled(CancelReason::timeout());
+        let err2 = err.clone();
+        assert_eq!(err, err2);
+    }
+
+    #[test]
+    fn join_error_eq() {
+        let a = JoinError::Cancelled(CancelReason::user("a"));
+        let b = JoinError::Cancelled(CancelReason::user("a"));
+        assert_eq!(a, b);
+
+        let c = JoinError::Panicked(PanicPayload::new("x"));
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn join_error_is_std_error() {
+        let err: &dyn std::error::Error = &JoinError::Cancelled(CancelReason::user("e"));
+        // std::error::Error requires Display + Debug
+        let _ = format!("{err}");
+        let _ = format!("{err:?}");
+    }
+
+    #[test]
+    fn task_handle_debug() {
+        let task_id = TaskId::from_arena(ArenaIndex::new(5, 0));
+        let (_tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        let handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
+        let dbg = format!("{handle:?}");
+        assert!(dbg.contains("TaskHandle"));
+    }
+
+    #[test]
+    fn try_join_not_ready() {
+        let task_id = TaskId::from_arena(ArenaIndex::new(20, 0));
+        let (_tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        let handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
+        let result = handle.try_join();
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn try_join_ready() {
+        let cx = test_cx();
+        let task_id = TaskId::from_arena(ArenaIndex::new(21, 0));
+        let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        tx.send(&cx, Ok(99)).expect("send");
+        let handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
+        let result = handle.try_join();
+        assert_eq!(result.unwrap(), Some(99));
+    }
+
+    #[test]
+    fn try_join_closed_channel() {
+        let task_id = TaskId::from_arena(ArenaIndex::new(22, 0));
+        let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        drop(tx);
+        let handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
+        let result = handle.try_join();
+        assert!(matches!(result, Err(JoinError::Cancelled(_))));
+    }
 }

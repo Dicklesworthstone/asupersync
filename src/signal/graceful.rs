@@ -398,4 +398,89 @@ mod tests {
         );
         crate::test_complete!("graceful_config_builder");
     }
+
+    // =========================================================================
+    // Wave 27: Data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn graceful_outcome_debug() {
+        let completed: GracefulOutcome<i32> = GracefulOutcome::Completed(42);
+        let dbg = format!("{completed:?}");
+        assert!(dbg.contains("Completed"));
+        assert!(dbg.contains("42"));
+
+        let shutdown: GracefulOutcome<i32> = GracefulOutcome::ShutdownSignaled;
+        let dbg = format!("{shutdown:?}");
+        assert!(dbg.contains("ShutdownSignaled"));
+    }
+
+    #[test]
+    fn graceful_outcome_clone_copy() {
+        let outcome: GracefulOutcome<i32> = GracefulOutcome::Completed(7);
+        let cloned = outcome.clone();
+        let copied = outcome; // Copy
+        assert_eq!(cloned, copied);
+        assert_eq!(cloned, GracefulOutcome::Completed(7));
+    }
+
+    #[test]
+    fn graceful_outcome_eq() {
+        let a: GracefulOutcome<i32> = GracefulOutcome::Completed(1);
+        let b: GracefulOutcome<i32> = GracefulOutcome::Completed(1);
+        let c: GracefulOutcome<i32> = GracefulOutcome::Completed(2);
+        let d: GracefulOutcome<i32> = GracefulOutcome::ShutdownSignaled;
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(a, d);
+    }
+
+    #[test]
+    fn graceful_config_debug() {
+        let config = GracefulConfig::default();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("GracefulConfig"));
+        assert!(dbg.contains("grace_period"));
+        assert!(dbg.contains("log_events"));
+    }
+
+    #[test]
+    fn graceful_config_clone() {
+        let config = GracefulConfig::default()
+            .with_grace_period(Duration::from_secs(5))
+            .with_logging(false);
+        let config2 = config.clone();
+        assert_eq!(config2.grace_period, Duration::from_secs(5));
+        assert!(!config2.log_events);
+    }
+
+    #[test]
+    fn graceful_config_default_values() {
+        let config = GracefulConfig::default();
+        assert_eq!(config.grace_period, Duration::from_secs(30));
+        assert!(config.log_events);
+    }
+
+    #[test]
+    fn grace_period_guard_debug() {
+        let guard = GracePeriodGuard::new(Duration::from_secs(60));
+        let dbg = format!("{guard:?}");
+        assert!(dbg.contains("GracePeriodGuard"));
+        assert!(dbg.contains("duration"));
+    }
+
+    #[test]
+    fn grace_period_guard_duration_accessor() {
+        let guard = GracePeriodGuard::new(Duration::from_millis(500));
+        assert_eq!(guard.duration(), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn grace_period_guard_started_at_accessor() {
+        let before = std::time::Instant::now();
+        let guard = GracePeriodGuard::new(Duration::from_secs(1));
+        let after = std::time::Instant::now();
+        assert!(guard.started_at() >= before);
+        assert!(guard.started_at() <= after);
+    }
 }
