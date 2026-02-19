@@ -311,4 +311,40 @@ mod tests {
         crate::assert_with_log!(name == "Service", "full_name", "Service", name);
         crate::test_complete!("test_service_descriptor_no_package");
     }
+
+    // =========================================================================
+    // Wave 46 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn method_descriptor_debug_clone() {
+        let md = MethodDescriptor::unary("Hello", "/pkg.Svc/Hello");
+        let dbg = format!("{md:?}");
+        assert!(dbg.contains("MethodDescriptor"), "{dbg}");
+        assert!(dbg.contains("Hello"), "{dbg}");
+        let cloned = md.clone();
+        assert_eq!(cloned.name, md.name);
+        assert_eq!(cloned.path, md.path);
+        assert_eq!(cloned.client_streaming, md.client_streaming);
+        assert_eq!(cloned.server_streaming, md.server_streaming);
+    }
+
+    #[test]
+    fn method_descriptor_client_streaming() {
+        let md = MethodDescriptor::client_streaming("Upload", "/pkg.Svc/Upload");
+        assert!(md.client_streaming);
+        assert!(!md.server_streaming);
+        assert!(!md.is_unary());
+    }
+
+    #[test]
+    fn service_descriptor_debug_clone() {
+        let desc = ServiceDescriptor::new("Greeter", "helloworld", METHODS_GREETER);
+        let dbg = format!("{desc:?}");
+        assert!(dbg.contains("ServiceDescriptor"), "{dbg}");
+        let cloned = desc.clone();
+        assert_eq!(cloned.name, "Greeter");
+        assert_eq!(cloned.package, "helloworld");
+        assert_eq!(cloned.methods.len(), 1);
+    }
 }

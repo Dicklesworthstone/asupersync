@@ -269,6 +269,43 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    // =========================================================================
+    // Wave 46 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn cache_config_debug_clone_default() {
+        let def = CacheConfig::default();
+        assert_eq!(def.max_entries, 10_000);
+        assert_eq!(def.min_ttl, Duration::from_mins(1));
+        assert_eq!(def.negative_ttl, Duration::from_secs(30));
+        let dbg = format!("{def:?}");
+        assert!(dbg.contains("CacheConfig"), "{dbg}");
+        let cloned = def.clone();
+        assert_eq!(cloned.max_entries, def.max_entries);
+    }
+
+    #[test]
+    fn cache_stats_debug_clone_default() {
+        let stats = CacheStats::default();
+        assert_eq!(stats.size, 0);
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.misses, 0);
+        assert_eq!(stats.evictions, 0);
+        assert_eq!(stats.hit_rate, 0.0);
+        let dbg = format!("{stats:?}");
+        assert!(dbg.contains("CacheStats"), "{dbg}");
+        let cloned = stats.clone();
+        assert_eq!(cloned.size, stats.size);
+    }
+
+    #[test]
+    fn dns_cache_debug_default() {
+        let cache = DnsCache::default();
+        let dbg = format!("{cache:?}");
+        assert!(dbg.contains("DnsCache"), "{dbg}");
+    }
+
     #[test]
     fn cache_hit_miss() {
         init_test("cache_hit_miss");

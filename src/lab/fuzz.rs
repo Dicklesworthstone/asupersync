@@ -368,4 +368,57 @@ mod tests {
         let r2 = run(77);
         assert_eq!(r1, r2);
     }
+
+    // =========================================================================
+    // Wave 46 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn fuzz_config_debug_clone_defaults() {
+        let cfg = FuzzConfig::new(42, 100);
+        let dbg = format!("{cfg:?}");
+        assert!(dbg.contains("FuzzConfig"), "{dbg}");
+        assert_eq!(cfg.base_seed, 42);
+        assert_eq!(cfg.iterations, 100);
+        assert_eq!(cfg.max_steps, 100_000);
+        assert_eq!(cfg.worker_count, 1);
+        assert!(cfg.minimize);
+        assert_eq!(cfg.minimize_attempts, 64);
+        let cloned = cfg.clone();
+        assert_eq!(cloned.base_seed, cfg.base_seed);
+        assert_eq!(cloned.iterations, cfg.iterations);
+    }
+
+    #[test]
+    fn fuzz_finding_debug_clone() {
+        let finding = FuzzFinding {
+            seed: 99,
+            steps: 500,
+            violations: vec![],
+            certificate_hash: 12345,
+            minimized_seed: Some(7),
+        };
+        let dbg = format!("{finding:?}");
+        assert!(dbg.contains("FuzzFinding"), "{dbg}");
+        let cloned = finding.clone();
+        assert_eq!(cloned.seed, 99);
+        assert_eq!(cloned.steps, 500);
+        assert_eq!(cloned.certificate_hash, 12345);
+        assert_eq!(cloned.minimized_seed, Some(7));
+    }
+
+    #[test]
+    fn fuzz_report_debug_empty() {
+        let report = FuzzReport {
+            iterations: 0,
+            findings: vec![],
+            violation_counts: BTreeMap::new(),
+            unique_certificates: 0,
+        };
+        let dbg = format!("{report:?}");
+        assert!(dbg.contains("FuzzReport"), "{dbg}");
+        assert!(!report.has_findings());
+        assert!(report.finding_seeds().is_empty());
+        assert!(report.minimized_seeds().is_empty());
+    }
 }
