@@ -591,6 +591,128 @@ mod tests {
         assert_eq!(injector.timed_count.load(Ordering::Relaxed), 0);
     }
 
+    // ── has_runnable_work tests (br-3narc.2.1) ──────────────────────────
+
+    #[test]
+    fn has_runnable_work_empty_returns_false() {
+        let injector = GlobalInjector::new();
+        assert!(
+            !injector.has_runnable_work(Time::ZERO),
+            "empty injector has no runnable work"
+        );
+    }
+
+    #[test]
+    fn has_runnable_work_cancel_always_runnable() {
+        let injector = GlobalInjector::new();
+        injector.inject_cancel(task(1), 100);
+        assert!(
+            injector.has_runnable_work(Time::ZERO),
+            "cancel work is always runnable regardless of time"
+        );
+    }
+
+    #[test]
+    fn has_runnable_work_ready_always_runnable() {
+        let injector = GlobalInjector::new();
+        injector.inject_ready(task(1), 50);
+        assert!(
+            injector.has_runnable_work(Time::ZERO),
+            "ready work is always runnable regardless of time"
+        );
+    }
+
+    #[test]
+    fn has_runnable_work_timed_not_due() {
+        let injector = GlobalInjector::new();
+        injector.inject_timed(task(1), Time::from_secs(100));
+        assert!(
+            !injector.has_runnable_work(Time::from_secs(50)),
+            "timed work with future deadline is not runnable"
+        );
+    }
+
+    #[test]
+    fn has_runnable_work_timed_exactly_due() {
+        let injector = GlobalInjector::new();
+        injector.inject_timed(task(1), Time::from_secs(100));
+        assert!(
+            injector.has_runnable_work(Time::from_secs(100)),
+            "timed work at exactly its deadline is runnable"
+        );
+    }
+
+    #[test]
+    fn has_runnable_work_timed_past_due() {
+        let injector = GlobalInjector::new();
+        injector.inject_timed(task(1), Time::from_secs(100));
+        assert!(
+            injector.has_runnable_work(Time::from_secs(200)),
+            "timed work past its deadline is runnable"
+        );
+    }
+
+    #[test]
+    fn has_runnable_work_only_timed_with_mixed_deadlines() {
+        let injector = GlobalInjector::new();
+        injector.inject_timed(task(1), Time::from_secs(100));
+        injector.inject_timed(task(2), Time::from_secs(50));
+
+        // At t=25, neither is due
+        assert!(
+            !injector.has_runnable_work(Time::from_secs(25)),
+            "no timed work due at t=25"
+        );
+
+        // At t=50, task 2 is due
+        assert!(
+            injector.has_runnable_work(Time::from_secs(50)),
+            "earliest timed work (t=50) is due"
+        );
+    }
+
+    // ── peek_earliest_deadline consistency (br-3narc.2.1) ─────────────
+
+    #[test]
+    fn peek_earliest_deadline_updates_after_pop() {
+        let injector = GlobalInjector::new();
+        injector.inject_timed(task(1), Time::from_secs(50));
+        injector.inject_timed(task(2), Time::from_secs(100));
+
+        assert_eq!(injector.peek_earliest_deadline(), Some(Time::from_secs(50)));
+
+        // Pop the earliest
+        let _ = injector.pop_timed();
+        assert_eq!(
+            injector.peek_earliest_deadline(),
+            Some(Time::from_secs(100)),
+            "peek should reflect next earliest after pop"
+        );
+
+        // Pop the last
+        let _ = injector.pop_timed();
+        assert_eq!(
+            injector.peek_earliest_deadline(),
+            None,
+            "peek should be None after draining all timed work"
+        );
+    }
+
+    #[test]
+    fn peek_earliest_deadline_updates_after_pop_if_due() {
+        let injector = GlobalInjector::new();
+        injector.inject_timed(task(1), Time::from_secs(50));
+        injector.inject_timed(task(2), Time::from_secs(100));
+
+        // Pop via pop_timed_if_due
+        let _ = injector.pop_timed_if_due(Time::from_secs(50));
+        assert_eq!(
+            injector.peek_earliest_deadline(),
+            Some(Time::from_secs(100)),
+            "peek updated after pop_timed_if_due"
+        );
+    }
+
     #[test]
     fn concurrent_decrements_saturate_counters_at_zero() {
         for _ in 0..2_000 {

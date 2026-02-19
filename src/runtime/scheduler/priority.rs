@@ -2736,4 +2736,257 @@ mod tests {
         let idx = Scheduler::tie_break_index(1u64 << 32, 3);
         assert_eq!(idx, 1);
     }
+
+    // ── ScheduledSet collision path tests (br-3narc.2.1) ─────────────────
+
+    #[test]
+    fn scheduled_set_dense_collision_same_index_different_gen() {
+        init_test("scheduled_set_dense_collision_same_index_different_gen");
+        // Two TaskIds with the same arena index but different generations
+        // should trigger DENSE_COLLISION and fall through to overflow.
+        let mut set = ScheduledSet::with_capacity(64);
+        let t1 = TaskId(ArenaIndex::new(5, 0)); // index=5, gen=0
+        let t2 = TaskId(ArenaIndex::new(5, 1)); // index=5, gen=1
+
+        assert!(set.insert(t1), "first insert succeeds");
+        assert!(set.insert(t2), "second insert at same index succeeds");
+        assert_eq!(set.len(), 2, "both tasks are tracked");
+
+        // Dense slot should be DENSE_COLLISION
+        assert_eq!(
+            set.dense[5],
+            ScheduledSet::DENSE_COLLISION,
+            "slot should be in collision mode"
+        );
+
+        // Both should be in overflow
+        assert!(set.overflow.contains(&t1));
+        assert!(set.overflow.contains(&t2));
+        crate::test_complete!("scheduled_set_dense_collision_same_index_different_gen");
+    }
+
+    #[test]
+    fn scheduled_set_collision_collapse_after_remove() {
+        init_test("scheduled_set_collision_collapse_after_remove");
+        let mut set = ScheduledSet::with_capacity(64);
+        let t1 = TaskId(ArenaIndex::new(7, 0));
+        let t2 = TaskId(ArenaIndex::new(7, 1));
+
+        set.insert(t1);
+        set.insert(t2);
+        assert_eq!(set.dense[7], ScheduledSet::DENSE_COLLISION);
+
+        // Remove t1: only t2 remains → should collapse back to dense
+        assert!(set.remove(t1));
+        assert_eq!(set.len(), 1);
+
+        // After collapse, dense slot should store t2's tag, not DENSE_COLLISION
+        let expected_tag = u64::from(t2.0.generation()) + 1;
+        assert_eq!(
+            set.dense[7], expected_tag,
+            "slot should collapse to remaining task's tag"
+        );
+        // t2 should no longer be in overflow
+        assert!(
+            !set.overflow.contains(&t2),
+            "remaining task should move back to dense tracking"
+        );
+        crate::test_complete!("scheduled_set_collision_collapse_after_remove");
+    }
+
+    #[test]
+    fn scheduled_set_collision_no_collapse_with_multiple_remaining() {
+        init_test("scheduled_set_collision_no_collapse_with_multiple_remaining");
+        let mut set = ScheduledSet::with_capacity(64);
+        let t1 = TaskId(ArenaIndex::new(3, 0));
+        let t2 = TaskId(ArenaIndex::new(3, 1));
+        let t3 = TaskId(ArenaIndex::new(3, 2));
+
+        set.insert(t1);
+        set.insert(t2);
+        set.insert(t3);
+        assert_eq!(set.len(), 3);
+        assert_eq!(set.dense[3], ScheduledSet::DENSE_COLLISION);
+
+        // Remove one: two remain → should stay in collision mode
+        set.remove(t1);
+        assert_eq!(set.len(), 2);
+        assert_eq!(
+            set.dense[3],
+            ScheduledSet::DENSE_COLLISION,
+            "slot should stay in collision mode with 2 remaining"
+        );
+        crate::test_complete!("scheduled_set_collision_no_collapse_with_multiple_remaining");
+    }
+
+    #[test]
+    fn scheduled_set_dedup_in_collision_mode() {
+        init_test("scheduled_set_dedup_in_collision_mode");
+        let mut set = ScheduledSet::with_capacity(64);
+        let t1 = TaskId(ArenaIndex::new(10, 0));
+        let t2 = TaskId(ArenaIndex::new(10, 1));
+
+        set.insert(t1);
+        set.insert(t2);
+        assert_eq!(set.len(), 2);
+
+        // Re-inserting t1 should be deduplicated
+        assert!(!set.insert(t1), "duplicate insert should return false");
+        assert_eq!(set.len(), 2, "length should not change on duplicate");
+        crate::test_complete!("scheduled_set_dedup_in_collision_mode");
+    }
+
+    #[test]
+    fn scheduled_set_overflow_for_high_index() {
+        init_test("scheduled_set_overflow_for_high_index");
+        // TaskId with an index beyond MAX_DENSE_LEN should go straight to overflow
+        let mut set = ScheduledSet::with_capacity(64);
+        let high_idx = (ScheduledSet::MAX_DENSE_LEN + 100) as u32;
+        let t = TaskId(ArenaIndex::new(high_idx, 0));
+
+        assert!(set.insert(t));
+        assert_eq!(set.len(), 1);
+        assert!(set.overflow.contains(&t));
+
+        assert!(set.remove(t));
+        assert_eq!(set.len(), 0);
+        crate::test_complete!("scheduled_set_overflow_for_high_index");
+    }
+
+    #[test]
+    fn scheduled_set_grow_dense_to_fit() {
+        init_test("scheduled_set_grow_dense_to_fit");
+        // Start with a small set and insert a task beyond initial dense range
+        let mut set = ScheduledSet::with_capacity(64);
+        let initial_len = set.dense.len();
+
+        // Insert at an index just beyond initial dense capacity
+        let idx = (initial_len + 10) as u32;
+        let t = TaskId(ArenaIndex::new(idx, 0));
+        assert!(set.insert(t));
+        assert!(
+            set.dense.len() > initial_len,
+            "dense vector should have grown"
+        );
+        assert_eq!(set.len(), 1);
+
+        // Should be in dense path (not overflow)
+        let expected_tag = u64::from(t.0.generation()) + 1;
+        assert_eq!(set.dense[idx as usize], expected_tag);
+        crate::test_complete!("scheduled_set_grow_dense_to_fit");
+    }
+
+    // ── Scheduler integration: collision tasks dispatch correctly (br-3narc.2.1) ──
+
+    #[test]
+    fn scheduler_handles_collision_tasks_correctly() {
+        init_test("scheduler_handles_collision_tasks_correctly");
+        let mut sched = Scheduler::new();
+
+        // Schedule two tasks with the same arena index but different generations
+        let t1 = TaskId(ArenaIndex::new(5, 0));
+        let t2 = TaskId(ArenaIndex::new(5, 1));
+        sched.schedule(t1, 50);
+        sched.schedule(t2, 100);
+
+        // Both should be dispatchable
+        let first = sched.pop();
+        let second = sched.pop();
+
+        // Higher priority should come first
+        crate::assert_with_log!(
+            first == Some(t2),
+            "higher priority task dispatches first",
+            Some(t2),
+            first
+        );
+        crate::assert_with_log!(
+            second == Some(t1),
+            "lower priority task dispatches second",
+            Some(t1),
+            second
+        );
+        assert!(sched.is_empty());
+        crate::test_complete!("scheduler_handles_collision_tasks_correctly");
+    }
+
+    // ── ScheduleCertificate determinism across independent runs (br-3narc.2.1) ──
+
+    #[test]
+    fn certificate_determinism_independent_schedulers() {
+        init_test("certificate_determinism_independent_schedulers");
+        // Two independent scheduler instances with same task sequence
+        // should produce matching certificates.
+        let mut sched1 = Scheduler::new();
+        let mut sched2 = Scheduler::new();
+        let mut cert1 = ScheduleCertificate::new();
+        let mut cert2 = ScheduleCertificate::new();
+
+        // Same sequence of operations on both
+        for i in 0..10 {
+            sched1.schedule(task(i), (i % 3) as u8 * 50);
+            sched2.schedule(task(i), (i % 3) as u8 * 50);
+        }
+
+        let mut step = 0u64;
+        while let Some((t1, lane1)) = sched1.pop_with_lane(0) {
+            let (t2, lane2) = sched2
+                .pop_with_lane(0)
+                .expect("both should have same tasks");
+            assert_eq!(t1, t2, "same dispatch order at step {step}");
+            assert_eq!(lane1, lane2, "same lane at step {step}");
+            cert1.record(t1, lane1, step);
+            cert2.record(t2, lane2, step);
+            step += 1;
+        }
+        assert!(
+            sched2.pop().is_none(),
+            "both schedulers should drain together"
+        );
+
+        crate::assert_with_log!(
+            cert1.matches(&cert2),
+            "certificates from identical sequences must match",
+            true,
+            cert1.matches(&cert2)
+        );
+        crate::assert_with_log!(
+            cert1.hash() == cert2.hash(),
+            "certificate hashes must be identical",
+            cert1.hash(),
+            cert2.hash()
+        );
+        crate::test_complete!("certificate_determinism_independent_schedulers");
+    }
+
+    // ── steal_ready_batch_into half-steal invariant (br-3narc.2.1) ────────
+
+    #[test]
+    fn steal_ready_batch_into_steals_at_most_half() {
+        init_test("steal_ready_batch_into_steals_at_most_half");
+        let mut sched = Scheduler::new();
+        let total = 20;
+        for i in 0..total {
+            sched.schedule(task(i), 50);
+        }
+
+        let mut buf = Vec::new();
+        let count = sched.steal_ready_batch_into(100, &mut buf);
+
+        // Should steal at most half: 20/2 = 10
+        crate::assert_with_log!(
+            count <= total as usize / 2,
+            "steal should take at most half",
+            true,
+            count <= total as usize / 2
+        );
+        // Remaining tasks should still be in scheduler
+        let remaining = sched.len();
+        assert_eq!(
+            remaining + count,
+            total as usize,
+            "stolen + remaining = total"
+        );
+        crate::test_complete!("steal_ready_batch_into_steals_at_most_half");
+    }
 }

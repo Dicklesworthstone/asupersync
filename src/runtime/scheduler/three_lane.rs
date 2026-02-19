@@ -3672,6 +3672,191 @@ mod tests {
         // guarantees even distribution over time)
     }
 
+    // ========== WorkerCoordinator non-power-of-two tests (br-3narc.2.1) ==========
+
+    #[test]
+    fn test_coordinator_non_power_of_two_round_robin() {
+        // 3 workers is non-power-of-two, so mask = None and modulo is used.
+        let parkers: Vec<Parker> = (0..3).map(|_| Parker::new()).collect();
+        let coordinator = WorkerCoordinator::new(parkers);
+
+        // mask should be None for non-power-of-two count
+        assert!(
+            coordinator.mask.is_none(),
+            "3 workers should use modulo path, not bitmask"
+        );
+
+        // Verify round-robin visits all 3 workers cyclically:
+        // idx=0 → 0%3=0, idx=1 → 1%3=1, idx=2 → 2%3=2,
+        // idx=3 → 3%3=0, idx=4 → 4%3=1, idx=5 → 5%3=2
+        for cycle in 0..3 {
+            for expected_slot in 0..3 {
+                let idx = coordinator.next_wake.load(Ordering::Relaxed);
+                let slot = idx % 3;
+                assert_eq!(
+                    slot, expected_slot,
+                    "cycle {cycle}, idx {idx} should wake slot {expected_slot}"
+                );
+                coordinator.wake_one();
+            }
+        }
+    }
+
+    #[test]
+    fn test_coordinator_power_of_two_uses_bitmask() {
+        // 4 workers is power-of-two, so mask = Some(3)
+        let parkers: Vec<Parker> = (0..4).map(|_| Parker::new()).collect();
+        let coordinator = WorkerCoordinator::new(parkers);
+
+        assert_eq!(
+            coordinator.mask,
+            Some(3),
+            "4 workers should use bitmask 0b11"
+        );
+
+        // Verify round-robin: idx & 3 == idx % 4 for small values
+        for i in 0u64..8 {
+            let idx = coordinator.next_wake.load(Ordering::Relaxed);
+            assert_eq!(idx & 3, (i as usize) % 4);
+            coordinator.wake_one();
+        }
+    }
+
+    #[test]
+    fn test_coordinator_single_worker() {
+        let parkers = vec![Parker::new()];
+        let coordinator = WorkerCoordinator::new(parkers);
+
+        // 1 is power-of-two, mask = Some(0) → always wakes slot 0
+        assert_eq!(coordinator.mask, Some(0));
+
+        for _ in 0..10 {
+            coordinator.wake_one();
+        }
+        // No panic = success (all wakes go to slot 0)
+    }
+
+    #[test]
+    fn test_coordinator_zero_workers_is_noop() {
+        let coordinator = WorkerCoordinator::new(vec![]);
+        assert!(coordinator.mask.is_none());
+        // wake_one should be a no-op, not panic
+        coordinator.wake_one();
+        coordinator.wake_all();
+    }
+
+    // ========== Default cancel_streak_limit=16 fairness (br-3narc.2.1) ==========
+
+    #[test]
+    fn test_default_cancel_streak_limit_fairness() {
+        // Verify that with the default limit (16), ready work is dispatched
+        // after at most 16 consecutive cancel dispatches.
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+
+        // Inject 20 cancel tasks and 1 ready task
+        for i in 0..20 {
+            scheduler.inject_cancel(TaskId::new_for_test(1, i), 100);
+        }
+        let ready_task = TaskId::new_for_test(1, 99);
+        scheduler.inject_ready(ready_task, 50);
+
+        let mut workers = scheduler.take_workers().into_iter();
+        let mut worker = workers.next().unwrap();
+
+        // Dispatch 21 tasks and find where the ready task appears
+        let mut dispatch_order = Vec::new();
+        for _ in 0..21 {
+            if let Some(task) = worker.next_task() {
+                dispatch_order.push(task);
+            }
+        }
+
+        let ready_pos = dispatch_order
+            .iter()
+            .position(|t| *t == ready_task)
+            .expect("ready task must be dispatched");
+
+        // Ready task must appear within cancel_streak_limit + 1 = 17 positions
+        assert!(
+            ready_pos <= DEFAULT_CANCEL_STREAK_LIMIT,
+            "ready task at position {ready_pos} must appear within \
+             cancel_streak_limit ({DEFAULT_CANCEL_STREAK_LIMIT}) + 1 dispatches"
+        );
+
+        // Verify preemption metrics
+        let metrics = worker.preemption_metrics();
+        assert!(
+            metrics.fairness_yields > 0,
+            "should have fairness yields with 20 cancel + 1 ready"
+        );
+        assert!(
+            metrics.max_cancel_streak <= DEFAULT_CANCEL_STREAK_LIMIT,
+            "max cancel streak {} should not exceed default limit {}",
+            metrics.max_cancel_streak,
+            DEFAULT_CANCEL_STREAK_LIMIT
+        );
+    }
+
+    // ========== Region close quiescence via RuntimeState (br-3narc.2.1) ==========
+
+    #[test]
+    #[allow(clippy::significant_drop_tightening)]
+    fn test_region_quiescence_all_tasks_complete() {
+        // Verify that the runtime state's is_quiescent correctly reflects
+        // whether all tasks in all regions have completed.
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let region = state
+            .lock()
+            .expect("lock")
+            .create_root_region(Budget::INFINITE);
+
+        // Create two tasks in the region
+        let task_id1 = {
+            let mut guard = state.lock().expect("lock");
+            let (id, _) = guard
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task");
+            id
+        };
+        let task_id2 = {
+            let mut guard = state.lock().expect("lock");
+            let (id, _) = guard
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task");
+            id
+        };
+
+        // Not quiescent: 2 live tasks
+        assert!(
+            !state.lock().expect("lock").is_quiescent(),
+            "should not be quiescent with live tasks"
+        );
+
+        // Execute task 1 via scheduler
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        scheduler.inject_ready(task_id1, 100);
+        scheduler.inject_ready(task_id2, 100);
+
+        let workers = scheduler.take_workers();
+        let worker = &workers[0];
+
+        // Execute both tasks
+        worker.execute(task_id1);
+        worker.execute(task_id2);
+
+        // After both tasks complete, the task table should be empty
+        let guard = state.lock().expect("lock");
+        assert!(
+            guard.task(task_id1).is_none(),
+            "task1 should be removed after completion"
+        );
+        assert!(
+            guard.task(task_id2).is_none(),
+            "task2 should be removed after completion"
+        );
+    }
+
     // ========== Governor Integration Tests (bd-2spm) ==========
 
     #[test]

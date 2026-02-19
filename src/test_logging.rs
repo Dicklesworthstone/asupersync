@@ -2755,7 +2755,9 @@ impl TestHarness {
             .with_phases(self.phases_executed())
             .with_artifact_paths(self.artifacts.clone());
 
-        if !passed {
+        if passed {
+            manifest = manifest.with_failure_class(FAILURE_CLASS_PASSED);
+        } else {
             if let Some(first_failure) = self.assertions.iter().find(|a| !a.passed) {
                 manifest = manifest.with_failure_reason(&format!(
                     "{}: expected={}, actual={}",
@@ -2763,8 +2765,6 @@ impl TestHarness {
                 ));
             }
             manifest = manifest.with_failure_class(FAILURE_CLASS_ASSERTION_FAILURE);
-        } else {
-            manifest = manifest.with_failure_class(FAILURE_CLASS_PASSED);
         }
 
         manifest
