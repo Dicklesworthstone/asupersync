@@ -109,4 +109,80 @@ mod tests {
         crate::assert_with_log!(still_none, "stream remains terminated", true, still_none);
         crate::test_complete!("broadcast_stream_none_is_terminal_after_cancel");
     }
+
+    /// Invariant: broadcast stream delivers pre-sent messages via poll_next.
+    #[test]
+    fn broadcast_stream_receives_prefilled_messages() {
+        init_test("broadcast_stream_receives_prefilled_messages");
+        let cx_send: Cx = Cx::for_testing();
+        let cx_recv: Cx = Cx::for_testing();
+
+        let (tx, rx) = broadcast::channel(8);
+        tx.send(&cx_send, 10).expect("send 10");
+        tx.send(&cx_send, 20).expect("send 20");
+
+        let mut stream = BroadcastStream::new(cx_recv, rx);
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut stream).poll_next(&mut task_cx);
+        let got_10 = matches!(poll, Poll::Ready(Some(Ok(10))));
+        crate::assert_with_log!(got_10, "received 10", true, got_10);
+
+        let poll = Pin::new(&mut stream).poll_next(&mut task_cx);
+        let got_20 = matches!(poll, Poll::Ready(Some(Ok(20))));
+        crate::assert_with_log!(got_20, "received 20", true, got_20);
+
+        crate::test_complete!("broadcast_stream_receives_prefilled_messages");
+    }
+
+    /// Invariant: stream yields None after all senders are dropped.
+    #[test]
+    fn broadcast_stream_terminated_after_sender_drop() {
+        init_test("broadcast_stream_terminated_after_sender_drop");
+        let cx_send: Cx = Cx::for_testing();
+        let cx_recv: Cx = Cx::for_testing();
+
+        let (tx, rx) = broadcast::channel(4);
+        tx.send(&cx_send, 42).expect("send");
+        drop(tx);
+
+        let mut stream = BroadcastStream::new(cx_recv, rx);
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        // First poll: should get the message.
+        let poll = Pin::new(&mut stream).poll_next(&mut task_cx);
+        let got_42 = matches!(poll, Poll::Ready(Some(Ok(42))));
+        crate::assert_with_log!(got_42, "received 42", true, got_42);
+
+        // Second poll: sender dropped, should terminate.
+        let poll = Pin::new(&mut stream).poll_next(&mut task_cx);
+        let is_none = matches!(poll, Poll::Ready(None));
+        crate::assert_with_log!(is_none, "terminated after sender drop", true, is_none);
+
+        crate::test_complete!("broadcast_stream_terminated_after_sender_drop");
+    }
+
+    /// Invariant: BroadcastStreamRecvError::Lagged preserves the count.
+    #[test]
+    fn broadcast_stream_recv_error_lagged_preserves_count() {
+        init_test("broadcast_stream_recv_error_lagged_preserves_count");
+
+        let err = BroadcastStreamRecvError::Lagged(42);
+        let is_lagged = matches!(err, BroadcastStreamRecvError::Lagged(42));
+        crate::assert_with_log!(is_lagged, "lagged(42)", true, is_lagged);
+
+        // Clone and Eq
+        let cloned = err.clone();
+        let eq = err == cloned;
+        crate::assert_with_log!(eq, "clone eq", true, eq);
+
+        // Debug
+        let dbg = format!("{err:?}");
+        let has_42 = dbg.contains("42");
+        crate::assert_with_log!(has_42, "debug contains count", true, has_42);
+
+        crate::test_complete!("broadcast_stream_recv_error_lagged_preserves_count");
+    }
 }

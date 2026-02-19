@@ -162,4 +162,54 @@ mod tests {
         crate::assert_with_log!(still_none, "stream remains terminated", true, still_none);
         crate::test_complete!("receiver_stream_none_is_terminal_after_cancel");
     }
+
+    /// Invariant: poll_next returns Pending when channel is empty but sender
+    /// is still alive.
+    #[test]
+    fn receiver_stream_pending_when_empty() {
+        init_test("receiver_stream_pending_when_empty");
+        let cx_recv: Cx = Cx::for_testing();
+        let (_tx, rx) = mpsc::channel::<i32>(4);
+        let mut stream = ReceiverStream::new(cx_recv, rx);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // No messages sent, sender alive — should be Pending.
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let is_pending = poll.is_pending();
+        crate::assert_with_log!(is_pending, "empty channel is Pending", true, is_pending);
+
+        crate::test_complete!("receiver_stream_pending_when_empty");
+    }
+
+    /// Invariant: accessors (get_ref, cx, into_inner) work correctly
+    /// and preserve stream state.
+    #[test]
+    fn receiver_stream_accessors() {
+        init_test("receiver_stream_accessors");
+        let cx_recv: Cx = Cx::for_testing();
+        let (tx, rx) = mpsc::channel::<i32>(4);
+        tx.try_send(99).expect("send");
+
+        let mut stream = ReceiverStream::new(cx_recv, rx);
+
+        // get_ref returns reference to inner receiver.
+        let _inner_ref = stream.get_ref();
+
+        // get_mut returns mutable reference.
+        let _inner_mut = stream.get_mut();
+
+        // cx() returns reference to the Cx.
+        let _cx_ref = stream.cx();
+
+        // into_inner consumes stream and returns the receiver.
+        let recovered = stream.into_inner();
+        // The message should still be in the channel.
+        let msg = recovered.try_recv();
+        let got_99 = matches!(msg, Ok(99));
+        crate::assert_with_log!(got_99, "message preserved after into_inner", true, got_99);
+
+        crate::test_complete!("receiver_stream_accessors");
+    }
 }
