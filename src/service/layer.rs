@@ -493,6 +493,41 @@ mod tests {
     // Readiness propagation
     // =========================================================================
 
+    // =========================================================================
+    // Wave 43 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn identity_debug_clone_copy_default() {
+        let id = Identity;
+        let dbg = format!("{id:?}");
+        assert_eq!(dbg, "Identity");
+        let copied = id;
+        let cloned = id.clone();
+        assert_eq!(format!("{copied:?}"), format!("{cloned:?}"));
+        let def = Identity::default();
+        assert_eq!(format!("{def:?}"), "Identity");
+    }
+
+    #[test]
+    fn stack_debug_clone() {
+        let s = Stack::new(Identity, Identity);
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("Stack"), "Debug should contain 'Stack': {dbg}");
+        assert!(
+            dbg.contains("Identity"),
+            "Debug should contain inner/outer: {dbg}"
+        );
+        let cloned = s.clone();
+        assert_eq!(format!("{cloned:?}"), dbg);
+        assert_eq!(format!("{:?}", cloned.inner()), "Identity");
+        assert_eq!(format!("{:?}", cloned.outer()), "Identity");
+    }
+
+    // =========================================================================
+    // Readiness propagation
+    // =========================================================================
+
     #[test]
     fn ready_service_propagates_through_stack() {
         let stack = Stack::new(MultiplyLayer(2), MultiplyLayer(3));

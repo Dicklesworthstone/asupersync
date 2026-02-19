@@ -251,4 +251,20 @@ mod tests {
         );
         crate::test_complete!("pop_expired_includes_exact_deadline");
     }
+
+    // =========================================================================
+    // Wave 43 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn timer_heap_debug_default() {
+        let heap = TimerHeap::default();
+        let dbg = format!("{heap:?}");
+        assert!(dbg.contains("TimerHeap"), "{dbg}");
+        assert!(heap.is_empty());
+        assert_eq!(heap.len(), 0);
+
+        let heap2 = TimerHeap::new();
+        assert_eq!(format!("{heap2:?}"), dbg);
+    }
 }

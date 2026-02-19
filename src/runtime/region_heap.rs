@@ -683,4 +683,99 @@ mod tests {
         // The global_alloc_count() function is available for debugging but
         // not used in this test due to parallel execution concerns.
     }
+
+    // =========================================================================
+    // Wave 43 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn heap_stats_debug_default_clone_copy() {
+        let stats = HeapStats::default();
+        assert_eq!(stats.allocations, 0);
+        assert_eq!(stats.reclaimed, 0);
+        assert_eq!(stats.live, 0);
+        assert_eq!(stats.bytes_allocated, 0);
+        assert_eq!(stats.bytes_live, 0);
+        let dbg = format!("{stats:?}");
+        assert!(dbg.contains("HeapStats"), "{dbg}");
+        let copied = stats;
+        let cloned = stats.clone();
+        assert_eq!(format!("{copied:?}"), format!("{cloned:?}"));
+    }
+
+    #[test]
+    fn heap_index_debug_clone_copy_eq_hash() {
+        use std::collections::HashSet;
+        let mut heap = RegionHeap::new();
+        let idx1 = heap.alloc(42u32);
+        let idx2 = heap.alloc(99u32);
+
+        // Debug
+        let dbg = format!("{idx1:?}");
+        assert!(dbg.contains("HeapIndex"), "{dbg}");
+
+        // Clone + Copy
+        let copied = idx1;
+        let cloned = idx1.clone();
+        assert_eq!(copied, cloned);
+
+        // PartialEq + Eq
+        assert_eq!(idx1, idx1);
+        assert_ne!(idx1, idx2);
+
+        // Hash
+        let mut set = HashSet::new();
+        set.insert(idx1);
+        set.insert(idx2);
+        set.insert(idx1);
+        assert_eq!(set.len(), 2);
+
+        // Accessors
+        assert_eq!(idx1.index(), 0);
+        assert_eq!(idx1.generation(), 0);
+    }
+
+    #[test]
+    fn heap_ref_debug_clone_copy_eq_hash() {
+        use std::collections::HashSet;
+        let mut heap = RegionHeap::new();
+        let idx1 = heap.alloc(42u32);
+        let idx2 = heap.alloc(99u32);
+
+        let r1 = HeapRef::<u32>::new(idx1);
+        let r2 = HeapRef::<u32>::new(idx2);
+
+        // Debug
+        let dbg = format!("{r1:?}");
+        assert!(dbg.contains("HeapRef"), "{dbg}");
+
+        // Clone + Copy
+        let copied = r1;
+        let cloned = r1.clone();
+        assert_eq!(copied, cloned);
+
+        // PartialEq + Eq
+        assert_eq!(r1, r1);
+        assert_ne!(r1, r2);
+
+        // Hash
+        let mut set = HashSet::new();
+        set.insert(r1);
+        set.insert(r2);
+        set.insert(r1);
+        assert_eq!(set.len(), 2);
+
+        // Typed accessor
+        assert_eq!(r1.get(&heap), Some(&42));
+        assert_eq!(r2.get(&heap), Some(&99));
+    }
+
+    #[test]
+    fn region_heap_debug_default() {
+        let heap = RegionHeap::default();
+        let dbg = format!("{heap:?}");
+        assert!(dbg.contains("RegionHeap"), "{dbg}");
+        assert_eq!(heap.len(), 0);
+        assert!(heap.is_empty());
+    }
 }

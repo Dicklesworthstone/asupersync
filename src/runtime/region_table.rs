@@ -399,6 +399,52 @@ mod tests {
         assert_eq!(table.parent(child), Some(Some(root)));
     }
 
+    // =========================================================================
+    // Wave 43 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn region_create_error_debug_clone_eq_display() {
+        let id = {
+            let mut table = RegionTable::new();
+            table.create_root(Budget::default(), Time::ZERO)
+        };
+
+        let e1 = RegionCreateError::ParentNotFound(id);
+        let e2 = RegionCreateError::ParentClosed(id);
+        let e3 = RegionCreateError::ParentAtCapacity {
+            region: id,
+            limit: 10,
+            live: 10,
+        };
+
+        // Debug
+        let d1 = format!("{e1:?}");
+        assert!(d1.contains("ParentNotFound"), "{d1}");
+        let d2 = format!("{e2:?}");
+        assert!(d2.contains("ParentClosed"), "{d2}");
+        let d3 = format!("{e3:?}");
+        assert!(d3.contains("ParentAtCapacity"), "{d3}");
+
+        // Display
+        let s1 = format!("{e1}");
+        assert!(s1.contains("parent region not found"), "{s1}");
+        let s2 = format!("{e2}");
+        assert!(s2.contains("parent region closed"), "{s2}");
+        let s3 = format!("{e3}");
+        assert!(s3.contains("admission limit reached"), "{s3}");
+
+        // Clone + PartialEq + Eq
+        assert_eq!(e1.clone(), e1);
+        assert_eq!(e2.clone(), e2);
+        assert_eq!(e3.clone(), e3);
+        assert_ne!(e1, e2);
+
+        // std::error::Error
+        let err: &dyn std::error::Error = &e1;
+        assert!(err.source().is_none());
+    }
+
     #[test]
     fn pending_obligations_initial_zero() {
         let mut table = RegionTable::new();
