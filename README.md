@@ -268,12 +268,13 @@ It maps common Tokio ecosystem crates to the corresponding Asupersync modules.
 | Async I/O traits and extensions | `tokio::io`, `tokio-util::io` | `src/io/` | Built-in | Active | Mixed | Medium |
 | Codec/framing layer | `tokio-util::codec` | `src/codec/` | Built-in | Active | Mixed | Medium |
 | Byte buffers | `bytes` | `src/bytes/` | Built-in | Mature | N/A | Low |
-| Reactor backends | Tokio + Mio internals | `src/runtime/reactor/{epoll,kqueue,windows,lab}.rs` (+ `io_uring` feature) | Built-in | Active | Mixed | Medium |
-| TCP/UDP/Unix sockets | `tokio::net` | `src/net/{tcp,udp,unix}.rs` | Built-in | Active | Mixed | Medium |
+| Reactor backends | Tokio + Mio internals | `src/runtime/reactor/{epoll,kqueue,windows,lab}.rs` (+ `io_uring` feature on Linux) | Built-in | Active | Mixed | Medium |
+| TCP/UDP/Unix sockets | `tokio::net` | `src/net/tcp/`, `src/net/udp.rs`, `src/net/unix/` | Built-in | Active | Mixed | Medium |
 | DNS resolution | `trust-dns`, `hickory`, custom stacks | `src/net/dns/` | Built-in | Active | Mixed | Medium |
 | TLS | `tokio-rustls`, `native-tls` | `src/tls/` (`tls`, `tls-native-roots`, `tls-webpki-roots`) | Feature-gated | Active | Mixed | Medium |
 | WebSocket | `tokio-tungstenite` | `src/net/websocket/` | Built-in | Active | Mixed | Medium |
-| HTTP stack | `hyper`, `h2`, `http-body`, `hyper-util` | `src/http/{h1,h2,h3}.rs`, `src/http/body.rs`, `src/http/pool.rs` | Built-in | Active | Mixed | Medium |
+| HTTP stack (HTTP/1.1 + HTTP/2) | `hyper`, `h2`, `http-body`, `hyper-util` | `src/http/h1/`, `src/http/h2/`, `src/http/body.rs`, `src/http/pool.rs` | Built-in | Active | Mixed | Medium |
+| QUIC + HTTP/3 | `quinn`, `h3`, `h3-quinn` | `src/net/quic/`, `src/http/h3/` (source present; `quic` / `http3` features currently not exposed in `Cargo.toml`) | In progress | Parked | N/A | High |
 | Web framework | `axum`, `warp`, `tower-http` | `src/web/`, `src/service/`, `src/server/` | In progress | Active | Mixed | Medium |
 | gRPC | `tonic` + `prost` + `tower` + `hyper` | `src/grpc/` | Built-in | Active | Mixed | Medium |
 | Database clients | `tokio-postgres`, `mysql_async`, `sqlx` | `src/database/{postgres,mysql,sqlite}.rs` | Feature-gated | Active | Mixed | Medium |
@@ -281,9 +282,9 @@ It maps common Tokio ecosystem crates to the corresponding Asupersync modules.
 | Service/middleware stack | `tower`, `tower-layer`, `tower-service` | `src/service/` + optional `tower` adapter feature | Built-in | Active | Lab-strong | Low |
 | Filesystem APIs | `tokio::fs` | `src/fs/` | In progress | Early | Mixed | Medium |
 | Process management | `tokio::process` | `src/process.rs` | Built-in | Active | Mixed | Medium |
-| Signals | `tokio::signal` | `src/signal.rs` | Built-in | Active | Mixed | Medium |
+| Signals | `tokio::signal` | `src/signal/` | Built-in | Active | Mixed | Medium |
 | Streams and adapters | `tokio-stream`, `futures-util::stream` | `src/stream/` | Built-in | Active | Lab-strong | Low |
-| Observability | `tracing`, `metrics`, `opentelemetry` | `src/observability/`, `src/tracing_compat.rs` | Feature-gated | Active | Mixed | Low |
+| Observability | `tracing`, `metrics`, `opentelemetry` | `src/observability/`, `src/tracing_compat.rs` | Built-in + feature-gated integrations | Active | Mixed | Low |
 | Deterministic concurrency testing | `loom`, `tokio-test`, external harnesses | `src/lab/`, `frankenlab/`, optional `loom-tests` feature | Built-in | Mature | Strong | Low |
 | Tokio-locked third-party crates | crates that require Tokio runtime traits directly | boundary adapters via service/runtime integration points | Adapter needed | N/A | N/A | High |
 
