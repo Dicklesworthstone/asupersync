@@ -1464,4 +1464,56 @@ mod tests {
         assert_eq!(frame.opcode, Opcode::Text);
         assert_eq!(frame.payload.as_ref(), b"OK");
     }
+
+    // =========================================================================
+    // Wave 56 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn opcode_debug_clone_copy_hash_eq() {
+        use std::collections::HashSet;
+        let op = Opcode::Text;
+        let dbg = format!("{op:?}");
+        assert!(dbg.contains("Text"), "{dbg}");
+        let copied = op;
+        let cloned = op.clone();
+        assert_eq!(copied, cloned);
+
+        let mut set = HashSet::new();
+        set.insert(Opcode::Text);
+        set.insert(Opcode::Binary);
+        assert_eq!(set.len(), 2);
+        assert!(set.contains(&Opcode::Text));
+    }
+
+    #[test]
+    fn frame_debug_clone() {
+        let f = Frame::text("hello");
+        let dbg = format!("{f:?}");
+        assert!(dbg.contains("Frame"), "{dbg}");
+        let cloned = f.clone();
+        assert_eq!(cloned.opcode, Opcode::Text);
+    }
+
+    #[test]
+    fn role_debug_clone_copy_eq() {
+        let r = Role::Client;
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("Client"), "{dbg}");
+        let copied = r;
+        let cloned = r.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(r, Role::Server);
+    }
+
+    #[test]
+    fn close_code_debug_clone_copy_eq() {
+        let c = CloseCode::Normal;
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("Normal"), "{dbg}");
+        let copied = c;
+        let cloned = c.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(c, CloseCode::GoingAway);
+    }
 }

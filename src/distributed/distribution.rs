@@ -796,4 +796,43 @@ mod tests {
         assert!(debug.contains("config"));
         assert!(debug.contains("metrics"));
     }
+
+    // =========================================================================
+    // Wave 56 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn distribution_config_debug_clone() {
+        let cfg = DistributionConfig::default();
+        let dbg = format!("{cfg:?}");
+        assert!(dbg.contains("DistributionConfig"), "{dbg}");
+        let cloned = cfg.clone();
+        assert_eq!(cfg.max_concurrent, cloned.max_concurrent);
+    }
+
+    #[test]
+    fn replica_ack_debug_clone() {
+        let ack = ReplicaAck {
+            replica_id: "r0".to_string(),
+            symbols_received: 10,
+            ack_time: Time::ZERO,
+        };
+        let dbg = format!("{ack:?}");
+        assert!(dbg.contains("ReplicaAck"), "{dbg}");
+        let cloned = ack.clone();
+        assert_eq!(cloned.replica_id, "r0");
+    }
+
+    #[test]
+    fn replica_failure_debug_clone() {
+        let fail = ReplicaFailure {
+            replica_id: "r1".to_string(),
+            error: "timeout".to_string(),
+            error_kind: ErrorKind::NodeUnavailable,
+        };
+        let dbg = format!("{fail:?}");
+        assert!(dbg.contains("ReplicaFailure"), "{dbg}");
+        let cloned = fail.clone();
+        assert_eq!(cloned.error, "timeout");
+    }
 }

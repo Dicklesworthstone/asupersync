@@ -729,4 +729,37 @@ mod tests {
         assert!(!config.close_on_drop);
         assert_eq!(config.cancellation_code, CloseCode::InternalError);
     }
+
+    // =========================================================================
+    // Wave 56 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn close_reason_debug_clone_eq() {
+        let r = CloseReason::normal();
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("CloseReason"), "{dbg}");
+        let cloned = r.clone();
+        assert_eq!(r, cloned);
+    }
+
+    #[test]
+    fn close_state_debug_clone_copy_eq_default() {
+        let s = CloseState::default();
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("Open"), "{dbg}");
+        let copied = s;
+        let cloned = s.clone();
+        assert_eq!(copied, cloned);
+        assert_ne!(s, CloseState::CloseSent);
+    }
+
+    #[test]
+    fn close_config_debug_clone() {
+        let cfg = CloseConfig::new();
+        let dbg = format!("{cfg:?}");
+        assert!(dbg.contains("CloseConfig"), "{dbg}");
+        let cloned = cfg.clone();
+        assert_eq!(cfg.close_timeout, cloned.close_timeout);
+    }
 }

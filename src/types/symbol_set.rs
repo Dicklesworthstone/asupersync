@@ -601,4 +601,29 @@ mod tests {
         assert!(set.is_empty());
         assert_eq!(set.memory_usage(), 0);
     }
+
+    // =========================================================================
+    // Wave 56 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn threshold_config_debug_clone_copy() {
+        let cfg = ThresholdConfig::new(1.02, 0, 0);
+        let dbg = format!("{cfg:?}");
+        assert!(dbg.contains("ThresholdConfig"), "{dbg}");
+        let copied = cfg;
+        let cloned = cfg.clone();
+        assert!((copied.overhead_factor - cloned.overhead_factor).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn insert_result_debug_clone() {
+        let mut set = SymbolSet::new();
+        let result = set.insert(test_symbol(0, 0, 4));
+        let dbg = format!("{result:?}");
+        assert!(dbg.contains("Insert"), "{dbg}");
+        let cloned = result.clone();
+        let dbg2 = format!("{cloned:?}");
+        assert_eq!(dbg, dbg2);
+    }
 }
