@@ -1009,4 +1009,66 @@ mod tests {
         assert!(display.contains("cancels: 1"));
         assert!(display.contains("delays: 1"));
     }
+
+    // =========================================================================
+    // Wave 48 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn injection_point_debug_clone_copy_eq_hash() {
+        use std::collections::HashSet;
+        let all = [
+            InjectionPoint::SchedulerPoll,
+            InjectionPoint::TaskPoll,
+            InjectionPoint::ReactorPoll,
+            InjectionPoint::WakerInvoke,
+            InjectionPoint::BudgetCheck,
+            InjectionPoint::TimerFire,
+            InjectionPoint::SyncAcquire,
+            InjectionPoint::ChannelSend,
+            InjectionPoint::ChannelRecv,
+        ];
+        let mut set = HashSet::new();
+        for ip in &all {
+            let copied = *ip;
+            let cloned = ip.clone();
+            assert_eq!(copied, cloned);
+            assert!(!format!("{ip:?}").is_empty());
+            set.insert(*ip);
+        }
+        assert_eq!(set.len(), 9);
+    }
+
+    #[test]
+    fn chaos_type_debug_clone_copy_eq_hash() {
+        use std::collections::HashSet;
+        let all = [
+            ChaosType::Cancel,
+            ChaosType::Delay,
+            ChaosType::IoError,
+            ChaosType::WakeupStorm,
+            ChaosType::BudgetExhaust,
+        ];
+        let mut set = HashSet::new();
+        for ct in &all {
+            let copied = *ct;
+            let cloned = ct.clone();
+            assert_eq!(copied, cloned);
+            set.insert(*ct);
+        }
+        assert_eq!(set.len(), 5);
+        assert_ne!(ChaosType::Cancel, ChaosType::Delay);
+    }
+
+    #[test]
+    fn chaos_stats_debug_clone_default() {
+        let def = ChaosStats::default();
+        assert_eq!(def.cancellations, 0);
+        assert_eq!(def.delays, 0);
+        assert_eq!(def.io_errors, 0);
+        let dbg = format!("{def:?}");
+        assert!(dbg.contains("ChaosStats"), "{dbg}");
+        let cloned = def.clone();
+        assert_eq!(cloned.cancellations, 0);
+    }
 }

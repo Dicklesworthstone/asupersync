@@ -6,6 +6,7 @@
 //! - stream + flow-control model
 
 pub mod connection;
+pub mod forensic_log;
 pub mod streams;
 pub mod tls;
 pub mod transport;

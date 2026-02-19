@@ -1139,4 +1139,45 @@ mod tests {
 
         crate::test_complete!("recv_large_delta_does_not_truncate_offset");
     }
+
+    // =========================================================================
+    // Wave 48 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn send_error_debug_clone_eq_display() {
+        let e = SendError::Closed(42);
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("Closed"), "{dbg}");
+        assert!(dbg.contains("42"), "{dbg}");
+        let display = format!("{e}");
+        assert!(display.contains("closed broadcast channel"), "{display}");
+        let cloned = e.clone();
+        assert_eq!(cloned, e);
+        let err: &dyn std::error::Error = &e;
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn recv_error_debug_clone_copy_eq_display() {
+        let errors = [
+            RecvError::Lagged(5),
+            RecvError::Closed,
+            RecvError::Cancelled,
+        ];
+        let expected_display = [
+            "receiver lagged by 5 messages",
+            "broadcast channel closed",
+            "receive operation cancelled",
+        ];
+        for (e, expected) in errors.iter().zip(expected_display.iter()) {
+            let copied = *e;
+            let cloned = e.clone();
+            assert_eq!(copied, cloned);
+            assert!(!format!("{e:?}").is_empty());
+            assert_eq!(format!("{e}"), *expected);
+        }
+        assert_ne!(errors[0], errors[1]);
+        assert_ne!(errors[1], errors[2]);
+    }
 }

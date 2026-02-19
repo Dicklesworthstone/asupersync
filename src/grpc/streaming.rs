@@ -592,4 +592,40 @@ mod tests {
         crate::assert_with_log!(has, "reserved metadata insert", true, has);
         crate::test_complete!("test_metadata_reserve_preserves_behavior");
     }
+
+    // =========================================================================
+    // Wave 48 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn metadata_debug_clone_default() {
+        let def = Metadata::default();
+        let dbg = format!("{def:?}");
+        assert!(dbg.contains("Metadata"), "{dbg}");
+        assert!(def.is_empty());
+
+        let mut md = Metadata::new();
+        md.insert("key", "val");
+        let cloned = md.clone();
+        assert_eq!(cloned.len(), 1);
+        match cloned.get("key") {
+            Some(MetadataValue::Ascii(v)) => assert_eq!(v, "val"),
+            _ => panic!("expected ascii value"),
+        }
+    }
+
+    #[test]
+    fn metadata_value_debug_clone() {
+        let ascii = MetadataValue::Ascii("hello".into());
+        let dbg = format!("{ascii:?}");
+        assert!(dbg.contains("Ascii"), "{dbg}");
+        let cloned = ascii.clone();
+        assert!(matches!(cloned, MetadataValue::Ascii(s) if s == "hello"));
+
+        let binary = MetadataValue::Binary(Bytes::from_static(b"\x00\x01"));
+        let dbg2 = format!("{binary:?}");
+        assert!(dbg2.contains("Binary"), "{dbg2}");
+        let cloned2 = binary.clone();
+        assert!(matches!(cloned2, MetadataValue::Binary(_)));
+    }
 }
