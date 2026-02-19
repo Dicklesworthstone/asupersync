@@ -357,4 +357,59 @@ mod tests {
             other => panic!("expected Cancelled, got {other:?}"),
         }
     }
+
+    // =========================================================================
+    // Wave 47 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn policy_action_debug_clone_eq() {
+        let actions = [
+            PolicyAction::Continue,
+            PolicyAction::CancelSiblings(CancelReason::sibling_failed()),
+            PolicyAction::Escalate,
+        ];
+        for a in &actions {
+            let dbg = format!("{a:?}");
+            assert!(!dbg.is_empty());
+            let cloned = a.clone();
+            assert_eq!(&cloned, a);
+        }
+        assert_ne!(actions[0], actions[1]);
+        assert_ne!(actions[0], actions[2]);
+    }
+
+    #[test]
+    fn aggregate_decision_debug_clone() {
+        let d1: AggregateDecision<crate::error::Error> = AggregateDecision::AllOk;
+        let dbg = format!("{d1:?}");
+        assert!(dbg.contains("AllOk"), "{dbg}");
+        let _cloned = d1.clone();
+
+        let d2: AggregateDecision<crate::error::Error> =
+            AggregateDecision::Cancelled(CancelReason::timeout());
+        let dbg2 = format!("{d2:?}");
+        assert!(dbg2.contains("Cancelled"), "{dbg2}");
+        let _cloned2 = d2.clone();
+    }
+
+    #[test]
+    fn fail_fast_debug_clone_copy_default() {
+        let ff = FailFast::default();
+        let dbg = format!("{ff:?}");
+        assert_eq!(dbg, "FailFast");
+        let copied = ff;
+        let cloned = ff.clone();
+        assert_eq!(format!("{copied:?}"), format!("{cloned:?}"));
+    }
+
+    #[test]
+    fn collect_all_debug_clone_copy_default() {
+        let ca = CollectAll::default();
+        let dbg = format!("{ca:?}");
+        assert_eq!(dbg, "CollectAll");
+        let copied = ca;
+        let cloned = ca.clone();
+        assert_eq!(format!("{copied:?}"), format!("{cloned:?}"));
+    }
 }

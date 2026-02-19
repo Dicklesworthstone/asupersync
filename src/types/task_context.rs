@@ -266,4 +266,33 @@ mod tests {
         crate::assert_with_log!(cx.mask_depth == 0, "mask_depth", 0, cx.mask_depth);
         crate::test_complete!("test_cx_inner_new");
     }
+
+    // =========================================================================
+    // Wave 47 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn checkpoint_state_debug_clone_default() {
+        let def = CheckpointState::default();
+        assert!(def.last_checkpoint.is_none());
+        assert!(def.last_message.is_none());
+        assert_eq!(def.checkpoint_count, 0);
+        let dbg = format!("{def:?}");
+        assert!(dbg.contains("CheckpointState"), "{dbg}");
+
+        let mut state = CheckpointState::new();
+        state.record_with_message("progress".into());
+        let cloned = state.clone();
+        assert_eq!(cloned.checkpoint_count, 1);
+        assert_eq!(cloned.last_message.as_deref(), Some("progress"));
+    }
+
+    #[test]
+    fn cx_inner_debug() {
+        let region = RegionId::testing_default();
+        let task = TaskId::testing_default();
+        let cx = CxInner::new(region, task, Budget::new());
+        let dbg = format!("{cx:?}");
+        assert!(dbg.contains("CxInner"), "{dbg}");
+    }
 }
