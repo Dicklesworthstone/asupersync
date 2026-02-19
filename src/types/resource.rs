@@ -908,4 +908,255 @@ mod tests {
         assert_eq!(usage.symbol_memory, 0);
         assert_eq!(usage.encoding_ops, 0);
     }
+
+    // ---- Pure data type tests ----
+
+    #[test]
+    fn pool_config_default() {
+        let cfg = PoolConfig::default();
+        assert_eq!(cfg.symbol_size, DEFAULT_SYMBOL_SIZE as u16);
+        assert_eq!(cfg.initial_size, 0);
+        assert_eq!(cfg.max_size, 0);
+        assert!(!cfg.allow_growth);
+        assert_eq!(cfg.growth_increment, 0);
+    }
+
+    #[test]
+    fn pool_config_debug() {
+        let cfg = PoolConfig::new(256, 10, 100, true, 5);
+        let dbg = format!("{cfg:?}");
+        assert!(dbg.contains("PoolConfig"), "{dbg}");
+        assert!(dbg.contains("256"), "{dbg}");
+    }
+
+    #[test]
+    fn pool_stats_default() {
+        let stats = PoolStats::default();
+        assert_eq!(stats.allocations, 0);
+        assert_eq!(stats.deallocations, 0);
+        assert_eq!(stats.pool_hits, 0);
+        assert_eq!(stats.pool_misses, 0);
+        assert_eq!(stats.peak_usage, 0);
+        assert_eq!(stats.current_usage, 0);
+        assert_eq!(stats.growth_events, 0);
+    }
+
+    #[test]
+    fn pool_stats_debug() {
+        let stats = PoolStats {
+            allocations: 5,
+            ..PoolStats::default()
+        };
+        let dbg = format!("{stats:?}");
+        assert!(dbg.contains("PoolStats"), "{dbg}");
+        assert!(dbg.contains("5"), "{dbg}");
+    }
+
+    #[test]
+    fn symbol_buffer_operations() {
+        let mut buf = SymbolBuffer::new(16);
+        assert_eq!(buf.len(), 16);
+        assert!(!buf.is_empty());
+        assert_eq!(buf.as_slice().len(), 16);
+        assert!(buf.as_slice().iter().all(|&b| b == 0));
+
+        buf.as_mut_slice()[0] = 42;
+        assert_eq!(buf.as_slice()[0], 42);
+
+        let boxed = buf.into_boxed_slice();
+        assert_eq!(boxed.len(), 16);
+        assert_eq!(boxed[0], 42);
+    }
+
+    #[test]
+    fn symbol_buffer_zero_size() {
+        let buf = SymbolBuffer::new(0);
+        assert_eq!(buf.len(), 0);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn symbol_buffer_debug() {
+        let buf = SymbolBuffer::new(4);
+        let dbg = format!("{buf:?}");
+        assert!(dbg.contains("SymbolBuffer"), "{dbg}");
+    }
+
+    #[test]
+    fn pool_exhausted_display_and_error() {
+        let err = PoolExhausted;
+        assert_eq!(err.to_string(), "symbol pool exhausted");
+        assert!(std::error::Error::source(&err).is_none());
+        assert_eq!(err, PoolExhausted);
+    }
+
+    #[test]
+    fn resource_exhausted_display_all_variants() {
+        let cases = [
+            (ResourceExhausted::SymbolMemory, "symbol memory"),
+            (ResourceExhausted::EncodingOps, "encoding operations"),
+            (ResourceExhausted::DecodingOps, "decoding operations"),
+            (ResourceExhausted::SymbolsInFlight, "symbols in flight"),
+            (ResourceExhausted::PerObjectMemory, "per-object memory"),
+        ];
+        for (variant, expected_substr) in cases {
+            let msg = variant.to_string();
+            assert!(msg.contains(expected_substr), "{msg}");
+            assert!(std::error::Error::source(&variant).is_none());
+        }
+    }
+
+    #[test]
+    fn resource_kind_debug_all_variants() {
+        let kinds = [
+            ResourceKind::SymbolMemory,
+            ResourceKind::EncodingOps,
+            ResourceKind::DecodingOps,
+            ResourceKind::SymbolsInFlight,
+            ResourceKind::PerObjectMemory,
+        ];
+        for kind in &kinds {
+            let dbg = format!("{kind:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    #[test]
+    fn resource_limits_default_is_zero() {
+        let limits = ResourceLimits::default();
+        assert!(limits.is_zero());
+    }
+
+    #[test]
+    fn resource_limits_non_zero() {
+        let limits = ResourceLimits {
+            max_symbol_memory: 1,
+            ..ResourceLimits::default()
+        };
+        assert!(!limits.is_zero());
+    }
+
+    #[test]
+    fn resource_usage_default() {
+        let usage = ResourceUsage::default();
+        assert_eq!(usage.symbol_memory, 0);
+        assert_eq!(usage.encoding_ops, 0);
+        assert_eq!(usage.decoding_ops, 0);
+        assert_eq!(usage.symbols_in_flight, 0);
+    }
+
+    #[test]
+    fn resource_request_default_and_accessor() {
+        let req = ResourceRequest::default();
+        assert_eq!(req.symbol_memory(), 0);
+
+        let req = ResourceRequest::new(1024, 2, 3, 10);
+        assert_eq!(req.symbol_memory(), 1024);
+    }
+
+    #[test]
+    fn resource_tracker_debug() {
+        let limits = ResourceLimits::default();
+        let tracker = ResourceTracker::new(limits);
+        let dbg = format!("{tracker:?}");
+        assert!(dbg.contains("ResourceTracker"), "{dbg}");
+    }
+
+    #[test]
+    fn resource_tracker_pressure_with_zero_limits() {
+        let limits = ResourceLimits::default();
+        let tracker = ResourceTracker::new(limits);
+        // No usage, no limits → pressure = 0
+        assert_eq!(tracker.pressure(), 0.0);
+    }
+
+    #[test]
+    fn resource_tracker_can_acquire_predicate() {
+        let limits = ResourceLimits {
+            max_symbol_memory: 100,
+            max_encoding_ops: 1,
+            max_decoding_ops: 1,
+            max_symbols_in_flight: 10,
+            max_per_object_memory: 100,
+        };
+        let tracker = ResourceTracker::new(limits);
+        let req = ResourceRequest::new(50, 1, 0, 0);
+        assert!(tracker.can_acquire(&req));
+
+        let req = ResourceRequest::new(200, 1, 0, 0);
+        assert!(!tracker.can_acquire(&req));
+    }
+
+    #[test]
+    fn resource_guard_debug() {
+        let limits = ResourceLimits {
+            max_symbol_memory: 100,
+            max_encoding_ops: 1,
+            max_decoding_ops: 1,
+            max_symbols_in_flight: 10,
+            max_per_object_memory: 100,
+        };
+        let tracker = ResourceTracker::shared(limits);
+        let guard = ResourceTracker::try_acquire_encoding(&tracker, 10).expect("acquire");
+        let dbg = format!("{guard:?}");
+        assert!(dbg.contains("ResourceGuard"), "{dbg}");
+    }
+
+    #[test]
+    fn pool_reset_stats() {
+        let config = PoolConfig::new(8, 2, 2, false, 0);
+        let mut pool = SymbolPool::new(config);
+        let buf = pool.allocate().expect("alloc");
+        pool.deallocate(buf);
+        assert!(pool.stats().allocations > 0);
+
+        pool.reset_stats();
+        assert_eq!(pool.stats().allocations, 0);
+        assert_eq!(pool.stats().deallocations, 0);
+    }
+
+    #[test]
+    fn pool_peak_usage_tracking() {
+        let config = PoolConfig::new(8, 4, 4, false, 0);
+        let mut pool = SymbolPool::new(config);
+        let a = pool.allocate().expect("a");
+        let b = pool.allocate().expect("b");
+        let c = pool.allocate().expect("c");
+        assert_eq!(pool.stats().peak_usage, 3);
+        pool.deallocate(a);
+        pool.deallocate(b);
+        // Peak stays at 3 even after deallocation
+        assert_eq!(pool.stats().peak_usage, 3);
+        assert_eq!(pool.stats().current_usage, 1);
+        pool.deallocate(c);
+    }
+
+    #[test]
+    fn try_acquire_decoding() {
+        let limits = ResourceLimits {
+            max_symbol_memory: 100,
+            max_encoding_ops: 1,
+            max_decoding_ops: 1,
+            max_symbols_in_flight: 10,
+            max_per_object_memory: 100,
+        };
+        let tracker = ResourceTracker::shared(limits);
+        let guard = ResourceTracker::try_acquire_decoding(&tracker, 50).expect("decode acquire");
+        {
+            let t = tracker.lock();
+            assert_eq!(t.usage().decoding_ops, 1);
+            assert_eq!(t.usage().symbol_memory, 50);
+        }
+        drop(guard);
+        let t = tracker.lock();
+        assert_eq!(t.usage().decoding_ops, 0);
+    }
+
+    #[test]
+    fn pool_config_max_clamp() {
+        // When max_size < initial_size, constructor clamps max_size
+        let config = PoolConfig::new(8, 5, 2, false, 0);
+        let pool = SymbolPool::new(config);
+        assert!(pool.config().max_size >= pool.config().initial_size);
+    }
 }
