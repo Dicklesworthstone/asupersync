@@ -213,8 +213,18 @@ It also carries the cross-entity liveness composition contract
 `lean.track3.cross_entity_liveness.v1` (source bead `asupersync-24rak`), which
 binds cancel-ladder, race-loser-drain, and close-quiescence theorem segments to
 end-to-end conformance consumers and required harness artifacts.
+The contract now includes:
+- segment-level theorem source anchors (`formal/lean/Asupersync.lean` lines),
+- explicit assumption IDs per segment and per end-to-end guarantee,
+- a canonical assumption catalog tied to runtime evidence references.
 
 Validation for this artifact is enforced in `tests/lean_invariant_theorem_test_link_map.rs`.
+
+`runtime_state_refinement_map.json` mirrors this via
+`cross_entity_liveness_contract` fields:
+- `theorem_sources` for each segment,
+- `required_assumptions` per segment,
+- `assumption_ids` on end-to-end guarantee rows.
 
 ## CI Verification Profiles
 

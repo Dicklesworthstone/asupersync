@@ -116,7 +116,7 @@ impl<T> TaskHandle<T> {
     /// # Example
     ///
     /// ```ignore
-    /// let handle = scope.spawn(&mut state, cx, async { 42 });
+    /// let mut handle = scope.spawn(&mut state, cx, async { 42 });
     /// match handle.join(cx).await {
     ///     Ok(value) => println!("Task returned: {value}"),
     ///     Err(JoinError::Cancelled(r)) => println!("Task was cancelled: {r}"),
@@ -124,10 +124,11 @@ impl<T> TaskHandle<T> {
     /// }
     /// ```
     #[must_use]
-    pub fn join<'a>(&'a self, cx: &'a Cx) -> JoinFuture<'a, T> {
+    pub fn join<'a>(&'a mut self, cx: &'a Cx) -> JoinFuture<'a, T> {
+        let cx_inner = self.inner.clone();
         JoinFuture {
-            handle: self,
             inner: self.receiver.recv(cx),
+            cx_inner,
             completed: false,
             drop_reason: None,
         }
@@ -141,13 +142,14 @@ impl<T> TaskHandle<T> {
     /// to "losing the race".
     #[must_use]
     pub fn join_with_drop_reason<'a>(
-        &'a self,
+        &'a mut self,
         cx: &'a Cx,
         reason: CancelReason,
     ) -> JoinFuture<'a, T> {
+        let cx_inner = self.inner.clone();
         JoinFuture {
-            handle: self,
             inner: self.receiver.recv(cx),
+            cx_inner,
             completed: false,
             drop_reason: Some(reason),
         }
@@ -160,7 +162,7 @@ impl<T> TaskHandle<T> {
     /// - `Ok(Some(result))` if the task has completed
     /// - `Ok(None)` if the task is still running
     /// - `Err(JoinError)` if the task was cancelled or panicked
-    pub fn try_join(&self) -> Result<Option<T>, JoinError> {
+    pub fn try_join(&mut self) -> Result<Option<T>, JoinError> {
         match self.receiver.try_recv() {
             Ok(result) => Ok(Some(result?)),
             Err(oneshot::TryRecvError::Empty) => Ok(None),
@@ -209,10 +211,35 @@ impl<T> TaskHandle<T> {
 /// This future aborts the task if dropped before completion, ensuring correct
 /// cleanup in races and timeouts.
 pub struct JoinFuture<'a, T> {
-    handle: &'a TaskHandle<T>,
     inner: oneshot::RecvFuture<'a, Result<T, JoinError>>,
+    cx_inner: Weak<RwLock<CxInner>>,
     completed: bool,
     drop_reason: Option<CancelReason>,
+}
+
+impl<T> JoinFuture<'_, T> {
+    fn closed_reason(&self) -> CancelReason {
+        self.cx_inner
+            .upgrade()
+            .and_then(|inner| inner.read().cancel_reason.clone())
+            .unwrap_or_else(|| CancelReason::user("join channel closed"))
+    }
+
+    fn abort_with_reason(&self, reason: CancelReason) {
+        if let Some(inner) = self.cx_inner.upgrade() {
+            let cancel_waker = {
+                let mut lock = inner.write();
+                lock.cancel_requested = true;
+                if lock.cancel_reason.is_none() {
+                    lock.cancel_reason = Some(reason);
+                }
+                lock.cancel_waker.clone()
+            };
+            if let Some(waker) = cancel_waker {
+                waker.wake_by_ref();
+            }
+        }
+    }
 }
 
 impl<T> std::future::Future for JoinFuture<'_, T> {
@@ -231,7 +258,7 @@ impl<T> std::future::Future for JoinFuture<'_, T> {
             }
             std::task::Poll::Ready(Err(_)) => {
                 this.completed = true;
-                std::task::Poll::Ready(Err(JoinError::Cancelled(this.handle.closed_reason())))
+                std::task::Poll::Ready(Err(JoinError::Cancelled(this.closed_reason())))
             }
             std::task::Poll::Pending => std::task::Poll::Pending,
         }
@@ -245,13 +272,13 @@ impl<T> Drop for JoinFuture<'_, T> {
         if !self.completed {
             // If a result is already ready, don't stamp a spurious cancel
             // reason when dropping an unpolled join future.
-            if self.handle.is_finished() {
+            if self.inner.receiver_finished() {
                 return;
             }
             if let Some(reason) = self.drop_reason.take() {
-                self.handle.abort_with_reason(reason);
+                self.abort_with_reason(reason);
             } else {
-                self.handle.abort();
+                self.abort_with_reason(CancelReason::user("abort"));
             }
         }
     }

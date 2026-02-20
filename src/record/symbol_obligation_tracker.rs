@@ -372,10 +372,12 @@ impl SymbolObligationTracker {
                 }
             }
 
-            if commit {
-                ob.commit(now);
-            } else {
-                ob.abort(now);
+            if ob.is_pending() {
+                if commit {
+                    ob.commit(now);
+                } else {
+                    ob.abort(now);
+                }
             }
             ob
         })

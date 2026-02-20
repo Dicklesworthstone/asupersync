@@ -1291,7 +1291,47 @@ fn assert_cross_entity_invariant_links(contract: &Value, link_map: &Value) {
     }
 }
 
-fn assert_cross_entity_theorem_chain(contract: &Value, theorem_index: &BTreeMap<String, u64>) {
+fn assert_cross_entity_assumption_catalog(contract: &Value) -> BTreeSet<String> {
+    let assumptions = contract
+        .get("assumption_catalog")
+        .and_then(Value::as_array)
+        .expect("assumption_catalog must be an array");
+    let mut ids = BTreeSet::new();
+    for assumption in assumptions {
+        let assumption_id = assumption
+            .get("assumption_id")
+            .and_then(Value::as_str)
+            .expect("assumption_id must be a string");
+        assert!(
+            ids.insert(assumption_id.to_string()),
+            "assumption_catalog must not repeat assumption_id {assumption_id}"
+        );
+        assert!(
+            assumption
+                .get("statement")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty()),
+            "assumption_catalog.{assumption_id}.statement must be non-empty"
+        );
+    }
+    assert_eq!(
+        ids,
+        BTreeSet::from([
+            "assume.cancel.checkpoint_observability.v1".to_string(),
+            "assume.cancel.streak_fairness_bound.v1".to_string(),
+            "assume.race.loser_drain_waits.v1".to_string(),
+            "assume.close.quiescence_guard.v1".to_string(),
+        ]),
+        "assumption_catalog must carry canonical cross-entity assumption IDs"
+    );
+    ids
+}
+
+fn assert_cross_entity_theorem_chain(
+    contract: &Value,
+    theorem_index: &BTreeMap<String, u64>,
+    assumption_ids: &BTreeSet<String>,
+) {
     let theorem_chain = contract
         .get("theorem_chain")
         .and_then(Value::as_array)
@@ -1328,6 +1368,68 @@ fn assert_cross_entity_theorem_chain(contract: &Value, theorem_index: &BTreeMap<
             assert!(
                 theorem_index.contains_key(theorem),
                 "theorem_chain.{segment_id} references unknown theorem {theorem}"
+            );
+        }
+
+        let theorem_sources = segment
+            .get("theorem_sources")
+            .and_then(Value::as_array)
+            .expect("theorem_sources must be an array");
+        assert!(
+            !theorem_sources.is_empty(),
+            "theorem_chain.{segment_id}.theorem_sources must be non-empty"
+        );
+        let mut source_lines = BTreeMap::new();
+        for source in theorem_sources {
+            let theorem = source
+                .get("theorem")
+                .and_then(Value::as_str)
+                .expect("theorem_sources.theorem must be a string");
+            let line = source
+                .get("line")
+                .and_then(Value::as_u64)
+                .expect("theorem_sources.line must be numeric");
+            assert!(
+                source
+                    .get("file")
+                    .and_then(Value::as_str)
+                    .is_some_and(|path| Path::new(path).exists()),
+                "theorem_sources.file must exist for theorem {theorem}"
+            );
+            let expected = theorem_index
+                .get(theorem)
+                .unwrap_or_else(|| panic!("unknown theorem in theorem_sources: {theorem}"));
+            assert_eq!(
+                line, *expected,
+                "theorem_sources line mismatch for {theorem}"
+            );
+            source_lines.insert(theorem.to_string(), line);
+        }
+        for theorem in theorems {
+            let theorem = theorem
+                .as_str()
+                .expect("segment theorem entries must be strings");
+            assert!(
+                source_lines.contains_key(theorem),
+                "theorem_chain.{segment_id}.theorem_sources missing theorem {theorem}"
+            );
+        }
+
+        let segment_assumptions = segment
+            .get("assumption_ids")
+            .and_then(Value::as_array)
+            .expect("segment assumption_ids must be an array");
+        assert!(
+            !segment_assumptions.is_empty(),
+            "theorem_chain.{segment_id}.assumption_ids must be non-empty"
+        );
+        for assumption in segment_assumptions {
+            let assumption = assumption
+                .as_str()
+                .expect("segment assumption_ids entries must be strings");
+            assert!(
+                assumption_ids.contains(assumption),
+                "theorem_chain.{segment_id} references unknown assumption_id {assumption}"
             );
         }
     }
@@ -1404,6 +1506,7 @@ fn assert_cross_entity_end_to_end_guarantees(
     contract: &Value,
     theorem_index: &BTreeMap<String, u64>,
     contract_harness_ids: &BTreeSet<String>,
+    assumption_ids: &BTreeSet<String>,
 ) {
     let guarantees = contract
         .get("end_to_end_guarantees")
@@ -1441,6 +1544,23 @@ fn assert_cross_entity_end_to_end_guarantees(
             assert!(
                 theorem_index.contains_key(theorem),
                 "end_to_end_guarantees.{guarantee_id} references unknown theorem {theorem}"
+            );
+        }
+        let guarantee_assumptions = guarantee
+            .get("assumption_ids")
+            .and_then(Value::as_array)
+            .expect("assumption_ids must be an array");
+        assert!(
+            !guarantee_assumptions.is_empty(),
+            "end_to_end_guarantees.{guarantee_id} must define assumption_ids"
+        );
+        for assumption in guarantee_assumptions {
+            let assumption = assumption
+                .as_str()
+                .expect("assumption_ids entries must be strings");
+            assert!(
+                assumption_ids.contains(assumption),
+                "end_to_end_guarantees.{guarantee_id} references unknown assumption_id {assumption}"
             );
         }
         let harness_ids = guarantee
@@ -1491,11 +1611,17 @@ fn cross_entity_liveness_contract_composes_theorem_chain_into_harness_consumers(
 
     assert_cross_entity_contract_identity(contract);
     assert_cross_entity_invariant_links(contract, &link_map);
+    let assumption_ids = assert_cross_entity_assumption_catalog(contract);
 
     let theorem_index = theorem_lines(&theorem_inventory);
-    assert_cross_entity_theorem_chain(contract, &theorem_index);
+    assert_cross_entity_theorem_chain(contract, &theorem_index, &assumption_ids);
 
     let harness_field_map = cross_entity_harness_field_map(&runtime_map);
     let contract_harness_ids = assert_cross_entity_harness_links(contract, &harness_field_map);
-    assert_cross_entity_end_to_end_guarantees(contract, &theorem_index, &contract_harness_ids);
+    assert_cross_entity_end_to_end_guarantees(
+        contract,
+        &theorem_index,
+        &contract_harness_ids,
+        &assumption_ids,
+    );
 }

@@ -1003,21 +1003,33 @@ macro_rules! assert_log {
 #[macro_export]
 macro_rules! assert_eq_log {
     ($logger:expr, $left:expr, $right:expr) => {
-        if $left != $right {
-            tracing::error!(report = %$logger.report(), "assertion failed: left == right");
-            panic!(
-                "assertion failed: `(left == right)`\n  left: {:?}\n right: {:?}",
-                $left, $right
-            );
+        match (&$left, &$right) {
+            (left_val, right_val) => {
+                if *left_val != *right_val {
+                    tracing::error!(report = %$logger.report(), "assertion failed: left == right");
+                    panic!(
+                        "assertion failed: `(left == right)`\n  left: {:?}\n right: {:?}",
+                        left_val, right_val
+                    );
+                }
+            }
         }
     };
     ($logger:expr, $left:expr, $right:expr, $($arg:tt)*) => {
-        if $left != $right {
-            tracing::error!(report = %$logger.report(), "assertion failed: {}", format_args!($($arg)*));
-            panic!(
-                "assertion failed: `(left == right)`\n  left: {:?}\n right: {:?}\n{}",
-                $left, $right, format!($($arg)*)
-            );
+        match (&$left, &$right) {
+            (left_val, right_val) => {
+                if *left_val != *right_val {
+                    tracing::error!(
+                        report = %$logger.report(),
+                        "assertion failed: {}",
+                        format_args!($($arg)*)
+                    );
+                    panic!(
+                        "assertion failed: `(left == right)`\n  left: {:?}\n right: {:?}\n{}",
+                        left_val, right_val, format!($($arg)*)
+                    );
+                }
+            }
         }
     };
 }
@@ -3117,11 +3129,15 @@ macro_rules! harness_phase_exit {
 #[macro_export]
 macro_rules! harness_assert_eq {
     ($harness:expr, $desc:expr, $expected:expr, $actual:expr) => {
-        if !$harness.assert_eq($desc, &$expected, &$actual) {
-            panic!(
-                "harness assertion failed: {}: expected {:?}, got {:?}",
-                $desc, $expected, $actual
-            );
+        match (&$expected, &$actual) {
+            (expected_val, actual_val) => {
+                if !$harness.assert_eq($desc, expected_val, actual_val) {
+                    panic!(
+                        "harness assertion failed: {}: expected {:?}, got {:?}",
+                        $desc, expected_val, actual_val
+                    );
+                }
+            }
         }
     };
 }
@@ -3237,8 +3253,8 @@ macro_rules! assert_with_context {
 #[allow(unsafe_code)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -3595,6 +3611,66 @@ mod tests {
         crate::test_complete!("test_harness_macros");
     }
 
+    #[test]
+    fn test_assert_eq_log_macro_evaluates_operands_once_on_failure() {
+        init_test("test_assert_eq_log_macro_evaluates_operands_once_on_failure");
+        let logger = TestLogger::new(TestLogLevel::Info);
+        let left_calls = Arc::new(AtomicUsize::new(0));
+        let right_calls = Arc::new(AtomicUsize::new(0));
+        let left_counter = Arc::clone(&left_calls);
+        let right_counter = Arc::clone(&right_calls);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_eq_log!(
+                logger,
+                {
+                    left_counter.fetch_add(1, Ordering::Relaxed);
+                    1
+                },
+                {
+                    right_counter.fetch_add(1, Ordering::Relaxed);
+                    2
+                }
+            );
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(left_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(right_calls.load(Ordering::Relaxed), 1);
+        crate::test_complete!("test_assert_eq_log_macro_evaluates_operands_once_on_failure");
+    }
+
+    #[test]
+    fn test_harness_assert_eq_macro_evaluates_operands_once_on_failure() {
+        init_test("test_harness_assert_eq_macro_evaluates_operands_once_on_failure");
+        let expected_calls = Arc::new(AtomicUsize::new(0));
+        let actual_calls = Arc::new(AtomicUsize::new(0));
+        let expected_counter = Arc::clone(&expected_calls);
+        let actual_counter = Arc::clone(&actual_calls);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut harness = TestHarness::new("harness_macro_eval_once");
+            harness_phase!(harness, "setup");
+            harness_assert_eq!(
+                harness,
+                "mismatch",
+                {
+                    expected_counter.fetch_add(1, Ordering::Relaxed);
+                    10
+                },
+                {
+                    actual_counter.fetch_add(1, Ordering::Relaxed);
+                    11
+                }
+            );
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(expected_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(actual_calls.load(Ordering::Relaxed), 1);
+        crate::test_complete!("test_harness_assert_eq_macro_evaluates_operands_once_on_failure");
+    }
+
     // ====================================================================
     // TestContext tests
     // ====================================================================
@@ -3818,11 +3894,9 @@ mod tests {
             vec!["no_leaks".to_string(), "quiescence".to_string()]
         );
         assert_eq!(manifest.failure_class, "assertion_failure");
-        assert!(
-            manifest
-                .replay_command
-                .contains("cargo test helper_test -- --nocapture")
-        );
+        assert!(manifest
+            .replay_command
+            .contains("cargo test helper_test -- --nocapture"));
         assert_eq!(
             manifest.artifact_paths,
             vec!["a.json".to_string(), "b.json".to_string()]

@@ -210,8 +210,9 @@ where
                 break;
             }
         } else {
-            // Spin-wait is acceptable here as we are outside the runtime
-            std::thread::yield_now();
+            // Yield back to the executor instead of blocking the worker thread
+            // with a busy spin.
+            crate::runtime::yield_now::yield_now().await;
         }
     }
 

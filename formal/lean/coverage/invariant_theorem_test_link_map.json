@@ -737,6 +737,40 @@
   "cross_entity_liveness_composition": {
     "contract_id": "lean.track3.cross_entity_liveness.v1",
     "source_bead": "asupersync-24rak",
+    "assumption_catalog": [
+      {
+        "assumption_id": "assume.cancel.checkpoint_observability.v1",
+        "statement": "Runtime tasks observe cancellation through explicit checkpoints so cancellation progression can be witnessed and bounded in traces.",
+        "evidence_refs": [
+          "src/cx/cx.rs:1090",
+          "src/cancel/symbol_cancel.rs"
+        ]
+      },
+      {
+        "assumption_id": "assume.cancel.streak_fairness_bound.v1",
+        "statement": "Scheduler cancel-lane streak limits preserve eventual timed/ready dispatch opportunities under sustained cancellation pressure.",
+        "evidence_refs": [
+          "src/runtime/scheduler/three_lane.rs:14",
+          "src/runtime/scheduler/three_lane.rs:1206"
+        ]
+      },
+      {
+        "assumption_id": "assume.race.loser_drain_waits.v1",
+        "statement": "Race combinators do not return until non-winning branches are cancelled and drained under structured scope ownership.",
+        "evidence_refs": [
+          "src/cx/scope.rs:884",
+          "tests/e2e/combinator/cancel_correctness/loser_drain.rs"
+        ]
+      },
+      {
+        "assumption_id": "assume.close.quiescence_guard.v1",
+        "statement": "Region close transitions require quiescence preconditions (no live descendants and no unresolved obligations) before terminal close completion.",
+        "evidence_refs": [
+          "src/runtime/state.rs",
+          "formal/lean/Asupersync.lean:794"
+        ]
+      }
+    ],
     "invariant_ids": [
       "inv.cancel.protocol",
       "inv.race.losers_drained",
@@ -750,6 +784,27 @@
           "cancel_steps_testable_bound",
           "cancel_propagation_bounded"
         ],
+        "theorem_sources": [
+          {
+            "theorem": "cancel_protocol_terminates",
+            "file": "formal/lean/Asupersync.lean",
+            "line": 3254
+          },
+          {
+            "theorem": "cancel_steps_testable_bound",
+            "file": "formal/lean/Asupersync.lean",
+            "line": 3309
+          },
+          {
+            "theorem": "cancel_propagation_bounded",
+            "file": "formal/lean/Asupersync.lean",
+            "line": 3333
+          }
+        ],
+        "assumption_ids": [
+          "assume.cancel.checkpoint_observability.v1",
+          "assume.cancel.streak_fairness_bound.v1"
+        ],
         "guarantee": "Cancellation reaches bounded terminal progression before downstream close sequencing."
       },
       {
@@ -757,6 +812,22 @@
         "theorems": [
           "cancel_propagation_bounded",
           "step_preserves_wellformed"
+        ],
+        "theorem_sources": [
+          {
+            "theorem": "cancel_propagation_bounded",
+            "file": "formal/lean/Asupersync.lean",
+            "line": 3333
+          },
+          {
+            "theorem": "step_preserves_wellformed",
+            "file": "formal/lean/Asupersync.lean",
+            "line": 3070
+          }
+        ],
+        "assumption_ids": [
+          "assume.cancel.checkpoint_observability.v1",
+          "assume.race.loser_drain_waits.v1"
         ],
         "guarantee": "Race losers are cancellation-bounded and structurally wellformed while draining."
       },
@@ -766,6 +837,26 @@
           "close_implies_quiescent",
           "close_quiescence_decomposition",
           "close_complete_step"
+        ],
+        "theorem_sources": [
+          {
+            "theorem": "close_implies_quiescent",
+            "file": "formal/lean/Asupersync.lean",
+            "line": 794
+          },
+          {
+            "theorem": "close_quiescence_decomposition",
+            "file": "formal/lean/Asupersync.lean",
+            "line": 889
+          },
+          {
+            "theorem": "close_complete_step",
+            "file": "formal/lean/Asupersync.lean",
+            "line": 1806
+          }
+        ],
+        "assumption_ids": [
+          "assume.close.quiescence_guard.v1"
         ],
         "guarantee": "Region close concludes only in quiescent state with completed close transition."
       }
@@ -779,6 +870,11 @@
           "cancel_steps_testable_bound",
           "close_quiescence_decomposition",
           "close_complete_step"
+        ],
+        "assumption_ids": [
+          "assume.cancel.checkpoint_observability.v1",
+          "assume.cancel.streak_fairness_bound.v1",
+          "assume.close.quiescence_guard.v1"
         ],
         "harness_ids": [
           "harness.cancellation_obligation"
@@ -796,6 +892,11 @@
           "cancel_propagation_bounded",
           "step_preserves_wellformed",
           "close_quiescence_decomposition"
+        ],
+        "assumption_ids": [
+          "assume.cancel.checkpoint_observability.v1",
+          "assume.race.loser_drain_waits.v1",
+          "assume.close.quiescence_guard.v1"
         ],
         "harness_ids": [
           "harness.race_loser_drain"

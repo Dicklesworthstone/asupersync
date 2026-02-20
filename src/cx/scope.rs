@@ -976,6 +976,7 @@ impl<P: Policy> Scope<'_, P> {
                     // Backup admission failed after primary already started.
                     // Request cancellation on primary to avoid orphaned work.
                     h1.abort_with_reason(CancelReason::resource_unavailable());
+                    let _ = f1_pinned.await; // Drain h1
                     return Err(JoinError::Cancelled(CancelReason::resource_unavailable()));
                 };
 

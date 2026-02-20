@@ -403,7 +403,7 @@ pub struct PooledResource<R> {
     /// implementations that use only the public `new()` constructor get
     /// `None`, which is harmless — it just means notification relies on
     /// the next `process_returns` call instead of being immediate.
-    return_wakers: Option<Arc<PoolMutex<SmallVec<[Waker; 4]>>>>,
+    return_wakers: Option<Arc<PoolMutex<SmallVec<[(u64, Waker); 4]>>>>,
 }
 
 impl<R> PooledResource<R> {
@@ -440,7 +440,7 @@ impl<R> PooledResource<R> {
     /// [`GenericPool`].  Called internally after construction so that
     /// returning/discarding the resource immediately wakes waiting
     /// acquirers.
-    fn with_return_notify(mut self, wakers: Arc<PoolMutex<SmallVec<[Waker; 4]>>>) -> Self {
+    fn with_return_notify(mut self, wakers: Arc<PoolMutex<SmallVec<[(u64, Waker); 4]>>>) -> Self {
         self.return_wakers = Some(wakers);
         self
     }
@@ -516,7 +516,7 @@ impl<R> PooledResource<R> {
     fn notify_return_wakers(&self) {
         if let Some(ref wakers) = self.return_wakers {
             let drained = std::mem::take(&mut *wakers.lock());
-            for waker in drained {
+            for (_, waker) in drained {
                 waker.wake();
             }
         }
@@ -838,8 +838,14 @@ where
         // code calls process_returns would leave us stuck until timeout.
         {
             let mut wakers = self.pool.return_wakers.lock();
-            if !wakers.iter().any(|w| w.will_wake(cx.waker())) {
-                wakers.push(cx.waker().clone());
+            let id = self.waiter_id.expect("waiter_id assigned above");
+            
+            if let Some((_, existing)) = wakers.iter_mut().find(|(wid, _)| *wid == id) {
+                if !existing.will_wake(cx.waker()) {
+                    existing.clone_from(cx.waker());
+                }
+            } else {
+                wakers.push((id, cx.waker().clone()));
             }
         }
 
@@ -856,6 +862,7 @@ where
     fn drop(&mut self) {
         if let Some(id) = self.waiter_id {
             self.pool.state.lock().waiters.retain(|w| w.id != id);
+            self.pool.return_wakers.lock().retain(|(wid, _)| *wid != id);
         }
     }
 }
@@ -966,7 +973,7 @@ where
     /// return/discard so that [`WaitForNotification`] futures are
     /// re-polled immediately instead of waiting for the next
     /// `process_returns` call.
-    return_wakers: Arc<PoolMutex<SmallVec<[Waker; 4]>>>,
+    return_wakers: Arc<PoolMutex<SmallVec<[(u64, Waker); 4]>>>,
     /// Lock-free snapshot of `GenericPoolState::closed` (monotone false→true).
     closed: AtomicBool,
     /// Optional metrics handle for observability.
@@ -1968,7 +1975,7 @@ mod tests {
     }
 
     struct ReentrantReturnWaker {
-        return_wakers: Arc<PoolMutex<SmallVec<[Waker; 4]>>>,
+        return_wakers: Arc<PoolMutex<SmallVec<[(u64, Waker); 4]>>>,
         tx: mpsc::Sender<bool>,
     }
 

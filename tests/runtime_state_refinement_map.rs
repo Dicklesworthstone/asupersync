@@ -938,6 +938,39 @@ fn runtime_state_refinement_map_cross_entity_liveness_contract_is_wired() {
         "linked_invariants must carry the canonical cross-entity liveness set"
     );
 
+    let assumption_catalog = contract
+        .get("assumption_catalog")
+        .and_then(Value::as_array)
+        .expect("assumption_catalog must be an array");
+    let mut assumption_ids = BTreeSet::new();
+    for assumption in assumption_catalog {
+        let assumption_id = assumption
+            .get("assumption_id")
+            .and_then(Value::as_str)
+            .expect("assumption_id must be string");
+        assert!(
+            assumption_ids.insert(assumption_id.to_string()),
+            "assumption_catalog must not repeat assumption_id {assumption_id}"
+        );
+        assert!(
+            assumption
+                .get("statement")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty()),
+            "assumption_catalog.{assumption_id}.statement must be non-empty"
+        );
+    }
+    assert_eq!(
+        assumption_ids,
+        BTreeSet::from([
+            "assume.cancel.checkpoint_observability.v1".to_string(),
+            "assume.cancel.streak_fairness_bound.v1".to_string(),
+            "assume.race.loser_drain_waits.v1".to_string(),
+            "assume.close.quiescence_guard.v1".to_string()
+        ]),
+        "assumption_catalog must define canonical cross-entity assumption IDs"
+    );
+
     let mappings = map
         .get("mappings")
         .and_then(Value::as_array)
@@ -1015,6 +1048,61 @@ fn runtime_state_refinement_map_cross_entity_liveness_contract_is_wired() {
             );
         }
 
+        let theorem_sources = segment
+            .get("theorem_sources")
+            .and_then(Value::as_array)
+            .expect("theorem_sources must be an array");
+        assert!(
+            !theorem_sources.is_empty(),
+            "segment {segment_id} must define theorem_sources"
+        );
+        let mut source_lines = BTreeMap::new();
+        for source in theorem_sources {
+            let theorem = source
+                .get("theorem")
+                .and_then(Value::as_str)
+                .expect("theorem_sources.theorem must be string");
+            let line = source
+                .get("line")
+                .and_then(Value::as_u64)
+                .expect("theorem_sources.line must be numeric");
+            let expected = theorem_lines
+                .get(theorem)
+                .unwrap_or_else(|| panic!("segment {segment_id} unknown theorem source {theorem}"));
+            assert_eq!(
+                line, *expected,
+                "segment {segment_id} theorem_sources line mismatch for {theorem}"
+            );
+            source_lines.insert(theorem.to_string(), line);
+        }
+        for theorem in required_theorems {
+            let theorem = theorem
+                .as_str()
+                .expect("required_theorems entries must be strings");
+            assert!(
+                source_lines.contains_key(theorem),
+                "segment {segment_id} theorem_sources missing theorem {theorem}"
+            );
+        }
+
+        let required_assumptions = segment
+            .get("required_assumptions")
+            .and_then(Value::as_array)
+            .expect("required_assumptions must be an array");
+        assert!(
+            !required_assumptions.is_empty(),
+            "segment {segment_id} must define required_assumptions"
+        );
+        for assumption in required_assumptions {
+            let assumption = assumption
+                .as_str()
+                .expect("required_assumptions entries must be strings");
+            assert!(
+                assumption_ids.contains(assumption),
+                "segment {segment_id} references unknown required_assumption {assumption}"
+            );
+        }
+
         let handoff_to = segment
             .get("handoff_to")
             .and_then(Value::as_str)
@@ -1085,6 +1173,24 @@ fn runtime_state_refinement_map_cross_entity_liveness_contract_is_wired() {
             conformance_harness_ids.contains(harness_id),
             "guarantee {guarantee_id} references unknown harness_id {harness_id}"
         );
+
+        let guarantee_assumptions = guarantee
+            .get("assumption_ids")
+            .and_then(Value::as_array)
+            .expect("assumption_ids must be an array");
+        assert!(
+            !guarantee_assumptions.is_empty(),
+            "guarantee {guarantee_id} must define assumption_ids"
+        );
+        for assumption in guarantee_assumptions {
+            let assumption = assumption
+                .as_str()
+                .expect("assumption_ids entries must be strings");
+            assert!(
+                assumption_ids.contains(assumption),
+                "guarantee {guarantee_id} references unknown assumption_id {assumption}"
+            );
+        }
 
         let conformance_tests = guarantee
             .get("conformance_tests")

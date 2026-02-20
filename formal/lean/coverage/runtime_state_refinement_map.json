@@ -300,6 +300,24 @@
   "cross_entity_liveness_contract": {
     "contract_id": "lean.track3.cross_entity_liveness.refinement.v1",
     "source_bead": "asupersync-24rak",
+    "assumption_catalog": [
+      {
+        "assumption_id": "assume.cancel.checkpoint_observability.v1",
+        "statement": "Runtime tasks observe cancellation at checkpoint boundaries, so cancellation-ladder transitions are externally testable and replay-stable."
+      },
+      {
+        "assumption_id": "assume.cancel.streak_fairness_bound.v1",
+        "statement": "Three-lane scheduler fairness bounds prevent unbounded cancel-lane starvation of timed/ready work during cancellation-heavy regimes."
+      },
+      {
+        "assumption_id": "assume.race.loser_drain_waits.v1",
+        "statement": "Race combinator implementations wait for loser cancellation/drain completion before returning from the parent scope."
+      },
+      {
+        "assumption_id": "assume.close.quiescence_guard.v1",
+        "statement": "Region close sequencing enforces quiescence (no live children and resolved obligations) before terminal close observations."
+      }
+    ],
     "linked_invariants": [
       "inv.cancel.protocol",
       "inv.race.losers_drained",
@@ -316,6 +334,24 @@
           "cancel_steps_testable_bound",
           "cancel_propagation_bounded"
         ],
+        "theorem_sources": [
+          {
+            "theorem": "cancel_protocol_terminates",
+            "line": 3254
+          },
+          {
+            "theorem": "cancel_steps_testable_bound",
+            "line": 3309
+          },
+          {
+            "theorem": "cancel_propagation_bounded",
+            "line": 3333
+          }
+        ],
+        "required_assumptions": [
+          "assume.cancel.checkpoint_observability.v1",
+          "assume.cancel.streak_fairness_bound.v1"
+        ],
         "handoff_to": "race_loser_drain"
       },
       {
@@ -326,6 +362,20 @@
         "required_theorems": [
           "cancel_propagation_bounded",
           "step_preserves_wellformed"
+        ],
+        "theorem_sources": [
+          {
+            "theorem": "cancel_propagation_bounded",
+            "line": 3333
+          },
+          {
+            "theorem": "step_preserves_wellformed",
+            "line": 3070
+          }
+        ],
+        "required_assumptions": [
+          "assume.cancel.checkpoint_observability.v1",
+          "assume.race.loser_drain_waits.v1"
         ],
         "handoff_to": "close_quiescence"
       },
@@ -340,6 +390,23 @@
           "close_quiescence_decomposition",
           "close_complete_step"
         ],
+        "theorem_sources": [
+          {
+            "theorem": "close_implies_quiescent",
+            "line": 794
+          },
+          {
+            "theorem": "close_quiescence_decomposition",
+            "line": 889
+          },
+          {
+            "theorem": "close_complete_step",
+            "line": 1806
+          }
+        ],
+        "required_assumptions": [
+          "assume.close.quiescence_guard.v1"
+        ],
         "handoff_to": "terminal"
       }
     ],
@@ -349,6 +416,11 @@
         "required_segments": [
           "cancel_ladder",
           "close_quiescence"
+        ],
+        "assumption_ids": [
+          "assume.cancel.checkpoint_observability.v1",
+          "assume.cancel.streak_fairness_bound.v1",
+          "assume.close.quiescence_guard.v1"
         ],
         "harness_id": "harness.cancellation_obligation",
         "conformance_tests": [
@@ -367,6 +439,11 @@
           "cancel_ladder",
           "race_loser_drain",
           "close_quiescence"
+        ],
+        "assumption_ids": [
+          "assume.cancel.checkpoint_observability.v1",
+          "assume.race.loser_drain_waits.v1",
+          "assume.close.quiescence_guard.v1"
         ],
         "harness_id": "harness.race_loser_drain",
         "conformance_tests": [
