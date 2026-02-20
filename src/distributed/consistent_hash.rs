@@ -291,17 +291,61 @@ mod tests {
         assert!(ring.node_for_key(&"key").is_none());
     }
 
-    // =========================================================================
-    // Wave 53 – pure data-type trait coverage
-    // =========================================================================
-
+    /// Invariant: adding a duplicate node is idempotent — node_count and
+    /// vnode_count must not change on the second add.
     #[test]
-    fn hash_ring_debug_clone() {
-        let ring = build_ring(2, 4);
-        let dbg = format!("{ring:?}");
-        assert!(dbg.contains("HashRing"), "{dbg}");
-        let cloned = ring;
-        assert_eq!(cloned.node_count(), 2);
-        assert_eq!(cloned.vnode_count(), 8);
+    fn duplicate_add_node_is_idempotent() {
+        let mut ring = HashRing::new(16);
+        assert!(ring.add_node("a"));
+        assert_eq!(ring.node_count(), 1);
+        assert_eq!(ring.vnode_count(), 16);
+
+        // Second add returns false and state is unchanged.
+        assert!(!ring.add_node("a"));
+        assert_eq!(ring.node_count(), 1);
+        assert_eq!(ring.vnode_count(), 16);
+    }
+
+    /// Invariant: single-node ring, add then remove leaves an empty ring
+    /// where node_for_key returns None.
+    #[test]
+    fn single_node_add_remove_leaves_empty_ring() {
+        let mut ring = HashRing::new(8);
+        ring.add_node("only-node");
+        assert_eq!(ring.node_count(), 1);
+        assert!(ring.node_for_key(&42u64).is_some());
+
+        let removed = ring.remove_node("only-node");
+        assert_eq!(removed, 8);
+        assert_eq!(ring.node_count(), 0);
+        assert_eq!(ring.vnode_count(), 0);
+        assert!(ring.is_empty());
+        assert!(
+            ring.node_for_key(&42u64).is_none(),
+            "empty ring must return None for any key"
+        );
+    }
+
+    /// Invariant: key assignment is deterministic across identical ring builds.
+    #[test]
+    fn deterministic_assignment_across_builds() {
+        let build = || {
+            let mut ring = HashRing::new(32);
+            for name in &["alpha", "beta", "gamma"] {
+                ring.add_node(*name);
+            }
+            ring
+        };
+
+        let r1 = build();
+        let r2 = build();
+
+        for key in 0..1000u64 {
+            assert_eq!(
+                r1.node_for_key(&key),
+                r2.node_for_key(&key),
+                "key {key} assigned differently across builds"
+            );
+        }
     }
 }

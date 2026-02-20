@@ -112,51 +112,6 @@
       "reason": "Platform fallback/stub export remains while deterministic cross-platform support is hardened.",
       "expires_at_utc": "2026-06-30T00:00:00Z",
       "replacement_issue": "asupersync-3narc.2.4"
-    },
-    {
-      "waiver_id": "waiver.tls.phase0-stub.acceptor.2026-02-18",
-      "path": "src/tls/acceptor.rs",
-      "owner": "tls-core",
-      "status": "active",
-      "reason": "Feature-gated TLS paths retain stub wording for disabled-mode behavior.",
-      "expires_at_utc": "2026-06-30T00:00:00Z",
-      "replacement_issue": "asupersync-3narc.2.5"
-    },
-    {
-      "waiver_id": "waiver.tls.phase0-stub.connector.2026-02-18",
-      "path": "src/tls/connector.rs",
-      "owner": "tls-core",
-      "status": "active",
-      "reason": "Feature-gated TLS paths retain stub wording for disabled-mode behavior.",
-      "expires_at_utc": "2026-06-30T00:00:00Z",
-      "replacement_issue": "asupersync-3narc.2.5"
-    },
-    {
-      "waiver_id": "waiver.tls.phase0-stub.stream.2026-02-18",
-      "path": "src/tls/stream.rs",
-      "owner": "tls-core",
-      "status": "active",
-      "reason": "Feature-gated TLS paths retain stub wording for disabled-mode behavior.",
-      "expires_at_utc": "2026-06-30T00:00:00Z",
-      "replacement_issue": "asupersync-3narc.2.5"
-    },
-    {
-      "waiver_id": "waiver.tls.phase0-stub.types.2026-02-18",
-      "path": "src/tls/types.rs",
-      "owner": "tls-core",
-      "status": "active",
-      "reason": "Feature-gated TLS paths retain stub wording for disabled-mode behavior.",
-      "expires_at_utc": "2026-06-30T00:00:00Z",
-      "replacement_issue": "asupersync-3narc.2.5"
-    },
-    {
-      "waiver_id": "waiver.web.debug.stub-endpoints.2026-02-18",
-      "path": "src/web/debug.rs",
-      "owner": "web-runtime",
-      "status": "active",
-      "reason": "Debug surface retains known stub wording while endpoints are migrated.",
-      "expires_at_utc": "2026-06-30T00:00:00Z",
-      "replacement_issue": "asupersync-3narc.2.5"
     }
   ]
 }

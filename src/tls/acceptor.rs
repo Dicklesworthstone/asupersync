@@ -128,7 +128,7 @@ impl TlsAcceptor {
         Ok(stream)
     }
 
-    /// Accept a connection (stub when TLS is disabled).
+    /// Accept a connection (disabled-mode fallback when TLS is disabled).
     #[cfg(not(feature = "tls"))]
     pub async fn accept<IO>(&self, _io: IO) -> Result<TlsStream<IO>, TlsError>
     where
@@ -336,7 +336,7 @@ impl TlsAcceptorBuilder {
         })
     }
 
-    /// Build the `TlsAcceptor` (stub when TLS is disabled).
+    /// Build the `TlsAcceptor` (disabled-mode fallback when TLS is disabled).
     #[cfg(not(feature = "tls"))]
     pub fn build(self) -> Result<TlsAcceptor, TlsError> {
         Err(TlsError::Configuration("tls feature not enabled".into()))

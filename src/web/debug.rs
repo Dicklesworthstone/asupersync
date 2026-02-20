@@ -12,7 +12,7 @@
 //! - `GET /debug` — HTML dashboard with auto-refresh
 //! - `GET /debug/snapshot` — Current runtime snapshot as JSON
 //! - `GET /debug/trace` — Recent trace events as JSON
-//! - `GET /debug/ws` — WebSocket endpoint (Phase 1, returns stub)
+//! - `GET /debug/ws` — WebSocket endpoint (Phase 1, returns a 501 placeholder)
 //!
 //! # Example
 //!

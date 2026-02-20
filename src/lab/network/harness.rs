@@ -232,7 +232,7 @@ impl SimNode {
     }
 
     /// Processes an incoming remote message with logical time metadata.
-    pub fn handle_message(&mut self, envelope: MessageEnvelope<RemoteMessage>) {
+    pub fn handle_message(&mut self, envelope: MessageEnvelope<RemoteMessage>, now: Time) {
         if self.crashed {
             return; // Silently drop messages to crashed nodes
         }
@@ -240,7 +240,7 @@ impl SimNode {
         self.record_receive(&envelope.sender_time);
 
         match envelope.payload {
-            RemoteMessage::SpawnRequest(req) => self.handle_spawn(req),
+            RemoteMessage::SpawnRequest(req) => self.handle_spawn(req, now),
             RemoteMessage::SpawnAck(ack) => Self::handle_spawn_ack(ack),
             RemoteMessage::CancelRequest(cancel) => self.handle_cancel(&cancel),
             RemoteMessage::ResultDelivery(result) => self.handle_result(result),
@@ -257,11 +257,15 @@ impl SimNode {
         }
     }
 
-    fn handle_spawn(&mut self, req: SpawnRequest) {
+    fn handle_spawn(&mut self, req: SpawnRequest, now: Time) {
         self.event_log.push(NodeEvent::SpawnReceived {
             task_id: req.remote_task_id,
             from: req.origin_node.clone(),
         });
+
+        // Keep dedup decisions aligned with virtual time progression so
+        // expired keys do not linger as stale duplicates.
+        let _ = self.dedup.evict_expired(now);
 
         // Check idempotency
         let dedup = self.dedup.check(&req.idempotency_key, &req.computation);
@@ -313,7 +317,7 @@ impl SimNode {
             req.idempotency_key,
             req.remote_task_id,
             req.computation.clone(),
-            Time::ZERO,
+            now,
         );
 
         // Accept the spawn
@@ -744,9 +748,13 @@ impl DistributedHarness {
             }
         }
 
+        let now = {
+            let nanos = self.sim_time.as_nanos().min(u128::from(u64::MAX)) as u64;
+            Time::from_nanos(nanos)
+        };
         for (node_id, envelope) in deliveries {
             if let Some(node) = self.nodes.get_mut(&node_id) {
-                node.handle_message(envelope);
+                node.handle_message(envelope, now);
             }
         }
     }
@@ -1222,6 +1230,57 @@ mod tests {
         // First should be accepted, second should be deduped
         assert_eq!(spawn_count, 1);
         assert_eq!(dedup_count, 1);
+    }
+
+    #[test]
+    fn idempotent_spawn_ttl_expiry_allows_fresh_spawn() {
+        let (mut harness, a, b) = setup_harness();
+        harness.set_tick(Duration::from_secs(1));
+        let task_id = RemoteTaskId::from_raw(7_777);
+
+        // First spawn is accepted.
+        harness.inject_spawn(&a, &b, task_id);
+        harness.run_for(Duration::from_secs(2));
+
+        // Immediate replay before TTL is deduplicated.
+        harness.inject_spawn(&a, &b, task_id);
+        harness.run_for(Duration::from_secs(2));
+
+        let node_b = harness.node(&b).unwrap();
+        let accepted_before = node_b
+            .events()
+            .iter()
+            .filter(|e| matches!(e, NodeEvent::SpawnAccepted { .. }))
+            .count();
+        let dedup_before = node_b
+            .events()
+            .iter()
+            .filter(|e| matches!(e, NodeEvent::DuplicateSpawn { .. }))
+            .count();
+        assert_eq!(accepted_before, 1);
+        assert_eq!(dedup_before, 1);
+
+        // Dedup TTL is 5 minutes; after expiry the same key should be treated as new.
+        harness.run_for(Duration::from_secs(301));
+        harness.inject_spawn(&a, &b, task_id);
+        harness.run_for(Duration::from_secs(2));
+
+        let node_b = harness.node(&b).unwrap();
+        let accepted_after = node_b
+            .events()
+            .iter()
+            .filter(|e| matches!(e, NodeEvent::SpawnAccepted { .. }))
+            .count();
+        let dedup_after = node_b
+            .events()
+            .iter()
+            .filter(|e| matches!(e, NodeEvent::DuplicateSpawn { .. }))
+            .count();
+        assert_eq!(
+            accepted_after, 2,
+            "expired dedup entry should allow respawn"
+        );
+        assert_eq!(dedup_after, 1, "only pre-expiry replay should deduplicate");
     }
 
     #[test]

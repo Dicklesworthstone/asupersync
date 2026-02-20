@@ -1598,65 +1598,191 @@ mod tests {
         assert!(debug.contains("attempt"));
     }
 
-    // =========================================================================
-    // Wave 52 – pure data-type trait coverage
-    // =========================================================================
+    // =====================================================================
+    // B6 Invariant Tests (asupersync-3narc.2.6)
+    // =====================================================================
 
+    /// Invariant: an unverified symbol can be upgraded to verified for the same ESI.
+    /// This prevents a poisoning attack where a malicious peer sends unverified
+    /// garbage for a given ESI first, blocking legitimate verified symbols.
     #[test]
-    fn collection_consistency_debug_clone_copy_eq() {
-        let c = CollectionConsistency::Quorum;
-        let dbg = format!("{c:?}");
-        assert!(dbg.contains("Quorum"), "{dbg}");
-        let copied = c;
-        let cloned = c;
-        assert_eq!(copied, cloned);
-        assert_ne!(CollectionConsistency::Any, CollectionConsistency::All);
-    }
+    fn collector_upgrades_unverified_to_verified_same_esi() {
+        let mut collector = RecoveryCollector::new(RecoveryConfig::default());
 
-    #[test]
-    fn recovery_phase_debug_clone_copy() {
-        let p = RecoveryPhase::Collecting;
-        let dbg = format!("{p:?}");
-        assert!(dbg.contains("Collecting"), "{dbg}");
-        let copied = p;
-        let cloned = p;
-        assert_eq!(copied, cloned);
-    }
-
-    #[test]
-    fn recovery_trigger_debug_clone() {
-        let trigger = RecoveryTrigger::NodeRestart {
-            region_id: RegionId::new_for_test(1, 0),
-            last_known_sequence: 100,
+        let esi = 7;
+        let unverified = CollectedSymbol {
+            symbol: Symbol::new_for_test(1, 0, esi, &[1, 2, 3]),
+            tag: AuthenticationTag::zero(),
+            source_replica: "r1".to_string(),
+            collected_at: Time::ZERO,
+            verified: false,
         };
-        let dbg = format!("{trigger:?}");
-        assert!(dbg.contains("NodeRestart"), "{dbg}");
-        let cloned = trigger;
-        assert_eq!(format!("{cloned:?}"), dbg);
-    }
+        assert!(collector.add_collected(unverified));
+        assert!(!collector.symbols()[0].verified);
 
-    #[test]
-    fn recovery_config_debug_clone_default() {
-        let cfg = RecoveryConfig::default();
-        let dbg = format!("{cfg:?}");
-        assert!(dbg.contains("RecoveryConfig"), "{dbg}");
-        let cloned = cfg;
-        assert!(format!("{cloned:?}").contains("RecoveryConfig"));
-    }
-
-    #[test]
-    fn recovery_progress_debug_clone() {
-        let p = RecoveryProgress {
-            started_at: Time::ZERO,
-            symbols_needed: 10,
-            symbols_collected: 5,
-            replicas_queried: 3,
-            replicas_responded: 2,
-            phase: RecoveryPhase::Collecting,
+        // Now add the same ESI but verified — should replace.
+        let verified = CollectedSymbol {
+            symbol: Symbol::new_for_test(1, 0, esi, &[1, 2, 3]),
+            tag: AuthenticationTag::zero(),
+            source_replica: "r2".to_string(),
+            collected_at: Time::from_secs(1),
+            verified: true,
         };
-        let dbg = format!("{p:?}");
-        assert!(dbg.contains("RecoveryProgress"), "{dbg}");
-        let cloned = p;
-        assert!(format!("{cloned:?}").contains("RecoveryProgress"));
+        assert!(
+            collector.add_collected(verified),
+            "verified symbol must replace unverified for same ESI"
+        );
+        assert_eq!(collector.symbols().len(), 1);
+        assert!(
+            collector.symbols()[0].verified,
+            "stored symbol must now be verified"
+        );
+        assert_eq!(collector.symbols()[0].source_replica, "r2");
+    }
+
+    /// Invariant: a verified symbol is NOT replaced by an unverified symbol
+    /// for the same ESI — this would be a downgrade.
+    #[test]
+    fn collector_rejects_downgrade_verified_to_unverified() {
+        let mut collector = RecoveryCollector::new(RecoveryConfig::default());
+
+        let verified = CollectedSymbol {
+            symbol: Symbol::new_for_test(1, 0, 7, &[1, 2, 3]),
+            tag: AuthenticationTag::zero(),
+            source_replica: "r1".to_string(),
+            collected_at: Time::ZERO,
+            verified: true,
+        };
+        assert!(collector.add_collected(verified));
+
+        let unverified = CollectedSymbol {
+            symbol: Symbol::new_for_test(1, 0, 7, &[4, 5, 6]),
+            tag: AuthenticationTag::zero(),
+            source_replica: "r2".to_string(),
+            collected_at: Time::from_secs(1),
+            verified: false,
+        };
+        assert!(
+            !collector.add_collected(unverified),
+            "unverified must not replace verified"
+        );
+        assert_eq!(collector.metrics.symbols_duplicate, 1);
+        assert!(collector.symbols()[0].verified);
+        assert_eq!(collector.symbols()[0].source_replica, "r1");
+    }
+
+    /// Invariant: same ESI from two different replicas — second is rejected
+    /// as a duplicate regardless of source (dedup is ESI-based, not replica-based).
+    #[test]
+    fn collector_same_esi_different_replicas_is_duplicate() {
+        let mut collector = RecoveryCollector::new(RecoveryConfig::default());
+
+        let from_r1 = CollectedSymbol {
+            symbol: Symbol::new_for_test(1, 0, 10, &[1, 2, 3]),
+            tag: AuthenticationTag::zero(),
+            source_replica: "r1".to_string(),
+            collected_at: Time::ZERO,
+            verified: false,
+        };
+        let from_r2 = CollectedSymbol {
+            symbol: Symbol::new_for_test(1, 0, 10, &[1, 2, 3]),
+            tag: AuthenticationTag::zero(),
+            source_replica: "r2".to_string(),
+            collected_at: Time::from_secs(1),
+            verified: false,
+        };
+
+        assert!(collector.add_collected(from_r1));
+        assert!(
+            !collector.add_collected(from_r2),
+            "same ESI from different replica must be rejected as duplicate"
+        );
+        assert_eq!(collector.symbols().len(), 1);
+        assert_eq!(collector.metrics.symbols_duplicate, 1);
+    }
+
+    /// Invariant: a cancelled orchestrator definitively refuses recovery.
+    /// This is a stronger assertion than the existing test: we provide
+    /// genuinely valid symbols and assert the error message is specific.
+    #[test]
+    fn orchestrator_cancel_is_definitive_with_valid_data() {
+        let snapshot = create_test_snapshot();
+        let encoded = encode_test_snapshot(&snapshot);
+
+        let symbols: Vec<CollectedSymbol> = encoded
+            .symbols
+            .iter()
+            .map(|s| CollectedSymbol {
+                symbol: s.clone(),
+                tag: AuthenticationTag::zero(),
+                source_replica: "r1".to_string(),
+                collected_at: Time::ZERO,
+                verified: false,
+            })
+            .collect();
+
+        let mut orchestrator = RecoveryOrchestrator::new(
+            RecoveryConfig::default(),
+            RecoveryDecodingConfig {
+                verify_integrity: false,
+                ..Default::default()
+            },
+        );
+
+        orchestrator.cancel("operator abort");
+        let result = orchestrator.recover_from_symbols(
+            &RecoveryTrigger::ManualTrigger {
+                region_id: RegionId::new_for_test(1, 0),
+                initiator: "test".to_string(),
+                reason: None,
+            },
+            &symbols,
+            encoded.params,
+            Duration::from_millis(1),
+        );
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::RecoveryFailed);
+        assert!(
+            err.to_string().contains("cancelled"),
+            "error message must mention cancellation: {}",
+            err
+        );
+    }
+
+    /// Invariant: decoder can be reused after reset to decode a completely
+    /// different object (different ESIs, different data).
+    #[test]
+    fn decoder_reset_allows_reuse_for_different_object() {
+        let snapshot1 = create_test_snapshot();
+        let encoded1 = encode_test_snapshot(&snapshot1);
+
+        let snapshot2 = RegionSnapshot {
+            region_id: RegionId::new_for_test(99, 0),
+            sequence: 42,
+            ..create_test_snapshot()
+        };
+        let encoded2 = encode_test_snapshot(&snapshot2);
+
+        let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
+
+        // Decode first object
+        for sym in &encoded1.symbols {
+            let auth = AuthenticatedSymbol::new_verified(sym.clone(), AuthenticationTag::zero());
+            decoder.add_symbol(&auth).unwrap();
+        }
+        let recovered1 = decoder.decode_snapshot(&encoded1.params).unwrap();
+        assert_eq!(recovered1.region_id, snapshot1.region_id);
+
+        // Reset and decode second object
+        decoder.reset();
+        for sym in &encoded2.symbols {
+            let auth = AuthenticatedSymbol::new_verified(sym.clone(), AuthenticationTag::zero());
+            decoder.add_symbol(&auth).unwrap();
+        }
+        let recovered2 = decoder.decode_snapshot(&encoded2.params).unwrap();
+        assert_eq!(recovered2.region_id, snapshot2.region_id);
+        assert_eq!(recovered2.sequence, 42);
     }
 }

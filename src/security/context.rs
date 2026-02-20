@@ -225,39 +225,114 @@ mod tests {
         assert_eq!(auth.symbol(), &symbol);
     }
 
-    // =========================================================================
-    // Wave 51 – pure data-type trait coverage
-    // =========================================================================
-
+    /// Invariant: derived contexts with different purposes produce incompatible keys.
+    /// A tag signed by derive_context("transport") must fail verification under
+    /// derive_context("storage"), even though both derive from the same master key.
     #[test]
-    fn auth_mode_debug_clone_copy_eq() {
-        let m = AuthMode::Strict;
-        let dbg = format!("{m:?}");
-        assert!(dbg.contains("Strict"), "{dbg}");
-        let copied = m;
-        let cloned = m;
-        assert_eq!(copied, cloned);
-        assert_ne!(AuthMode::Strict, AuthMode::Permissive);
-        assert_ne!(AuthMode::Permissive, AuthMode::Disabled);
+    fn cross_context_verification_isolation() {
+        let master = SecurityContext::for_testing(99);
+        let transport_ctx = master.derive_context(b"transport");
+        let storage_ctx = master.derive_context(b"storage");
+
+        let id = SymbolId::new_for_test(1, 0, 0);
+        let symbol = Symbol::new(id, vec![10, 20, 30], SymbolKind::Source);
+
+        // Sign with transport context
+        let auth = transport_ctx.sign_symbol(&symbol);
+        assert!(auth.is_verified());
+
+        // Simulate receiving this symbol in the storage context
+        let mut received = AuthenticatedSymbol::from_parts(auth.clone().into_symbol(), *auth.tag());
+
+        // Verification under storage context must fail (strict mode)
+        let result = storage_ctx.verify_authenticated_symbol(&mut received);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().is_invalid_tag());
+        assert!(!received.is_verified());
+
+        // Verification under same transport context must succeed
+        let mut received2 =
+            AuthenticatedSymbol::from_parts(auth.clone().into_symbol(), *auth.tag());
+        transport_ctx
+            .verify_authenticated_symbol(&mut received2)
+            .expect("same context verification must succeed");
+        assert!(received2.is_verified());
     }
 
+    /// Invariant: permissive mode with a valid tag marks the symbol as verified.
     #[test]
-    fn auth_stats_debug_default() {
-        let stats = AuthStats::default();
-        let dbg = format!("{stats:?}");
-        assert!(dbg.contains("AuthStats"), "{dbg}");
-        assert_eq!(stats.signed.load(Ordering::Relaxed), 0);
-        assert_eq!(stats.verified_ok.load(Ordering::Relaxed), 0);
-        assert_eq!(stats.verified_fail.load(Ordering::Relaxed), 0);
+    fn permissive_mode_with_valid_tag_marks_verified() {
+        let ctx = SecurityContext::for_testing(42).with_mode(AuthMode::Permissive);
+        let id = SymbolId::new_for_test(1, 0, 0);
+        let symbol = Symbol::new(id, vec![5, 6, 7], SymbolKind::Source);
+
+        let auth = ctx.sign_symbol(&symbol);
+        let mut received = AuthenticatedSymbol::from_parts(auth.clone().into_symbol(), *auth.tag());
+        assert!(!received.is_verified());
+
+        ctx.verify_authenticated_symbol(&mut received)
+            .expect("valid tag in permissive mode should succeed");
+        assert!(received.is_verified());
+        assert_eq!(ctx.stats().verified_ok.load(Ordering::Relaxed), 1);
+        assert_eq!(ctx.stats().failures_allowed.load(Ordering::Relaxed), 0);
     }
 
+    /// Invariant: disabled mode does not alter a pre-existing verified=true flag.
+    /// If a symbol was signed locally (verified=true), then passed through a disabled
+    /// context, the flag should remain true since disabled mode returns early.
     #[test]
-    fn security_context_debug_clone() {
-        let ctx = SecurityContext::for_testing(42);
-        let dbg = format!("{ctx:?}");
-        assert!(dbg.contains("SecurityContext"), "{dbg}");
-        let cloned = ctx;
-        let dbg2 = format!("{cloned:?}");
-        assert!(dbg2.contains("SecurityContext"), "{dbg2}");
+    fn disabled_mode_preserves_pre_verified_flag() {
+        let signing_ctx = SecurityContext::for_testing(42);
+        let disabled_ctx = SecurityContext::for_testing(42).with_mode(AuthMode::Disabled);
+
+        let id = SymbolId::new_for_test(1, 0, 0);
+        let symbol = Symbol::new(id, vec![1, 2], SymbolKind::Source);
+
+        let mut auth = signing_ctx.sign_symbol(&symbol);
+        assert!(auth.is_verified());
+
+        // Pass through disabled context — flag should remain true
+        disabled_ctx
+            .verify_authenticated_symbol(&mut auth)
+            .expect("disabled mode never errors");
+        assert!(
+            auth.is_verified(),
+            "disabled mode must not clear pre-existing verified flag"
+        );
+    }
+
+    /// Invariant: cloned contexts share the same Arc<AuthStats>.
+    #[test]
+    fn cloned_context_shares_stats() {
+        let ctx1 = SecurityContext::for_testing(77);
+        let ctx2 = ctx1.clone();
+
+        let id = SymbolId::new_for_test(1, 0, 0);
+        let symbol = Symbol::new(id, vec![1], SymbolKind::Source);
+
+        let _ = ctx1.sign_symbol(&symbol);
+        let _ = ctx2.sign_symbol(&symbol);
+
+        // Both increments must be visible from either context's stats
+        assert_eq!(ctx1.stats().signed.load(Ordering::Relaxed), 2);
+        assert_eq!(ctx2.stats().signed.load(Ordering::Relaxed), 2);
+    }
+
+    /// Invariant: derived contexts get fresh stats (not shared with parent).
+    #[test]
+    fn derived_context_has_independent_stats() {
+        let master = SecurityContext::for_testing(42);
+        let derived = master.derive_context(b"child");
+
+        let id = SymbolId::new_for_test(1, 0, 0);
+        let symbol = Symbol::new(id, vec![1], SymbolKind::Source);
+
+        let _ = master.sign_symbol(&symbol);
+        assert_eq!(master.stats().signed.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            derived.stats().signed.load(Ordering::Relaxed),
+            0,
+            "derived context must have independent stats"
+        );
     }
 }

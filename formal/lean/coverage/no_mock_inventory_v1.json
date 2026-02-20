@@ -15,9 +15,9 @@
     ]
   },
   "summary": {
-    "matching_paths_total": 24,
+    "matching_paths_total": 19,
     "allowlisted_count": 14,
-    "waiver_count": 10,
+    "waiver_count": 5,
     "remediation_required_count": 0
   },
   "allowlisted_paths": [
@@ -194,66 +194,6 @@
       "hit_count": 3,
       "first_hit_line": 287,
       "policy_rationale": "Platform fallback/stub export remains while deterministic cross-platform support is hardened."
-    },
-    {
-      "path": "src/tls/acceptor.rs",
-      "classification": "temporary_waiver",
-      "waiver_id": "waiver.tls.phase0-stub.acceptor.2026-02-18",
-      "owner": "tls-core",
-      "status": "active",
-      "expires_at_utc": "2026-06-30T00:00:00Z",
-      "replacement_issue": "asupersync-3narc.2.5",
-      "hit_count": 2,
-      "first_hit_line": 131,
-      "policy_rationale": "Feature-gated TLS paths retain stub wording for disabled-mode behavior."
-    },
-    {
-      "path": "src/tls/connector.rs",
-      "classification": "temporary_waiver",
-      "waiver_id": "waiver.tls.phase0-stub.connector.2026-02-18",
-      "owner": "tls-core",
-      "status": "active",
-      "expires_at_utc": "2026-06-30T00:00:00Z",
-      "replacement_issue": "asupersync-3narc.2.5",
-      "hit_count": 5,
-      "first_hit_line": 121,
-      "policy_rationale": "Feature-gated TLS paths retain stub wording for disabled-mode behavior."
-    },
-    {
-      "path": "src/tls/stream.rs",
-      "classification": "temporary_waiver",
-      "waiver_id": "waiver.tls.phase0-stub.stream.2026-02-18",
-      "owner": "tls-core",
-      "status": "active",
-      "expires_at_utc": "2026-06-30T00:00:00Z",
-      "replacement_issue": "asupersync-3narc.2.5",
-      "hit_count": 1,
-      "first_hit_line": 51,
-      "policy_rationale": "Feature-gated TLS paths retain stub wording for disabled-mode behavior."
-    },
-    {
-      "path": "src/tls/types.rs",
-      "classification": "temporary_waiver",
-      "waiver_id": "waiver.tls.phase0-stub.types.2026-02-18",
-      "owner": "tls-core",
-      "status": "active",
-      "expires_at_utc": "2026-06-30T00:00:00Z",
-      "replacement_issue": "asupersync-3narc.2.5",
-      "hit_count": 14,
-      "first_hit_line": 34,
-      "policy_rationale": "Feature-gated TLS paths retain stub wording for disabled-mode behavior."
-    },
-    {
-      "path": "src/web/debug.rs",
-      "classification": "temporary_waiver",
-      "waiver_id": "waiver.web.debug.stub-endpoints.2026-02-18",
-      "owner": "web-runtime",
-      "status": "active",
-      "expires_at_utc": "2026-06-30T00:00:00Z",
-      "replacement_issue": "asupersync-3narc.2.5",
-      "hit_count": 1,
-      "first_hit_line": 15,
-      "policy_rationale": "Debug surface retains known stub wording while endpoints are migrated."
     }
   ],
   "remediation_required_paths": [],

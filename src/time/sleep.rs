@@ -955,6 +955,181 @@ mod tests {
         crate::test_complete!("drop_cancels_timer_registration");
     }
 
+    #[test]
+    fn reset_cancels_old_timer_and_re_registers_on_poll() {
+        init_test("reset_cancels_old_timer_and_re_registers_on_poll");
+
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let mut sleep = Sleep::after(timer.now(), Duration::from_secs(5));
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        let first_poll = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(
+            first_poll.is_pending(),
+            "first poll pending",
+            true,
+            first_poll.is_pending()
+        );
+        crate::assert_with_log!(
+            timer.pending_count() == 1,
+            "first timer registration",
+            1,
+            timer.pending_count()
+        );
+
+        sleep.reset(Time::from_secs(10));
+        crate::assert_with_log!(
+            timer.pending_count() == 0,
+            "reset cancels previous timer",
+            0,
+            timer.pending_count()
+        );
+        crate::assert_with_log!(
+            sleep.deadline() == Time::from_secs(10),
+            "deadline updated on reset",
+            Time::from_secs(10),
+            sleep.deadline()
+        );
+
+        let second_poll = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(
+            second_poll.is_pending(),
+            "second poll pending after reset",
+            true,
+            second_poll.is_pending()
+        );
+        crate::assert_with_log!(
+            timer.pending_count() == 1,
+            "timer re-registered after reset",
+            1,
+            timer.pending_count()
+        );
+
+        clock.set(Time::from_secs(9));
+        let fired_before_deadline = timer.process_timers();
+        crate::assert_with_log!(
+            fired_before_deadline == 0,
+            "no timers fire before new deadline",
+            0,
+            fired_before_deadline
+        );
+
+        clock.set(Time::from_secs(10));
+        let _ = timer.process_timers();
+        let ready_poll = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(
+            ready_poll.is_ready(),
+            "sleep ready at reset deadline",
+            true,
+            ready_poll.is_ready()
+        );
+        crate::assert_with_log!(
+            timer.pending_count() == 0,
+            "timer registration cleared on completion",
+            0,
+            timer.pending_count()
+        );
+
+        crate::test_complete!("reset_cancels_old_timer_and_re_registers_on_poll");
+    }
+
+    #[test]
+    fn poll_with_new_timer_driver_migrates_registration() {
+        init_test("poll_with_new_timer_driver_migrates_registration");
+
+        let clock1 = Arc::new(VirtualClock::new());
+        let timer1 = TimerDriverHandle::with_virtual_clock(clock1);
+        let cx1 = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 1),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer1.clone()),
+            None,
+        );
+        let _guard1 = Cx::set_current(Some(cx1));
+
+        let mut sleep = Sleep::after(timer1.now(), Duration::from_secs(5));
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        let first_poll = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(
+            first_poll.is_pending(),
+            "first poll pending",
+            true,
+            first_poll.is_pending()
+        );
+        crate::assert_with_log!(
+            timer1.pending_count() == 1,
+            "timer1 has registration",
+            1,
+            timer1.pending_count()
+        );
+
+        let clock2 = Arc::new(VirtualClock::new());
+        let timer2 = TimerDriverHandle::with_virtual_clock(clock2);
+        let cx2 = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 2),
+            TaskId::new_for_test(0, 2),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer2.clone()),
+            None,
+        );
+        {
+            let _guard2 = Cx::set_current(Some(cx2));
+
+            let second_poll = Pin::new(&mut sleep).poll(&mut task_cx);
+            crate::assert_with_log!(
+                second_poll.is_pending(),
+                "second poll pending on new driver",
+                true,
+                second_poll.is_pending()
+            );
+            crate::assert_with_log!(
+                timer1.pending_count() == 0,
+                "timer1 registration canceled after migration",
+                0,
+                timer1.pending_count()
+            );
+            crate::assert_with_log!(
+                timer2.pending_count() == 1,
+                "timer2 owns migrated registration",
+                1,
+                timer2.pending_count()
+            );
+
+            drop(sleep);
+            crate::assert_with_log!(
+                timer2.pending_count() == 0,
+                "drop cancels migrated timer registration",
+                0,
+                timer2.pending_count()
+            );
+        }
+
+        crate::test_complete!("poll_with_new_timer_driver_migrates_registration");
+    }
+
     // =========================================================================
     // Clone Tests
     // =========================================================================

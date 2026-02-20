@@ -15,10 +15,10 @@ use crate::transport::sink::{SymbolSink, SymbolSinkExt};
 use crate::types::symbol::{ObjectId, Symbol};
 use crate::types::{RegionId, Time};
 use parking_lot::RwLock;
-use smallvec::{SmallVec, smallvec};
+use smallvec::{smallvec, SmallVec};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 type EndpointSinkMap = HashMap<EndpointId, Arc<Mutex<Box<dyn SymbolSink>>>>;
 
@@ -415,7 +415,7 @@ impl LoadBalancer {
         &self,
         endpoints: &'a [Arc<Endpoint>],
         n: usize,
-        object_id: Option<ObjectId>,
+        _object_id: Option<ObjectId>,
     ) -> Vec<&'a Arc<Endpoint>> {
         if n == 0 {
             return Vec::new();
@@ -424,7 +424,7 @@ impl LoadBalancer {
         // Filter healthy endpoints first
         // Note: For high-throughput this allocation might be costly.
         // But we need a contiguous slice/vec for indexing.
-        let available: Vec<&Arc<Endpoint>> = endpoints
+        let mut available: Vec<&Arc<Endpoint>> = endpoints
             .iter()
             .filter(|e| e.state().can_receive())
             .collect();
@@ -445,24 +445,24 @@ impl LoadBalancer {
             }
 
             LoadBalanceStrategy::Random => {
-                // Fisher-Yates shuffle for first n elements
-                let mut indices: Vec<usize> = (0..available.len()).collect();
-                let mut selected = Vec::with_capacity(n);
+                // Fisher-Yates shuffle in-place on the available vector.
+                // This avoids allocating a separate indices vector.
                 let mut seed = self.random_seed.fetch_add(n as u64, Ordering::Relaxed);
+                let len = available.len();
+                let count = n.min(len);
 
-                for i in 0..n {
+                for i in 0..count {
                     // Simple LCG step
                     seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
                     // Range is [i, len)
-                    let range = indices.len() - i;
+                    let range = len - i;
                     let offset = (seed as usize) % range;
                     let swap_idx = i + offset;
-                    indices.swap(i, swap_idx);
-                    selected.push(available[indices[i]]);
+                    available.swap(i, swap_idx);
                 }
-                selected
+                available.truncate(count);
+                available
             }
-
             LoadBalanceStrategy::LeastConnections
             | LoadBalanceStrategy::WeightedLeastConnections => {
                 let mut candidates = available;
@@ -1199,8 +1199,6 @@ impl SymbolDispatcher {
         symbol: &AuthenticatedSymbol,
         count: usize,
     ) -> Result<DispatchResult, DispatchError> {
-        let object_id = symbol.symbol().object_id();
-
         if count == 0 {
             return Ok(DispatchResult {
                 successes: 0,

@@ -328,6 +328,23 @@ mod tests {
     }
 
     #[test]
+    fn test_grpc_codec_decode_message_too_large() {
+        init_test("test_grpc_codec_decode_message_too_large");
+        let mut codec = GrpcCodec::with_max_size(3);
+        let mut buf = BytesMut::new();
+
+        // Header declares 4-byte payload, which exceeds max size (3).
+        buf.put_u8(0);
+        buf.put_u32(4);
+        buf.extend_from_slice(b"abcd");
+
+        let result = codec.decode(&mut buf);
+        let ok = matches!(result, Err(GrpcError::MessageTooLarge));
+        crate::assert_with_log!(ok, "decode rejects oversized frame", true, ok);
+        crate::test_complete!("test_grpc_codec_decode_message_too_large");
+    }
+
+    #[test]
     fn test_grpc_codec_partial_header() {
         init_test("test_grpc_codec_partial_header");
         let mut codec = GrpcCodec::new();
@@ -357,6 +374,39 @@ mod tests {
     }
 
     #[test]
+    fn test_grpc_codec_partial_body_then_complete() {
+        init_test("test_grpc_codec_partial_body_then_complete");
+        let mut codec = GrpcCodec::new();
+        let mut buf = BytesMut::new();
+
+        // Declare 5-byte payload but provide only first 2 bytes.
+        buf.put_u8(0);
+        buf.put_u32(5);
+        buf.extend_from_slice(b"ab");
+
+        let first = codec.decode(&mut buf).unwrap();
+        let first_none = first.is_none();
+        crate::assert_with_log!(first_none, "first decode pending", true, first_none);
+
+        // Complete the payload and decode again.
+        buf.extend_from_slice(b"cde");
+        let second = codec.decode(&mut buf).unwrap();
+        let second_some = second.is_some();
+        crate::assert_with_log!(second_some, "second decode ready", true, second_some);
+
+        let decoded = second.unwrap();
+        crate::assert_with_log!(
+            decoded.data == Bytes::from_static(b"abcde"),
+            "decoded payload after completion",
+            Bytes::from_static(b"abcde"),
+            decoded.data.clone()
+        );
+        let drained = buf.is_empty();
+        crate::assert_with_log!(drained, "buffer fully consumed", true, drained);
+        crate::test_complete!("test_grpc_codec_partial_body_then_complete");
+    }
+
+    #[test]
     fn test_grpc_codec_rejects_invalid_compression_flag() {
         init_test("test_grpc_codec_rejects_invalid_compression_flag");
         let mut codec = GrpcCodec::new();
@@ -371,6 +421,29 @@ mod tests {
         let ok = matches!(result, Err(GrpcError::Protocol(_)));
         crate::assert_with_log!(ok, "invalid compression flag rejected", true, ok);
         crate::test_complete!("test_grpc_codec_rejects_invalid_compression_flag");
+    }
+
+    #[test]
+    fn test_grpc_codec_invalid_compression_flag_preserves_buffer() {
+        init_test("test_grpc_codec_invalid_compression_flag_preserves_buffer");
+        let mut codec = GrpcCodec::new();
+        let mut buf = BytesMut::new();
+
+        buf.put_u8(2);
+        buf.put_u32(3);
+        buf.extend_from_slice(b"abc");
+        let before = buf.as_ref().to_vec();
+
+        let result = codec.decode(&mut buf);
+        let ok = matches!(result, Err(GrpcError::Protocol(_)));
+        crate::assert_with_log!(ok, "invalid compression flag rejected", true, ok);
+        crate::assert_with_log!(
+            buf.as_ref() == before.as_slice(),
+            "invalid frame leaves buffer untouched",
+            before,
+            buf.as_ref().to_vec()
+        );
+        crate::test_complete!("test_grpc_codec_invalid_compression_flag_preserves_buffer");
     }
 
     #[test]
@@ -415,49 +488,22 @@ mod tests {
         crate::test_complete!("test_framed_codec_with_compression_errors_on_encode");
     }
 
-    // =========================================================================
-    // Wave 44 – pure data-type trait coverage
-    // =========================================================================
-
     #[test]
-    fn grpc_message_debug_clone() {
-        let msg = GrpcMessage::new(Bytes::from_static(b"hello"));
-        let dbg = format!("{msg:?}");
-        assert!(dbg.contains("GrpcMessage"), "{dbg}");
-        assert!(!msg.compressed);
-        let cloned = msg;
-        assert!(!cloned.compressed);
-        assert_eq!(cloned.data, Bytes::from_static(b"hello"));
+    fn test_framed_codec_decode_rejects_compressed_frame() {
+        init_test("test_framed_codec_decode_rejects_compressed_frame");
+        let mut codec = FramedCodec::new(IdentityCodec);
+        let mut buf = BytesMut::new();
 
-        let compressed = GrpcMessage::compressed(Bytes::from_static(b"zz"));
-        assert!(compressed.compressed);
-        let cloned2 = compressed;
-        assert!(cloned2.compressed);
-    }
+        // Build a valid framed message with compressed flag set.
+        buf.put_u8(1);
+        buf.put_u32(3);
+        buf.extend_from_slice(b"xyz");
 
-    #[test]
-    fn grpc_codec_debug_default() {
-        let codec = GrpcCodec::default();
-        let dbg = format!("{codec:?}");
-        assert!(dbg.contains("GrpcCodec"), "{dbg}");
-        assert_eq!(codec.max_message_size(), DEFAULT_MAX_MESSAGE_SIZE);
-
-        let codec2 = GrpcCodec::new();
-        assert_eq!(codec2.max_message_size(), DEFAULT_MAX_MESSAGE_SIZE);
-
-        let custom = GrpcCodec::with_max_size(1024);
-        assert_eq!(custom.max_message_size(), 1024);
-    }
-
-    #[test]
-    fn identity_codec_debug_clone_copy_default() {
-        let ic = IdentityCodec;
-        let dbg = format!("{ic:?}");
-        assert!(dbg.contains("IdentityCodec"), "{dbg}");
-        let copied = ic;
-        let cloned = ic;
-        assert_eq!(format!("{copied:?}"), format!("{cloned:?}"));
-        let def = IdentityCodec;
-        assert_eq!(format!("{def:?}"), dbg);
+        let result = codec.decode_message(&mut buf);
+        let ok = matches!(result, Err(GrpcError::Compression(_)));
+        crate::assert_with_log!(ok, "compressed frame rejected", true, ok);
+        let drained = buf.is_empty();
+        crate::assert_with_log!(drained, "compressed frame consumed", true, drained);
+        crate::test_complete!("test_framed_codec_decode_rejects_compressed_frame");
     }
 }

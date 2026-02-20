@@ -567,21 +567,6 @@ impl ThreeLaneScheduler {
     /// Uses the sharded task table when available, otherwise falls back to
     /// RuntimeState's embedded table.
     #[inline]
-    fn with_task_table<R, F: FnOnce(&mut TaskTable) -> R>(&self, f: F) -> R {
-        if let Some(tt) = &self.task_table {
-            let mut guard = tt.lock().expect("lock poisoned");
-            f(&mut guard)
-        } else {
-            let mut state = self.state.lock().expect("lock poisoned");
-            f(&mut state.tasks)
-        }
-    }
-
-    /// Read-only task table access for inject/spawn methods.
-    ///
-    /// Uses the sharded task table when available, otherwise falls back to
-    /// RuntimeState's embedded table.
-    #[inline]
     fn with_task_table_ref<R, F: FnOnce(&TaskTable) -> R>(&self, f: F) -> R {
         if let Some(tt) = &self.task_table {
             let guard = tt.lock().expect("lock poisoned");
@@ -761,23 +746,8 @@ impl ThreeLaneScheduler {
 
             // 1. Try scheduling on current thread (fastest, no locks if TLS setup)
             // ONLY if this thread is the owner.
-            if is_pinned_here {
-                // Lazy pinning: if the task is local but not yet pinned, and we are
-                // on a worker thread, pin it to us. This ensures subsequent cross-thread
-                // wakes/cancels can route to this worker.
-                if pinned_worker.is_none() {
-                    if let Some(worker_id) = current_worker {
-                        self.with_task_table(|tt| {
-                            if let Some(record) = tt.task_mut(task) {
-                                record.pin_to_worker(worker_id);
-                            }
-                        });
-                    }
-                }
-
-                if schedule_local_task(task) {
-                    return;
-                }
+            if is_pinned_here && schedule_local_task(task) {
+                return;
             }
 
             // 2. Try routing to pinned worker (cross-thread spawn)
@@ -847,23 +817,8 @@ impl ThreeLaneScheduler {
 
             // 1. Try scheduling on current thread (fastest, no locks if TLS setup)
             // ONLY if this thread is the owner.
-            if is_pinned_here {
-                // Lazy pinning: if the task is local but not yet pinned, and we are
-                // on a worker thread, pin it to us. This ensures subsequent cross-thread
-                // wakes/cancels can route to this worker.
-                if pinned_worker.is_none() {
-                    if let Some(worker_id) = current_worker {
-                        self.with_task_table(|tt| {
-                            if let Some(record) = tt.task_mut(task) {
-                                record.pin_to_worker(worker_id);
-                            }
-                        });
-                    }
-                }
-
-                if schedule_local_task(task) {
-                    return;
-                }
+            if is_pinned_here && schedule_local_task(task) {
+                return;
             }
 
             // 2. Try routing to pinned worker (cross-thread wake)
@@ -2332,13 +2287,8 @@ impl ThreeLaneLocalWaker {
 
             if is_cancelling {
                 // Route to local cancel lane (PriorityScheduler).
-                // Note: We don't need to remove from local_ready because it's not there yet
-                // (we are waking it). However, if it WAS in local_ready (rare race),
-                // PriorityScheduler::move_to_cancel_lane doesn't check local_ready.
-                // But since we successfully notified (state transition Idle->Notified),
-                // it shouldn't be in any queue unless logic is buggy.
                 let mut local = self.local.lock();
-                local.move_to_cancel_lane(self.task_id, priority);
+                local.schedule_cancel(self.task_id, priority);
             } else {
                 // Fast path: push to non-stealable local_ready queue via TLS.
                 if !schedule_local_task(self.task_id) {
@@ -3376,6 +3326,7 @@ mod tests {
                     global: Arc::clone(&global),
                     coordinator: Arc::clone(&coordinator),
                     priority: 0,
+                    cx_inner: Weak::new(),
                 }))
             })
             .collect();
@@ -3890,7 +3841,6 @@ mod tests {
     // ========== Region close quiescence via RuntimeState (br-3narc.2.1) ==========
 
     #[test]
-    #[allow(clippy::significant_drop_tightening)]
     fn test_region_quiescence_all_tasks_complete() {
         // Verify that the runtime state's is_quiescent correctly reflects
         // whether all tasks in all regions have completed.
@@ -4669,6 +4619,7 @@ mod tests {
         let waker = Waker::from(Arc::new(ThreeLaneLocalWaker {
             task_id,
             wake_state: Arc::clone(&wake_state),
+            local: Arc::clone(&priority_sched),
             local_ready: Arc::clone(&local_ready),
             parker,
             cx_inner: Weak::new(),
@@ -4699,6 +4650,7 @@ mod tests {
         // the owner's local_ready Arc directly.
         let task_id = TaskId::new_for_test(1, 1);
         let wake_state = Arc::new(crate::record::task::TaskWakeState::new());
+        let priority_sched = Arc::new(Mutex::new(PriorityScheduler::new()));
         let parker = Parker::new();
 
         let local_ready = Arc::new(LocalReadyQueue::new(Vec::new()));
@@ -4706,6 +4658,7 @@ mod tests {
         let waker = Waker::from(Arc::new(ThreeLaneLocalWaker {
             task_id,
             wake_state: Arc::clone(&wake_state),
+            local: Arc::clone(&priority_sched),
             local_ready: Arc::clone(&local_ready),
             parker,
             cx_inner: Weak::new(),
@@ -5334,22 +5287,5 @@ mod tests {
         // Flag should be cleared.
         let ack = cx_inner.read().cancel_acknowledged;
         assert!(!ack, "cancel_acknowledged should be cleared");
-    }
-
-    // --- wave 80 trait coverage ---
-
-    #[test]
-    fn preemption_metrics_debug_clone_default() {
-        let m = PreemptionMetrics::default();
-        assert_eq!(m.cancel_dispatches, 0);
-        assert_eq!(m.timed_dispatches, 0);
-        assert_eq!(m.ready_dispatches, 0);
-        assert_eq!(m.fairness_yields, 0);
-        assert_eq!(m.max_cancel_streak, 0);
-        assert_eq!(m.fallback_cancel_dispatches, 0);
-        let m2 = m.clone();
-        assert_eq!(m2.cancel_dispatches, 0);
-        let dbg = format!("{m:?}");
-        assert!(dbg.contains("PreemptionMetrics"));
     }
 }

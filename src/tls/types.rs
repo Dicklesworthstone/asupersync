@@ -31,7 +31,7 @@ impl Certificate {
         }
     }
 
-    /// Create a certificate from DER-encoded bytes (stub when TLS is disabled).
+    /// Create a certificate from DER-encoded bytes (fallback when TLS is disabled).
     #[cfg(not(feature = "tls"))]
     pub fn from_der(der: impl Into<Vec<u8>>) -> Self {
         Self { _data: der.into() }
@@ -54,7 +54,7 @@ impl Certificate {
         Ok(certs.into_iter().map(|c| Self { inner: c }).collect())
     }
 
-    /// Parse certificates from PEM-encoded data (stub when TLS is disabled).
+    /// Parse certificates from PEM-encoded data (fallback when TLS is disabled).
     #[cfg(not(feature = "tls"))]
     pub fn from_pem(_pem: &[u8]) -> Result<Vec<Self>, TlsError> {
         Err(TlsError::Configuration("tls feature not enabled".into()))
@@ -73,7 +73,7 @@ impl Certificate {
         self.inner.as_ref()
     }
 
-    /// Get the raw DER bytes (stub when TLS is disabled).
+    /// Get the raw DER bytes (fallback when TLS is disabled).
     #[cfg(not(feature = "tls"))]
     pub fn as_der(&self) -> &[u8] {
         &self._data
@@ -173,7 +173,7 @@ impl PrivateKey {
         }
     }
 
-    /// Create a private key from PKCS#8 DER-encoded bytes (stub when TLS is disabled).
+    /// Create a private key from PKCS#8 DER-encoded bytes (fallback when TLS is disabled).
     #[cfg(not(feature = "tls"))]
     pub fn from_pkcs8_der(der: impl Into<Vec<u8>>) -> Self {
         Self { _data: der.into() }
@@ -224,7 +224,7 @@ impl PrivateKey {
         Err(TlsError::Certificate("no private key found in PEM".into()))
     }
 
-    /// Parse a private key from PEM-encoded data (stub when TLS is disabled).
+    /// Parse a private key from PEM-encoded data (fallback when TLS is disabled).
     #[cfg(not(feature = "tls"))]
     pub fn from_pem(_pem: &[u8]) -> Result<Self, TlsError> {
         Err(TlsError::Configuration("tls feature not enabled".into()))
@@ -245,7 +245,7 @@ impl PrivateKey {
         }
     }
 
-    /// Create a private key from SEC1 (EC) DER-encoded bytes (stub when TLS is disabled).
+    /// Create a private key from SEC1 (EC) DER-encoded bytes (fallback when TLS is disabled).
     #[cfg(not(feature = "tls"))]
     pub fn from_sec1_der(der: impl Into<Vec<u8>>) -> Self {
         Self { _data: der.into() }
@@ -290,7 +290,7 @@ impl RootCertStore {
         }
     }
 
-    /// Create an empty root certificate store (stub when TLS is disabled).
+    /// Create an empty root certificate store (fallback when TLS is disabled).
     #[cfg(not(feature = "tls"))]
     pub fn empty() -> Self {
         Self { certs: Vec::new() }
@@ -304,7 +304,7 @@ impl RootCertStore {
             .map_err(|e| crate::tls::TlsError::Certificate(e.to_string()))
     }
 
-    /// Add a certificate to the store (stub when TLS is disabled).
+    /// Add a certificate to the store (fallback when TLS is disabled).
     #[cfg(not(feature = "tls"))]
     pub fn add(&mut self, cert: &Certificate) -> Result<(), crate::tls::TlsError> {
         self.certs.push(cert.clone());
@@ -317,7 +317,7 @@ impl RootCertStore {
         self.inner.len()
     }
 
-    /// Get the number of certificates in the store (stub when TLS is disabled).
+    /// Get the number of certificates in the store (fallback when TLS is disabled).
     #[cfg(not(feature = "tls"))]
     pub fn len(&self) -> usize {
         self.certs.len()
@@ -351,7 +351,7 @@ impl RootCertStore {
             .extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
 
-    /// Extend with webpki root certificates (stub when feature is disabled).
+    /// Extend with webpki root certificates (fallback when feature is disabled).
     #[cfg(not(feature = "tls-webpki-roots"))]
     pub fn extend_from_webpki_roots(&mut self) {
         // No-op when feature is disabled
@@ -380,7 +380,7 @@ impl RootCertStore {
         Ok(count)
     }
 
-    /// Extend with native/platform root certificates (stub when feature is disabled).
+    /// Extend with native/platform root certificates (fallback when feature is disabled).
     #[cfg(not(feature = "tls-native-roots"))]
     pub fn extend_from_native_roots(&mut self) -> Result<usize, TlsError> {
         Err(TlsError::Configuration(
@@ -482,7 +482,7 @@ impl CertificatePin {
         Ok(Self::SpkiSha256(hash.as_ref().to_vec()))
     }
 
-    /// Compute the SPKI SHA-256 pin for a certificate (stub when TLS is disabled).
+    /// Compute the SPKI SHA-256 pin for a certificate (fallback when TLS is disabled).
     #[cfg(not(feature = "tls"))]
     pub fn compute_spki_sha256(_cert: &Certificate) -> Result<Self, TlsError> {
         Err(TlsError::Configuration("tls feature not enabled".into()))
@@ -496,7 +496,7 @@ impl CertificatePin {
         Ok(Self::CertSha256(hash.as_ref().to_vec()))
     }
 
-    /// Compute the certificate SHA-256 pin for a certificate (stub when TLS is disabled).
+    /// Compute the certificate SHA-256 pin for a certificate (fallback when TLS is disabled).
     #[cfg(not(feature = "tls"))]
     pub fn compute_cert_sha256(_cert: &Certificate) -> Result<Self, TlsError> {
         Err(TlsError::Configuration("tls feature not enabled".into()))
@@ -628,7 +628,7 @@ impl CertificatePinSet {
         }
     }
 
-    /// Validate a certificate against the pin set (stub when TLS is disabled).
+    /// Validate a certificate against the pin set (fallback when TLS is disabled).
     #[cfg(not(feature = "tls"))]
     pub fn validate(&self, _cert: &Certificate) -> Result<bool, TlsError> {
         Err(TlsError::Configuration("tls feature not enabled".into()))

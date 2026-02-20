@@ -280,12 +280,12 @@ impl Stealer {
             return src.steal_batch_into_non_local(steal_limit, arena, dest) > 0;
         }
 
-        // Cap probe depth to prevent O(N) stalls if the queue is filled with
-        // thousands of local tasks.
-        let mut remaining_attempts = initial_len.min(1024);
-
-        while stolen < steal_limit && remaining_attempts > 0 {
-            remaining_attempts -= 1;
+        // Steal loop with bounded lookahead.
+        // We stop probing if we encounter too many local tasks (SKIPPED_LOCALS_INLINE_CAP)
+        // to prevent:
+        // 1. O(N) scan times in the lock (latency spikes).
+        // 2. Heap allocation for skipped_locals (SmallVec spill).
+        while stolen < steal_limit && skipped_locals.len() < Self::SKIPPED_LOCALS_INLINE_CAP {
             let Some((task_id, is_local)) = src.steal_one_with_locality(arena) else {
                 break;
             };

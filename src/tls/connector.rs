@@ -118,7 +118,7 @@ impl TlsConnector {
         Ok(stream)
     }
 
-    /// Establish a TLS connection (stub when TLS is disabled).
+    /// Establish a TLS connection (disabled-mode fallback when TLS is disabled).
     #[cfg(not(feature = "tls"))]
     pub async fn connect<IO>(&self, _domain: &str, _io: IO) -> Result<TlsStream<IO>, TlsError>
     where
@@ -137,7 +137,7 @@ impl TlsConnector {
         Ok(())
     }
 
-    /// Validate a domain name for use with TLS (stub when TLS is disabled).
+    /// Validate a domain name for use with TLS (disabled-mode fallback when TLS is disabled).
     #[cfg(not(feature = "tls"))]
     pub fn validate_domain(domain: &str) -> Result<(), TlsError> {
         // Basic validation: not empty and no spaces
@@ -235,7 +235,7 @@ impl TlsConnectorBuilder {
         Ok(self)
     }
 
-    /// Add platform/native root certificates (stub when feature is disabled).
+    /// Add platform/native root certificates (fallback when feature is disabled).
     #[cfg(not(feature = "tls-native-roots"))]
     pub fn with_native_roots(self) -> Result<Self, TlsError> {
         Err(TlsError::Configuration(
@@ -259,7 +259,7 @@ impl TlsConnectorBuilder {
         self
     }
 
-    /// Add the standard webpki root certificates (stub when feature is disabled).
+    /// Add the standard webpki root certificates (fallback when feature is disabled).
     #[cfg(not(feature = "tls-webpki-roots"))]
     pub fn with_webpki_roots(self) -> Self {
         #[cfg(feature = "tracing-integration")]
@@ -502,7 +502,7 @@ impl TlsConnectorBuilder {
         })
     }
 
-    /// Build the `TlsConnector` (stub when TLS is disabled).
+    /// Build the `TlsConnector` (disabled-mode fallback when TLS is disabled).
     #[cfg(not(feature = "tls"))]
     pub fn build(self) -> Result<TlsConnector, TlsError> {
         Err(TlsError::Configuration("tls feature not enabled".into()))

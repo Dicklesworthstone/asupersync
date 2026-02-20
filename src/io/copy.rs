@@ -978,36 +978,10 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        // Run poll() in a thread with timeout to detect infinite loop
-        let (tx, rx) = std::sync::mpsc::channel();
-
-        // We need to move `fut` into the thread, but `Pin` makes it tricky.
-        // Actually, since `InfiniteStream` is ZST and `CopyBidirectional` owns `&mut`,
-        // passing `&mut a` across thread boundary is hard.
-        // But we can just use `std::thread::scope` or rely on `poll` returning quickly.
-        // Or construct the future inside the thread? But `copy_bidirectional` takes lifetimes.
-
-        // Let's just construct everything inside the thread.
-        std::thread::spawn(move || {
-            let mut a = InfiniteStream;
-            let mut b = InfiniteStream;
-            let mut fut = copy_bidirectional(&mut a, &mut b);
-            let mut fut = Pin::new(&mut fut);
-
-            let waker = noop_waker();
-            let mut cx = Context::from_waker(&waker);
-
-            // Should return Pending eventually due to yield
-            let _ = fut.poll(&mut cx);
-            tx.send(true).unwrap();
-        });
-
-        // Wait up to 100ms. If it loops forever, we timeout.
-        let result = rx.recv_timeout(std::time::Duration::from_millis(100));
-
-        if result.is_err() {
-            panic!("copy_bidirectional failed to yield (infinite loop)");
-        }
+        // Fast streams should yield back to the scheduler instead of spinning forever.
+        let poll_result = fut.as_mut().poll(&mut cx);
+        let is_pending = matches!(poll_result, Poll::Pending);
+        crate::assert_with_log!(is_pending, "poll result is pending", true, is_pending);
 
         crate::test_complete!("copy_bidirectional_yields_on_fast_streams");
     }

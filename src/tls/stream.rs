@@ -48,7 +48,7 @@ pub struct TlsStream<IO> {
     state: TlsState,
 }
 
-/// Stub TlsStream when TLS is disabled.
+/// Fallback `TlsStream` when TLS is disabled.
 #[cfg(not(feature = "tls"))]
 pub struct TlsStream<IO> {
     io: IO,

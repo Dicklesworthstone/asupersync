@@ -1696,4 +1696,77 @@ mod tests {
         let result = bridge.complete_close(Time::from_secs(2)).unwrap();
         assert_eq!(result.effective_state, EffectiveState::Closed);
     }
+
+    // =================================================================
+    // B6 Invariant Tests (asupersync-3narc.2.6)
+    // =================================================================
+
+    /// Invariant: all state pairs that do NOT match an explicit rule in
+    /// `EffectiveState::compute` must produce `Inconsistent` with the
+    /// correct local and distributed states preserved.
+    #[test]
+    fn effective_state_inconsistent_pairs_are_exhaustive() {
+        // These pairs should all produce Inconsistent.
+        let inconsistent_pairs: &[(RegionState, DistributedRegionState)] = &[
+            (RegionState::Closed, DistributedRegionState::Active),
+            (RegionState::Closed, DistributedRegionState::Initializing),
+            (RegionState::Closed, DistributedRegionState::Degraded),
+            (RegionState::Closed, DistributedRegionState::Recovering),
+            (RegionState::Closed, DistributedRegionState::Closing),
+            (RegionState::Closing, DistributedRegionState::Active),
+            (RegionState::Closing, DistributedRegionState::Initializing),
+            (RegionState::Closing, DistributedRegionState::Degraded),
+            (RegionState::Closing, DistributedRegionState::Recovering),
+            (RegionState::Closing, DistributedRegionState::Closed),
+            (RegionState::Draining, DistributedRegionState::Active),
+            (RegionState::Draining, DistributedRegionState::Initializing),
+            (RegionState::Draining, DistributedRegionState::Degraded),
+            (RegionState::Draining, DistributedRegionState::Recovering),
+            (RegionState::Draining, DistributedRegionState::Closed),
+            (RegionState::Finalizing, DistributedRegionState::Active),
+            (
+                RegionState::Finalizing,
+                DistributedRegionState::Initializing,
+            ),
+            (RegionState::Finalizing, DistributedRegionState::Degraded),
+            (RegionState::Finalizing, DistributedRegionState::Recovering),
+            (RegionState::Finalizing, DistributedRegionState::Closed),
+            (RegionState::Open, DistributedRegionState::Closing),
+            (RegionState::Open, DistributedRegionState::Closed),
+        ];
+
+        for (local, distributed) in inconsistent_pairs {
+            let state = EffectiveState::compute(*local, Some(*distributed));
+            assert!(
+                state.is_inconsistent(),
+                "({local:?}, {distributed:?}) should be Inconsistent, got {state:?}"
+            );
+            if let EffectiveState::Inconsistent {
+                local: l,
+                distributed: d,
+            } = state
+            {
+                assert_eq!(l, *local, "local state not preserved");
+                assert_eq!(d, *distributed, "distributed state not preserved");
+            }
+        }
+    }
+
+    /// Invariant: Hybrid mode bridge with no distributed record reports
+    /// sync as NotNeeded, even though mode.is_replicated() is true.
+    #[test]
+    fn hybrid_mode_sync_not_needed_without_distributed_record() {
+        let mut bridge = RegionBridge::with_mode(
+            RegionId::new_for_test(1, 0),
+            None,
+            Budget::default(),
+            RegionMode::hybrid(3),
+        );
+        assert!(bridge.mode().is_replicated());
+        let sync = bridge.sync().unwrap();
+        assert!(
+            matches!(sync, SyncResult::NotNeeded),
+            "hybrid mode without distributed record must report NotNeeded"
+        );
+    }
 }

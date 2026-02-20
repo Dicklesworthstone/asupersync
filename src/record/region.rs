@@ -612,6 +612,12 @@ impl RegionRecord {
 
         let size_hint = std::mem::size_of::<T>();
         let mut inner = self.inner.write();
+
+        // Double check under lock to race with complete_close
+        if self.state().is_terminal() {
+            return Err(AdmissionError::Closed);
+        }
+
         if let Some(limit) = inner.limits.max_heap_bytes {
             let live_bytes = inner.heap.stats().bytes_live;
             let requested = live_bytes.saturating_add(size_hint as u64);

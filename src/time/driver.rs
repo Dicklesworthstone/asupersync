@@ -815,6 +815,57 @@ mod tests {
     }
 
     #[test]
+    fn timer_driver_does_not_fire_while_clock_paused() {
+        init_test("timer_driver_does_not_fire_while_clock_paused");
+        let clock = Arc::new(VirtualClock::new());
+        let driver = TimerDriver::with_clock(clock.clone());
+
+        let woken = Arc::new(AtomicBool::new(false));
+        let waker = waker_that_sets(woken.clone());
+        driver.register(Time::from_secs(1), waker);
+
+        clock.pause();
+        clock.advance(2_000_000_000);
+        let fired_while_paused = driver.process_timers();
+        crate::assert_with_log!(
+            fired_while_paused == 0,
+            "paused clock does not advance timers",
+            0,
+            fired_while_paused
+        );
+        crate::assert_with_log!(
+            !woken.load(Ordering::SeqCst),
+            "waker not called while paused",
+            false,
+            woken.load(Ordering::SeqCst)
+        );
+        crate::assert_with_log!(
+            driver.pending_count() == 1,
+            "timer remains pending while paused",
+            1,
+            driver.pending_count()
+        );
+
+        clock.resume();
+        clock.advance(2_000_000_000);
+        let fired_after_resume = driver.process_timers();
+        crate::assert_with_log!(
+            fired_after_resume == 1,
+            "timer fires after resume and advance",
+            1,
+            fired_after_resume
+        );
+        crate::assert_with_log!(
+            woken.load(Ordering::SeqCst),
+            "waker called after resume",
+            true,
+            woken.load(Ordering::SeqCst)
+        );
+        crate::assert_with_log!(driver.is_empty(), "driver empty", true, driver.is_empty());
+        crate::test_complete!("timer_driver_does_not_fire_while_clock_paused");
+    }
+
+    #[test]
     fn timer_driver_multiple_timers() {
         init_test("timer_driver_multiple_timers");
         let clock = Arc::new(VirtualClock::new());

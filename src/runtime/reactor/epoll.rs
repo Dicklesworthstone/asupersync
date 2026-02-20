@@ -58,11 +58,11 @@
 #![allow(unsafe_code)]
 
 use super::{Event, Events, Interest, Reactor, Source, Token};
-use libc::{F_GETFD, fcntl};
+use libc::{fcntl, F_GETFD};
 use parking_lot::Mutex;
 use polling::{Event as PollEvent, Events as PollEvents, PollMode, Poller};
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::io;
 use std::num::NonZeroUsize;
 use std::os::fd::BorrowedFd;
@@ -211,6 +211,11 @@ impl EpollReactor {
 
         interest
     }
+}
+
+#[inline]
+fn should_resize_poll_events(current: usize, target: usize) -> bool {
+    current < target || current >= target.saturating_mul(4)
 }
 
 impl Reactor for EpollReactor {
@@ -389,7 +394,7 @@ impl Reactor for EpollReactor {
         // Resize if too small OR significantly too large (hysteresis to prevent thrashing).
         // If we strictly enforced equality, allocators rounding up (e.g. 60 -> 64)
         // would cause reallocation on every poll.
-        if current < target || current >= target * 4 {
+        if should_resize_poll_events(current, target) {
             *poll_events = PollEvents::with_capacity(requested_capacity);
         } else {
             poll_events.clear();
@@ -791,6 +796,48 @@ mod tests {
 
         reactor.deregister(token).expect("deregister failed");
         crate::test_complete!("poll_zero_capacity_reports_zero_events_stored");
+    }
+
+    #[test]
+    fn poll_events_resize_hysteresis_thresholds() {
+        init_test("poll_events_resize_hysteresis_thresholds");
+        let too_small = should_resize_poll_events(7, 8);
+        let within_band = should_resize_poll_events(16, 8);
+        let too_large = should_resize_poll_events(32, 8);
+
+        crate::assert_with_log!(too_small, "resize when too small", true, too_small);
+        crate::assert_with_log!(
+            !within_band,
+            "no resize within hysteresis band",
+            true,
+            !within_band
+        );
+        crate::assert_with_log!(too_large, "resize at 4x threshold", true, too_large);
+        crate::test_complete!("poll_events_resize_hysteresis_thresholds");
+    }
+
+    #[test]
+    fn poll_events_resize_hysteresis_saturates_at_usize_max() {
+        init_test("poll_events_resize_hysteresis_saturates_at_usize_max");
+        let target = usize::MAX;
+        let near_max = usize::MAX - 1;
+
+        let no_resize = should_resize_poll_events(near_max, target);
+        let yes_resize = should_resize_poll_events(target, target);
+
+        crate::assert_with_log!(
+            !no_resize,
+            "near-max current stays within hysteresis",
+            true,
+            !no_resize
+        );
+        crate::assert_with_log!(
+            yes_resize,
+            "equal current/target resizes safely at usize::MAX",
+            true,
+            yes_resize
+        );
+        crate::test_complete!("poll_events_resize_hysteresis_saturates_at_usize_max");
     }
 
     #[test]

@@ -1027,8 +1027,8 @@ impl StreamingResponse {
 mod tests {
     use super::*;
     use crate::types::CancelKind;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use std::task::{Wake, Waker};
 
     struct NoopWaker;
@@ -1307,12 +1307,11 @@ mod tests {
     fn streaming_response_chunked() {
         let cx: Cx = Cx::for_testing();
         let (resp, _sender) = StreamingResponse::chunked(&cx, 4, 200, "OK");
-        assert!(
-            resp.head
-                .headers
-                .iter()
-                .any(|(n, v)| { n.eq_ignore_ascii_case("transfer-encoding") && v == "chunked" })
-        );
+        assert!(resp
+            .head
+            .headers
+            .iter()
+            .any(|(n, v)| { n.eq_ignore_ascii_case("transfer-encoding") && v == "chunked" }));
         assert!(resp.body.kind().is_chunked());
     }
 
@@ -1320,12 +1319,11 @@ mod tests {
     fn streaming_response_content_length() {
         let cx: Cx = Cx::for_testing();
         let (resp, _sender) = StreamingResponse::with_content_length(&cx, 4, 200, "OK", 100);
-        assert!(
-            resp.head
-                .headers
-                .iter()
-                .any(|(n, v)| { n.eq_ignore_ascii_case("content-length") && v == "100" })
-        );
+        assert!(resp
+            .head
+            .headers
+            .iter()
+            .any(|(n, v)| { n.eq_ignore_ascii_case("content-length") && v == "100" }));
         assert_eq!(resp.body.kind(), BodyKind::ContentLength(100));
     }
 
