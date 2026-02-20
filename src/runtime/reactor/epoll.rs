@@ -382,7 +382,7 @@ impl Reactor for EpollReactor {
         let requested_capacity =
             NonZeroUsize::new(events.capacity().max(1)).expect("capacity >= 1");
         let mut poll_events = self.poll_events.lock();
-        
+
         let current = poll_events.capacity().get();
         let target = requested_capacity.get();
 

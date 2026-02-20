@@ -231,8 +231,8 @@ fn parse_request_line_bytes(line: &[u8]) -> Result<(Method, String, Version), Ht
                             Method::from_bytes(method_bytes).ok_or(HttpError::BadMethod)?;
                         let version = Version::from_bytes(version_bytes)
                             .ok_or(HttpError::UnsupportedVersion)?;
-                        let uri =
-                            std::str::from_utf8(uri_bytes).map_err(|_| HttpError::BadRequestLine)?;
+                        let uri = std::str::from_utf8(uri_bytes)
+                            .map_err(|_| HttpError::BadRequestLine)?;
                         return Ok((method, uri.to_owned(), version));
                     }
                 }

@@ -210,7 +210,7 @@ impl SymbolCancelToken {
                 .cancelled_at
                 .store(now.as_nanos(), Ordering::Release);
             *reason_guard = Some(reason.clone());
-            
+
             // Drop the lock before notifying to avoid reentrancy deadlocks.
             drop(reason_guard);
 

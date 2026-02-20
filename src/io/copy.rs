@@ -939,11 +939,15 @@ mod tests {
     #[test]
     fn copy_bidirectional_yields_on_fast_streams() {
         init_test("copy_bidirectional_yields_on_fast_streams");
-        
+
         // Use an infinitely fast, infinite stream.
         struct InfiniteStream;
         impl AsyncRead for InfiniteStream {
-            fn poll_read(self: Pin<&mut Self>, _cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                buf: &mut ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
                 let space = buf.remaining();
                 let zeros = vec![0u8; space];
                 buf.put_slice(&zeros);
@@ -951,40 +955,48 @@ mod tests {
             }
         }
         impl AsyncWrite for InfiniteStream {
-            fn poll_write(self: Pin<&mut Self>, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                buf: &[u8],
+            ) -> Poll<io::Result<usize>> {
                 Poll::Ready(Ok(buf.len()))
             }
-            fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
-            fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
+            fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+            fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
         }
 
         let mut a = InfiniteStream;
         let mut b = InfiniteStream;
         let mut fut = copy_bidirectional(&mut a, &mut b);
         let mut fut = Pin::new(&mut fut);
-        
+
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
         // Run poll() in a thread with timeout to detect infinite loop
         let (tx, rx) = std::sync::mpsc::channel();
-        
+
         // We need to move `fut` into the thread, but `Pin` makes it tricky.
-        // Actually, since `InfiniteStream` is ZST and `CopyBidirectional` owns `&mut`, 
+        // Actually, since `InfiniteStream` is ZST and `CopyBidirectional` owns `&mut`,
         // passing `&mut a` across thread boundary is hard.
         // But we can just use `std::thread::scope` or rely on `poll` returning quickly.
         // Or construct the future inside the thread? But `copy_bidirectional` takes lifetimes.
-        
+
         // Let's just construct everything inside the thread.
         std::thread::spawn(move || {
             let mut a = InfiniteStream;
             let mut b = InfiniteStream;
             let mut fut = copy_bidirectional(&mut a, &mut b);
             let mut fut = Pin::new(&mut fut);
-            
+
             let waker = noop_waker();
             let mut cx = Context::from_waker(&waker);
-            
+
             // Should return Pending eventually due to yield
             let _ = fut.poll(&mut cx);
             tx.send(true).unwrap();
@@ -992,11 +1004,11 @@ mod tests {
 
         // Wait up to 100ms. If it loops forever, we timeout.
         let result = rx.recv_timeout(std::time::Duration::from_millis(100));
-        
+
         if result.is_err() {
             panic!("copy_bidirectional failed to yield (infinite loop)");
         }
-        
+
         crate::test_complete!("copy_bidirectional_yields_on_fast_streams");
     }
 }

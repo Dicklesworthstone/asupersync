@@ -895,7 +895,7 @@ mod tests {
         events.push(Event::readable(Token::new(5)));
 
         crate::assert_with_log!(events.len() == 5, "len grew", 5usize, events.len());
-        
+
         // Capacity might be larger due to Vec growth strategy
         crate::assert_with_log!(
             events.capacity() == 3,

@@ -471,7 +471,7 @@ impl LoadBalancer {
                 candidates.sort_by_key(|e| e.connection_count());
                 candidates.truncate(n);
                 candidates
-            },
+            }
 
             // For others, fallback to first-available logic or simple selection
             _ => available.into_iter().take(n).collect(),
