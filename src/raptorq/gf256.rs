@@ -387,6 +387,23 @@ pub struct Gf256ProfilePackManifestSnapshot {
     pub profile_pack_catalog: &'static [Gf256ProfilePackMetadata],
     /// Full deterministic offline-tuning candidate catalog.
     pub tuning_candidate_catalog: &'static [Gf256TuningCandidateMetadata],
+    /// Deterministic build-target metadata for reproducibility and forensics.
+    pub environment_metadata: Gf256ProfileEnvironmentMetadata,
+}
+
+/// Deterministic environment metadata emitted with profile-pack manifests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Gf256ProfileEnvironmentMetadata {
+    /// Target architecture identifier from compile-time cfg.
+    pub target_arch: &'static str,
+    /// Target operating-system identifier from compile-time cfg.
+    pub target_os: &'static str,
+    /// Target ABI/environment identifier from compile-time cfg.
+    pub target_env: &'static str,
+    /// Target endianness identifier (`little` or `big`).
+    pub target_endian: &'static str,
+    /// Target pointer width in bits.
+    pub target_pointer_width_bits: usize,
 }
 
 /// Architecture class used to map profile-pack defaults.
@@ -669,6 +686,48 @@ fn tuning_candidate_metadata(candidate_id: &str) -> Option<&'static Gf256TuningC
     GF256_TUNING_CANDIDATE_CATALOG
         .iter()
         .find(|metadata| metadata.candidate_id == candidate_id)
+}
+
+fn target_env_name() -> &'static str {
+    match option_env!("CARGO_CFG_TARGET_ENV") {
+        Some(env) if !env.is_empty() => env,
+        _ => "unknown",
+    }
+}
+
+fn target_endian_name() -> &'static str {
+    match option_env!("CARGO_CFG_TARGET_ENDIAN") {
+        Some("little") => "little",
+        Some("big") => "big",
+        Some(other) => other,
+        None => {
+            if cfg!(target_endian = "little") {
+                "little"
+            } else {
+                "big"
+            }
+        }
+    }
+}
+
+fn target_pointer_width_bits() -> usize {
+    match option_env!("CARGO_CFG_TARGET_POINTER_WIDTH") {
+        Some("16") => 16,
+        Some("32") => 32,
+        Some("64") => 64,
+        Some("128") => 128,
+        _ => usize::BITS as usize,
+    }
+}
+
+fn profile_environment_metadata() -> Gf256ProfileEnvironmentMetadata {
+    Gf256ProfileEnvironmentMetadata {
+        target_arch: std::env::consts::ARCH,
+        target_os: std::env::consts::OS,
+        target_env: target_env_name(),
+        target_endian: target_endian_name(),
+        target_pointer_width_bits: target_pointer_width_bits(),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -970,6 +1029,7 @@ pub fn gf256_profile_pack_manifest_snapshot() -> Gf256ProfilePackManifestSnapsho
         ),
         profile_pack_catalog: gf256_profile_pack_catalog(),
         tuning_candidate_catalog: gf256_tuning_candidate_catalog(),
+        environment_metadata: profile_environment_metadata(),
         active_policy,
     }
 }
@@ -2904,7 +2964,10 @@ mod tests {
             manifest.schema_version,
             GF256_PROFILE_PACK_MANIFEST_SCHEMA_VERSION
         );
-        assert_eq!(policy.profile_schema_version, GF256_PROFILE_PACK_SCHEMA_VERSION);
+        assert_eq!(
+            policy.profile_schema_version,
+            GF256_PROFILE_PACK_SCHEMA_VERSION
+        );
         assert_eq!(
             manifest.active_profile_metadata.profile_pack,
             policy.profile_pack
@@ -2914,11 +2977,15 @@ mod tests {
             policy.architecture_class
         );
         assert_eq!(
-            manifest.active_profile_metadata.selected_tuning_candidate_id,
+            manifest
+                .active_profile_metadata
+                .selected_tuning_candidate_id,
             policy.selected_tuning_candidate_id
         );
         assert_eq!(
-            manifest.active_profile_metadata.rejected_tuning_candidate_ids,
+            manifest
+                .active_profile_metadata
+                .rejected_tuning_candidate_ids,
             policy.rejected_tuning_candidate_ids
         );
         assert!(
@@ -2932,6 +2999,23 @@ mod tests {
             .expect("selected tuning candidate must exist in deterministic catalog");
         assert_eq!(selected.candidate_id, policy.selected_tuning_candidate_id);
         assert_eq!(selected.profile_pack, policy.profile_pack);
+        assert_eq!(
+            manifest.environment_metadata.target_arch,
+            std::env::consts::ARCH
+        );
+        assert_eq!(
+            manifest.environment_metadata.target_os,
+            std::env::consts::OS
+        );
+        assert!(!manifest.environment_metadata.target_env.is_empty());
+        assert!(matches!(
+            manifest.environment_metadata.target_endian,
+            "little" | "big"
+        ));
+        assert!(matches!(
+            manifest.environment_metadata.target_pointer_width_bits,
+            16 | 32 | 64 | 128
+        ));
         assert!(manifest.profile_pack_catalog.len() >= 3);
         assert!(manifest.tuning_candidate_catalog.len() >= 3);
     }

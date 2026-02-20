@@ -13,9 +13,9 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 
 use asupersync::raptorq::decoder::{DecodeStats, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::{
-    Gf256, Gf256ProfilePackId, dual_addmul_kernel_decision, dual_kernel_policy_snapshot,
+    Gf256, Gf256ProfilePackId, Gf256ProfilePackManifestSnapshot, dual_addmul_kernel_decision,
     dual_mul_kernel_decision, gf256_add_slice, gf256_addmul_slice, gf256_addmul_slices2,
-    gf256_mul_slice, gf256_mul_slices2,
+    gf256_mul_slice, gf256_mul_slices2, gf256_profile_pack_manifest_snapshot,
 };
 use asupersync::raptorq::linalg::{DenseRow, GaussianSolver, row_scale_add, row_xor};
 use asupersync::raptorq::systematic::SystematicEncoder;
@@ -77,12 +77,17 @@ fn gf256_bench_context(scenario: &Gf256BenchScenario, outcome: &str) -> String {
 }
 
 fn emit_track_e_policy_log(scenario: &Gf256BenchScenario) {
-    let policy = dual_kernel_policy_snapshot();
+    let manifest = gf256_profile_pack_manifest_snapshot();
+    let policy = manifest.active_policy;
+    let env = manifest.environment_metadata;
+    let (tile_bytes, unroll, prefetch_distance, fusion_shape) =
+        selected_candidate_fields(&manifest);
     let mul_decision = dual_mul_kernel_decision(scenario.len, scenario.len);
     let addmul_decision = dual_addmul_kernel_decision(scenario.len, scenario.len);
     eprintln!(
-        "{{\"schema_version\":\"{}\",\"profile_schema_version\":\"{}\",\"scenario_id\":\"{}\",\"seed\":{},\"kernel\":\"{:?}\",\"architecture_class\":\"{}\",\"profile_pack\":\"{}\",\"profile_fallback_reason\":\"{}\",\"rejected_profile_packs\":\"{}\",\"tuning_corpus_id\":\"{}\",\"selected_tuning_candidate_id\":\"{}\",\"rejected_tuning_candidate_ids\":\"{}\",\"replay_pointer\":\"{}\",\"command_bundle\":\"{}\",\"mode\":\"{:?}\",\"mul_window_min\":{},\"mul_window_max\":{},\"addmul_window_min\":{},\"addmul_window_max\":{},\"max_lane_ratio\":{},\"lane_len_a\":{},\"lane_len_b\":{},\"total_len\":{},\"mul_decision\":\"{:?}\",\"addmul_decision\":\"{:?}\",\"artifact_path\":\"{}\",\"repro_command\":\"{}\"}}",
+        "{{\"schema_version\":\"{}\",\"manifest_schema_version\":\"{}\",\"profile_schema_version\":\"{}\",\"scenario_id\":\"{}\",\"seed\":{},\"kernel\":\"{:?}\",\"architecture_class\":\"{}\",\"profile_pack\":\"{}\",\"profile_fallback_reason\":\"{}\",\"rejected_profile_packs\":\"{}\",\"profile_catalog_count\":{},\"tuning_candidate_catalog_count\":{},\"active_profile_architecture_class\":\"{}\",\"target_arch\":\"{}\",\"target_os\":\"{}\",\"target_env\":\"{}\",\"target_endian\":\"{}\",\"target_pointer_width_bits\":{},\"tuning_corpus_id\":\"{}\",\"selected_tuning_candidate_id\":\"{}\",\"selected_tuning_tile_bytes\":{},\"selected_tuning_unroll\":{},\"selected_tuning_prefetch_distance\":{},\"selected_tuning_fusion_shape\":\"{}\",\"rejected_tuning_candidate_ids\":\"{}\",\"replay_pointer\":\"{}\",\"command_bundle\":\"{}\",\"mode\":\"{:?}\",\"mul_window_min\":{},\"mul_window_max\":{},\"addmul_window_min\":{},\"addmul_window_max\":{},\"max_lane_ratio\":{},\"lane_len_a\":{},\"lane_len_b\":{},\"total_len\":{},\"mul_decision\":\"{:?}\",\"addmul_decision\":\"{:?}\",\"artifact_path\":\"{}\",\"repro_command\":\"{}\"}}",
         TRACK_E_POLICY_SCHEMA_VERSION,
+        manifest.schema_version,
         policy.profile_schema_version,
         scenario.scenario_id,
         scenario.seed,
@@ -94,8 +99,20 @@ fn emit_track_e_policy_log(scenario: &Gf256BenchScenario) {
             .map(|reason| reason.as_str())
             .unwrap_or("none"),
         csv_profile_pack_ids(policy.rejected_candidates),
+        manifest.profile_pack_catalog.len(),
+        manifest.tuning_candidate_catalog.len(),
+        manifest.active_profile_metadata.architecture_class.as_str(),
+        env.target_arch,
+        env.target_os,
+        env.target_env,
+        env.target_endian,
+        env.target_pointer_width_bits,
         policy.tuning_corpus_id,
         policy.selected_tuning_candidate_id,
+        tile_bytes,
+        unroll,
+        prefetch_distance,
+        fusion_shape,
         csv_str_ids(policy.rejected_tuning_candidate_ids),
         policy.replay_pointer,
         policy.command_bundle,
@@ -131,12 +148,17 @@ fn emit_track_e_policy_probe_log(
     mul_decision: &str,
     addmul_decision: &str,
 ) {
-    let policy = dual_kernel_policy_snapshot();
+    let manifest = gf256_profile_pack_manifest_snapshot();
+    let policy = manifest.active_policy;
+    let env = manifest.environment_metadata;
+    let (tile_bytes, unroll, prefetch_distance, fusion_shape) =
+        selected_candidate_fields(&manifest);
     let total = scenario.lane_a_len.saturating_add(scenario.lane_b_len);
     let lane_ratio = lane_ratio_string(scenario.lane_a_len, scenario.lane_b_len);
     eprintln!(
-        "{{\"schema_version\":\"{}\",\"profile_schema_version\":\"{}\",\"scenario_id\":\"{}\",\"seed\":{},\"kernel\":\"{:?}\",\"architecture_class\":\"{}\",\"profile_pack\":\"{}\",\"profile_fallback_reason\":\"{}\",\"rejected_profile_packs\":\"{}\",\"tuning_corpus_id\":\"{}\",\"selected_tuning_candidate_id\":\"{}\",\"rejected_tuning_candidate_ids\":\"{}\",\"replay_pointer\":\"{}\",\"command_bundle\":\"{}\",\"mode\":\"{:?}\",\"lane_len_a\":{},\"lane_len_b\":{},\"total_len\":{},\"lane_ratio\":\"{}\",\"mul_window_min\":{},\"mul_window_max\":{},\"addmul_window_min\":{},\"addmul_window_max\":{},\"max_lane_ratio\":{},\"mul_decision\":\"{}\",\"addmul_decision\":\"{}\",\"artifact_path\":\"{}\",\"repro_command\":\"{}\"}}",
+        "{{\"schema_version\":\"{}\",\"manifest_schema_version\":\"{}\",\"profile_schema_version\":\"{}\",\"scenario_id\":\"{}\",\"seed\":{},\"kernel\":\"{:?}\",\"architecture_class\":\"{}\",\"profile_pack\":\"{}\",\"profile_fallback_reason\":\"{}\",\"rejected_profile_packs\":\"{}\",\"profile_catalog_count\":{},\"tuning_candidate_catalog_count\":{},\"active_profile_architecture_class\":\"{}\",\"target_arch\":\"{}\",\"target_os\":\"{}\",\"target_env\":\"{}\",\"target_endian\":\"{}\",\"target_pointer_width_bits\":{},\"tuning_corpus_id\":\"{}\",\"selected_tuning_candidate_id\":\"{}\",\"selected_tuning_tile_bytes\":{},\"selected_tuning_unroll\":{},\"selected_tuning_prefetch_distance\":{},\"selected_tuning_fusion_shape\":\"{}\",\"rejected_tuning_candidate_ids\":\"{}\",\"replay_pointer\":\"{}\",\"command_bundle\":\"{}\",\"mode\":\"{:?}\",\"lane_len_a\":{},\"lane_len_b\":{},\"total_len\":{},\"lane_ratio\":\"{}\",\"mul_window_min\":{},\"mul_window_max\":{},\"addmul_window_min\":{},\"addmul_window_max\":{},\"max_lane_ratio\":{},\"mul_decision\":\"{}\",\"addmul_decision\":\"{}\",\"artifact_path\":\"{}\",\"repro_command\":\"{}\"}}",
         TRACK_E_POLICY_PROBE_SCHEMA_VERSION,
+        manifest.schema_version,
         policy.profile_schema_version,
         scenario.scenario_id,
         scenario.seed,
@@ -148,8 +170,20 @@ fn emit_track_e_policy_probe_log(
             .map(|reason| reason.as_str())
             .unwrap_or("none"),
         csv_profile_pack_ids(policy.rejected_candidates),
+        manifest.profile_pack_catalog.len(),
+        manifest.tuning_candidate_catalog.len(),
+        manifest.active_profile_metadata.architecture_class.as_str(),
+        env.target_arch,
+        env.target_os,
+        env.target_env,
+        env.target_endian,
+        env.target_pointer_width_bits,
         policy.tuning_corpus_id,
         policy.selected_tuning_candidate_id,
+        tile_bytes,
+        unroll,
+        prefetch_distance,
+        fusion_shape,
         csv_str_ids(policy.rejected_tuning_candidate_ids),
         policy.replay_pointer,
         policy.command_bundle,
@@ -168,6 +202,21 @@ fn emit_track_e_policy_probe_log(
         TRACK_E_ARTIFACT_PATH,
         TRACK_E_POLICY_PROBE_REPRO_CMD,
     );
+}
+
+fn selected_candidate_fields(
+    manifest: &Gf256ProfilePackManifestSnapshot,
+) -> (usize, usize, usize, &'static str) {
+    if let Some(candidate) = manifest.active_selected_tuning_candidate {
+        (
+            candidate.tile_bytes,
+            candidate.unroll,
+            candidate.prefetch_distance,
+            candidate.fusion_shape,
+        )
+    } else {
+        (0, 0, 0, "unknown")
+    }
 }
 
 fn csv_profile_pack_ids(ids: &[Gf256ProfilePackId]) -> String {
