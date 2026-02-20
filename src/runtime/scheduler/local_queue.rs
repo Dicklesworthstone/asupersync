@@ -270,7 +270,9 @@ impl Stealer {
         if initial_len == 0 {
             return false;
         }
-        let steal_limit = (initial_len / 2).max(1);
+        // Cap theft at 256 tasks to avoid monopolizing the destination queue
+        // or holding locks too long processing the batch.
+        let steal_limit = (initial_len / 2).max(1).min(256);
 
         // Common case: queue has only stealable tasks. Skip per-task locality
         // branching and temporary local-task buffering entirely.
@@ -278,7 +280,9 @@ impl Stealer {
             return src.steal_batch_into_non_local(steal_limit, arena, dest) > 0;
         }
 
-        let mut remaining_attempts = initial_len;
+        // Cap probe depth to prevent O(N) stalls if the queue is filled with
+        // thousands of local tasks.
+        let mut remaining_attempts = initial_len.min(1024);
 
         while stolen < steal_limit && remaining_attempts > 0 {
             remaining_attempts -= 1;
