@@ -137,6 +137,9 @@ impl DenseRow {
     #[inline]
     #[must_use]
     pub fn first_nonzero_from(&self, start: usize) -> Option<usize> {
+        if start >= self.data.len() {
+            return None;
+        }
         self.data[start..]
             .iter()
             .position(|&b| b != 0)
@@ -508,7 +511,7 @@ pub fn select_pivot_basic(matrix: &[&[u8]], start: usize, end: usize, col: usize
         .enumerate()
         .take(end)
         .skip(start)
-        .find(|(_, row_data)| row_data[col] != 0)
+        .find(|(_, row_data)| row_data.get(col).copied().unwrap_or(0) != 0)
         .map(|(row, _)| row)
 }
 
@@ -537,12 +540,16 @@ pub fn select_pivot_markowitz(
     let mut best: Option<(usize, usize)> = None;
 
     for (row, row_data) in matrix.iter().enumerate().take(end).skip(start) {
-        if row_data[col] == 0 {
+        if row_data.get(col).copied().unwrap_or(0) == 0 {
             continue;
         }
         let nnz = match best {
             None => count_nonzero_capped_from(row_data, col, usize::MAX),
-            Some((_, best_nnz)) => count_nonzero_capped_from(row_data, col, best_nnz),
+            Some((_, best_nnz)) => {
+                // We only need to know whether this row can beat the incumbent.
+                // Cap at `best_nnz - 1` to short-circuit tie/worse candidates.
+                count_nonzero_capped_from(row_data, col, best_nnz.saturating_sub(1))
+            }
         };
         match &best {
             None => {
@@ -578,6 +585,9 @@ pub fn row_nonzero_count(row: &[u8]) -> usize {
 #[inline]
 #[must_use]
 pub fn row_first_nonzero_from(row: &[u8], start_col: usize) -> Option<usize> {
+    if start_col >= row.len() {
+        return None;
+    }
     row[start_col..]
         .iter()
         .position(|&b| b != 0)
@@ -816,7 +826,10 @@ impl GaussianSolver {
             );
             let nnz = match best {
                 None => count_nonzero_capped_from(row_slice, col, usize::MAX),
-                Some((_, current_best)) => count_nonzero_capped_from(row_slice, col, current_best),
+                Some((_, current_best)) => {
+                    // Cap at `current_best - 1`; >= current_best cannot improve pivot.
+                    count_nonzero_capped_from(row_slice, col, current_best.saturating_sub(1))
+                }
             };
             match &best {
                 None => {
@@ -921,6 +934,9 @@ impl GaussianSolver {
 /// Counts non-zero coefficients in `row[start_col..]`, stopping once the count
 /// exceeds `cap`. This keeps Markowitz scans bounded once a good candidate
 /// exists and skips structural-zero prefix columns.
+///
+/// Typical Markowitz usage passes `cap = best_nnz - 1`: any value returned
+/// above `cap` proves the row cannot beat the incumbent and allows early exit.
 fn count_nonzero_capped_from(row: &[u8], start_col: usize, cap: usize) -> usize {
     let start = start_col.min(row.len());
     let mut count = 0usize;
@@ -972,6 +988,7 @@ mod tests {
         assert_eq!(row.first_nonzero_from(2), Some(2));
         assert_eq!(row.first_nonzero_from(3), Some(4));
         assert_eq!(row.first_nonzero_from(5), None);
+        assert_eq!(row.first_nonzero_from(6), None);
     }
 
     #[test]
@@ -1152,6 +1169,23 @@ mod tests {
     }
 
     #[test]
+    fn select_pivot_helpers_handle_short_rows_and_oob_columns() {
+        let rows: Vec<Vec<u8>> = vec![
+            vec![1],          // shorter row
+            vec![0, 1, 0, 0], // valid pivot at col=1
+            vec![1, 0, 1, 0], // valid width, no pivot at col=1
+        ];
+        let matrix: Vec<&[u8]> = rows.iter().map(Vec::as_slice).collect();
+
+        // Short rows and out-of-range columns should be treated as zero, not panic.
+        assert_eq!(select_pivot_basic(&matrix, 0, 3, 9), None);
+        assert_eq!(select_pivot_markowitz(&matrix, 0, 3, 9), None);
+
+        assert_eq!(select_pivot_basic(&matrix, 0, 3, 1), Some(1));
+        assert_eq!(select_pivot_markowitz(&matrix, 0, 3, 1), Some((1, 1)));
+    }
+
+    #[test]
     fn select_pivot_markowitz_counts_only_active_submatrix_tail() {
         let rows: Vec<Vec<u8>> = vec![
             vec![9, 9, 1, 1, 1], // tail nnz from col=2 is 3
@@ -1176,6 +1210,7 @@ mod tests {
         assert_eq!(row_first_nonzero_from(&row, 0), Some(2));
         assert_eq!(row_first_nonzero_from(&row, 3), Some(4));
         assert_eq!(row_first_nonzero_from(&row, 5), None);
+        assert_eq!(row_first_nonzero_from(&row, 6), None);
     }
 
     // -- Gaussian Solver tests --
@@ -1468,6 +1503,13 @@ mod tests {
         assert_eq!(count_nonzero_capped_from(&row, 2, usize::MAX), 3);
         assert_eq!(count_nonzero_capped_from(&row, 2, 1), 2);
         assert_eq!(count_nonzero_capped_from(&row, row.len(), usize::MAX), 0);
+    }
+
+    #[test]
+    fn nonzero_count_capped_from_short_circuits_tie_or_worse_rows() {
+        let row = [1, 1, 1, 1, 1, 1, 1, 1];
+        // `cap = 1` models incumbent nnz=2 with cap=best_nnz-1.
+        assert_eq!(count_nonzero_capped_from(&row, 0, 1), 2);
     }
 
     #[test]

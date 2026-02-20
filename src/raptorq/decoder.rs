@@ -11,7 +11,7 @@
 //! - Tie-breaking rules are explicit (lowest column index wins)
 //! - Same received symbols in same order produce identical decode results
 
-use crate::raptorq::gf256::{Gf256, gf256_addmul_slice};
+use crate::raptorq::gf256::{Gf256, gf256_add_slice, gf256_addmul_slice};
 use crate::raptorq::proof::{
     DecodeConfig, DecodeProof, EliminationTrace, FailureReason, InactivationStrategy, PeelingTrace,
     ReceivedSummary,
@@ -1409,6 +1409,22 @@ fn sparse_update_columns_if_beneficial_into(
     true
 }
 
+fn sparse_update_columns_for_elimination_if_beneficial_into(
+    pivot_row: &[Gf256],
+    n_cols: usize,
+    pivot_col: usize,
+    cols: &mut Vec<usize>,
+) -> bool {
+    if !sparse_update_columns_if_beneficial_into(pivot_row, n_cols, cols) {
+        return false;
+    }
+
+    if let Ok(idx) = cols.binary_search(&pivot_col) {
+        cols.remove(idx);
+    }
+    true
+}
+
 #[inline]
 fn dense_update_start_col(pivot_row: &[Gf256], pivot_col: usize) -> usize {
     if pivot_row
@@ -1435,26 +1451,59 @@ fn eliminate_row_coefficients(
     debug_assert_eq!(row.len(), pivot_row.len());
     debug_assert!(pivot_col < row.len());
     row[pivot_col] = Gf256::ZERO;
+    let factor_is_one = factor == Gf256::ONE;
 
     if use_sparse {
-        for &c in sparse_cols {
-            if c == pivot_col {
-                continue;
+        debug_assert!(sparse_cols.iter().all(|&c| c != pivot_col));
+        if factor_is_one {
+            for &c in sparse_cols {
+                row[c] += pivot_row[c];
             }
-            row[c] += factor * pivot_row[c];
+        } else {
+            for &c in sparse_cols {
+                row[c] += factor * pivot_row[c];
+            }
         }
         return;
     }
 
     if dense_start_col == 0 {
-        for c in 0..pivot_col {
-            row[c] += factor * pivot_row[c];
+        let row_prefix = &mut row[..pivot_col];
+        let pivot_prefix = &pivot_row[..pivot_col];
+        if factor_is_one {
+            for (dst, src) in row_prefix.iter_mut().zip(pivot_prefix.iter()) {
+                *dst += *src;
+            }
+        } else {
+            for (dst, src) in row_prefix.iter_mut().zip(pivot_prefix.iter()) {
+                *dst += factor * *src;
+            }
         }
     }
 
     let tail_start = dense_start_col.max(pivot_col.saturating_add(1));
-    for c in tail_start..row.len() {
-        row[c] += factor * pivot_row[c];
+    if tail_start < row.len() {
+        let row_tail = &mut row[tail_start..];
+        let pivot_tail = &pivot_row[tail_start..];
+        if factor_is_one {
+            for (dst, src) in row_tail.iter_mut().zip(pivot_tail.iter()) {
+                *dst += *src;
+            }
+        } else {
+            for (dst, src) in row_tail.iter_mut().zip(pivot_tail.iter()) {
+                *dst += factor * *src;
+            }
+        }
+    }
+}
+
+#[inline]
+fn eliminate_row_rhs(rhs: &mut [u8], pivot_rhs: &[u8], factor: Gf256) {
+    debug_assert_eq!(rhs.len(), pivot_rhs.len());
+    if factor == Gf256::ONE {
+        gf256_add_slice(rhs, pivot_rhs);
+    } else {
+        gf256_addmul_slice(rhs, pivot_rhs, factor);
     }
 }
 
@@ -2247,9 +2296,10 @@ impl InactivationDecoder {
                 // Copy pivot row into reusable buffers (no heap allocation)
                 pivot_buf[..n_cols].copy_from_slice(&a[prow_off..prow_off + n_cols]);
                 pivot_rhs[..symbol_size].copy_from_slice(&b[prow]);
-                let use_sparse = sparse_update_columns_if_beneficial_into(
+                let use_sparse = sparse_update_columns_for_elimination_if_beneficial_into(
                     &pivot_buf[..n_cols],
                     n_cols,
+                    col,
                     &mut sparse_cols,
                 );
                 let dense_start_col = dense_update_start_col(&pivot_buf[..n_cols], col);
@@ -2273,7 +2323,7 @@ impl InactivationDecoder {
                         &sparse_cols,
                         dense_start_col,
                     );
-                    gf256_addmul_slice(rhs, &pivot_rhs[..symbol_size], factor);
+                    eliminate_row_rhs(rhs, &pivot_rhs[..symbol_size], factor);
                     gauss_ops += 1;
                 }
             }
@@ -2503,9 +2553,10 @@ impl InactivationDecoder {
                 // Copy pivot row into reusable buffers
                 pivot_buf[..n_cols].copy_from_slice(&a[prow_off..prow_off + n_cols]);
                 pivot_rhs[..symbol_size].copy_from_slice(&b[prow]);
-                let use_sparse = sparse_update_columns_if_beneficial_into(
+                let use_sparse = sparse_update_columns_for_elimination_if_beneficial_into(
                     &pivot_buf[..n_cols],
                     n_cols,
+                    col,
                     &mut sparse_cols,
                 );
                 let dense_start_col = dense_update_start_col(&pivot_buf[..n_cols], col);
@@ -2529,7 +2580,7 @@ impl InactivationDecoder {
                         &sparse_cols,
                         dense_start_col,
                     );
-                    gf256_addmul_slice(rhs, &pivot_rhs[..symbol_size], factor);
+                    eliminate_row_rhs(rhs, &pivot_rhs[..symbol_size], factor);
                     gauss_ops += 1;
                     // Record row operation in proof trace
                     trace.record_row_op();
@@ -3075,6 +3126,34 @@ mod tests {
     }
 
     #[test]
+    fn sparse_update_columns_for_elimination_drops_pivot_column() {
+        let row_sparse = vec![
+            Gf256::ONE,
+            Gf256::ZERO,
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ZERO,
+            Gf256::ONE,
+            Gf256::ZERO,
+            Gf256::ZERO,
+            Gf256::ZERO,
+            Gf256::ZERO,
+        ];
+        let mut cols = Vec::new();
+        assert!(sparse_update_columns_for_elimination_if_beneficial_into(
+            &row_sparse,
+            10,
+            3,
+            &mut cols
+        ));
+        assert_eq!(
+            cols,
+            vec![0, 2, 5],
+            "elimination sparse columns should omit pivot column"
+        );
+    }
+
+    #[test]
     fn dense_update_start_col_prefers_suffix_when_prefix_zero() {
         let mut pivot = vec![Gf256::ZERO; 12];
         for coef in pivot.iter_mut().skip(5) {
@@ -3149,15 +3228,14 @@ mod tests {
     #[test]
     fn eliminate_row_coefficients_matches_manual_for_sparse_and_dense_paths() {
         let pivot_col = 3usize;
-        let factor = Gf256::new(0x5d);
         let pivot_row = vec![
             Gf256::new(0x10),
-            Gf256::new(0x20),
-            Gf256::new(0x30),
+            Gf256::ZERO,
+            Gf256::ZERO,
             Gf256::ONE,
-            Gf256::new(0x40),
+            Gf256::ZERO,
             Gf256::new(0x50),
-            Gf256::new(0x60),
+            Gf256::ZERO,
             Gf256::new(0x70),
         ];
         let row = vec![
@@ -3171,44 +3249,130 @@ mod tests {
             Gf256::new(0x08),
         ];
 
-        let mut expected = row.clone();
-        for c in 0..pivot_row.len() {
-            expected[c] += factor * pivot_row[c];
+        for factor in [Gf256::ONE, Gf256::new(0x5d)] {
+            let mut expected = row.clone();
+            for c in 0..pivot_row.len() {
+                expected[c] += factor * pivot_row[c];
+            }
+            expected[pivot_col] = Gf256::ZERO;
+
+            let mut dense_actual = row.clone();
+            eliminate_row_coefficients(
+                &mut dense_actual,
+                &pivot_row,
+                factor,
+                pivot_col,
+                false,
+                &[],
+                0,
+            );
+            assert_eq!(
+                dense_actual, expected,
+                "dense elimination helper must match manual elimination for factor={:?}",
+                factor
+            );
+
+            let mut sparse_cols = Vec::new();
+            assert!(sparse_update_columns_for_elimination_if_beneficial_into(
+                &pivot_row,
+                pivot_row.len(),
+                pivot_col,
+                &mut sparse_cols
+            ));
+            let mut sparse_actual = row.clone();
+            eliminate_row_coefficients(
+                &mut sparse_actual,
+                &pivot_row,
+                factor,
+                pivot_col,
+                true,
+                &sparse_cols,
+                pivot_col,
+            );
+            assert_eq!(
+                sparse_actual, expected,
+                "sparse elimination helper must match manual elimination for factor={:?}",
+                factor
+            );
         }
-        expected[pivot_col] = Gf256::ZERO;
+    }
 
-        let mut dense_actual = row.clone();
-        eliminate_row_coefficients(
-            &mut dense_actual,
-            &pivot_row,
-            factor,
-            pivot_col,
-            false,
-            &[],
-            0,
-        );
-        assert_eq!(
-            dense_actual, expected,
-            "dense elimination helper must match manual elimination"
-        );
+    #[test]
+    fn eliminate_row_rhs_matches_manual_for_factor_one_and_nonone() {
+        let base_rhs = vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+        let pivot_rhs = vec![0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee];
 
-        let sparse_cols: Vec<usize> = (0..pivot_row.len())
-            .filter(|&c| !pivot_row[c].is_zero())
-            .collect();
-        let mut sparse_actual = row;
-        eliminate_row_coefficients(
-            &mut sparse_actual,
-            &pivot_row,
-            factor,
-            pivot_col,
-            true,
-            &sparse_cols,
-            pivot_col,
-        );
-        assert_eq!(
-            sparse_actual, expected,
-            "sparse elimination helper must match manual elimination"
-        );
+        for factor in [Gf256::ONE, Gf256::new(0x5d)] {
+            let mut actual = base_rhs.clone();
+            eliminate_row_rhs(&mut actual, &pivot_rhs, factor);
+
+            let mut expected = base_rhs.clone();
+            for i in 0..expected.len() {
+                let delta = factor * Gf256::new(pivot_rhs[i]);
+                expected[i] ^= delta.raw();
+            }
+            assert_eq!(
+                actual, expected,
+                "rhs elimination helper must match manual gf(256) arithmetic for factor={:?}",
+                factor
+            );
+        }
+    }
+
+    #[test]
+    fn eliminate_row_coefficients_dense_suffix_mode_matches_manual_for_both_factors() {
+        let pivot_col = 4usize;
+        let pivot_row = vec![
+            Gf256::ZERO,
+            Gf256::ZERO,
+            Gf256::ZERO,
+            Gf256::ZERO,
+            Gf256::ONE,
+            Gf256::new(0x2a),
+            Gf256::ZERO,
+            Gf256::new(0x7c),
+            Gf256::new(0x11),
+            Gf256::ZERO,
+        ];
+        let dense_start_col = dense_update_start_col(&pivot_row, pivot_col);
+        assert_eq!(dense_start_col, pivot_col);
+
+        let row = vec![
+            Gf256::new(0x10),
+            Gf256::new(0x20),
+            Gf256::new(0x30),
+            Gf256::new(0x40),
+            Gf256::new(0x50),
+            Gf256::new(0x60),
+            Gf256::new(0x70),
+            Gf256::new(0x80),
+            Gf256::new(0x90),
+            Gf256::new(0xa0),
+        ];
+
+        for factor in [Gf256::ONE, Gf256::new(0x5d)] {
+            let mut expected = row.clone();
+            for c in 0..pivot_row.len() {
+                expected[c] += factor * pivot_row[c];
+            }
+            expected[pivot_col] = Gf256::ZERO;
+
+            let mut actual = row.clone();
+            eliminate_row_coefficients(
+                &mut actual,
+                &pivot_row,
+                factor,
+                pivot_col,
+                false,
+                &[],
+                dense_start_col,
+            );
+            assert_eq!(
+                actual, expected,
+                "dense suffix-mode elimination helper must match manual arithmetic for factor={:?}",
+                factor
+            );
+        }
     }
 
     fn make_source_data(k: usize, symbol_size: usize) -> Vec<Vec<u8>> {
