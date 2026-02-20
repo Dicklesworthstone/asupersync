@@ -278,7 +278,15 @@ impl RegressionMonitor {
             });
         }
 
-        let regime_state = stats.regime_state.map(ToString::to_string);
+        let regime_state = stats
+            .policy_mode
+            .map(ToString::to_string)
+            .or_else(|| stats.hard_regime_branch.map(ToString::to_string))
+            .or_else(|| {
+                stats
+                    .hard_regime_activated
+                    .then(|| "hard-regime".to_string())
+            });
 
         RegressionReport {
             schema_version: G8_SCHEMA_VERSION,
@@ -403,7 +411,7 @@ mod tests {
             dense_core_cols: gauss_ops / 3,
             pivots_selected: inactivated,
             peel_frontier_peak: 4,
-            regime_state: Some("stable"),
+            policy_mode: Some("stable"),
             ..Default::default()
         }
     }
@@ -605,7 +613,7 @@ mod tests {
         }
 
         let mut stats = make_baseline_stats(10, 3);
-        stats.regime_state = Some("retuned");
+        stats.policy_mode = Some("retuned");
         let report = monitor.check(&stats);
         assert_eq!(
             report.regime_state,

@@ -1244,6 +1244,24 @@ pub fn gf256_add_slice(dst: &mut [u8], src: &[u8]) {
     (dispatch().add_slice)(dst, src);
 }
 
+/// XOR two independent source/destination pairs in one dispatch lookup.
+///
+/// Applies:
+/// - `dst_a[i] ^= src_a[i]`
+/// - `dst_b[i] ^= src_b[i]`
+///
+/// # Panics
+///
+/// Panics if `dst_a.len() != src_a.len()` or `dst_b.len() != src_b.len()`.
+#[inline]
+pub fn gf256_add_slices2(dst_a: &mut [u8], src_a: &[u8], dst_b: &mut [u8], src_b: &[u8]) {
+    assert_eq!(dst_a.len(), src_a.len(), "slice length mismatch");
+    assert_eq!(dst_b.len(), src_b.len(), "slice length mismatch");
+    let add_slice = dispatch().add_slice;
+    add_slice(dst_a, src_a);
+    add_slice(dst_b, src_b);
+}
+
 fn gf256_add_slice_scalar(dst: &mut [u8], src: &[u8]) {
     assert_eq!(dst.len(), src.len(), "slice length mismatch");
 
@@ -2421,6 +2439,34 @@ mod tests {
         gf256_addmul_slices2(&mut accum_left, &src_a, &mut accum_right, &src_b, c);
         gf256_addmul_slice(&mut expected_left, &src_a, c);
         gf256_addmul_slice(&mut expected_right, &src_b, c);
+
+        assert_eq!(accum_left, expected_left, "{context}");
+        assert_eq!(accum_right, expected_right, "{context}");
+    }
+
+    #[test]
+    fn add_slices2_matches_two_independent_add_slice_calls() {
+        const LEN_A: usize = 83;
+        const LEN_B: usize = 141;
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-equivalence-v1";
+        let context = failure_context(
+            "RQ-U-GF256-ALGEBRA",
+            seed,
+            "add_slices2_matches_two_independent_add_slice_calls",
+            replay_ref,
+        );
+
+        let src_a: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(13)) as u8).collect();
+        let src_b: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(17)) as u8).collect();
+        let mut accum_left: Vec<u8> = (0..LEN_A).map(|i| (i.wrapping_mul(19)) as u8).collect();
+        let mut accum_right: Vec<u8> = (0..LEN_B).map(|i| (i.wrapping_mul(23)) as u8).collect();
+        let mut expected_left = accum_left.clone();
+        let mut expected_right = accum_right.clone();
+
+        gf256_add_slices2(&mut accum_left, &src_a, &mut accum_right, &src_b);
+        gf256_add_slice(&mut expected_left, &src_a);
+        gf256_add_slice(&mut expected_right, &src_b);
 
         assert_eq!(accum_left, expected_left, "{context}");
         assert_eq!(accum_right, expected_right, "{context}");

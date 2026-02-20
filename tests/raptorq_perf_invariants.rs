@@ -2814,16 +2814,16 @@ fn f6_regime_stats_populated_after_decode() {
 
     let result = decoder.decode(&received).expect("decode should succeed");
 
-    // Regime state must always be populated after decode.
+    // Policy metadata must be populated after decode.
     assert!(
-        result.stats.regime_state.is_some(),
-        "f6: regime_state must be populated after decode"
+        result.stats.policy_mode.is_some() || result.stats.hard_regime_branch.is_some(),
+        "f6: policy mode/branch must be populated after decode"
     );
-    // Regime replay ref must always be set.
+    // Policy replay ref must always be set.
     assert_eq!(
-        result.stats.regime_replay_ref,
-        Some("replay:rq-track-f-regime-shift-v1"),
-        "f6: regime_replay_ref must match schema"
+        result.stats.policy_replay_ref,
+        Some("replay:rq-track-f-runtime-policy-v1"),
+        "f6: policy_replay_ref must match schema"
     );
 }
 
@@ -2841,30 +2841,18 @@ fn f6_first_decode_is_stable_with_zero_deltas() {
     let received = build_decode_received(&source, &encoder, &decoder, &[], 0);
     let result = decoder.decode(&received).expect("decode should succeed");
 
-    assert_eq!(
-        result.stats.regime_state,
-        Some("stable"),
-        "f6: first decode should be stable"
+    assert!(
+        result.stats.policy_mode.is_some() || result.stats.hard_regime_branch.is_some(),
+        "f6: first decode should expose policy mode/branch"
     );
     assert_eq!(
-        result.stats.regime_window_len, 1,
-        "f6: first decode should have window_len=1"
+        result.stats.hard_regime_fallbacks, 0,
+        "f6: first decode should not require hard-regime fallback retries"
     );
     assert_eq!(
-        result.stats.regime_delta_density_bias, 0,
-        "f6: first decode should have zero density bias delta"
-    );
-    assert_eq!(
-        result.stats.regime_delta_pressure_bias, 0,
-        "f6: first decode should have zero pressure bias delta"
-    );
-    assert_eq!(
-        result.stats.regime_retune_count, 0,
-        "f6: first decode should have zero retune count"
-    );
-    assert_eq!(
-        result.stats.regime_rollback_count, 0,
-        "f6: first decode should have zero rollback count"
+        result.stats.policy_replay_ref,
+        Some("replay:rq-track-f-runtime-policy-v1"),
+        "f6: first decode should expose policy replay ref"
     );
 }
 
@@ -2882,23 +2870,30 @@ fn f6_window_bounded_across_decodes() {
 
     let received = build_decode_received(&source, &encoder, &decoder, &[], 0);
 
-    let mut last_window_len = 0;
+    let mut last_replay_ref = None;
     // Decode 50 times on the same decoder instance.
     for i in 0..50 {
         let result = decoder
             .decode(&received)
             .unwrap_or_else(|e| panic!("f6: decode {i} should succeed: {e:?}"));
-        last_window_len = result.stats.regime_window_len;
+        let replay_ref = result.stats.policy_replay_ref;
+        if let Some(previous) = last_replay_ref {
+            assert_eq!(
+                replay_ref,
+                Some(previous),
+                "f6: replay ref drifted at decode {i}"
+            );
+        }
+        last_replay_ref = replay_ref;
         assert!(
-            last_window_len <= 32,
-            "f6: window_len({last_window_len}) must not exceed capacity(32) at decode {i}"
+            replay_ref.is_some(),
+            "f6: policy replay ref missing at decode {i}"
         );
     }
 
-    // After 50 decodes, window should be saturated at capacity.
-    assert_eq!(
-        last_window_len, 32,
-        "f6: window should be at capacity after 50 decodes"
+    assert!(
+        last_replay_ref.is_some(),
+        "f6: expected replay ref after decode series"
     );
 }
 
@@ -2915,21 +2910,25 @@ fn f6_retuning_deltas_always_bounded() {
 
     let received = build_decode_received(&source, &encoder, &decoder, &[], 0);
 
-    // Repeated decodes — verify delta bounds after each.
+    // Repeated decodes — verify policy feature bounds after each.
     for i in 0..100 {
         let result = decoder
             .decode(&received)
             .unwrap_or_else(|e| panic!("f6: decode {i} should succeed: {e:?}"));
-        let cap = 200i32;
         assert!(
-            result.stats.regime_delta_density_bias.abs() <= cap,
-            "f6: density bias delta {} out of bounds at decode {i}",
-            result.stats.regime_delta_density_bias
+            result.stats.policy_density_permille <= 1000,
+            "f6: policy_density_permille {} out of bounds at decode {i}",
+            result.stats.policy_density_permille
         );
         assert!(
-            result.stats.regime_delta_pressure_bias.abs() <= cap,
-            "f6: pressure bias delta {} out of bounds at decode {i}",
-            result.stats.regime_delta_pressure_bias
+            result.stats.policy_rank_deficit_permille <= 1000,
+            "f6: policy_rank_deficit_permille {} out of bounds at decode {i}",
+            result.stats.policy_rank_deficit_permille
+        );
+        assert!(
+            result.stats.policy_inactivation_pressure_permille <= 1000,
+            "f6: policy_inactivation_pressure_permille {} out of bounds at decode {i}",
+            result.stats.policy_inactivation_pressure_permille
         );
     }
 }
@@ -2959,24 +2958,20 @@ fn f6_deterministic_replay_across_decoders() {
             .unwrap_or_else(|e| panic!("f6: decode_b {i} failed: {e:?}"));
 
         assert_eq!(
-            result_a.stats.regime_score, result_b.stats.regime_score,
-            "f6: regime_score mismatch at decode {i}"
+            result_a.stats.policy_mode, result_b.stats.policy_mode,
+            "f6: policy_mode mismatch at decode {i}"
         );
         assert_eq!(
-            result_a.stats.regime_state, result_b.stats.regime_state,
-            "f6: regime_state mismatch at decode {i}"
+            result_a.stats.policy_replay_ref, result_b.stats.policy_replay_ref,
+            "f6: policy_replay_ref mismatch at decode {i}"
         );
         assert_eq!(
-            result_a.stats.regime_retune_count, result_b.stats.regime_retune_count,
-            "f6: retune_count mismatch at decode {i}"
+            result_a.stats.policy_reason, result_b.stats.policy_reason,
+            "f6: policy_reason mismatch at decode {i}"
         );
         assert_eq!(
-            result_a.stats.regime_delta_density_bias, result_b.stats.regime_delta_density_bias,
-            "f6: density_bias mismatch at decode {i}"
-        );
-        assert_eq!(
-            result_a.stats.regime_delta_pressure_bias, result_b.stats.regime_delta_pressure_bias,
-            "f6: pressure_bias mismatch at decode {i}"
+            result_a.stats.hard_regime_fallbacks, result_b.stats.hard_regime_fallbacks,
+            "f6: hard_regime_fallbacks mismatch at decode {i}"
         );
     }
 }
@@ -2985,12 +2980,11 @@ fn f6_deterministic_replay_across_decoders() {
 #[test]
 fn f6_benchmark_covers_regime_observability() {
     for required in [
-        "regime_score",
-        "regime_state",
-        "regime_retune_count",
-        "regime_rollback_count",
-        "regime_delta_density_bias",
-        "regime_delta_pressure_bias",
+        "policy_mode",
+        "policy_reason",
+        "policy_replay_ref",
+        "hard_regime_branch",
+        "hard_regime_conservative_fallback_reason",
     ] {
         assert!(
             RAPTORQ_BENCH_RS.contains(required),

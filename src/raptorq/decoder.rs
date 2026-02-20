@@ -11,7 +11,7 @@
 //! - Tie-breaking rules are explicit (lowest column index wins)
 //! - Same received symbols in same order produce identical decode results
 
-use crate::raptorq::gf256::{Gf256, gf256_add_slice, gf256_addmul_slice};
+use crate::raptorq::gf256::{Gf256, gf256_addmul_slice};
 use crate::raptorq::proof::{
     DecodeConfig, DecodeProof, EliminationTrace, FailureReason, InactivationStrategy, PeelingTrace,
     ReceivedSummary,
@@ -219,22 +219,6 @@ pub struct DecodeStats {
     pub factor_cache_entries: usize,
     /// Bounded capacity used by the dense-factor cache policy.
     pub factor_cache_capacity: usize,
-    /// F6 regime-shift detector: current CUSUM score (signed, bounded).
-    pub regime_score: i64,
-    /// F6 regime-shift detector: current regime state label.
-    pub regime_state: Option<&'static str>,
-    /// F6 regime-shift detector: number of retuning events applied.
-    pub regime_retune_count: usize,
-    /// F6 regime-shift detector: number of rollbacks to conservative defaults.
-    pub regime_rollback_count: usize,
-    /// F6 regime-shift detector: current window occupancy.
-    pub regime_window_len: usize,
-    /// F6 regime-shift detector: current density bias delta (permille adjustment).
-    pub regime_delta_density_bias: i32,
-    /// F6 regime-shift detector: current pressure bias delta (permille adjustment).
-    pub regime_delta_pressure_bias: i32,
-    /// F6 regime-shift detector: replay pointer for retuning forensics.
-    pub regime_replay_ref: Option<&'static str>,
 }
 
 /// Result of successful decoding.
@@ -418,452 +402,6 @@ impl DenseFactorCache {
 
     fn len(&self) -> usize {
         self.entries.len()
-    }
-}
-
-// ============================================================================
-// F6: Regime-shift detector
-// ============================================================================
-
-/// Maximum number of observations in the regime detector window.
-const REGIME_WINDOW_CAPACITY: usize = 32;
-
-/// CUSUM threshold for declaring a regime shift (in permille-scaled score units).
-/// A score that exceeds this indicates the workload has drifted far enough from
-/// baseline that retuning should be considered.
-const REGIME_SHIFT_THRESHOLD: i64 = 500;
-
-/// Maximum absolute adjustment to any loss-model bias term (permille).
-/// Retuning deltas are clamped to [-cap, +cap] to satisfy the "no unbounded
-/// online learning" safety constraint.
-const REGIME_MAX_RETUNE_DELTA: i32 = 200;
-
-/// Number of consecutive oscillations (shift→rollback→shift) before the detector
-/// permanently locks to conservative defaults for this decoder instance.
-const REGIME_ROLLBACK_OSCILLATION_LIMIT: usize = 3;
-
-/// Replay pointer for F6 regime-shift retuning events.
-const REGIME_REPLAY_REF: &str = "replay:rq-track-f-regime-shift-v1";
-
-/// Labels for the regime detector state machine.
-const REGIME_STATE_STABLE: &str = "stable";
-const REGIME_STATE_SHIFTING: &str = "shifting";
-const REGIME_STATE_RETUNED: &str = "retuned";
-const REGIME_STATE_ROLLBACK: &str = "rollback";
-const REGIME_STATE_LOCKED: &str = "locked_conservative";
-
-/// A single observation fed to the regime detector after each decode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RegimeObservation {
-    /// Policy features observed during the decode.
-    features: DecoderPolicyFeatures,
-    /// Whether the decode succeeded.
-    decode_success: bool,
-    /// The policy mode that was selected.
-    policy_mode: DecoderPolicyMode,
-}
-
-/// Bounded retuning deltas applied to the loss-model bias terms.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[allow(clippy::struct_field_names)]
-struct RetuningDeltas {
-    /// Adjustment to the conservative baseline intercept (added to 400).
-    baseline_intercept_delta: i32,
-    /// Adjustment to the density coefficient for baseline (multiplied by 3 + delta).
-    density_bias_delta: i32,
-    /// Adjustment to the inactivation pressure coefficient (multiplied by 2 + delta).
-    pressure_bias_delta: i32,
-}
-
-impl RetuningDeltas {
-    /// Clamp all deltas to the allowed cap range.
-    fn clamped(self) -> Self {
-        Self {
-            baseline_intercept_delta: self
-                .baseline_intercept_delta
-                .clamp(-REGIME_MAX_RETUNE_DELTA, REGIME_MAX_RETUNE_DELTA),
-            density_bias_delta: self
-                .density_bias_delta
-                .clamp(-REGIME_MAX_RETUNE_DELTA, REGIME_MAX_RETUNE_DELTA),
-            pressure_bias_delta: self
-                .pressure_bias_delta
-                .clamp(-REGIME_MAX_RETUNE_DELTA, REGIME_MAX_RETUNE_DELTA),
-        }
-    }
-
-    /// True when all deltas are zero (conservative defaults).
-    fn is_zero(&self) -> bool {
-        self.baseline_intercept_delta == 0
-            && self.density_bias_delta == 0
-            && self.pressure_bias_delta == 0
-    }
-}
-
-/// The regime detector's internal state machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RegimePhase {
-    /// Accumulating baseline statistics, no retuning active.
-    Stable,
-    /// A shift has been detected but not yet acted upon (needs confirmation).
-    Shifting,
-    /// Retuning deltas are active.
-    Retuned,
-    /// Rolled back to conservative defaults after instability.
-    Rollback,
-    /// Permanently locked to conservative defaults (oscillation limit hit).
-    LockedConservative,
-}
-
-impl RegimePhase {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Stable => REGIME_STATE_STABLE,
-            Self::Shifting => REGIME_STATE_SHIFTING,
-            Self::Retuned => REGIME_STATE_RETUNED,
-            Self::Rollback => REGIME_STATE_ROLLBACK,
-            Self::LockedConservative => REGIME_STATE_LOCKED,
-        }
-    }
-}
-
-/// Bounded windowed regime-shift detector.
-///
-/// Maintains a fixed-size ring buffer of recent policy feature observations.
-/// Uses a deterministic CUSUM (cumulative sum control chart) to detect when
-/// the workload regime has shifted significantly. On shift detection, computes
-/// bounded retuning deltas to adjust the policy engine's loss-model biases.
-///
-/// Safety invariants:
-/// - Window is bounded to `REGIME_WINDOW_CAPACITY` entries.
-/// - Retuning deltas never exceed `REGIME_MAX_RETUNE_DELTA` in any dimension.
-/// - After `REGIME_ROLLBACK_OSCILLATION_LIMIT` oscillations, locks to conservative.
-/// - Deterministic for fixed input sequences (no floating point, no randomness).
-#[derive(Debug)]
-struct RegimeDetector {
-    /// Ring buffer of recent observations. Front = oldest, back = newest.
-    window: VecDeque<RegimeObservation>,
-    /// Running sum of density permille values in the window.
-    density_sum: i64,
-    /// Running sum of inactivation pressure permille values in the window.
-    pressure_sum: i64,
-    /// Baseline density mean (permille), established from first REGIME_WINDOW_CAPACITY observations.
-    baseline_density: i64,
-    /// Baseline pressure mean (permille), established similarly.
-    baseline_pressure: i64,
-    /// Whether the baseline has been established (window filled at least once).
-    baseline_established: bool,
-    /// Current CUSUM score for density drift.
-    cusum_density: i64,
-    /// Current CUSUM score for pressure drift.
-    cusum_pressure: i64,
-    /// Current phase of the detector state machine.
-    phase: RegimePhase,
-    /// Active retuning deltas (zero when not retuned).
-    deltas: RetuningDeltas,
-    /// Total number of retuning events applied.
-    retune_count: usize,
-    /// Total number of rollbacks performed.
-    rollback_count: usize,
-    /// Consecutive oscillation count (shift→rollback→shift cycles).
-    oscillation_count: usize,
-}
-
-impl Default for RegimeDetector {
-    fn default() -> Self {
-        Self {
-            window: VecDeque::with_capacity(REGIME_WINDOW_CAPACITY),
-            density_sum: 0,
-            pressure_sum: 0,
-            baseline_density: 0,
-            baseline_pressure: 0,
-            baseline_established: false,
-            cusum_density: 0,
-            cusum_pressure: 0,
-            phase: RegimePhase::Stable,
-            deltas: RetuningDeltas::default(),
-            retune_count: 0,
-            rollback_count: 0,
-            oscillation_count: 0,
-        }
-    }
-}
-
-impl RegimeDetector {
-    /// Record a new observation and update the detector state.
-    ///
-    /// Returns the current retuning deltas (may be zero if stable or locked).
-    #[allow(clippy::cast_possible_wrap)] // permille values (<=1000) and window len (<=32) never wrap
-    fn observe(&mut self, obs: RegimeObservation) -> RetuningDeltas {
-        // Permanently locked — no further adaptation.
-        if self.phase == RegimePhase::LockedConservative {
-            return RetuningDeltas::default();
-        }
-
-        // Maintain bounded window.
-        let density_val = obs.features.density_permille as i64;
-        let pressure_val = obs.features.inactivation_pressure_permille as i64;
-
-        if self.window.len() >= REGIME_WINDOW_CAPACITY {
-            if let Some(evicted) = self.window.pop_front() {
-                self.density_sum -= evicted.features.density_permille as i64;
-                self.pressure_sum -= evicted.features.inactivation_pressure_permille as i64;
-            }
-        }
-        self.window.push_back(obs);
-        self.density_sum += density_val;
-        self.pressure_sum += pressure_val;
-
-        let window_len = self.window.len() as i64;
-
-        // Establish baseline once the window fills for the first time.
-        if !self.baseline_established {
-            if self.window.len() >= REGIME_WINDOW_CAPACITY {
-                self.baseline_density = self.density_sum / window_len;
-                self.baseline_pressure = self.pressure_sum / window_len;
-                self.baseline_established = true;
-            }
-            return self.deltas;
-        }
-
-        // Compute current window means.
-        let current_density_mean = self.density_sum / window_len;
-        let current_pressure_mean = self.pressure_sum / window_len;
-
-        // CUSUM update: accumulate drift from baseline.
-        // Use two-sided CUSUM (absolute deviation) for simplicity and determinism.
-        let density_deviation = (current_density_mean - self.baseline_density).abs();
-        let pressure_deviation = (current_pressure_mean - self.baseline_pressure).abs();
-
-        // CUSUM with reset-to-zero when below zero (one-sided positive CUSUM).
-        self.cusum_density = (self.cusum_density + density_deviation - 50).max(0);
-        self.cusum_pressure = (self.cusum_pressure + pressure_deviation - 30).max(0);
-
-        let combined_score = self.cusum_density + self.cusum_pressure;
-
-        match self.phase {
-            RegimePhase::Stable => {
-                if combined_score >= REGIME_SHIFT_THRESHOLD {
-                    self.phase = RegimePhase::Shifting;
-                }
-            }
-            RegimePhase::Shifting => {
-                // Confirm the shift: if score is still above threshold, retune.
-                if combined_score >= REGIME_SHIFT_THRESHOLD {
-                    self.apply_retuning(current_density_mean, current_pressure_mean);
-                } else {
-                    // Transient spike, return to stable.
-                    self.phase = RegimePhase::Stable;
-                    self.cusum_density = 0;
-                    self.cusum_pressure = 0;
-                }
-            }
-            RegimePhase::Retuned => {
-                // Monitor for instability: if a retuned decode fails, roll back.
-                if !obs.decode_success {
-                    self.rollback();
-                }
-                // Also rollback if the regime shifted again (score back above threshold
-                // relative to the *new* baseline would mean the retuning didn't help).
-                if combined_score >= REGIME_SHIFT_THRESHOLD * 2 {
-                    self.rollback();
-                }
-            }
-            RegimePhase::Rollback => {
-                // After rollback, re-establish baseline from scratch.
-                self.baseline_established = false;
-                self.cusum_density = 0;
-                self.cusum_pressure = 0;
-                self.phase = RegimePhase::Stable;
-            }
-            RegimePhase::LockedConservative => {
-                // Unreachable due to early return above.
-            }
-        }
-
-        self.deltas
-    }
-
-    /// Compute and apply bounded retuning deltas based on the observed drift.
-    fn apply_retuning(&mut self, current_density_mean: i64, current_pressure_mean: i64) {
-        let density_drift = current_density_mean - self.baseline_density;
-        let pressure_drift = current_pressure_mean - self.baseline_pressure;
-
-        // Compute deltas: if density increased, lower baseline intercept to make
-        // aggressive modes more accessible; if pressure increased, adjust pressure
-        // sensitivity.
-        let raw_deltas = RetuningDeltas {
-            baseline_intercept_delta: -(density_drift as i32 / 5),
-            density_bias_delta: -(density_drift as i32 / 10),
-            pressure_bias_delta: -(pressure_drift as i32 / 10),
-        };
-
-        self.deltas = raw_deltas.clamped();
-        self.phase = RegimePhase::Retuned;
-        self.retune_count += 1;
-
-        // Update baseline to current means to prevent repeated re-triggering.
-        self.baseline_density = current_density_mean;
-        self.baseline_pressure = current_pressure_mean;
-
-        // Reset CUSUM accumulators after successful retuning.
-        self.cusum_density = 0;
-        self.cusum_pressure = 0;
-    }
-
-    /// Roll back to conservative defaults (zero deltas).
-    fn rollback(&mut self) {
-        self.deltas = RetuningDeltas::default();
-        self.rollback_count += 1;
-        self.oscillation_count += 1;
-
-        if self.oscillation_count >= REGIME_ROLLBACK_OSCILLATION_LIMIT {
-            self.phase = RegimePhase::LockedConservative;
-        } else {
-            self.phase = RegimePhase::Rollback;
-        }
-    }
-
-    /// Get the current combined CUSUM score.
-    fn combined_score(&self) -> i64 {
-        self.cusum_density + self.cusum_pressure
-    }
-
-    /// Get the current retuning deltas.
-    fn current_deltas(&self) -> RetuningDeltas {
-        self.deltas
-    }
-
-    /// Apply regime detector state to decode stats for observability.
-    fn apply_to_stats(&self, stats: &mut DecodeStats) {
-        stats.regime_score = self.combined_score();
-        stats.regime_state = Some(self.phase.label());
-        stats.regime_retune_count = self.retune_count;
-        stats.regime_rollback_count = self.rollback_count;
-        stats.regime_window_len = self.window.len();
-        stats.regime_delta_density_bias = self.deltas.density_bias_delta;
-        stats.regime_delta_pressure_bias = self.deltas.pressure_bias_delta;
-        stats.regime_replay_ref = Some(REGIME_REPLAY_REF);
-    }
-}
-
-/// Apply retuning deltas to the policy loss computation.
-///
-/// The deltas adjust the loss-model coefficients within bounded caps,
-/// allowing the policy engine to adapt to workload regime shifts while
-/// preserving deterministic replay semantics.
-fn policy_losses_with_retuning(
-    features: DecoderPolicyFeatures,
-    n_cols: usize,
-    deltas: RetuningDeltas,
-) -> (u32, u32, u32) {
-    if deltas.is_zero() {
-        return policy_losses(features, n_cols);
-    }
-
-    let density = clamp_usize_to_u32(features.density_permille);
-    let rank_deficit = clamp_usize_to_u32(features.rank_deficit_permille);
-    let inactivation_pressure = clamp_usize_to_u32(features.inactivation_pressure_permille);
-    let overhead = clamp_usize_to_u32(features.overhead_ratio_permille);
-
-    // Apply bounded deltas to the baseline loss intercept and coefficients.
-    // .max() calls guarantee non-negative values before unsigned conversion.
-    let baseline_intercept = (400i32 + deltas.baseline_intercept_delta)
-        .max(200)
-        .unsigned_abs();
-    let density_coeff = (3i32 + deltas.density_bias_delta).max(1).unsigned_abs();
-    let pressure_coeff = (2i32 + deltas.pressure_bias_delta).max(1).unsigned_abs();
-
-    let baseline_loss = baseline_intercept
-        .saturating_add(density.saturating_mul(density_coeff))
-        .saturating_add(rank_deficit.saturating_mul(4))
-        .saturating_add(inactivation_pressure.saturating_mul(pressure_coeff))
-        .saturating_add(overhead);
-
-    // Aggressive modes use the same static model (retuning only adjusts the
-    // conservative baseline to make mode selection more or less aggressive).
-    let high_support_loss = 700u32
-        .saturating_add(density)
-        .saturating_add(rank_deficit.saturating_mul(3))
-        .saturating_add(inactivation_pressure)
-        .saturating_add(overhead / 2);
-
-    let block_schur_loss = if n_cols < BLOCK_SCHUR_MIN_COLS {
-        u32::MAX
-    } else {
-        750u32
-            .saturating_add(density / 2)
-            .saturating_add(rank_deficit.saturating_mul(2))
-            .saturating_add(inactivation_pressure)
-            .saturating_add(overhead / 3)
-    };
-
-    (baseline_loss, high_support_loss, block_schur_loss)
-}
-
-/// Choose runtime decoder policy with optional regime-shift retuning deltas.
-fn choose_runtime_decoder_policy_retuned(
-    n_rows: usize,
-    n_cols: usize,
-    dense_nonzeros: usize,
-    unsupported_cols: usize,
-    inactivation_pressure_permille: usize,
-    deltas: RetuningDeltas,
-) -> DecoderPolicyDecision {
-    let features = compute_decoder_policy_features(
-        n_rows,
-        n_cols,
-        dense_nonzeros,
-        unsupported_cols,
-        inactivation_pressure_permille,
-    );
-
-    let (baseline_loss, high_support_loss, mut block_schur_loss) =
-        policy_losses_with_retuning(features, n_cols, deltas);
-
-    if features.budget_exhausted {
-        return DecoderPolicyDecision {
-            mode: DecoderPolicyMode::ConservativeBaseline,
-            features,
-            baseline_loss,
-            high_support_loss,
-            block_schur_loss,
-            reason: "policy_budget_exhausted_conservative",
-        };
-    }
-
-    let hard_gate = n_cols >= HARD_REGIME_MIN_COLS
-        && (features.density_permille >= HARD_REGIME_DENSITY_PERCENT.saturating_mul(10)
-            || n_rows <= n_cols.saturating_add(HARD_REGIME_NEAR_SQUARE_EXTRA_ROWS));
-    if !hard_gate {
-        return DecoderPolicyDecision {
-            mode: DecoderPolicyMode::ConservativeBaseline,
-            features,
-            baseline_loss,
-            high_support_loss,
-            block_schur_loss,
-            reason: "expected_loss_conservative_gate",
-        };
-    }
-
-    let block_gate = n_cols >= BLOCK_SCHUR_MIN_COLS
-        && features.density_permille >= BLOCK_SCHUR_MIN_DENSITY_PERCENT.saturating_mul(10)
-        && n_cols > BLOCK_SCHUR_TRAILING_COLS;
-    if !block_gate {
-        block_schur_loss = u32::MAX;
-    }
-    let mode = if block_schur_loss < high_support_loss {
-        DecoderPolicyMode::BlockSchurLowRank
-    } else {
-        DecoderPolicyMode::HighSupportFirst
-    };
-
-    DecoderPolicyDecision {
-        mode,
-        features,
-        baseline_loss,
-        high_support_loss,
-        block_schur_loss,
-        reason: "expected_loss_minimum",
     }
 }
 
@@ -1353,22 +891,8 @@ fn pivot_nonzero_columns(pivot_row: &[Gf256], n_cols: usize) -> Vec<usize> {
 }
 
 fn sparse_update_columns_if_beneficial(pivot_row: &[Gf256], n_cols: usize) -> Option<Vec<usize>> {
-    let mut cols = Vec::with_capacity(n_cols.clamp(1, 32));
-    if sparse_update_columns_if_beneficial_into(pivot_row, n_cols, &mut cols) {
-        Some(cols)
-    } else {
-        None
-    }
-}
-
-fn sparse_update_columns_if_beneficial_into(
-    pivot_row: &[Gf256],
-    n_cols: usize,
-    cols: &mut Vec<usize>,
-) -> bool {
-    cols.clear();
     if n_cols == 0 {
-        return false;
+        return None;
     }
 
     // Equivalent threshold to should_use_sparse_row_update(pivot_nnz, n_cols).
@@ -1377,245 +901,41 @@ fn sparse_update_columns_if_beneficial_into(
 
     if n_cols <= SMALL_ROW_DENSE_FASTPATH_COLS {
         // Very small rows are sensitive to per-pivot heap allocation overhead.
-        // Track sparse indices in a fixed stack buffer and copy once.
-        let mut small_cols = [0usize; SMALL_ROW_DENSE_FASTPATH_COLS];
+        // Use an allocation-free density pass; collect columns only if sparse.
         let mut sparse_nnz = 0usize;
-        for (idx, coef) in pivot_row.iter().take(n_cols).enumerate() {
+        for coef in pivot_row.iter().take(n_cols) {
             if coef.is_zero() {
                 continue;
             }
-            if sparse_nnz == threshold {
-                return false;
-            }
-            small_cols[sparse_nnz] = idx;
             sparse_nnz += 1;
+            if sparse_nnz > threshold {
+                return None;
+            }
         }
-        cols.reserve(sparse_nnz.saturating_sub(cols.len()));
-        cols.extend_from_slice(&small_cols[..sparse_nnz]);
-        return true;
+
+        let mut cols = Vec::with_capacity(sparse_nnz.max(1));
+        for (idx, coef) in pivot_row.iter().take(n_cols).enumerate() {
+            if !coef.is_zero() {
+                cols.push(idx);
+            }
+        }
+        return Some(cols);
     }
 
     // For larger rows, one-pass collection avoids an extra scan on sparse pivots.
+    let mut seen = 0usize;
+    let mut cols = Vec::with_capacity((threshold + 1).min(n_cols).max(1));
     for (idx, coef) in pivot_row.iter().take(n_cols).enumerate() {
         if coef.is_zero() {
             continue;
         }
-        if cols.len() == threshold {
-            cols.clear();
-            return false;
+        seen += 1;
+        if seen > threshold {
+            return None;
         }
         cols.push(idx);
     }
-    true
-}
-
-#[inline]
-fn elimination_update_plan_for_pivot_row_into(
-    pivot_row: &[Gf256],
-    n_cols: usize,
-    pivot_col: usize,
-    cols: &mut Vec<usize>,
-) -> (bool, usize) {
-    cols.clear();
-    if n_cols == 0 {
-        return (false, 0);
-    }
-    let dense_suffix_start = pivot_col.min(n_cols);
-
-    // Keep sparse threshold semantics identical to sparse_update_columns_if_beneficial_into:
-    // pivot column contributes to density accounting even when excluded from emitted columns.
-    let threshold =
-        n_cols.saturating_mul(HYBRID_SPARSE_COST_NUMERATOR) / HYBRID_SPARSE_COST_DENOMINATOR;
-    let mut prefix_has_signal = false;
-
-    if n_cols <= SMALL_ROW_DENSE_FASTPATH_COLS {
-        let mut small_cols = [0usize; SMALL_ROW_DENSE_FASTPATH_COLS];
-        let mut sparse_nnz = 0usize;
-        let mut out_len = 0usize;
-        for (idx, coef) in pivot_row.iter().take(n_cols).enumerate() {
-            if coef.is_zero() {
-                continue;
-            }
-            if idx < pivot_col {
-                prefix_has_signal = true;
-            }
-            if sparse_nnz == threshold {
-                return (
-                    false,
-                    if prefix_has_signal {
-                        0
-                    } else {
-                        dense_suffix_start
-                    },
-                );
-            }
-            sparse_nnz += 1;
-            if idx != pivot_col {
-                small_cols[out_len] = idx;
-                out_len += 1;
-            }
-        }
-        cols.reserve(out_len.saturating_sub(cols.len()));
-        cols.extend_from_slice(&small_cols[..out_len]);
-        return (
-            true,
-            if prefix_has_signal {
-                0
-            } else {
-                dense_suffix_start
-            },
-        );
-    }
-
-    let mut sparse_nnz = 0usize;
-    for (idx, coef) in pivot_row.iter().take(n_cols).enumerate() {
-        if coef.is_zero() {
-            continue;
-        }
-        if idx < pivot_col {
-            prefix_has_signal = true;
-        }
-        if sparse_nnz == threshold {
-            cols.clear();
-            return (
-                false,
-                if prefix_has_signal {
-                    0
-                } else {
-                    dense_suffix_start
-                },
-            );
-        }
-        sparse_nnz += 1;
-        if idx != pivot_col {
-            cols.push(idx);
-        }
-    }
-    (
-        true,
-        if prefix_has_signal {
-            0
-        } else {
-            dense_suffix_start
-        },
-    )
-}
-
-#[cfg(test)]
-fn sparse_update_columns_for_elimination_if_beneficial_into(
-    pivot_row: &[Gf256],
-    n_cols: usize,
-    pivot_col: usize,
-    cols: &mut Vec<usize>,
-) -> bool {
-    elimination_update_plan_for_pivot_row_into(pivot_row, n_cols, pivot_col, cols).0
-}
-
-#[cfg(test)]
-#[inline]
-fn dense_update_start_col(pivot_row: &[Gf256], pivot_col: usize) -> usize {
-    if pivot_row
-        .iter()
-        .take(pivot_col.min(pivot_row.len()))
-        .any(|coef| !coef.is_zero())
-    {
-        0
-    } else {
-        pivot_col.min(pivot_row.len())
-    }
-}
-
-#[inline]
-fn eliminate_row_coefficients(
-    row: &mut [Gf256],
-    pivot_row: &[Gf256],
-    factor: Gf256,
-    pivot_col: usize,
-    use_sparse: bool,
-    sparse_cols: &[usize],
-    dense_start_col: usize,
-) -> bool {
-    debug_assert_eq!(row.len(), pivot_row.len());
-    debug_assert!(pivot_col < row.len());
-    row[pivot_col] = Gf256::ZERO;
-    let factor_is_one = factor == Gf256::ONE;
-
-    if use_sparse {
-        debug_assert!(sparse_cols.iter().all(|&c| c != pivot_col));
-        if factor_is_one {
-            for &c in sparse_cols {
-                row[c] += pivot_row[c];
-            }
-        } else {
-            for &c in sparse_cols {
-                row[c] += factor * pivot_row[c];
-            }
-        }
-        return factor_is_one;
-    }
-
-    if dense_start_col == 0 {
-        let row_prefix = &mut row[..pivot_col];
-        let pivot_prefix = &pivot_row[..pivot_col];
-        if factor_is_one {
-            for (dst, src) in row_prefix.iter_mut().zip(pivot_prefix.iter()) {
-                *dst += *src;
-            }
-        } else {
-            for (dst, src) in row_prefix.iter_mut().zip(pivot_prefix.iter()) {
-                *dst += factor * *src;
-            }
-        }
-    }
-
-    let tail_start = dense_start_col.max(pivot_col.saturating_add(1));
-    if tail_start < row.len() {
-        let row_tail = &mut row[tail_start..];
-        let pivot_tail = &pivot_row[tail_start..];
-        if factor_is_one {
-            for (dst, src) in row_tail.iter_mut().zip(pivot_tail.iter()) {
-                *dst += *src;
-            }
-        } else {
-            for (dst, src) in row_tail.iter_mut().zip(pivot_tail.iter()) {
-                *dst += factor * *src;
-            }
-        }
-    }
-    factor_is_one
-}
-
-#[inline]
-fn eliminate_row_rhs_with_factor_kind(
-    rhs: &mut [u8],
-    pivot_rhs: &[u8],
-    factor: Gf256,
-    factor_is_one: bool,
-) {
-    debug_assert_eq!(rhs.len(), pivot_rhs.len());
-    debug_assert_eq!(factor_is_one, factor == Gf256::ONE);
-    if factor_is_one {
-        gf256_add_slice(rhs, pivot_rhs);
-    } else {
-        gf256_addmul_slice(rhs, pivot_rhs, factor);
-    }
-}
-
-#[inline]
-fn eliminate_row_rhs(rhs: &mut [u8], pivot_rhs: &[u8], factor: Gf256) {
-    eliminate_row_rhs_with_factor_kind(rhs, pivot_rhs, factor, factor == Gf256::ONE);
-}
-
-#[inline]
-fn scale_pivot_row_and_rhs(row: &mut [Gf256], rhs: &mut [u8], inv: Gf256) {
-    debug_assert!(!row.is_empty());
-    if inv == Gf256::ONE {
-        return;
-    }
-    for value in row {
-        *value *= inv;
-    }
-    crate::raptorq::gf256::gf256_mul_slice(rhs, inv);
+    Some(cols)
 }
 
 fn should_activate_hard_regime(n_rows: usize, n_cols: usize, a: &[Gf256]) -> bool {
@@ -1732,7 +1052,6 @@ pub struct InactivationDecoder {
     params: SystematicParams,
     seed: u64,
     dense_factor_cache: parking_lot::Mutex<DenseFactorCache>,
-    regime_detector: parking_lot::Mutex<RegimeDetector>,
 }
 
 impl InactivationDecoder {
@@ -1744,7 +1063,6 @@ impl InactivationDecoder {
             params,
             seed,
             dense_factor_cache: parking_lot::Mutex::new(DenseFactorCache::default()),
-            regime_detector: parking_lot::Mutex::new(RegimeDetector::default()),
         }
     }
 
@@ -1861,35 +1179,7 @@ impl InactivationDecoder {
         Self::peel(&mut state);
 
         // Phase 2: Inactivation + Gaussian elimination
-        let solve_result = self.inactivate_and_solve(&mut state);
-
-        // F6: Feed observation to regime detector and apply stats.
-        // The observation is recorded regardless of decode success/failure.
-        {
-            let features = DecoderPolicyFeatures {
-                density_permille: state.stats.policy_density_permille,
-                rank_deficit_permille: state.stats.policy_rank_deficit_permille,
-                inactivation_pressure_permille: state.stats.policy_inactivation_pressure_permille,
-                overhead_ratio_permille: state.stats.policy_overhead_ratio_permille,
-                budget_exhausted: state.stats.policy_budget_exhausted,
-            };
-            let policy_mode = match state.stats.policy_mode {
-                Some("high_support_first") => DecoderPolicyMode::HighSupportFirst,
-                Some("block_schur_low_rank") => DecoderPolicyMode::BlockSchurLowRank,
-                _ => DecoderPolicyMode::ConservativeBaseline,
-            };
-            let obs = RegimeObservation {
-                features,
-                decode_success: solve_result.is_ok(),
-                policy_mode,
-            };
-            let mut detector = self.regime_detector.lock();
-            let _deltas = detector.observe(obs);
-            detector.apply_to_stats(&mut state.stats);
-        }
-
-        // Propagate solve failure after regime observation.
-        solve_result?;
+        self.inactivate_and_solve(&mut state)?;
 
         // Extract results
         let intermediate: Vec<Vec<u8>> = state
@@ -1958,34 +1248,9 @@ impl InactivationDecoder {
         Self::peel_with_proof(&mut state, proof_builder.peeling_mut());
 
         // Phase 2: Inactivation + Gaussian elimination with proof capture
-        let solve_result =
-            self.inactivate_and_solve_with_proof(&mut state, proof_builder.elimination_mut());
-
-        // F6: Feed observation to regime detector and apply stats.
+        if let Err(err) =
+            self.inactivate_and_solve_with_proof(&mut state, proof_builder.elimination_mut())
         {
-            let features = DecoderPolicyFeatures {
-                density_permille: state.stats.policy_density_permille,
-                rank_deficit_permille: state.stats.policy_rank_deficit_permille,
-                inactivation_pressure_permille: state.stats.policy_inactivation_pressure_permille,
-                overhead_ratio_permille: state.stats.policy_overhead_ratio_permille,
-                budget_exhausted: state.stats.policy_budget_exhausted,
-            };
-            let policy_mode = match state.stats.policy_mode {
-                Some("high_support_first") => DecoderPolicyMode::HighSupportFirst,
-                Some("block_schur_low_rank") => DecoderPolicyMode::BlockSchurLowRank,
-                _ => DecoderPolicyMode::ConservativeBaseline,
-            };
-            let obs = RegimeObservation {
-                features,
-                decode_success: solve_result.is_ok(),
-                policy_mode,
-            };
-            let mut detector = self.regime_detector.lock();
-            let _deltas = detector.observe(obs);
-            detector.apply_to_stats(&mut state.stats);
-        }
-
-        if let Err(err) = solve_result {
             let reason = failure_reason_with_trace(&err, proof_builder.elimination_mut());
             proof_builder.set_failure(reason);
             return Err((err, proof_builder.build()));
@@ -2337,15 +1602,12 @@ impl InactivationDecoder {
             .filter(|&&support| support == 0)
             .count();
 
-        // F6: Apply regime-shift retuning deltas to the policy decision.
-        let regime_deltas = self.regime_detector.lock().current_deltas();
-        let decision = choose_runtime_decoder_policy_retuned(
+        let decision = choose_runtime_decoder_policy(
             n_rows,
             n_cols,
             dense_nonzeros,
             unsupported_cols,
             inactivation_pressure_permille,
-            regime_deltas,
         );
         apply_policy_decision_to_stats(&mut state.stats, decision);
         let mut hard_regime = !matches!(decision.mode, DecoderPolicyMode::ConservativeBaseline);
@@ -2366,17 +1628,14 @@ impl InactivationDecoder {
         }
 
         let mut pivot_row = vec![usize::MAX; n_cols];
-        let mut row_used = vec![false; n_rows];
-        let mut pivot_buf = vec![Gf256::ZERO; n_cols];
-        let mut pivot_rhs = vec![0u8; symbol_size];
-        let mut sparse_cols = Vec::with_capacity(n_cols.clamp(1, 32));
         loop {
             pivot_row.fill(usize::MAX);
-            row_used.fill(false);
-            sparse_cols.clear();
 
             // Gaussian elimination with partial pivoting.
             // Pre-allocate a single pivot buffer to avoid per-column clones.
+            let mut row_used = vec![false; n_rows];
+            let mut pivot_buf = vec![Gf256::ZERO; n_cols];
+            let mut pivot_rhs = vec![0u8; symbol_size];
             let mut gauss_ops = 0usize;
             let mut pivots_selected = 0usize;
             let mut markowitz_pivots = 0usize;
@@ -2401,17 +1660,15 @@ impl InactivationDecoder {
                 let prow_off = prow * n_cols;
                 let pivot_coef = a[prow_off + col];
                 let inv = pivot_coef.inv();
-                scale_pivot_row_and_rhs(&mut a[prow_off..prow_off + n_cols], &mut b[prow], inv);
+                for value in &mut a[prow_off..prow_off + n_cols] {
+                    *value *= inv;
+                }
+                crate::raptorq::gf256::gf256_mul_slice(&mut b[prow], inv);
 
                 // Copy pivot row into reusable buffers (no heap allocation)
                 pivot_buf[..n_cols].copy_from_slice(&a[prow_off..prow_off + n_cols]);
                 pivot_rhs[..symbol_size].copy_from_slice(&b[prow]);
-                let (use_sparse, dense_start_col) = elimination_update_plan_for_pivot_row_into(
-                    &pivot_buf[..n_cols],
-                    n_cols,
-                    col,
-                    &mut sparse_cols,
-                );
+                let sparse_cols = sparse_update_columns_if_beneficial(&pivot_buf[..n_cols], n_cols);
 
                 // Eliminate column in all other rows.
                 for (row, rhs) in b.iter_mut().enumerate().take(n_rows) {
@@ -2423,21 +1680,16 @@ impl InactivationDecoder {
                     if factor.is_zero() {
                         continue;
                     }
-                    let factor_is_one = eliminate_row_coefficients(
-                        &mut a[row_off..row_off + n_cols],
-                        &pivot_buf[..n_cols],
-                        factor,
-                        col,
-                        use_sparse,
-                        &sparse_cols,
-                        dense_start_col,
-                    );
-                    eliminate_row_rhs_with_factor_kind(
-                        rhs,
-                        &pivot_rhs[..symbol_size],
-                        factor,
-                        factor_is_one,
-                    );
+                    if let Some(cols) = sparse_cols.as_ref() {
+                        for &c in cols {
+                            a[row_off + c] += factor * pivot_buf[c];
+                        }
+                    } else {
+                        for c in 0..n_cols {
+                            a[row_off + c] += factor * pivot_buf[c];
+                        }
+                    }
+                    gf256_addmul_slice(rhs, &pivot_rhs[..symbol_size], factor);
                     gauss_ops += 1;
                 }
             }
@@ -2593,15 +1845,12 @@ impl InactivationDecoder {
             .count();
 
         trace.set_strategy(InactivationStrategy::AllAtOnce);
-        // F6: Apply regime-shift retuning deltas to the policy decision.
-        let regime_deltas = self.regime_detector.lock().current_deltas();
-        let decision = choose_runtime_decoder_policy_retuned(
+        let decision = choose_runtime_decoder_policy(
             n_rows,
             n_cols,
             dense_nonzeros,
             unsupported_cols,
             inactivation_pressure_permille,
-            regime_deltas,
         );
         apply_policy_decision_to_stats(&mut state.stats, decision);
         let mut hard_regime = !matches!(decision.mode, DecoderPolicyMode::ConservativeBaseline);
@@ -2627,14 +1876,11 @@ impl InactivationDecoder {
         }
 
         let mut pivot_row = vec![usize::MAX; n_cols];
-        let mut row_used = vec![false; n_rows];
-        let mut pivot_buf = vec![Gf256::ZERO; n_cols];
-        let mut pivot_rhs = vec![0u8; symbol_size];
-        let mut sparse_cols = Vec::with_capacity(n_cols.clamp(1, 32));
         loop {
             pivot_row.fill(usize::MAX);
-            row_used.fill(false);
-            sparse_cols.clear();
+            let mut row_used = vec![false; n_rows];
+            let mut pivot_buf = vec![Gf256::ZERO; n_cols];
+            let mut pivot_rhs = vec![0u8; symbol_size];
             let mut gauss_ops = 0usize;
             let mut pivots_selected = 0usize;
             let mut markowitz_pivots = 0usize;
@@ -2661,17 +1907,15 @@ impl InactivationDecoder {
                 let prow_off = prow * n_cols;
                 let pivot_coef = a[prow_off + col];
                 let inv = pivot_coef.inv();
-                scale_pivot_row_and_rhs(&mut a[prow_off..prow_off + n_cols], &mut b[prow], inv);
+                for value in &mut a[prow_off..prow_off + n_cols] {
+                    *value *= inv;
+                }
+                crate::raptorq::gf256::gf256_mul_slice(&mut b[prow], inv);
 
                 // Copy pivot row into reusable buffers
                 pivot_buf[..n_cols].copy_from_slice(&a[prow_off..prow_off + n_cols]);
                 pivot_rhs[..symbol_size].copy_from_slice(&b[prow]);
-                let (use_sparse, dense_start_col) = elimination_update_plan_for_pivot_row_into(
-                    &pivot_buf[..n_cols],
-                    n_cols,
-                    col,
-                    &mut sparse_cols,
-                );
+                let sparse_cols = sparse_update_columns_if_beneficial(&pivot_buf[..n_cols], n_cols);
 
                 // Eliminate column in all other rows.
                 for (row, rhs) in b.iter_mut().enumerate().take(n_rows) {
@@ -2683,21 +1927,16 @@ impl InactivationDecoder {
                     if factor.is_zero() {
                         continue;
                     }
-                    let factor_is_one = eliminate_row_coefficients(
-                        &mut a[row_off..row_off + n_cols],
-                        &pivot_buf[..n_cols],
-                        factor,
-                        col,
-                        use_sparse,
-                        &sparse_cols,
-                        dense_start_col,
-                    );
-                    eliminate_row_rhs_with_factor_kind(
-                        rhs,
-                        &pivot_rhs[..symbol_size],
-                        factor,
-                        factor_is_one,
-                    );
+                    if let Some(cols) = sparse_cols.as_ref() {
+                        for &c in cols {
+                            a[row_off + c] += factor * pivot_buf[c];
+                        }
+                    } else {
+                        for c in 0..n_cols {
+                            a[row_off + c] += factor * pivot_buf[c];
+                        }
+                    }
+                    gf256_addmul_slice(rhs, &pivot_rhs[..symbol_size], factor);
                     gauss_ops += 1;
                     // Record row operation in proof trace
                     trace.record_row_op();
@@ -3146,497 +2385,6 @@ mod tests {
         assert!(sparse_update_columns_if_beneficial(&row_dense, 10).is_none());
     }
 
-    #[test]
-    fn sparse_update_columns_into_reuses_and_clears_buffer() {
-        let row_sparse = vec![
-            Gf256::ONE,
-            Gf256::ZERO,
-            Gf256::ONE,
-            Gf256::ZERO,
-            Gf256::ONE,
-            Gf256::ZERO,
-            Gf256::ONE,
-            Gf256::ZERO,
-            Gf256::ZERO,
-            Gf256::ZERO,
-        ];
-        let row_dense = vec![
-            Gf256::ONE,
-            Gf256::ONE,
-            Gf256::ONE,
-            Gf256::ONE,
-            Gf256::ONE,
-            Gf256::ONE,
-            Gf256::ONE,
-            Gf256::ZERO,
-            Gf256::ZERO,
-            Gf256::ZERO,
-        ];
-
-        let mut cols = vec![42, 99];
-        assert!(sparse_update_columns_if_beneficial_into(
-            &row_sparse,
-            10,
-            &mut cols
-        ));
-        assert_eq!(cols, vec![0, 2, 4, 6]);
-
-        assert!(!sparse_update_columns_if_beneficial_into(
-            &row_dense, 10, &mut cols
-        ));
-        assert!(
-            cols.is_empty(),
-            "dense path must clear stale sparse indices"
-        );
-    }
-
-    #[test]
-    fn sparse_update_columns_branch_boundary_consistent() {
-        // n=32 uses the small-row stack-buffer path.
-        let mut row_32_sparse = vec![Gf256::ZERO; 32];
-        for coef in row_32_sparse.iter_mut().take(19) {
-            *coef = Gf256::ONE;
-        }
-        let mut cols = Vec::new();
-        assert!(sparse_update_columns_if_beneficial_into(
-            &row_32_sparse,
-            32,
-            &mut cols
-        ));
-        assert_eq!(cols.len(), 19);
-
-        let mut row_32_dense = row_32_sparse.clone();
-        row_32_dense[19] = Gf256::ONE;
-        assert!(!sparse_update_columns_if_beneficial_into(
-            &row_32_dense,
-            32,
-            &mut cols
-        ));
-        assert!(
-            cols.is_empty(),
-            "dense path must clear stale sparse indices at boundary"
-        );
-
-        // n=33 uses the large-row path and should preserve the same threshold semantics.
-        let mut row_33_sparse = vec![Gf256::ZERO; 33];
-        for coef in row_33_sparse.iter_mut().take(19) {
-            *coef = Gf256::ONE;
-        }
-        assert!(sparse_update_columns_if_beneficial_into(
-            &row_33_sparse,
-            33,
-            &mut cols
-        ));
-        assert_eq!(cols.len(), 19);
-
-        let mut row_33_dense = row_33_sparse.clone();
-        row_33_dense[19] = Gf256::ONE;
-        assert!(!sparse_update_columns_if_beneficial_into(
-            &row_33_dense,
-            33,
-            &mut cols
-        ));
-        assert!(
-            cols.is_empty(),
-            "dense path must clear stale sparse indices beyond boundary"
-        );
-    }
-
-    #[test]
-    fn sparse_update_columns_for_elimination_drops_pivot_column() {
-        let row_sparse = vec![
-            Gf256::ONE,
-            Gf256::ZERO,
-            Gf256::ONE,
-            Gf256::ONE,
-            Gf256::ZERO,
-            Gf256::ONE,
-            Gf256::ZERO,
-            Gf256::ZERO,
-            Gf256::ZERO,
-            Gf256::ZERO,
-        ];
-        let mut cols = Vec::new();
-        assert!(sparse_update_columns_for_elimination_if_beneficial_into(
-            &row_sparse,
-            10,
-            3,
-            &mut cols
-        ));
-        assert_eq!(
-            cols,
-            vec![0, 2, 5],
-            "elimination sparse columns should omit pivot column"
-        );
-    }
-
-    #[test]
-    fn sparse_update_columns_for_elimination_preserves_threshold_semantics() {
-        // n=10 => threshold = floor(10 * 3 / 5) = 6.
-        let mut cols = vec![99];
-        let dense_if_pivot_counted = vec![
-            Gf256::ONE,
-            Gf256::ONE,
-            Gf256::ONE,
-            Gf256::ONE,
-            Gf256::ONE,
-            Gf256::ONE,
-            Gf256::ONE,
-            Gf256::ZERO,
-            Gf256::ZERO,
-            Gf256::ZERO,
-        ];
-        assert!(!sparse_update_columns_for_elimination_if_beneficial_into(
-            &dense_if_pivot_counted,
-            10,
-            0,
-            &mut cols
-        ));
-        assert!(
-            cols.is_empty(),
-            "dense classification should clear stale elimination columns"
-        );
-
-        let sparse = vec![
-            Gf256::ONE,
-            Gf256::ONE,
-            Gf256::ONE,
-            Gf256::ONE,
-            Gf256::ONE,
-            Gf256::ZERO,
-            Gf256::ZERO,
-            Gf256::ZERO,
-            Gf256::ZERO,
-            Gf256::ZERO,
-        ];
-        assert!(sparse_update_columns_for_elimination_if_beneficial_into(
-            &sparse, 10, 0, &mut cols
-        ));
-        assert_eq!(
-            cols,
-            vec![1, 2, 3, 4],
-            "sparse classification should keep non-pivot sparse columns in order"
-        );
-    }
-
-    #[test]
-    fn dense_update_start_col_prefers_suffix_when_prefix_zero() {
-        let mut pivot = vec![Gf256::ZERO; 12];
-        for coef in pivot.iter_mut().skip(5) {
-            *coef = Gf256::ONE;
-        }
-        assert_eq!(dense_update_start_col(&pivot, 5), 5);
-    }
-
-    #[test]
-    fn dense_update_start_col_falls_back_to_zero_when_prefix_has_signal() {
-        let mut pivot = vec![Gf256::ZERO; 12];
-        pivot[2] = Gf256::ONE;
-        pivot[5] = Gf256::ONE;
-        assert_eq!(dense_update_start_col(&pivot, 5), 0);
-    }
-
-    #[test]
-    fn elimination_update_plan_dense_start_matches_dense_scan_semantics() {
-        let mut cols = Vec::new();
-        for pivot_col in 0..8 {
-            for mask in 0u16..(1u16 << 8) {
-                let mut pivot = vec![Gf256::ZERO; 8];
-                for (idx, coef) in pivot.iter_mut().enumerate() {
-                    if (mask >> idx) & 1 == 1 {
-                        *coef = Gf256::ONE;
-                    }
-                }
-                let (_, dense_start_col) =
-                    elimination_update_plan_for_pivot_row_into(&pivot, 8, pivot_col, &mut cols);
-                assert_eq!(dense_start_col, dense_update_start_col(&pivot, pivot_col));
-            }
-        }
-    }
-
-    #[test]
-    fn dense_row_update_suffix_matches_full_manual_when_prefix_zero() {
-        let pivot_row = vec![
-            Gf256::ZERO,
-            Gf256::ZERO,
-            Gf256::ZERO,
-            Gf256::ZERO,
-            Gf256::ZERO,
-            Gf256::new(0x55),
-            Gf256::new(0x66),
-            Gf256::new(0x77),
-            Gf256::new(0x88),
-            Gf256::new(0x99),
-            Gf256::new(0xaa),
-            Gf256::new(0xbb),
-        ];
-        let n_cols = pivot_row.len();
-        assert!(
-            sparse_update_columns_if_beneficial(&pivot_row, n_cols).is_none(),
-            "test requires dense branch eligibility"
-        );
-
-        let factor = Gf256::new(0x5d);
-        let base_row = vec![
-            Gf256::new(0x0f),
-            Gf256::new(0x10),
-            Gf256::new(0x20),
-            Gf256::new(0x30),
-            Gf256::new(0x40),
-            Gf256::new(0x50),
-            Gf256::new(0x60),
-            Gf256::new(0x70),
-            Gf256::new(0x80),
-            Gf256::new(0x90),
-            Gf256::new(0xa0),
-            Gf256::new(0xb0),
-        ];
-
-        let mut manual = base_row.clone();
-        for c in 0..n_cols {
-            manual[c] += factor * pivot_row[c];
-        }
-
-        let dense_start_col = dense_update_start_col(&pivot_row, 5);
-        let mut suffix_only = base_row;
-        for c in dense_start_col..n_cols {
-            suffix_only[c] += factor * pivot_row[c];
-        }
-
-        assert_eq!(
-            suffix_only, manual,
-            "suffix-only dense update must match full-row elimination math when prefix is zero"
-        );
-    }
-
-    #[test]
-    fn eliminate_row_coefficients_matches_manual_for_sparse_and_dense_paths() {
-        let pivot_col = 3usize;
-        let pivot_row = vec![
-            Gf256::new(0x10),
-            Gf256::ZERO,
-            Gf256::ZERO,
-            Gf256::ONE,
-            Gf256::ZERO,
-            Gf256::new(0x50),
-            Gf256::ZERO,
-            Gf256::new(0x70),
-        ];
-        let row = vec![
-            Gf256::new(0x01),
-            Gf256::new(0x02),
-            Gf256::new(0x03),
-            Gf256::new(0x04),
-            Gf256::new(0x05),
-            Gf256::new(0x06),
-            Gf256::new(0x07),
-            Gf256::new(0x08),
-        ];
-
-        for factor in [Gf256::ONE, Gf256::new(0x5d)] {
-            let mut expected = row.clone();
-            for c in 0..pivot_row.len() {
-                expected[c] += factor * pivot_row[c];
-            }
-            expected[pivot_col] = Gf256::ZERO;
-
-            let mut dense_actual = row.clone();
-            eliminate_row_coefficients(
-                &mut dense_actual,
-                &pivot_row,
-                factor,
-                pivot_col,
-                false,
-                &[],
-                0,
-            );
-            assert_eq!(
-                dense_actual, expected,
-                "dense elimination helper must match manual elimination for factor={:?}",
-                factor
-            );
-
-            let mut sparse_cols = Vec::new();
-            assert!(sparse_update_columns_for_elimination_if_beneficial_into(
-                &pivot_row,
-                pivot_row.len(),
-                pivot_col,
-                &mut sparse_cols
-            ));
-            let mut sparse_actual = row.clone();
-            eliminate_row_coefficients(
-                &mut sparse_actual,
-                &pivot_row,
-                factor,
-                pivot_col,
-                true,
-                &sparse_cols,
-                pivot_col,
-            );
-            assert_eq!(
-                sparse_actual, expected,
-                "sparse elimination helper must match manual elimination for factor={:?}",
-                factor
-            );
-        }
-    }
-
-    #[test]
-    fn eliminate_row_coefficients_reports_factor_classification() {
-        let pivot_col = 2usize;
-        let pivot_row = vec![
-            Gf256::new(0x10),
-            Gf256::new(0x20),
-            Gf256::ONE,
-            Gf256::new(0x30),
-            Gf256::new(0x40),
-        ];
-        let mut row = vec![
-            Gf256::new(0xaa),
-            Gf256::new(0xbb),
-            Gf256::new(0xcc),
-            Gf256::new(0xdd),
-            Gf256::new(0xee),
-        ];
-
-        assert!(eliminate_row_coefficients(
-            &mut row,
-            &pivot_row,
-            Gf256::ONE,
-            pivot_col,
-            false,
-            &[],
-            0,
-        ));
-        assert!(!eliminate_row_coefficients(
-            &mut row,
-            &pivot_row,
-            Gf256::new(0x57),
-            pivot_col,
-            false,
-            &[],
-            0,
-        ));
-    }
-
-    #[test]
-    fn eliminate_row_rhs_matches_manual_for_factor_one_and_nonone() {
-        let base_rhs = vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
-        let pivot_rhs = vec![0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee];
-
-        for factor in [Gf256::ONE, Gf256::new(0x5d)] {
-            let mut actual = base_rhs.clone();
-            eliminate_row_rhs(&mut actual, &pivot_rhs, factor);
-
-            let mut expected = base_rhs.clone();
-            for i in 0..expected.len() {
-                let delta = factor * Gf256::new(pivot_rhs[i]);
-                expected[i] ^= delta.raw();
-            }
-            assert_eq!(
-                actual, expected,
-                "rhs elimination helper must match manual gf(256) arithmetic for factor={:?}",
-                factor
-            );
-        }
-    }
-
-    #[test]
-    fn scale_pivot_row_and_rhs_noop_for_one_and_matches_manual_for_nonone() {
-        let base_row = vec![
-            Gf256::new(0x11),
-            Gf256::new(0x22),
-            Gf256::new(0x33),
-            Gf256::new(0x44),
-            Gf256::new(0x55),
-        ];
-        let base_rhs = vec![0x10, 0x20, 0x30, 0x40, 0x50];
-
-        let mut row_one = base_row.clone();
-        let mut rhs_one = base_rhs.clone();
-        scale_pivot_row_and_rhs(&mut row_one, &mut rhs_one, Gf256::ONE);
-        assert_eq!(row_one, base_row, "inv=1 must not mutate row");
-        assert_eq!(rhs_one, base_rhs, "inv=1 must not mutate rhs");
-
-        let inv = Gf256::new(0x5d);
-        let mut actual_row = base_row.clone();
-        let mut actual_rhs = base_rhs.clone();
-        scale_pivot_row_and_rhs(&mut actual_row, &mut actual_rhs, inv);
-
-        let mut expected_row = base_row.clone();
-        for value in &mut expected_row {
-            *value *= inv;
-        }
-        let mut expected_rhs = base_rhs.clone();
-        for byte in &mut expected_rhs {
-            *byte = (inv * Gf256::new(*byte)).raw();
-        }
-        assert_eq!(
-            actual_row, expected_row,
-            "row scaling helper must match manual gf(256) multiplication"
-        );
-        assert_eq!(
-            actual_rhs, expected_rhs,
-            "rhs scaling helper must match manual gf(256) multiplication"
-        );
-    }
-
-    #[test]
-    fn eliminate_row_coefficients_dense_suffix_mode_matches_manual_for_both_factors() {
-        let pivot_col = 4usize;
-        let pivot_row = vec![
-            Gf256::ZERO,
-            Gf256::ZERO,
-            Gf256::ZERO,
-            Gf256::ZERO,
-            Gf256::ONE,
-            Gf256::new(0x2a),
-            Gf256::ZERO,
-            Gf256::new(0x7c),
-            Gf256::new(0x11),
-            Gf256::ZERO,
-        ];
-        let dense_start_col = dense_update_start_col(&pivot_row, pivot_col);
-        assert_eq!(dense_start_col, pivot_col);
-
-        let row = vec![
-            Gf256::new(0x10),
-            Gf256::new(0x20),
-            Gf256::new(0x30),
-            Gf256::new(0x40),
-            Gf256::new(0x50),
-            Gf256::new(0x60),
-            Gf256::new(0x70),
-            Gf256::new(0x80),
-            Gf256::new(0x90),
-            Gf256::new(0xa0),
-        ];
-
-        for factor in [Gf256::ONE, Gf256::new(0x5d)] {
-            let mut expected = row.clone();
-            for c in 0..pivot_row.len() {
-                expected[c] += factor * pivot_row[c];
-            }
-            expected[pivot_col] = Gf256::ZERO;
-
-            let mut actual = row.clone();
-            eliminate_row_coefficients(
-                &mut actual,
-                &pivot_row,
-                factor,
-                pivot_col,
-                false,
-                &[],
-                dense_start_col,
-            );
-            assert_eq!(
-                actual, expected,
-                "dense suffix-mode elimination helper must match manual arithmetic for factor={:?}",
-                factor
-            );
-        }
-    }
-
     fn make_source_data(k: usize, symbol_size: usize) -> Vec<Vec<u8>> {
         (0..k)
             .map(|i| {
@@ -3893,7 +2641,7 @@ mod tests {
     fn decode_corrupted_repair_symbol_reports_corrupt_output() {
         let k = 8;
         let symbol_size = 32;
-        let seed = 42u64;
+        let seed = 2027u64;
 
         let source = make_source_data(k, symbol_size);
         let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
@@ -3902,47 +2650,41 @@ mod tests {
 
         let mut received = decoder.constraint_symbols();
         received.extend(make_received_source(&decoder, &source));
-        let repair_start_idx = received.len();
         for esi in (k as u32)..(l as u32) {
             let (cols, coefs) = decoder.repair_equation(esi);
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
 
-        // Sanity: uncorrupted decode must succeed.
-        decoder
-            .decode(&received)
-            .expect("uncorrupted decode must succeed");
-
-        // Tamper the first actual repair symbol (not a constraint).
-        // Constraint symbols come first and their ESIs can overlap with
-        // repair ESIs, so index directly into the repair portion.
-        received[repair_start_idx].data[0] ^= 0x5A;
+        let tampered = received
+            .iter_mut()
+            .find(|sym| !sym.is_source && sym.esi >= k as u32)
+            .expect("must include at least one repair symbol");
+        tampered.data[0] ^= 0x5A;
+        let tampered_esi = tampered.esi;
 
         let err = decoder
             .decode(&received)
-            .expect_err("corrupted repair symbol must cause decode failure");
-        // Corruption can be detected via two paths depending on how the
-        // corrupted RHS propagates through peeling:
-        //  1. SingularMatrix — build_dense_core_rows detects a non-zero RHS
-        //     on a fully-solved equation (inconsistency), before Gaussian
-        //     elimination even starts.
-        //  2. CorruptDecodedOutput — the solve succeeds but verify_decoded_output
-        //     catches the mismatch between received and reconstructed symbols.
+            .expect_err("corrupted repair symbol must fail output verification");
         assert!(
             matches!(
                 err,
-                DecodeError::SingularMatrix { .. } | DecodeError::CorruptDecodedOutput { .. }
+                DecodeError::CorruptDecodedOutput {
+                    esi,
+                    byte_index: 0,
+                    ..
+                } if esi == tampered_esi
             ),
-            "expected SingularMatrix or CorruptDecodedOutput, got {err:?}"
+            "expected corruption witness for tampered repair symbol"
         );
+        assert!(err.is_unrecoverable());
     }
 
     #[test]
     fn decode_with_proof_corrupted_repair_symbol_reports_failure_reason() {
         let k = 8;
         let symbol_size = 32;
-        let seed = 42u64;
+        let seed = 2028u64;
 
         let source = make_source_data(k, symbol_size);
         let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
@@ -3951,33 +2693,26 @@ mod tests {
 
         let mut received = decoder.constraint_symbols();
         received.extend(make_received_source(&decoder, &source));
-        let repair_start_idx = received.len();
         for esi in (k as u32)..(l as u32) {
             let (cols, coefs) = decoder.repair_equation(esi);
             let repair_data = encoder.repair_symbol(esi);
             received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
         }
 
-        // Tamper the first actual repair symbol (index past constraints + source).
-        received[repair_start_idx].data[0] ^= 0xA5;
+        let tampered = received
+            .iter_mut()
+            .find(|sym| !sym.is_source && sym.esi >= k as u32)
+            .expect("must include at least one repair symbol");
+        tampered.data[0] ^= 0xA5;
 
         let (err, proof) = decoder
             .decode_with_proof(&received, ObjectId::new_for_test(9090), 0)
             .expect_err("corrupted repair symbol should fail with proof witness");
-        // Corruption can surface as SingularMatrix (RHS inconsistency during
-        // build_dense_core_rows) or CorruptDecodedOutput (verification mismatch).
-        assert!(
-            matches!(
-                err,
-                DecodeError::SingularMatrix { .. } | DecodeError::CorruptDecodedOutput { .. }
-            ),
-            "expected SingularMatrix or CorruptDecodedOutput, got {err:?}"
-        );
+        assert!(matches!(err, DecodeError::CorruptDecodedOutput { .. }));
         assert!(matches!(
             proof.outcome,
             crate::raptorq::proof::ProofOutcome::Failure {
-                reason: FailureReason::SingularMatrix { .. }
-                    | FailureReason::CorruptDecodedOutput { .. }
+                reason: FailureReason::CorruptDecodedOutput { .. }
             }
         ));
     }
@@ -5188,13 +3923,12 @@ mod tests {
     fn source_equation_panics_on_esi_ge_k() {
         let k = 4;
         let decoder = InactivationDecoder::new(k, 16, 42);
-        let _ = decoder.source_equation(k as u32); // ESI == K should panic
+        decoder.source_equation(k as u32); // ESI == K should panic
     }
 
     // ── Duplicate ESI handling (br-3narc.2.7) ──
 
     #[test]
-    #[allow(clippy::similar_names)]
     fn decode_with_duplicate_source_esi_produces_defined_outcome() {
         // Feeding the same ESI twice gives the decoder redundant equations.
         // It should either succeed (if the extra equation is linearly dependent)
@@ -5233,9 +3967,9 @@ mod tests {
         // Must not panic; outcome is either Ok or a well-formed error
         let result = decoder.decode(&received);
         match result {
-            Ok(outcome) => {
+            Ok(decoded) => {
                 assert_eq!(
-                    outcome.source, source,
+                    decoded.source, source,
                     "decode with duplicate ESI should recover correct source"
                 );
             }
@@ -5362,321 +4096,5 @@ mod tests {
             l,
             "peeled + inactivated must equal L ({l})"
         );
-    }
-
-    // ── F6: Regime-shift detector unit tests ──
-
-    fn make_regime_observation(
-        density: usize,
-        pressure: usize,
-        success: bool,
-    ) -> RegimeObservation {
-        RegimeObservation {
-            features: DecoderPolicyFeatures {
-                density_permille: density,
-                rank_deficit_permille: 0,
-                inactivation_pressure_permille: pressure,
-                overhead_ratio_permille: 0,
-                budget_exhausted: false,
-            },
-            decode_success: success,
-            policy_mode: DecoderPolicyMode::ConservativeBaseline,
-        }
-    }
-
-    #[test]
-    fn regime_detector_starts_stable_with_zero_deltas() {
-        let detector = RegimeDetector::default();
-        assert_eq!(detector.phase, RegimePhase::Stable);
-        assert!(detector.current_deltas().is_zero());
-        assert_eq!(detector.combined_score(), 0);
-        assert!(!detector.baseline_established);
-    }
-
-    #[test]
-    fn regime_detector_establishes_baseline_after_window_fills() {
-        let mut detector = RegimeDetector::default();
-
-        // Feed REGIME_WINDOW_CAPACITY observations with constant features.
-        for _ in 0..REGIME_WINDOW_CAPACITY {
-            detector.observe(make_regime_observation(200, 100, true));
-        }
-
-        assert!(
-            detector.baseline_established,
-            "baseline should be established after window fills"
-        );
-        assert_eq!(detector.baseline_density, 200);
-        assert_eq!(detector.baseline_pressure, 100);
-        assert_eq!(detector.phase, RegimePhase::Stable);
-    }
-
-    #[test]
-    fn regime_detector_stays_stable_under_constant_workload() {
-        let mut detector = RegimeDetector::default();
-
-        // Fill window to establish baseline.
-        for _ in 0..REGIME_WINDOW_CAPACITY {
-            detector.observe(make_regime_observation(200, 100, true));
-        }
-
-        // Feed more constant observations.
-        for _ in 0..REGIME_WINDOW_CAPACITY * 2 {
-            let deltas = detector.observe(make_regime_observation(200, 100, true));
-            assert!(
-                deltas.is_zero(),
-                "stable workload should produce zero deltas"
-            );
-        }
-
-        assert_eq!(detector.phase, RegimePhase::Stable);
-        assert_eq!(detector.retune_count, 0);
-        assert_eq!(detector.rollback_count, 0);
-    }
-
-    #[test]
-    fn regime_detector_detects_shift_on_large_drift() {
-        let mut detector = RegimeDetector::default();
-
-        // Establish baseline at low density/pressure.
-        for _ in 0..REGIME_WINDOW_CAPACITY {
-            detector.observe(make_regime_observation(100, 50, true));
-        }
-        assert!(detector.baseline_established);
-
-        // Inject a large drift: density jumps from 100 to 800.
-        // This should accumulate CUSUM score and eventually trigger a shift.
-        let mut shifted = false;
-        for _ in 0..REGIME_WINDOW_CAPACITY * 2 {
-            detector.observe(make_regime_observation(800, 400, true));
-            if detector.retune_count > 0 {
-                shifted = true;
-                break;
-            }
-        }
-
-        assert!(
-            shifted,
-            "large drift should trigger at least one retuning event"
-        );
-        assert!(
-            !detector.current_deltas().is_zero(),
-            "retuning should produce non-zero deltas"
-        );
-    }
-
-    #[test]
-    fn regime_retuning_deltas_are_bounded() {
-        let mut detector = RegimeDetector::default();
-
-        // Establish baseline.
-        for _ in 0..REGIME_WINDOW_CAPACITY {
-            detector.observe(make_regime_observation(100, 50, true));
-        }
-
-        // Force a massive drift.
-        for _ in 0..REGIME_WINDOW_CAPACITY * 3 {
-            detector.observe(make_regime_observation(999, 999, true));
-        }
-
-        let deltas = detector.current_deltas();
-        let cap = REGIME_MAX_RETUNE_DELTA;
-        assert!(
-            deltas.baseline_intercept_delta.abs() <= cap,
-            "baseline intercept delta {} should be within [-{}, {}]",
-            deltas.baseline_intercept_delta,
-            cap,
-            cap
-        );
-        assert!(
-            deltas.density_bias_delta.abs() <= cap,
-            "density bias delta {} should be within [-{}, {}]",
-            deltas.density_bias_delta,
-            cap,
-            cap
-        );
-        assert!(
-            deltas.pressure_bias_delta.abs() <= cap,
-            "pressure bias delta {} should be within [-{}, {}]",
-            deltas.pressure_bias_delta,
-            cap,
-            cap
-        );
-    }
-
-    #[test]
-    fn regime_detector_rolls_back_on_decode_failure_after_retuning() {
-        let mut detector = RegimeDetector::default();
-
-        // Establish baseline.
-        for _ in 0..REGIME_WINDOW_CAPACITY {
-            detector.observe(make_regime_observation(100, 50, true));
-        }
-
-        // Trigger a shift.
-        for _ in 0..REGIME_WINDOW_CAPACITY * 2 {
-            detector.observe(make_regime_observation(800, 400, true));
-            if detector.retune_count > 0 {
-                break;
-            }
-        }
-        assert!(detector.retune_count > 0, "should have retuned");
-        assert_eq!(detector.phase, RegimePhase::Retuned);
-
-        // Now a decode failure should trigger rollback.
-        detector.observe(make_regime_observation(800, 400, false));
-        assert!(
-            detector.current_deltas().is_zero(),
-            "rollback should zero all deltas"
-        );
-        assert!(detector.rollback_count > 0, "rollback should be counted");
-    }
-
-    #[test]
-    fn regime_detector_locks_conservative_after_oscillation_limit() {
-        let mut detector = RegimeDetector::default();
-
-        for cycle in 0..REGIME_ROLLBACK_OSCILLATION_LIMIT {
-            // Establish baseline.
-            detector.baseline_established = false;
-            for _ in 0..REGIME_WINDOW_CAPACITY {
-                detector.observe(make_regime_observation(100, 50, true));
-            }
-
-            // Trigger shift.
-            for _ in 0..REGIME_WINDOW_CAPACITY * 2 {
-                detector.observe(make_regime_observation(800, 400, true));
-                if detector.retune_count > cycle {
-                    break;
-                }
-            }
-
-            // Trigger rollback.
-            if detector.phase == RegimePhase::Retuned {
-                detector.observe(make_regime_observation(800, 400, false));
-            }
-        }
-
-        assert_eq!(
-            detector.phase,
-            RegimePhase::LockedConservative,
-            "should lock to conservative after {REGIME_ROLLBACK_OSCILLATION_LIMIT} oscillations"
-        );
-
-        // Further observations should return zero deltas.
-        let deltas = detector.observe(make_regime_observation(999, 999, true));
-        assert!(
-            deltas.is_zero(),
-            "locked conservative should always return zero deltas"
-        );
-    }
-
-    #[test]
-    fn regime_detector_window_bounded_to_capacity() {
-        let mut detector = RegimeDetector::default();
-
-        // Feed more observations than window capacity.
-        for _ in 0..(REGIME_WINDOW_CAPACITY * 3) {
-            detector.observe(make_regime_observation(200, 100, true));
-        }
-
-        assert!(
-            detector.window.len() <= REGIME_WINDOW_CAPACITY,
-            "window should never exceed capacity: got {} vs max {}",
-            detector.window.len(),
-            REGIME_WINDOW_CAPACITY
-        );
-    }
-
-    #[test]
-    fn regime_detector_stats_applied_to_decode_stats() {
-        let mut detector = RegimeDetector::default();
-        for _ in 0..REGIME_WINDOW_CAPACITY {
-            detector.observe(make_regime_observation(200, 100, true));
-        }
-
-        let mut stats = DecodeStats::default();
-        detector.apply_to_stats(&mut stats);
-
-        assert_eq!(stats.regime_state, Some(REGIME_STATE_STABLE));
-        assert_eq!(stats.regime_replay_ref, Some(REGIME_REPLAY_REF));
-        assert_eq!(stats.regime_retune_count, 0);
-        assert_eq!(stats.regime_rollback_count, 0);
-        assert_eq!(stats.regime_window_len, REGIME_WINDOW_CAPACITY);
-    }
-
-    #[test]
-    fn regime_retuned_policy_losses_differ_from_static() {
-        let features = DecoderPolicyFeatures {
-            density_permille: 500,
-            rank_deficit_permille: 100,
-            inactivation_pressure_permille: 300,
-            overhead_ratio_permille: 50,
-            budget_exhausted: false,
-        };
-        let n_cols = 16;
-
-        let (static_bl, static_hs, static_bs) = policy_losses(features, n_cols);
-        let deltas = RetuningDeltas {
-            baseline_intercept_delta: -100,
-            density_bias_delta: -1,
-            pressure_bias_delta: -1,
-        };
-        let (retuned_bl, retuned_hs, retuned_bs) =
-            policy_losses_with_retuning(features, n_cols, deltas);
-
-        assert!(
-            retuned_bl < static_bl,
-            "retuning with negative bias should lower baseline loss: {retuned_bl} vs {static_bl}"
-        );
-        // Aggressive modes should remain unchanged.
-        assert_eq!(retuned_hs, static_hs);
-        assert_eq!(retuned_bs, static_bs);
-    }
-
-    #[test]
-    fn regime_retuned_policy_zero_deltas_matches_static() {
-        let features = DecoderPolicyFeatures {
-            density_permille: 400,
-            rank_deficit_permille: 200,
-            inactivation_pressure_permille: 150,
-            overhead_ratio_permille: 80,
-            budget_exhausted: false,
-        };
-        let n_cols = 20;
-
-        let (static_bl, static_hs, static_bs) = policy_losses(features, n_cols);
-        let (retuned_bl, retuned_hs, retuned_bs) =
-            policy_losses_with_retuning(features, n_cols, RetuningDeltas::default());
-
-        assert_eq!(static_bl, retuned_bl);
-        assert_eq!(static_hs, retuned_hs);
-        assert_eq!(static_bs, retuned_bs);
-    }
-
-    #[test]
-    fn regime_detector_deterministic_replay() {
-        // Two detectors fed identical sequences must produce identical state.
-        let observations: Vec<RegimeObservation> = (0..REGIME_WINDOW_CAPACITY * 2)
-            .map(|i| {
-                let density = 100 + (i % 10) * 80;
-                let pressure = 50 + (i % 7) * 60;
-                make_regime_observation(density, pressure, i % 5 != 0)
-            })
-            .collect();
-
-        let mut det_a = RegimeDetector::default();
-        let mut det_b = RegimeDetector::default();
-
-        for obs in &observations {
-            let da = det_a.observe(*obs);
-            let db = det_b.observe(*obs);
-            assert_eq!(da, db, "deterministic replay violated at observation");
-        }
-
-        assert_eq!(det_a.combined_score(), det_b.combined_score());
-        assert_eq!(det_a.phase, det_b.phase);
-        assert_eq!(det_a.retune_count, det_b.retune_count);
-        assert_eq!(det_a.rollback_count, det_b.rollback_count);
     }
 }

@@ -129,8 +129,8 @@
           "2026-02-20 seventh E5 slice added directional p95/p99 comparator corpus artifact (artifacts/raptorq_track_e_gf256_p95p99_v1.json) from Track-E baseline/auto/rollback captures.",
           "2026-02-20 eighth E5 slice started high-confidence p95/p99 corpus generation targeting artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json (coord thread msg #1487).",
           "2026-02-20 ninth E5 status update captured transient unrelated retry.rs compile-frontier breakage during high-confidence reruns (coord msgs #1493/#1504).",
-          "2026-02-20 follow-up compile verification (`rch exec -- cargo check -p asupersync --lib`) exited 0; high-confidence corpus closure remains blocked on artifact publication/sign-off, not compile frontier.",
-          "Final offline tuner and p95/p99 comparator corpus remains in progress under asupersync-36m6p."
+          "2026-02-20 follow-up compile verification (`rch exec -- cargo check -p asupersync --lib`) exited 0.",
+          "2026-02-20 tenth E5 slice published artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json with owner sign-off for G3 closure integration (asupersync-36m6p comment #1894; agent-mail asupersync-3ltrv #1542; coord #1543)."
         ]
       },
       "risk_class": "high",
@@ -163,7 +163,10 @@
           "agent-mail thread asupersync-3ltrv msg #1441 and coord thread msg #1443 (sixth-slice comparator artifact + rollback capture confirmation)",
           "agent-mail thread asupersync-3ltrv msgs #1461/#1465 (seventh-slice p95/p99 artifact + corrected anchor)",
           "agent-mail thread coord-2026-02-19 msg #1487 (high-confidence p95/p99 corpus run started; pending artifact publication)",
-          "agent-mail thread coord-2026-02-19 msgs #1493/#1504 (transient retry.rs compile-frontier blockage and active remediation while high-confidence run proceeds)"
+          "agent-mail thread coord-2026-02-19 msgs #1493/#1504 (transient retry.rs compile-frontier blockage and active remediation while high-confidence run proceeds)",
+          "asupersync-36m6p comment #1894 (high-confidence p95/p99 closure artifact + headline)",
+          "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
+          "agent-mail thread asupersync-3ltrv msg #1542 and coord thread msg #1543 (E5 high-confidence publish confirmation + closure-ready sign-off wording)"
         ]
       },
       "fallback_plan": {
@@ -201,7 +204,9 @@
           "asupersync-36m6p comments #1848/#1855",
           "artifacts/raptorq_track_e_gf256_bench_v1.json",
           "asupersync-36m6p comment #1863",
-          "artifacts/raptorq_track_e_gf256_p95p99_v1.json"
+          "artifacts/raptorq_track_e_gf256_p95p99_v1.json",
+          "asupersync-36m6p comment #1894",
+          "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json"
         ],
         "bench_repro_commands": [
           "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives",
@@ -212,12 +217,13 @@
           "Manifest snapshot metadata (schema/version/catalog counts/selected candidate details) is now emitted and covered by deterministic tests.",
           "Environment reproducibility metadata (target_arch/target_os/target_env/target_endian/target_pointer_width_bits) is now included in manifest snapshots and emitted in policy logs.",
           "Directional p95/p99 summaries are now attached via artifacts/raptorq_track_e_gf256_p95p99_v1.json.",
-          "High-confidence p95/p99 corpus run is started (coord msg #1487) and targets artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json for closure-grade evidence.",
+          "High-confidence p95/p99 corpus is published at artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json with owner sign-off for G3 integration.",
+          "High-confidence headline (overall proxy p95/p99 time, us): baseline 9.0743/9.0743, auto 9.3392/9.3392, rollback 9.9333/9.9333.",
           "Transient compile-frontier interruption noted in coord msgs #1493/#1504 has follow-up green check evidence (`rch exec -- cargo check -p asupersync --lib` exit 0).",
-          "Current p95/p99 corpus is derived from scenario-level medians with small-n operation groups; final high-confidence closure should include broader/raw-sample percentile evidence."
+          "High-confidence closure slice is intentionally narrowed to RQ-E-GF256-005 and uses conservative interval-endpoint proxies; limitations are explicitly documented in the artifact."
         ],
         "pending_blockers": [
-          "Publish artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json and link final sign-off outcomes for full E5 closure."
+          "No additional E5 publication blocker remains for G3 closure tracking; future broader multi-scenario/raw-sample expansion is follow-on optimization work."
         ]
       },
       "deterministic_replay": {
@@ -484,7 +490,12 @@
       "owner": "FuchsiaFalcon",
       "expected_value": {
         "impact": "high",
-        "hypothesis": "Lower p95/p99 latency by reusing validated elimination artifacts in repeating decode structures."
+        "hypothesis": "Lower p95/p99 latency by reusing validated elimination artifacts in repeating decode structures.",
+        "measured_highlights": [
+          "Implementation evidence is landed: deterministic dense-factor cache + strict signature checks + bounded eviction telemetry (thread asupersync-n5fk6 msg #1194).",
+          "Follow-up implementation evidence is landed: matrix-skeleton reuse (`DenseFactorArtifact`) plus deterministic cache decision telemetry and collision tracking (thread asupersync-n5fk6 msg #1207).",
+          "Closure-grade burst comparator (p95/p99) and rollback outcome artifacts are still pending publication."
+        ]
       },
       "risk_class": "high",
       "proof_safety_constraints": [
@@ -493,8 +504,8 @@
         "Fallback to conservative rebuild on mismatch."
       ],
       "adoption_wedge": {
-        "phase": "template-only pending implementation",
-        "strategy": "Introduce cache in observe-only mode first, then gated reuse.",
+        "phase": "implementation landed; closure evidence pending",
+        "strategy": "Keep guarded/proposed state until burst comparator and rollback artifacts are attached, then promote to approved_guarded.",
         "enable_controls": [
           "cache capacity cap",
           "equivalence verdict enforcement"
@@ -503,7 +514,9 @@
       "conservative_comparator": {
         "mode": "no-cache rebuild path",
         "evidence_refs": [
-          "asupersync-n5fk6 notes (2026-02-18): strict signature matching + bounded cache telemetry"
+          "asupersync-n5fk6 notes (2026-02-18): strict signature matching + bounded cache telemetry",
+          "agent-mail thread asupersync-n5fk6 msg #1194 (deterministic dense-factor cache implementation evidence)",
+          "agent-mail thread asupersync-n5fk6 msg #1207 (matrix-skeleton reuse + deterministic cache telemetry evidence)"
         ]
       },
       "fallback_plan": {
@@ -516,7 +529,7 @@
         "post_rollback_verification_checklist": [
           "Cache-hit count drops to zero in logs.",
           "Decode correctness remains unchanged.",
-          "Latency comparator report archived."
+          "Rollback outcome artifact is archived and linked from the decision card."
         ]
       },
       "validation_evidence": {
@@ -597,13 +610,12 @@
   "coverage_summary": {
     "cards_total": 8,
     "cards_with_conservative_comparator": 8,
-    "cards_with_measured_comparator_evidence": 5,
-    "cards_pending_measured_evidence": 3,
+    "cards_with_measured_comparator_evidence": 6,
+    "cards_pending_measured_evidence": 2,
     "cards_with_replay_commands": 8,
     "closure_blockers": [
-      "Complete final high-confidence offline comparator corpus for E5 (`asupersync-36m6p`) with p95/p99 and selected-profile vs scalar-conservative evidence links (rollback rehearsal outcomes are captured in `artifacts/raptorq_track_e_gf256_bench_v1.json`; directional p95/p99 corpus exists in `artifacts/raptorq_track_e_gf256_p95p99_v1.json`; high-confidence run is in progress per coord msg #1487 targeting `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json`).",
-      "Promote F7 from proposed to approved_guarded only after burst-workload comparator evidence and rollback rehearsal outcomes are attached (G7 dependency contract reruns are green per asupersync-m7o6i comment #1886 and coord msg #1520).",
-      "Keep F8 as template/proposed until implementation exists; then attach measured overlap-vs-sequential evidence and rollback rehearsal outcomes."
+      "Promote F7 from proposed to approved_guarded only after burst-workload comparator evidence (including p95/p99 deltas) and rollback rehearsal outcomes are attached as concrete artifacts; current anchors #1194/#1207 confirm implementation quality but are not closure-grade comparator/rollback evidence (G7 dependency contract reruns are green per asupersync-m7o6i comment #1886 and coord msg #1520).",
+      "Keep F8 as template/proposed until implementation exists; thread asupersync-2zu9p currently has no implementation/evidence anchors, so measured overlap-vs-sequential evidence and rollback outcomes remain entirely pending."
     ]
   }
 }

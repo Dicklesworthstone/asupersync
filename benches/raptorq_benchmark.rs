@@ -1104,9 +1104,8 @@ fn emit_campaign_decode_log(scenario: &RepairCampaignScenario, stats: &DecodeSta
          \"policy_budget_exhausted\":{},\
          \"factor_cache_hits\":{},\"factor_cache_misses\":{},\"factor_cache_inserts\":{},\
          \"factor_cache_evictions\":{},\
-         \"regime_score\":{},\"regime_state\":\"{}\",\"regime_retune_count\":{},\
-         \"regime_rollback_count\":{},\"regime_window_len\":{},\
-         \"regime_delta_density_bias\":{},\"regime_delta_pressure_bias\":{},\
+         \"policy_mode\":\"{}\",\"policy_reason\":\"{}\",\"policy_replay_ref\":\"{}\",\
+         \"hard_regime_branch\":\"{}\",\"hard_regime_conservative_fallback_reason\":\"{}\",\
          \"repro_command\":\"{}\"}}",
         F4_CAMPAIGN_SCHEMA_VERSION,
         scenario.scenario_id,
@@ -1139,13 +1138,13 @@ fn emit_campaign_decode_log(scenario: &RepairCampaignScenario, stats: &DecodeSta
         stats.factor_cache_misses,
         stats.factor_cache_inserts,
         stats.factor_cache_evictions,
-        stats.regime_score,
-        stats.regime_state.unwrap_or("unknown"),
-        stats.regime_retune_count,
-        stats.regime_rollback_count,
-        stats.regime_window_len,
-        stats.regime_delta_density_bias,
-        stats.regime_delta_pressure_bias,
+        stats.policy_mode.unwrap_or("unknown"),
+        stats.policy_reason.unwrap_or("unknown"),
+        stats.policy_replay_ref.unwrap_or("unknown"),
+        stats.hard_regime_branch.unwrap_or("none"),
+        stats
+            .hard_regime_conservative_fallback_reason
+            .unwrap_or("none"),
         F4_CAMPAIGN_REPRO_CMD,
     );
 }

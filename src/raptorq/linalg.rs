@@ -33,7 +33,8 @@
 //! ```
 
 use super::gf256::{
-    Gf256, gf256_add_slice, gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slices2,
+    Gf256, gf256_add_slice, gf256_add_slices2, gf256_addmul_slice, gf256_addmul_slices2,
+    gf256_mul_slices2,
 };
 
 // ============================================================================
@@ -880,9 +881,40 @@ impl GaussianSolver {
         }
         self.stats.scale_adds += 1;
         let factor_is_one = factor == Gf256::ONE;
+        let cols = self.matrix[target].len();
+        let tail_start = (pivot + 1).min(cols);
+        // Eliminate the pivot coefficient directly; this is always required.
+        self.matrix[target][pivot] = 0;
 
-        // Eliminate in coefficient matrix/RHS. Use split_at_mut to get
-        // separate mutable/immutable references for each surface.
+        // Eliminate in RHS - use split_at_mut to satisfy borrow checker.
+        // When there is no coefficient tail, we can skip matrix split/borrow
+        // and run the cheaper RHS-only path.
+        let rhs_len = self.rhs[pivot].len();
+        if tail_start >= cols && rhs_len == 0 {
+            return;
+        }
+        if tail_start >= cols {
+            if self.rhs[target].len() < rhs_len {
+                self.rhs[target].data.resize(rhs_len, 0);
+            }
+            let (lower, upper) = if target < pivot {
+                let (lo, hi) = self.rhs.split_at_mut(pivot);
+                (&mut lo[target], &hi[0])
+            } else {
+                let (lo, hi) = self.rhs.split_at_mut(target);
+                (&mut hi[0], &lo[pivot])
+            };
+            let rhs_target = &mut lower.as_mut_slice()[..rhs_len];
+            let rhs_pivot = &upper.as_slice()[..rhs_len];
+            if factor_is_one {
+                gf256_add_slice(rhs_target, rhs_pivot);
+            } else {
+                gf256_addmul_slice(rhs_target, rhs_pivot, factor);
+            }
+            return;
+        }
+
+        // Coefficient-tail + optional RHS path.
         let (target_row, pivot_row) = if target < pivot {
             let (lo, hi) = self.matrix.split_at_mut(pivot);
             (&mut lo[target], hi[0].as_slice())
@@ -890,14 +922,6 @@ impl GaussianSolver {
             let (lo, hi) = self.matrix.split_at_mut(target);
             (&mut hi[0], lo[pivot].as_slice())
         };
-        let cols = target_row.len();
-        // Columns left of `pivot` are already structurally zero for both rows.
-        // Skip that prefix and only operate on the tail; set pivot directly.
-        target_row[pivot] = 0;
-        let tail_start = (pivot + 1).min(cols);
-
-        // Eliminate in RHS - use split_at_mut to satisfy borrow checker
-        let rhs_len = self.rhs[pivot].len();
         if rhs_len > 0 {
             if self.rhs[target].len() < rhs_len {
                 self.rhs[target].data.resize(rhs_len, 0);
@@ -916,8 +940,12 @@ impl GaussianSolver {
             let rhs_pivot = &upper.as_slice()[..rhs_len];
             if tail_start < cols {
                 if factor_is_one {
-                    gf256_add_slice(&mut target_row[tail_start..], &pivot_row[tail_start..]);
-                    gf256_add_slice(rhs_target, rhs_pivot);
+                    gf256_add_slices2(
+                        &mut target_row[tail_start..],
+                        &pivot_row[tail_start..],
+                        rhs_target,
+                        rhs_pivot,
+                    );
                 } else {
                     gf256_addmul_slices2(
                         &mut target_row[tail_start..],
@@ -932,7 +960,7 @@ impl GaussianSolver {
             } else {
                 gf256_addmul_slice(rhs_target, rhs_pivot, factor);
             }
-        } else if tail_start < cols {
+        } else {
             if factor_is_one {
                 gf256_add_slice(&mut target_row[tail_start..], &pivot_row[tail_start..]);
             } else {
@@ -1569,6 +1597,34 @@ mod tests {
         assert_eq!(solver.matrix[0], before_row);
         assert_eq!(solver.rhs[0].as_slice(), before_rhs.as_slice());
         assert_eq!(solver.stats.scale_adds, before_scale_adds);
+    }
+
+    #[test]
+    fn eliminate_row_pivot_only_with_empty_rhs_short_circuits_tail_work() {
+        let mut solver = GaussianSolver::new(2, 3);
+        solver.set_row(0, &[4, 8, 55], DenseRow::zeros(0));
+        solver.set_row(1, &[1, 2, 9], DenseRow::zeros(0));
+
+        solver.eliminate_row(0, 1, Gf256::new(7));
+
+        assert_eq!(solver.matrix[0], vec![4, 8, 0]);
+        assert!(solver.rhs[0].as_slice().is_empty());
+        assert_eq!(solver.stats.scale_adds, 1);
+    }
+
+    #[test]
+    fn eliminate_row_pivot_only_with_rhs_nonone_updates_rhs_only() {
+        let mut solver = GaussianSolver::new(2, 1);
+        solver.set_row(0, &[7], DenseRow::new(vec![0x55]));
+        solver.set_row(1, &[1], DenseRow::new(vec![0x23]));
+
+        let factor = Gf256::new(0x0f);
+        solver.eliminate_row(0, 1, factor);
+
+        let expected_rhs = Gf256::new(0x55) + (factor * Gf256::new(0x23));
+        assert_eq!(solver.matrix[0], vec![0]);
+        assert_eq!(solver.rhs[0].as_slice(), &[expected_rhs.raw()]);
+        assert_eq!(solver.stats.scale_adds, 1);
     }
 
     #[test]

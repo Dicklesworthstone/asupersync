@@ -1832,7 +1832,6 @@ mod edge_cases {
 // Failure-mode + invariant closure tests (br-3narc.2.7)
 // =========================================================================
 
-#[allow(clippy::similar_names, clippy::cast_sign_loss)]
 mod failure_modes {
     use crate::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
     use crate::raptorq::gf256::Gf256;
@@ -1957,9 +1956,9 @@ mod failure_modes {
 
         let result = decoder.decode(&received);
         match result {
-            Ok(outcome) => {
+            Ok(decoded) => {
                 assert_eq!(
-                    outcome.source, source,
+                    decoded.source, source,
                     "{context} burst-loss decode should recover original source"
                 );
             }
@@ -2002,7 +2001,6 @@ mod failure_modes {
         let mut received = decoder.constraint_symbols();
 
         // Keep only second half of source symbols
-        #[allow(clippy::needless_range_loop)]
         for i in (k / 2)..k {
             received.push(ReceivedSymbol::source(i as u32, source[i].clone()));
         }
@@ -2016,9 +2014,9 @@ mod failure_modes {
 
         let result = decoder.decode(&received);
         match result {
-            Ok(outcome) => {
+            Ok(decoded) => {
                 assert_eq!(
-                    outcome.source, source,
+                    decoded.source, source,
                     "{context} first-half burst loss should still recover"
                 );
             }
@@ -2045,6 +2043,14 @@ mod failure_modes {
             &format!("k={k},symbol_size={symbol_size}"),
             replay_ref,
         );
+
+        let source: Vec<Vec<u8>> = (0..k)
+            .map(|i| {
+                (0..symbol_size)
+                    .map(|j| ((i * 37 + j * 13 + 7) % 256) as u8)
+                    .collect()
+            })
+            .collect();
 
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let l = decoder.params().l;
@@ -2139,16 +2145,17 @@ mod failure_modes {
         let result = decoder.decode(&received);
         // Must not silently succeed with wrong data
         match result {
-            Ok(outcome) => {
+            Ok(decoded) => {
                 // If the system is overdetermined enough that the corruption
                 // doesn't affect the solution, source should still match.
                 // Otherwise this should have been caught.
                 assert_eq!(
-                    outcome.source, source,
+                    decoded.source, source,
                     "{context} if decode succeeds, source must be correct"
                 );
             }
-            Err(DecodeError::CorruptDecodedOutput { .. } | DecodeError::SingularMatrix { .. }) => {
+            Err(DecodeError::CorruptDecodedOutput { .. })
+            | Err(DecodeError::SingularMatrix { .. }) => {
                 // Expected: corruption detected either during solve or verification
             }
             Err(other) => {
@@ -2162,7 +2169,6 @@ mod failure_modes {
 // Systematic encoder invariant tests (br-3narc.2.7)
 // =========================================================================
 
-#[allow(clippy::similar_names, clippy::cast_sign_loss)]
 mod encoder_invariants {
     use crate::raptorq::gf256::gf256_addmul_slice;
     use crate::raptorq::systematic::SystematicEncoder;

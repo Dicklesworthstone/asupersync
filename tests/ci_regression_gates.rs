@@ -149,7 +149,10 @@ fn emit_gate_log(
     stats: &DecodeStats,
     report: Option<&RegressionReport>,
 ) {
-    let regime_state = stats.regime_state.unwrap_or("unknown");
+    let regime_state = stats
+        .policy_mode
+        .or(stats.hard_regime_branch)
+        .unwrap_or("unknown");
     let policy_mode = stats.policy_mode.unwrap_or("unknown");
     let overall_verdict = report
         .map(|r| r.overall_verdict.label())
@@ -169,8 +172,8 @@ fn emit_gate_log(
          \"dense_core_rows\":{},\"dense_core_cols\":{},\
          \"factor_cache_hits\":{},\"factor_cache_misses\":{},\
          \"hard_regime_activated\":{},\"hard_regime_fallbacks\":{},\
-         \"regime_score\":{},\"regime_retune_count\":{},\"regime_rollback_count\":{},\
-         \"regime_delta_density_bias\":{},\"regime_delta_pressure_bias\":{},\
+         \"policy_reason\":\"{}\",\"policy_replay_ref\":\"{}\",\
+         \"hard_regime_branch\":\"{}\",\"hard_regime_fallback_reason\":\"{}\",\
          \"artifact_path\":\"{G2_ARTIFACT_PATH}\",\"repro_command\":\"{G2_REPRO_CMD}\"}}",
         stats.peeled,
         stats.inactivated,
@@ -181,11 +184,12 @@ fn emit_gate_log(
         stats.factor_cache_misses,
         stats.hard_regime_activated,
         stats.hard_regime_fallbacks,
-        stats.regime_score,
-        stats.regime_retune_count,
-        stats.regime_rollback_count,
-        stats.regime_delta_density_bias,
-        stats.regime_delta_pressure_bias,
+        stats.policy_reason.unwrap_or("unknown"),
+        stats.policy_replay_ref.unwrap_or("unknown"),
+        stats.hard_regime_branch.unwrap_or("none"),
+        stats
+            .hard_regime_conservative_fallback_reason
+            .unwrap_or("none"),
     );
 }
 
@@ -625,18 +629,26 @@ fn g2_f6_regime_tracked_across_decodes() {
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
     let received = build_decode_received(&source, &encoder, &decoder, &[0, 3], 4);
 
-    // Multiple decodes should show regime accumulation.
-    let mut last_window_len = 0;
+    // Multiple decodes should keep replay metadata stable.
+    let mut last_replay_ref = None;
     for i in 0..20 {
         let result = decoder
             .decode(&received)
             .unwrap_or_else(|e| panic!("G2-F6: decode {i} failed: {e:?}"));
 
+        let replay_ref = result.stats.policy_replay_ref;
         assert!(
-            result.stats.regime_state.is_some(),
-            "G2-F6: regime_state must be populated at decode {i}"
+            replay_ref.is_some(),
+            "G2-F6: policy_replay_ref must be populated at decode {i}"
         );
-        last_window_len = result.stats.regime_window_len;
+        if let Some(previous) = last_replay_ref {
+            assert_eq!(
+                replay_ref,
+                Some(previous),
+                "G2-F6: policy replay ref drifted at decode {i}"
+            );
+        }
+        last_replay_ref = replay_ref;
 
         emit_gate_log(
             "G2-F6-VERIFY",
@@ -648,10 +660,9 @@ fn g2_f6_regime_tracked_across_decodes() {
         );
     }
 
-    // Window should accumulate.
     assert!(
-        last_window_len > 1,
-        "G2-F6: regime window must grow across decodes, got {last_window_len}"
+        last_replay_ref.is_some(),
+        "G2-F6: expected at least one replay reference"
     );
 }
 
@@ -744,8 +755,16 @@ fn g2_conservative_vs_radical_overhead_report() {
         warmed.stats.peeled,
         baseline.stats.factor_cache_hits,
         warmed.stats.factor_cache_hits,
-        baseline.stats.regime_state.unwrap_or("unknown"),
-        warmed.stats.regime_state.unwrap_or("unknown"),
+        baseline
+            .stats
+            .policy_mode
+            .or(baseline.stats.hard_regime_branch)
+            .unwrap_or("unknown"),
+        warmed
+            .stats
+            .policy_mode
+            .or(warmed.stats.hard_regime_branch)
+            .unwrap_or("unknown"),
         baseline.stats.policy_mode.unwrap_or("unknown"),
         warmed.stats.policy_mode.unwrap_or("unknown"),
     );
@@ -912,7 +931,6 @@ fn g2_structured_log_schema_compliance() {
         peeled: 10,
         inactivated: 3,
         gauss_ops: 5,
-        regime_state: Some("stable"),
         policy_mode: Some("conservative_baseline"),
         ..Default::default()
     };
@@ -929,11 +947,14 @@ fn g2_structured_log_schema_compliance() {
          \"dense_core_rows\":{},\"dense_core_cols\":{},\
          \"factor_cache_hits\":{},\"factor_cache_misses\":{},\
          \"hard_regime_activated\":{},\"hard_regime_fallbacks\":{},\
-         \"regime_score\":{},\"regime_retune_count\":{},\"regime_rollback_count\":{},\
-         \"regime_delta_density_bias\":{},\"regime_delta_pressure_bias\":{},\
+         \"policy_reason\":\"{}\",\"policy_replay_ref\":\"{}\",\
+         \"hard_regime_branch\":\"{}\",\"hard_regime_fallback_reason\":\"{}\",\
          \"artifact_path\":\"{G2_ARTIFACT_PATH}\",\"repro_command\":\"{G2_REPRO_CMD}\"}}",
         stats.policy_mode.unwrap_or("unknown"),
-        stats.regime_state.unwrap_or("unknown"),
+        stats
+            .policy_mode
+            .or(stats.hard_regime_branch)
+            .unwrap_or("unknown"),
         stats.peeled,
         stats.inactivated,
         stats.gauss_ops,
@@ -943,11 +964,12 @@ fn g2_structured_log_schema_compliance() {
         stats.factor_cache_misses,
         stats.hard_regime_activated,
         stats.hard_regime_fallbacks,
-        stats.regime_score,
-        stats.regime_retune_count,
-        stats.regime_rollback_count,
-        stats.regime_delta_density_bias,
-        stats.regime_delta_pressure_bias,
+        stats.policy_reason.unwrap_or("unknown"),
+        stats.policy_replay_ref.unwrap_or("unknown"),
+        stats.hard_regime_branch.unwrap_or("none"),
+        stats
+            .hard_regime_conservative_fallback_reason
+            .unwrap_or("none"),
     );
 
     for field in required_fields {
@@ -1005,9 +1027,9 @@ fn g2_benchmark_covers_gate_observability_fields() {
         "dense_core_rows",
         "factor_cache_hits",
         "factor_cache_misses",
-        "regime_score",
-        "regime_state",
-        "regime_retune_count",
+        "policy_mode",
+        "policy_replay_ref",
+        "hard_regime_branch",
     ];
 
     for field in required_fields {
@@ -1046,7 +1068,7 @@ fn g2_regression_report_metadata() {
         inactivated: 1,
         pivots_selected: 1,
         peel_frontier_peak: 2,
-        regime_state: Some("stable"),
+        policy_mode: Some("stable"),
         ..Default::default()
     };
 
