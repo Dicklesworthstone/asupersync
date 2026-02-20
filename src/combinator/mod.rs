@@ -48,7 +48,8 @@ pub use first_ok::{
     first_ok_to_result,
 };
 pub use hedge::{
-    Hedge, HedgeConfig, HedgeError, HedgeResult, HedgeWinner, hedge_outcomes, hedge_to_result,
+    Hedge, HedgeConfig, HedgeError, HedgeFuture, HedgeResult, HedgeWinner, hedge, hedge_outcomes,
+    hedge_to_result,
 };
 pub use join::{
     Join, Join2Result, JoinAll, JoinAllError, JoinAllResult, JoinError, aggregate_outcomes,
@@ -77,9 +78,9 @@ pub use rate_limit::{
     RateLimiter, RateLimiterRegistry, SlidingWindowRateLimiter, WaitStrategy,
 };
 pub use retry::{
-    AlwaysRetry, NeverRetry, RetryError, RetryFailure, RetryIf, RetryPolicy, RetryPredicate,
+    AlwaysRetry, NeverRetry, Retry, RetryError, RetryFailure, RetryIf, RetryPolicy, RetryPredicate,
     RetryResult, RetryState, calculate_deadline as retry_deadline, calculate_delay,
-    make_retry_result, total_delay_budget,
+    make_retry_result, retry, total_delay_budget,
 };
 pub use select::{Either, Select, SelectAll, SelectAllDrain, SelectAllDrainResult};
 pub use timeout::{

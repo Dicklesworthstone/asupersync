@@ -483,22 +483,19 @@ impl Bulkhead {
     pub fn cancel_entry(&self, entry_id: u64) {
         let mut queue = self.queue.write();
         if let Some(idx) = queue.iter().position(|e| e.id == entry_id) {
-            let entry = &mut queue[idx];
+            let entry = queue.remove(idx);
 
             if matches!(entry.result, Some(Ok(()))) {
                 // Permit was granted but not claimed. Release it.
-                let weight = entry.weight;
-                queue.remove(idx);
-                drop(queue);
-                self.release_permit(weight);
+                self.release_permit(entry.weight);
                 self.total_cancelled_atomic.fetch_add(1, Ordering::Relaxed);
             } else if entry.result.is_none() {
                 // Still waiting. Mark as cancelled.
-                entry.result = Some(Err(RejectionReason::Cancelled));
                 self.pending_queue_count.fetch_sub(1, Ordering::Relaxed);
-                drop(queue);
                 self.total_cancelled_atomic.fetch_add(1, Ordering::Relaxed);
             }
+            // If entry.result was Some(Err(_)), it was already counted (e.g. as Timeout)
+            // and pending_queue_count was decremented. We just removed it to prevent leaks.
         }
     }
 
@@ -1522,6 +1519,69 @@ mod tests {
             bh.available(),
             1,
             "permit should be released upon cancellation of granted entry"
+        );
+    }
+
+    #[test]
+    fn cancel_removes_entry_from_queue() {
+        let bh = Bulkhead::new(BulkheadPolicy {
+            max_concurrent: 1,
+            max_queue: 10,
+            ..Default::default()
+        });
+
+        let now = Time::from_millis(0);
+
+        // 1. Exhaust permits
+        let _p1 = bh.try_acquire(1).unwrap();
+
+        // 2. Enqueue waiter
+        let entry_id = bh.enqueue(1, now).unwrap();
+
+        // 3. Cancel the entry
+        bh.cancel_entry(entry_id);
+
+        // 4. Verify queue is empty
+        let metrics = bh.metrics();
+        assert_eq!(
+            metrics.queue_depth, 0,
+            "queue should be empty after cancellation"
+        );
+
+        // Internal check to ensure vector is actually cleared
+        // We can't access private fields, but we can check if we can fill the queue again
+        // If the zombie is still there, we might hit the limit earlier than expected
+    }
+
+    #[test]
+    fn cancel_removes_timed_out_entry_from_queue() {
+        let bh = Bulkhead::new(BulkheadPolicy {
+            max_concurrent: 1,
+            max_queue: 10,
+            queue_timeout: Duration::from_millis(1),
+            ..Default::default()
+        });
+
+        let now = Time::from_millis(0);
+
+        // 1. Exhaust permits
+        let _p1 = bh.try_acquire(1).unwrap();
+
+        // 2. Enqueue waiter
+        let entry_id = bh.enqueue(1, now).unwrap();
+
+        // 3. Timeout the entry
+        let later = Time::from_millis(100);
+        bh.process_queue(later);
+
+        // 4. Cancel the entry
+        bh.cancel_entry(entry_id);
+
+        // 5. Verify queue is empty
+        let metrics = bh.metrics();
+        assert_eq!(
+            metrics.queue_depth, 0,
+            "queue should be empty after cancellation of timed-out entry"
         );
     }
 

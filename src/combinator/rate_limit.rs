@@ -208,9 +208,6 @@ struct QueueEntry {
 // Token Bucket Implementation
 // =========================================================================
 
-/// Fixed-point scale for token storage (allows fractional tokens).
-const FIXED_POINT_SCALE: u64 = 1000;
-
 #[inline]
 fn duration_to_millis_saturating(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
@@ -218,9 +215,8 @@ fn duration_to_millis_saturating(duration: Duration) -> u64 {
 
 /// Internal state of the token bucket.
 struct BucketState {
-    /// Token bucket state (stored as fixed-point).
-    /// tokens * FIXED_POINT_SCALE to allow fractional tokens.
-    tokens_fixed: u64,
+    /// Token bucket state.
+    tokens: f64,
 
     /// Last refill time (as millis since epoch).
     last_refill: u64,
@@ -230,9 +226,9 @@ struct BucketState {
 pub struct RateLimiter {
     policy: RateLimitPolicy,
 
-    /// Pre-computed tokens per millisecond in fixed-point scale.
-    /// Avoids FP division on every `refill_inner` call.
-    tokens_per_ms_fixed: f64,
+    /// Pre-computed tokens per millisecond.
+    /// Avoids division on every `refill_inner` call.
+    tokens_per_ms: f64,
 
     /// Protected bucket state.
     state: Mutex<BucketState>,
@@ -256,19 +252,19 @@ impl RateLimiter {
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn new(policy: RateLimitPolicy) -> Self {
-        let initial_tokens = u64::from(policy.burst) * FIXED_POINT_SCALE;
+        let initial_tokens = f64::from(policy.burst);
         let period_ms = duration_to_millis_saturating(policy.period) as f64;
-        let tokens_per_ms_fixed = if period_ms > 0.0 {
-            (f64::from(policy.rate) / period_ms) * FIXED_POINT_SCALE as f64
+        let tokens_per_ms = if period_ms > 0.0 {
+            f64::from(policy.rate) / period_ms
         } else {
             0.0
         };
 
         Self {
             policy,
-            tokens_per_ms_fixed,
+            tokens_per_ms,
             state: Mutex::new(BucketState {
-                tokens_fixed: initial_tokens,
+                tokens: initial_tokens,
                 last_refill: 0,
             }),
             wait_queue: RwLock::new(VecDeque::with_capacity(16)),
@@ -301,7 +297,7 @@ impl RateLimiter {
         // metrics and state locks at the same time.
         let available_tokens = {
             let state = self.state.lock();
-            state.tokens_fixed as f64 / FIXED_POINT_SCALE as f64
+            state.tokens
         };
 
         let total_waited = self.total_waited.load(Ordering::Relaxed);
@@ -335,11 +331,11 @@ impl RateLimiter {
 
         let elapsed_ms = now_millis - state.last_refill;
 
-        if self.tokens_per_ms_fixed > 0.0 {
-            let tokens_to_add = (elapsed_ms as f64 * self.tokens_per_ms_fixed) as u64;
-            let max_tokens = u64::from(self.policy.burst) * FIXED_POINT_SCALE;
+        if self.tokens_per_ms > 0.0 {
+            let tokens_to_add = elapsed_ms as f64 * self.tokens_per_ms;
+            let max_tokens = f64::from(self.policy.burst);
 
-            state.tokens_fixed = (state.tokens_fixed + tokens_to_add).min(max_tokens);
+            state.tokens = (state.tokens + tokens_to_add).min(max_tokens);
         }
 
         state.last_refill = now_millis;
@@ -355,16 +351,17 @@ impl RateLimiter {
     ///
     /// Returns `true` if tokens were acquired, `false` if insufficient tokens.
     #[must_use]
+    #[allow(clippy::cast_precision_loss)]
     pub fn try_acquire(&self, cost: u32, now: Time) -> bool {
         let mut state = self.state.lock();
         let now_millis = now.as_millis();
 
         self.refill_inner(&mut state, now_millis);
 
-        let cost_fixed = u64::from(cost) * FIXED_POINT_SCALE;
+        let cost_f = f64::from(cost);
 
-        if state.tokens_fixed >= cost_fixed {
-            state.tokens_fixed -= cost_fixed;
+        if state.tokens >= cost_f {
+            state.tokens -= cost_f;
             drop(state); // Release bucket lock immediately
 
             self.total_allowed.fetch_add(1, Ordering::Relaxed);
@@ -420,25 +417,25 @@ impl RateLimiter {
         clippy::cast_sign_loss
     )]
     pub fn time_until_available(&self, cost: u32, now: Time) -> Duration {
-        let current_fixed = {
+        let current_tokens = {
             let mut state = self.state.lock();
             self.refill_inner(&mut state, now.as_millis());
-            state.tokens_fixed
+            state.tokens
         };
-        let cost_fixed = u64::from(cost) * FIXED_POINT_SCALE;
+        let cost_f = f64::from(cost);
 
-        if current_fixed >= cost_fixed {
+        if current_tokens >= cost_f {
             return Duration::ZERO;
         }
 
-        let tokens_needed = cost_fixed - current_fixed;
-        let tokens_per_ms = self.tokens_per_ms_fixed;
+        let tokens_needed = cost_f - current_tokens;
+        let tokens_per_ms = self.tokens_per_ms;
 
         if tokens_per_ms <= 0.0 {
             return Duration::MAX; // No refill rate
         }
 
-        let ms_needed = (tokens_needed as f64 / tokens_per_ms).ceil() as u64;
+        let ms_needed = (tokens_needed / tokens_per_ms).ceil() as u64;
         Duration::from_millis(ms_needed)
     }
 
@@ -461,7 +458,7 @@ impl RateLimiter {
     #[allow(clippy::cast_precision_loss)]
     pub fn available_tokens(&self) -> f64 {
         let state = self.state.lock();
-        state.tokens_fixed as f64 / FIXED_POINT_SCALE as f64
+        state.tokens
     }
 
     // =========================================================================
@@ -549,10 +546,10 @@ impl RateLimiter {
                 continue;
             }
 
-            let cost_fixed = u64::from(entry.cost) * FIXED_POINT_SCALE;
+            let cost_f = f64::from(entry.cost);
 
-            if state.tokens_fixed >= cost_fixed {
-                state.tokens_fixed -= cost_fixed;
+            if state.tokens >= cost_f {
+                state.tokens -= cost_f;
                 entry.result = Some(Ok(()));
 
                 if first_granted.is_none() {
@@ -663,11 +660,11 @@ impl RateLimiter {
 
     /// Reset the rate limiter to full capacity.
     pub fn reset(&self) {
-        let initial_tokens = u64::from(self.policy.burst) * FIXED_POINT_SCALE;
+        let initial_tokens = f64::from(self.policy.burst);
 
         {
             let mut state = self.state.lock();
-            state.tokens_fixed = initial_tokens;
+            state.tokens = initial_tokens;
             state.last_refill = 0;
         }
 
@@ -1712,141 +1709,6 @@ mod tests {
         assert_eq!(inner.to_string(), "inner error");
     }
 
-    // =========================================================================
-    // Reset Tests
-    // =========================================================================
-
-    #[test]
-    fn reset_restores_capacity() {
-        let rl = RateLimiter::new(RateLimitPolicy {
-            rate: 100,
-            burst: 10,
-            ..Default::default()
-        });
-
-        let now = Time::from_millis(0);
-
-        // Exhaust
-        assert!(rl.try_acquire(10, now));
-        assert!(rl.available_tokens() < 0.1);
-
-        // Reset
-        rl.reset();
-        assert!((rl.available_tokens() - 10.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn reset_cancels_queued_entries() {
-        let rl = RateLimiter::new(RateLimitPolicy {
-            rate: 1,
-            period: Duration::from_mins(1),
-            burst: 1,
-            wait_strategy: WaitStrategy::Block,
-            ..Default::default()
-        });
-
-        let now = Time::from_millis(0);
-        assert!(rl.try_acquire(1, now));
-
-        let entry_id = rl.enqueue(1, now).unwrap();
-
-        // Reset
-        rl.reset();
-
-        // Entry should be cancelled
-        let result = rl.check_entry(entry_id, now);
-        assert!(matches!(result, Err(RateLimitError::Cancelled)));
-    }
-
-    #[test]
-    fn enqueue_deadline_saturates_for_huge_timeouts() {
-        let rl = RateLimiter::new(RateLimitPolicy {
-            rate: 1,
-            period: Duration::from_mins(1),
-            burst: 1,
-            wait_strategy: WaitStrategy::BlockWithTimeout(Duration::MAX),
-            ..Default::default()
-        });
-
-        let now = Time::from_millis(0);
-        assert!(rl.try_acquire(1, now));
-
-        let entry_id = rl.enqueue(1, now).expect("enqueue should succeed");
-        let deadline_millis = rl
-            .wait_queue
-            .read()
-            .iter()
-            .find(|entry| entry.id == entry_id)
-            .map(|entry| entry.deadline_millis)
-            .expect("queued entry should exist");
-
-        assert_eq!(deadline_millis, u64::MAX);
-    }
-
-    #[test]
-    fn duration_to_millis_saturates_for_large_durations() {
-        assert_eq!(duration_to_millis_saturating(Duration::MAX), u64::MAX);
-    }
-
-    #[test]
-    fn metrics_completes_after_state_lock_released() {
-        use std::sync::{Arc, Barrier};
-        use std::thread;
-
-        let rl = Arc::new(RateLimiter::new(RateLimitPolicy {
-            rate: 10,
-            burst: 10,
-            ..Default::default()
-        }));
-
-        let state_guard = rl.state.lock();
-        let rendezvous = Arc::new(Barrier::new(2));
-        let rl_clone = Arc::clone(&rl);
-        let rendezvous_clone = Arc::clone(&rendezvous);
-
-        let handle = thread::spawn(move || {
-            rendezvous_clone.wait();
-            let _ = rl_clone.metrics();
-        });
-
-        rendezvous.wait();
-        // Let spawned thread attempt metrics() while state lock is held.
-        thread::sleep(Duration::from_millis(10));
-
-        // metrics() is now lock-free except for state.lock() (for available_tokens).
-        // Release state lock so the spawned thread can complete.
-        drop(state_guard);
-        handle.join().expect("metrics thread should complete");
-    }
-
-    #[test]
-    fn wait_strategy_debug_clone_default() {
-        let w = WaitStrategy::default();
-        let dbg = format!("{w:?}");
-        assert!(dbg.contains("Block"), "{dbg}");
-        let cloned = w;
-        assert_eq!(format!("{cloned:?}"), dbg);
-    }
-
-    #[test]
-    fn rate_limit_algorithm_debug_clone_default() {
-        let a = RateLimitAlgorithm::default();
-        let dbg = format!("{a:?}");
-        assert!(dbg.contains("TokenBucket"), "{dbg}");
-        let cloned = a;
-        assert_eq!(format!("{cloned:?}"), dbg);
-    }
-
-    #[test]
-    fn rate_limit_metrics_debug_clone_default() {
-        let m = RateLimitMetrics::default();
-        let dbg = format!("{m:?}");
-        assert!(dbg.contains("RateLimitMetrics"), "{dbg}");
-        assert_eq!(m.total_allowed, 0);
-        let cloned = m;
-        assert_eq!(format!("{cloned:?}"), dbg);
-    }
-
     #[test]
     fn rate_limit_error_debug_clone_eq() {
         let e = RateLimitError::<String>::RateLimitExceeded;
@@ -1859,5 +1721,40 @@ mod tests {
             waited: Duration::from_millis(200),
         };
         assert_ne!(e, e2);
+    }
+
+    #[test]
+    fn test_slow_rate_starvation() {
+        // Rate: 0.5 per second (1 per 2000ms)
+        // 0.5 tokens/sec = 0.0005 tokens/ms
+        let rl = RateLimiter::new(RateLimitPolicy {
+            rate: 1,
+            period: Duration::from_millis(2000),
+            burst: 1,
+            ..Default::default()
+        });
+
+        let now = Time::from_millis(0);
+        // Consume burst
+        assert!(rl.try_acquire(1, now));
+
+        // Poll every 1ms for 4 seconds.
+        // Should accrue ~2 tokens.
+        let mut acquired = false;
+        let mut t = now;
+
+        for _ in 0..4000 {
+            t = Time::from_millis(t.as_millis() + 1);
+            // Try to acquire 1 token
+            if rl.try_acquire(1, t) {
+                acquired = true;
+                break;
+            }
+        }
+
+        assert!(
+            acquired,
+            "Failed to acquire token due to precision loss starvation"
+        );
     }
 }

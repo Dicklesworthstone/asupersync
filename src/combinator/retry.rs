@@ -26,11 +26,16 @@
 //!              = max_attempts * per_attempt_budget + Σ(delays)
 //! ```
 
+use crate::cx::Cx;
+use crate::time::Sleep;
 use crate::types::cancel::CancelReason;
 use crate::types::outcome::PanicPayload;
 use crate::types::{Outcome, Time};
 use crate::util::det_rng::DetRng;
 use core::fmt;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 /// Policy for retry behavior.
@@ -547,6 +552,163 @@ impl<E, F: Fn(&E, u32) -> bool> RetryPredicate<E> for RetryIf<F> {
     }
 }
 
+/// Internal state machine for the retry future.
+enum RetryInner<F> {
+    /// No operation in progress, ready to start next attempt.
+    Idle,
+    /// Polling the inner future.
+    Polling(F),
+    /// Sleeping before the next attempt.
+    Sleeping(Sleep),
+}
+
+/// A future that executes a retry loop.
+///
+/// This struct is created by the [`retry`] function.
+pub struct Retry<F, Fut, P, Pred> {
+    factory: F,
+    policy: P,
+    predicate: Pred,
+    state: RetryState,
+    inner: RetryInner<Fut>,
+}
+
+impl<F, Fut, P, Pred> Retry<F, Fut, P, Pred>
+where
+    P: Clone + Into<RetryPolicy>,
+{
+    fn new(factory: F, policy: P, predicate: Pred) -> Self {
+        let policy_val = policy.clone().into();
+        Self {
+            factory,
+            policy,
+            predicate,
+            state: RetryState::new(policy_val),
+            inner: RetryInner::Idle,
+        }
+    }
+}
+
+impl<F, Fut, P, Pred, T, E> Future for Retry<F, Fut, P, Pred>
+where
+    F: FnMut() -> Fut + Unpin,
+    Fut: Future<Output = Outcome<T, E>> + Unpin,
+    P: Clone + Into<RetryPolicy> + Unpin,
+    Pred: RetryPredicate<E> + Unpin,
+    E: Clone + Unpin,
+{
+    type Output = RetryResult<T, E>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        loop {
+            // Check cancellation from the context first
+            if let Some(cx_ref) = Cx::current() {
+                if cx_ref.is_cancel_requested() {
+                    return Poll::Ready(RetryResult::Cancelled(
+                        cx_ref.cancel_reason().unwrap_or_default(),
+                    ));
+                }
+            }
+
+            match &mut self.inner {
+                RetryInner::Idle => {
+                    // Start next attempt or sleep
+                    // Use Cx entropy if available
+                    let mut rng = Cx::current().map(|c| DetRng::new(c.random_u64()));
+
+                    if let Some(delay) = self.state.next_attempt(rng.as_mut()) {
+                        if delay == Duration::ZERO {
+                            // Start immediately
+                            let fut = (self.factory)();
+                            self.inner = RetryInner::Polling(fut);
+                        } else {
+                            // Sleep before starting
+                            // Cx::current() will be used by Sleep internally
+                            // We need to construct Sleep with a relative duration from "now"
+                            // Sleep::after handles getting the time source correctly
+                            let now = if let Some(current) = Cx::current() {
+                                if let Some(driver) = current.timer_driver() {
+                                    driver.now()
+                                } else {
+                                    crate::time::wall_now()
+                                }
+                            } else {
+                                crate::time::wall_now()
+                            };
+
+                            let sleep = Sleep::after(now, delay);
+                            self.inner = RetryInner::Sleeping(sleep);
+                        }
+                    } else {
+                        // This case is unreachable because we only transition to Idle
+                        // if has_attempts_remaining() is true, or initially (attempt=0)
+                        // where max_attempts >= 1.
+                        unreachable!(
+                            "Retry logic invariant violated: Idle state with no remaining attempts"
+                        );
+                    }
+                }
+                RetryInner::Sleeping(sleep) => {
+                    match Pin::new(sleep).poll(cx) {
+                        Poll::Ready(()) => {
+                            // Sleep done, start factory
+                            let fut = (self.factory)();
+                            self.inner = RetryInner::Polling(fut);
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                RetryInner::Polling(fut) => {
+                    match Pin::new(fut).poll(cx) {
+                        Poll::Ready(outcome) => {
+                            match outcome {
+                                Outcome::Ok(val) => return Poll::Ready(RetryResult::Ok(val)),
+                                Outcome::Err(e) => {
+                                    let attempt = self.state.attempt;
+                                    // Check predicate
+                                    if self.predicate.should_retry(&e, attempt)
+                                        && self.state.has_attempts_remaining()
+                                    {
+                                        // Retry
+                                        self.inner = RetryInner::Idle;
+                                        // Loop will handle Idle -> Sleeping/Polling
+                                    } else {
+                                        // Final failure
+                                        return Poll::Ready(RetryResult::Failed(
+                                            self.state.clone().into_error(e),
+                                        ));
+                                    }
+                                }
+                                Outcome::Cancelled(r) => {
+                                    return Poll::Ready(RetryResult::Cancelled(r));
+                                }
+                                Outcome::Panicked(p) => {
+                                    return Poll::Ready(RetryResult::Panicked(p));
+                                }
+                            }
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Creates a retry future.
+///
+/// # Arguments
+/// * `policy` - Retry policy (max attempts, delay, jitter).
+/// * `predicate` - Logic to decide if an error is retriable.
+/// * `factory` - Closure that produces the future to retry.
+pub fn retry<F, Fut, P, Pred>(policy: P, predicate: Pred, factory: F) -> Retry<F, Fut, P, Pred>
+where
+    F: FnMut() -> Fut,
+    P: Into<RetryPolicy> + Clone,
+{
+    Retry::new(factory, policy, predicate)
+}
+
 /// Retries an operation with configurable backoff.
 ///
 /// # Semantics
@@ -555,7 +717,7 @@ impl<E, F: Fn(&E, u32) -> bool> RetryPredicate<E> for RetryIf<F> {
 /// let result = retry!(
 ///     attempts: 3,
 ///     backoff: exponential(100ms, 2.0),
-///     operation()
+///     || operation()
 /// ).await;
 /// ```
 ///
@@ -565,20 +727,23 @@ impl<E, F: Fn(&E, u32) -> bool> RetryPredicate<E> for RetryIf<F> {
 /// - Respects cancellation during both operation and delay
 #[macro_export]
 macro_rules! retry {
-    // Full syntax with policy
-    (attempts: $max:expr, backoff: $backoff:expr, $operation:expr) => {{
-        // Placeholder: in real implementation, this retries with backoff
-        let _ = $max;
-        let _ = $backoff;
-        let _ = $operation;
-    }};
+    // Simple syntax: retry!(max_attempts, || operation())
+    ($max:expr, $factory:expr) => {
+        $crate::combinator::retry::retry(
+            $crate::combinator::retry::RetryPolicy::new().with_max_attempts($max),
+            $crate::combinator::retry::AlwaysRetry,
+            $factory,
+        )
+    };
 
-    // Simple syntax: retry!(max_attempts, operation)
-    ($max:expr, $operation:expr) => {{
-        // Placeholder: in real implementation, this retries with fixed delay
-        let _ = $max;
-        let _ = $operation;
-    }};
+    // With predicate: retry!(max_attempts, predicate, || operation())
+    ($max:expr, $predicate:expr, $factory:expr) => {
+        $crate::combinator::retry::retry(
+            $crate::combinator::retry::RetryPolicy::new().with_max_attempts($max),
+            $predicate,
+            $factory,
+        )
+    };
 }
 
 #[cfg(test)]
@@ -990,5 +1155,56 @@ mod tests {
         assert!(dbg.contains("RetryState"), "{dbg}");
         let cloned = s;
         assert_eq!(format!("{cloned:?}"), dbg);
+    }
+
+    #[test]
+    fn test_retry_execution() {
+        // Use a counter to fail the first 2 times, then succeed
+        // Must use Arc/Mutex or cell because the closure is called multiple times
+        // and FnMut allows mutating state.
+        let mut attempts = 0;
+
+        let future = retry(
+            RetryPolicy::new()
+                .with_max_attempts(3)
+                .no_jitter()
+                .with_initial_delay(Duration::ZERO),
+            AlwaysRetry,
+            move || {
+                attempts += 1;
+                let current_attempt = attempts;
+                std::future::ready(if current_attempt < 3 {
+                    Outcome::Err("fail")
+                } else {
+                    Outcome::Ok(42)
+                })
+            },
+        );
+
+        let result = futures_lite::future::block_on(future);
+        assert!(result.is_ok());
+        if let RetryResult::Ok(val) = result {
+            assert_eq!(val, 42);
+        }
+    }
+
+    #[test]
+    fn test_retry_exhausted() {
+        // Always fail
+        let future = retry(
+            RetryPolicy::new()
+                .with_max_attempts(3)
+                .no_jitter()
+                .with_initial_delay(Duration::ZERO),
+            AlwaysRetry,
+            || std::future::ready(Outcome::<i32, &str>::Err("fail forever")),
+        );
+
+        let result = futures_lite::future::block_on(future);
+        assert!(result.is_failed());
+        if let RetryResult::Failed(err) = result {
+            assert_eq!(err.attempts, 3);
+            assert_eq!(err.final_error, "fail forever");
+        }
     }
 }

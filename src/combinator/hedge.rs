@@ -42,11 +42,16 @@
 //! - If caller requests cancel before primary completes: cancel primary, never spawn backup
 //! - If caller requests cancel during race: cancel both, drain both
 
+use crate::cx::Cx;
+use crate::time::Sleep;
 use crate::types::cancel::CancelReason;
 use crate::types::outcome::PanicPayload;
 use crate::types::{Outcome, Time};
 use core::fmt;
+use std::future::Future;
 use std::marker::PhantomData;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 /// Configuration for a hedge operation.
@@ -427,25 +432,138 @@ pub fn hedge_to_result<T, E>(result: HedgeResult<T, E>) -> Result<T, HedgeError<
     }
 }
 
-/// Macro for hedging an operation (not yet implemented).
+/// A future that executes a hedge operation.
 ///
-/// In the full implementation, this spawns the primary, waits for the deadline,
-/// and races with the backup if needed.
+/// This struct is created by the [`hedge`] function.
+pub struct HedgeFuture<Prim, Back, F> {
+    primary: Option<Prim>,
+    backup_factory: Option<F>,
+    backup: Option<Back>,
+    timer: Option<Sleep>,
+    config: HedgeConfig,
+}
+
+impl<Prim, Back, F> HedgeFuture<Prim, Back, F> {
+    fn new(config: HedgeConfig, primary: Prim, backup_factory: F) -> Self {
+        // Start timer immediately
+        let timer = {
+            let now = if let Some(current) = Cx::current() {
+                if let Some(driver) = current.timer_driver() {
+                    driver.now()
+                } else {
+                    crate::time::wall_now()
+                }
+            } else {
+                crate::time::wall_now()
+            };
+            Sleep::after(now, config.hedge_delay)
+        };
+
+        Self {
+            primary: Some(primary),
+            backup_factory: Some(backup_factory),
+            backup: None,
+            timer: Some(timer),
+            config,
+        }
+    }
+}
+
+impl<Prim, Back, F, T, E> Future for HedgeFuture<Prim, Back, F>
+where
+    Prim: Future<Output = Outcome<T, E>> + Unpin,
+    Back: Future<Output = Outcome<T, E>> + Unpin,
+    F: FnOnce() -> Back + Unpin,
+    T: Unpin,
+    E: Clone + Unpin,
+{
+    type Output = HedgeResult<T, E>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = &mut *self;
+
+        // Poll primary if present
+        if let Some(primary) = &mut this.primary {
+            if let Poll::Ready(outcome) = Pin::new(primary).poll(cx) {
+                // Primary finished.
+                return Poll::Ready(if this.backup.is_some() {
+                    // Backup was running, so this was a race.
+                    // Note: We are dropping backup here, which cancels it.
+                    // We are NOT awaiting draining, as discussed in design limitations.
+                    HedgeResult::primary_won(
+                        outcome,
+                        Outcome::Cancelled(CancelReason::race_loser()),
+                    )
+                } else {
+                    // Backup never started
+                    HedgeResult::primary_fast(outcome)
+                });
+            }
+        }
+
+        // Check timer to start backup
+        if this.timer.is_some() {
+            // If timer is ready, spawn backup
+            if let Poll::Ready(()) = Pin::new(this.timer.as_mut().unwrap()).poll(cx) {
+                // Timer elapsed, start backup
+                this.timer = None; // Drop timer
+                this.config.backup_spawned = true;
+                if let Some(factory) = this.backup_factory.take() {
+                    this.backup = Some(factory());
+                }
+            }
+        }
+
+        // Poll backup if present
+        if let Some(backup) = &mut this.backup {
+            if let Poll::Ready(outcome) = Pin::new(backup).poll(cx) {
+                // Backup finished first.
+                // Drop primary (cancel).
+                return Poll::Ready(HedgeResult::backup_won(
+                    outcome,
+                    Outcome::Cancelled(CancelReason::race_loser()),
+                ));
+            }
+        }
+
+        Poll::Pending
+    }
+}
+
+/// Creates a hedge future.
 ///
-/// # Example (API shape)
+/// # Arguments
+/// * `config` - Hedge configuration (delay).
+/// * `primary` - The primary future.
+/// * `backup_factory` - Closure that produces the backup future.
+pub fn hedge<Prim, Back, F>(
+    config: HedgeConfig,
+    primary: Prim,
+    backup_factory: F,
+) -> HedgeFuture<Prim, Back, F>
+where
+    F: FnOnce() -> Back,
+{
+    HedgeFuture::new(config, primary, backup_factory)
+}
+
+/// Macro for hedging an operation.
+///
+/// In this implementation, this races the primary against a timer, and spawns
+/// the backup if the timer expires.
+///
+/// # Example
 /// ```ignore
 /// let result = hedge!(
-///     100.millis(),           // hedge delay
-///     call_primary_server(),  // primary future
-///     || call_backup_server() // backup closure (only called if needed)
-/// );
+///     HedgeConfig::from_millis(100), // hedge delay
+///     call_primary_server(),         // primary future
+///     || call_backup_server()        // backup closure (only called if needed)
+/// ).await;
 /// ```
 #[macro_export]
 macro_rules! hedge {
-    ($delay:expr, $primary:expr, $backup:expr) => {
-        compile_error!(
-            "hedge! macro not yet implemented; use hedge_outcomes or hedge_to_result instead"
-        )
+    ($config:expr, $primary:expr, $backup:expr) => {
+        $crate::combinator::hedge::hedge($config, $primary, $backup)
     };
 }
 
@@ -924,5 +1042,41 @@ mod tests {
         assert_eq!(r.winner(), r2.winner());
         let dbg = format!("{r:?}");
         assert!(dbg.contains("HedgeResult") || dbg.contains("PrimaryFast"));
+    }
+
+    // Test helper to block
+    fn block_on<F: Future>(f: F) -> F::Output {
+        futures_lite::future::block_on(f)
+    }
+
+    #[test]
+    fn test_hedge_execution_primary_fast() {
+        let config = HedgeConfig::from_secs(10); // Long delay
+        let future = hedge(
+            config,
+            std::future::ready(Outcome::<i32, ()>::Ok(1)),
+            || std::future::ready(Outcome::<i32, ()>::Ok(2)),
+        );
+
+        let result = block_on(future);
+        assert!(result.is_primary_fast());
+        if let Outcome::Ok(v) = result.winner_outcome() {
+            assert_eq!(*v, 1);
+        }
+    }
+
+    #[test]
+    fn test_hedge_execution_backup_wins_pending_primary() {
+        let config = HedgeConfig::from_millis(1);
+        let future = hedge(config, std::future::pending::<Outcome<i32, ()>>(), || {
+            std::future::ready(Outcome::<i32, ()>::Ok(2))
+        });
+
+        let result = block_on(future);
+        assert!(result.was_raced());
+        assert!(result.winner().is_backup());
+        if let Outcome::Ok(v) = result.winner_outcome() {
+            assert_eq!(*v, 2);
+        }
     }
 }
