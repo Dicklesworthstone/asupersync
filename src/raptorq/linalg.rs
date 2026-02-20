@@ -33,7 +33,7 @@
 //! ```
 
 use super::gf256::{
-    Gf256, gf256_add_slice, gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slices2,
+    gf256_add_slice, gf256_addmul_slice, gf256_addmul_slices2, gf256_mul_slices2, Gf256,
 };
 
 // ============================================================================
@@ -872,10 +872,13 @@ impl GaussianSolver {
 
     /// Eliminate: row[target] -= factor * row[pivot].
     fn eliminate_row(&mut self, target: usize, pivot: usize, factor: Gf256) {
-        self.stats.scale_adds += 1;
         if target == pivot {
             return;
         }
+        if factor == Gf256::ZERO {
+            return;
+        }
+        self.stats.scale_adds += 1;
         let factor_is_one = factor == Gf256::ONE;
 
         // Eliminate in coefficient matrix/RHS. Use split_at_mut to get
@@ -1534,6 +1537,38 @@ mod tests {
 
         assert_eq!(solver.matrix[0], vec![0, 0, 6, 6]);
         assert_eq!(solver.rhs[0].as_slice(), &[1, 2, 63]);
+    }
+
+    #[test]
+    fn eliminate_row_factor_zero_is_noop() {
+        let mut solver = GaussianSolver::new(2, 4);
+        solver.set_row(0, &[7, 9, 4, 5], DenseRow::new(vec![11, 22, 33]));
+        solver.set_row(1, &[6, 1, 2, 3], DenseRow::new(vec![10, 20, 30]));
+
+        let before_scale_adds = solver.stats.scale_adds;
+        let before_row = solver.matrix[0].clone();
+        let before_rhs = solver.rhs[0].as_slice().to_vec();
+        solver.eliminate_row(0, 1, Gf256::ZERO);
+
+        assert_eq!(solver.matrix[0], before_row);
+        assert_eq!(solver.rhs[0].as_slice(), before_rhs.as_slice());
+        assert_eq!(solver.stats.scale_adds, before_scale_adds);
+    }
+
+    #[test]
+    fn eliminate_row_target_equals_pivot_is_noop() {
+        let mut solver = GaussianSolver::new(2, 4);
+        solver.set_row(0, &[7, 9, 4, 5], DenseRow::new(vec![11, 22, 33]));
+        solver.set_row(1, &[6, 1, 2, 3], DenseRow::new(vec![10, 20, 30]));
+
+        let before_scale_adds = solver.stats.scale_adds;
+        let before_row = solver.matrix[0].clone();
+        let before_rhs = solver.rhs[0].as_slice().to_vec();
+        solver.eliminate_row(0, 0, Gf256::new(7));
+
+        assert_eq!(solver.matrix[0], before_row);
+        assert_eq!(solver.rhs[0].as_slice(), before_rhs.as_slice());
+        assert_eq!(solver.stats.scale_adds, before_scale_adds);
     }
 
     #[test]

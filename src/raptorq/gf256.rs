@@ -58,15 +58,15 @@ use core::arch::aarch64::{
 };
 #[cfg(all(feature = "simd-intrinsics", target_arch = "x86"))]
 use core::arch::x86::{
-    __m128i, __m256i, _mm_loadu_si128, _mm256_and_si256, _mm256_broadcastsi128_si256,
-    _mm256_loadu_si256, _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16,
-    _mm256_storeu_si256, _mm256_xor_si256,
+    __m128i, __m256i, _mm256_and_si256, _mm256_broadcastsi128_si256, _mm256_loadu_si256,
+    _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16, _mm256_storeu_si256,
+    _mm256_xor_si256, _mm_loadu_si128,
 };
 #[cfg(all(feature = "simd-intrinsics", target_arch = "x86_64"))]
 use core::arch::x86_64::{
-    __m128i, __m256i, _mm_loadu_si128, _mm256_and_si256, _mm256_broadcastsi128_si256,
-    _mm256_loadu_si256, _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16,
-    _mm256_storeu_si256, _mm256_xor_si256,
+    __m128i, __m256i, _mm256_and_si256, _mm256_broadcastsi128_si256, _mm256_loadu_si256,
+    _mm256_set1_epi8, _mm256_shuffle_epi8, _mm256_srli_epi16, _mm256_storeu_si256,
+    _mm256_xor_si256, _mm_loadu_si128,
 };
 
 /// The irreducible polynomial x^8 + x^4 + x^3 + x^2 + 1.
@@ -1370,9 +1370,10 @@ pub fn gf256_mul_slices2(dst_a: &mut [u8], dst_b: &mut [u8], c: Gf256) {
     if c == Gf256::ONE {
         return;
     }
+    let dispatch = dispatch();
     if !should_use_dual_mul_fused(dst_a.len(), dst_b.len()) {
-        gf256_mul_slice(dst_a, c);
-        gf256_mul_slice(dst_b, c);
+        (dispatch.mul_slice)(dst_a, c);
+        (dispatch.mul_slice)(dst_b, c);
         return;
     }
 
@@ -1384,9 +1385,9 @@ pub fn gf256_mul_slices2(dst_a: &mut [u8], dst_b: &mut [u8], c: Gf256) {
         feature = "simd-intrinsics",
         any(target_arch = "x86", target_arch = "x86_64")
     ))]
-    if matches!(dispatch().kind, Gf256Kernel::X86Avx2) && std::is_x86_feature_detected!("avx2") {
-        // SAFETY: AVX2 support is checked above and pointers remain within
-        // bounds of the provided slices.
+    if matches!(dispatch.kind, Gf256Kernel::X86Avx2) {
+        // SAFETY: `dispatch()` only selects X86Avx2 when runtime feature
+        // detection succeeds; pointers remain within provided slice bounds.
         unsafe {
             gf256_mul_slice_x86_avx2_impl_tables(dst_a, low_tbl_arr, high_tbl_arr, table);
             gf256_mul_slice_x86_avx2_impl_tables(dst_b, low_tbl_arr, high_tbl_arr, table);
@@ -1395,11 +1396,9 @@ pub fn gf256_mul_slices2(dst_a: &mut [u8], dst_b: &mut [u8], c: Gf256) {
     }
 
     #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
-    if matches!(dispatch().kind, Gf256Kernel::Aarch64Neon)
-        && std::arch::is_aarch64_feature_detected!("neon")
-    {
-        // SAFETY: NEON support is checked above and pointers remain within
-        // bounds of the provided slices.
+    if matches!(dispatch.kind, Gf256Kernel::Aarch64Neon) {
+        // SAFETY: `dispatch()` only selects Aarch64Neon when runtime feature
+        // detection succeeds; pointers remain within provided slice bounds.
         unsafe {
             gf256_mul_slice_aarch64_neon_impl_tables(dst_a, low_tbl_arr, high_tbl_arr, table);
             gf256_mul_slice_aarch64_neon_impl_tables(dst_b, low_tbl_arr, high_tbl_arr, table);
@@ -1660,14 +1659,15 @@ pub fn gf256_addmul_slices2(
     if c.is_zero() {
         return;
     }
+    let dispatch = dispatch();
     if c == Gf256::ONE {
-        gf256_add_slice(dst_a, src_a);
-        gf256_add_slice(dst_b, src_b);
+        (dispatch.add_slice)(dst_a, src_a);
+        (dispatch.add_slice)(dst_b, src_b);
         return;
     }
     if !should_use_dual_addmul_fused(dst_a.len(), dst_b.len()) {
-        gf256_addmul_slice(dst_a, src_a, c);
-        gf256_addmul_slice(dst_b, src_b, c);
+        (dispatch.addmul_slice)(dst_a, src_a, c);
+        (dispatch.addmul_slice)(dst_b, src_b, c);
         return;
     }
 
@@ -1679,8 +1679,9 @@ pub fn gf256_addmul_slices2(
         feature = "simd-intrinsics",
         any(target_arch = "x86", target_arch = "x86_64")
     ))]
-    if matches!(dispatch().kind, Gf256Kernel::X86Avx2) && std::is_x86_feature_detected!("avx2") {
-        // SAFETY: AVX2 support is checked above and both pairs are length-checked.
+    if matches!(dispatch.kind, Gf256Kernel::X86Avx2) {
+        // SAFETY: `dispatch()` only selects X86Avx2 when runtime feature
+        // detection succeeds; both pairs are length-checked.
         unsafe {
             gf256_addmul_slice_x86_avx2_impl_tables(dst_a, src_a, low_tbl_arr, high_tbl_arr, table);
             gf256_addmul_slice_x86_avx2_impl_tables(dst_b, src_b, low_tbl_arr, high_tbl_arr, table);
@@ -1689,10 +1690,9 @@ pub fn gf256_addmul_slices2(
     }
 
     #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
-    if matches!(dispatch().kind, Gf256Kernel::Aarch64Neon)
-        && std::arch::is_aarch64_feature_detected!("neon")
-    {
-        // SAFETY: NEON support is checked above and both pairs are length-checked.
+    if matches!(dispatch.kind, Gf256Kernel::Aarch64Neon) {
+        // SAFETY: `dispatch()` only selects Aarch64Neon when runtime feature
+        // detection succeeds; both pairs are length-checked.
         unsafe {
             gf256_addmul_slice_aarch64_neon_impl_tables(
                 dst_a,
@@ -2988,12 +2988,10 @@ mod tests {
                 .rejected_tuning_candidate_ids,
             policy.rejected_tuning_candidate_ids
         );
-        assert!(
-            manifest
-                .profile_pack_catalog
-                .iter()
-                .any(|metadata| metadata.profile_pack == policy.profile_pack)
-        );
+        assert!(manifest
+            .profile_pack_catalog
+            .iter()
+            .any(|metadata| metadata.profile_pack == policy.profile_pack));
         let selected = manifest
             .active_selected_tuning_candidate
             .expect("selected tuning candidate must exist in deterministic catalog");

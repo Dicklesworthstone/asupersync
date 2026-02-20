@@ -1409,21 +1409,24 @@ fn sparse_update_columns_if_beneficial_into(
     true
 }
 
-fn sparse_update_columns_for_elimination_if_beneficial_into(
+#[inline]
+fn elimination_update_plan_for_pivot_row_into(
     pivot_row: &[Gf256],
     n_cols: usize,
     pivot_col: usize,
     cols: &mut Vec<usize>,
-) -> bool {
+) -> (bool, usize) {
     cols.clear();
     if n_cols == 0 {
-        return false;
+        return (false, 0);
     }
+    let dense_suffix_start = pivot_col.min(n_cols);
 
     // Keep sparse threshold semantics identical to sparse_update_columns_if_beneficial_into:
     // pivot column contributes to density accounting even when excluded from emitted columns.
     let threshold =
         n_cols.saturating_mul(HYBRID_SPARSE_COST_NUMERATOR) / HYBRID_SPARSE_COST_DENOMINATOR;
+    let mut prefix_has_signal = false;
 
     if n_cols <= SMALL_ROW_DENSE_FASTPATH_COLS {
         let mut small_cols = [0usize; SMALL_ROW_DENSE_FASTPATH_COLS];
@@ -1433,8 +1436,18 @@ fn sparse_update_columns_for_elimination_if_beneficial_into(
             if coef.is_zero() {
                 continue;
             }
+            if idx < pivot_col {
+                prefix_has_signal = true;
+            }
             if sparse_nnz == threshold {
-                return false;
+                return (
+                    false,
+                    if prefix_has_signal {
+                        0
+                    } else {
+                        dense_suffix_start
+                    },
+                );
             }
             sparse_nnz += 1;
             if idx != pivot_col {
@@ -1444,7 +1457,14 @@ fn sparse_update_columns_for_elimination_if_beneficial_into(
         }
         cols.reserve(out_len.saturating_sub(cols.len()));
         cols.extend_from_slice(&small_cols[..out_len]);
-        return true;
+        return (
+            true,
+            if prefix_has_signal {
+                0
+            } else {
+                dense_suffix_start
+            },
+        );
     }
 
     let mut sparse_nnz = 0usize;
@@ -1452,18 +1472,46 @@ fn sparse_update_columns_for_elimination_if_beneficial_into(
         if coef.is_zero() {
             continue;
         }
+        if idx < pivot_col {
+            prefix_has_signal = true;
+        }
         if sparse_nnz == threshold {
             cols.clear();
-            return false;
+            return (
+                false,
+                if prefix_has_signal {
+                    0
+                } else {
+                    dense_suffix_start
+                },
+            );
         }
         sparse_nnz += 1;
         if idx != pivot_col {
             cols.push(idx);
         }
     }
-    true
+    (
+        true,
+        if prefix_has_signal {
+            0
+        } else {
+            dense_suffix_start
+        },
+    )
 }
 
+#[cfg(test)]
+fn sparse_update_columns_for_elimination_if_beneficial_into(
+    pivot_row: &[Gf256],
+    n_cols: usize,
+    pivot_col: usize,
+    cols: &mut Vec<usize>,
+) -> bool {
+    elimination_update_plan_for_pivot_row_into(pivot_row, n_cols, pivot_col, cols).0
+}
+
+#[cfg(test)]
 #[inline]
 fn dense_update_start_col(pivot_row: &[Gf256], pivot_col: usize) -> usize {
     if pivot_row
@@ -1486,7 +1534,7 @@ fn eliminate_row_coefficients(
     use_sparse: bool,
     sparse_cols: &[usize],
     dense_start_col: usize,
-) {
+) -> bool {
     debug_assert_eq!(row.len(), pivot_row.len());
     debug_assert!(pivot_col < row.len());
     row[pivot_col] = Gf256::ZERO;
@@ -1503,7 +1551,7 @@ fn eliminate_row_coefficients(
                 row[c] += factor * pivot_row[c];
             }
         }
-        return;
+        return factor_is_one;
     }
 
     if dense_start_col == 0 {
@@ -1534,16 +1582,28 @@ fn eliminate_row_coefficients(
             }
         }
     }
+    factor_is_one
 }
 
 #[inline]
-fn eliminate_row_rhs(rhs: &mut [u8], pivot_rhs: &[u8], factor: Gf256) {
+fn eliminate_row_rhs_with_factor_kind(
+    rhs: &mut [u8],
+    pivot_rhs: &[u8],
+    factor: Gf256,
+    factor_is_one: bool,
+) {
     debug_assert_eq!(rhs.len(), pivot_rhs.len());
-    if factor == Gf256::ONE {
+    debug_assert_eq!(factor_is_one, factor == Gf256::ONE);
+    if factor_is_one {
         gf256_add_slice(rhs, pivot_rhs);
     } else {
         gf256_addmul_slice(rhs, pivot_rhs, factor);
     }
+}
+
+#[inline]
+fn eliminate_row_rhs(rhs: &mut [u8], pivot_rhs: &[u8], factor: Gf256) {
+    eliminate_row_rhs_with_factor_kind(rhs, pivot_rhs, factor, factor == Gf256::ONE);
 }
 
 #[inline]
@@ -2346,13 +2406,12 @@ impl InactivationDecoder {
                 // Copy pivot row into reusable buffers (no heap allocation)
                 pivot_buf[..n_cols].copy_from_slice(&a[prow_off..prow_off + n_cols]);
                 pivot_rhs[..symbol_size].copy_from_slice(&b[prow]);
-                let use_sparse = sparse_update_columns_for_elimination_if_beneficial_into(
+                let (use_sparse, dense_start_col) = elimination_update_plan_for_pivot_row_into(
                     &pivot_buf[..n_cols],
                     n_cols,
                     col,
                     &mut sparse_cols,
                 );
-                let dense_start_col = dense_update_start_col(&pivot_buf[..n_cols], col);
 
                 // Eliminate column in all other rows.
                 for (row, rhs) in b.iter_mut().enumerate().take(n_rows) {
@@ -2364,7 +2423,7 @@ impl InactivationDecoder {
                     if factor.is_zero() {
                         continue;
                     }
-                    eliminate_row_coefficients(
+                    let factor_is_one = eliminate_row_coefficients(
                         &mut a[row_off..row_off + n_cols],
                         &pivot_buf[..n_cols],
                         factor,
@@ -2373,7 +2432,12 @@ impl InactivationDecoder {
                         &sparse_cols,
                         dense_start_col,
                     );
-                    eliminate_row_rhs(rhs, &pivot_rhs[..symbol_size], factor);
+                    eliminate_row_rhs_with_factor_kind(
+                        rhs,
+                        &pivot_rhs[..symbol_size],
+                        factor,
+                        factor_is_one,
+                    );
                     gauss_ops += 1;
                 }
             }
@@ -2602,13 +2666,12 @@ impl InactivationDecoder {
                 // Copy pivot row into reusable buffers
                 pivot_buf[..n_cols].copy_from_slice(&a[prow_off..prow_off + n_cols]);
                 pivot_rhs[..symbol_size].copy_from_slice(&b[prow]);
-                let use_sparse = sparse_update_columns_for_elimination_if_beneficial_into(
+                let (use_sparse, dense_start_col) = elimination_update_plan_for_pivot_row_into(
                     &pivot_buf[..n_cols],
                     n_cols,
                     col,
                     &mut sparse_cols,
                 );
-                let dense_start_col = dense_update_start_col(&pivot_buf[..n_cols], col);
 
                 // Eliminate column in all other rows.
                 for (row, rhs) in b.iter_mut().enumerate().take(n_rows) {
@@ -2620,7 +2683,7 @@ impl InactivationDecoder {
                     if factor.is_zero() {
                         continue;
                     }
-                    eliminate_row_coefficients(
+                    let factor_is_one = eliminate_row_coefficients(
                         &mut a[row_off..row_off + n_cols],
                         &pivot_buf[..n_cols],
                         factor,
@@ -2629,7 +2692,12 @@ impl InactivationDecoder {
                         &sparse_cols,
                         dense_start_col,
                     );
-                    eliminate_row_rhs(rhs, &pivot_rhs[..symbol_size], factor);
+                    eliminate_row_rhs_with_factor_kind(
+                        rhs,
+                        &pivot_rhs[..symbol_size],
+                        factor,
+                        factor_is_one,
+                    );
                     gauss_ops += 1;
                     // Record row operation in proof trace
                     trace.record_row_op();
@@ -3269,6 +3337,24 @@ mod tests {
     }
 
     #[test]
+    fn elimination_update_plan_dense_start_matches_dense_scan_semantics() {
+        let mut cols = Vec::new();
+        for pivot_col in 0..8 {
+            for mask in 0u16..(1u16 << 8) {
+                let mut pivot = vec![Gf256::ZERO; 8];
+                for (idx, coef) in pivot.iter_mut().enumerate() {
+                    if (mask >> idx) & 1 == 1 {
+                        *coef = Gf256::ONE;
+                    }
+                }
+                let (_, dense_start_col) =
+                    elimination_update_plan_for_pivot_row_into(&pivot, 8, pivot_col, &mut cols);
+                assert_eq!(dense_start_col, dense_update_start_col(&pivot, pivot_col));
+            }
+        }
+    }
+
+    #[test]
     fn dense_row_update_suffix_matches_full_manual_when_prefix_zero() {
         let pivot_row = vec![
             Gf256::ZERO,
@@ -3393,6 +3479,44 @@ mod tests {
                 factor
             );
         }
+    }
+
+    #[test]
+    fn eliminate_row_coefficients_reports_factor_classification() {
+        let pivot_col = 2usize;
+        let pivot_row = vec![
+            Gf256::new(0x10),
+            Gf256::new(0x20),
+            Gf256::ONE,
+            Gf256::new(0x30),
+            Gf256::new(0x40),
+        ];
+        let mut row = vec![
+            Gf256::new(0xaa),
+            Gf256::new(0xbb),
+            Gf256::new(0xcc),
+            Gf256::new(0xdd),
+            Gf256::new(0xee),
+        ];
+
+        assert!(eliminate_row_coefficients(
+            &mut row,
+            &pivot_row,
+            Gf256::ONE,
+            pivot_col,
+            false,
+            &[],
+            0,
+        ));
+        assert!(!eliminate_row_coefficients(
+            &mut row,
+            &pivot_row,
+            Gf256::new(0x57),
+            pivot_col,
+            false,
+            &[],
+            0,
+        ));
     }
 
     #[test]
