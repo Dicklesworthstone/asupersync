@@ -273,7 +273,7 @@ impl<A: Actor> ActorHandle<A> {
     ///
     /// Blocks until the actor loop completes (mailbox closed or cancelled),
     /// then returns the actor's final state or a join error.
-    pub async fn join(&mut self, cx: &Cx) -> Result<A, JoinError> {
+    pub async fn join(&self, cx: &Cx) -> Result<A, JoinError> {
         self.receiver.recv(cx).await.unwrap_or_else(|_| {
             // The oneshot was dropped without sending — the actor task was
             // cancelled or the runtime shut down. Propagate the actual

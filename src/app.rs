@@ -1588,7 +1588,7 @@ mod tests {
 
         // Spawn a client task that calls GetHistory.
         let server_ref = handle.server_ref();
-        let (mut client_handle, client_stored) = scope
+        let (client_handle, client_stored) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
                 server_ref.call(&cx, ChatCall::GetHistory).await.unwrap()
             })
@@ -1636,7 +1636,7 @@ mod tests {
         handle.try_cast(ChatCast::Post("msg3".into())).unwrap();
 
         let server_ref = handle.server_ref();
-        let (mut client_handle, client_stored) = scope
+        let (client_handle, client_stored) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
                 server_ref.call(&cx, ChatCall::GetHistory).await.unwrap()
             })
@@ -1698,7 +1698,7 @@ mod tests {
             .unwrap();
 
         let server_ref = named_handle.server_ref();
-        let (mut client_handle, client_stored) = scope
+        let (client_handle, client_stored) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
                 server_ref.call(&cx, ChatCall::GetHistory).await.unwrap()
             })
@@ -1879,7 +1879,7 @@ mod tests {
             .unwrap();
 
         let server_ref = handle.server_ref();
-        let (mut client_handle, client_stored) = scope
+        let (client_handle, client_stored) = scope
             .spawn(&mut runtime.state, &cx, move |cx| async move {
                 server_ref.call(&cx, ChatCall::GetHistory).await.unwrap()
             })

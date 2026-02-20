@@ -530,7 +530,7 @@ impl RemoteHandle {
     ///
     /// Returns `RemoteError` if the remote task failed, was cancelled,
     /// or the lease expired.
-    pub async fn join(&mut self, cx: &Cx) -> Result<RemoteOutcome, RemoteError> {
+    pub async fn join(&self, cx: &Cx) -> Result<RemoteOutcome, RemoteError> {
         self.receiver.recv(cx).await.unwrap_or_else(|_| {
             Err(RemoteError::Cancelled(CancelReason::user(
                 "remote handle channel closed",
@@ -545,7 +545,7 @@ impl RemoteHandle {
     /// - `Ok(Some(result))` if the remote task has completed
     /// - `Ok(None)` if the remote task is still running
     /// - `Err(RemoteError)` if the remote task failed
-    pub fn try_join(&mut self) -> Result<Option<RemoteOutcome>, RemoteError> {
+    pub fn try_join(&self) -> Result<Option<RemoteOutcome>, RemoteError> {
         match self.receiver.try_recv() {
             Ok(result) => Ok(Some(result?)),
             Err(oneshot::TryRecvError::Empty) => Ok(None),

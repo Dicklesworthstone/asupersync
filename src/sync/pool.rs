@@ -224,6 +224,10 @@ pub type PoolReturnSender<R> = mpsc::Sender<PoolReturn<R>>;
 /// Receiver used to observe resources returning to a pool.
 pub type PoolReturnReceiver<R> = mpsc::Receiver<PoolReturn<R>>;
 
+type ReturnWakerEntry = (u64, Waker);
+type ReturnWakerList = SmallVec<[ReturnWakerEntry; 4]>;
+type ReturnWakers = Arc<PoolMutex<ReturnWakerList>>;
+
 /// Trait for resource pools with cancel-safe acquisition.
 pub trait Pool: Send + Sync {
     /// The type of resource managed by this pool.
@@ -403,7 +407,7 @@ pub struct PooledResource<R> {
     /// implementations that use only the public `new()` constructor get
     /// `None`, which is harmless — it just means notification relies on
     /// the next `process_returns` call instead of being immediate.
-    return_wakers: Option<Arc<PoolMutex<SmallVec<[(u64, Waker); 4]>>>>,
+    return_wakers: Option<ReturnWakers>,
 }
 
 impl<R> PooledResource<R> {
@@ -440,7 +444,7 @@ impl<R> PooledResource<R> {
     /// [`GenericPool`].  Called internally after construction so that
     /// returning/discarding the resource immediately wakes waiting
     /// acquirers.
-    fn with_return_notify(mut self, wakers: Arc<PoolMutex<SmallVec<[(u64, Waker); 4]>>>) -> Self {
+    fn with_return_notify(mut self, wakers: ReturnWakers) -> Self {
         self.return_wakers = Some(wakers);
         self
     }
@@ -839,7 +843,7 @@ where
         {
             let mut wakers = self.pool.return_wakers.lock();
             let id = self.waiter_id.expect("waiter_id assigned above");
-            
+
             if let Some((_, existing)) = wakers.iter_mut().find(|(wid, _)| *wid == id) {
                 if !existing.will_wake(cx.waker()) {
                     existing.clone_from(cx.waker());
@@ -973,7 +977,7 @@ where
     /// return/discard so that [`WaitForNotification`] futures are
     /// re-polled immediately instead of waiting for the next
     /// `process_returns` call.
-    return_wakers: Arc<PoolMutex<SmallVec<[(u64, Waker); 4]>>>,
+    return_wakers: ReturnWakers,
     /// Lock-free snapshot of `GenericPoolState::closed` (monotone false→true).
     closed: AtomicBool,
     /// Optional metrics handle for observability.
@@ -1975,7 +1979,7 @@ mod tests {
     }
 
     struct ReentrantReturnWaker {
-        return_wakers: Arc<PoolMutex<SmallVec<[(u64, Waker); 4]>>>,
+        return_wakers: ReturnWakers,
         tx: mpsc::Sender<bool>,
     }
 
@@ -2036,7 +2040,7 @@ mod tests {
     fn pooled_resource_notifies_wakers_outside_return_waker_lock() {
         init_test("pooled_resource_notifies_wakers_outside_return_waker_lock");
         let (return_tx, _return_rx) = mpsc::channel();
-        let return_wakers = Arc::new(PoolMutex::new(SmallVec::<[(u64, Waker); 4]>::new()));
+        let return_wakers = Arc::new(PoolMutex::new(ReturnWakerList::new()));
         let (probe_tx, probe_rx) = mpsc::channel();
 
         {

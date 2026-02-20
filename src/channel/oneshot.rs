@@ -547,8 +547,8 @@ mod tests {
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
     use std::future::Future;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Waker};
 
     fn init_test(name: &str) {
@@ -602,7 +602,7 @@ mod tests {
     fn basic_send_recv() {
         init_test("basic_send_recv");
         let cx = test_cx();
-        let (tx, mut rx) = channel::<i32>();
+        let (tx, rx) = channel::<i32>();
 
         tx.send(&cx, 42).expect("send should succeed");
         let value = block_on(rx.recv(&cx)).expect("recv should succeed");
@@ -614,7 +614,7 @@ mod tests {
     fn reserve_then_send() {
         init_test("reserve_then_send");
         let cx = test_cx();
-        let (tx, mut rx) = channel::<i32>();
+        let (tx, rx) = channel::<i32>();
 
         let permit = tx.reserve(&cx);
         permit.send(42).expect("send should succeed");
@@ -628,7 +628,7 @@ mod tests {
     fn reserve_then_abort() {
         init_test("reserve_then_abort");
         let cx = test_cx();
-        let (tx, mut rx) = channel::<i32>();
+        let (tx, rx) = channel::<i32>();
 
         let permit = tx.reserve(&cx);
         permit.abort();
@@ -647,7 +647,7 @@ mod tests {
     fn permit_drop_is_abort() {
         init_test("permit_drop_is_abort");
         let cx = test_cx();
-        let (tx, mut rx) = channel::<i32>();
+        let (tx, rx) = channel::<i32>();
 
         {
             let _permit = tx.reserve(&cx);
@@ -667,7 +667,7 @@ mod tests {
     #[test]
     fn sender_dropped_without_send() {
         init_test("sender_dropped_without_send");
-        let (tx, mut rx) = channel::<i32>();
+        let (tx, rx) = channel::<i32>();
         // Explicitly drop sender without sending
         drop(tx);
 
@@ -685,7 +685,7 @@ mod tests {
     fn receiver_dropped_before_send() {
         init_test("receiver_dropped_before_send");
         let cx = test_cx();
-        let (tx, mut rx) = channel::<i32>();
+        let (tx, rx) = channel::<i32>();
 
         // Drop receiver first
         drop(rx);
@@ -708,7 +708,7 @@ mod tests {
     #[test]
     fn try_recv_empty() {
         init_test("try_recv_empty");
-        let (tx, mut rx) = channel::<i32>();
+        let (tx, rx) = channel::<i32>();
 
         // Nothing sent yet
         let err = rx.try_recv();
@@ -822,7 +822,7 @@ mod tests {
         init_test("value_is_moved_not_cloned");
         // Test that non-Clone types work
         let cx = test_cx();
-        let (tx, mut rx) = channel::<NonClone>();
+        let (tx, rx) = channel::<NonClone>();
 
         tx.send(&cx, NonClone(42)).expect("send should succeed");
         let value = block_on(rx.recv(&cx)).expect("recv should succeed");
@@ -834,7 +834,7 @@ mod tests {
     fn permit_send_returns_error_with_value() {
         init_test("permit_send_returns_error_with_value");
         let cx = test_cx();
-        let (tx, mut rx) = channel::<i32>();
+        let (tx, rx) = channel::<i32>();
 
         drop(rx);
 
@@ -855,7 +855,7 @@ mod tests {
         let cx = test_cx();
         cx.set_cancel_requested(true);
 
-        let (tx, mut rx) = channel::<i32>();
+        let (tx, rx) = channel::<i32>();
 
         // Sender sends but receiver is cancelled
         tx.send(&cx, 42).expect("send should succeed");
@@ -900,7 +900,7 @@ mod tests {
     fn recv_cancel_after_pending_clears_registered_waker() {
         init_test("recv_cancel_after_pending_clears_registered_waker");
         let cx = test_cx();
-        let (_tx, mut rx) = channel::<i32>();
+        let (_tx, rx) = channel::<i32>();
         let inner = Arc::clone(&rx.inner);
 
         let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
@@ -956,7 +956,7 @@ mod tests {
     fn recv_value_ready_clears_stale_waker() {
         init_test("recv_value_ready_clears_stale_waker");
         let cx = test_cx();
-        let (tx, mut rx) = channel::<i32>();
+        let (tx, rx) = channel::<i32>();
         let inner = Arc::clone(&rx.inner);
 
         let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
@@ -995,7 +995,7 @@ mod tests {
     fn recv_closed_clears_stale_waker() {
         init_test("recv_closed_clears_stale_waker");
         let cx = test_cx();
-        let (tx, mut rx) = channel::<i32>();
+        let (tx, rx) = channel::<i32>();
         let inner = Arc::clone(&rx.inner);
 
         let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
@@ -1030,7 +1030,7 @@ mod tests {
     fn try_recv_value_ready_clears_stale_waker() {
         init_test("try_recv_value_ready_clears_stale_waker");
         let cx = test_cx();
-        let (tx, mut rx) = channel::<i32>();
+        let (tx, rx) = channel::<i32>();
         let inner = Arc::clone(&rx.inner);
 
         let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
@@ -1057,7 +1057,7 @@ mod tests {
     fn try_recv_closed_clears_stale_waker() {
         init_test("try_recv_closed_clears_stale_waker");
         let cx = test_cx();
-        let (tx, mut rx) = channel::<i32>();
+        let (tx, rx) = channel::<i32>();
         let inner = Arc::clone(&rx.inner);
 
         let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
@@ -1086,7 +1086,7 @@ mod tests {
     fn permit_send_receiver_dropped_clears_waker() {
         init_test("permit_send_receiver_dropped_clears_waker");
         let cx = test_cx();
-        let (tx, mut rx) = channel::<i32>();
+        let (tx, rx) = channel::<i32>();
 
         // Poll recv to register a waker, then drop the future.
         // RecvFuture::Drop now clears the stale waker (correct behavior).
@@ -1152,7 +1152,7 @@ mod tests {
     #[test]
     fn receiver_drop_on_poisoned_mutex_does_not_panic() {
         init_test("receiver_drop_on_poisoned_mutex_does_not_panic");
-        let (tx, mut rx) = channel::<i32>();
+        let (tx, rx) = channel::<i32>();
 
         // Poison the mutex.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1170,7 +1170,7 @@ mod tests {
     fn recv_future_drop_clears_stale_waker() {
         init_test("recv_future_drop_clears_stale_waker");
         let cx = test_cx();
-        let (tx, mut rx) = channel::<i32>();
+        let (tx, rx) = channel::<i32>();
 
         let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
         let mut task_cx = Context::from_waker(&waker);
@@ -1207,7 +1207,7 @@ mod tests {
         // Value-ready takes priority over cancellation.
         init_test("recv_returns_value_even_when_cancelled");
         let cx = test_cx();
-        let (tx, mut rx) = channel::<i32>();
+        let (tx, rx) = channel::<i32>();
 
         tx.send(&cx, 77).unwrap();
         cx.set_cancel_requested(true);
@@ -1224,7 +1224,7 @@ mod tests {
         // After reserve + abort, is_closed should be true (no sender, no permit, no value).
         init_test("is_closed_after_permit_abort");
         let cx = test_cx();
-        let (tx, mut rx) = channel::<i32>();
+        let (tx, rx) = channel::<i32>();
 
         let permit = tx.reserve(&cx);
         // At this point: sender_consumed=true, permit_outstanding=true
@@ -1359,7 +1359,7 @@ mod tests {
     fn permit_abort_wakes_pending_receiver_and_returns_closed() {
         init_test("permit_abort_wakes_pending_receiver_and_returns_closed");
         let cx = test_cx();
-        let (tx, mut rx) = channel::<i32>();
+        let (tx, rx) = channel::<i32>();
 
         let wake_counter = Arc::new(AtomicUsize::new(0));
         let recv_waker = counting_waker(Arc::clone(&wake_counter));
@@ -1429,7 +1429,7 @@ mod tests {
     fn recv_repoll_same_waker_keeps_waiter_identity() {
         init_test("recv_repoll_same_waker_keeps_waiter_identity");
         let cx = test_cx();
-        let (_tx, mut rx) = channel::<i32>();
+        let (_tx, rx) = channel::<i32>();
 
         let recv_waker = counting_waker(Arc::new(AtomicUsize::new(0)));
         let mut task_cx = Context::from_waker(&recv_waker);

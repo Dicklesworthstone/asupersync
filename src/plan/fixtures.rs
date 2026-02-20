@@ -7,8 +7,8 @@
 use std::fmt::Write;
 use std::time::Duration;
 
-use super::rewrite::RewriteRule;
 use super::PlanDag;
+use super::rewrite::RewriteRule;
 
 /// A named plan fixture with metadata.
 #[derive(Debug)]
@@ -371,7 +371,7 @@ fn race_obligation_cancel() -> PlanFixture {
 
 use std::collections::{BTreeSet, HashMap};
 
-use super::certificate::{verify, verify_steps, PlanHash, RewriteCertificate};
+use super::certificate::{PlanHash, RewriteCertificate, verify, verify_steps};
 use super::extractor::PlanCost;
 use super::rewrite::RewritePolicy;
 use super::{PlanId, PlanNode};
@@ -1702,8 +1702,8 @@ mod tests {
 
     #[test]
     fn extraction_pipeline_equivalence() {
-        use crate::plan::extractor::Extractor;
         use crate::plan::PlanId;
+        use crate::plan::extractor::Extractor;
         use std::collections::HashMap;
 
         init_test();
@@ -1772,8 +1772,8 @@ mod tests {
 
     #[test]
     fn extraction_after_rewrite_equivalence() {
-        use crate::plan::extractor::Extractor;
         use crate::plan::PlanId;
+        use crate::plan::extractor::Extractor;
         use std::collections::HashMap;
 
         init_test();

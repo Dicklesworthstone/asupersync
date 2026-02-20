@@ -330,7 +330,7 @@ mod tests {
         let task_id = TaskId::from_arena(ArenaIndex::new(1, 0));
         let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
 
-        let mut handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
+        let handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
         crate::assert_with_log!(
             handle.task_id() == task_id,
             "task id matches",
@@ -364,7 +364,7 @@ mod tests {
         let task_id = TaskId::from_arena(ArenaIndex::new(1, 0));
         let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
 
-        let mut handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
+        let handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
 
         // Send a cancelled result
         crate::test_section!("send");
@@ -404,7 +404,7 @@ mod tests {
         }
 
         drop(tx);
-        let mut handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
+        let handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
 
         let result = block_on(handle.join(&cx));
         match result {
@@ -429,7 +429,7 @@ mod tests {
         let task_id = TaskId::from_arena(ArenaIndex::new(1, 0));
         let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
 
-        let mut handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
+        let handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
 
         crate::test_section!("send");
         tx.send(
@@ -499,7 +499,7 @@ mod tests {
         tx.send(&cx, Ok::<i32, JoinError>(7))
             .expect("send should succeed");
 
-        let mut handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
+        let handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
         drop(handle.join(&cx));
 
         let (cancel_requested, cancel_reason_is_none) = {
@@ -529,7 +529,7 @@ mod tests {
         let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
         drop(tx);
 
-        let mut handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
+        let handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
         drop(handle.join(&cx));
 
         let (cancel_requested, cancel_reason_is_none) = {
@@ -598,7 +598,7 @@ mod tests {
     fn task_handle_debug() {
         let task_id = TaskId::from_arena(ArenaIndex::new(5, 0));
         let (_tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
-        let mut handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
+        let handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
         let dbg = format!("{handle:?}");
         assert!(dbg.contains("TaskHandle"));
     }
@@ -607,7 +607,7 @@ mod tests {
     fn try_join_not_ready() {
         let task_id = TaskId::from_arena(ArenaIndex::new(20, 0));
         let (_tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
-        let mut handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
+        let handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
         let result = handle.try_join();
         assert!(matches!(result, Ok(None)));
     }
@@ -618,7 +618,7 @@ mod tests {
         let task_id = TaskId::from_arena(ArenaIndex::new(21, 0));
         let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
         tx.send(&cx, Ok(99)).expect("send");
-        let mut handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
+        let handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
         let result = handle.try_join();
         assert_eq!(result.unwrap(), Some(99));
     }

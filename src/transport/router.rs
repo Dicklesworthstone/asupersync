@@ -15,10 +15,10 @@ use crate::transport::sink::{SymbolSink, SymbolSinkExt};
 use crate::types::symbol::{ObjectId, Symbol};
 use crate::types::{RegionId, Time};
 use parking_lot::RwLock;
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 type EndpointSinkMap = HashMap<EndpointId, Arc<Mutex<Box<dyn SymbolSink>>>>;
 
@@ -316,7 +316,8 @@ impl LoadBalancer {
 
         match self.strategy {
             LoadBalanceStrategy::RoundRobin => {
-                let idx = (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize) % available.len();
+                let idx =
+                    (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize) % available.len();
                 Some(available[idx])
             }
 
@@ -339,19 +340,19 @@ impl LoadBalancer {
                 Some(*available.last().unwrap())
             }
 
-            LoadBalanceStrategy::LeastConnections => available
-                .into_iter()
-                .min_by_key(|e| e.connection_count()),
+            LoadBalanceStrategy::LeastConnections => {
+                available.into_iter().min_by_key(|e| e.connection_count())
+            }
 
-            LoadBalanceStrategy::WeightedLeastConnections => available
-                .into_iter()
-                .min_by(|a, b| {
+            LoadBalanceStrategy::WeightedLeastConnections => {
+                available.into_iter().min_by(|a, b| {
                     let a_score = f64::from(a.connection_count()) / f64::from(a.weight.max(1));
                     let b_score = f64::from(b.connection_count()) / f64::from(b.weight.max(1));
                     a_score
                         .partial_cmp(&b_score)
                         .unwrap_or(std::cmp::Ordering::Equal)
-                }),
+                })
+            }
 
             LoadBalanceStrategy::Random => {
                 // Simple LCG random
@@ -364,7 +365,8 @@ impl LoadBalancer {
             LoadBalanceStrategy::HashBased => object_id.map_or_else(
                 || {
                     // Fall back to round-robin
-                    let idx = (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize) % available.len();
+                    let idx = (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize)
+                        % available.len();
                     Some(available[idx])
                 },
                 |oid| {
@@ -387,13 +389,14 @@ impl LoadBalancer {
             return Vec::new();
         }
 
-        // Filter healthy endpoints first
-        // Note: For high-throughput this allocation might be costly.
-        // But we need a contiguous slice/vec for indexing.
-        let mut available: Vec<&Arc<Endpoint>> = endpoints
-            .iter()
-            .filter(|e| e.state().can_receive())
-            .collect();
+        // Filter healthy endpoints first.
+        // Pre-size from the full endpoint set to avoid repeated growth in mixed-health pools.
+        let mut available: Vec<&Arc<Endpoint>> = Vec::with_capacity(endpoints.len());
+        for endpoint in endpoints {
+            if endpoint.state().can_receive() {
+                available.push(endpoint);
+            }
+        }
 
         if available.is_empty() {
             return Vec::new();
@@ -1542,6 +1545,7 @@ impl From<DispatchError> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     fn test_endpoint(id: u64) -> Endpoint {
         Endpoint::new(EndpointId(id), format!("node-{id}:8080"))
@@ -1900,7 +1904,6 @@ mod tests {
         let b = EndpointId::new(2);
         assert!(a < b);
 
-        use std::collections::HashSet;
         let mut set = HashSet::new();
         set.insert(a);
         set.insert(b);
@@ -1994,7 +1997,6 @@ mod tests {
         assert!(format!("{k1:?}").contains("Object"));
         assert!(k1 <= k2);
 
-        use std::collections::HashSet;
         let mut set = HashSet::new();
         set.insert(k1);
         set.insert(RouteKey::Default);

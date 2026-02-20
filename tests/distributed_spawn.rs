@@ -26,7 +26,7 @@ fn test_distributed_spawn_virtual_runtime() {
 
     // 3. Spawn remote task on Node B (from Node A's perspective)
     println!("Spawning remote task from A to B...");
-    let mut handle = spawn_remote(
+    let handle = spawn_remote(
         &cx,
         node_b.clone(),
         ComputationName::new("test-computation"),
