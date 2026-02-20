@@ -442,7 +442,7 @@ mod tests {
     fn tracked_oneshot_send_recv() {
         init_test("tracked_oneshot_send_recv");
         let cx = test_cx();
-        let (tx, rx) = tracked_oneshot::<i32>();
+        let (tx, mut rx) = tracked_oneshot::<i32>();
 
         let permit = tx.reserve(&cx);
         let proof = permit.send(100).expect("oneshot send failed");
@@ -465,7 +465,7 @@ mod tests {
     fn tracked_oneshot_abort() {
         init_test("tracked_oneshot_abort");
         let cx = test_cx();
-        let (tx, rx) = tracked_oneshot::<i32>();
+        let (tx, mut rx) = tracked_oneshot::<i32>();
 
         let permit = tx.reserve(&cx);
         let proof = permit.abort();
@@ -506,7 +506,7 @@ mod tests {
     fn tracked_oneshot_convenience_send() {
         init_test("tracked_oneshot_convenience_send");
         let cx = test_cx();
-        let (tx, rx) = tracked_oneshot::<i32>();
+        let (tx, mut rx) = tracked_oneshot::<i32>();
 
         let proof = tx.send(&cx, 55).expect("convenience send failed");
 

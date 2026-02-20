@@ -999,7 +999,7 @@ mod tests {
         }
 
         let err = decoder.decode_snapshot(&encoded.params).unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::CorruptedSymbol);
+        assert_eq!(err.kind(), ErrorKind::InsufficientSymbols);
     }
 
     #[test]

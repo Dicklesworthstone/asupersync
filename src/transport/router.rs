@@ -305,31 +305,25 @@ impl LoadBalancer {
         endpoints: &'a [Arc<Endpoint>],
         object_id: Option<ObjectId>,
     ) -> Option<&'a Arc<Endpoint>> {
+        let available: SmallVec<[&Arc<Endpoint>; 8]> = endpoints
+            .iter()
+            .filter(|e| e.state().can_receive())
+            .collect();
+
+        if available.is_empty() {
+            return None;
+        }
+
         match self.strategy {
             LoadBalanceStrategy::RoundRobin => {
-                let available_len = endpoints.iter().filter(|e| e.state().can_receive()).count();
-                if available_len == 0 {
-                    return None;
-                }
-                let idx =
-                    (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize) % available_len;
-                endpoints
-                    .iter()
-                    .filter(|e| e.state().can_receive())
-                    .nth(idx)
+                let idx = (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize) % available.len();
+                Some(available[idx])
             }
 
             LoadBalanceStrategy::WeightedRoundRobin => {
-                let available: SmallVec<[&Arc<Endpoint>; 8]> = endpoints
-                    .iter()
-                    .filter(|e| e.state().can_receive())
-                    .collect();
-                if available.is_empty() {
-                    return None;
-                }
                 let total_weight: u64 = available.iter().map(|e| u64::from(e.weight)).sum();
                 if total_weight == 0 {
-                    return available.first().copied();
+                    return Some(available[0]);
                 }
 
                 let counter = self.rr_counter.fetch_add(1, Ordering::Relaxed);
@@ -342,17 +336,15 @@ impl LoadBalancer {
                         return Some(endpoint);
                     }
                 }
-                available.last().copied()
+                Some(*available.last().unwrap())
             }
 
-            LoadBalanceStrategy::LeastConnections => endpoints
-                .iter()
-                .filter(|e| e.state().can_receive())
+            LoadBalanceStrategy::LeastConnections => available
+                .into_iter()
                 .min_by_key(|e| e.connection_count()),
 
-            LoadBalanceStrategy::WeightedLeastConnections => endpoints
-                .iter()
-                .filter(|e| e.state().can_receive())
+            LoadBalanceStrategy::WeightedLeastConnections => available
+                .into_iter()
                 .min_by(|a, b| {
                     let a_score = f64::from(a.connection_count()) / f64::from(a.weight.max(1));
                     let b_score = f64::from(b.connection_count()) / f64::from(b.weight.max(1));
@@ -362,51 +354,25 @@ impl LoadBalancer {
                 }),
 
             LoadBalanceStrategy::Random => {
-                let available_len = endpoints.iter().filter(|e| e.state().can_receive()).count();
-                if available_len == 0 {
-                    return None;
-                }
                 // Simple LCG random
                 let seed = self.random_seed.fetch_add(1, Ordering::Relaxed);
                 let random = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-                let idx = (random as usize) % available_len;
-                endpoints
-                    .iter()
-                    .filter(|e| e.state().can_receive())
-                    .nth(idx)
+                let idx = (random as usize) % available.len();
+                Some(available[idx])
             }
 
             LoadBalanceStrategy::HashBased => object_id.map_or_else(
                 || {
                     // Fall back to round-robin
-                    let available_len =
-                        endpoints.iter().filter(|e| e.state().can_receive()).count();
-                    if available_len == 0 {
-                        return None;
-                    }
-                    let idx =
-                        (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize) % available_len;
-                    endpoints
-                        .iter()
-                        .filter(|e| e.state().can_receive())
-                        .nth(idx)
+                    let idx = (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize) % available.len();
+                    Some(available[idx])
                 },
                 |oid| {
-                    let available_len =
-                        endpoints.iter().filter(|e| e.state().can_receive()).count();
-                    if available_len == 0 {
-                        return None;
-                    }
                     let hash = oid.as_u128() as usize;
-                    endpoints
-                        .iter()
-                        .filter(|e| e.state().can_receive())
-                        .nth(hash % available_len)
+                    Some(available[hash % available.len()])
                 },
             ),
-            LoadBalanceStrategy::FirstAvailable => {
-                endpoints.iter().find(|e| e.state().can_receive())
-            }
+            LoadBalanceStrategy::FirstAvailable => Some(available[0]),
         }
     }
 

@@ -973,6 +973,8 @@ impl RegionRecord {
         tasks: Vec<TaskId>,
         cancel_reason: Option<CancelReason>,
     ) {
+        let prev_state = self.state.load();
+
         // Update atomic state
         self.state.store(state);
 
@@ -982,6 +984,12 @@ impl RegionRecord {
         inner.children = children;
         inner.tasks = tasks;
         inner.cancel_reason = cancel_reason;
+        drop(inner);
+
+        // Ensure heap is reclaimed if the snapshot forces the region closed
+        if state == RegionState::Closed && prev_state != RegionState::Closed {
+            self.clear_heap();
+        }
     }
 }
 

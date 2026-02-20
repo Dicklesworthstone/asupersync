@@ -1785,10 +1785,7 @@ mod tests {
     fn curve_budget_debug_clone_eq() {
         let arrival = MinPlusCurve::new(vec![0, 2, 4], 2).unwrap();
         let service = MinPlusCurve::new(vec![0, 3, 6], 3).unwrap();
-        let cb = CurveBudget {
-            arrival: arrival,
-            service: service,
-        };
+        let cb = CurveBudget { arrival, service };
         let cb2 = cb.clone();
         assert_eq!(cb, cb2);
         let dbg = format!("{cb:?}");

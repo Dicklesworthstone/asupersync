@@ -3967,9 +3967,9 @@ mod tests {
         // Must not panic; outcome is either Ok or a well-formed error
         let result = decoder.decode(&received);
         match result {
-            Ok(decoded) => {
+            Ok(decoded_symbols) => {
                 assert_eq!(
-                    decoded.source, source,
+                    decoded_symbols.source, source,
                     "decode with duplicate ESI should recover correct source"
                 );
             }

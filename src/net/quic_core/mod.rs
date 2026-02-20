@@ -1119,7 +1119,7 @@ mod tests {
     fn long_header_handshake_roundtrip() {
         let header = PacketHeader::Long(LongHeader {
             packet_type: LongPacketType::Handshake,
-            version: 0x00000001,
+            version: 0x0000_0001,
             dst_cid: ConnectionId::new(&[0x01, 0x02]).unwrap(),
             src_cid: ConnectionId::new(&[0x03]).unwrap(),
             token: vec![],
@@ -1138,7 +1138,7 @@ mod tests {
     fn long_header_zerortt_roundtrip() {
         let header = PacketHeader::Long(LongHeader {
             packet_type: LongPacketType::ZeroRtt,
-            version: 0xff00001d,
+            version: 0xff00_001d,
             dst_cid: ConnectionId::new(&[0xaa, 0xbb, 0xcc]).unwrap(),
             src_cid: ConnectionId::new(&[]).unwrap(),
             token: vec![],

@@ -294,8 +294,6 @@ impl DecodingPipeline {
         &mut self,
         mut auth_symbol: AuthenticatedSymbol,
     ) -> Result<SymbolAcceptResult, DecodingError> {
-        let symbol_id = auth_symbol.symbol().id();
-
         if self.config.verify_auth {
             match &self.auth_context {
                 Some(ctx) => {
@@ -310,9 +308,11 @@ impl DecodingPipeline {
                 None => {
                     // If callers already verified the symbol (e.g. at a trusted boundary), allow
                     // the verified flag to stand. If not verified and we have no auth context,
-                    // we cannot validate the tag and must fail deterministically.
+                    // we cannot validate the tag and must reject the symbol deterministically.
                     if !auth_symbol.is_verified() {
-                        return Err(DecodingError::AuthenticationFailed { symbol_id });
+                        return Ok(SymbolAcceptResult::Rejected(
+                            RejectReason::AuthenticationFailed,
+                        ));
                     }
                 }
             }
@@ -1631,15 +1631,21 @@ mod tests {
         );
 
         let result = decoder.feed(auth);
-        let is_err = result.is_err();
-        crate::assert_with_log!(is_err, "unverified with no context errors", true, is_err);
-        let err = result.unwrap_err();
-        let is_auth_failed = matches!(err, DecodingError::AuthenticationFailed { .. });
+        let is_ok = result.is_ok();
         crate::assert_with_log!(
-            is_auth_failed,
-            "AuthenticationFailed variant",
+            is_ok,
+            "unverified with no context is rejected safely",
             true,
-            is_auth_failed
+            is_ok
+        );
+
+        let accept = result.unwrap();
+        let expected = SymbolAcceptResult::Rejected(RejectReason::AuthenticationFailed);
+        crate::assert_with_log!(
+            accept == expected,
+            "rejected as auth failed",
+            expected,
+            accept
         );
         crate::test_complete!("verify_auth_no_context_unverified_symbol_errors");
     }

@@ -474,11 +474,12 @@ impl<'a> Cursor<'a> {
     }
 
     fn read_exact(&mut self, n: usize) -> Result<&'a [u8], SnapshotError> {
-        if self.pos + n > self.data.len() {
+        let end = self.pos.checked_add(n).ok_or(SnapshotError::UnexpectedEof)?;
+        if end > self.data.len() {
             return Err(SnapshotError::UnexpectedEof);
         }
-        let slice = &self.data[self.pos..self.pos + n];
-        self.pos += n;
+        let slice = &self.data[self.pos..end];
+        self.pos = end;
         Ok(slice)
     }
 

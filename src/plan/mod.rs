@@ -868,7 +868,11 @@ mod tests {
         }
     }
 
-    async fn join_branch(cx: &Cx, left: &LeafHandle, right: &LeafHandle) -> BTreeSet<&'static str> {
+    async fn join_branch(
+        cx: &Cx,
+        left: &mut LeafHandle,
+        right: &mut LeafHandle,
+    ) -> BTreeSet<&'static str> {
         let left_result = left.join(cx).await;
         let right_result = right.join(cx).await;
         let mut set = BTreeSet::new();
@@ -881,7 +885,11 @@ mod tests {
         set
     }
 
-    async fn race_branch(cx: &Cx, left: LeafHandle, right: LeafHandle) -> Option<&'static str> {
+    async fn race_branch(
+        cx: &Cx,
+        mut left: LeafHandle,
+        mut right: LeafHandle,
+    ) -> Option<&'static str> {
         let winner =
             crate::combinator::Select::new(Box::pin(left.join(cx)), Box::pin(right.join(cx))).await;
         match winner {
@@ -956,29 +964,29 @@ mod tests {
         crate::lab::runtime::test(seed, |runtime| {
             let region = runtime.state.create_root_region(Budget::INFINITE);
 
-            let (_driver_id, driver_handle, scheduled) = match kind {
+            let (_driver_id, mut driver_handle, scheduled) = match kind {
                 ProgramKind::Original => {
-                    let (a1_id, a1_handle) = runtime
+                    let (a1_id, mut a1_handle) = runtime
                         .state
                         .create_task(region, Budget::INFINITE, leaf_task("a", 2))
                         .expect("spawn a1");
-                    let (b_id, b_handle) = runtime
+                    let (b_id, mut b_handle) = runtime
                         .state
                         .create_task(region, Budget::INFINITE, leaf_task("b", 1))
                         .expect("spawn b");
-                    let (a2_id, a2_handle) = runtime
+                    let (a2_id, mut a2_handle) = runtime
                         .state
                         .create_task(region, Budget::INFINITE, leaf_task("a", 2))
                         .expect("spawn a2");
-                    let (c_id, c_handle) = runtime
+                    let (c_id, mut c_handle) = runtime
                         .state
                         .create_task(region, Budget::INFINITE, leaf_task("c", 3))
                         .expect("spawn c");
 
                     let driver_future = async move {
                         let cx = Cx::current().expect("cx set");
-                        let join_left = join_branch(&cx, &a1_handle, &b_handle);
-                        let join_right = join_branch(&cx, &a2_handle, &c_handle);
+                        let join_left = join_branch(&cx, &mut a1_handle, &mut b_handle);
+                        let join_right = join_branch(&cx, &mut a2_handle, &mut c_handle);
                         match crate::combinator::Select::new(
                             Box::pin(join_left),
                             Box::pin(join_right),
@@ -1015,7 +1023,7 @@ mod tests {
                     (driver_id, driver_handle, scheduled)
                 }
                 ProgramKind::Rewritten => {
-                    let (a_id, a_handle) = runtime
+                    let (a_id, mut a_handle) = runtime
                         .state
                         .create_task(region, Budget::INFINITE, leaf_task("a", 2))
                         .expect("spawn a");

@@ -7,8 +7,8 @@
 use std::fmt::Write;
 use std::time::Duration;
 
-use super::PlanDag;
 use super::rewrite::RewriteRule;
+use super::PlanDag;
 
 /// A named plan fixture with metadata.
 #[derive(Debug)]
@@ -371,7 +371,7 @@ fn race_obligation_cancel() -> PlanFixture {
 
 use std::collections::{BTreeSet, HashMap};
 
-use super::certificate::{PlanHash, RewriteCertificate, verify, verify_steps};
+use super::certificate::{verify, verify_steps, PlanHash, RewriteCertificate};
 use super::extractor::PlanCost;
 use super::rewrite::RewritePolicy;
 use super::{PlanId, PlanNode};
@@ -597,7 +597,7 @@ enum LabJoinState {
 }
 
 struct SharedLabInner {
-    handle: TaskHandle<BTreeSet<String>>,
+    handle: parking_lot::Mutex<Option<TaskHandle<BTreeSet<String>>>>,
     state: parking_lot::Mutex<LabJoinState>,
 }
 
@@ -610,7 +610,7 @@ impl SharedLabHandle {
     fn new(handle: TaskHandle<BTreeSet<String>>) -> Self {
         Self {
             inner: std::sync::Arc::new(SharedLabInner {
-                handle,
+                handle: parking_lot::Mutex::new(Some(handle)),
                 state: parking_lot::Mutex::new(LabJoinState::Empty),
             }),
         }
@@ -635,7 +635,14 @@ impl SharedLabHandle {
         }
 
         if i_am_joiner {
-            let result = self.inner.handle.join(&cx).await.unwrap_or_default();
+            let handle = self
+                .inner
+                .handle
+                .lock()
+                .take()
+                .expect("join handle available");
+            let result = handle.join(&cx).await.unwrap_or_default();
+            *self.inner.handle.lock() = Some(handle);
             *self.inner.state.lock() = LabJoinState::Ready(result.clone());
             result
         } else {
@@ -659,23 +666,35 @@ impl SharedLabHandle {
         match &*state {
             LabJoinState::Ready(result) => Some(result.clone()),
             LabJoinState::InFlight => None,
-            LabJoinState::Empty => match self.inner.handle.try_join() {
-                Ok(Some(result)) => {
-                    *state = LabJoinState::Ready(result.clone());
-                    Some(result)
+            LabJoinState::Empty => {
+                let handle = self
+                    .inner
+                    .handle
+                    .lock()
+                    .take()
+                    .expect("join handle available");
+                let join_result = handle.try_join();
+                *self.inner.handle.lock() = Some(handle);
+                match join_result {
+                    Ok(Some(result)) => {
+                        *state = LabJoinState::Ready(result.clone());
+                        Some(result)
+                    }
+                    Ok(None) => None,
+                    Err(_) => {
+                        *state = LabJoinState::Ready(BTreeSet::new());
+                        drop(state);
+                        Some(BTreeSet::new())
+                    }
                 }
-                Ok(None) => None,
-                Err(_) => {
-                    *state = LabJoinState::Ready(BTreeSet::new());
-                    drop(state);
-                    Some(BTreeSet::new())
-                }
-            },
+            }
         }
     }
 
     fn abort_with_reason(&self, reason: CancelReason) {
-        self.inner.handle.abort_with_reason(reason);
+        if let Some(handle) = self.inner.handle.lock().as_ref() {
+            handle.abort_with_reason(reason);
+        }
     }
 }
 
@@ -880,44 +899,25 @@ fn spawn_lab_race(
 
         let cx = crate::cx::Cx::current().expect("cx set");
 
-        // Race children using waker-based select: create JoinFutures that
-        // register the race driver's waker on each child's oneshot receiver.
-        // When any child completes, the oneshot wakes the race driver and it
-        // polls all children to find the winner. This avoids busy-poll
-        // starvation where the scheduler might consistently pick the race
-        // driver over children due to deterministic RNG tie-breaking.
-        let winner_idx;
-        let winner_result;
-        {
-            let mut join_futs: Vec<_> = child_handles
+        let (winner_idx, winner_result) = loop {
+            if let Some((i, result)) = child_handles
                 .iter()
-                .map(|h| {
-                    Some(
-                        h.inner
-                            .handle
-                            .join_with_drop_reason(&cx, CancelReason::race_loser()),
-                    )
-                })
-                .collect();
+                .enumerate()
+                .find_map(|(i, handle)| handle.try_join_probe().map(|result| (i, result)))
+            {
+                break (i, result);
+            }
+            if cx.checkpoint().is_err() {
+                return BTreeSet::new();
+            }
+            lab_yield_once().await;
+        };
 
-            let (idx, result) = std::future::poll_fn(|task_cx| {
-                for (i, fut_opt) in join_futs.iter_mut().enumerate() {
-                    if let Some(fut) = fut_opt {
-                        if let std::task::Poll::Ready(result) =
-                            std::pin::Pin::new(fut).poll(task_cx)
-                        {
-                            *fut_opt = None;
-                            return std::task::Poll::Ready((i, result.unwrap_or_default()));
-                        }
-                    }
-                }
-                std::task::Poll::Pending
-            })
-            .await;
-            winner_idx = idx;
-            winner_result = result;
-            // Drop remaining JoinFutures — their drop handlers call
-            // abort_with_reason(race_loser) on losers.
+        // Cancel losers deterministically before draining them.
+        for (j, handle) in child_handles.iter().enumerate() {
+            if j != winner_idx {
+                handle.abort_with_reason(CancelReason::race_loser());
+            }
         }
 
         // Cache winner result in SharedLabHandle so other DAG parents
@@ -1702,8 +1702,8 @@ mod tests {
 
     #[test]
     fn extraction_pipeline_equivalence() {
-        use crate::plan::PlanId;
         use crate::plan::extractor::Extractor;
+        use crate::plan::PlanId;
         use std::collections::HashMap;
 
         init_test();
@@ -1772,8 +1772,8 @@ mod tests {
 
     #[test]
     fn extraction_after_rewrite_equivalence() {
-        use crate::plan::PlanId;
         use crate::plan::extractor::Extractor;
+        use crate::plan::PlanId;
         use std::collections::HashMap;
 
         init_test();

@@ -98,7 +98,7 @@
 
 use crate::channel::oneshot;
 use crate::combinator::{Either, Select};
-use crate::cx::{Cx, cap};
+use crate::cx::{cap, Cx};
 use crate::record::{AdmissionError, TaskRecord};
 use crate::runtime::task_handle::{JoinError, TaskHandle};
 use crate::runtime::{RegionCreateError, RuntimeState, SpawnError, StoredTask};
@@ -943,8 +943,8 @@ impl<P: Policy> Scope<'_, P> {
         Fut2: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        use crate::combinator::Either;
         use crate::combinator::select::Select;
+        use crate::combinator::Either;
         use std::pin::pin;
 
         // 1. Spawn primary
@@ -1288,7 +1288,7 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let handle = scope
+        let mut handle = scope
             .spawn_registered(&mut state, &cx, move |cx| async move {
                 let child_registry = cx.registry_handle().expect("child must inherit registry");
                 let child_registry_arc = child_registry.as_arc();
@@ -1339,7 +1339,7 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (handle, mut stored) = scope
+        let (mut handle, mut stored) = scope
             .spawn(&mut state, &cx, |cx| async move { cx.has_timer() })
             .expect("spawn should succeed");
 
@@ -1371,7 +1371,7 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (handle, mut stored) = scope
+        let (mut handle, mut stored) = scope
             .spawn_blocking(&mut state, &cx, |cx| cx.has_timer())
             .expect("spawn_blocking should succeed");
 
@@ -1394,7 +1394,7 @@ mod tests {
         let scope = test_scope(region, Budget::INFINITE);
 
         // spawn_registered should both create and store the task
-        let handle = scope
+        let mut handle = scope
             .spawn_registered(&mut state, &cx, |_| async { 42_i32 })
             .unwrap();
 
@@ -1521,7 +1521,7 @@ mod tests {
             crate::runtime::scheduler::three_lane::ScopedLocalReady::new(Arc::clone(&local_ready));
         let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(1);
 
-        let handle = scope
+        let mut handle = scope
             .spawn_local(&mut state, &cx, |_| async move { 7_i32 })
             .unwrap();
 
@@ -1621,7 +1621,8 @@ mod tests {
         let scope = test_scope(region, Budget::INFINITE);
 
         // Spawn a task
-        let (handle, mut stored_task) = scope.spawn(&mut state, &cx, |_| async { 42_i32 }).unwrap();
+        let (mut handle, mut stored_task) =
+            scope.spawn(&mut state, &cx, |_| async { 42_i32 }).unwrap();
         // The stored task is returned directly, not put in state by scope.spawn
 
         // Create join future
@@ -1660,7 +1661,7 @@ mod tests {
         let scope = test_scope(region, Budget::INFINITE);
 
         // Spawn a task that checks for cancellation
-        let (handle, mut stored_task) = scope
+        let (mut handle, mut stored_task) = scope
             .spawn(&mut state, &cx, |cx| async move {
                 // We expect to be cancelled immediately because abort() is called before we run
                 if cx.checkpoint().is_err() {
@@ -1901,7 +1902,7 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (handle, mut stored_task) = scope
+        let (mut handle, mut stored_task) = scope
             .spawn(&mut state, &cx, |_| async {
                 std::panic::panic_any("oops");
             })

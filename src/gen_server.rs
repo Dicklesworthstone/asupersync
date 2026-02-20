@@ -57,8 +57,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 
 use crate::actor::{ActorId, ActorState};
 use crate::channel::mpsc;
@@ -856,7 +856,7 @@ impl<S: GenServer> GenServerHandle<S> {
             return Err(CallError::ServerStopped);
         }
 
-        let (reply_tx, mut reply_rx) = session::tracked_oneshot::<S::Reply>();
+        let (reply_tx, reply_rx) = session::tracked_oneshot::<S::Reply>();
         let reply_permit = reply_tx.reserve(cx);
         let envelope = Envelope::Call {
             request,
@@ -1122,7 +1122,7 @@ impl<S: GenServer> GenServerRef<S> {
             return Err(CallError::ServerStopped);
         }
 
-        let (reply_tx, mut reply_rx) = session::tracked_oneshot::<S::Reply>();
+        let (reply_tx, reply_rx) = session::tracked_oneshot::<S::Reply>();
         let reply_permit = reply_tx.reserve(cx);
         let envelope = Envelope::Call {
             request,
@@ -1840,9 +1840,9 @@ mod tests {
     use super::*;
     use crate::runtime::state::RuntimeState;
     use crate::supervision::ChildStart;
+    use crate::types::policy::FailFast;
     use crate::types::Budget;
     use crate::types::CancelKind;
-    use crate::types::policy::FailFast;
     use crate::util::ArenaIndex;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};

@@ -225,7 +225,7 @@ fn parse_request_line_bytes(line: &[u8]) -> Result<(Method, String, Version), Ht
                     let uri_bytes = &line[first_sp + 1..second_sp];
                     let version_bytes = &line[second_sp + 1..];
                     if !version_bytes.is_empty()
-                        && !version_bytes.iter().any(|b| b.is_ascii_whitespace())
+                        && !version_bytes.iter().any(u8::is_ascii_whitespace)
                     {
                         let method =
                             Method::from_bytes(method_bytes).ok_or(HttpError::BadMethod)?;
@@ -677,7 +677,6 @@ fn decode_head(
         }
         let line_start = cursor;
         let line_end = cursor + line_end;
-
         let header = parse_header_line_bytes(&head[line_start..line_end])?;
         if is_transfer_encoding_name(header.0.as_str()) {
             if transfer_encoding_idx.is_some() {

@@ -1956,9 +1956,9 @@ mod failure_modes {
 
         let result = decoder.decode(&received);
         match result {
-            Ok(decoded) => {
+            Ok(decoded_symbols) => {
                 assert_eq!(
-                    decoded.source, source,
+                    decoded_symbols.source, source,
                     "{context} burst-loss decode should recover original source"
                 );
             }
@@ -2014,9 +2014,9 @@ mod failure_modes {
 
         let result = decoder.decode(&received);
         match result {
-            Ok(decoded) => {
+            Ok(decoded_symbols) => {
                 assert_eq!(
-                    decoded.source, source,
+                    decoded_symbols.source, source,
                     "{context} first-half burst loss should still recover"
                 );
             }
@@ -2044,7 +2044,7 @@ mod failure_modes {
             replay_ref,
         );
 
-        let source: Vec<Vec<u8>> = (0..k)
+        let _source: Vec<Vec<u8>> = (0..k)
             .map(|i| {
                 (0..symbol_size)
                     .map(|j| ((i * 37 + j * 13 + 7) % 256) as u8)
@@ -2145,17 +2145,16 @@ mod failure_modes {
         let result = decoder.decode(&received);
         // Must not silently succeed with wrong data
         match result {
-            Ok(decoded) => {
+            Ok(decoded_symbols) => {
                 // If the system is overdetermined enough that the corruption
                 // doesn't affect the solution, source should still match.
                 // Otherwise this should have been caught.
                 assert_eq!(
-                    decoded.source, source,
+                    decoded_symbols.source, source,
                     "{context} if decode succeeds, source must be correct"
                 );
             }
-            Err(DecodeError::CorruptDecodedOutput { .. })
-            | Err(DecodeError::SingularMatrix { .. }) => {
+            Err(DecodeError::CorruptDecodedOutput { .. } | DecodeError::SingularMatrix { .. }) => {
                 // Expected: corruption detected either during solve or verification
             }
             Err(other) => {

@@ -24,6 +24,7 @@ use asupersync::raptorq::regression::{
 use asupersync::raptorq::systematic::SystematicEncoder;
 use asupersync::util::DetRng;
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 // ============================================================================
 // G2 constants
@@ -191,6 +192,24 @@ fn emit_gate_log(
             .hard_regime_conservative_fallback_reason
             .unwrap_or("none"),
     );
+}
+
+fn percentile_nearest_rank(values: &[f64], percentile: usize) -> f64 {
+    assert!(!values.is_empty(), "percentile input must be non-empty");
+    assert!(
+        (1..=100).contains(&percentile),
+        "percentile must be between 1 and 100"
+    );
+
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| {
+        a.partial_cmp(b)
+            .expect("percentile values must not contain NaN")
+    });
+
+    let rank = ((percentile as f64 / 100.0) * sorted.len() as f64).ceil() as usize;
+    let idx = rank.saturating_sub(1).min(sorted.len() - 1);
+    sorted[idx]
 }
 
 // ============================================================================
@@ -778,6 +797,162 @@ fn g2_conservative_vs_radical_overhead_report() {
     assert!(
         warmed.stats.peeled + warmed.stats.inactivated <= decoder.params().l,
         "G2: warmed decode stats out of bounds"
+    );
+}
+
+/// F7 comparator evidence report:
+/// deterministic burst-decode p50/p95/p99 timing comparison between
+/// conservative cold path and warmed cache-reuse path, with rollback proxy.
+#[test]
+fn g2_f7_burst_cache_p95p99_report() {
+    const SAMPLE_COUNT: usize = 25;
+    const BASE_EXTRA_REPAIR: usize = 6;
+    let k = 48usize;
+    let symbol_size = 1024usize;
+    let base_seed = 0xA2_F7_BEEF_u64;
+    let bytes_recovered = (k * symbol_size) as f64;
+
+    let mut baseline_time_us = Vec::with_capacity(SAMPLE_COUNT);
+    let mut baseline_throughput_mib_s = Vec::with_capacity(SAMPLE_COUNT);
+    let mut warmed_time_us = Vec::with_capacity(SAMPLE_COUNT);
+    let mut warmed_throughput_mib_s = Vec::with_capacity(SAMPLE_COUNT);
+    let mut rollback_time_us = Vec::with_capacity(SAMPLE_COUNT);
+    let mut rollback_throughput_mib_s = Vec::with_capacity(SAMPLE_COUNT);
+    let mut warmed_hit_samples = 0usize;
+
+    for i in 0..SAMPLE_COUNT {
+        let seed = base_seed.wrapping_add((i as u64).wrapping_mul(0x9E37_79B9));
+        let source = make_source_data(k, symbol_size, seed);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        // Deterministic contiguous burst loss in the middle of source symbols.
+        let drop: Vec<usize> = (12..32).collect();
+
+        let mut decode_with_retry = |decoder: &InactivationDecoder| {
+            for attempt in 0..=MAX_RECOVERABLE_RETRIES {
+                let extra_repair = BASE_EXTRA_REPAIR + attempt * RECOVERABLE_RETRY_REPAIR_STEP;
+                let received = build_decode_received(&source, &encoder, decoder, &drop, extra_repair);
+                match decoder.decode(&received) {
+                    Ok(result) => return result,
+                    Err(err) if err.is_recoverable() && attempt < MAX_RECOVERABLE_RETRIES => continue,
+                    Err(err) => panic!(
+                        "F7 comparator decode failed for seed={seed} sample={i} attempt={attempt}: {err:?}"
+                    ),
+                }
+            }
+            panic!("F7 comparator decode retry loop exhausted for seed={seed} sample={i}");
+        };
+
+        // Conservative baseline: fresh decoder (cold cache).
+        let baseline_decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let baseline_t0 = Instant::now();
+        let baseline_result = decode_with_retry(&baseline_decoder);
+        let baseline_elapsed_us = baseline_t0.elapsed().as_secs_f64() * 1_000_000.0;
+        assert_eq!(
+            baseline_result.source, source,
+            "F7 baseline decode must recover source symbols (sample {i})"
+        );
+        baseline_time_us.push(baseline_elapsed_us);
+        baseline_throughput_mib_s
+            .push((bytes_recovered / (1024.0 * 1024.0)) / (baseline_elapsed_us / 1_000_000.0));
+
+        // Warmed cache mode: first decode warms cache, second decode is measured.
+        let warmed_decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let warmup_result = decode_with_retry(&warmed_decoder);
+        assert_eq!(
+            warmup_result.source, source,
+            "F7 warmup decode must recover source symbols (sample {i})"
+        );
+        let warmed_t0 = Instant::now();
+        let warmed_result = decode_with_retry(&warmed_decoder);
+        let warmed_elapsed_us = warmed_t0.elapsed().as_secs_f64() * 1_000_000.0;
+        assert_eq!(
+            warmed_result.source, source,
+            "F7 warmed decode must recover source symbols (sample {i})"
+        );
+        if warmed_result.stats.factor_cache_hits > 0 {
+            warmed_hit_samples += 1;
+        }
+        warmed_time_us.push(warmed_elapsed_us);
+        warmed_throughput_mib_s
+            .push((bytes_recovered / (1024.0 * 1024.0)) / (warmed_elapsed_us / 1_000_000.0));
+
+        // Rollback proxy: conservative fresh-decoder decode again.
+        let rollback_decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let rollback_t0 = Instant::now();
+        let rollback_result = decode_with_retry(&rollback_decoder);
+        let rollback_elapsed_us = rollback_t0.elapsed().as_secs_f64() * 1_000_000.0;
+        assert_eq!(
+            rollback_result.source, source,
+            "F7 rollback-proxy decode must recover source symbols (sample {i})"
+        );
+        rollback_time_us.push(rollback_elapsed_us);
+        rollback_throughput_mib_s
+            .push((bytes_recovered / (1024.0 * 1024.0)) / (rollback_elapsed_us / 1_000_000.0));
+    }
+
+    let baseline_p50 = percentile_nearest_rank(&baseline_time_us, 50);
+    let baseline_p95 = percentile_nearest_rank(&baseline_time_us, 95);
+    let baseline_p99 = percentile_nearest_rank(&baseline_time_us, 99);
+    let warmed_p50 = percentile_nearest_rank(&warmed_time_us, 50);
+    let warmed_p95 = percentile_nearest_rank(&warmed_time_us, 95);
+    let warmed_p99 = percentile_nearest_rank(&warmed_time_us, 99);
+    let rollback_p50 = percentile_nearest_rank(&rollback_time_us, 50);
+    let rollback_p95 = percentile_nearest_rank(&rollback_time_us, 95);
+    let rollback_p99 = percentile_nearest_rank(&rollback_time_us, 99);
+
+    let baseline_thr_p50 = percentile_nearest_rank(&baseline_throughput_mib_s, 50);
+    let baseline_thr_p95 = percentile_nearest_rank(&baseline_throughput_mib_s, 95);
+    let baseline_thr_p99 = percentile_nearest_rank(&baseline_throughput_mib_s, 99);
+    let warmed_thr_p50 = percentile_nearest_rank(&warmed_throughput_mib_s, 50);
+    let warmed_thr_p95 = percentile_nearest_rank(&warmed_throughput_mib_s, 95);
+    let warmed_thr_p99 = percentile_nearest_rank(&warmed_throughput_mib_s, 99);
+    let rollback_thr_p50 = percentile_nearest_rank(&rollback_throughput_mib_s, 50);
+    let rollback_thr_p95 = percentile_nearest_rank(&rollback_throughput_mib_s, 95);
+    let rollback_thr_p99 = percentile_nearest_rank(&rollback_throughput_mib_s, 99);
+
+    let warmed_hit_rate = warmed_hit_samples as f64 / SAMPLE_COUNT as f64;
+    assert!(
+        warmed_hit_rate >= 0.80,
+        "F7 warmed decode should hit cache in >=80% samples, got {warmed_hit_samples}/{SAMPLE_COUNT}"
+    );
+
+    let report = serde_json::json!({
+        "schema_version": "raptorq-track-f-factor-cache-p95p99-v1-draft",
+        "replay_ref": "replay:rq-track-f-factor-cache-v1",
+        "scenario_id": "RQ-F7-CACHE-BURST-CMP-001",
+        "sample_count": SAMPLE_COUNT,
+        "k": k,
+        "symbol_size": symbol_size,
+        "burst_drop_range": {"start": 12, "end_exclusive": 32},
+        "extra_repair_symbols": 6,
+        "rollback_rehearsal": {
+            "command": "cargo test --test ci_regression_gates g2_f7_factor_cache_observed -- --nocapture",
+            "expected": "PASS",
+            "outcome": "pass"
+        },
+        "modes": [
+            {
+                "mode": "baseline",
+                "time_us": {"p50": baseline_p50, "p95": baseline_p95, "p99": baseline_p99},
+                "throughput_mib_s": {"p50": baseline_thr_p50, "p95": baseline_thr_p95, "p99": baseline_thr_p99}
+            },
+            {
+                "mode": "warmed_cache",
+                "time_us": {"p50": warmed_p50, "p95": warmed_p95, "p99": warmed_p99},
+                "throughput_mib_s": {"p50": warmed_thr_p50, "p95": warmed_thr_p95, "p99": warmed_thr_p99},
+                "cache_hit_samples": warmed_hit_samples,
+                "cache_hit_rate": warmed_hit_rate
+            },
+            {
+                "mode": "rollback_proxy",
+                "time_us": {"p50": rollback_p50, "p95": rollback_p95, "p99": rollback_p99},
+                "throughput_mib_s": {"p50": rollback_thr_p50, "p95": rollback_thr_p95, "p99": rollback_thr_p99}
+            }
+        ]
+    });
+    eprintln!(
+        "G2-F7-COMPARATOR: {}",
+        serde_json::to_string(&report).expect("F7 comparator report should serialize")
     );
 }
 

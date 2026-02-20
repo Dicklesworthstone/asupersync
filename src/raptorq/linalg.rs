@@ -938,27 +938,22 @@ impl GaussianSolver {
 
             let rhs_target = &mut lower.as_mut_slice()[..rhs_len];
             let rhs_pivot = &upper.as_slice()[..rhs_len];
-            if tail_start < cols {
-                if factor_is_one {
-                    gf256_add_slices2(
-                        &mut target_row[tail_start..],
-                        &pivot_row[tail_start..],
-                        rhs_target,
-                        rhs_pivot,
-                    );
-                } else {
-                    gf256_addmul_slices2(
-                        &mut target_row[tail_start..],
-                        &pivot_row[tail_start..],
-                        rhs_target,
-                        rhs_pivot,
-                        factor,
-                    );
-                }
-            } else if factor_is_one {
-                gf256_add_slice(rhs_target, rhs_pivot);
+            debug_assert!(tail_start < cols);
+            if factor_is_one {
+                gf256_add_slices2(
+                    &mut target_row[tail_start..],
+                    &pivot_row[tail_start..],
+                    rhs_target,
+                    rhs_pivot,
+                );
             } else {
-                gf256_addmul_slice(rhs_target, rhs_pivot, factor);
+                gf256_addmul_slices2(
+                    &mut target_row[tail_start..],
+                    &pivot_row[tail_start..],
+                    rhs_target,
+                    rhs_pivot,
+                    factor,
+                );
             }
         } else {
             if factor_is_one {
