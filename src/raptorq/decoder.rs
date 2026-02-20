@@ -11,7 +11,7 @@
 //! - Tie-breaking rules are explicit (lowest column index wins)
 //! - Same received symbols in same order produce identical decode results
 
-use crate::raptorq::gf256::{Gf256, gf256_add_slice, gf256_addmul_slice};
+use crate::raptorq::gf256::{gf256_add_slice, gf256_addmul_slice, Gf256};
 use crate::raptorq::proof::{
     DecodeConfig, DecodeProof, EliminationTrace, FailureReason, InactivationStrategy, PeelingTrace,
     ReceivedSummary,
@@ -1415,12 +1415,51 @@ fn sparse_update_columns_for_elimination_if_beneficial_into(
     pivot_col: usize,
     cols: &mut Vec<usize>,
 ) -> bool {
-    if !sparse_update_columns_if_beneficial_into(pivot_row, n_cols, cols) {
+    cols.clear();
+    if n_cols == 0 {
         return false;
     }
 
-    if let Ok(idx) = cols.binary_search(&pivot_col) {
-        cols.remove(idx);
+    // Keep sparse threshold semantics identical to sparse_update_columns_if_beneficial_into:
+    // pivot column contributes to density accounting even when excluded from emitted columns.
+    let threshold =
+        n_cols.saturating_mul(HYBRID_SPARSE_COST_NUMERATOR) / HYBRID_SPARSE_COST_DENOMINATOR;
+
+    if n_cols <= SMALL_ROW_DENSE_FASTPATH_COLS {
+        let mut small_cols = [0usize; SMALL_ROW_DENSE_FASTPATH_COLS];
+        let mut sparse_nnz = 0usize;
+        let mut out_len = 0usize;
+        for (idx, coef) in pivot_row.iter().take(n_cols).enumerate() {
+            if coef.is_zero() {
+                continue;
+            }
+            if sparse_nnz == threshold {
+                return false;
+            }
+            sparse_nnz += 1;
+            if idx != pivot_col {
+                small_cols[out_len] = idx;
+                out_len += 1;
+            }
+        }
+        cols.reserve(out_len.saturating_sub(cols.len()));
+        cols.extend_from_slice(&small_cols[..out_len]);
+        return true;
+    }
+
+    let mut sparse_nnz = 0usize;
+    for (idx, coef) in pivot_row.iter().take(n_cols).enumerate() {
+        if coef.is_zero() {
+            continue;
+        }
+        if sparse_nnz == threshold {
+            cols.clear();
+            return false;
+        }
+        sparse_nnz += 1;
+        if idx != pivot_col {
+            cols.push(idx);
+        }
     }
     true
 }
@@ -1505,6 +1544,18 @@ fn eliminate_row_rhs(rhs: &mut [u8], pivot_rhs: &[u8], factor: Gf256) {
     } else {
         gf256_addmul_slice(rhs, pivot_rhs, factor);
     }
+}
+
+#[inline]
+fn scale_pivot_row_and_rhs(row: &mut [Gf256], rhs: &mut [u8], inv: Gf256) {
+    debug_assert!(!row.is_empty());
+    if inv == Gf256::ONE {
+        return;
+    }
+    for value in row {
+        *value *= inv;
+    }
+    crate::raptorq::gf256::gf256_mul_slice(rhs, inv);
 }
 
 fn should_activate_hard_regime(n_rows: usize, n_cols: usize, a: &[Gf256]) -> bool {
@@ -2290,10 +2341,7 @@ impl InactivationDecoder {
                 let prow_off = prow * n_cols;
                 let pivot_coef = a[prow_off + col];
                 let inv = pivot_coef.inv();
-                for value in &mut a[prow_off..prow_off + n_cols] {
-                    *value *= inv;
-                }
-                crate::raptorq::gf256::gf256_mul_slice(&mut b[prow], inv);
+                scale_pivot_row_and_rhs(&mut a[prow_off..prow_off + n_cols], &mut b[prow], inv);
 
                 // Copy pivot row into reusable buffers (no heap allocation)
                 pivot_buf[..n_cols].copy_from_slice(&a[prow_off..prow_off + n_cols]);
@@ -2549,10 +2597,7 @@ impl InactivationDecoder {
                 let prow_off = prow * n_cols;
                 let pivot_coef = a[prow_off + col];
                 let inv = pivot_coef.inv();
-                for value in &mut a[prow_off..prow_off + n_cols] {
-                    *value *= inv;
-                }
-                crate::raptorq::gf256::gf256_mul_slice(&mut b[prow], inv);
+                scale_pivot_row_and_rhs(&mut a[prow_off..prow_off + n_cols], &mut b[prow], inv);
 
                 // Copy pivot row into reusable buffers
                 pivot_buf[..n_cols].copy_from_slice(&a[prow_off..prow_off + n_cols]);
@@ -2778,7 +2823,7 @@ impl ReceivedSymbol {
 mod tests {
     use super::*;
     use crate::raptorq::systematic::SystematicEncoder;
-    use crate::raptorq::test_log_schema::{UnitDecodeStats, UnitLogEntry, validate_unit_log_json};
+    use crate::raptorq::test_log_schema::{validate_unit_log_json, UnitDecodeStats, UnitLogEntry};
 
     fn rfc_eq_context(
         scenario_id: &str,
@@ -3158,6 +3203,55 @@ mod tests {
     }
 
     #[test]
+    fn sparse_update_columns_for_elimination_preserves_threshold_semantics() {
+        // n=10 => threshold = floor(10 * 3 / 5) = 6.
+        let mut cols = vec![99];
+        let dense_if_pivot_counted = vec![
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ZERO,
+            Gf256::ZERO,
+            Gf256::ZERO,
+        ];
+        assert!(!sparse_update_columns_for_elimination_if_beneficial_into(
+            &dense_if_pivot_counted,
+            10,
+            0,
+            &mut cols
+        ));
+        assert!(
+            cols.is_empty(),
+            "dense classification should clear stale elimination columns"
+        );
+
+        let sparse = vec![
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ONE,
+            Gf256::ZERO,
+            Gf256::ZERO,
+            Gf256::ZERO,
+            Gf256::ZERO,
+            Gf256::ZERO,
+        ];
+        assert!(sparse_update_columns_for_elimination_if_beneficial_into(
+            &sparse, 10, 0, &mut cols
+        ));
+        assert_eq!(
+            cols,
+            vec![1, 2, 3, 4],
+            "sparse classification should keep non-pivot sparse columns in order"
+        );
+    }
+
+    #[test]
     fn dense_update_start_col_prefers_suffix_when_prefix_zero() {
         let mut pivot = vec![Gf256::ZERO; 12];
         for coef in pivot.iter_mut().skip(5) {
@@ -3321,6 +3415,46 @@ mod tests {
                 factor
             );
         }
+    }
+
+    #[test]
+    fn scale_pivot_row_and_rhs_noop_for_one_and_matches_manual_for_nonone() {
+        let base_row = vec![
+            Gf256::new(0x11),
+            Gf256::new(0x22),
+            Gf256::new(0x33),
+            Gf256::new(0x44),
+            Gf256::new(0x55),
+        ];
+        let base_rhs = vec![0x10, 0x20, 0x30, 0x40, 0x50];
+
+        let mut row_one = base_row.clone();
+        let mut rhs_one = base_rhs.clone();
+        scale_pivot_row_and_rhs(&mut row_one, &mut rhs_one, Gf256::ONE);
+        assert_eq!(row_one, base_row, "inv=1 must not mutate row");
+        assert_eq!(rhs_one, base_rhs, "inv=1 must not mutate rhs");
+
+        let inv = Gf256::new(0x5d);
+        let mut actual_row = base_row.clone();
+        let mut actual_rhs = base_rhs.clone();
+        scale_pivot_row_and_rhs(&mut actual_row, &mut actual_rhs, inv);
+
+        let mut expected_row = base_row.clone();
+        for value in &mut expected_row {
+            *value *= inv;
+        }
+        let mut expected_rhs = base_rhs.clone();
+        for byte in &mut expected_rhs {
+            *byte = (inv * Gf256::new(*byte)).raw();
+        }
+        assert_eq!(
+            actual_row, expected_row,
+            "row scaling helper must match manual gf(256) multiplication"
+        );
+        assert_eq!(
+            actual_rhs, expected_rhs,
+            "rhs scaling helper must match manual gf(256) multiplication"
+        );
     }
 
     #[test]
@@ -4252,38 +4386,30 @@ mod tests {
 
     #[test]
     fn failure_classification_is_explicit() {
-        assert!(
-            DecodeError::InsufficientSymbols {
-                received: 1,
-                required: 2
-            }
-            .is_recoverable()
-        );
+        assert!(DecodeError::InsufficientSymbols {
+            received: 1,
+            required: 2
+        }
+        .is_recoverable());
         assert!(DecodeError::SingularMatrix { row: 3 }.is_recoverable());
-        assert!(
-            DecodeError::SymbolSizeMismatch {
-                expected: 8,
-                actual: 7
-            }
-            .is_unrecoverable()
-        );
-        assert!(
-            DecodeError::ColumnIndexOutOfRange {
-                esi: 1,
-                column: 99,
-                max_valid: 12
-            }
-            .is_unrecoverable()
-        );
-        assert!(
-            DecodeError::CorruptDecodedOutput {
-                esi: 1,
-                byte_index: 0,
-                expected: 1,
-                actual: 2
-            }
-            .is_unrecoverable()
-        );
+        assert!(DecodeError::SymbolSizeMismatch {
+            expected: 8,
+            actual: 7
+        }
+        .is_unrecoverable());
+        assert!(DecodeError::ColumnIndexOutOfRange {
+            esi: 1,
+            column: 99,
+            max_valid: 12
+        }
+        .is_unrecoverable());
+        assert!(DecodeError::CorruptDecodedOutput {
+            esi: 1,
+            byte_index: 0,
+            expected: 1,
+            actual: 2
+        }
+        .is_unrecoverable());
     }
 
     fn make_rank_deficient_state(

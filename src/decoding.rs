@@ -11,7 +11,7 @@ use crate::raptorq::decoder::{
     DecodeError as RaptorDecodeError, InactivationDecoder, ReceivedSymbol,
 };
 use crate::raptorq::gf256::{Gf256, gf256_addmul_slice};
-use crate::raptorq::systematic::{ConstraintMatrix, SystematicParams};
+use crate::raptorq::systematic::SystematicParams;
 use crate::security::{AuthenticatedSymbol, SecurityContext};
 use crate::types::symbol_set::{InsertResult, SymbolSet, ThresholdConfig};
 use crate::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
@@ -674,25 +674,16 @@ fn decode_block(
     let object_id = symbols.first().map_or(ObjectId::NIL, Symbol::object_id);
     let params = SystematicParams::for_source_block(k, symbol_size);
     let block_seed = seed_for_block(object_id, plan.sbn);
-    let constraints = ConstraintMatrix::build(&params, block_seed);
     let base_rows = params.s + params.h;
 
     let decoder = InactivationDecoder::new(k, symbol_size, block_seed);
     let padding_rows = params.k_prime.saturating_sub(k);
-    let mut received: Vec<ReceivedSymbol> =
-        Vec::with_capacity(base_rows + symbols.len() + padding_rows);
+    
+    // 1. Start with constraint symbols (LDPC + HDPC)
+    let mut received = decoder.constraint_symbols();
+    received.reserve(symbols.len() + padding_rows);
 
-    for row in 0..base_rows {
-        let (columns, coefficients) = constraint_row_equation(&constraints, row);
-        received.push(ReceivedSymbol {
-            esi: row as u32,
-            is_source: false,
-            columns,
-            coefficients,
-            data: vec![0u8; symbol_size],
-        });
-    }
-
+    // 2. Add received symbols (Source + Repair)
     for symbol in symbols {
         match symbol.kind() {
             SymbolKind::Source => {
@@ -703,13 +694,12 @@ fn decode_block(
                         details: format!("source esi {esi} >= k {k}"),
                     });
                 }
-                let row = base_rows + esi;
-                let (columns, coefficients) = constraint_row_equation(&constraints, row);
+                // Systematic: source symbol i maps to intermediate symbol i (identity).
                 received.push(ReceivedSymbol {
                     esi: symbol.esi(),
                     is_source: true,
-                    columns,
-                    coefficients,
+                    columns: vec![esi],
+                    coefficients: vec![Gf256::ONE],
                     data: symbol.data().to_vec(),
                 });
             }
@@ -726,22 +716,20 @@ fn decode_block(
         }
     }
 
-    // Add zero-padded rows for K..K'. The encoder pads source blocks to K'
-    // symbols with zeros; these rows constrain the solver identically.
+    // 3. Add zero-padded rows for K..K'.
+    // These act as implicit source symbols with value 0.
     for esi in k..params.k_prime {
-        let row = base_rows + esi;
-        let (columns, coefficients) = constraint_row_equation(&constraints, row);
         received.push(ReceivedSymbol {
             esi: esi as u32,
             is_source: false,
-            columns,
-            coefficients,
+            columns: vec![esi],
+            coefficients: vec![Gf256::ONE],
             data: vec![0u8; symbol_size],
         });
     }
 
-    let intermediate = match decoder.decode(&received) {
-        Ok(result) => result.intermediate,
+    let result = match decoder.decode(&received) {
+        Ok(result) => result,
         Err(err) => {
             let mapped = match err {
                 RaptorDecodeError::InsufficientSymbols { received, required } => {
@@ -794,16 +782,11 @@ fn decode_block(
         }
     };
 
+    // 4. Construct decoded symbols from the source data returned by the decoder.
+    // InactivationDecoder::decode already extracts the first K intermediate symbols
+    // into `result.source`, which corresponds exactly to the systematic source data.
     let mut decoded_symbols = Vec::with_capacity(k);
-    for esi in 0..k {
-        let row = base_rows + esi;
-        let mut data = vec![0u8; symbol_size];
-        for (col, symbol) in intermediate.iter().enumerate().take(params.l) {
-            let coeff = constraints.get(row, col);
-            if !coeff.is_zero() {
-                gf256_addmul_slice(&mut data, symbol, coeff);
-            }
-        }
+    for (esi, data) in result.source.into_iter().enumerate() {
         decoded_symbols.push(Symbol::new(
             SymbolId::new(object_id, plan.sbn, esi as u32),
             data,
@@ -814,18 +797,7 @@ fn decode_block(
     Ok(decoded_symbols)
 }
 
-fn constraint_row_equation(constraints: &ConstraintMatrix, row: usize) -> (Vec<usize>, Vec<Gf256>) {
-    let mut columns = Vec::new();
-    let mut coefficients = Vec::new();
-    for col in 0..constraints.cols {
-        let coeff = constraints.get(row, col);
-        if !coeff.is_zero() {
-            columns.push(col);
-            coefficients.push(coeff);
-        }
-    }
-    (columns, coefficients)
-}
+
 
 fn seed_for_block(object_id: ObjectId, sbn: u8) -> u64 {
     seed_for(object_id, sbn, 0)

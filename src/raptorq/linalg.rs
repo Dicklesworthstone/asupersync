@@ -876,6 +876,7 @@ impl GaussianSolver {
         if target == pivot {
             return;
         }
+        let factor_is_one = factor == Gf256::ONE;
 
         // Eliminate in coefficient matrix/RHS. Use split_at_mut to get
         // separate mutable/immutable references for each surface.
@@ -911,22 +912,33 @@ impl GaussianSolver {
             let rhs_target = &mut lower.as_mut_slice()[..rhs_len];
             let rhs_pivot = &upper.as_slice()[..rhs_len];
             if tail_start < cols {
-                gf256_addmul_slices2(
-                    &mut target_row[tail_start..],
-                    &pivot_row[tail_start..],
-                    rhs_target,
-                    rhs_pivot,
-                    factor,
-                );
+                if factor_is_one {
+                    gf256_add_slice(&mut target_row[tail_start..], &pivot_row[tail_start..]);
+                    gf256_add_slice(rhs_target, rhs_pivot);
+                } else {
+                    gf256_addmul_slices2(
+                        &mut target_row[tail_start..],
+                        &pivot_row[tail_start..],
+                        rhs_target,
+                        rhs_pivot,
+                        factor,
+                    );
+                }
+            } else if factor_is_one {
+                gf256_add_slice(rhs_target, rhs_pivot);
             } else {
                 gf256_addmul_slice(rhs_target, rhs_pivot, factor);
             }
         } else if tail_start < cols {
-            gf256_addmul_slice(
-                &mut target_row[tail_start..],
-                &pivot_row[tail_start..],
-                factor,
-            );
+            if factor_is_one {
+                gf256_add_slice(&mut target_row[tail_start..], &pivot_row[tail_start..]);
+            } else {
+                gf256_addmul_slice(
+                    &mut target_row[tail_start..],
+                    &pivot_row[tail_start..],
+                    factor,
+                );
+            }
         }
     }
 }
@@ -1510,6 +1522,18 @@ mod tests {
         let row = [1, 1, 1, 1, 1, 1, 1, 1];
         // `cap = 1` models incumbent nnz=2 with cap=best_nnz-1.
         assert_eq!(count_nonzero_capped_from(&row, 0, 1), 2);
+    }
+
+    #[test]
+    fn eliminate_row_factor_one_updates_tail_and_rhs_as_xor() {
+        let mut solver = GaussianSolver::new(2, 4);
+        solver.set_row(0, &[0, 9, 4, 5], DenseRow::new(vec![11, 22, 33]));
+        solver.set_row(1, &[0, 1, 2, 3], DenseRow::new(vec![10, 20, 30]));
+
+        solver.eliminate_row(0, 1, Gf256::ONE);
+
+        assert_eq!(solver.matrix[0], vec![0, 0, 6, 6]);
+        assert_eq!(solver.rhs[0].as_slice(), &[1, 2, 63]);
     }
 
     #[test]
