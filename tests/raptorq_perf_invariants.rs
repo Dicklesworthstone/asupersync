@@ -22,6 +22,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const G1_BUDGET_SCHEMA_VERSION: &str = "raptorq-g1-budget-draft-v1";
 const G3_DECISION_RECORDS_SCHEMA_VERSION: &str = "raptorq-optimization-decision-records-v1";
+const G4_ROLLOUT_POLICY_SCHEMA_VERSION: &str = "raptorq-controlled-rollout-policy-v1";
+const G7_EXPECTED_LOSS_CONTRACT_SCHEMA_VERSION: &str = "raptorq-g7-expected-loss-contract-v1";
 const BEADS_ISSUES_JSONL: &str = include_str!("../.beads/issues.jsonl");
 const RAPTORQ_BASELINE_PROFILE_MD: &str = include_str!("../docs/raptorq_baseline_bench_profile.md");
 const RAPTORQ_UNIT_MATRIX_MD: &str = include_str!("../docs/raptorq_unit_test_matrix.md");
@@ -29,6 +31,14 @@ const RAPTORQ_OPT_DECISIONS_MD: &str =
     include_str!("../docs/raptorq_optimization_decision_records.md");
 const RAPTORQ_OPT_DECISIONS_JSON: &str =
     include_str!("../artifacts/raptorq_optimization_decision_records_v1.json");
+const RAPTORQ_G4_ROLLOUT_POLICY_MD: &str =
+    include_str!("../docs/raptorq_controlled_rollout_policy.md");
+const RAPTORQ_G4_ROLLOUT_POLICY_JSON: &str =
+    include_str!("../artifacts/raptorq_controlled_rollout_policy_v1.json");
+const RAPTORQ_G7_EXPECTED_LOSS_MD: &str =
+    include_str!("../docs/raptorq_expected_loss_decision_contract.md");
+const RAPTORQ_G7_EXPECTED_LOSS_JSON: &str =
+    include_str!("../artifacts/raptorq_expected_loss_decision_contract_v1.json");
 const RAPTORQ_BENCH_RS: &str = include_str!("../benches/raptorq_benchmark.rs");
 const REPLAY_CATALOG_ARTIFACT_PATH: &str = "artifacts/raptorq_replay_catalog_v1.json";
 const REPLAY_FIXTURE_REF: &str = "RQ-D9-REPLAY-CATALOG-V1";
@@ -1509,6 +1519,394 @@ fn g3_decision_record_docs_are_cross_linked() {
         assert!(
             RAPTORQ_OPT_DECISIONS_MD.contains(required),
             "decision-record doc must mention {required}"
+        );
+    }
+}
+
+/// Validate G4 controlled-rollout policy schema and lever coverage.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn g4_rollout_policy_schema_and_lever_coverage() {
+    let artifact: serde_json::Value = serde_json::from_str(RAPTORQ_G4_ROLLOUT_POLICY_JSON)
+        .expect("G4 rollout policy artifact must be valid JSON");
+
+    assert_eq!(
+        artifact["schema_version"].as_str(),
+        Some(G4_ROLLOUT_POLICY_SCHEMA_VERSION),
+        "unexpected G4 rollout policy schema version"
+    );
+    assert_eq!(
+        artifact["track_bead_id"].as_str(),
+        Some("asupersync-23kd4"),
+        "G4 rollout policy must stay anchored to asupersync-23kd4"
+    );
+    assert_eq!(
+        artifact["external_ref"].as_str(),
+        Some("bd-2frfp"),
+        "G4 rollout policy must stay anchored to bd-2frfp"
+    );
+    assert_eq!(
+        artifact["command_policy"]["cargo_heavy_commands_must_use_rch"].as_bool(),
+        Some(true),
+        "G4 command policy must require rch for cargo-heavy commands"
+    );
+    assert_eq!(
+        artifact["command_policy"]["required_prefix"].as_str(),
+        Some("rch exec --"),
+        "G4 command policy must enforce rch command prefix"
+    );
+
+    let stages = artifact["staged_rollout"]
+        .as_array()
+        .expect("staged_rollout must be an array");
+    assert_eq!(
+        stages.len(),
+        4,
+        "G4 staged_rollout must define exactly 4 stages"
+    );
+    let expected_stage_order = [
+        ("shadow_observe", 0_i64),
+        ("canary", 1_i64),
+        ("guarded_ramp", 2_i64),
+        ("broad_default", 3_i64),
+    ];
+    for (idx, (expected_stage, expected_order)) in expected_stage_order.iter().enumerate() {
+        let stage = &stages[idx];
+        assert_eq!(
+            stage["stage"].as_str(),
+            Some(*expected_stage),
+            "unexpected stage name at index {idx}"
+        );
+        assert_eq!(
+            stage["order"].as_i64(),
+            Some(*expected_order),
+            "unexpected stage order for {expected_stage}"
+        );
+        for field in ["entry_criteria", "hold_requirements", "stop_conditions"] {
+            let entries = stage[field]
+                .as_array()
+                .expect("stage requirements must be arrays");
+            assert!(
+                !entries.is_empty(),
+                "stage {expected_stage} must define non-empty {field}"
+            );
+        }
+    }
+
+    let trigger_classes = artifact["rollback_automation"]["trigger_classes"]
+        .as_array()
+        .expect("rollback_automation.trigger_classes must be an array")
+        .iter()
+        .map(|entry| {
+            entry["class"]
+                .as_str()
+                .expect("trigger class must be a string")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    let expected_trigger_classes = BTreeSet::from([
+        "correctness_regression".to_string(),
+        "performance_budget_breach".to_string(),
+        "instability_signal".to_string(),
+    ]);
+    assert_eq!(
+        trigger_classes, expected_trigger_classes,
+        "G4 rollback trigger classes must match required governance set"
+    );
+
+    let operator_fields = artifact["operator_response_packet"]["required_fields"]
+        .as_array()
+        .expect("operator_response_packet.required_fields must be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("operator_response_packet field must be a string")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    for required in [
+        "symptom",
+        "exposure_scope",
+        "affected_levers",
+        "mitigation_executed",
+        "replay_command",
+        "artifact_path",
+        "eta",
+        "user_impact_message_template",
+    ] {
+        assert!(
+            operator_fields.contains(required),
+            "operator response packet must include {required}"
+        );
+    }
+
+    let expected_levers = BTreeSet::from([
+        "C5".to_string(),
+        "C6".to_string(),
+        "E4".to_string(),
+        "E5".to_string(),
+        "F5".to_string(),
+        "F6".to_string(),
+        "F7".to_string(),
+        "F8".to_string(),
+    ]);
+    let lever_rows = artifact["lever_matrix"]
+        .as_array()
+        .expect("lever_matrix must be an array");
+    assert_eq!(
+        lever_rows.len(),
+        8,
+        "G4 lever matrix must contain exactly 8 high-impact lever rows"
+    );
+    let observed_levers = lever_rows
+        .iter()
+        .map(|entry| {
+            entry["lever_code"]
+                .as_str()
+                .expect("lever_matrix entry must include lever_code")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        observed_levers, expected_levers,
+        "G4 lever matrix must cover C5/C6/E4/E5/F5/F6/F7/F8"
+    );
+}
+
+/// Validate G4 rollout-policy docs cross-link to canonical artifacts.
+#[test]
+fn g4_rollout_policy_docs_are_cross_linked() {
+    for required in [
+        "asupersync-23kd4",
+        "asupersync-2cyx5",
+        "artifacts/raptorq_controlled_rollout_policy_v1.json",
+        "artifacts/raptorq_optimization_decision_records_v1.json",
+        "rch exec --",
+        "shadow_observe",
+        "broad_default",
+        "user_impact_message_template",
+    ] {
+        assert!(
+            RAPTORQ_G4_ROLLOUT_POLICY_MD.contains(required),
+            "G4 rollout policy doc must mention {required}"
+        );
+    }
+}
+
+/// Validate G7 expected-loss decision-contract schema and coverage.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn g7_expected_loss_contract_schema_and_coverage() {
+    let artifact: serde_json::Value = serde_json::from_str(RAPTORQ_G7_EXPECTED_LOSS_JSON)
+        .expect("G7 expected-loss artifact must be valid JSON");
+
+    assert_eq!(
+        artifact["schema_version"].as_str(),
+        Some(G7_EXPECTED_LOSS_CONTRACT_SCHEMA_VERSION),
+        "unexpected G7 expected-loss schema version"
+    );
+    assert_eq!(
+        artifact["track_bead_id"].as_str(),
+        Some("asupersync-m7o6i"),
+        "G7 contract must stay anchored to asupersync-m7o6i"
+    );
+    assert_eq!(
+        artifact["external_ref"].as_str(),
+        Some("bd-2bd8e"),
+        "G7 contract must stay anchored to bd-2bd8e"
+    );
+
+    let expected_states = BTreeSet::from([
+        "healthy".to_string(),
+        "degraded".to_string(),
+        "regression".to_string(),
+        "unknown".to_string(),
+    ]);
+    let observed_states = artifact["contract"]["states"]
+        .as_array()
+        .expect("contract.states must be an array")
+        .iter()
+        .map(|value| value.as_str().expect("state entries must be strings").to_string())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        observed_states, expected_states,
+        "G7 state set must cover healthy/degraded/regression/unknown"
+    );
+
+    let expected_actions = BTreeSet::from([
+        "continue".to_string(),
+        "canary_hold".to_string(),
+        "rollback".to_string(),
+        "fallback".to_string(),
+    ]);
+    let observed_actions = artifact["contract"]["actions"]
+        .as_array()
+        .expect("contract.actions must be an array")
+        .iter()
+        .map(|value| value.as_str().expect("action entries must be strings").to_string())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        observed_actions, expected_actions,
+        "G7 action set must cover continue/canary_hold/rollback/fallback"
+    );
+
+    let matrix_rows = artifact["contract"]["loss_matrix"]
+        .as_array()
+        .expect("contract.loss_matrix must be an array");
+    assert_eq!(matrix_rows.len(), 4, "G7 loss matrix must have 4 state rows");
+    for row in matrix_rows {
+        let state = row["state"]
+            .as_str()
+            .expect("loss_matrix state must be a string");
+        let terms = row["loss_terms"]
+            .as_object()
+            .expect("loss_matrix.loss_terms must be an object");
+        for action in ["continue", "canary_hold", "rollback", "fallback"] {
+            let term = terms
+                .get(action)
+                .expect("loss_terms must contain every action")
+                .as_i64()
+                .expect("loss term must be numeric");
+            assert!(term >= 0, "loss term must be non-negative for state {state}");
+        }
+    }
+    let regression_terms = artifact["contract"]["loss_matrix"][2]["loss_terms"]
+        .as_object()
+        .expect("regression loss terms must be present");
+    let regression_continue = regression_terms["continue"]
+        .as_i64()
+        .expect("regression continue loss must be numeric");
+    let regression_fallback = regression_terms["fallback"]
+        .as_i64()
+        .expect("regression fallback loss must be numeric");
+    assert!(
+        regression_fallback < regression_continue,
+        "regression loss must prefer fallback over continue"
+    );
+
+    assert_eq!(
+        artifact["contract"]["decision_rule"]["selector"].as_str(),
+        Some("argmin_expected_loss"),
+        "G7 selector must be argmin_expected_loss"
+    );
+    assert_eq!(
+        artifact["contract"]["decision_rule"]["deterministic_fallback_trigger"]["then_action"]
+            .as_str(),
+        Some("fallback"),
+        "G7 fallback trigger must force fallback action"
+    );
+
+    let expected_levers = BTreeSet::from([
+        "C5".to_string(),
+        "C6".to_string(),
+        "E4".to_string(),
+        "E5".to_string(),
+        "F5".to_string(),
+        "F6".to_string(),
+        "F7".to_string(),
+        "F8".to_string(),
+    ]);
+    let lever_rows = artifact["runtime_control_surface"]["in_scope_levers"]
+        .as_array()
+        .expect("runtime_control_surface.in_scope_levers must be an array");
+    assert_eq!(lever_rows.len(), 8, "G7 lever map must contain 8 rows");
+    let observed_levers = lever_rows
+        .iter()
+        .map(|entry| {
+            let controls = entry["controls"]
+                .as_array()
+                .expect("lever controls must be an array");
+            assert!(
+                !controls.is_empty(),
+                "each G7 lever row must include at least one control field"
+            );
+            entry["lever_code"]
+                .as_str()
+                .expect("lever_code must be a string")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        observed_levers, expected_levers,
+        "G7 lever map must cover C5/C6/E4/E5/F5/F6/F7/F8"
+    );
+
+    let required_output_fields = artifact["decision_output"]["required_fields"]
+        .as_array()
+        .expect("decision_output.required_fields must be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("required decision output fields must be strings")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    for field in [
+        "state_posterior",
+        "expected_loss_terms",
+        "chosen_action",
+        "top_evidence_contributors",
+        "confidence_score",
+        "uncertainty_score",
+        "deterministic_fallback_trigger",
+        "replay_ref",
+    ] {
+        assert!(
+            required_output_fields.contains(field),
+            "G7 decision output must include {field}"
+        );
+    }
+
+    let logging_fields = artifact["structured_logging"]["required_fields"]
+        .as_array()
+        .expect("structured_logging.required_fields must be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("structured logging fields must be strings")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    for field in [
+        "state_posterior",
+        "expected_loss_terms",
+        "chosen_action",
+        "replay_ref",
+    ] {
+        assert!(
+            logging_fields.contains(field),
+            "G7 structured logging must include {field}"
+        );
+    }
+
+    let replay_command = artifact["reproducibility"]["replay_command"]
+        .as_str()
+        .expect("replay command must be present");
+    assert!(
+        replay_command.contains("rch exec --"),
+        "G7 replay command must use rch"
+    );
+}
+
+/// Validate G7 expected-loss docs cross-link to canonical artifacts.
+#[test]
+fn g7_expected_loss_contract_docs_are_cross_linked() {
+    for required in [
+        "asupersync-m7o6i",
+        "asupersync-2cyx5",
+        "artifacts/raptorq_expected_loss_decision_contract_v1.json",
+        "argmin_expected_loss",
+        "deterministic_fallback_trigger",
+        "rch exec --",
+        "C6",
+        "F8",
+    ] {
+        assert!(
+            RAPTORQ_G7_EXPECTED_LOSS_MD.contains(required),
+            "G7 expected-loss doc must mention {required}"
         );
     }
 }
