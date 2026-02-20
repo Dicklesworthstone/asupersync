@@ -606,6 +606,10 @@ impl RegionRecord {
         &self,
         value: T,
     ) -> Result<HeapIndex, AdmissionError> {
+        if self.state().is_terminal() {
+            return Err(AdmissionError::Closed);
+        }
+
         let size_hint = std::mem::size_of::<T>();
         let mut inner = self.inner.write();
         if let Some(limit) = inner.limits.max_heap_bytes {
@@ -791,7 +795,7 @@ impl RegionRecord {
             });
         }
         if self.state().is_terminal() {
-            return Err(RRefError::AllocationInvalid);
+            return Err(RRefError::RegionClosed);
         }
         let inner = self.inner.read();
         inner
@@ -814,7 +818,7 @@ impl RegionRecord {
             });
         }
         if self.state().is_terminal() {
-            return Err(RRefError::AllocationInvalid);
+            return Err(RRefError::RegionClosed);
         }
         let inner = self.inner.read();
         inner
@@ -1305,7 +1309,7 @@ mod tests {
         let err = region
             .rref_get(&rref)
             .expect_err("rref should be invalid after close");
-        assert_eq!(err, RRefError::AllocationInvalid);
+        assert_eq!(err, RRefError::RegionClosed);
     }
 
     #[test]
@@ -1883,6 +1887,17 @@ mod tests {
     }
 
     #[test]
+    fn heap_alloc_rejected_when_closed() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+
+        assert!(region.begin_close(None));
+        assert!(region.begin_finalize());
+        assert!(region.complete_close());
+
+        assert_eq!(region.heap_alloc(42u32), Err(AdmissionError::Closed));
+    }
+
+    #[test]
     fn heap_reclamation_timing_matches_state_machine() {
         let region = RegionRecord::new(test_region_id(), None, Budget::default());
         region.heap_alloc(1u32).unwrap();
@@ -1960,7 +1975,7 @@ mod tests {
         // Closed — heap reclaimed, RRef invalid
         assert!(region.complete_close());
         let err = region.rref_get(&rref).expect_err("invalid after close");
-        assert_eq!(err, RRefError::AllocationInvalid);
+        assert_eq!(err, RRefError::RegionClosed);
     }
 
     #[test]

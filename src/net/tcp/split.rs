@@ -193,6 +193,7 @@ impl std::fmt::Debug for TcpStreamInner {
 }
 
 impl TcpStreamInner {
+    #[allow(clippy::significant_drop_tightening)] // Lock held across register() to prevent ADD race
     fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
         let mut guard = self.state.lock();
 

@@ -155,7 +155,7 @@ impl Budget {
         deadline: None,
         poll_quota: u32::MAX,
         cost_quota: None,
-        priority: 128,
+        priority: 255,
     };
 
     /// A budget with zero resources (nothing allowed).
@@ -178,10 +178,15 @@ impl Budget {
         priority: 128,
     };
 
-    /// Creates a new budget with default values (unlimited).
+    /// Creates a new budget with default values (priority 128, unlimited quotas).
     #[must_use]
     pub const fn new() -> Self {
-        Self::INFINITE
+        Self {
+            deadline: None,
+            poll_quota: u32::MAX,
+            cost_quota: None,
+            priority: 128,
+        }
     }
 
     /// Creates an unlimited budget (alias for [`INFINITE`](Self::INFINITE)).
@@ -356,7 +361,7 @@ impl Budget {
                 (None, Some(b)) => Some(b),
                 (None, None) => None,
             },
-            priority: self.priority.max(other.priority),
+            priority: self.priority.min(other.priority),
         };
 
         // Trace when budget is tightened (any constraint becomes stricter)
@@ -377,8 +382,10 @@ impl Budget {
             (Some(_), None, _) | (Some(_), _, None) => true,
             _ => false,
         };
+        let priority_tightened =
+            combined.priority < self.priority || combined.priority < other.priority;
 
-        if deadline_tightened || poll_tightened || cost_tightened {
+        if deadline_tightened || poll_tightened || cost_tightened || priority_tightened {
             trace!(
                 deadline_tightened,
                 poll_tightened,
@@ -826,7 +833,7 @@ mod tests {
         assert_eq!(b.deadline, None);
         assert_eq!(b.poll_quota, u32::MAX);
         assert_eq!(b.cost_quota, None);
-        assert_eq!(b.priority, 128);
+        assert_eq!(b.priority, 255);
     }
 
     #[test]
@@ -839,13 +846,16 @@ mod tests {
     }
 
     #[test]
-    fn new_returns_infinite() {
-        assert_eq!(Budget::new(), Budget::INFINITE);
+    fn new_returns_default_priority() {
+        let b = Budget::new();
+        assert_eq!(b.priority, 128);
+        assert_ne!(b, Budget::INFINITE);
     }
 
     #[test]
-    fn default_returns_infinite() {
-        assert_eq!(Budget::default(), Budget::INFINITE);
+    fn default_returns_new() {
+        assert_eq!(Budget::default(), Budget::new());
+        assert_ne!(Budget::default(), Budget::INFINITE);
     }
 
     // =========================================================================
@@ -1010,8 +1020,8 @@ mod tests {
         assert_eq!(combined.deadline, Some(Time::from_secs(5)));
         // Poll quota: min
         assert_eq!(combined.poll_quota, 100);
-        // Priority: max
-        assert_eq!(combined.priority, 100);
+        // Priority: min
+        assert_eq!(combined.priority, 50);
     }
 
     #[test]
@@ -1067,8 +1077,8 @@ mod tests {
         assert_eq!(combined.poll_quota, 0);
         // ZERO's cost_quota (Some(0)) is tighter
         assert_eq!(combined.cost_quota, Some(0));
-        // Priority: max of 200 and 0 = 200
-        assert_eq!(combined.priority, 200);
+        // Priority: min of 200 and 0 = 0
+        assert_eq!(combined.priority, 0);
     }
 
     #[test]
@@ -1085,8 +1095,8 @@ mod tests {
         assert_eq!(combined.deadline, Some(Time::from_secs(10)));
         assert_eq!(combined.poll_quota, 100);
         assert_eq!(combined.cost_quota, Some(1000));
-        // Priority: max of 50 and 128 = 128
-        assert_eq!(combined.priority, 128);
+        // Priority: min of 50 and 255 = 50
+        assert_eq!(combined.priority, 50);
     }
 
     // =========================================================================
@@ -1471,13 +1481,14 @@ mod tests {
             .with_cost_quota(500)
             .with_priority(50);
 
-        // Note: priority of INFINITE (128) > a's priority (50), so
-        // meet takes max priority. This is by design — INFINITE
+        // Note: priority of INFINITE (255) > a's priority (50), so
+        // meet takes min priority. This is by design — INFINITE
         // represents "no constraint" which includes default priority.
         let result = Budget::INFINITE.meet(a);
         assert_eq!(result.deadline, a.deadline);
         assert_eq!(result.poll_quota, a.poll_quota);
         assert_eq!(result.cost_quota, a.cost_quota);
+        assert_eq!(result.priority, a.priority);
     }
 
     #[test]

@@ -567,6 +567,21 @@ impl ThreeLaneScheduler {
     /// Uses the sharded task table when available, otherwise falls back to
     /// RuntimeState's embedded table.
     #[inline]
+    fn with_task_table<R, F: FnOnce(&mut TaskTable) -> R>(&self, f: F) -> R {
+        if let Some(tt) = &self.task_table {
+            let mut guard = tt.lock().expect("lock poisoned");
+            f(&mut guard)
+        } else {
+            let mut state = self.state.lock().expect("lock poisoned");
+            f(&mut state.tasks)
+        }
+    }
+
+    /// Read-only task table access for inject/spawn methods.
+    ///
+    /// Uses the sharded task table when available, otherwise falls back to
+    /// RuntimeState's embedded table.
+    #[inline]
     fn with_task_table_ref<R, F: FnOnce(&TaskTable) -> R>(&self, f: F) -> R {
         if let Some(tt) = &self.task_table {
             let guard = tt.lock().expect("lock poisoned");
@@ -699,12 +714,14 @@ impl ThreeLaneScheduler {
             self.inject_global_ready_checked(task, priority);
             trace!(
                 ?task,
-                priority, "inject_ready: task injected into global ready queue"
+                priority,
+                "inject_ready: task injected into global ready queue"
             );
         } else {
             trace!(
                 ?task,
-                priority, "inject_ready: task NOT scheduled (should_schedule=false)"
+                priority,
+                "inject_ready: task NOT scheduled (should_schedule=false)"
             );
         }
     }
@@ -746,8 +763,23 @@ impl ThreeLaneScheduler {
 
             // 1. Try scheduling on current thread (fastest, no locks if TLS setup)
             // ONLY if this thread is the owner.
-            if is_pinned_here && schedule_local_task(task) {
-                return;
+            if is_pinned_here {
+                // Lazy pinning: if the task is local but not yet pinned, and we are
+                // on a worker thread, pin it to us. This ensures subsequent cross-thread
+                // wakes/cancels can route to this worker.
+                if pinned_worker.is_none() {
+                    if let Some(worker_id) = current_worker {
+                        self.with_task_table(|tt| {
+                            if let Some(record) = tt.task_mut(task) {
+                                record.pin_to_worker(worker_id);
+                            }
+                        });
+                    }
+                }
+
+                if schedule_local_task(task) {
+                    return;
+                }
             }
 
             // 2. Try routing to pinned worker (cross-thread spawn)
@@ -817,8 +849,23 @@ impl ThreeLaneScheduler {
 
             // 1. Try scheduling on current thread (fastest, no locks if TLS setup)
             // ONLY if this thread is the owner.
-            if is_pinned_here && schedule_local_task(task) {
-                return;
+            if is_pinned_here {
+                // Lazy pinning: if the task is local but not yet pinned, and we are
+                // on a worker thread, pin it to us. This ensures subsequent cross-thread
+                // wakes/cancels can route to this worker.
+                if pinned_worker.is_none() {
+                    if let Some(worker_id) = current_worker {
+                        self.with_task_table(|tt| {
+                            if let Some(record) = tt.task_mut(task) {
+                                record.pin_to_worker(worker_id);
+                            }
+                        });
+                    }
+                }
+
+                if schedule_local_task(task) {
+                    return;
+                }
             }
 
             // 2. Try routing to pinned worker (cross-thread wake)
@@ -1911,7 +1958,6 @@ impl ThreeLaneWorker {
                 Waker::from(Arc::new(ThreeLaneLocalWaker {
                     task_id,
                     wake_state: Arc::clone(&wake_state),
-                    local: Arc::clone(&self.local),
                     local_ready: Arc::clone(&self.local_ready),
                     parker: self.parker.clone(),
                     cx_inner: weak_inner,
@@ -2241,7 +2287,6 @@ impl Wake for ThreeLaneWaker {
 struct ThreeLaneLocalWaker {
     task_id: TaskId,
     wake_state: Arc<crate::record::task::TaskWakeState>,
-    local: Arc<Mutex<PriorityScheduler>>,
     local_ready: Arc<LocalReadyQueue>,
     parker: Parker,
     cx_inner: Weak<RwLock<CxInner>>,

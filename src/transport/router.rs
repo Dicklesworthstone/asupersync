@@ -15,10 +15,10 @@ use crate::transport::sink::{SymbolSink, SymbolSinkExt};
 use crate::types::symbol::{ObjectId, Symbol};
 use crate::types::{RegionId, Time};
 use parking_lot::RwLock;
-use smallvec::{SmallVec, smallvec};
+use smallvec::{smallvec, SmallVec};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 type EndpointSinkMap = HashMap<EndpointId, Arc<Mutex<Box<dyn SymbolSink>>>>;
 
@@ -404,10 +404,77 @@ impl LoadBalancer {
                         .nth(hash % available_len)
                 },
             ),
-
             LoadBalanceStrategy::FirstAvailable => {
                 endpoints.iter().find(|e| e.state().can_receive())
             }
+        }
+    }
+
+    /// Selects multiple endpoints from the available set.
+    pub fn select_n<'a>(
+        &self,
+        endpoints: &'a [Arc<Endpoint>],
+        n: usize,
+        object_id: Option<ObjectId>,
+    ) -> Vec<&'a Arc<Endpoint>> {
+        if n == 0 {
+            return Vec::new();
+        }
+
+        // Filter healthy endpoints first
+        // Note: For high-throughput this allocation might be costly.
+        // But we need a contiguous slice/vec for indexing.
+        let available: Vec<&Arc<Endpoint>> = endpoints
+            .iter()
+            .filter(|e| e.state().can_receive())
+            .collect();
+
+        if available.is_empty() {
+            return Vec::new();
+        }
+
+        if n >= available.len() {
+            return available;
+        }
+
+        match self.strategy {
+            LoadBalanceStrategy::RoundRobin => {
+                let start = self.rr_counter.fetch_add(n as u64, Ordering::Relaxed) as usize;
+                let len = available.len();
+                (0..n).map(|i| available[(start + i) % len]).collect()
+            }
+
+            LoadBalanceStrategy::Random => {
+                // Fisher-Yates shuffle for first n elements
+                let mut indices: Vec<usize> = (0..available.len()).collect();
+                let mut selected = Vec::with_capacity(n);
+                let mut seed = self.random_seed.fetch_add(n as u64, Ordering::Relaxed);
+
+                for i in 0..n {
+                    // Simple LCG step
+                    seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                    // Range is [i, len)
+                    let range = indices.len() - i;
+                    let offset = (seed as usize) % range;
+                    let swap_idx = i + offset;
+                    indices.swap(i, swap_idx);
+                    selected.push(available[indices[i]]);
+                }
+                selected
+            }
+
+            LoadBalanceStrategy::LeastConnections
+            | LoadBalanceStrategy::WeightedLeastConnections => {
+                let mut candidates = available;
+                // Sort by connection count (approximated by full sort for simplicity)
+                // In production, select_nth_unstable is better.
+                candidates.sort_by_key(|e| e.connection_count());
+                candidates.truncate(n);
+                candidates
+            }
+
+            // For others, fallback to first-available logic or simple selection
+            _ => available.into_iter().take(n).collect(),
         }
     }
 }
@@ -484,6 +551,16 @@ impl RoutingEntry {
         self.load_balancer
             .select(&self.endpoints, object_id)
             .cloned()
+    }
+
+    /// Selects multiple endpoints for routing.
+    #[must_use]
+    pub fn select_endpoints(&self, n: usize, object_id: Option<ObjectId>) -> Vec<Arc<Endpoint>> {
+        self.load_balancer
+            .select_n(&self.endpoints, n, object_id)
+            .into_iter()
+            .cloned()
+            .collect()
     }
 }
 
@@ -796,21 +873,14 @@ impl SymbolRouter {
             };
 
         // Select multiple endpoints
-        let available: Vec<_> = entry
-            .endpoints
-            .iter()
-            .filter(|e| e.state().can_receive())
-            .cloned()
-            .collect();
+        let endpoints = entry.select_endpoints(count, Some(object_id));
 
-        if available.is_empty() {
+        if endpoints.is_empty() {
             return Err(RoutingError::NoHealthyEndpoints { object_id });
         }
 
-        let selected_count = count.min(available.len());
-        let results: Vec<_> = available
+        let results: Vec<_> = endpoints
             .into_iter()
-            .take(selected_count)
             .map(|endpoint| RouteResult {
                 endpoint,
                 matched_key: matched_key.clone(),
@@ -1141,33 +1211,16 @@ impl SymbolDispatcher {
             });
         }
 
-        // Get the routing entry
-        let key = RouteKey::Object(object_id);
-        let entry = self
-            .router
-            .table()
-            .lookup(&key)
-            .or_else(|| self.router.table().lookup(&RouteKey::Default))
-            .ok_or_else(|| RoutingError::NoRoute {
-                object_id,
-                reason: "No route for multicast".into(),
-            })?;
-
-        let mut selected = SmallVec::<[Arc<Endpoint>; 8]>::new();
-        for endpoint in &entry.endpoints {
-            if endpoint.state().can_receive() {
-                selected.push(endpoint.clone());
-                if selected.len() >= count {
-                    break;
-                }
+        // Use router to resolve endpoints with load balancing strategy
+        let routes = match self.router.route_multicast(symbol.symbol(), count) {
+            Ok(routes) => routes,
+            Err(RoutingError::NoHealthyEndpoints { object_id }) => {
+                return Err(DispatchError::RoutingFailed(
+                    RoutingError::NoHealthyEndpoints { object_id },
+                ));
             }
-        }
-
-        if selected.is_empty() {
-            return Err(DispatchError::RoutingFailed(
-                RoutingError::NoHealthyEndpoints { object_id },
-            ));
-        }
+            Err(e) => return Err(DispatchError::RoutingFailed(e)),
+        };
 
         // Actually dispatch to selected endpoints
         let mut successes = 0;
@@ -1175,7 +1228,8 @@ impl SymbolDispatcher {
         let mut sent_to = SmallVec::<[EndpointId; 4]>::new();
         let mut failed = SmallVec::<[(EndpointId, DispatchError); 4]>::new();
 
-        for endpoint in selected {
+        for route in routes {
+            let endpoint = route.endpoint;
             let _guard = endpoint.acquire_connection_guard();
 
             // Attempt send

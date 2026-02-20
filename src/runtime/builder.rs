@@ -1145,13 +1145,11 @@ impl RuntimeInner {
 
         let task_id = {
             let mut guard = self.state.lock().expect("runtime state lock poisoned");
-            let (task_id, _handle) =
-                guard.create_task(self.root_region, Budget::INFINITE, wrapped)?;
+            let (task_id, _handle) = guard.create_task(self.root_region, Budget::new(), wrapped)?;
             task_id
         };
 
-        self.scheduler
-            .inject_ready(task_id, Budget::INFINITE.priority);
+        self.scheduler.inject_ready(task_id, Budget::new().priority);
 
         Ok(JoinHandle::new(join_state))
     }

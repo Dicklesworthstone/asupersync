@@ -1396,6 +1396,16 @@ impl Default for Saga {
     }
 }
 
+impl Drop for Saga {
+    fn drop(&mut self) {
+        if self.state == SagaState::Running {
+            // Unwind or early return: execute compensations to prevent leaks.
+            // If we are already panicking, running compensations that panic will abort the process.
+            self.run_compensations();
+        }
+    }
+}
+
 //
 //   1. SpawnRequest  — originator → remote node
 //   2. SpawnAck      — remote node → originator

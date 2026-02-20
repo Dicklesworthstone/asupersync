@@ -894,9 +894,9 @@ impl<P: Policy> Scope<'_, P> {
 
         match Select::new(f1_pinned.as_mut(), f2_pinned.as_mut()).await {
             Either::Left(res) => {
-                // h1 finished first
-                // h2 was dropped and aborted by JoinFuture::drop
-                // We manually ensure it's cancelled (idempotent) and drain it
+                // h1 finished first.
+                // h2 is pinned on the stack and borrowed by Select, so it was NOT dropped.
+                // We MUST explicitly abort it before draining to avoid deadlock.
                 h2.abort_with_reason(CancelReason::race_loser());
                 let _ = f2_pinned.await; // Drain h2
                 res

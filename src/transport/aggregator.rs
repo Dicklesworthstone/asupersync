@@ -843,32 +843,36 @@ impl SymbolReorderer {
         let mut flushed = Vec::with_capacity(4);
 
         for state in objects.values_mut() {
-            let mut to_remove = Vec::with_capacity(state.buffer.len());
+            // Find the highest sequence number that has timed out.
+            // Any symbol with seq <= max_timeout_seq must be flushed to preserve order,
+            // because we are about to advance next_expected past it.
+            let mut max_timeout_seq = None;
 
             for (&seq, buffered) in &state.buffer {
                 let wait_time = now
                     .as_nanos()
                     .saturating_sub(buffered.received_at.as_nanos());
                 if wait_time >= max_wait_nanos {
-                    to_remove.push(seq);
+                    max_timeout_seq = Some(seq);
                 }
             }
 
-            let mut max_flushed_seq = None;
-            for seq in to_remove {
-                if let Some(buffered) = state.buffer.remove(&seq) {
+            if let Some(cutoff) = max_timeout_seq {
+                // Drain everything up to cutoff
+                // BTreeMap::split_off returns keys >= argument.
+                // We want to keep keys > cutoff, so we split at cutoff + 1.
+                let keep = state.buffer.split_off(&(cutoff + 1));
+                let to_flush = std::mem::replace(&mut state.buffer, keep);
+
+                for (_, buffered) in to_flush {
                     flushed.push(buffered.symbol);
+                    // We treat these as timeout deliveries because they are forced out
+                    // by a timeout event (either their own or a later symbol's).
                     self.timeout_deliveries.fetch_add(1, Ordering::Relaxed);
-                    max_flushed_seq = Some(seq);
                 }
-            }
 
-            // Advance next_expected past flushed symbols so the reorderer
-            // does not get permanently stuck waiting for a gap that will
-            // never be filled.
-            if let Some(max_seq) = max_flushed_seq {
-                if max_seq >= state.next_expected {
-                    state.next_expected = max_seq + 1;
+                if cutoff >= state.next_expected {
+                    state.next_expected = cutoff + 1;
                 }
             }
 
