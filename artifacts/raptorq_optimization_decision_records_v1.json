@@ -3,7 +3,7 @@
   "artifact_id": "raptorq_optimization_decision_records_v1",
   "track_bead_id": "asupersync-3ltrv",
   "external_ref": "bd-7toum",
-  "generated_at_utc": "2026-02-20T00:36:00Z",
+  "generated_at_utc": "2026-02-20T01:47:30Z",
   "governance_rules": {
     "required_fields": [
       "decision_id",
@@ -123,6 +123,9 @@
           "Track-E prior scalar/fused corpus indicates substantial gains in selected regimes (e.g. dual fused uplift in representative cases).",
           "2026-02-19 E5 slices landed deterministic profile catalog + host-class rejected-candidate metadata + replay pointer surfacing.",
           "2026-02-19 third E5 slice added deterministic tuning-candidate provenance fields and structured benchmark log metadata (tuning corpus ID, selected/rejected candidate IDs, command bundle).",
+          "2026-02-20 fourth E5 slice added deterministic profile-pack manifest snapshot API and manifest-level reproducibility fields in Track-E benchmark logs.",
+          "2026-02-20 fifth E5 slice added deterministic environment metadata (arch/os/env/endian/pointer width) to manifest snapshots and Track-E policy logs.",
+          "2026-02-20 sixth E5 slice added artifacts/raptorq_track_e_gf256_bench_v1.json with baseline/auto/rollback comparator capture and rollback rehearsal outcomes.",
           "Final offline tuner and p95/p99 comparator corpus remains in progress under asupersync-36m6p."
         ]
       },
@@ -145,8 +148,13 @@
         "mode": "scalar-conservative-v1 profile pack",
         "evidence_refs": [
           "asupersync-36m6p comments #1826 and #1834",
+          "asupersync-36m6p comments #1848/#1855 (manifest snapshot and environment reproducibility metadata; all-targets checks pass)",
+          "artifacts/raptorq_track_e_gf256_bench_v1.json",
           "asupersync-2ncba notes benchmark corpus",
-          "agent-mail thread asupersync-3ltrv msg #1383 (2026-02-19 E5 evidence sync)"
+          "agent-mail thread asupersync-3ltrv msg #1383 (2026-02-19 E5 evidence sync)",
+          "agent-mail thread coord-2026-02-19 msgs #1408/#1410 (compile-mismatch no longer reproduced)",
+          "agent-mail thread asupersync-3ltrv msgs #1422/#1424 (E5 fifth-slice evidence + corrected anchor)",
+          "agent-mail thread asupersync-3ltrv msg #1441 and coord thread msg #1443 (sixth-slice comparator artifact + rollback capture confirmation)"
         ]
       },
       "fallback_plan": {
@@ -165,13 +173,15 @@
       "validation_evidence": {
         "unit": [
           "rch exec -- cargo test -p asupersync --lib raptorq::gf256::tests::dual_policy_snapshot_exposes_profile_pack_metadata -- --nocapture",
-          "rch exec -- cargo check -p asupersync --lib"
+          "rch exec -- cargo test -p asupersync --lib raptorq::gf256::tests::profile_pack_manifest_snapshot_ -- --nocapture",
+          "rch exec -- cargo check -p asupersync --lib",
+          "rch exec -- cargo check --all-targets"
         ],
         "deterministic_e2e": [
           "rch exec -- NO_PREFLIGHT=1 ./scripts/run_raptorq_e2e.sh --profile fast --bundle"
         ],
         "structured_logs": [
-          "artifacts/raptorq_track_e_gf256_bench_v1.json",
+          "benches/raptorq_benchmark.rs Track-E policy/probe logs emit manifest-level reproducibility fields.",
           "target/e2e-results/raptorq/<profile>_<timestamp>/summary.json",
           "target/e2e-results/raptorq/<profile>_<timestamp>/validation_stages.ndjson"
         ]
@@ -179,6 +189,7 @@
       "measured_comparator_evidence": {
         "status": "partial",
         "artifacts": [
+          "asupersync-36m6p comments #1848/#1855",
           "artifacts/raptorq_track_e_gf256_bench_v1.json"
         ],
         "bench_repro_commands": [
@@ -187,10 +198,12 @@
         ],
         "notes": [
           "Profile-pack and tuning-candidate provenance fields are now emitted in Track-E policy logs.",
-          "Comparator corpus is not final until p95/p99 summaries and rollback rehearsal outcomes are attached."
+          "Manifest snapshot metadata (schema/version/catalog counts/selected candidate details) is now emitted and covered by deterministic tests.",
+          "Environment reproducibility metadata (target_arch/target_os/target_env/target_endian/target_pointer_width_bits) is now included in manifest snapshots and emitted in policy logs.",
+          "Comparator corpus is not final until p95/p99 summaries are attached."
         ],
         "pending_blockers": [
-          "Pre-existing compile debt in src/raptorq/decoder.rs (gf256_addmul_slice argument mismatch near ~2222/~2479) is blocking complete closure runs."
+          "Final p95/p99 comparator corpus is still pending for full E5 closure."
         ]
       },
       "deterministic_replay": {
@@ -574,7 +587,7 @@
     "cards_pending_measured_evidence": 3,
     "cards_with_replay_commands": 8,
     "closure_blockers": [
-      "Complete final offline comparator corpus for E5 (`asupersync-36m6p`) with p95/p99 and selected-profile vs scalar-conservative evidence links; current blocker is pre-existing compile debt in `src/raptorq/decoder.rs` (`gf256_addmul_slice` argument mismatch near ~2222/~2479).",
+      "Complete final offline comparator corpus for E5 (`asupersync-36m6p`) with p95/p99 and selected-profile vs scalar-conservative evidence links (rollback rehearsal outcomes are now captured in `artifacts/raptorq_track_e_gf256_bench_v1.json`).",
       "Promote F7 from proposed to approved_guarded only after burst-workload comparator evidence and rollback rehearsal outcomes are attached.",
       "Keep F8 as template/proposed until implementation exists; then attach measured overlap-vs-sequential evidence and rollback rehearsal outcomes."
     ]

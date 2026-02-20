@@ -1,0 +1,147 @@
+{
+  "schema_version": "raptorq-track-e-gf256-bench-v1",
+  "artifact_id": "raptorq_track_e_gf256_bench_v1",
+  "generated_at_utc": "2026-02-20T01:47:30Z",
+  "track_bead_id": "asupersync-36m6p",
+  "external_ref": "bd-7toum",
+  "benchmark": {
+    "name": "raptorq_benchmark",
+    "filter": "gf256_primitives",
+    "sample_size": 10,
+    "warm_up_time_seconds": 0.1,
+    "measurement_time_seconds": 0.1,
+    "runner": "rch exec"
+  },
+  "runs": [
+    {
+      "run_id": "baseline",
+      "intent": "conservative comparator",
+      "environment": {
+        "ASUPERSYNC_GF256_PROFILE_PACK": "scalar-conservative-v1",
+        "ASUPERSYNC_GF256_DUAL_POLICY": "never",
+        "CARGO_TARGET_DIR": "/tmp/rch-e5-baseline"
+      },
+      "command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-e5-baseline cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+      "log_path": "/tmp/e5_gf256_primitives_baseline.log",
+      "remote_exit": {
+        "status": 0,
+        "finished_at_utc": "2026-02-20T01:41:03.425255Z",
+        "duration_ms": 140953
+      }
+    },
+    {
+      "run_id": "auto",
+      "intent": "optimized mode under test",
+      "environment": {
+        "ASUPERSYNC_GF256_PROFILE_PACK": "auto",
+        "ASUPERSYNC_GF256_DUAL_POLICY": "auto",
+        "CARGO_TARGET_DIR": "/tmp/rch-e5-auto"
+      },
+      "command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto CARGO_TARGET_DIR=/tmp/rch-e5-auto cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+      "log_path": "/tmp/e5_gf256_primitives_auto.log",
+      "remote_exit": {
+        "status": 0,
+        "finished_at_utc": "2026-02-20T01:43:36.058550Z",
+        "duration_ms": 137318
+      }
+    },
+    {
+      "run_id": "rollback",
+      "intent": "rollback rehearsal",
+      "environment": {
+        "ASUPERSYNC_GF256_PROFILE_PACK": "scalar-conservative-v1",
+        "ASUPERSYNC_GF256_DUAL_POLICY": "never",
+        "CARGO_TARGET_DIR": "/tmp/rch-e5-rollback"
+      },
+      "command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-e5-rollback cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+      "log_path": "/tmp/e5_gf256_primitives_rollback.log",
+      "remote_exit": {
+        "status": 0,
+        "finished_at_utc": "2026-02-20T01:46:04.795862Z",
+        "duration_ms": 139169
+      }
+    }
+  ],
+  "policy_snapshot_rq_e_gf256_005": {
+    "scenario_id": "RQ-E-GF256-005",
+    "seed": 4101,
+    "kernel": "Scalar",
+    "profile_pack": "scalar-conservative-v1",
+    "selected_tuning_candidate_id": "scalar-t16-u1-pf0-fused-off-v1",
+    "target_arch": "x86_64",
+    "target_os": "linux",
+    "target_env": "unknown",
+    "target_endian": "little",
+    "target_pointer_width_bits": 64,
+    "mul_decision": "Sequential",
+    "addmul_decision": "Sequential",
+    "replay_pointer": "replay:rq-e-gf256-profile-pack-v1"
+  },
+  "comparators": [
+    {
+      "operation": "addmul_slices2_fused",
+      "scenario": "RQ-E-GF256-005_n16384_seed4101_k64_sym16384",
+      "baseline": {
+        "time_us": [7.1791, 7.3862, 7.7066],
+        "throughput_gib_s": [1.98, 2.0658, 2.1254]
+      },
+      "auto": {
+        "time_us": [9.2225, 9.5736, 9.7188],
+        "throughput_gib_s": [1.57, 1.5938, 1.6545]
+      },
+      "rollback": {
+        "time_us": [6.8208, 7.0658, 7.6799],
+        "throughput_gib_s": [1.9868, 2.1595, 2.2371]
+      },
+      "delta_vs_baseline_median_pct": {
+        "auto": -22.845,
+        "rollback": 4.536
+      }
+    },
+    {
+      "operation": "addmul_slices2_sequential",
+      "scenario": "RQ-E-GF256-005_n16384_seed4101_k64_sym16384",
+      "baseline": {
+        "time_us": [7.4095, 7.76, 8.2403],
+        "throughput_gib_s": [1.8517, 1.9663, 2.0593]
+      },
+      "auto": {
+        "time_us": [7.2211, 7.5283, 8.0534],
+        "throughput_gib_s": [1.8947, 2.0269, 2.1131]
+      },
+      "rollback": {
+        "time_us": [6.5595, 6.6884, 6.8038],
+        "throughput_gib_s": [2.2427, 2.2814, 2.3262]
+      },
+      "delta_vs_baseline_median_pct": {
+        "auto": 3.082,
+        "rollback": 16.025
+      }
+    }
+  ],
+  "rollback_rehearsal": {
+    "result": "pass",
+    "checks": [
+      {
+        "name": "rollback command exits successfully",
+        "status": "pass",
+        "evidence": "remote_exit.status=0"
+      },
+      {
+        "name": "conservative profile selected",
+        "status": "pass",
+        "evidence": "profile_pack=scalar-conservative-v1 in Track-E policy log"
+      },
+      {
+        "name": "deterministic tuning candidate emitted",
+        "status": "pass",
+        "evidence": "selected_tuning_candidate_id=scalar-t16-u1-pf0-fused-off-v1"
+      }
+    ]
+  },
+  "notes": [
+    "All three runs emitted Track-E policy/probe JSON with deterministic manifest/profile metadata fields.",
+    "This comparator capture uses short Criterion windows for fast rehearsal and should be treated as directional evidence.",
+    "Observed throughput variance indicates a full p95/p99 corpus is still required for final E5 closure."
+  ]
+}

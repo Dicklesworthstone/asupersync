@@ -1,0 +1,156 @@
+{
+  "schema_version": "raptorq-track-e-gf256-p95p99-v1",
+  "artifact_id": "raptorq_track_e_gf256_p95p99_v1",
+  "generated_at_utc": "2026-02-20T04:13:30Z",
+  "track_bead_id": "asupersync-36m6p",
+  "external_ref": "bd-3g5em",
+  "source_artifacts": [
+    "artifacts/raptorq_track_e_gf256_bench_v1.json"
+  ],
+  "source_logs": [
+    "/tmp/e5_gf256_primitives_baseline.log",
+    "/tmp/e5_gf256_primitives_auto.log",
+    "/tmp/e5_gf256_primitives_rollback.log"
+  ],
+  "methodology": {
+    "benchmark": "raptorq_benchmark",
+    "filter": "gf256_primitives",
+    "scenario_scope": [
+      "RQ-E-GF256-001",
+      "RQ-E-GF256-002",
+      "RQ-E-GF256-003",
+      "RQ-E-GF256-004",
+      "RQ-E-GF256-005"
+    ],
+    "operation_scope": [
+      "mul_slices2_fused",
+      "mul_slices2_sequential",
+      "addmul_slices2_fused",
+      "addmul_slices2_sequential"
+    ],
+    "value_extraction": "Use Criterion median estimates from benchmark output lines: time [low median high] and thrpt [low median high].",
+    "unit_normalization": "Time medians converted to microseconds; ns values divided by 1000.",
+    "percentile_method": "Nearest-rank percentile over sorted scenario-level medians per mode/op; n=5 per op and n=20 for overall aggregate.",
+    "commands": [
+      "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-e5-baseline cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+      "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto CARGO_TARGET_DIR=/tmp/rch-e5-auto cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+      "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-e5-rollback cargo bench --bench raptorq_benchmark -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1"
+    ]
+  },
+  "per_mode_overall_percentiles": [
+    {
+      "mode": "baseline",
+      "samples": 20,
+      "time_us": { "p50": 0.37729, "p95": 7.3862, "p99": 7.76 },
+      "throughput_gib_s": { "p50": 2.3058, "p95": 2.7239, "p99": 2.8543 }
+    },
+    {
+      "mode": "auto",
+      "samples": 20,
+      "time_us": { "p50": 0.41773, "p95": 7.5283, "p99": 9.5736 },
+      "throughput_gib_s": { "p50": 2.0269, "p95": 2.6268, "p99": 2.6351 }
+    },
+    {
+      "mode": "rollback",
+      "samples": 20,
+      "time_us": { "p50": 0.374, "p95": 6.9451, "p99": 7.0658 },
+      "throughput_gib_s": { "p50": 2.1971, "p95": 2.5499, "p99": 2.6145 }
+    }
+  ],
+  "per_mode_operation_percentiles": [
+    {
+      "mode": "baseline",
+      "operation": "mul_slices2_fused",
+      "samples": 5,
+      "time_us": { "p50": 0.39138, "p95": 5.3458, "p99": 5.3458 },
+      "throughput_gib_s": { "p50": 2.5607, "p95": 2.8543, "p99": 2.8543 }
+    },
+    {
+      "mode": "baseline",
+      "operation": "mul_slices2_sequential",
+      "samples": 5,
+      "time_us": { "p50": 0.61012, "p95": 6.0973, "p99": 6.0973 },
+      "throughput_gib_s": { "p50": 2.0925, "p95": 2.6617, "p99": 2.6617 }
+    },
+    {
+      "mode": "baseline",
+      "operation": "addmul_slices2_fused",
+      "samples": 5,
+      "time_us": { "p50": 0.37729, "p95": 7.3862, "p99": 7.3862 },
+      "throughput_gib_s": { "p50": 2.1009, "p95": 2.5277, "p99": 2.5277 }
+    },
+    {
+      "mode": "baseline",
+      "operation": "addmul_slices2_sequential",
+      "samples": 5,
+      "time_us": { "p50": 0.37101, "p95": 7.76, "p99": 7.76 },
+      "throughput_gib_s": { "p50": 2.3058, "p95": 2.6563, "p99": 2.6563 }
+    },
+    {
+      "mode": "auto",
+      "operation": "mul_slices2_fused",
+      "samples": 5,
+      "time_us": { "p50": 0.49921, "p95": 6.0754, "p99": 6.0754 },
+      "throughput_gib_s": { "p50": 1.882, "p95": 2.5116, "p99": 2.5116 }
+    },
+    {
+      "mode": "auto",
+      "operation": "mul_slices2_sequential",
+      "samples": 5,
+      "time_us": { "p50": 0.52607, "p95": 7.209, "p99": 7.209 },
+      "throughput_gib_s": { "p50": 1.9501, "p95": 2.6351, "p99": 2.6351 }
+    },
+    {
+      "mode": "auto",
+      "operation": "addmul_slices2_fused",
+      "samples": 5,
+      "time_us": { "p50": 0.36306, "p95": 9.5736, "p99": 9.5736 },
+      "throughput_gib_s": { "p50": 2.2161, "p95": 2.6268, "p99": 2.6268 }
+    },
+    {
+      "mode": "auto",
+      "operation": "addmul_slices2_sequential",
+      "samples": 5,
+      "time_us": { "p50": 0.41773, "p95": 7.5283, "p99": 7.5283 },
+      "throughput_gib_s": { "p50": 2.2268, "p95": 2.4434, "p99": 2.4434 }
+    },
+    {
+      "mode": "rollback",
+      "operation": "mul_slices2_fused",
+      "samples": 5,
+      "time_us": { "p50": 0.37756, "p95": 6.4359, "p99": 6.4359 },
+      "throughput_gib_s": { "p50": 2.3709, "p95": 2.5259, "p99": 2.5259 }
+    },
+    {
+      "mode": "rollback",
+      "operation": "mul_slices2_sequential",
+      "samples": 5,
+      "time_us": { "p50": 0.36477, "p95": 6.9451, "p99": 6.9451 },
+      "throughput_gib_s": { "p50": 2.1971, "p95": 2.6145, "p99": 2.6145 }
+    },
+    {
+      "mode": "rollback",
+      "operation": "addmul_slices2_fused",
+      "samples": 5,
+      "time_us": { "p50": 0.374, "p95": 7.0658, "p99": 7.0658 },
+      "throughput_gib_s": { "p50": 2.1595, "p95": 2.5499, "p99": 2.5499 }
+    },
+    {
+      "mode": "rollback",
+      "operation": "addmul_slices2_sequential",
+      "samples": 5,
+      "time_us": { "p50": 0.42494, "p95": 6.6884, "p99": 6.6884 },
+      "throughput_gib_s": { "p50": 2.2443, "p95": 2.35, "p99": 2.35 }
+    }
+  ],
+  "findings": [
+    "Auto mode shows a heavier p99 tail in the selected operation set versus baseline (9.5736 us vs 7.7600 us in this corpus).",
+    "Rollback corpus restores overall p95/p99 time tail below baseline in this sample set (6.9451/7.0658 us vs 7.3862/7.7600 us).",
+    "Per-op tails remain mixed across modes; this artifact should be treated as directional evidence pending larger-sample p95/p99 confirmation."
+  ],
+  "limitations": [
+    "Percentiles are computed over scenario-level medians rather than raw Criterion sample streams.",
+    "Per-operation percentile groups have n=5, so p95/p99 collapse to max by nearest-rank definition.",
+    "Runs used short Criterion windows (sample-size 10, 0.1s warmup/measurement), favoring fast iteration over statistical power."
+  ]
+}

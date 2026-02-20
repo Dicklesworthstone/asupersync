@@ -91,7 +91,7 @@ Current artifact summary (`coverage_summary` in JSON):
 
 Closure blockers for `asupersync-3ltrv` remain:
 
-1. Finalize offline profile-pack comparator evidence for `E5` (`asupersync-36m6p`) with p95/p99 links; current blocker is pre-existing `src/raptorq/decoder.rs` compile debt (`gf256_addmul_slice` argument mismatch near ~2222/~2479).
+1. Finalize offline profile-pack comparator evidence for `E5` (`asupersync-36m6p`) with p95/p99 links.
 2. Promote `F7` from proposed to approved_guarded only after burst comparator evidence + rollback rehearsal outcomes are recorded.
 3. Keep `F8` as proposed/template until implementation exists, then attach overlap-vs-sequential evidence and rollback outcomes.
 
@@ -103,8 +103,12 @@ Recent evidence alignment updates (2026-02-19):
 
 Recent evidence alignment updates (2026-02-20):
 
-- Added partial `E5` measured-comparator evidence anchors from latest Track-E execution (`agent-mail asupersync-3ltrv #1383`), including artifact path `artifacts/raptorq_track_e_gf256_bench_v1.json`.
+- Added partial `E5` measured-comparator evidence anchors from latest Track-E execution (`agent-mail asupersync-3ltrv #1383`) and linked bead evidence comments (`asupersync-36m6p` comments `#1848` and `#1855`).
 - Added deterministic bench repro commands for E5 comparator capture:
   - `rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives`
   - `rch exec -- cargo bench --bench raptorq_benchmark -- gf256_dual_policy`
-- Recorded current closure blocker for final E5 comparator corpus: pre-existing `src/raptorq/decoder.rs` compile mismatch around `gf256_addmul_slice` usage.
+- Added follow-up E5 evidence from `asupersync-36m6p` comment `#1848` and coord thread updates (`#1408`, `#1410`): manifest snapshot determinism tests + `rch exec -- cargo check --all-targets` pass.
+- Added follow-up E5 fifth-slice reproducibility evidence (`asupersync-36m6p` comment `#1855`, agent-mail `#1422/#1424`): deterministic environment metadata now included in manifest snapshots and Track-E policy/probe logs.
+- Added sixth-slice comparator artifact `artifacts/raptorq_track_e_gf256_bench_v1.json`: baseline/auto/rollback Track-E capture with rollback rehearsal outcomes.
+- Added sixth-slice confirmation references (`agent-mail asupersync-3ltrv #1441`, `coord thread #1443`) to tie the new comparator artifact and rollback capture into G3 evidence flow.
+- Removed stale compile-mismatch blocker text; current E5 blocker is narrowed to missing final p95/p99 comparator corpus.
