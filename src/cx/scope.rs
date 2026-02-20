@@ -542,7 +542,7 @@ impl<P: Policy> Scope<'_, P> {
         use crate::runtime::task_handle::JoinError;
 
         // Use the infrastructure helper to create the record, channel, etc.
-        let (task_id, handle, base_cx_full, result_tx) =
+        let (task_id, mut handle, base_cx_full, result_tx) =
             state.create_task_infrastructure(self.region, self.budget)?;
 
         // Ensure child contexts inherit capability wiring (no-globals).
@@ -1423,7 +1423,7 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let handle = scope
+        let mut handle = scope
             .spawn_registered(&mut state, &cx, |_| async { 42_i32 })
             .unwrap();
 

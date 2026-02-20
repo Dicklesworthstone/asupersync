@@ -2036,7 +2036,7 @@ mod tests {
     fn pooled_resource_notifies_wakers_outside_return_waker_lock() {
         init_test("pooled_resource_notifies_wakers_outside_return_waker_lock");
         let (return_tx, _return_rx) = mpsc::channel();
-        let return_wakers = Arc::new(PoolMutex::new(SmallVec::<[Waker; 4]>::new()));
+        let return_wakers = Arc::new(PoolMutex::new(SmallVec::<[(u64, Waker); 4]>::new()));
         let (probe_tx, probe_rx) = mpsc::channel();
 
         {
@@ -2045,7 +2045,7 @@ mod tests {
                 tx: probe_tx,
             });
             let mut wakers = return_wakers.lock();
-            wakers.push(Waker::from(probe));
+            wakers.push((1, Waker::from(probe)));
         }
 
         let pooled =
