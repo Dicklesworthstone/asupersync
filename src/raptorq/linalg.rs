@@ -516,6 +516,8 @@ pub fn select_pivot_basic(matrix: &[&[u8]], start: usize, end: usize, col: usize
 ///
 /// This heuristic reduces fill-in during Gaussian elimination, improving
 /// performance for sparse matrices like LDPC/HDPC precodes.
+/// Nonzero counts are computed in the active submatrix (`col..`), which
+/// matches elimination semantics after prior pivot columns are cleared.
 ///
 /// Returns `(row_index, nonzero_count)` of the best pivot, if any.
 ///
@@ -538,10 +540,23 @@ pub fn select_pivot_markowitz(
         if row_data[col] == 0 {
             continue;
         }
-        let nnz = row_data.iter().filter(|&&b| b != 0).count();
+        let nnz = match best {
+            None => count_nonzero_capped_from(row_data, col, usize::MAX),
+            Some((_, best_nnz)) => count_nonzero_capped_from(row_data, col, best_nnz),
+        };
         match &best {
-            None => best = Some((row, nnz)),
-            Some((_, best_nnz)) if nnz < *best_nnz => best = Some((row, nnz)),
+            None => {
+                best = Some((row, nnz));
+                if nnz == 1 {
+                    break;
+                }
+            }
+            Some((_, best_nnz)) if nnz < *best_nnz => {
+                best = Some((row, nnz));
+                if nnz == 1 {
+                    break;
+                }
+            }
             Some((best_row, best_nnz)) if nnz == *best_nnz && row < *best_row => {
                 best = Some((row, nnz));
             }
@@ -792,9 +807,16 @@ impl GaussianSolver {
             if self.matrix[row][col] == 0 {
                 continue;
             }
+            let row_slice = self.matrix[row].as_slice();
+            debug_assert!(
+                row_slice[..col.min(row_slice.len())]
+                    .iter()
+                    .all(|&coef| coef == 0),
+                "markowitz expects columns before current pivot to be structurally zero"
+            );
             let nnz = match best {
-                None => self.matrix[row].iter().filter(|&&b| b != 0).count(),
-                Some((_, current_best)) => count_nonzero_capped(self.matrix[row].as_slice(), current_best),
+                None => count_nonzero_capped_from(row_slice, col, usize::MAX),
+                Some((_, current_best)) => count_nonzero_capped_from(row_slice, col, current_best),
             };
             match &best {
                 None => {
@@ -896,11 +918,13 @@ impl GaussianSolver {
     }
 }
 
-/// Counts non-zero coefficients in `row`, stopping once the count exceeds
-/// `cap`. This keeps Markowitz scans bounded once a good candidate exists.
-fn count_nonzero_capped(row: &[u8], cap: usize) -> usize {
+/// Counts non-zero coefficients in `row[start_col..]`, stopping once the count
+/// exceeds `cap`. This keeps Markowitz scans bounded once a good candidate
+/// exists and skips structural-zero prefix columns.
+fn count_nonzero_capped_from(row: &[u8], start_col: usize, cap: usize) -> usize {
+    let start = start_col.min(row.len());
     let mut count = 0usize;
-    for &coef in row {
+    for &coef in &row[start..] {
         if coef != 0 {
             count += 1;
             if count > cap {
@@ -1125,6 +1149,18 @@ mod tests {
 
         assert_eq!(select_pivot_markowitz(&matrix, 0, 3, 0), Some((0, 2)));
         assert_eq!(select_pivot_markowitz(&matrix, 1, 3, 0), Some((1, 2)));
+    }
+
+    #[test]
+    fn select_pivot_markowitz_counts_only_active_submatrix_tail() {
+        let rows: Vec<Vec<u8>> = vec![
+            vec![9, 9, 1, 1, 1], // tail nnz from col=2 is 3
+            vec![7, 7, 1, 0, 0], // tail nnz from col=2 is 1 (best)
+            vec![5, 5, 1, 0, 1], // tail nnz from col=2 is 2
+        ];
+        let matrix: Vec<&[u8]> = rows.iter().map(Vec::as_slice).collect();
+
+        assert_eq!(select_pivot_markowitz(&matrix, 0, 3, 2), Some((1, 1)));
     }
 
     #[test]
@@ -1409,6 +1445,29 @@ mod tests {
             Some((0, 2)),
             "equal-nnz candidates should retain lowest row index"
         );
+    }
+
+    #[test]
+    fn markowitz_column_offset_prefers_sparser_tail() {
+        let mut solver = GaussianSolver::new(3, 5);
+        solver.set_row(0, &[0, 0, 1, 1, 1], DenseRow::zeros(0));
+        solver.set_row(1, &[0, 0, 1, 0, 0], DenseRow::zeros(0));
+        solver.set_row(2, &[0, 0, 1, 0, 1], DenseRow::zeros(0));
+
+        assert_eq!(
+            solver.find_pivot_markowitz(2, 0),
+            Some((1, 1)),
+            "pivot selection should use nonzero count from active column tail"
+        );
+    }
+
+    #[test]
+    fn nonzero_count_capped_from_respects_start_and_cap() {
+        let row = [1, 0, 1, 1, 0, 1];
+        assert_eq!(count_nonzero_capped_from(&row, 0, usize::MAX), 4);
+        assert_eq!(count_nonzero_capped_from(&row, 2, usize::MAX), 3);
+        assert_eq!(count_nonzero_capped_from(&row, 2, 1), 2);
+        assert_eq!(count_nonzero_capped_from(&row, row.len(), usize::MAX), 0);
     }
 
     #[test]

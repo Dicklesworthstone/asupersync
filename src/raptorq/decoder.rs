@@ -11,7 +11,7 @@
 //! - Tie-breaking rules are explicit (lowest column index wins)
 //! - Same received symbols in same order produce identical decode results
 
-use crate::raptorq::gf256::{gf256_addmul_slice, Gf256};
+use crate::raptorq::gf256::{Gf256, gf256_addmul_slice};
 use crate::raptorq::proof::{
     DecodeConfig, DecodeProof, EliminationTrace, FailureReason, InactivationStrategy, PeelingTrace,
     ReceivedSummary,
@@ -1422,6 +1422,42 @@ fn dense_update_start_col(pivot_row: &[Gf256], pivot_col: usize) -> usize {
     }
 }
 
+#[inline]
+fn eliminate_row_coefficients(
+    row: &mut [Gf256],
+    pivot_row: &[Gf256],
+    factor: Gf256,
+    pivot_col: usize,
+    use_sparse: bool,
+    sparse_cols: &[usize],
+    dense_start_col: usize,
+) {
+    debug_assert_eq!(row.len(), pivot_row.len());
+    debug_assert!(pivot_col < row.len());
+    row[pivot_col] = Gf256::ZERO;
+
+    if use_sparse {
+        for &c in sparse_cols {
+            if c == pivot_col {
+                continue;
+            }
+            row[c] += factor * pivot_row[c];
+        }
+        return;
+    }
+
+    if dense_start_col == 0 {
+        for c in 0..pivot_col {
+            row[c] += factor * pivot_row[c];
+        }
+    }
+
+    let tail_start = dense_start_col.max(pivot_col.saturating_add(1));
+    for c in tail_start..row.len() {
+        row[c] += factor * pivot_row[c];
+    }
+}
+
 fn should_activate_hard_regime(n_rows: usize, n_cols: usize, a: &[Gf256]) -> bool {
     if n_cols < HARD_REGIME_MIN_COLS {
         return false;
@@ -2228,15 +2264,15 @@ impl InactivationDecoder {
                     if factor.is_zero() {
                         continue;
                     }
-                    if use_sparse {
-                        for &c in &sparse_cols {
-                            a[row_off + c] += factor * pivot_buf[c];
-                        }
-                    } else {
-                        for c in dense_start_col..n_cols {
-                            a[row_off + c] += factor * pivot_buf[c];
-                        }
-                    }
+                    eliminate_row_coefficients(
+                        &mut a[row_off..row_off + n_cols],
+                        &pivot_buf[..n_cols],
+                        factor,
+                        col,
+                        use_sparse,
+                        &sparse_cols,
+                        dense_start_col,
+                    );
                     gf256_addmul_slice(rhs, &pivot_rhs[..symbol_size], factor);
                     gauss_ops += 1;
                 }
@@ -2484,15 +2520,15 @@ impl InactivationDecoder {
                     if factor.is_zero() {
                         continue;
                     }
-                    if use_sparse {
-                        for &c in &sparse_cols {
-                            a[row_off + c] += factor * pivot_buf[c];
-                        }
-                    } else {
-                        for c in dense_start_col..n_cols {
-                            a[row_off + c] += factor * pivot_buf[c];
-                        }
-                    }
+                    eliminate_row_coefficients(
+                        &mut a[row_off..row_off + n_cols],
+                        &pivot_buf[..n_cols],
+                        factor,
+                        col,
+                        use_sparse,
+                        &sparse_cols,
+                        dense_start_col,
+                    );
                     gf256_addmul_slice(rhs, &pivot_rhs[..symbol_size], factor);
                     gauss_ops += 1;
                     // Record row operation in proof trace
@@ -2687,7 +2723,7 @@ impl ReceivedSymbol {
 mod tests {
     use super::*;
     use crate::raptorq::systematic::SystematicEncoder;
-    use crate::raptorq::test_log_schema::{validate_unit_log_json, UnitDecodeStats, UnitLogEntry};
+    use crate::raptorq::test_log_schema::{UnitDecodeStats, UnitLogEntry, validate_unit_log_json};
 
     fn rfc_eq_context(
         scenario_id: &str,
@@ -3107,6 +3143,71 @@ mod tests {
         assert_eq!(
             suffix_only, manual,
             "suffix-only dense update must match full-row elimination math when prefix is zero"
+        );
+    }
+
+    #[test]
+    fn eliminate_row_coefficients_matches_manual_for_sparse_and_dense_paths() {
+        let pivot_col = 3usize;
+        let factor = Gf256::new(0x5d);
+        let pivot_row = vec![
+            Gf256::new(0x10),
+            Gf256::new(0x20),
+            Gf256::new(0x30),
+            Gf256::ONE,
+            Gf256::new(0x40),
+            Gf256::new(0x50),
+            Gf256::new(0x60),
+            Gf256::new(0x70),
+        ];
+        let row = vec![
+            Gf256::new(0x01),
+            Gf256::new(0x02),
+            Gf256::new(0x03),
+            Gf256::new(0x04),
+            Gf256::new(0x05),
+            Gf256::new(0x06),
+            Gf256::new(0x07),
+            Gf256::new(0x08),
+        ];
+
+        let mut expected = row.clone();
+        for c in 0..pivot_row.len() {
+            expected[c] += factor * pivot_row[c];
+        }
+        expected[pivot_col] = Gf256::ZERO;
+
+        let mut dense_actual = row.clone();
+        eliminate_row_coefficients(
+            &mut dense_actual,
+            &pivot_row,
+            factor,
+            pivot_col,
+            false,
+            &[],
+            0,
+        );
+        assert_eq!(
+            dense_actual, expected,
+            "dense elimination helper must match manual elimination"
+        );
+
+        let sparse_cols: Vec<usize> = (0..pivot_row.len())
+            .filter(|&c| !pivot_row[c].is_zero())
+            .collect();
+        let mut sparse_actual = row;
+        eliminate_row_coefficients(
+            &mut sparse_actual,
+            &pivot_row,
+            factor,
+            pivot_col,
+            true,
+            &sparse_cols,
+            pivot_col,
+        );
+        assert_eq!(
+            sparse_actual, expected,
+            "sparse elimination helper must match manual elimination"
         );
     }
 
@@ -3983,30 +4084,38 @@ mod tests {
 
     #[test]
     fn failure_classification_is_explicit() {
-        assert!(DecodeError::InsufficientSymbols {
-            received: 1,
-            required: 2
-        }
-        .is_recoverable());
+        assert!(
+            DecodeError::InsufficientSymbols {
+                received: 1,
+                required: 2
+            }
+            .is_recoverable()
+        );
         assert!(DecodeError::SingularMatrix { row: 3 }.is_recoverable());
-        assert!(DecodeError::SymbolSizeMismatch {
-            expected: 8,
-            actual: 7
-        }
-        .is_unrecoverable());
-        assert!(DecodeError::ColumnIndexOutOfRange {
-            esi: 1,
-            column: 99,
-            max_valid: 12
-        }
-        .is_unrecoverable());
-        assert!(DecodeError::CorruptDecodedOutput {
-            esi: 1,
-            byte_index: 0,
-            expected: 1,
-            actual: 2
-        }
-        .is_unrecoverable());
+        assert!(
+            DecodeError::SymbolSizeMismatch {
+                expected: 8,
+                actual: 7
+            }
+            .is_unrecoverable()
+        );
+        assert!(
+            DecodeError::ColumnIndexOutOfRange {
+                esi: 1,
+                column: 99,
+                max_valid: 12
+            }
+            .is_unrecoverable()
+        );
+        assert!(
+            DecodeError::CorruptDecodedOutput {
+                esi: 1,
+                byte_index: 0,
+                expected: 1,
+                actual: 2
+            }
+            .is_unrecoverable()
+        );
     }
 
     fn make_rank_deficient_state(
