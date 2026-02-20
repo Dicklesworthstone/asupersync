@@ -1,0 +1,267 @@
+{
+  "artifact_id": "raptorq-expected-loss-decision-contract-v1",
+  "schema_version": "raptorq-g7-expected-loss-contract-v1",
+  "track_bead_id": "asupersync-m7o6i",
+  "parent_track_bead_id": "asupersync-2cyx5",
+  "external_ref": "bd-2bd8e",
+  "generated_at_utc": "2026-02-20T04:45:00Z",
+  "contract": {
+    "states": [
+      "healthy",
+      "degraded",
+      "regression",
+      "unknown"
+    ],
+    "actions": [
+      "continue",
+      "canary_hold",
+      "rollback",
+      "fallback"
+    ],
+    "loss_matrix": [
+      {
+        "state": "healthy",
+        "loss_terms": {
+          "continue": 10,
+          "canary_hold": 25,
+          "rollback": 90,
+          "fallback": 120
+        }
+      },
+      {
+        "state": "degraded",
+        "loss_terms": {
+          "continue": 80,
+          "canary_hold": 35,
+          "rollback": 45,
+          "fallback": 50
+        }
+      },
+      {
+        "state": "regression",
+        "loss_terms": {
+          "continue": 220,
+          "canary_hold": 120,
+          "rollback": 30,
+          "fallback": 20
+        }
+      },
+      {
+        "state": "unknown",
+        "loss_terms": {
+          "continue": 170,
+          "canary_hold": 95,
+          "rollback": 55,
+          "fallback": 35
+        }
+      }
+    ],
+    "decision_rule": {
+      "selector": "argmin_expected_loss",
+      "deterministic_tie_breaker": "fallback > rollback > canary_hold > continue",
+      "posterior_model": {
+        "type": "deterministic_weighted_signal_model",
+        "state_score_range": [
+          0,
+          1000
+        ]
+      },
+      "confidence_model": {
+        "confidence_score_range": [
+          0,
+          1000
+        ],
+        "uncertainty_score_range": [
+          0,
+          1000
+        ]
+      },
+      "deterministic_fallback_trigger": {
+        "if_any": [
+          "decode_mismatch_detected",
+          "proof_replay_mismatch",
+          "unknown_state_with_low_confidence",
+          "conservative_fallback_reason_unclassified"
+        ],
+        "then_action": "fallback"
+      }
+    }
+  },
+  "runtime_control_surface": {
+    "in_scope_levers": [
+      {
+        "lever_code": "E4",
+        "bead_id": "asupersync-348uw",
+        "controls": [
+          "ASUPERSYNC_GF256_DUAL_POLICY",
+          "decode.stats.policy_mode",
+          "decode.stats.policy_reason"
+        ]
+      },
+      {
+        "lever_code": "E5",
+        "bead_id": "asupersync-36m6p",
+        "controls": [
+          "ASUPERSYNC_GF256_PROFILE_PACK",
+          "decode.stats.policy_replay_ref",
+          "decode.stats.hard_regime_conservative_fallback_reason"
+        ]
+      },
+      {
+        "lever_code": "C5",
+        "bead_id": "asupersync-zfn8v",
+        "controls": [
+          "decode.stats.hard_regime_activated",
+          "decode.stats.hard_regime_branch",
+          "decode.stats.markowitz_pivots"
+        ]
+      },
+      {
+        "lever_code": "C6",
+        "bead_id": "asupersync-2qfjd",
+        "controls": [
+          "decode.stats.peeling_fallback_reason",
+          "decode.stats.dense_core_rows",
+          "decode.stats.dense_core_cols"
+        ]
+      },
+      {
+        "lever_code": "F5",
+        "bead_id": "asupersync-324sc",
+        "controls": [
+          "decode.stats.policy_mode",
+          "decode.stats.policy_baseline_loss",
+          "decode.stats.policy_high_support_loss",
+          "decode.stats.policy_block_schur_loss"
+        ]
+      },
+      {
+        "lever_code": "F6",
+        "bead_id": "asupersync-j96j4",
+        "controls": [
+          "decode.stats.regime_state",
+          "decode.stats.regime_score",
+          "decode.stats.regime_retune_count",
+          "decode.stats.regime_rollback_count"
+        ]
+      },
+      {
+        "lever_code": "F7",
+        "bead_id": "asupersync-n5fk6",
+        "controls": [
+          "decode.stats.factor_cache_hits",
+          "decode.stats.factor_cache_misses",
+          "decode.stats.factor_cache_last_reason",
+          "decode.stats.factor_cache_last_reuse_eligible"
+        ]
+      },
+      {
+        "lever_code": "F8",
+        "bead_id": "asupersync-2zu9p",
+        "controls": [
+          "decode.stats.gauss_ops",
+          "decode.stats.inactivated",
+          "decode.stats.pivots_selected"
+        ]
+      }
+    ],
+    "actions_to_runtime_intent": {
+      "continue": "keep current optimized mode",
+      "canary_hold": "freeze rollout stage and collect additional evidence",
+      "rollback": "revert to previous approved lever mode",
+      "fallback": "force conservative baseline comparator immediately"
+    }
+  },
+  "evidence_contributors": [
+    {
+      "name": "correctness_mismatch_signal",
+      "weight_permille": 350,
+      "inputs": [
+        "decode equality checks",
+        "proof replay verdict"
+      ]
+    },
+    {
+      "name": "performance_budget_signal",
+      "weight_permille": 250,
+      "inputs": [
+        "p95 regression",
+        "p99 regression",
+        "SLO threshold status"
+      ]
+    },
+    {
+      "name": "instability_signal",
+      "weight_permille": 200,
+      "inputs": [
+        "hard_regime_fallbacks",
+        "regime_rollback_count",
+        "unclassified fallback reason"
+      ]
+    },
+    {
+      "name": "cache_policy_signal",
+      "weight_permille": 100,
+      "inputs": [
+        "factor_cache_hit_rate",
+        "factor_cache_collision_rate"
+      ]
+    },
+    {
+      "name": "policy_conflict_signal",
+      "weight_permille": 100,
+      "inputs": [
+        "policy_mode disagreement with expected-loss recommendation",
+        "missing replay pointer"
+      ]
+    }
+  ],
+  "decision_output": {
+    "required_fields": [
+      "state_posterior",
+      "expected_loss_terms",
+      "chosen_action",
+      "top_evidence_contributors",
+      "confidence_score",
+      "uncertainty_score",
+      "deterministic_fallback_trigger",
+      "replay_ref"
+    ]
+  },
+  "structured_logging": {
+    "required_fields": [
+      "scenario_id",
+      "seed",
+      "state_posterior",
+      "expected_loss_terms",
+      "chosen_action",
+      "top_evidence_contributors",
+      "confidence_score",
+      "uncertainty_score",
+      "deterministic_fallback_trigger",
+      "replay_ref"
+    ],
+    "artifact_paths": [
+      "target/e2e-results/raptorq/<profile>_<timestamp>/summary.json",
+      "target/e2e-results/raptorq/<profile>_<timestamp>/scenarios.ndjson"
+    ]
+  },
+  "validation": {
+    "unit_commands": [
+      "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_schema_and_coverage -- --nocapture"
+    ],
+    "deterministic_e2e_commands": [
+      "rch exec -- ./scripts/run_raptorq_e2e.sh --profile fast"
+    ]
+  },
+  "reproducibility": {
+    "replay_bundle_required_inputs": [
+      "state posterior vector",
+      "loss matrix snapshot",
+      "evidence contributor scores",
+      "seed",
+      "scenario id"
+    ],
+    "replay_command": "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_schema_and_coverage -- --nocapture"
+  }
+}
