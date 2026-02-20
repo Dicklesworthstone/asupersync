@@ -150,7 +150,7 @@ struct MpscReceiverWrapper<T>(mpsc::Receiver<T>);
 
 impl<T: Send + 'static> MpscReceiver<T> for MpscReceiverWrapper<T> {
     fn recv(&mut self) -> Pin<Box<dyn Future<Output = Option<T>> + Send + '_>> {
-        let receiver = &self.0;
+        let receiver = &mut self.0;
         Box::pin(async move {
             let cx = current_cx();
             receiver.recv(&cx).await.ok()

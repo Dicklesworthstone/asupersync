@@ -357,7 +357,7 @@ mod tests {
     fn tracked_mpsc_send_recv() {
         init_test("tracked_mpsc_send_recv");
         let cx = test_cx();
-        let (tx, rx) = tracked_channel::<i32>(10);
+        let (tx, mut rx) = tracked_channel::<i32>(10);
 
         let permit = block_on(tx.reserve(&cx)).expect("reserve failed");
         let proof = permit.send(42);
@@ -380,7 +380,7 @@ mod tests {
     fn tracked_mpsc_abort_returns_proof() {
         init_test("tracked_mpsc_abort_returns_proof");
         let cx = test_cx();
-        let (tx, rx) = tracked_channel::<i32>(1);
+        let (tx, mut rx) = tracked_channel::<i32>(1);
 
         let permit = block_on(tx.reserve(&cx)).expect("reserve failed");
         let proof = permit.abort();
@@ -419,7 +419,7 @@ mod tests {
     fn tracked_mpsc_try_reserve_send() {
         init_test("tracked_mpsc_try_reserve_send");
         let cx = test_cx();
-        let (tx, rx) = tracked_channel::<i32>(10);
+        let (tx, mut rx) = tracked_channel::<i32>(10);
 
         let permit = tx.try_reserve().expect("try_reserve failed");
         let proof = permit.send(7);
@@ -528,7 +528,7 @@ mod tests {
     fn tracked_into_inner_escapes() {
         init_test("tracked_into_inner_escapes");
         let cx = test_cx();
-        let (tx, rx) = tracked_channel::<i32>(10);
+        let (tx, mut rx) = tracked_channel::<i32>(10);
 
         let raw_tx = tx.into_inner();
         // Use the raw sender — no obligation tracking, no panic on permit drop.

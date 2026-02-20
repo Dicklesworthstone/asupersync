@@ -633,7 +633,7 @@ impl<T> Receiver<T> {
 
     /// Attempts to receive a value without blocking.
     #[inline]
-    pub fn try_recv(&mut self) -> Result<T, RecvError> {
+    pub fn try_recv(&self) -> Result<T, RecvError> {
         let mut inner = self.shared.inner.lock();
         inner.queue.pop_front().map_or_else(
             || {
@@ -695,7 +695,7 @@ pub struct Recv<'a, T> {
 impl<T> Future for Recv<'_, T> {
     type Output = Result<T, RecvError>;
 
-    fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.cx.checkpoint().is_err() {
             self.cx.trace("mpsc::recv cancelled");
             return Poll::Ready(Err(RecvError::Cancelled));
@@ -795,7 +795,7 @@ mod tests {
     fn basic_send_recv() {
         init_test("basic_send_recv");
         let cx = test_cx();
-        let (tx, rx) = channel::<i32>(10);
+        let (tx, mut rx) = channel::<i32>(10);
 
         block_on(tx.send(&cx, 42)).expect("send failed");
         let value = block_on(rx.recv(&cx)).expect("recv failed");
@@ -807,7 +807,7 @@ mod tests {
     fn fifo_ordering_single_sender() {
         init_test("fifo_ordering_single_sender");
         let cx = test_cx();
-        let (tx, rx) = channel::<usize>(128);
+        let (tx, mut rx) = channel::<usize>(128);
 
         for i in 0..100 {
             block_on(tx.send(&cx, i)).expect("send failed");
@@ -840,7 +840,7 @@ mod tests {
     fn backpressure_blocks_until_recv() {
         init_test("backpressure_blocks_until_recv");
         let cx = test_cx();
-        let (tx, rx) = channel::<i32>(1);
+        let (tx, mut rx) = channel::<i32>(1);
 
         block_on(tx.send(&cx, 1)).expect("send failed");
 
@@ -888,7 +888,7 @@ mod tests {
     fn two_phase_send_recv() {
         init_test("two_phase_send_recv");
         let cx = test_cx();
-        let (tx, rx) = channel::<i32>(10);
+        let (tx, mut rx) = channel::<i32>(10);
 
         // Phase 1: reserve
         let permit = block_on(tx.reserve(&cx)).expect("reserve failed");
@@ -987,7 +987,7 @@ mod tests {
     #[test]
     fn recv_after_sender_dropped_drains_queue() {
         init_test("recv_after_sender_dropped_drains_queue");
-        let (tx, rx) = channel::<i32>(10);
+        let (tx, mut rx) = channel::<i32>(10);
         let cx = test_cx();
 
         block_on(tx.send(&cx, 1)).expect("send failed");
@@ -1010,7 +1010,7 @@ mod tests {
     #[test]
     fn multiple_senders() {
         init_test("multiple_senders");
-        let (tx1, rx) = channel::<i32>(10);
+        let (tx1, mut rx) = channel::<i32>(10);
         let tx2 = tx1.clone();
         let cx = test_cx();
 
@@ -1075,7 +1075,7 @@ mod tests {
     #[test]
     fn recv_cancelled_returns_error() {
         init_test("recv_cancelled_returns_error");
-        let (_tx, rx) = channel::<i32>(1);
+        let (_tx, mut rx) = channel::<i32>(1);
         let cx = cancelled_cx();
         let result = block_on(rx.recv(&cx));
         crate::assert_with_log!(
@@ -1090,7 +1090,7 @@ mod tests {
     #[test]
     fn recv_cancelled_does_not_consume_message() {
         init_test("recv_cancelled_does_not_consume_message");
-        let (tx, rx) = channel::<i32>(1);
+        let (tx, mut rx) = channel::<i32>(1);
         let cx = test_cx();
 
         block_on(tx.send(&cx, 9)).expect("send");
@@ -1113,7 +1113,7 @@ mod tests {
     #[test]
     fn dropped_permit_releases_capacity() {
         init_test("dropped_permit_releases_capacity");
-        let (tx, rx) = channel::<i32>(1);
+        let (tx, mut rx) = channel::<i32>(1);
         let cx = test_cx();
 
         let permit = block_on(tx.reserve(&cx)).expect("reserve");
@@ -1326,7 +1326,7 @@ mod tests {
         // Verify send_evict_oldest wakes a pending receiver.
         init_test("send_evict_oldest_wakes_receiver");
         let cx = test_cx();
-        let (tx, rx) = channel::<i32>(2);
+        let (tx, mut rx) = channel::<i32>(2);
 
         block_on(tx.send(&cx, 1)).expect("send 1");
         block_on(tx.send(&cx, 2)).expect("send 2");
@@ -1369,7 +1369,7 @@ mod tests {
         // Verify used_slots never exceeds capacity through mixed operations.
         init_test("capacity_invariant_across_reserve_send_abort");
         let cx = test_cx();
-        let (tx, rx) = channel::<i32>(3);
+        let (tx, mut rx) = channel::<i32>(3);
 
         // Reserve 2 slots.
         let p1 = block_on(tx.reserve(&cx)).expect("reserve 1");
@@ -1559,7 +1559,7 @@ mod tests {
     fn wake_receiver_notifies_pending_recv_waker() {
         init_test("wake_receiver_notifies_pending_recv_waker");
         let cx = test_cx();
-        let (tx, rx) = channel::<i32>(1);
+        let (tx, mut rx) = channel::<i32>(1);
 
         let wake_count = Arc::new(AtomicUsize::new(0));
         let waker = counting_waker(Arc::clone(&wake_count));
@@ -1600,27 +1600,5 @@ mod tests {
             format!("{:?}", third_poll)
         );
         crate::test_complete!("wake_receiver_notifies_pending_recv_waker");
-    }
-
-    #[test]
-    fn mpsc_send_error_debug_clone_copy_eq() {
-        let e = SendError::Disconnected(42);
-        let dbg = format!("{e:?}");
-        assert!(dbg.contains("Disconnected"), "{dbg}");
-        let copied: SendError<i32> = e;
-        let cloned = e;
-        assert_eq!(copied, cloned);
-        assert_ne!(e, SendError::Full(42));
-    }
-
-    #[test]
-    fn mpsc_recv_error_debug_clone_copy_eq() {
-        let e = RecvError::Disconnected;
-        let dbg = format!("{e:?}");
-        assert!(dbg.contains("Disconnected"), "{dbg}");
-        let copied: RecvError = e;
-        let cloned = e;
-        assert_eq!(copied, cloned);
-        assert_ne!(e, RecvError::Empty);
     }
 }

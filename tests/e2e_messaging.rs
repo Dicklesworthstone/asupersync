@@ -21,7 +21,7 @@ fn e2e_mpsc_queue_delivery() {
     common::run_test_with_cx(|cx| async move {
         test_phase!("MPSC Queue");
 
-        let (tx, rx) = asupersync::channel::mpsc::channel::<i32>(10);
+        let (tx, mut rx) = asupersync::channel::mpsc::channel::<i32>(10);
 
         test_section!("Send messages");
         for i in 0..5 {
@@ -138,7 +138,7 @@ fn e2e_mpsc_backpressure() {
     common::run_test_with_cx(|cx| async move {
         test_phase!("MPSC Backpressure");
 
-        let (tx, rx) = asupersync::channel::mpsc::channel::<i32>(2);
+        let (tx, mut rx) = asupersync::channel::mpsc::channel::<i32>(2);
 
         test_section!("Fill channel to capacity");
         let p1 = tx.reserve(&cx).await.unwrap();
@@ -212,7 +212,7 @@ fn e2e_tracked_mpsc_commit_with_lab_replay() {
     );
     let root = runtime.state.create_root_region(Budget::INFINITE);
 
-    let (tx, rx) = tracked_channel::<u64>(2);
+    let (tx, mut rx) = tracked_channel::<u64>(2);
     let received = Arc::new(Mutex::new(Vec::new()));
     let recv_store = Arc::clone(&received);
 
@@ -270,7 +270,7 @@ fn e2e_tracked_mpsc_abort_with_lab_replay() {
     );
     let root = runtime.state.create_root_region(Budget::INFINITE);
 
-    let (tx, rx) = tracked_channel::<u64>(1);
+    let (tx, mut rx) = tracked_channel::<u64>(1);
     let result = Arc::new(Mutex::new(None));
     let recv_result = Arc::clone(&result);
 

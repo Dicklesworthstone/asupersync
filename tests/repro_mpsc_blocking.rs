@@ -18,7 +18,7 @@ fn repro_mpsc_deadlock_in_single_threaded_runtime() {
     let mut lab = LabRuntime::new(LabConfig::new(1));
     let region = lab.state.create_root_region(Budget::INFINITE);
 
-    let (tx, rx) = mpsc::channel::<i32>(1); // Capacity 1
+    let (tx, mut rx) = mpsc::channel::<i32>(1); // Capacity 1
 
     // Spawn receiver
     let (recv_id, _recv_handle) = lab

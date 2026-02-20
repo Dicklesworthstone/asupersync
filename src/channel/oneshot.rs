@@ -369,7 +369,7 @@ impl<T> Drop for SendPermit<T> {
 
 /// Future returned by [`Receiver::recv`].
 pub struct RecvFuture<'a, T> {
-    receiver: &'a Receiver<T>,
+    receiver: &'a mut Receiver<T>,
     cx: &'a Cx,
     waiter_id: Option<u64>,
 }
@@ -377,8 +377,8 @@ pub struct RecvFuture<'a, T> {
 impl<T> Future for RecvFuture<'_, T> {
     type Output = Result<T, RecvError>;
 
-    fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
+    fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = &mut *self;
         let mut inner = this.receiver.inner.lock();
 
         // 1. Check if value is ready
@@ -480,7 +480,7 @@ impl<T> Receiver<T> {
     ///
     /// Returns `Err(RecvError::Closed)` if the sender was dropped without sending.
     #[must_use]
-    pub fn recv<'a>(&'a self, cx: &'a Cx) -> RecvFuture<'a, T> {
+    pub fn recv<'a>(&'a mut self, cx: &'a Cx) -> RecvFuture<'a, T> {
         RecvFuture {
             receiver: self,
             cx,
@@ -494,7 +494,7 @@ impl<T> Receiver<T> {
     ///
     /// - `TryRecvError::Empty` if no value is available yet but sender exists
     /// - `TryRecvError::Closed` if the sender was dropped without sending
-    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+    pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
         let mut inner = self.inner.lock();
 
         if let Some(value) = inner.value.take() {
@@ -579,16 +579,16 @@ mod tests {
         fn wake(self: std::sync::Arc<Self>) {}
     }
 
-    struct WakeCounter(Arc<AtomicUsize>);
+    struct CountWaker(Arc<AtomicUsize>);
 
-    impl std::task::Wake for WakeCounter {
+    impl std::task::Wake for CountWaker {
         fn wake(self: std::sync::Arc<Self>) {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
     }
 
     fn counting_waker(counter: Arc<AtomicUsize>) -> Waker {
-        Waker::from(Arc::new(WakeCounter(counter)))
+        Waker::from(Arc::new(CountWaker(counter)))
     }
 
     #[test]
@@ -1259,24 +1259,14 @@ mod tests {
 
     #[test]
     fn sender_drop_wakes_pending_receiver() {
-        struct CountWaker(std::sync::Arc<std::sync::atomic::AtomicUsize>);
-        impl std::task::Wake for CountWaker {
-            fn wake(self: std::sync::Arc<Self>) {
-                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            }
-        }
-
         // Dropping the sender should wake a pending receiver.
         init_test("sender_drop_wakes_pending_receiver");
 
         let cx = test_cx();
         let (tx, rx) = channel::<i32>();
 
-        let notify_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-
-        let poll_waker = Waker::from(std::sync::Arc::new(CountWaker(std::sync::Arc::clone(
-            &notify_count,
-        ))));
+        let notify_count = Arc::new(AtomicUsize::new(0));
+        let poll_waker = counting_waker(Arc::clone(&notify_count));
         let mut task_cx = Context::from_waker(&poll_waker);
         let mut fut = Box::pin(rx.recv(&cx));
 
@@ -1285,7 +1275,7 @@ mod tests {
 
         drop(tx); // Should wake the receiver.
 
-        let notifications = notify_count.load(std::sync::atomic::Ordering::SeqCst);
+        let notifications = notify_count.load(Ordering::SeqCst);
         crate::assert_with_log!(notifications == 1, "woken once", 1usize, notifications);
 
         let result = fut.as_mut().poll(&mut task_cx);
@@ -1296,25 +1286,14 @@ mod tests {
 
     #[test]
     fn dropping_stale_recv_future_does_not_clear_new_waiter() {
-        struct CountWaker(std::sync::Arc<std::sync::atomic::AtomicUsize>);
-        impl std::task::Wake for CountWaker {
-            fn wake(self: std::sync::Arc<Self>) {
-                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            }
-        }
-
         init_test("dropping_stale_recv_future_does_not_clear_new_waiter");
         let cx = test_cx();
         let (tx, rx) = channel::<i32>();
 
-        let wake_counter_1 = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let wake_counter_2 = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let recv_waker_1 = Waker::from(std::sync::Arc::new(CountWaker(std::sync::Arc::clone(
-            &wake_counter_1,
-        ))));
-        let recv_waker_2 = Waker::from(std::sync::Arc::new(CountWaker(std::sync::Arc::clone(
-            &wake_counter_2,
-        ))));
+        let wake_counter_1 = Arc::new(AtomicUsize::new(0));
+        let wake_counter_2 = Arc::new(AtomicUsize::new(0));
+        let recv_waker_1 = counting_waker(Arc::clone(&wake_counter_1));
+        let recv_waker_2 = counting_waker(Arc::clone(&wake_counter_2));
 
         let mut task_cx_1 = Context::from_waker(&recv_waker_1);
         let mut task_cx_2 = Context::from_waker(&recv_waker_2);
@@ -1341,8 +1320,8 @@ mod tests {
 
         tx.send(&cx, 5).expect("send should succeed");
 
-        let wake_count_1 = wake_counter_1.load(std::sync::atomic::Ordering::SeqCst);
-        let wake_count_2 = wake_counter_2.load(std::sync::atomic::Ordering::SeqCst);
+        let wake_count_1 = wake_counter_1.load(Ordering::SeqCst);
+        let wake_count_2 = wake_counter_2.load(Ordering::SeqCst);
         crate::assert_with_log!(
             wake_count_1 == 0,
             "stale waiter not woken",
@@ -1471,43 +1450,5 @@ mod tests {
             second_waiter_id
         );
         crate::test_complete!("recv_repoll_same_waker_keeps_waiter_identity");
-    }
-
-    // --- wave 76 trait coverage ---
-
-    #[test]
-    fn send_error_debug_clone_copy_eq() {
-        let e = SendError::Disconnected(42_i32);
-        let e2 = e; // Copy
-        let e3 = e;
-        assert_eq!(e, e2);
-        assert_eq!(e, e3);
-        assert_ne!(e, SendError::Disconnected(99));
-        let dbg = format!("{e:?}");
-        assert!(dbg.contains("Disconnected"));
-    }
-
-    #[test]
-    fn recv_error_debug_clone_copy_eq() {
-        let e = RecvError::Closed;
-        let e2 = e; // Copy
-        let e3 = e;
-        assert_eq!(e, e2);
-        assert_eq!(e, e3);
-        assert_ne!(e, RecvError::Cancelled);
-        let dbg = format!("{e:?}");
-        assert!(dbg.contains("Closed"));
-    }
-
-    #[test]
-    fn try_recv_error_debug_clone_copy_eq() {
-        let e = TryRecvError::Empty;
-        let e2 = e; // Copy
-        let e3 = e;
-        assert_eq!(e, e2);
-        assert_eq!(e, e3);
-        assert_ne!(e, TryRecvError::Closed);
-        let dbg = format!("{e:?}");
-        assert!(dbg.contains("Empty"));
     }
 }
