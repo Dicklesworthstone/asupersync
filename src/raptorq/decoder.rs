@@ -2255,15 +2255,17 @@ impl InactivationDecoder {
         }
 
         let mut pivot_row = vec![usize::MAX; n_cols];
+        let mut row_used = vec![false; n_rows];
+        let mut pivot_buf = vec![Gf256::ZERO; n_cols];
+        let mut pivot_rhs = vec![0u8; symbol_size];
+        let mut sparse_cols = Vec::with_capacity(n_cols.clamp(1, 32));
         loop {
             pivot_row.fill(usize::MAX);
+            row_used.fill(false);
+            sparse_cols.clear();
 
             // Gaussian elimination with partial pivoting.
             // Pre-allocate a single pivot buffer to avoid per-column clones.
-            let mut row_used = vec![false; n_rows];
-            let mut pivot_buf = vec![Gf256::ZERO; n_cols];
-            let mut pivot_rhs = vec![0u8; symbol_size];
-            let mut sparse_cols = Vec::with_capacity(n_cols.clamp(1, 32));
             let mut gauss_ops = 0usize;
             let mut pivots_selected = 0usize;
             let mut markowitz_pivots = 0usize;
@@ -2513,12 +2515,14 @@ impl InactivationDecoder {
         }
 
         let mut pivot_row = vec![usize::MAX; n_cols];
+        let mut row_used = vec![false; n_rows];
+        let mut pivot_buf = vec![Gf256::ZERO; n_cols];
+        let mut pivot_rhs = vec![0u8; symbol_size];
+        let mut sparse_cols = Vec::with_capacity(n_cols.clamp(1, 32));
         loop {
             pivot_row.fill(usize::MAX);
-            let mut row_used = vec![false; n_rows];
-            let mut pivot_buf = vec![Gf256::ZERO; n_cols];
-            let mut pivot_rhs = vec![0u8; symbol_size];
-            let mut sparse_cols = Vec::with_capacity(n_cols.clamp(1, 32));
+            row_used.fill(false);
+            sparse_cols.clear();
             let mut gauss_ops = 0usize;
             let mut pivots_selected = 0usize;
             let mut markowitz_pivots = 0usize;
