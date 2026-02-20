@@ -11,6 +11,7 @@ use crate::http::h1::codec::{
 };
 use crate::http::h1::types::{Method, Request, Response, Version};
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
+use memchr::memmem;
 use std::fmt::Write;
 use std::future::poll_fn;
 use std::pin::Pin;
@@ -101,7 +102,7 @@ impl Default for Http1ClientCodec {
 
 /// Find `\r\n\r\n` delimiter.
 fn find_headers_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
+    memmem::find(buf, b"\r\n\r\n").map(|idx| idx + 4)
 }
 
 /// Parse status line: `HTTP/1.1 200 OK`.

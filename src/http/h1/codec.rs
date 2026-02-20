@@ -7,6 +7,7 @@
 use crate::bytes::BytesMut;
 use crate::codec::{Decoder, Encoder};
 use crate::http::h1::types::{self, Method, Request, Response, Version};
+use memchr::{memchr, memmem};
 use std::fmt;
 use std::io;
 
@@ -187,18 +188,7 @@ impl Default for Http1Codec {
 /// Find the position of `\r\n\r\n` in `buf`, returning the index of the
 /// first byte after the delimiter.
 fn find_headers_end(buf: &[u8]) -> Option<usize> {
-    if buf.len() < 4 {
-        return None;
-    }
-
-    let mut i = 3;
-    while i < buf.len() {
-        if buf[i - 3] == b'\r' && buf[i - 2] == b'\n' && buf[i - 1] == b'\r' && buf[i] == b'\n' {
-            return Some(i + 1);
-        }
-        i += 1;
-    }
-    None
+    memmem::find(buf, b"\r\n\r\n").map(|idx| idx + 4)
 }
 
 /// Find the position of the first CRLF (`\r\n`) in `buf`.
@@ -206,16 +196,13 @@ fn find_headers_end(buf: &[u8]) -> Option<usize> {
 /// Returns the index of `\r` when found.
 #[inline]
 fn find_crlf(buf: &[u8]) -> Option<usize> {
-    if buf.len() < 2 {
-        return None;
-    }
-
-    let mut i = 1;
-    while i < buf.len() {
-        if buf[i - 1] == b'\r' && buf[i] == b'\n' {
-            return Some(i - 1);
+    let mut start = 0usize;
+    while let Some(rel_idx) = memchr(b'\n', &buf[start..]) {
+        let idx = start + rel_idx;
+        if idx > 0 && buf[idx - 1] == b'\r' {
+            return Some(idx - 1);
         }
-        i += 1;
+        start = idx + 1;
     }
     None
 }
@@ -226,6 +213,37 @@ fn parse_request_line(line: &str) -> Result<(Method, String, Version), HttpError
 }
 
 fn parse_request_line_bytes(line: &[u8]) -> Result<(Method, String, Version), HttpError> {
+    // Fast path for the overwhelmingly common HTTP/1.x wire form:
+    // `METHOD SP URI SP VERSION` with no extra whitespace tokens.
+    if let Some(first_sp) = memchr(b' ', line) {
+        if first_sp > 0 {
+            let rest = &line[first_sp + 1..];
+            if let Some(second_sp_rel) = memchr(b' ', rest) {
+                let second_sp = first_sp + 1 + second_sp_rel;
+                if second_sp > first_sp + 1 {
+                    let method_bytes = &line[..first_sp];
+                    let uri_bytes = &line[first_sp + 1..second_sp];
+                    let version_bytes = &line[second_sp + 1..];
+                    if !version_bytes.is_empty()
+                        && !version_bytes.iter().any(|b| b.is_ascii_whitespace())
+                    {
+                        let method =
+                            Method::from_bytes(method_bytes).ok_or(HttpError::BadMethod)?;
+                        let version = Version::from_bytes(version_bytes)
+                            .ok_or(HttpError::UnsupportedVersion)?;
+                        let uri =
+                            std::str::from_utf8(uri_bytes).map_err(|_| HttpError::BadRequestLine)?;
+                        return Ok((method, uri.to_owned(), version));
+                    }
+                }
+            }
+        }
+    }
+
+    parse_request_line_bytes_slow(line)
+}
+
+fn parse_request_line_bytes_slow(line: &[u8]) -> Result<(Method, String, Version), HttpError> {
     fn next_token_bounds(bytes: &[u8], cursor: &mut usize) -> Option<(usize, usize)> {
         while *cursor < bytes.len() && bytes[*cursor].is_ascii_whitespace() {
             *cursor += 1;
@@ -614,17 +632,20 @@ fn decode_head(
     src: &mut BytesMut,
     max_headers_size: usize,
 ) -> Result<Option<(Method, String, Version, Vec<(String, String)>, BodyKind)>, HttpError> {
-    // Check request-line length limit
-    let request_line_end_hint = match find_crlf(src.as_ref()) {
-        Some(line_end) if line_end > MAX_REQUEST_LINE => {
-            return Err(HttpError::RequestLineTooLong);
-        }
-        other => other,
-    };
-
     let Some(end) = find_headers_end(src.as_ref()) else {
         if src.len() > max_headers_size {
             return Err(HttpError::HeadersTooLarge);
+        }
+        // Preserve request-line limit behavior for incomplete heads while
+        // avoiding an extra scan on the common fully-buffered decode path.
+        if src.len() > MAX_REQUEST_LINE {
+            match find_crlf(src.as_ref()) {
+                Some(line_end) if line_end > MAX_REQUEST_LINE => {
+                    return Err(HttpError::RequestLineTooLong);
+                }
+                Some(_) => {}
+                None => return Err(HttpError::RequestLineTooLong),
+            }
         }
         return Ok(None);
     };
@@ -635,7 +656,10 @@ fn decode_head(
 
     let head_bytes = src.split_to(end);
     let head = head_bytes.as_ref();
-    let request_line_end = request_line_end_hint.ok_or(HttpError::BadRequestLine)?;
+    let request_line_end = find_crlf(head).ok_or(HttpError::BadRequestLine)?;
+    if request_line_end > MAX_REQUEST_LINE {
+        return Err(HttpError::RequestLineTooLong);
+    }
     if request_line_end >= head.len() {
         return Err(HttpError::BadRequestLine);
     }
@@ -1038,6 +1062,31 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(req.method, Method::Extension("PURGE".into()));
+    }
+
+    #[test]
+    fn parse_request_line_fast_path() {
+        let (method, uri, version) = parse_request_line_bytes(b"GET /fast HTTP/1.1").unwrap();
+        assert_eq!(method, Method::Get);
+        assert_eq!(uri, "/fast");
+        assert_eq!(version, Version::Http11);
+    }
+
+    #[test]
+    fn parse_request_line_fallback_with_extra_spaces() {
+        // Extra spacing forces the tolerant parser fallback.
+        let (method, uri, version) = parse_request_line_bytes(b"GET   /slow   HTTP/1.1").unwrap();
+        assert_eq!(method, Method::Get);
+        assert_eq!(uri, "/slow");
+        assert_eq!(version, Version::Http11);
+    }
+
+    #[test]
+    fn decode_request_line_too_long_without_crlf() {
+        let mut codec = Http1Codec::new();
+        let raw = vec![b'G'; MAX_REQUEST_LINE + 1];
+        let result = decode_one(&mut codec, &raw);
+        assert!(matches!(result, Err(HttpError::RequestLineTooLong)));
     }
 
     #[test]
