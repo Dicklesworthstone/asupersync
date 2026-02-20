@@ -1,0 +1,276 @@
+{
+  "schema_version": "raptorq-track-e-gf256-p95p99-highconf-v1",
+  "artifact_id": "raptorq_track_e_gf256_p95p99_highconf_v1",
+  "generated_at_utc": "2026-02-20T15:19:30Z",
+  "track_bead_id": "asupersync-36m6p",
+  "external_ref": "bd-3g5em",
+  "source_artifacts": [
+    "artifacts/raptorq_track_e_gf256_p95p99_v1.json"
+  ],
+  "source_logs": [
+    "rch exec stdout: baseline run (sample-size 60)",
+    "rch exec stdout: auto run (sample-size 60)",
+    "rch exec stdout: rollback run (sample-size 60)"
+  ],
+  "methodology": {
+    "benchmark": "raptorq_benchmark",
+    "filter": "RQ-E-GF256-005_n16384_seed4101_k64_sym16384",
+    "scenario_scope": [
+      "RQ-E-GF256-005_n16384_seed4101_k64_sym16384"
+    ],
+    "operation_scope": [
+      "mul_slices2_fused",
+      "mul_slices2_sequential",
+      "addmul_slices2_fused",
+      "addmul_slices2_sequential"
+    ],
+    "criterion_settings": {
+      "sample_size": 60,
+      "warm_up_time_seconds": 0.2,
+      "measurement_time_seconds": 0.2
+    },
+    "value_extraction": "Use Criterion console-reported intervals `time: [low median high]` and `thrpt: [low median high]` for each mode/operation.",
+    "percentile_method": "For each operation, p50=median and p95/p99=high interval endpoint as conservative tail proxy. For overall mode rollups, nearest-rank over operation-level p50 and p95/p99 proxies (n=4).",
+    "commands": [
+      "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-e5-hi-baseline cargo bench --bench raptorq_benchmark -- RQ-E-GF256-005_n16384_seed4101_k64_sym16384 --sample-size 60 --warm-up-time 0.2 --measurement-time 0.2",
+      "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto CARGO_TARGET_DIR=/tmp/rch-e5-hi-auto cargo bench --bench raptorq_benchmark -- RQ-E-GF256-005_n16384_seed4101_k64_sym16384 --sample-size 60 --warm-up-time 0.2 --measurement-time 0.2",
+      "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-e5-hi-rollback cargo bench --bench raptorq_benchmark -- RQ-E-GF256-005_n16384_seed4101_k64_sym16384 --sample-size 60 --warm-up-time 0.2 --measurement-time 0.2"
+    ]
+  },
+  "per_mode_overall_percentiles": [
+    {
+      "mode": "baseline",
+      "samples": 4,
+      "time_us": {
+        "p50": 6.5651,
+        "p95": 9.0743,
+        "p99": 9.0743
+      },
+      "throughput_gib_s": {
+        "p50": 1.8012,
+        "p95": 2.516,
+        "p99": 2.516
+      }
+    },
+    {
+      "mode": "auto",
+      "samples": 4,
+      "time_us": {
+        "p50": 8.0901,
+        "p95": 9.3392,
+        "p99": 9.3392
+      },
+      "throughput_gib_s": {
+        "p50": 1.7174,
+        "p95": 2.1243,
+        "p99": 2.1243
+      }
+    },
+    {
+      "mode": "rollback",
+      "samples": 4,
+      "time_us": {
+        "p50": 8.5946,
+        "p95": 9.9333,
+        "p99": 9.9333
+      },
+      "throughput_gib_s": {
+        "p50": 1.7037,
+        "p95": 2.4337,
+        "p99": 2.4337
+      }
+    }
+  ],
+  "per_mode_operation_percentiles": [
+    {
+      "mode": "baseline",
+      "operation": "mul_slices2_fused",
+      "samples": 60,
+      "time_us": {
+        "p50": 6.5651,
+        "p95": 6.9192,
+        "p99": 6.9192
+      },
+      "throughput_gib_s": {
+        "p50": 2.3242,
+        "p95": 2.4262,
+        "p99": 2.4262
+      }
+    },
+    {
+      "mode": "baseline",
+      "operation": "mul_slices2_sequential",
+      "samples": 60,
+      "time_us": {
+        "p50": 6.2182,
+        "p95": 6.4121,
+        "p99": 6.4121
+      },
+      "throughput_gib_s": {
+        "p50": 2.4539,
+        "p95": 2.516,
+        "p99": 2.516
+      }
+    },
+    {
+      "mode": "baseline",
+      "operation": "addmul_slices2_fused",
+      "samples": 60,
+      "time_us": {
+        "p50": 8.5305,
+        "p95": 9.0743,
+        "p99": 9.0743
+      },
+      "throughput_gib_s": {
+        "p50": 1.7887,
+        "p95": 1.9061,
+        "p99": 1.9061
+      }
+    },
+    {
+      "mode": "baseline",
+      "operation": "addmul_slices2_sequential",
+      "samples": 60,
+      "time_us": {
+        "p50": 8.4714,
+        "p95": 8.9687,
+        "p99": 8.9687
+      },
+      "throughput_gib_s": {
+        "p50": 1.8012,
+        "p95": 1.8958,
+        "p99": 1.8958
+      }
+    },
+    {
+      "mode": "auto",
+      "operation": "mul_slices2_fused",
+      "samples": 60,
+      "time_us": {
+        "p50": 8.0901,
+        "p95": 8.5484,
+        "p99": 8.5484
+      },
+      "throughput_gib_s": {
+        "p50": 1.8861,
+        "p95": 1.9458,
+        "p99": 1.9458
+      }
+    },
+    {
+      "mode": "auto",
+      "operation": "mul_slices2_sequential",
+      "samples": 60,
+      "time_us": {
+        "p50": 7.4453,
+        "p95": 7.7089,
+        "p99": 7.7089
+      },
+      "throughput_gib_s": {
+        "p50": 2.0495,
+        "p95": 2.1243,
+        "p99": 2.1243
+      }
+    },
+    {
+      "mode": "auto",
+      "operation": "addmul_slices2_fused",
+      "samples": 60,
+      "time_us": {
+        "p50": 8.8848,
+        "p95": 8.9193,
+        "p99": 8.9193
+      },
+      "throughput_gib_s": {
+        "p50": 1.7174,
+        "p95": 1.724,
+        "p99": 1.724
+      }
+    },
+    {
+      "mode": "auto",
+      "operation": "addmul_slices2_sequential",
+      "samples": 60,
+      "time_us": {
+        "p50": 9.2716,
+        "p95": 9.3392,
+        "p99": 9.3392
+      },
+      "throughput_gib_s": {
+        "p50": 1.6458,
+        "p95": 1.6616,
+        "p99": 1.6616
+      }
+    },
+    {
+      "mode": "rollback",
+      "operation": "mul_slices2_fused",
+      "samples": 60,
+      "time_us": {
+        "p50": 6.5324,
+        "p95": 6.8096,
+        "p99": 6.8096
+      },
+      "throughput_gib_s": {
+        "p50": 2.3359,
+        "p95": 2.4337,
+        "p99": 2.4337
+      }
+    },
+    {
+      "mode": "rollback",
+      "operation": "mul_slices2_sequential",
+      "samples": 60,
+      "time_us": {
+        "p50": 8.956,
+        "p95": 9.9333,
+        "p99": 9.9333
+      },
+      "throughput_gib_s": {
+        "p50": 1.7037,
+        "p95": 1.8772,
+        "p99": 1.8772
+      }
+    },
+    {
+      "mode": "rollback",
+      "operation": "addmul_slices2_fused",
+      "samples": 60,
+      "time_us": {
+        "p50": 8.5946,
+        "p95": 8.6101,
+        "p99": 8.6101
+      },
+      "throughput_gib_s": {
+        "p50": 1.7754,
+        "p95": 1.7785,
+        "p99": 1.7785
+      }
+    },
+    {
+      "mode": "rollback",
+      "operation": "addmul_slices2_sequential",
+      "samples": 60,
+      "time_us": {
+        "p50": 9.1029,
+        "p95": 9.2556,
+        "p99": 9.2556
+      },
+      "throughput_gib_s": {
+        "p50": 1.6763,
+        "p95": 1.7146,
+        "p99": 1.7146
+      }
+    }
+  ],
+  "findings": [
+    "For this high-confidence single-scenario corpus, auto mode shows higher latency tails than baseline in both overall proxy p95/p99 and all four dual-slice operation tails.",
+    "Rollback recovers mul_slices2_fused tail behavior close to baseline but regresses mul_slices2_sequential tails versus both baseline and auto.",
+    "Addmul tails in rollback are mixed: fused improves versus baseline/auto, while sequential remains above baseline but below auto."
+  ],
+  "limitations": [
+    "This closure artifact focuses on one closure-critical scenario (`RQ-E-GF256-005_n16384_seed4101_k64_sym16384`) rather than the full five-scenario matrix.",
+    "p95/p99 values are conservative proxies derived from Criterion interval upper bounds because raw sample artifacts were not retrievable through current rch artifact-sync patterns.",
+    "Throughput percentiles use interval endpoints rather than raw-sample throughput distributions."
+  ]
+}

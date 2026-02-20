@@ -128,7 +128,8 @@
           "2026-02-20 sixth E5 slice added artifacts/raptorq_track_e_gf256_bench_v1.json with baseline/auto/rollback comparator capture and rollback rehearsal outcomes.",
           "2026-02-20 seventh E5 slice added directional p95/p99 comparator corpus artifact (artifacts/raptorq_track_e_gf256_p95p99_v1.json) from Track-E baseline/auto/rollback captures.",
           "2026-02-20 eighth E5 slice started high-confidence p95/p99 corpus generation targeting artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json (coord thread msg #1487).",
-          "2026-02-20 ninth E5 status update: high-confidence reruns hit transient unrelated retry.rs compile-frontier breakage; remediation is active (coord msgs #1493/#1504).",
+          "2026-02-20 ninth E5 status update captured transient unrelated retry.rs compile-frontier breakage during high-confidence reruns (coord msgs #1493/#1504).",
+          "2026-02-20 follow-up compile verification (`rch exec -- cargo check -p asupersync --lib`) exited 0; high-confidence corpus closure remains blocked on artifact publication/sign-off, not compile frontier.",
           "Final offline tuner and p95/p99 comparator corpus remains in progress under asupersync-36m6p."
         ]
       },
@@ -212,12 +213,11 @@
           "Environment reproducibility metadata (target_arch/target_os/target_env/target_endian/target_pointer_width_bits) is now included in manifest snapshots and emitted in policy logs.",
           "Directional p95/p99 summaries are now attached via artifacts/raptorq_track_e_gf256_p95p99_v1.json.",
           "High-confidence p95/p99 corpus run is started (coord msg #1487) and targets artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json for closure-grade evidence.",
-          "High-confidence reruns currently depend on clearing transient unrelated retry.rs compile-frontier errors reported in coord msgs #1493/#1504.",
+          "Transient compile-frontier interruption noted in coord msgs #1493/#1504 has follow-up green check evidence (`rch exec -- cargo check -p asupersync --lib` exit 0).",
           "Current p95/p99 corpus is derived from scenario-level medians with small-n operation groups; final high-confidence closure should include broader/raw-sample percentile evidence."
         ],
         "pending_blockers": [
-          "Publish artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json and link final sign-off outcomes for full E5 closure.",
-          "Keep shared compile frontier stable enough for full baseline/auto/rollback reruns during high-confidence corpus generation."
+          "Publish artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json and link final sign-off outcomes for full E5 closure."
         ]
       },
       "deterministic_replay": {
@@ -601,8 +601,8 @@
     "cards_pending_measured_evidence": 3,
     "cards_with_replay_commands": 8,
     "closure_blockers": [
-      "Complete final high-confidence offline comparator corpus for E5 (`asupersync-36m6p`) with p95/p99 and selected-profile vs scalar-conservative evidence links (rollback rehearsal outcomes are captured in `artifacts/raptorq_track_e_gf256_bench_v1.json`; directional p95/p99 corpus exists in `artifacts/raptorq_track_e_gf256_p95p99_v1.json`; high-confidence run is in progress per coord msg #1487 targeting `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json`, with transient compile-frontier remediation tracked in coord msgs #1493/#1504).",
-      "Promote F7 from proposed to approved_guarded only after burst-workload comparator evidence and rollback rehearsal outcomes are attached.",
+      "Complete final high-confidence offline comparator corpus for E5 (`asupersync-36m6p`) with p95/p99 and selected-profile vs scalar-conservative evidence links (rollback rehearsal outcomes are captured in `artifacts/raptorq_track_e_gf256_bench_v1.json`; directional p95/p99 corpus exists in `artifacts/raptorq_track_e_gf256_p95p99_v1.json`; high-confidence run is in progress per coord msg #1487 targeting `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json`).",
+      "Promote F7 from proposed to approved_guarded only after burst-workload comparator evidence and rollback rehearsal outcomes are attached (G7 dependency contract reruns are green per asupersync-m7o6i comment #1886 and coord msg #1520).",
       "Keep F8 as template/proposed until implementation exists; then attach measured overlap-vs-sequential evidence and rollback rehearsal outcomes."
     ]
   }

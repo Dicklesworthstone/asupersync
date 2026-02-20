@@ -91,7 +91,7 @@ Current artifact summary (`coverage_summary` in JSON):
 
 Closure blockers for `asupersync-3ltrv` remain:
 
-1. Finalize high-confidence offline profile-pack comparator evidence for `E5` (`asupersync-36m6p`) with p95/p99 links (directional p95/p99 corpus now exists; high-confidence run has started targeting `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` but publication/sign-off is still pending, and reruns are currently tracking transient compile-frontier remediation in coord msgs `#1493/#1504`).
+1. Finalize high-confidence offline profile-pack comparator evidence for `E5` (`asupersync-36m6p`) with p95/p99 links (directional p95/p99 corpus now exists; high-confidence run has started targeting `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` but publication/sign-off is still pending).
 2. Promote `F7` from proposed to approved_guarded only after burst comparator evidence + rollback rehearsal outcomes are recorded.
 3. Keep `F8` as proposed/template until implementation exists, then attach overlap-vs-sequential evidence and rollback outcomes.
 
@@ -114,4 +114,7 @@ Recent evidence alignment updates (2026-02-20):
 - Added seventh-slice p95/p99-oriented comparator corpus (`artifacts/raptorq_track_e_gf256_p95p99_v1.json`, bead comment `#1863`, agent-mail `#1461/#1465`) and updated blocker wording to reflect this as directional evidence pending final high-confidence corpus closure.
 - Added in-progress high-confidence run reference (`coord thread #1487`) with planned closure artifact target `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json`.
 - Added ninth-slice run-state note (`coord thread #1493/#1504`): high-confidence reruns temporarily hit unrelated `src/combinator/retry.rs` compile-frontier issues while remediation is active.
+- Added follow-up compile verification note: `rch exec -- cargo check -p asupersync --lib` exits 0, so closure focus remains on publishing/signing off the high-confidence E5 artifact.
+- Added G7 dependency-state note (`asupersync-m7o6i` comment `#1886`, `coord thread #1520`): targeted expected-loss contract reruns are all PASS; remaining G3 gating remains E5/F7/F8 closure evidence linkage.
+- Added independent support refresh (`asupersync-3ltrv` comment `#1896`, agent-mail thread `asupersync-3ltrv` msg `#1555`): fresh `bv --robot-next` still ranks G3 top-impact; targeted `cargo test --test raptorq_perf_invariants g3_decision -- --nocapture` rerun is PASS (2/2), and cross-agent request for latest E5/F7/F8 closure anchors has been rebroadcast in-thread.
 - Removed stale compile-mismatch blocker text; current E5 blocker is narrowed to missing final p95/p99 comparator corpus.
