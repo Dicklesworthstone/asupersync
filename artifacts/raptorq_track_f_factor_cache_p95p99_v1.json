@@ -1,0 +1,104 @@
+{
+  "schema_version": "raptorq-track-f-factor-cache-p95p99-v1",
+  "artifact_id": "raptorq_track_f_factor_cache_p95p99_v1",
+  "generated_at_utc": "2026-02-20T19:49:30Z",
+  "track_bead_id": "asupersync-n5fk6",
+  "external_ref": "bd-37ryw",
+  "source_logs": [
+    "cargo test --test ci_regression_gates g2_f7_burst_cache_p95p99_report -- --nocapture",
+    "cargo test --test ci_regression_gates g2_f7_factor_cache_observed -- --nocapture"
+  ],
+  "methodology": {
+    "scenario_id": "RQ-F7-CACHE-BURST-CMP-001",
+    "replay_ref": "replay:rq-track-f-factor-cache-v1",
+    "sample_count": 25,
+    "k": 48,
+    "symbol_size": 1024,
+    "burst_drop_range": {
+      "start": 12,
+      "end_exclusive": 32
+    },
+    "extra_repair_symbols": 6,
+    "percentile_method": "nearest-rank over per-sample decode wall-time/throughput observations",
+    "mode_definitions": {
+      "baseline": "fresh decoder, first decode (cold cache)",
+      "warmed_cache": "same decoder after warmup decode (cache-reuse path)",
+      "rollback_proxy": "fresh decoder decode used as conservative rollback proxy"
+    },
+    "rollback_rehearsal": {
+      "command": "cargo test --test ci_regression_gates g2_f7_factor_cache_observed -- --nocapture",
+      "expected": "PASS",
+      "outcome": "pass"
+    }
+  },
+  "per_mode_overall_percentiles": [
+    {
+      "mode": "baseline",
+      "samples": 25,
+      "time_us": {
+        "p50": 19684.678,
+        "p95": 19940.665,
+        "p99": 19986.8
+      },
+      "throughput_mib_s": {
+        "p50": 2.3812937148374993,
+        "p95": 2.387343367356605,
+        "p99": 2.3882767937143305
+      }
+    },
+    {
+      "mode": "warmed_cache",
+      "samples": 25,
+      "time_us": {
+        "p50": 19619.969,
+        "p95": 19823.406,
+        "p99": 20135.226
+      },
+      "throughput_mib_s": {
+        "p50": 2.3891475057886176,
+        "p95": 2.3972131265918772,
+        "p99": 2.4041271284987618
+      },
+      "cache_hit_samples": 25,
+      "cache_hit_rate": 1.0
+    },
+    {
+      "mode": "rollback_proxy",
+      "samples": 25,
+      "time_us": {
+        "p50": 19697.763,
+        "p95": 20039.798000000003,
+        "p99": 20155.834000000003
+      },
+      "throughput_mib_s": {
+        "p50": 2.3797118484977204,
+        "p95": 2.389818775517529,
+        "p99": 2.396408929456776
+      }
+    }
+  ],
+  "delta_vs_baseline": {
+    "warmed_cache": {
+      "time_us": {
+        "p50_delta_pct": -0.328625957795144,
+        "p95_delta_pct": -0.5880358871828449,
+        "p99_delta_pct": 0.7426354329084814
+      },
+      "throughput_mib_s": {
+        "p50_delta_pct": 0.32982756027070056,
+        "p95_delta_pct": 0.41383781808452063,
+        "p99_delta_pct": 0.6644365786038088
+      }
+    }
+  },
+  "findings": [
+    "Warmed cache path deterministically hit the factor cache in 25/25 samples.",
+    "Warmed cache p50/p95 latency is modestly lower than baseline in this scenario, but p99 latency is slightly worse.",
+    "Rollback-proxy conservative mode remains close to baseline and serves as deterministic fallback evidence."
+  ],
+  "limitations": [
+    "Evidence is currently single-scenario and should be expanded to additional burst regimes for closure-grade confidence.",
+    "Throughput percentiles are derived from per-sample wall-time and bytes recovered, not from Criterion raw sample streams.",
+    "Current data demonstrates deterministic cache behavior and rollback evidence, but does not yet prove material p95/p99 gain across representative workloads."
+  ]
+}

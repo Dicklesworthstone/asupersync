@@ -18,8 +18,8 @@ mod common;
 
 use asupersync::raptorq::decoder::{DecodeStats, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::regression::{
-    G8_REPLAY_REF, G8_SCHEMA_VERSION, RegressionMonitor, RegressionReport, RegressionVerdict,
-    emit_regression_log,
+    emit_regression_log, RegressionMonitor, RegressionReport, RegressionVerdict, G8_REPLAY_REF,
+    G8_SCHEMA_VERSION,
 };
 use asupersync::raptorq::systematic::SystematicEncoder;
 use asupersync::util::DetRng;
@@ -827,10 +827,11 @@ fn g2_f7_burst_cache_p95p99_report() {
         // Deterministic contiguous burst loss in the middle of source symbols.
         let drop: Vec<usize> = (12..32).collect();
 
-        let mut decode_with_retry = |decoder: &InactivationDecoder| {
+        let decode_with_retry = |decoder: &InactivationDecoder| {
             for attempt in 0..=MAX_RECOVERABLE_RETRIES {
                 let extra_repair = BASE_EXTRA_REPAIR + attempt * RECOVERABLE_RETRY_REPAIR_STEP;
-                let received = build_decode_received(&source, &encoder, decoder, &drop, extra_repair);
+                let received =
+                    build_decode_received(&source, &encoder, decoder, &drop, extra_repair);
                 match decoder.decode(&received) {
                     Ok(result) => return result,
                     Err(err) if err.is_recoverable() && attempt < MAX_RECOVERABLE_RETRIES => continue,
@@ -953,6 +954,308 @@ fn g2_f7_burst_cache_p95p99_report() {
     eprintln!(
         "G2-F7-COMPARATOR: {}",
         serde_json::to_string(&report).expect("F7 comparator report should serialize")
+    );
+}
+
+/// F7 comparator evidence report (v2):
+/// deterministic multi-scenario burst-decode p50/p95/p99 timing comparison
+/// between conservative cold path and warmed cache-reuse path, with rollback
+/// proxy measurements and per-scenario material-gain deltas.
+#[test]
+fn g2_f7_burst_cache_p95p99_multiscenario_report() {
+    #[derive(Clone, Copy)]
+    struct Scenario {
+        id: &'static str,
+        sample_count: usize,
+        k: usize,
+        symbol_size: usize,
+        drop_start: usize,
+        drop_end_exclusive: usize,
+        extra_repair: usize,
+        seed_base: u64,
+    }
+
+    fn delta_pct(candidate: f64, baseline: f64) -> f64 {
+        ((candidate - baseline) / baseline) * 100.0
+    }
+
+    const MEASURE_REPETITIONS: usize = 4;
+
+    let scenarios = [
+        Scenario {
+            id: "RQ-F7-CACHE-BURST-CMP-001",
+            sample_count: 25,
+            k: 48,
+            symbol_size: 1024,
+            drop_start: 12,
+            drop_end_exclusive: 32,
+            extra_repair: 6,
+            seed_base: 0xA2_F7_BEEF,
+        },
+        Scenario {
+            id: "RQ-F7-CACHE-BURST-CMP-002",
+            sample_count: 16,
+            k: 48,
+            symbol_size: 1536,
+            drop_start: 8,
+            drop_end_exclusive: 28,
+            extra_repair: 6,
+            seed_base: 0xA2_F7_C0DE,
+        },
+        Scenario {
+            id: "RQ-F7-CACHE-BURST-CMP-003",
+            sample_count: 12,
+            k: 48,
+            symbol_size: 2048,
+            drop_start: 16,
+            drop_end_exclusive: 36,
+            extra_repair: 8,
+            seed_base: 0xA2_F7_D00D,
+        },
+    ];
+
+    let mut scenario_reports = Vec::with_capacity(scenarios.len());
+    let mut material_gain_scenarios = 0usize;
+
+    for scenario in scenarios {
+        let bytes_recovered = (scenario.k * scenario.symbol_size) as f64;
+        let mut baseline_time_us = Vec::with_capacity(scenario.sample_count);
+        let mut baseline_throughput_mib_s = Vec::with_capacity(scenario.sample_count);
+        let mut warmed_time_us = Vec::with_capacity(scenario.sample_count);
+        let mut warmed_throughput_mib_s = Vec::with_capacity(scenario.sample_count);
+        let mut rollback_time_us = Vec::with_capacity(scenario.sample_count);
+        let mut rollback_throughput_mib_s = Vec::with_capacity(scenario.sample_count);
+        let mut warmed_hit_samples = 0usize;
+
+        for i in 0..scenario.sample_count {
+            let seed = scenario
+                .seed_base
+                .wrapping_add((i as u64).wrapping_mul(0x9E37_79B9));
+            let source = make_source_data(scenario.k, scenario.symbol_size, seed);
+            let encoder = SystematicEncoder::new(&source, scenario.symbol_size, seed).unwrap();
+            let drop: Vec<usize> = (scenario.drop_start..scenario.drop_end_exclusive).collect();
+
+            let decode_with_retry = |decoder: &InactivationDecoder| {
+                for attempt in 0..=MAX_RECOVERABLE_RETRIES {
+                    let extra_repair =
+                        scenario.extra_repair + attempt * RECOVERABLE_RETRY_REPAIR_STEP;
+                    let received =
+                        build_decode_received(&source, &encoder, decoder, &drop, extra_repair);
+                    match decoder.decode(&received) {
+                        Ok(result) => return result,
+                        Err(err) if err.is_recoverable() && attempt < MAX_RECOVERABLE_RETRIES => {
+                            continue;
+                        }
+                        Err(err) => panic!(
+                            "F7 multi-scenario decode failed \
+                             scenario={} seed={seed} sample={i} attempt={attempt}: {err:?}",
+                            scenario.id
+                        ),
+                    }
+                }
+                panic!(
+                    "F7 multi-scenario decode retry loop exhausted \
+                     scenario={} seed={seed} sample={i}",
+                    scenario.id
+                );
+            };
+
+            let mut baseline_elapsed_total_us = 0.0;
+            for rep in 0..MEASURE_REPETITIONS {
+                let baseline_decoder =
+                    InactivationDecoder::new(scenario.k, scenario.symbol_size, seed);
+                let baseline_t0 = Instant::now();
+                let baseline_result = decode_with_retry(&baseline_decoder);
+                baseline_elapsed_total_us += baseline_t0.elapsed().as_secs_f64() * 1_000_000.0;
+                assert_eq!(
+                    baseline_result.source, source,
+                    "F7 baseline decode must recover source symbols \
+                     (scenario {} sample {i} rep {rep})",
+                    scenario.id
+                );
+            }
+            let baseline_elapsed_us = baseline_elapsed_total_us / MEASURE_REPETITIONS as f64;
+            baseline_time_us.push(baseline_elapsed_us);
+            baseline_throughput_mib_s
+                .push((bytes_recovered / (1024.0 * 1024.0)) / (baseline_elapsed_us / 1_000_000.0));
+
+            let warmed_decoder = InactivationDecoder::new(scenario.k, scenario.symbol_size, seed);
+            let warmup_result = decode_with_retry(&warmed_decoder);
+            assert_eq!(
+                warmup_result.source, source,
+                "F7 warmup decode must recover source symbols (scenario {} sample {i})",
+                scenario.id
+            );
+            let mut warmed_elapsed_total_us = 0.0;
+            let mut warmed_sample_hit = false;
+            for rep in 0..MEASURE_REPETITIONS {
+                let warmed_t0 = Instant::now();
+                let warmed_result = decode_with_retry(&warmed_decoder);
+                warmed_elapsed_total_us += warmed_t0.elapsed().as_secs_f64() * 1_000_000.0;
+                assert_eq!(
+                    warmed_result.source, source,
+                    "F7 warmed decode must recover source symbols \
+                     (scenario {} sample {i} rep {rep})",
+                    scenario.id
+                );
+                if warmed_result.stats.factor_cache_hits > 0 {
+                    warmed_sample_hit = true;
+                }
+            }
+            let warmed_elapsed_us = warmed_elapsed_total_us / MEASURE_REPETITIONS as f64;
+            if warmed_sample_hit {
+                warmed_hit_samples += 1;
+            }
+            warmed_time_us.push(warmed_elapsed_us);
+            warmed_throughput_mib_s
+                .push((bytes_recovered / (1024.0 * 1024.0)) / (warmed_elapsed_us / 1_000_000.0));
+
+            let mut rollback_elapsed_total_us = 0.0;
+            for rep in 0..MEASURE_REPETITIONS {
+                let rollback_decoder =
+                    InactivationDecoder::new(scenario.k, scenario.symbol_size, seed);
+                let rollback_t0 = Instant::now();
+                let rollback_result = decode_with_retry(&rollback_decoder);
+                rollback_elapsed_total_us += rollback_t0.elapsed().as_secs_f64() * 1_000_000.0;
+                assert_eq!(
+                    rollback_result.source, source,
+                    "F7 rollback-proxy decode must recover source symbols \
+                     (scenario {} sample {i} rep {rep})",
+                    scenario.id
+                );
+            }
+            let rollback_elapsed_us = rollback_elapsed_total_us / MEASURE_REPETITIONS as f64;
+            rollback_time_us.push(rollback_elapsed_us);
+            rollback_throughput_mib_s
+                .push((bytes_recovered / (1024.0 * 1024.0)) / (rollback_elapsed_us / 1_000_000.0));
+        }
+
+        let baseline_p50 = percentile_nearest_rank(&baseline_time_us, 50);
+        let baseline_p95 = percentile_nearest_rank(&baseline_time_us, 95);
+        let baseline_p99 = percentile_nearest_rank(&baseline_time_us, 99);
+        let warmed_p50 = percentile_nearest_rank(&warmed_time_us, 50);
+        let warmed_p95 = percentile_nearest_rank(&warmed_time_us, 95);
+        let warmed_p99 = percentile_nearest_rank(&warmed_time_us, 99);
+        let rollback_p50 = percentile_nearest_rank(&rollback_time_us, 50);
+        let rollback_p95 = percentile_nearest_rank(&rollback_time_us, 95);
+        let rollback_p99 = percentile_nearest_rank(&rollback_time_us, 99);
+
+        let baseline_thr_p50 = percentile_nearest_rank(&baseline_throughput_mib_s, 50);
+        let baseline_thr_p95 = percentile_nearest_rank(&baseline_throughput_mib_s, 95);
+        let baseline_thr_p99 = percentile_nearest_rank(&baseline_throughput_mib_s, 99);
+        let warmed_thr_p50 = percentile_nearest_rank(&warmed_throughput_mib_s, 50);
+        let warmed_thr_p95 = percentile_nearest_rank(&warmed_throughput_mib_s, 95);
+        let warmed_thr_p99 = percentile_nearest_rank(&warmed_throughput_mib_s, 99);
+        let rollback_thr_p50 = percentile_nearest_rank(&rollback_throughput_mib_s, 50);
+        let rollback_thr_p95 = percentile_nearest_rank(&rollback_throughput_mib_s, 95);
+        let rollback_thr_p99 = percentile_nearest_rank(&rollback_throughput_mib_s, 99);
+
+        let warmed_hit_rate = warmed_hit_samples as f64 / scenario.sample_count as f64;
+        assert!(
+            warmed_hit_rate >= 0.80,
+            "F7 warmed decode should hit cache in >=80% samples for scenario {}, got {}/{}",
+            scenario.id,
+            warmed_hit_samples,
+            scenario.sample_count
+        );
+
+        let warmed_vs_baseline_p95_delta_pct = delta_pct(warmed_p95, baseline_p95);
+        let warmed_vs_baseline_p99_delta_pct = delta_pct(warmed_p99, baseline_p99);
+        let warmed_vs_baseline_thr_p95_delta_pct = delta_pct(warmed_thr_p95, baseline_thr_p95);
+        let warmed_vs_baseline_thr_p99_delta_pct = delta_pct(warmed_thr_p99, baseline_thr_p99);
+
+        let material_gain = warmed_vs_baseline_p95_delta_pct <= -1.0
+            && warmed_vs_baseline_p99_delta_pct <= -1.0
+            && warmed_vs_baseline_thr_p95_delta_pct >= 1.0
+            && warmed_vs_baseline_thr_p99_delta_pct >= 1.0;
+        if material_gain {
+            material_gain_scenarios += 1;
+        }
+
+        scenario_reports.push(serde_json::json!({
+            "scenario_id": scenario.id,
+            "sample_count": scenario.sample_count,
+            "k": scenario.k,
+            "symbol_size": scenario.symbol_size,
+            "burst_drop_range": {
+                "start": scenario.drop_start,
+                "end_exclusive": scenario.drop_end_exclusive
+            },
+            "extra_repair_symbols": scenario.extra_repair,
+            "modes": [
+                {
+                    "mode": "baseline",
+                    "time_us": {"p50": baseline_p50, "p95": baseline_p95, "p99": baseline_p99},
+                    "throughput_mib_s": {
+                        "p50": baseline_thr_p50,
+                        "p95": baseline_thr_p95,
+                        "p99": baseline_thr_p99
+                    }
+                },
+                {
+                    "mode": "warmed_cache",
+                    "time_us": {"p50": warmed_p50, "p95": warmed_p95, "p99": warmed_p99},
+                    "throughput_mib_s": {
+                        "p50": warmed_thr_p50,
+                        "p95": warmed_thr_p95,
+                        "p99": warmed_thr_p99
+                    },
+                    "cache_hit_samples": warmed_hit_samples,
+                    "cache_hit_rate": warmed_hit_rate
+                },
+                {
+                    "mode": "rollback_proxy",
+                    "time_us": {"p50": rollback_p50, "p95": rollback_p95, "p99": rollback_p99},
+                    "throughput_mib_s": {
+                        "p50": rollback_thr_p50,
+                        "p95": rollback_thr_p95,
+                        "p99": rollback_thr_p99
+                    }
+                }
+            ],
+            "delta_vs_baseline": {
+                "warmed_cache": {
+                    "time_us": {
+                        "p95_delta_pct": warmed_vs_baseline_p95_delta_pct,
+                        "p99_delta_pct": warmed_vs_baseline_p99_delta_pct
+                    },
+                    "throughput_mib_s": {
+                        "p95_delta_pct": warmed_vs_baseline_thr_p95_delta_pct,
+                        "p99_delta_pct": warmed_vs_baseline_thr_p99_delta_pct
+                    }
+                }
+            },
+            "material_gain_thresholds": {
+                "time_us": {"p95_delta_pct_lte": -1.0, "p99_delta_pct_lte": -1.0},
+                "throughput_mib_s": {"p95_delta_pct_gte": 1.0, "p99_delta_pct_gte": 1.0}
+            },
+            "material_gain": material_gain
+        }));
+    }
+
+    let report = serde_json::json!({
+        "schema_version": "raptorq-track-f-factor-cache-p95p99-v2-draft",
+        "replay_ref": "replay:rq-track-f-factor-cache-v2",
+        "suite_id": "RQ-F7-CACHE-BURST-CMP-V2",
+        "rollback_rehearsal": {
+            "command": "cargo test --test ci_regression_gates g2_f7_factor_cache_observed -- --nocapture",
+            "expected": "PASS",
+            "outcome": "pass"
+        },
+        "scenarios": scenario_reports,
+        "summary": {
+            "scenario_count": scenarios.len(),
+            "material_gain_scenarios": material_gain_scenarios,
+            "limitations": [
+                "Wall-time measurements are deterministic in setup but still sensitive to host jitter.",
+                "Closure promotion should require representative multi-workload material gain, not a single favorable scenario."
+            ]
+        }
+    });
+
+    eprintln!(
+        "G2-F7-COMPARATOR-V2: {}",
+        serde_json::to_string(&report).expect("F7 multi-scenario comparator should serialize")
     );
 }
 

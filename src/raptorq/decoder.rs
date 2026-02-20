@@ -11,7 +11,7 @@
 //! - Tie-breaking rules are explicit (lowest column index wins)
 //! - Same received symbols in same order produce identical decode results
 
-use crate::raptorq::gf256::{Gf256, gf256_addmul_slice};
+use crate::raptorq::gf256::{gf256_addmul_slice, Gf256};
 use crate::raptorq::proof::{
     DecodeConfig, DecodeProof, EliminationTrace, FailureReason, InactivationStrategy, PeelingTrace,
     ReceivedSummary,
@@ -2130,7 +2130,7 @@ impl ReceivedSymbol {
 mod tests {
     use super::*;
     use crate::raptorq::systematic::SystematicEncoder;
-    use crate::raptorq::test_log_schema::{UnitDecodeStats, UnitLogEntry, validate_unit_log_json};
+    use crate::raptorq::test_log_schema::{validate_unit_log_json, UnitDecodeStats, UnitLogEntry};
 
     fn rfc_eq_context(
         scenario_id: &str,
@@ -3245,38 +3245,30 @@ mod tests {
 
     #[test]
     fn failure_classification_is_explicit() {
-        assert!(
-            DecodeError::InsufficientSymbols {
-                received: 1,
-                required: 2
-            }
-            .is_recoverable()
-        );
+        assert!(DecodeError::InsufficientSymbols {
+            received: 1,
+            required: 2
+        }
+        .is_recoverable());
         assert!(DecodeError::SingularMatrix { row: 3 }.is_recoverable());
-        assert!(
-            DecodeError::SymbolSizeMismatch {
-                expected: 8,
-                actual: 7
-            }
-            .is_unrecoverable()
-        );
-        assert!(
-            DecodeError::ColumnIndexOutOfRange {
-                esi: 1,
-                column: 99,
-                max_valid: 12
-            }
-            .is_unrecoverable()
-        );
-        assert!(
-            DecodeError::CorruptDecodedOutput {
-                esi: 1,
-                byte_index: 0,
-                expected: 1,
-                actual: 2
-            }
-            .is_unrecoverable()
-        );
+        assert!(DecodeError::SymbolSizeMismatch {
+            expected: 8,
+            actual: 7
+        }
+        .is_unrecoverable());
+        assert!(DecodeError::ColumnIndexOutOfRange {
+            esi: 1,
+            column: 99,
+            max_valid: 12
+        }
+        .is_unrecoverable());
+        assert!(DecodeError::CorruptDecodedOutput {
+            esi: 1,
+            byte_index: 0,
+            expected: 1,
+            actual: 2
+        }
+        .is_unrecoverable());
     }
 
     fn make_rank_deficient_state(
@@ -3923,7 +3915,7 @@ mod tests {
     fn source_equation_panics_on_esi_ge_k() {
         let k = 4;
         let decoder = InactivationDecoder::new(k, 16, 42);
-        decoder.source_equation(k as u32); // ESI == K should panic
+        let _ = decoder.source_equation(k as u32); // ESI == K should panic
     }
 
     // ── Duplicate ESI handling (br-3narc.2.7) ──

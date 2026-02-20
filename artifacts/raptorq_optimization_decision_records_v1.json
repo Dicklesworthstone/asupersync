@@ -494,7 +494,8 @@
         "measured_highlights": [
           "Implementation evidence is landed: deterministic dense-factor cache + strict signature checks + bounded eviction telemetry (thread asupersync-n5fk6 msg #1194).",
           "Follow-up implementation evidence is landed: matrix-skeleton reuse (`DenseFactorArtifact`) plus deterministic cache decision telemetry and collision tracking (thread asupersync-n5fk6 msg #1207).",
-          "Closure-grade burst comparator (p95/p99) and rollback outcome artifacts are still pending publication."
+          "F7 comparator artifacts are published: artifacts/raptorq_track_f_factor_cache_p95p99_v1.json (single-scenario) and artifacts/raptorq_track_f_factor_cache_p95p99_v2.json (multi-scenario).",
+          "Latest multi-scenario comparator (v2) shows deterministic cache hits in all scenarios but 0/3 scenarios satisfy current material p95/p99 gain thresholds; runs continue to show tail-latency variability with occasional warmed-cache p95 regressions."
         ]
       },
       "risk_class": "high",
@@ -505,7 +506,7 @@
       ],
       "adoption_wedge": {
         "phase": "implementation landed; closure evidence pending",
-        "strategy": "Keep guarded/proposed state until burst comparator and rollback artifacts are attached, then promote to approved_guarded.",
+        "strategy": "Keep guarded/proposed state until burst comparator and rollback artifacts show material p95/p99 gain across representative workloads, then promote to approved_guarded.",
         "enable_controls": [
           "cache capacity cap",
           "equivalence verdict enforcement"
@@ -543,6 +544,28 @@
         "structured_logs": [
           "tests/ci_regression_gates.rs::emit_gate_log (lever=F7)",
           "target/e2e-results/raptorq/<profile>_<timestamp>/scenarios.ndjson"
+        ]
+      },
+      "measured_comparator_evidence": {
+        "status": "partial",
+        "artifacts": [
+          "artifacts/raptorq_track_f_factor_cache_p95p99_v1.json",
+          "artifacts/raptorq_track_f_factor_cache_p95p99_v2.json"
+        ],
+        "bench_repro_commands": [
+          "cargo test --test ci_regression_gates g2_f7_burst_cache_p95p99_report -- --nocapture",
+          "cargo test --test ci_regression_gates g2_f7_burst_cache_p95p99_multiscenario_report -- --nocapture",
+          "cargo test --test ci_regression_gates g2_f7_factor_cache_observed -- --nocapture"
+        ],
+        "notes": [
+          "Comparator artifact includes baseline, warmed_cache, and rollback_proxy p50/p95/p99 metrics for deterministic burst scenario RQ-F7-CACHE-BURST-CMP-001.",
+          "Warmed cache path hit factor cache in 25/25 samples, confirming deterministic reuse activation.",
+          "Multi-scenario comparator artifact (v2) expands coverage to three deterministic burst workloads with per-scenario p95/p99 deltas and rollback-proxy captures.",
+          "v2 summary currently reports material_gain_scenarios = 0 and tail-latency variability across reruns, so closure-grade gain remains unproven."
+        ],
+        "pending_blockers": [
+          "Demonstrate material p95/p99 latency and throughput gain on representative burst workloads; current v2 corpus (3 scenarios) still yields 0 scenarios meeting material-gain thresholds.",
+          "Eliminate or explain warmed-cache tail-risk variability observed in the multi-scenario comparator corpus before promoting from proposed to approved_guarded."
         ]
       },
       "deterministic_replay": {
@@ -610,11 +633,11 @@
   "coverage_summary": {
     "cards_total": 8,
     "cards_with_conservative_comparator": 8,
-    "cards_with_measured_comparator_evidence": 6,
-    "cards_pending_measured_evidence": 2,
+    "cards_with_measured_comparator_evidence": 7,
+    "cards_pending_measured_evidence": 1,
     "cards_with_replay_commands": 8,
     "closure_blockers": [
-      "Promote F7 from proposed to approved_guarded only after burst-workload comparator evidence (including p95/p99 deltas) and rollback rehearsal outcomes are attached as concrete artifacts; current anchors #1194/#1207 confirm implementation quality but are not closure-grade comparator/rollback evidence (G7 dependency contract reruns are green per asupersync-m7o6i comment #1886 and coord msg #1520).",
+      "Promote F7 from proposed to approved_guarded only after published burst-workload comparator + rollback artifacts demonstrate material p95/p99 gain across representative workloads; current artifacts (`artifacts/raptorq_track_f_factor_cache_p95p99_v1.json`, `artifacts/raptorq_track_f_factor_cache_p95p99_v2.json`) confirm deterministic cache behavior, but v2 still reports material_gain_scenarios=0 and tail-latency variability across reruns.",
       "Keep F8 as template/proposed until implementation exists; thread asupersync-2zu9p currently has no implementation/evidence anchors, so measured overlap-vs-sequential evidence and rollback outcomes remain entirely pending."
     ]
   }

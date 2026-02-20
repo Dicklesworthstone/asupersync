@@ -86,12 +86,12 @@ Current artifact summary (`coverage_summary` in JSON):
 
 - `cards_total = 8`
 - `cards_with_replay_commands = 8`
-- `cards_with_measured_comparator_evidence = 6`
-- `cards_pending_measured_evidence = 2`
+- `cards_with_measured_comparator_evidence = 7`
+- `cards_pending_measured_evidence = 1`
 
 Closure blockers for `asupersync-3ltrv` remain:
 
-1. Promote `F7` from proposed to approved_guarded only after burst comparator evidence + rollback rehearsal outcomes are recorded.
+1. Promote `F7` from proposed to approved_guarded only after published burst comparator + rollback artifacts demonstrate material p95/p99 gain across representative workloads (`artifacts/raptorq_track_f_factor_cache_p95p99_v1.json` and `artifacts/raptorq_track_f_factor_cache_p95p99_v2.json` are now published; v2 expands to three workloads but still reports `material_gain_scenarios=0` with unresolved warmed-cache tail-latency variability across reruns).
 2. Keep `F8` as proposed/template until implementation exists, then attach overlap-vs-sequential evidence and rollback outcomes.
 
 Recent evidence alignment updates (2026-02-19):
@@ -119,4 +119,6 @@ Recent evidence alignment updates (2026-02-20):
 - Added independent support refresh (`asupersync-3ltrv` comment `#1896`, agent-mail thread `asupersync-3ltrv` msg `#1555`): fresh `bv --robot-next` still ranks G3 top-impact; targeted `cargo test --test raptorq_perf_invariants g3_decision -- --nocapture` rerun is PASS (2/2), and cross-agent request for latest E5/F7/F8 closure anchors has been rebroadcast in-thread.
 - Added focused F7/F8 evidence-harvest integration (`asupersync-3ltrv` comment `#1907`, agent-mail `#1587`): F7 implementation anchors are now explicit (`asupersync-n5fk6` thread msgs `#1194/#1207`), but promotion remains blocked pending closure-grade burst comparator (p95/p99) + rollback outcome artifacts; F8 remains open with no thread evidence anchors in `asupersync-2zu9p`.
 - Added latest post-frontier verification: `cargo test --test raptorq_perf_invariants g3_decision -- --nocapture` PASS (2/2) after repair of unrelated compile-frontier issues.
+- Added eleventh-slice F7 comparator/rollback artifact publication: `artifacts/raptorq_track_f_factor_cache_p95p99_v1.json` generated from deterministic burst comparator command `cargo test --test ci_regression_gates g2_f7_burst_cache_p95p99_report -- --nocapture` plus rollback rehearsal command `cargo test --test ci_regression_gates g2_f7_factor_cache_observed -- --nocapture` (both PASS). G3 blocker wording was tightened: F7 now has concrete comparator+rollback artifacts but still needs closure-grade material p95/p99 gain across broader workload coverage.
+- Added twelfth-slice F7 multi-scenario comparator publication: `artifacts/raptorq_track_f_factor_cache_p95p99_v2.json` generated from `cargo test --test ci_regression_gates g2_f7_burst_cache_p95p99_multiscenario_report -- --nocapture` + rollback rehearsal command `cargo test --test ci_regression_gates g2_f7_factor_cache_observed -- --nocapture` (PASS). Coverage is broader (3 deterministic burst workloads), but current outcome is still non-closure-grade (`material_gain_scenarios=0`) with unresolved warmed-cache tail-latency variability across reruns.
 - Removed stale compile-mismatch blocker text and reconciled closure blockers to current state (E5 publication/sign-off cleared; F7/F8 remain).
