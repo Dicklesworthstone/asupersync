@@ -339,7 +339,8 @@ impl Bulkhead {
                 .fetch_add(timeout_count, Ordering::Relaxed);
         }
 
-        // Find first waiting entry that can be granted
+        // Find all waiting entries that can be granted
+        let mut first_granted = None;
         for entry in queue.iter_mut() {
             if entry.result.is_none() {
                 // CAS loop to safely consume permits (prevents TOCTOU race with try_acquire)
@@ -361,7 +362,8 @@ impl Bulkhead {
                     }
                 };
                 if !granted {
-                    continue;
+                    // Stop at first ungrantable entry to preserve FIFO order
+                    break;
                 }
                 entry.result = Some(Ok(()));
                 self.pending_queue_count.fetch_sub(1, Ordering::Relaxed);
@@ -375,11 +377,13 @@ impl Bulkhead {
                 self.max_queue_wait_ms_atomic
                     .fetch_max(wait_ms, Ordering::Relaxed);
 
-                return Some(entry.id);
+                if first_granted.is_none() {
+                    first_granted = Some(entry.id);
+                }
             }
         }
 
-        None
+        first_granted
     }
 
     /// Enqueue a waiting operation.

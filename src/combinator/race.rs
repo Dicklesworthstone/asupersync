@@ -32,7 +32,6 @@
 //! for invariant verification only).
 
 use core::fmt;
-use smallvec::SmallVec;
 use std::future::Future;
 use std::marker::PhantomData;
 
@@ -554,8 +553,8 @@ pub fn race_all_outcomes<T, E>(
     let loser_count = outcomes.len().saturating_sub(1);
     let mut iter = outcomes.into_iter().enumerate();
     let mut winner_outcome = None;
-    let mut loser_outcomes: SmallVec<[(usize, Outcome<T, E>); 4]> =
-        SmallVec::with_capacity(loser_count);
+    let mut loser_outcomes: Vec<(usize, Outcome<T, E>)> =
+        Vec::with_capacity(loser_count);
 
     for (i, outcome) in iter.by_ref() {
         if i == winner_index {
@@ -568,7 +567,7 @@ pub fn race_all_outcomes<T, E>(
     RaceAllResult::new(
         winner_outcome.expect("winner not found"),
         winner_index,
-        loser_outcomes.into_vec(),
+        loser_outcomes,
     )
 }
 

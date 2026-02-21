@@ -786,8 +786,6 @@ impl CircuitBreaker {
                     match state {
                         State::Closed { failures } => {
                             let new_failures = failures + 1;
-                            self.current_failure_streak
-                                .store(new_failures, Ordering::Relaxed);
 
                             if new_failures >= self.policy.failure_threshold || window_triggered {
                                 let new_state = State::Open {
@@ -800,6 +798,8 @@ impl CircuitBreaker {
                                     Ordering::Acquire,
                                 ) {
                                     Ok(_) => {
+                                        self.current_failure_streak
+                                            .store(new_failures, Ordering::Relaxed);
                                         self.times_opened.fetch_add(1, Ordering::Relaxed);
                                         let mut m = self.metrics.write();
                                         m.current_state = new_state;
@@ -824,7 +824,11 @@ impl CircuitBreaker {
                                     Ordering::Release,
                                     Ordering::Acquire,
                                 ) {
-                                    Ok(_) => break,
+                                    Ok(_) => {
+                                        self.current_failure_streak
+                                            .store(new_failures, Ordering::Relaxed);
+                                        break;
+                                    }
                                     Err(actual) => current_bits = actual,
                                 }
                             }
