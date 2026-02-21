@@ -261,6 +261,7 @@ impl<A: Actor> ActorHandle<A> {
             let mut guard = inner.write();
             guard.cancel_requested = true;
         }
+        self.sender.wake_receiver();
     }
 
     /// Returns true if the actor has finished.
@@ -301,6 +302,7 @@ impl<A: Actor> ActorHandle<A> {
             let mut guard = inner.write();
             guard.cancel_requested = true;
         }
+        self.sender.wake_receiver();
     }
 }
 
@@ -775,7 +777,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
         let (msg_tx, msg_rx) = mpsc::channel::<A::Message>(mailbox_capacity);
 
         // Create oneshot for returning the actor state
-        let (result_tx, result_rx) = oneshot::channel::<Result<A, JoinError>>();
+        let (result_tx, mut result_rx) = oneshot::channel::<Result<A, JoinError>>();
 
         // Create task record
         let task_id = self.create_task_record(state)?;
@@ -891,7 +893,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
 
         let actor = factory();
         let (msg_tx, msg_rx) = mpsc::channel::<A::Message>(mailbox_capacity);
-        let (result_tx, result_rx) = oneshot::channel::<Result<A, JoinError>>();
+        let (result_tx, mut result_rx) = oneshot::channel::<Result<A, JoinError>>();
         let task_id = self.create_task_record(state)?;
         let actor_id = ActorId::from_task(task_id);
         let actor_state = Arc::new(ActorStateCell::new(ActorState::Created));

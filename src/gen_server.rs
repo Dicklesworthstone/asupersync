@@ -1458,7 +1458,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
 
         let overflow_policy = server.cast_overflow_policy();
         let (msg_tx, msg_rx) = mpsc::channel::<Envelope<S>>(mailbox_capacity);
-        let (result_tx, result_rx) = oneshot::channel::<Result<S, JoinError>>();
+        let (result_tx, mut result_rx) = oneshot::channel::<Result<S, JoinError>>();
         let task_id = self.create_task_record(state)?;
         let actor_id = ActorId::from_task(task_id);
         let server_state = Arc::new(GenServerStateCell::new(ActorState::Created));
@@ -1824,6 +1824,10 @@ where
             if let Some(mut lease) = lease_to_abort {
                 let _ = lease.abort();
             }
+            if let Some(region_record) = state.region(scope.region_id()) {
+                region_record.remove_task(task_id);
+            }
+            state.remove_task(task_id);
             return Err(SpawnError::RegionClosed(scope.region_id()));
         }
 
