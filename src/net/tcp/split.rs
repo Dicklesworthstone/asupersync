@@ -214,6 +214,9 @@ impl TcpStreamInner {
             guard.write_waker = Some(cx.waker().clone());
         }
 
+        let mut dropped_reg = None;
+        let mut early_return = None;
+
         // Destructure to enable independent field borrows through the MutexGuard.
         {
             let SplitIoState {
@@ -226,23 +229,29 @@ impl TcpStreamInner {
                 let waker = combined_waker(read_waker.as_ref(), write_waker.as_ref());
                 // Single lock in io_driver: re-arm interest + refresh waker.
                 match reg.rearm(combined_interest, &waker) {
-                    Ok(true) => return Ok(()),
+                    Ok(true) => early_return = Some(Ok(())),
                     Ok(false) => {
-                        *registration = None;
+                        dropped_reg = registration.take();
                     }
                     Err(err) if err.kind() == io::ErrorKind::NotConnected => {
-                        *registration = None;
+                        dropped_reg = registration.take();
                         if let Some(w) = read_waker.as_ref() {
                             w.wake_by_ref();
                         }
                         if let Some(w) = write_waker.as_ref() {
                             w.wake_by_ref();
                         }
-                        return Ok(());
+                        early_return = Some(Ok(()));
                     }
-                    Err(err) => return Err(err),
+                    Err(err) => early_return = Some(Err(err)),
                 }
             }
+        }
+
+        if let Some(res) = early_return {
+            drop(guard);
+            drop(dropped_reg);
+            return res;
         }
 
         // Build combined waker while still holding the lock. We keep the lock
@@ -258,10 +267,14 @@ impl TcpStreamInner {
 
         let Some(current) = Cx::current() else {
             cx.waker().wake_by_ref();
+            drop(guard);
+            drop(dropped_reg);
             return Ok(());
         };
         let Some(driver) = current.io_driver_handle() else {
             cx.waker().wake_by_ref();
+            drop(guard);
+            drop(dropped_reg);
             return Ok(());
         };
 
@@ -277,6 +290,7 @@ impl TcpStreamInner {
             Err(err) => Err(err),
         };
         drop(guard);
+        drop(dropped_reg);
         result
     }
 
@@ -299,9 +313,15 @@ impl TcpStreamInner {
         let mut clear_registration = desired_interest.is_empty();
         if !clear_registration {
             let combined = combined_waker(guard.read_waker.as_ref(), guard.write_waker.as_ref());
-            if let Some(reg) = guard.registration.as_mut() {
-                // Single lock in io_driver: re-arm + waker refresh.
-                if !matches!(reg.rearm(desired_interest, &combined), Ok(true)) {
+            let is_some = guard.registration.is_some();
+            let rearm_ok = if let Some(reg) = guard.registration.as_mut() {
+                matches!(reg.rearm(desired_interest, &combined), Ok(true))
+            } else {
+                false
+            };
+
+            if is_some {
+                if !rearm_ok {
                     clear_registration = true;
                     if let Some(w) = guard.read_waker.as_ref() {
                         w.wake_by_ref();
@@ -322,12 +342,14 @@ impl TcpStreamInner {
             }
         }
 
-        // No pending waiters remain, or re-arm/waker refresh failed.
-        // Drop registration so its driver-side waker slot/token are released.
-        if clear_registration {
-            guard.registration = None;
-        }
+        let dropped_reg = if clear_registration {
+            guard.registration.take()
+        } else {
+            None
+        };
+
         drop(guard);
+        drop(dropped_reg);
     }
 }
 

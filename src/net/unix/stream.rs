@@ -31,6 +31,101 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
+use socket2::{Domain, SockAddr, Socket, Type};
+
+fn connect_in_progress(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+    ) || err.raw_os_error() == Some(libc::EINPROGRESS)
+}
+
+async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>> {
+    let Some(driver) = Cx::current().and_then(|cx| cx.io_driver_handle()) else {
+        wait_for_connect_fallback(socket).await?;
+        return Ok(None);
+    };
+
+    let mut registration: Option<IoRegistration> = None;
+    let mut fallback = false;
+    std::future::poll_fn(|cx| {
+        if let Some(err) = socket.take_error()? {
+            return Poll::Ready(Err(err));
+        }
+
+        match socket.peer_addr() {
+            Ok(_) => Poll::Ready(Ok(())),
+            Err(err) if err.kind() == io::ErrorKind::NotConnected => {
+                if let Err(err) = rearm_connect_registration(&mut registration, cx) {
+                    return Poll::Ready(Err(err));
+                }
+
+                if registration.is_none() {
+                    match driver.register(socket, Interest::WRITABLE, cx.waker().clone()) {
+                        Ok(new_reg) => registration = Some(new_reg),
+                        Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+                            fallback = true;
+                            return Poll::Ready(Ok(()));
+                        }
+                        Err(err) => return Poll::Ready(Err(err)),
+                    }
+                }
+
+                Poll::Pending
+            }
+            Err(err) => Poll::Ready(Err(err)),
+        }
+    })
+    .await?;
+
+    if fallback {
+        wait_for_connect_fallback(socket).await?;
+        return Ok(None);
+    }
+
+    Ok(registration)
+}
+
+fn rearm_connect_registration(
+    registration: &mut Option<IoRegistration>,
+    cx: &Context<'_>,
+) -> io::Result<()> {
+    let Some(existing) = registration.as_mut() else {
+        return Ok(());
+    };
+
+    match existing.rearm(Interest::WRITABLE, cx.waker()) {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            *registration = None;
+            Ok(())
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotConnected => {
+            *registration = None;
+            cx.waker().wake_by_ref();
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
+}
+
+async fn wait_for_connect_fallback(socket: &Socket) -> io::Result<()> {
+    loop {
+        if let Some(err) = socket.take_error()? {
+            return Err(err);
+        }
+
+        match socket.peer_addr() {
+            Ok(_) => return Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotConnected => {
+                std::thread::sleep(Duration::from_millis(1));
+                crate::runtime::yield_now().await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
 
 fn nix_to_io(err: nix::Error) -> io::Error {
     // nix::Error is a type alias to nix::errno::Errno (Copy + Eq, etc).
@@ -117,14 +212,21 @@ impl UnixStream {
     /// let stream = UnixStream::connect("/tmp/my_socket.sock").await?;
     /// ```
     pub async fn connect<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        // For now, use blocking connect
-        // TODO: Use non-blocking connect with reactor when available
-        let inner = net::UnixStream::connect(path)?;
-        inner.set_nonblocking(true)?;
+        let domain = Domain::UNIX;
+        let socket = Socket::new(domain, Type::STREAM, None)?;
+        socket.set_nonblocking(true)?;
 
+        let sock_addr = SockAddr::unix(path)?;
+        let registration = match socket.connect(&sock_addr) {
+            Ok(()) => None,
+            Err(err) if connect_in_progress(&err) => wait_for_connect(&socket).await?,
+            Err(err) => return Err(err),
+        };
+
+        let inner: net::UnixStream = socket.into();
         Ok(Self {
             inner: Arc::new(inner),
-            registration: Mutex::new(None), // Lazy registration on first I/O
+            registration: Mutex::new(registration),
         })
     }
 
@@ -150,13 +252,22 @@ impl UnixStream {
     pub async fn connect_abstract(name: &[u8]) -> io::Result<Self> {
         use std::os::linux::net::SocketAddrExt;
 
-        let addr = SocketAddr::from_abstract_name(name)?;
-        let inner = net::UnixStream::connect_addr(&addr)?;
-        inner.set_nonblocking(true)?;
+        let addr = std::os::unix::net::SocketAddr::from_abstract_name(name)?;
+        let domain = Domain::UNIX;
+        let socket = Socket::new(domain, Type::STREAM, None)?;
+        socket.set_nonblocking(true)?;
 
+        let sock_addr = SockAddr::from(addr);
+        let registration = match socket.connect(&sock_addr) {
+            Ok(()) => None,
+            Err(err) if connect_in_progress(&err) => wait_for_connect(&socket).await?,
+            Err(err) => return Err(err),
+        };
+
+        let inner: net::UnixStream = socket.into();
         Ok(Self {
             inner: Arc::new(inner),
-            registration: Mutex::new(None), // Lazy registration on first I/O
+            registration: Mutex::new(registration),
         })
     }
 

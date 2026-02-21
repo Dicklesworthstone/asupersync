@@ -221,10 +221,12 @@ impl<S: SymbolSink + Unpin + ?Sized> Future for CloseFuture<'_, S> {
 
 // ---- Adapters ----
 
+use std::collections::VecDeque;
+
 /// A sink that buffers symbols.
 pub struct BufferedSink<S> {
     inner: S,
-    buffer: Vec<AuthenticatedSymbol>,
+    buffer: VecDeque<AuthenticatedSymbol>,
     capacity: usize,
 }
 
@@ -233,7 +235,7 @@ impl<S> BufferedSink<S> {
     pub fn new(inner: S, capacity: usize) -> Self {
         Self {
             inner,
-            buffer: Vec::with_capacity(capacity),
+            buffer: VecDeque::with_capacity(capacity),
             capacity,
         }
     }
@@ -264,7 +266,7 @@ impl<S: SymbolSink + Unpin> SymbolSink for BufferedSink<S> {
                 Poll::Pending => return Poll::Pending,
             }
         }
-        self.get_mut().buffer.push(symbol);
+        self.get_mut().buffer.push_back(symbol);
         Poll::Ready(Ok(()))
     }
 
@@ -279,13 +281,13 @@ impl<S: SymbolSink + Unpin> SymbolSink for BufferedSink<S> {
                 Poll::Pending => return Poll::Pending,
             }
 
-            let symbol = match this.buffer.first() {
+            let symbol = match this.buffer.front() {
                 Some(symbol) => symbol.clone(),
                 None => break,
             };
             match Pin::new(&mut this.inner).poll_send(cx, symbol) {
                 Poll::Ready(Ok(())) => {
-                    this.buffer.remove(0);
+                    this.buffer.pop_front();
                 }
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => {
