@@ -202,10 +202,7 @@ impl<T> Sender<T> {
     /// Convenience method: reserve and send in one step.
     pub async fn send(&self, cx: &Cx, value: T) -> Result<(), SendError<T>> {
         match self.reserve(cx).await {
-            Ok(permit) => {
-                permit.send(value);
-                Ok(())
-            }
+            Ok(permit) => permit.try_send(value),
             Err(SendError::Disconnected(())) => Err(SendError::Disconnected(value)),
             Err(SendError::Full(())) => Err(SendError::Full(value)),
             Err(SendError::Cancelled(())) => Err(SendError::Cancelled(value)),
@@ -243,10 +240,7 @@ impl<T> Sender<T> {
     #[inline]
     pub fn try_send(&self, value: T) -> Result<(), SendError<T>> {
         match self.try_reserve() {
-            Ok(permit) => {
-                permit.send(value);
-                Ok(())
-            }
+            Ok(permit) => permit.try_send(value),
             Err(SendError::Disconnected(())) => Err(SendError::Disconnected(value)),
             Err(SendError::Full(())) => Err(SendError::Full(value)),
             Err(SendError::Cancelled(())) => unreachable!(),
@@ -351,7 +345,12 @@ impl<'a, T> Future for Reserve<'a, T> {
             return Poll::Ready(Err(SendError::Disconnected(())));
         }
 
-        if inner.has_capacity(self.sender.shared.capacity) {
+        let is_first = match self.waiter_id {
+            Some(id) => inner.send_wakers.front().is_some_and(|w| w.id == id),
+            None => inner.send_wakers.is_empty(),
+        };
+
+        if is_first && inner.has_capacity(self.sender.shared.capacity) {
             inner.reserved += 1;
             // Remove self from queue
             if let Some(id) = self.waiter_id {
@@ -374,6 +373,9 @@ impl<'a, T> Future for Reserve<'a, T> {
                 if let Some(w) = cascade_waker {
                     w.wake();
                 }
+                
+                // Clear waiter_id so Drop doesn't uselessly lock and search the queue
+                self.waiter_id = None;
             } else {
                 drop(inner);
             }
@@ -532,7 +534,13 @@ pub struct SendPermit<'a, T> {
 impl<T> SendPermit<'_, T> {
     /// Commits the reserved slot, enqueuing the value.
     #[inline]
-    pub fn send(mut self, value: T) {
+    pub fn send(self, value: T) {
+        let _ = self.try_send(value);
+    }
+
+    /// Commits the reserved slot, returning an error if the receiver was dropped.
+    #[inline]
+    pub fn try_send(mut self, value: T) -> Result<(), SendError<T>> {
         self.sent = true;
         let mut inner = self.sender.shared.inner.lock();
 
@@ -547,7 +555,7 @@ impl<T> SendPermit<'_, T> {
             // Collect wakers before dropping the lock to avoid wake-under-lock.
             if inner.send_wakers.is_empty() {
                 drop(inner);
-                return;
+                return Err(SendError::Disconnected(value));
             }
             let wakers: SmallVec<[Waker; 4]> = inner
                 .send_wakers
@@ -558,7 +566,7 @@ impl<T> SendPermit<'_, T> {
             for waker in wakers {
                 waker.wake();
             }
-            return;
+            return Err(SendError::Disconnected(value));
         }
 
         inner.queue.push_back(value);
@@ -569,6 +577,7 @@ impl<T> SendPermit<'_, T> {
         if let Some(waker) = recv_waker {
             waker.wake();
         }
+        Ok(())
     }
 
     /// Aborts the reserved slot without sending.
@@ -722,6 +731,15 @@ impl<T> Future for Recv<'_, T> {
             _ => inner.recv_waker = Some(ctx.waker().clone()),
         }
         Poll::Pending
+    }
+}
+
+impl<T> Drop for Recv<'_, T> {
+    fn drop(&mut self) {
+        // Clear the registered waker to avoid retaining stale executor state
+        // if this future is dropped (e.g., cancelled by select!).
+        let mut inner = self.receiver.shared.inner.lock();
+        inner.recv_waker = None;
     }
 }
 

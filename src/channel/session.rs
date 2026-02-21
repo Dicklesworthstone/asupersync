@@ -104,7 +104,7 @@ impl<T> TrackedSender<T> {
             Err(mpsc::SendError::Full(())) => return Err(mpsc::SendError::Full(value)),
             Err(mpsc::SendError::Cancelled(())) => return Err(mpsc::SendError::Cancelled(value)),
         };
-        Ok(permit.send(value))
+        permit.try_send(value)
     }
 
     /// Returns the underlying [`mpsc::Sender`], discarding obligation tracking.
@@ -152,6 +152,18 @@ impl<T> TrackedPermit<'_, T> {
         let Self { permit, obligation } = self;
         permit.send(value);
         obligation.commit()
+    }
+
+    /// Sends a value, returning an error if the receiver was dropped.
+    pub fn try_send(self, value: T) -> Result<CommittedProof<SendPermit>, mpsc::SendError<T>> {
+        let Self { permit, obligation } = self;
+        match permit.try_send(value) {
+            Ok(()) => Ok(obligation.commit()),
+            Err(e) => {
+                let _aborted = obligation.abort();
+                Err(e)
+            }
+        }
     }
 
     /// Aborts the reserved slot, consuming the permit and returning an [`AbortedProof`].
@@ -442,7 +454,7 @@ mod tests {
     fn tracked_oneshot_send_recv() {
         init_test("tracked_oneshot_send_recv");
         let cx = test_cx();
-        let (tx, rx) = tracked_oneshot::<i32>();
+        let (tx, mut rx) = tracked_oneshot::<i32>();
 
         let permit = tx.reserve(&cx);
         let proof = permit.send(100).expect("oneshot send failed");
@@ -465,7 +477,7 @@ mod tests {
     fn tracked_oneshot_abort() {
         init_test("tracked_oneshot_abort");
         let cx = test_cx();
-        let (tx, rx) = tracked_oneshot::<i32>();
+        let (tx, mut rx) = tracked_oneshot::<i32>();
 
         let permit = tx.reserve(&cx);
         let proof = permit.abort();
@@ -506,7 +518,7 @@ mod tests {
     fn tracked_oneshot_convenience_send() {
         init_test("tracked_oneshot_convenience_send");
         let cx = test_cx();
-        let (tx, rx) = tracked_oneshot::<i32>();
+        let (tx, mut rx) = tracked_oneshot::<i32>();
 
         let proof = tx.send(&cx, 55).expect("convenience send failed");
 
@@ -571,7 +583,7 @@ mod tests {
     fn tracked_oneshot_reserved_send_returns_disconnected_without_obligation_leak() {
         init_test("tracked_oneshot_reserved_send_returns_disconnected_without_obligation_leak");
         let cx = test_cx();
-        let (tx, rx) = tracked_oneshot::<i32>();
+        let (tx, mut rx) = tracked_oneshot::<i32>();
         let permit = tx.reserve(&cx);
         drop(rx);
 
@@ -632,7 +644,7 @@ mod tests {
 
     #[test]
     fn tracked_oneshot_sender_is_closed() {
-        let (tx, rx) = tracked_oneshot::<i32>();
+        let (tx, mut rx) = tracked_oneshot::<i32>();
         assert!(!tx.is_closed());
         drop(rx);
         assert!(tx.is_closed());
@@ -651,7 +663,7 @@ mod tests {
     #[test]
     fn tracked_oneshot_permit_is_closed() {
         let cx = test_cx();
-        let (tx, rx) = tracked_oneshot::<i32>();
+        let (tx, mut rx) = tracked_oneshot::<i32>();
         let permit = tx.reserve(&cx);
         assert!(!permit.is_closed());
         drop(rx);
@@ -664,7 +676,7 @@ mod tests {
     fn tracked_oneshot_convenience_send_returns_disconnected_when_receiver_dropped() {
         init_test("tracked_oneshot_convenience_send_returns_disconnected_when_receiver_dropped");
         let cx = test_cx();
-        let (tx, rx) = tracked_oneshot::<i32>();
+        let (tx, mut rx) = tracked_oneshot::<i32>();
         drop(rx);
 
         let err = tx
