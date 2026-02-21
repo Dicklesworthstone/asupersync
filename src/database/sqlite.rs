@@ -347,25 +347,28 @@ impl SqliteConnection {
         let pool = get_sqlite_pool();
         let pool_clone = pool.clone();
 
-        // Use oneshot channel pattern for result
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, mut rx) = crate::channel::oneshot::channel();
+        let permit = tx.reserve(cx);
 
         let handle = pool.spawn(move || {
             let result =
                 rusqlite::Connection::open(&path).map_err(|e| SqliteError::Sqlite(e.to_string()));
-            let _ = tx.send(result);
+            let _ = permit.send(result);
         });
 
-        // Wait for completion (could be improved with async notification)
-        handle.wait();
-
-        match rx.recv() {
+        match rx.recv(cx).await {
             Ok(Ok(conn)) => Outcome::Ok(Self {
                 inner: Arc::new(Mutex::new(SqliteConnectionInner::new(conn))),
                 pool: pool_clone,
             }),
             Ok(Err(e)) => Outcome::Err(e),
-            Err(_) => Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string())),
+            Err(crate::channel::oneshot::RecvError::Cancelled) => {
+                handle.cancel();
+                Outcome::Cancelled(cx.cancel_reason().unwrap_or_else(|| CancelReason::user("cancelled")))
+            }
+            Err(crate::channel::oneshot::RecvError::Closed) => {
+                Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string()))
+            }
         }
     }
 
@@ -386,23 +389,28 @@ impl SqliteConnection {
         let pool = get_sqlite_pool();
         let pool_clone = pool.clone();
 
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, mut rx) = crate::channel::oneshot::channel();
+        let permit = tx.reserve(cx);
 
         let handle = pool.spawn(move || {
             let result = rusqlite::Connection::open_in_memory()
                 .map_err(|e| SqliteError::Sqlite(e.to_string()));
-            let _ = tx.send(result);
+            let _ = permit.send(result);
         });
 
-        handle.wait();
-
-        match rx.recv() {
+        match rx.recv(cx).await {
             Ok(Ok(conn)) => Outcome::Ok(Self {
                 inner: Arc::new(Mutex::new(SqliteConnectionInner::new(conn))),
                 pool: pool_clone,
             }),
             Ok(Err(e)) => Outcome::Err(e),
-            Err(_) => Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string())),
+            Err(crate::channel::oneshot::RecvError::Cancelled) => {
+                handle.cancel();
+                Outcome::Cancelled(cx.cancel_reason().unwrap_or_else(|| CancelReason::user("cancelled")))
+            }
+            Err(crate::channel::oneshot::RecvError::Closed) => {
+                Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string()))
+            }
         }
     }
 
@@ -431,7 +439,8 @@ impl SqliteConnection {
         let sql = sql.to_string();
         let params: Vec<SqliteValue> = params.to_vec();
 
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, mut rx) = crate::channel::oneshot::channel();
+        let permit = tx.reserve(cx);
 
         let handle = self.pool.spawn(move || {
             let result = (|| {
@@ -445,15 +454,19 @@ impl SqliteConnection {
                     .map(|n| n as u64)
                     .map_err(|e| SqliteError::Sqlite(e.to_string()))
             })();
-            let _ = tx.send(result);
+            let _ = permit.send(result);
         });
 
-        handle.wait();
-
-        match rx.recv() {
+        match rx.recv(cx).await {
             Ok(Ok(n)) => Outcome::Ok(n),
             Ok(Err(e)) => Outcome::Err(e),
-            Err(_) => Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string())),
+            Err(crate::channel::oneshot::RecvError::Cancelled) => {
+                handle.cancel();
+                Outcome::Cancelled(cx.cancel_reason().unwrap_or_else(|| CancelReason::user("cancelled")))
+            }
+            Err(crate::channel::oneshot::RecvError::Closed) => {
+                Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string()))
+            }
         }
     }
 
@@ -473,7 +486,8 @@ impl SqliteConnection {
         let inner = Arc::clone(&self.inner);
         let sql = sql.to_string();
 
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, mut rx) = crate::channel::oneshot::channel();
+        let permit = tx.reserve(cx);
 
         let handle = self.pool.spawn(move || {
             let result = (|| {
@@ -482,15 +496,19 @@ impl SqliteConnection {
                 conn.execute_batch(&sql)
                     .map_err(|e| SqliteError::Sqlite(e.to_string()))
             })();
-            let _ = tx.send(result);
+            let _ = permit.send(result);
         });
 
-        handle.wait();
-
-        match rx.recv() {
+        match rx.recv(cx).await {
             Ok(Ok(())) => Outcome::Ok(()),
             Ok(Err(e)) => Outcome::Err(e),
-            Err(_) => Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string())),
+            Err(crate::channel::oneshot::RecvError::Cancelled) => {
+                handle.cancel();
+                Outcome::Cancelled(cx.cancel_reason().unwrap_or_else(|| CancelReason::user("cancelled")))
+            }
+            Err(crate::channel::oneshot::RecvError::Closed) => {
+                Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string()))
+            }
         }
     }
 
@@ -516,7 +534,8 @@ impl SqliteConnection {
         let sql = sql.to_string();
         let params: Vec<SqliteValue> = params.to_vec();
 
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, mut rx) = crate::channel::oneshot::channel();
+        let permit = tx.reserve(cx);
 
         let handle = self.pool.spawn(move || {
             let result = (|| {
@@ -563,15 +582,19 @@ impl SqliteConnection {
 
                 Ok(result)
             })();
-            let _ = tx.send(result);
+            let _ = permit.send(result);
         });
 
-        handle.wait();
-
-        match rx.recv() {
+        match rx.recv(cx).await {
             Ok(Ok(rows)) => Outcome::Ok(rows),
             Ok(Err(e)) => Outcome::Err(e),
-            Err(_) => Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string())),
+            Err(crate::channel::oneshot::RecvError::Cancelled) => {
+                handle.cancel();
+                Outcome::Cancelled(cx.cancel_reason().unwrap_or_else(|| CancelReason::user("cancelled")))
+            }
+            Err(crate::channel::oneshot::RecvError::Closed) => {
+                Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string()))
+            }
         }
     }
 
@@ -752,8 +775,7 @@ impl Drop for SqliteTransaction<'_> {
                 }
             });
 
-            // Wait for rollback to complete (best-effort)
-            handle.wait();
+            // Fire and forget best-effort rollback
         }
     }
 }
