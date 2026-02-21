@@ -1848,11 +1848,7 @@ impl<Caps> Cx<Caps> {
     /// ```
     pub fn cancel_chain(&self) -> impl Iterator<Item = CancelReason> {
         let cancel_reason = self.inner.read().cancel_reason.clone();
-        let chain: Vec<CancelReason> = cancel_reason
-            .as_ref()
-            .map(|r| r.chain().cloned().collect())
-            .unwrap_or_default();
-        chain.into_iter()
+        std::iter::successors(cancel_reason, |r| r.cause.as_deref().cloned())
     }
 
     /// Gets the root cause of cancellation.

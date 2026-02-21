@@ -632,7 +632,7 @@ pub fn spawn_remote(
     cx.trace("spawn_remote");
 
     // Create the oneshot channel for result delivery.
-    let (tx, rx) = oneshot::channel::<Result<RemoteOutcome, RemoteError>>();
+    let (tx, mut rx) = oneshot::channel::<Result<RemoteOutcome, RemoteError>>();
 
     // If a remote runtime is attached, register the task and send the request.
     if let Some(runtime) = cap.runtime() {

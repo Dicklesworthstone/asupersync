@@ -1617,9 +1617,9 @@ impl InactivationDecoder {
             }
             DecoderPolicyMode::BlockSchurLowRank => select_hard_regime_plan(n_rows, n_cols, &a),
         };
-        let retry_snapshot = (!hard_regime
+        let retry_rhs_snapshot = (!hard_regime
             || matches!(hard_plan, HardRegimePlan::BlockSchurLowRank { .. }))
-        .then(|| (a.clone(), snapshot_dense_rhs(&b, symbol_size)));
+        .then(|| snapshot_dense_rhs(&b, symbol_size));
         if hard_regime {
             state.stats.hard_regime_activated = true;
             state.stats.hard_regime_branch = Some(hard_plan.label());
@@ -1714,8 +1714,14 @@ impl InactivationDecoder {
                     state.stats.hard_regime_fallbacks += 1;
                     state.stats.hard_regime_conservative_fallback_reason =
                         Some("fallback_after_baseline_failure");
-                    if let Some((base_a, base_b)) = retry_snapshot.as_ref() {
-                        a.clone_from(base_a);
+                    if let Some(base_b) = retry_rhs_snapshot.as_ref() {
+                        rebuild_dense_matrix_from_equations(
+                            &state.equations,
+                            &dense_rows,
+                            &col_to_dense,
+                            n_cols,
+                            &mut a,
+                        );
                         restore_dense_rhs(&mut b, base_b, symbol_size);
                     }
                     continue;
@@ -1725,8 +1731,14 @@ impl InactivationDecoder {
                     state.stats.hard_regime_fallbacks += 1;
                     state.stats.hard_regime_conservative_fallback_reason =
                         Some("block_schur_failed_to_converge");
-                    if let Some((base_a, base_b)) = retry_snapshot.as_ref() {
-                        a.clone_from(base_a);
+                    if let Some(base_b) = retry_rhs_snapshot.as_ref() {
+                        rebuild_dense_matrix_from_equations(
+                            &state.equations,
+                            &dense_rows,
+                            &col_to_dense,
+                            n_cols,
+                            &mut a,
+                        );
                         restore_dense_rhs(&mut b, base_b, symbol_size);
                     }
                     continue;
@@ -1860,9 +1872,9 @@ impl InactivationDecoder {
             }
             DecoderPolicyMode::BlockSchurLowRank => select_hard_regime_plan(n_rows, n_cols, &a),
         };
-        let retry_snapshot = (!hard_regime
+        let retry_rhs_snapshot = (!hard_regime
             || matches!(hard_plan, HardRegimePlan::BlockSchurLowRank { .. }))
-        .then(|| (a.clone(), snapshot_dense_rhs(&b, symbol_size)));
+        .then(|| snapshot_dense_rhs(&b, symbol_size));
         if hard_regime {
             state.stats.hard_regime_activated = true;
             state.stats.hard_regime_branch = Some(hard_plan.label());
@@ -1972,8 +1984,14 @@ impl InactivationDecoder {
                     trace.pivot_events.clear();
                     trace.row_ops = 0;
                     trace.truncated = false;
-                    if let Some((base_a, base_b)) = retry_snapshot.as_ref() {
-                        a.clone_from(base_a);
+                    if let Some(base_b) = retry_rhs_snapshot.as_ref() {
+                        rebuild_dense_matrix_from_equations(
+                            &state.equations,
+                            &dense_rows,
+                            &col_to_dense,
+                            n_cols,
+                            &mut a,
+                        );
                         restore_dense_rhs(&mut b, base_b, symbol_size);
                     }
                     continue;
@@ -1992,8 +2010,14 @@ impl InactivationDecoder {
                     trace.pivot_events.clear();
                     trace.row_ops = 0;
                     trace.truncated = false;
-                    if let Some((base_a, base_b)) = retry_snapshot.as_ref() {
-                        a.clone_from(base_a);
+                    if let Some(base_b) = retry_rhs_snapshot.as_ref() {
+                        rebuild_dense_matrix_from_equations(
+                            &state.equations,
+                            &dense_rows,
+                            &col_to_dense,
+                            n_cols,
+                            &mut a,
+                        );
                         restore_dense_rhs(&mut b, base_b, symbol_size);
                     }
                     continue;
@@ -2071,6 +2095,24 @@ fn first_mismatch_byte(expected: &[u8], actual: &[u8]) -> Option<usize> {
         .iter()
         .zip(actual.iter())
         .position(|(expected, actual)| expected != actual)
+}
+
+fn rebuild_dense_matrix_from_equations(
+    equations: &[Equation],
+    dense_rows: &[usize],
+    col_to_dense: &[usize],
+    n_cols: usize,
+    a: &mut [Gf256],
+) {
+    a.fill(Gf256::ZERO);
+    for (row, &eq_idx) in dense_rows.iter().enumerate() {
+        let row_off = row * n_cols;
+        for &(col, coef) in &equations[eq_idx].terms {
+            if let Some(dense_col) = dense_col_index(col_to_dense, col) {
+                a[row_off + dense_col] = coef;
+            }
+        }
+    }
 }
 
 fn snapshot_dense_rhs(rows: &[Vec<u8>], symbol_size: usize) -> Vec<u8> {

@@ -297,7 +297,7 @@ impl<P: Policy> Scope<'_, P> {
         Fut::Output: Send + 'static,
     {
         // Create oneshot channel for result delivery
-        let (tx, rx) = oneshot::channel::<Result<Fut::Output, JoinError>>();
+        let (tx, mut rx) = oneshot::channel::<Result<Fut::Output, JoinError>>();
 
         // Create task record
         let task_id = self.create_task_record(state)?;
@@ -699,7 +699,7 @@ impl<P: Policy> Scope<'_, P> {
         R: Send + 'static,
     {
         // Create oneshot channel for result delivery
-        let (tx, rx) = oneshot::channel::<Result<R, JoinError>>();
+        let (tx, mut rx) = oneshot::channel::<Result<R, JoinError>>();
 
         // Create task record
         let task_id = self.create_task_record(state)?;

@@ -488,9 +488,6 @@ impl ChaosRng {
     #[must_use]
     pub fn next_delay(&mut self, config: &ChaosConfig) -> Duration {
         let range = &config.delay_range;
-        if range.is_empty() {
-            return Duration::ZERO;
-        }
         let start_nanos = range.start.as_nanos();
         let end_nanos = range.end.as_nanos();
         if end_nanos <= start_nanos {
@@ -539,9 +536,6 @@ impl ChaosRng {
     #[must_use]
     pub fn next_wakeup_count(&mut self, config: &ChaosConfig) -> usize {
         let range = &config.wakeup_storm_count;
-        if range.is_empty() {
-            return 0;
-        }
         if range.end <= range.start {
             return range.start;
         }

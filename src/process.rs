@@ -13,11 +13,11 @@
 //! ```ignore
 //! use asupersync::process::Command;
 //!
-//! async fn run_command() -> std::io::Result<()> {
-//!     let output = Command::new("echo")
+//! fn run_command() -> std::io::Result<()> {
+//!     let mut cmd = Command::new("echo");
+//!     let output = cmd
 //!         .arg("hello")
-//!         .output()
-//!         .await?;
+//!         .output()?;
 //!
 //!     println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
 //!     Ok(())
@@ -454,7 +454,7 @@ impl Command {
     ///     .stdout(Stdio::piped())
     ///     .spawn()?;
     ///
-    /// let status = child.wait().await?;
+    /// let status = child.wait()?;
     /// ```
     pub fn spawn(&mut self) -> Result<Child, ProcessError> {
         let mut cmd = std_process::Command::new(&self.program);
@@ -701,7 +701,7 @@ impl Child {
             }
 
             if !progressed {
-                std::thread::yield_now();
+                std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
 
