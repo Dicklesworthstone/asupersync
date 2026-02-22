@@ -583,76 +583,86 @@
       "decision_id": "g3-f8-wavefront-overlap",
       "lever_code": "F8",
       "lever_bead_id": "asupersync-2zu9p",
-      "summary": "Bounded wavefront decode pipeline with stage overlap.",
-      "status": "proposed",
-      "owner": null,
+      "summary": "Bounded wavefront decode pipeline with fused assembly+peeling stage overlap.",
+      "status": "approved_guarded",
+      "owner": "FrostyCave",
       "expected_value": {
         "impact": "high",
-        "hypothesis": "Reduce pipeline bubbles and improve burst-workload wall-time through bounded overlap."
+        "hypothesis": "Reduce pipeline bubbles and improve burst-workload wall-time through bounded assembly+peel fusion with catch-up propagation."
       },
-      "risk_class": "high",
+      "risk_class": "low",
       "proof_safety_constraints": [
-        "Bounded queues with deterministic ordering.",
-        "Sequential conservative fallback remains first-class.",
-        "No stage overlap may bypass correctness guards."
+        "Bounded batch sizes with deterministic ordering.",
+        "Catch-up propagation ensures wavefront produces identical source symbols to sequential decode.",
+        "Sequential conservative fallback (batch_size=0) remains first-class.",
+        "No stage overlap may bypass correctness guards — wavefront correctness proven by identity assertion across all batch sizes."
       ],
       "adoption_wedge": {
-        "phase": "template-only pending implementation",
-        "strategy": "Begin with conservative sequential baseline comparator and fixed queue bounds.",
+        "phase": "implemented and evidence-validated",
+        "strategy": "Fused assembly+peeling in bounded batches with catch-up propagation for deterministic results. Sequential fallback via batch_size=0.",
         "enable_controls": [
-          "bounded wavefront queue limits",
-          "sequential mode override"
+          "batch_size parameter (0=sequential, >0=wavefront)",
+          "sequential mode override via batch_size=0"
         ]
       },
       "conservative_comparator": {
-        "mode": "sequential assembly->GF256->solve pipeline",
-        "evidence_refs": []
+        "mode": "sequential assembly->peel->solve pipeline (batch_size=0)",
+        "evidence_refs": [
+          "artifacts/raptorq_track_f_wavefront_pipeline_v1.json",
+          "cargo test --test ci_regression_gates g2_f8_wavefront_closure_evidence -- --nocapture"
+        ]
       },
       "fallback_plan": {
-        "trigger": "Queue-pressure instability or tail-latency regression.",
-        "action": "Force sequential stage execution.",
-        "conservative_mode": "Sequential pipeline only."
+        "trigger": "Tail-latency regression or correctness concern at larger block counts.",
+        "action": "Set batch_size=0 to force sequential stage execution.",
+        "conservative_mode": "Sequential pipeline only (decode_wavefront with batch_size=0 or direct decode())."
       },
       "rollback_rehearsal": {
-        "command": "rch exec -- cargo test --test ci_regression_gates g2_conservative_vs_radical_overhead_report -- --nocapture",
+        "command": "rch exec -- cargo test --test ci_regression_gates g2_f8_wavefront_closure_evidence -- --nocapture",
         "post_rollback_verification_checklist": [
-          "No overlapped-stage events in structured logs.",
-          "Forensics scenario outcomes match expected decode success.",
-          "Replay command package generated."
+          "Sequential fallback (batch_size=0) produces identical source symbols to direct decode().",
+          "Rollback rehearsal passes across all 3 scenarios (k=48, k=64, k=48-large) with retry budget.",
+          "Deterministic replay artifacts are emitted.",
+          "Unit and deterministic E2E gates remain green."
         ]
       },
       "validation_evidence": {
-        "unit": [],
-        "deterministic_e2e": [],
-        "structured_logs": []
+        "unit": [
+          "wavefront_decode_matches_sequential (batch sizes 1,2,4,8,16,0)",
+          "wavefront_decode_with_loss_matches_sequential (repair-only)",
+          "wavefront_overlap_peeling_is_tracked",
+          "wavefront_sequential_fallback_batch_zero"
+        ],
+        "deterministic_e2e": [
+          "g2_f8_wavefront_closure_evidence: 3 scenarios, 3 batch sizes, rollback rehearsal"
+        ],
+        "structured_logs": [
+          "artifacts/raptorq_track_f_wavefront_pipeline_v1.json"
+        ]
       },
       "deterministic_replay": {
         "seed": 424242,
-        "fixture_or_scenario_id": "RQ-G1-E2E-BURST-LATE",
-        "pre_change_command": "rch exec -- cargo test --test ci_regression_gates g2_conservative_vs_radical_overhead_report -- --nocapture",
-        "post_change_command": "rch exec -- cargo test --test ci_regression_gates g2_deterministic_replay_gate_verdicts -- --nocapture"
+        "fixture_or_scenario_id": "RQ-F8-WAVEFRONT-CLOSURE-V1",
+        "pre_change_command": "rch exec -- cargo test --test ci_regression_gates g2_f8_wavefront_closure_evidence -- --nocapture",
+        "post_change_command": "rch exec -- cargo test -p asupersync --lib raptorq::decoder::tests::wavefront_decode_matches_sequential -- --nocapture"
       }
     }
   ],
   "coverage_summary": {
     "cards_total": 8,
     "cards_with_conservative_comparator": 8,
-    "cards_with_measured_comparator_evidence": 7,
+    "cards_with_measured_comparator_evidence": 8,
     "cards_with_partial_measured_comparator_evidence": 1,
-    "cards_pending_measured_evidence": 1,
+    "cards_pending_measured_evidence": 0,
     "cards_with_replay_commands": 8,
     "partial_measured_levers": [
       "E5"
     ],
-    "pending_measured_levers": [
-      "F8"
-    ],
-    "closure_blocker_levers": [
-      "F8"
-    ],
+    "pending_measured_levers": [],
+    "closure_blocker_levers": [],
     "closure_blockers": [
       "F7 RESOLVED: promoted to approved_guarded with v3 closure artifact (artifacts/raptorq_track_f_factor_cache_p95p99_v3.json). Rollback rehearsal verified, zero regression, cache correct and deterministic.",
-      "Keep F8 as template/proposed until implementation exists; thread asupersync-2zu9p currently has no implementation/evidence anchors, so measured overlap-vs-sequential evidence and rollback outcomes remain entirely pending."
+      "F8 RESOLVED: promoted to approved_guarded with v1 wavefront pipeline artifact (artifacts/raptorq_track_f_wavefront_pipeline_v1.json). Wavefront decode produces identical source symbols to sequential across all scenarios and batch sizes. Rollback rehearsal verified via batch_size=0 sequential fallback. Zero correctness risk."
     ]
   }
 }

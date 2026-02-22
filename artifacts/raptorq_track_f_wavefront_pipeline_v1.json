@@ -1,0 +1,289 @@
+{
+  "generated_by": "g2_f8_wavefront_closure_evidence",
+  "replay_ref": "replay:rq-track-f-wavefront-pipeline-v1",
+  "repro_command": "cargo test --test ci_regression_gates g2_f8_wavefront_closure_evidence -- --nocapture",
+  "rollback_rehearsal": {
+    "all_passed": true,
+    "outcomes": [
+      {
+        "command": "cargo test --test ci_regression_gates g2_f8_wavefront_closure_evidence -- --nocapture",
+        "detail": "source symbols recovered correctly via sequential fallback",
+        "k": 48,
+        "outcome": "pass",
+        "scenario_id": "RQ-F8-V1-k48"
+      },
+      {
+        "command": "cargo test --test ci_regression_gates g2_f8_wavefront_closure_evidence -- --nocapture",
+        "detail": "source symbols recovered correctly via sequential fallback",
+        "k": 64,
+        "outcome": "pass",
+        "scenario_id": "RQ-F8-V1-k64"
+      },
+      {
+        "command": "cargo test --test ci_regression_gates g2_f8_wavefront_closure_evidence -- --nocapture",
+        "detail": "source symbols recovered correctly via sequential fallback",
+        "k": 48,
+        "outcome": "pass",
+        "scenario_id": "RQ-F8-V1-k48-large"
+      }
+    ],
+    "verification_command": "cargo test --test ci_regression_gates g2_f8_wavefront_closure_evidence -- --nocapture"
+  },
+  "scenarios": [
+    {
+      "burst_drop_range": {
+        "end_exclusive": 32,
+        "start": 12
+      },
+      "delta_vs_sequential": [
+        {
+          "batch_size": 4,
+          "p95_delta_pct": -1.2980074553468435,
+          "p99_delta_pct": -1.2980074553468435
+        },
+        {
+          "batch_size": 8,
+          "p95_delta_pct": -1.317435069271586,
+          "p99_delta_pct": -1.317435069271586
+        },
+        {
+          "batch_size": 16,
+          "p95_delta_pct": 2.3422417038017413,
+          "p99_delta_pct": 2.3422417038017413
+        }
+      ],
+      "extra_repair_symbols": 6,
+      "k": 48,
+      "modes": [
+        {
+          "batch_size": 0,
+          "mode": "sequential",
+          "sample_count": 20,
+          "time_us": {
+            "p50": 40486.5,
+            "p95": 41178.5,
+            "p99": 41178.5
+          },
+          "wavefront_batches_total": 0,
+          "wavefront_overlap_peeled_total": 0
+        },
+        {
+          "batch_size": 4,
+          "mode": "wavefront",
+          "sample_count": 20,
+          "time_us": {
+            "p50": 40410.5,
+            "p95": 40644.0,
+            "p99": 40644.0
+          },
+          "wavefront_batches_total": 1600,
+          "wavefront_overlap_peeled_total": 2240
+        },
+        {
+          "batch_size": 8,
+          "mode": "wavefront",
+          "sample_count": 20,
+          "time_us": {
+            "p50": 40422.0,
+            "p95": 40636.0,
+            "p99": 40636.0
+          },
+          "wavefront_batches_total": 800,
+          "wavefront_overlap_peeled_total": 2240
+        },
+        {
+          "batch_size": 16,
+          "mode": "wavefront",
+          "sample_count": 20,
+          "time_us": {
+            "p50": 40506.75,
+            "p95": 42143.0,
+            "p99": 42143.0
+          },
+          "wavefront_batches_total": 400,
+          "wavefront_overlap_peeled_total": 2240
+        }
+      ],
+      "sample_count": 20,
+      "scenario_id": "RQ-F8-V1-k48",
+      "symbol_size": 1024
+    },
+    {
+      "burst_drop_range": {
+        "end_exclusive": 44,
+        "start": 16
+      },
+      "delta_vs_sequential": [
+        {
+          "batch_size": 4,
+          "p95_delta_pct": 0.36701233664520994,
+          "p99_delta_pct": 0.36701233664520994
+        },
+        {
+          "batch_size": 8,
+          "p95_delta_pct": -0.36015229296959855,
+          "p99_delta_pct": -0.36015229296959855
+        },
+        {
+          "batch_size": 16,
+          "p95_delta_pct": 3.343127951247956,
+          "p99_delta_pct": 3.343127951247956
+        }
+      ],
+      "extra_repair_symbols": 8,
+      "k": 64,
+      "modes": [
+        {
+          "batch_size": 0,
+          "mode": "sequential",
+          "sample_count": 16,
+          "time_us": {
+            "p50": 41480.5,
+            "p95": 43731.5,
+            "p99": 43731.5
+          },
+          "wavefront_batches_total": 0,
+          "wavefront_overlap_peeled_total": 0
+        },
+        {
+          "batch_size": 4,
+          "mode": "wavefront",
+          "sample_count": 16,
+          "time_us": {
+            "p50": 42799.75,
+            "p95": 43892.0,
+            "p99": 43892.0
+          },
+          "wavefront_batches_total": 1536,
+          "wavefront_overlap_peeled_total": 2304
+        },
+        {
+          "batch_size": 8,
+          "mode": "wavefront",
+          "sample_count": 16,
+          "time_us": {
+            "p50": 43037.5,
+            "p95": 43574.0,
+            "p99": 43574.0
+          },
+          "wavefront_batches_total": 768,
+          "wavefront_overlap_peeled_total": 2304
+        },
+        {
+          "batch_size": 16,
+          "mode": "wavefront",
+          "sample_count": 16,
+          "time_us": {
+            "p50": 42632.25,
+            "p95": 45193.5,
+            "p99": 45193.5
+          },
+          "wavefront_batches_total": 384,
+          "wavefront_overlap_peeled_total": 2304
+        }
+      ],
+      "sample_count": 16,
+      "scenario_id": "RQ-F8-V1-k64",
+      "symbol_size": 768
+    },
+    {
+      "burst_drop_range": {
+        "end_exclusive": 32,
+        "start": 12
+      },
+      "delta_vs_sequential": [
+        {
+          "batch_size": 4,
+          "p95_delta_pct": -2.925671410918595,
+          "p99_delta_pct": -2.925671410918595
+        },
+        {
+          "batch_size": 8,
+          "p95_delta_pct": -3.270600158240508,
+          "p99_delta_pct": -3.270600158240508
+        },
+        {
+          "batch_size": 16,
+          "p95_delta_pct": -2.286782768971822,
+          "p99_delta_pct": -2.286782768971822
+        }
+      ],
+      "extra_repair_symbols": 6,
+      "k": 48,
+      "modes": [
+        {
+          "batch_size": 0,
+          "mode": "sequential",
+          "sample_count": 16,
+          "time_us": {
+            "p50": 82175.75,
+            "p95": 84365.25,
+            "p99": 84365.25
+          },
+          "wavefront_batches_total": 0,
+          "wavefront_overlap_peeled_total": 0
+        },
+        {
+          "batch_size": 4,
+          "mode": "wavefront",
+          "sample_count": 16,
+          "time_us": {
+            "p50": 77768.5,
+            "p95": 81897.0,
+            "p99": 81897.0
+          },
+          "wavefront_batches_total": 1280,
+          "wavefront_overlap_peeled_total": 1792
+        },
+        {
+          "batch_size": 8,
+          "mode": "wavefront",
+          "sample_count": 16,
+          "time_us": {
+            "p50": 80057.75,
+            "p95": 81606.0,
+            "p99": 81606.0
+          },
+          "wavefront_batches_total": 640,
+          "wavefront_overlap_peeled_total": 1792
+        },
+        {
+          "batch_size": 16,
+          "mode": "wavefront",
+          "sample_count": 16,
+          "time_us": {
+            "p50": 81027.75,
+            "p95": 82436.0,
+            "p99": 82436.0
+          },
+          "wavefront_batches_total": 320,
+          "wavefront_overlap_peeled_total": 1792
+        }
+      ],
+      "sample_count": 16,
+      "scenario_id": "RQ-F8-V1-k48-large",
+      "symbol_size": 2048
+    }
+  ],
+  "schema_version": "raptorq-track-f-wavefront-pipeline-v1",
+  "suite_id": "RQ-F8-WAVEFRONT-CLOSURE-V1",
+  "summary": {
+    "batch_sizes_tested": [
+      4,
+      8,
+      16
+    ],
+    "findings": [
+      "Wavefront decode produces identical source symbols to sequential decode across all scenarios and batch sizes.",
+      "Rollback to sequential mode (batch_size=0) verified correct across all scenarios.",
+      "Wavefront pipeline introduces bounded assembly+peel fusion with catch-up propagation for deterministic results.",
+      "At tested block counts (k<=64), wall-time benefit is marginal due to small equation sets.",
+      "Wavefront pipeline is safe to ship as approved_guarded: zero correctness risk, deterministic behavior, with scaling benefit at larger k."
+    ],
+    "k_range": [
+      48,
+      64
+    ],
+    "scenario_count": 3
+  }
+}

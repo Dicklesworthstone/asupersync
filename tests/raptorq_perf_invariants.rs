@@ -1549,10 +1549,9 @@ fn g3_decision_records_schema_and_high_impact_lever_coverage() {
                 .to_string()
         })
         .collect::<BTreeSet<_>>();
-    assert_eq!(
-        pending_measured_levers,
-        BTreeSet::from(["F8".to_string()]),
-        "pending_measured_levers must identify unresolved measured-evidence card(s)"
+    assert!(
+        pending_measured_levers.is_empty(),
+        "pending_measured_levers must be empty after F8 closure"
     );
     assert_eq!(
         coverage
@@ -1588,10 +1587,9 @@ fn g3_decision_records_schema_and_high_impact_lever_coverage() {
                 .to_string()
         })
         .collect::<BTreeSet<_>>();
-    assert_eq!(
-        closure_blocker_levers,
-        BTreeSet::from(["F8".to_string()]),
-        "closure_blocker_levers must match current G3 blockers"
+    assert!(
+        closure_blocker_levers.is_empty(),
+        "closure_blocker_levers must be empty after F7+F8 closure"
     );
 
     let f7_card = cards
@@ -1617,12 +1615,13 @@ fn g3_decision_records_schema_and_high_impact_lever_coverage() {
         .expect("decision cards must include F8");
     assert_eq!(
         f8_card["status"].as_str(),
-        Some("proposed"),
-        "F8 must remain proposed while implementation/evidence are pending"
+        Some("approved_guarded"),
+        "F8 must be approved_guarded after wavefront pipeline closure"
     );
-    assert!(
-        f8_card.get("measured_comparator_evidence").is_none(),
-        "F8 should not declare measured_comparator_evidence before implementation"
+    assert_eq!(
+        f8_card["owner"].as_str(),
+        Some("FrostyCave"),
+        "F8 must have FrostyCave as owner after closure"
     );
 }
 

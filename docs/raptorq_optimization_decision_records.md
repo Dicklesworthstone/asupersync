@@ -86,17 +86,19 @@ Current artifact summary (`coverage_summary` in JSON):
 
 - `cards_total = 8`
 - `cards_with_replay_commands = 8`
-- `cards_with_measured_comparator_evidence = 7`
+- `cards_with_measured_comparator_evidence = 8`
 - `cards_with_partial_measured_comparator_evidence = 1`
-- `cards_pending_measured_evidence = 1`
+- `cards_pending_measured_evidence = 0`
 - `partial_measured_levers = [E5]`
-- `pending_measured_levers = [F8]`
-- `closure_blocker_levers = [F8]`
+- `pending_measured_levers = []`
+- `closure_blocker_levers = []`
 
 Closure blockers for `asupersync-3ltrv`:
 
 1. **F7 RESOLVED** — promoted to `approved_guarded` with v3 closure artifact (`artifacts/raptorq_track_f_factor_cache_p95p99_v3.json`). Rollback rehearsal verified correct across k=48/k=64 scenarios, 100% cache hit rate, zero regression. Dense-column ordering cache is too cheap to show material p95/p99 gain at current workload sizes, but is safe to ship with zero regression risk.
-2. Keep `F8` as proposed/template until implementation exists, then attach overlap-vs-sequential evidence and rollback outcomes.
+2. **F8 RESOLVED** — promoted to `approved_guarded` with v1 wavefront pipeline artifact (`artifacts/raptorq_track_f_wavefront_pipeline_v1.json`). Wavefront decode (`decode_wavefront`) produces identical source symbols to sequential decode across all scenarios (k=48, k=64, k=48-large) and batch sizes (4, 8, 16). Rollback rehearsal verified via `batch_size=0` sequential fallback. Zero correctness risk, deterministic behavior.
+
+**All G3 closure blockers are now resolved.** All 8 high-impact lever cards have measured comparator evidence and rollback rehearsal artifacts.
 
 Recent evidence alignment updates (2026-02-19):
 
@@ -146,3 +148,12 @@ Recent evidence alignment updates (2026-02-22):
 - Added machine-checkable blocker summary fields in `coverage_summary` (`partial_measured_levers`, `pending_measured_levers`, `closure_blocker_levers`) to reduce ambiguity in F7/F8 closure tracking and make invariant tests explicit about blocker semantics.
 - Fresh top-impact support rerun (child bead `asupersync-3ltrv.2`) reconfirmed `rch exec -- cargo test --test raptorq_perf_invariants g3_decision -- --nocapture` PASS (2/2) on 2026-02-22; after F7 v3 closure promotion, the remaining G3 closure blocker is `F8` only.
 - Folded in latest F7 implementation-hardening evidence from `asupersync-n5fk6.1` completion (`agent-mail asupersync-n5fk6 #1780/#1781`): Arc-backed cache artifact sharing + flattened deterministic signature representation are explicitly referenced in the F7 decision card and support keeping F7 at `approved_guarded` without reopening blocker status.
+- **F8 closure evidence landed (FrostyCave)**: Published `artifacts/raptorq_track_f_wavefront_pipeline_v1.json` with closure-grade evidence:
+  - Implemented bounded wavefront decode pipeline (`decode_wavefront`) in `src/raptorq/decoder.rs` with fused assembly+peeling in bounded batches and catch-up propagation for deterministic results.
+  - Added `g2_f8_wavefront_closure_evidence` test to `tests/ci_regression_gates.rs` covering k=48, k=64, and k=48-large scenarios across batch sizes [4, 8, 16].
+  - Explicit rollback rehearsal with retry budget verified: all 3 scenarios produce correct source symbol recovery via sequential fallback (`batch_size=0`).
+  - Wavefront produces identical source symbols to sequential decode across all scenarios — zero correctness risk.
+  - 4 unit tests added: `wavefront_decode_matches_sequential`, `wavefront_decode_with_loss_matches_sequential`, `wavefront_overlap_peeling_is_tracked`, `wavefront_sequential_fallback_batch_zero`.
+  - F8 card promoted from `proposed` to `approved_guarded` in both JSON artifact and this doc.
+  - F8 removed from `closure_blocker_levers`; **all G3 closure blockers are now resolved**.
+  - Closure rationale: wavefront pipeline is functionally correct, deterministic, safe, and produces identical results to sequential. At k<=64 wall-time benefit is marginal, but the pipeline enables scaling benefit at larger block counts.

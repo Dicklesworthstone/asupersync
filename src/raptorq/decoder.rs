@@ -1303,7 +1303,11 @@ impl InactivationDecoder {
         self.validate_input(symbols)?;
 
         // A batch_size of 0 falls back to sequential (single batch = all symbols).
-        let effective_batch = if batch_size == 0 { symbols.len() } else { batch_size };
+        let effective_batch = if batch_size == 0 {
+            symbols.len()
+        } else {
+            batch_size
+        };
 
         // Initialize state with empty equations; we'll add them in batches.
         let active_cols: BTreeSet<usize> = (0..l).collect();
@@ -1334,6 +1338,30 @@ impl InactivationDecoder {
                 state.rhs.push(sym.data.clone());
             }
             queued.resize(state.equations.len(), false);
+
+            // Catch-up: apply already-peeled solutions to newly assembled equations.
+            // This ensures new equations see the same reduced state they would in
+            // the sequential path where all equations are present before peeling.
+            for idx in base_eq_idx..state.equations.len() {
+                let eq = &state.equations[idx];
+                // Collect columns that have been solved and appear in this equation.
+                let solved_terms: Vec<(usize, Gf256)> = eq
+                    .terms
+                    .iter()
+                    .filter(|(col, coef)| !coef.is_zero() && state.solved[*col].is_some())
+                    .copied()
+                    .collect();
+                for (col, eq_coef) in &solved_terms {
+                    let solution = state.solved[*col].as_ref().unwrap();
+                    gf256_addmul_slice(&mut state.rhs[idx], solution, *eq_coef);
+                    if let Ok(pos) = state.equations[idx]
+                        .terms
+                        .binary_search_by_key(col, |(c, _)| *c)
+                    {
+                        state.equations[idx].terms.remove(pos);
+                    }
+                }
+            }
 
             // Scan newly added equations for degree-1 candidates.
             for idx in base_eq_idx..state.equations.len() {
@@ -1384,11 +1412,7 @@ impl InactivationDecoder {
     ///
     /// This is the core peeling loop factored out so it can be called
     /// incrementally by the wavefront pipeline after each assembly batch.
-    fn peel_from_queue(
-        state: &mut DecoderState,
-        queue: &mut VecDeque<usize>,
-        queued: &mut [bool],
-    ) {
+    fn peel_from_queue(state: &mut DecoderState, queue: &mut VecDeque<usize>, queued: &mut [bool]) {
         while let Some(eq_idx) = queue.pop_front() {
             state.stats.peel_queue_pops += 1;
             queued[eq_idx] = false;
@@ -1428,14 +1452,9 @@ impl InactivationDecoder {
                     state.equations[i].terms.remove(pos);
                 }
 
-                if !queued[i]
-                    && !state.equations[i].used
-                    && state.equations[i].degree() == 1
-                {
+                if !queued[i] && !state.equations[i].used && state.equations[i].degree() == 1 {
                     let next_col = state.equations[i].terms[0].0;
-                    if state.active_cols.contains(&next_col)
-                        && state.solved[next_col].is_none()
-                    {
+                    if state.active_cols.contains(&next_col) && state.solved[next_col].is_none() {
                         queue.push_back(i);
                         queued[i] = true;
                         state.stats.peel_queue_pushes += 1;
@@ -4479,7 +4498,14 @@ mod tests {
             }
 
             assert!(wavefront.stats.wavefront_active);
-            assert_eq!(wavefront.stats.wavefront_batch_size, if batch_size == 0 { received.len() } else { batch_size });
+            assert_eq!(
+                wavefront.stats.wavefront_batch_size,
+                if batch_size == 0 {
+                    received.len()
+                } else {
+                    batch_size
+                }
+            );
             assert!(wavefront.stats.wavefront_batches > 0);
         }
     }
@@ -4585,7 +4611,9 @@ mod tests {
         }
 
         let sequential = decoder.decode(&received).expect("sequential");
-        let wavefront = decoder.decode_wavefront(&received, 0).expect("wavefront batch_size=0");
+        let wavefront = decoder
+            .decode_wavefront(&received, 0)
+            .expect("wavefront batch_size=0");
 
         assert_eq!(sequential.source, wavefront.source);
         assert!(wavefront.stats.wavefront_active);
