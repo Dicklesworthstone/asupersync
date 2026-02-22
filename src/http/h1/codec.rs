@@ -566,11 +566,6 @@ impl ChunkedBodyDecoder {
                 }
 
                 ChunkPhase::Trailers => {
-                    // Limit total trailer size (DoS hardening).
-                    if self.trailers_bytes + src.len() > self.max_trailers_size {
-                        return Err(HttpError::HeadersTooLarge);
-                    }
-
                     let Some(line) = split_line_crlf(src, self.max_trailers_size)? else {
                         return Ok(None);
                     };
@@ -1035,6 +1030,23 @@ mod tests {
         assert_eq!(req.trailers.len(), 2);
         assert_eq!(req.trailers[0].0, "X-Trailer");
         assert_eq!(req.trailers[0].1, "one");
+    }
+
+    #[test]
+    fn decode_chunked_keeps_pipelined_next_request() {
+        let mut codec = Http1Codec::new();
+        let mut raw =
+            b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n".to_vec();
+        raw.extend_from_slice(b"GET /next HTTP/1.1\r\nX-Long: ");
+        raw.extend_from_slice(&vec![b'a'; 9000]);
+        raw.extend_from_slice(b"\r\n\r\n");
+
+        let mut buf = BytesMut::from(raw.as_slice());
+        let first = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(first.method, Method::Post);
+        assert_eq!(first.uri, "/upload");
+        assert!(first.trailers.is_empty());
+        assert!(buf.as_ref().starts_with(b"GET /next HTTP/1.1\r\n"));
     }
 
     #[test]
