@@ -187,7 +187,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client_cx = cx.clone();
     let client_ref = server_ref;
-    let (client_task, client_handle) =
+    let (client_task, mut client_handle) =
         runtime
             .state
             .create_task(app_region, Budget::INFINITE, async move {

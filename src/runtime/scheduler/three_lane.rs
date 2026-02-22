@@ -3894,6 +3894,7 @@ mod tests {
             guard.task(task_id2).is_none(),
             "task2 should be removed after completion"
         );
+        drop(guard);
     }
 
     // ========== Governor Integration Tests (bd-2spm) ==========

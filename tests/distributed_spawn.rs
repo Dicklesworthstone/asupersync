@@ -2,7 +2,7 @@
 
 use asupersync::cx::Cx;
 use asupersync::lab::network::{DistributedHarness, NetworkConfig};
-use asupersync::remote::{spawn_remote, ComputationName, RemoteInput};
+use asupersync::remote::{ComputationName, RemoteInput, spawn_remote};
 use std::time::Duration;
 
 #[test]
@@ -26,7 +26,7 @@ fn test_distributed_spawn_virtual_runtime() {
 
     // 3. Spawn remote task on Node B (from Node A's perspective)
     println!("Spawning remote task from A to B...");
-    let handle = spawn_remote(
+    let mut handle = spawn_remote(
         &cx,
         node_b.clone(),
         ComputationName::new("test-computation"),

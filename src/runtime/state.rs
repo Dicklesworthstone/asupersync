@@ -850,7 +850,7 @@ impl RuntimeState {
         use crate::channel::oneshot;
 
         // Create oneshot channel for the result
-        let (result_tx, mut result_rx) =
+        let (result_tx, result_rx) =
             oneshot::channel::<Result<T, crate::runtime::task_handle::JoinError>>();
 
         // Create the TaskRecord
@@ -1899,9 +1899,6 @@ impl RuntimeState {
             .unwrap_or_default();
         let _waiter_count = waiters.len();
 
-        // Remove the task record to prevent memory leaks
-        let _ = self.remove_task(task_id);
-
         if !matches!(completion, TaskCompletionKind::Cancelled) {
             let leaks = self.collect_obligation_leaks_for_holder(task_id);
             if !leaks.is_empty() {
@@ -1930,6 +1927,9 @@ impl RuntimeState {
         for ob_id in orphaned {
             let _ = self.abort_obligation(ob_id, ObligationAbortReason::Cancel);
         }
+
+        // Remove the task record to prevent memory leaks
+        let _ = self.remove_task(task_id);
 
         // Remove task from owning region to prevent memory leak
         if let Some(region) = self.regions.get(owner.arena_index()) {

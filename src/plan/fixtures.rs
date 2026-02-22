@@ -635,7 +635,7 @@ impl SharedLabHandle {
         }
 
         if i_am_joiner {
-            let handle = self
+            let mut handle = self
                 .inner
                 .handle
                 .lock()

@@ -300,6 +300,11 @@ pub struct EGraph {
     hashcons: DetHashMap<ENode, EClassId>,
 }
 
+#[inline]
+fn arena_index_from_len(len: usize) -> u32 {
+    u32::try_from(len).expect("egraph node arena exceeded u32::MAX entries")
+}
+
 impl EGraph {
     /// Creates an empty e-graph.
     #[must_use]
@@ -336,7 +341,7 @@ impl EGraph {
             return self.find(*existing);
         }
 
-        let arena_idx = self.node_arena.len() as u32;
+        let arena_idx = arena_index_from_len(self.node_arena.len());
         self.node_arena.push(canonical.clone());
 
         let id = EClassId::new(self.classes.len());
@@ -868,7 +873,11 @@ mod tests {
         }
     }
 
-    async fn join_branch(cx: &Cx, left: &LeafHandle, right: &LeafHandle) -> BTreeSet<&'static str> {
+    async fn join_branch(
+        cx: &Cx,
+        left: &mut LeafHandle,
+        right: &mut LeafHandle,
+    ) -> BTreeSet<&'static str> {
         let left_result = left.join(cx).await;
         let right_result = right.join(cx).await;
         let mut set = BTreeSet::new();
@@ -881,7 +890,11 @@ mod tests {
         set
     }
 
-    async fn race_branch(cx: &Cx, left: LeafHandle, right: LeafHandle) -> Option<&'static str> {
+    async fn race_branch(
+        cx: &Cx,
+        mut left: LeafHandle,
+        mut right: LeafHandle,
+    ) -> Option<&'static str> {
         let winner =
             crate::combinator::Select::new(Box::pin(left.join(cx)), Box::pin(right.join(cx))).await;
         match winner {
@@ -958,27 +971,27 @@ mod tests {
 
             let (_driver_id, driver_handle, scheduled) = match kind {
                 ProgramKind::Original => {
-                    let (a1_id, a1_handle) = runtime
+                    let (a1_id, mut a1_handle) = runtime
                         .state
                         .create_task(region, Budget::INFINITE, leaf_task("a", 2))
                         .expect("spawn a1");
-                    let (b_id, b_handle) = runtime
+                    let (b_id, mut b_handle) = runtime
                         .state
                         .create_task(region, Budget::INFINITE, leaf_task("b", 1))
                         .expect("spawn b");
-                    let (a2_id, a2_handle) = runtime
+                    let (a2_id, mut a2_handle) = runtime
                         .state
                         .create_task(region, Budget::INFINITE, leaf_task("a", 2))
                         .expect("spawn a2");
-                    let (c_id, c_handle) = runtime
+                    let (c_id, mut c_handle) = runtime
                         .state
                         .create_task(region, Budget::INFINITE, leaf_task("c", 3))
                         .expect("spawn c");
 
                     let driver_future = async move {
                         let cx = Cx::current().expect("cx set");
-                        let join_left = join_branch(&cx, &a1_handle, &b_handle);
-                        let join_right = join_branch(&cx, &a2_handle, &c_handle);
+                        let join_left = join_branch(&cx, &mut a1_handle, &mut b_handle);
+                        let join_right = join_branch(&cx, &mut a2_handle, &mut c_handle);
                         match crate::combinator::Select::new(
                             Box::pin(join_left),
                             Box::pin(join_right),
@@ -1015,7 +1028,7 @@ mod tests {
                     (driver_id, driver_handle, scheduled)
                 }
                 ProgramKind::Rewritten => {
-                    let (a_id, a_handle) = runtime
+                    let (a_id, mut a_handle) = runtime
                         .state
                         .create_task(region, Budget::INFINITE, leaf_task("a", 2))
                         .expect("spawn a");
@@ -1131,6 +1144,25 @@ mod tests {
         let join2 = eg.add_join(vec![a, b]);
         assert_eq!(eg.canonical_id(join1), eg.canonical_id(join2));
         crate::test_complete!("egraph_hashcons_dedup");
+    }
+
+    #[test]
+    fn arena_index_from_len_bounds() {
+        init_test("arena_index_from_len_bounds");
+        assert_eq!(arena_index_from_len(0), 0);
+        assert_eq!(arena_index_from_len(u32::MAX as usize), u32::MAX);
+        crate::test_complete!("arena_index_from_len_bounds");
+    }
+
+    #[test]
+    fn arena_index_from_len_overflow_panics() {
+        init_test("arena_index_from_len_overflow_panics");
+        if usize::BITS > u32::BITS {
+            let overflow = (u32::MAX as usize) + 1;
+            let result = std::panic::catch_unwind(|| arena_index_from_len(overflow));
+            assert!(result.is_err());
+        }
+        crate::test_complete!("arena_index_from_len_overflow_panics");
     }
 
     #[test]

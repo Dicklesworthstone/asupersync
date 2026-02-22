@@ -1800,7 +1800,7 @@ fn e2e_obligation_tracked_oneshot_abort() {
     let mut runtime = LabRuntime::new(config);
     let root = runtime.state.create_root_region(Budget::INFINITE);
 
-    let (tx, rx) = tracked_oneshot::<u32>();
+    let (tx, mut rx) = tracked_oneshot::<u32>();
     let recv_closed = Arc::new(Mutex::new(None));
     let recv_closed_clone = recv_closed.clone();
     let proof_kind = Arc::new(Mutex::new(None));

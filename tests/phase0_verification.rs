@@ -9,8 +9,8 @@ mod common;
 use asupersync::channel::mpsc;
 use asupersync::cx::Cx;
 use asupersync::lab::oracle::{
-    assert_deterministic, CancellationProtocolOracle, DeadlineMonotoneOracle, LoserDrainOracle,
-    OracleSuite,
+    CancellationProtocolOracle, DeadlineMonotoneOracle, LoserDrainOracle, OracleSuite,
+    assert_deterministic,
 };
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::plan::certificate::{verify, verify_steps};
@@ -18,8 +18,8 @@ use asupersync::plan::fixtures::all_fixtures;
 use asupersync::plan::{PlanDag, PlanId, PlanNode, RewritePolicy};
 use asupersync::record::task::{TaskPhase, TaskState};
 use asupersync::record::{Finalizer, ObligationKind, ObligationState};
-use asupersync::runtime::{yield_now, JoinError, RuntimeState, TaskHandle};
-use asupersync::trace::{trace_fingerprint, TraceData, TraceEvent, TraceEventKind};
+use asupersync::runtime::{JoinError, RuntimeState, TaskHandle, yield_now};
+use asupersync::trace::{TraceData, TraceEvent, TraceEventKind, trace_fingerprint};
 use asupersync::types::{Budget, CancelReason, Outcome, RegionId, TaskId, Time};
 use common::*;
 use futures_lite::future;
@@ -862,7 +862,7 @@ struct SharedHandle<T> {
 }
 
 struct SharedInner<T> {
-    handle: TaskHandle<T>,
+    handle: Mutex<Option<TaskHandle<T>>>,
     state: Mutex<JoinState<T>>,
 }
 
@@ -876,14 +876,19 @@ impl<T> SharedHandle<T> {
     fn new(handle: TaskHandle<T>) -> Self {
         Self {
             inner: Arc::new(SharedInner {
-                handle,
+                handle: Mutex::new(Some(handle)),
                 state: Mutex::new(JoinState::Empty),
             }),
         }
     }
 
     fn task_id(&self) -> TaskId {
-        self.inner.handle.task_id()
+        self.inner
+            .handle
+            .lock()
+            .as_ref()
+            .expect("shared handle missing task handle")
+            .task_id()
     }
 
     fn try_join(&self) -> Option<Result<T, JoinError>>
@@ -900,7 +905,14 @@ impl<T> SharedHandle<T> {
         }
         drop(state);
 
-        let result = match self.inner.handle.try_join() {
+        let join_result = self
+            .inner
+            .handle
+            .lock()
+            .as_ref()
+            .expect("shared handle missing task handle")
+            .try_join();
+        let result = match join_result {
             Ok(Some(value)) => Some(Ok(value)),
             Ok(None) => None,
             Err(err) => Some(Err(err)),
@@ -934,7 +946,14 @@ impl<T> SharedHandle<T> {
             };
 
             if should_join {
-                let result = self.inner.handle.join(cx).await;
+                let mut handle = self
+                    .inner
+                    .handle
+                    .lock()
+                    .take()
+                    .expect("shared handle missing task handle");
+                let result = handle.join(cx).await;
+                *self.inner.handle.lock() = Some(handle);
                 {
                     let mut state = self.inner.state.lock();
                     *state = JoinState::Ready(result.clone());

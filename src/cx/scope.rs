@@ -297,7 +297,7 @@ impl<P: Policy> Scope<'_, P> {
         Fut::Output: Send + 'static,
     {
         // Create oneshot channel for result delivery
-        let (tx, mut rx) = oneshot::channel::<Result<Fut::Output, JoinError>>();
+        let (tx, rx) = oneshot::channel::<Result<Fut::Output, JoinError>>();
 
         // Create task record
         let task_id = self.create_task_record(state)?;
@@ -699,7 +699,7 @@ impl<P: Policy> Scope<'_, P> {
         R: Send + 'static,
     {
         // Create oneshot channel for result delivery
-        let (tx, mut rx) = oneshot::channel::<Result<R, JoinError>>();
+        let (tx, rx) = oneshot::channel::<Result<R, JoinError>>();
 
         // Create task record
         let task_id = self.create_task_record(state)?;
@@ -857,8 +857,8 @@ impl<P: Policy> Scope<'_, P> {
     pub async fn join<T1, T2>(
         &self,
         cx: &Cx,
-        h1: TaskHandle<T1>,
-        h2: TaskHandle<T2>,
+        mut h1: TaskHandle<T1>,
+        mut h2: TaskHandle<T2>,
     ) -> (Result<T1, JoinError>, Result<T2, JoinError>) {
         let r1 = h1.join(cx).await;
         let r2 = h2.join(cx).await;
@@ -881,30 +881,23 @@ impl<P: Policy> Scope<'_, P> {
     pub async fn race<T>(
         &self,
         cx: &Cx,
-        h1: TaskHandle<T>,
-        h2: TaskHandle<T>,
+        mut h1: TaskHandle<T>,
+        mut h2: TaskHandle<T>,
     ) -> Result<T, JoinError> {
-        use std::pin::pin;
+        let mut f1 = Box::pin(h1.join_with_drop_reason(cx, CancelReason::race_loser()));
+        let mut f2 = Box::pin(h2.join_with_drop_reason(cx, CancelReason::race_loser()));
 
-        let f1 = h1.join_with_drop_reason(cx, CancelReason::race_loser());
-        let mut f1_pinned = pin!(f1);
-
-        let f2 = h2.join_with_drop_reason(cx, CancelReason::race_loser());
-        let mut f2_pinned = pin!(f2);
-
-        match Select::new(f1_pinned.as_mut(), f2_pinned.as_mut()).await {
+        match Select::new(f1.as_mut(), f2.as_mut()).await {
             Either::Left(res) => {
-                // h1 finished first.
-                // h2 is pinned on the stack and borrowed by Select, so it was NOT dropped.
-                // We MUST explicitly abort it before draining to avoid deadlock.
-                h2.abort_with_reason(CancelReason::race_loser());
-                let _ = f2_pinned.await; // Drain h2
+                // Dropping f2 applies the loser cancel reason via JoinFuture::drop.
+                drop(f2);
+                let _ = h2.join(cx).await; // Drain h2
                 res
             }
             Either::Right(res) => {
-                // h2 finished first
-                h1.abort_with_reason(CancelReason::race_loser());
-                let _ = f1_pinned.await; // Drain h1
+                // Dropping f1 applies the loser cancel reason via JoinFuture::drop.
+                drop(f1);
+                let _ = h1.join(cx).await; // Drain h1
                 res
             }
         }
@@ -945,60 +938,58 @@ impl<P: Policy> Scope<'_, P> {
     {
         use crate::combinator::Either;
         use crate::combinator::select::Select;
-        use std::pin::pin;
-
         // 1. Spawn primary
-        let h1 = self
+        let mut h1 = self
             .spawn_registered(state, cx, primary)
             .map_err(|_| JoinError::Cancelled(CancelReason::resource_unavailable()))?;
 
         // 2. Race primary vs delay
         // We reuse the join future if it doesn't complete, so we must pin it.
         // We use plain join() because we don't want to cancel h1 if the delay fires.
-        let f1_join = h1.join(cx);
-        let mut f1_pinned = pin!(f1_join);
+        let mut f1_primary = Box::pin(h1.join(cx));
 
         // Compute deadline
         let now = cx
             .timer_driver()
             .map_or_else(crate::time::wall_now, |d| d.now());
         let sleep_fut = crate::time::sleep(now, delay);
-        let mut sleep_pinned = pin!(sleep_fut);
+        let mut sleep_pinned = std::pin::pin!(sleep_fut);
 
-        match Select::new(f1_pinned.as_mut(), sleep_pinned.as_mut()).await {
+        match Select::new(f1_primary.as_mut(), sleep_pinned.as_mut()).await {
             Either::Left(res) => {
                 // Primary finished first
                 res
             }
             Either::Right(()) => {
                 // Timeout fired. Spawn backup.
-                let Ok(h2) = self.spawn_registered(state, cx, backup) else {
+                let Ok(mut h2) = self.spawn_registered(state, cx, backup) else {
                     // Backup admission failed after primary already started.
                     // Request cancellation on primary to avoid orphaned work.
+                    drop(f1_primary);
                     h1.abort_with_reason(CancelReason::resource_unavailable());
-                    let _ = f1_pinned.await; // Drain h1
+                    let _ = h1.join(cx).await; // Drain h1
                     return Err(JoinError::Cancelled(CancelReason::resource_unavailable()));
                 };
 
                 // Now race h1 and h2
-                // We reuse f1_pinned which is still pending.
-                // We create h2 join future.
-                let f2_join = h2.join(cx);
-                let mut f2_pinned = pin!(f2_join);
+                // We recreate h1's join future with an explicit loser drop reason.
+                drop(f1_primary);
+                let mut f1_race =
+                    Box::pin(h1.join_with_drop_reason(cx, CancelReason::race_loser()));
+                let mut f2_race =
+                    Box::pin(h2.join_with_drop_reason(cx, CancelReason::race_loser()));
 
-                match Select::new(f1_pinned.as_mut(), f2_pinned.as_mut()).await {
+                match Select::new(f1_race.as_mut(), f2_race.as_mut()).await {
                     Either::Left(res) => {
-                        // Primary won race
-                        // Cancel h2
-                        h2.abort_with_reason(CancelReason::race_loser());
-                        let _ = f2_pinned.await; // Drain h2
+                        // Dropping f2_race applies loser cancellation.
+                        drop(f2_race);
+                        let _ = h2.join(cx).await; // Drain h2
                         res
                     }
                     Either::Right(res) => {
-                        // Backup won race
-                        // Cancel h1
-                        h1.abort_with_reason(CancelReason::race_loser());
-                        let _ = f1_pinned.await; // Drain h1
+                        // Dropping f1_race applies loser cancellation.
+                        drop(f1_race);
+                        let _ = h1.join(cx).await; // Drain h1
                         res
                     }
                 }
@@ -1024,6 +1015,7 @@ impl<P: Policy> Scope<'_, P> {
     ) -> Result<(T, usize), JoinError> {
         use crate::combinator::select::SelectAll;
 
+        let mut handles = handles;
         if handles.is_empty() {
             return Err(JoinError::Cancelled(CancelReason::user(
                 "race_all requires at least one handle",
@@ -1031,7 +1023,7 @@ impl<P: Policy> Scope<'_, P> {
         }
 
         let futures: Vec<_> = handles
-            .iter()
+            .iter_mut()
             .map(|h| Box::pin(h.join_with_drop_reason(cx, CancelReason::race_loser())))
             .collect();
 
@@ -1040,13 +1032,13 @@ impl<P: Policy> Scope<'_, P> {
         // Cancel and drain losers
         // Note: Losers were already aborted when SelectAll dropped their futures.
         // The abort reason was set to RaceLost by JoinFuture::drop.
-        for (i, handle) in handles.iter().enumerate() {
+        for (i, handle) in handles.iter_mut().enumerate() {
             if i != winner_idx {
                 handle.abort_with_reason(CancelReason::race_loser());
             }
         }
 
-        for (i, handle) in handles.iter().enumerate() {
+        for (i, handle) in handles.iter_mut().enumerate() {
             if i != winner_idx {
                 let _ = handle.join(cx).await;
             }
@@ -1064,7 +1056,7 @@ impl<P: Policy> Scope<'_, P> {
         handles: Vec<TaskHandle<T>>,
     ) -> Vec<Result<T, JoinError>> {
         let mut results = Vec::with_capacity(handles.len());
-        for handle in handles {
+        for mut handle in handles {
             results.push(handle.join(cx).await);
         }
         results
@@ -1288,7 +1280,7 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let handle = scope
+        let mut handle = scope
             .spawn_registered(&mut state, &cx, move |cx| async move {
                 let child_registry = cx.registry_handle().expect("child must inherit registry");
                 let child_registry_arc = child_registry.as_arc();
@@ -1339,7 +1331,7 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (handle, mut stored) = scope
+        let (mut handle, mut stored) = scope
             .spawn(&mut state, &cx, |cx| async move { cx.has_timer() })
             .expect("spawn should succeed");
 
@@ -1371,7 +1363,7 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (handle, mut stored) = scope
+        let (mut handle, mut stored) = scope
             .spawn_blocking(&mut state, &cx, |cx| cx.has_timer())
             .expect("spawn_blocking should succeed");
 
@@ -1423,7 +1415,7 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let handle = scope
+        let mut handle = scope
             .spawn_registered(&mut state, &cx, |_| async { 42_i32 })
             .unwrap();
 
@@ -1521,7 +1513,7 @@ mod tests {
             crate::runtime::scheduler::three_lane::ScopedLocalReady::new(Arc::clone(&local_ready));
         let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(1);
 
-        let handle = scope
+        let mut handle = scope
             .spawn_local(&mut state, &cx, |_| async move { 7_i32 })
             .unwrap();
 
@@ -1621,7 +1613,8 @@ mod tests {
         let scope = test_scope(region, Budget::INFINITE);
 
         // Spawn a task
-        let (handle, mut stored_task) = scope.spawn(&mut state, &cx, |_| async { 42_i32 }).unwrap();
+        let (mut handle, mut stored_task) =
+            scope.spawn(&mut state, &cx, |_| async { 42_i32 }).unwrap();
         // The stored task is returned directly, not put in state by scope.spawn
 
         // Create join future
@@ -1660,7 +1653,7 @@ mod tests {
         let scope = test_scope(region, Budget::INFINITE);
 
         // Spawn a task that checks for cancellation
-        let (handle, mut stored_task) = scope
+        let (mut handle, mut stored_task) = scope
             .spawn(&mut state, &cx, |cx| async move {
                 // We expect to be cancelled immediately because abort() is called before we run
                 if cx.checkpoint().is_err() {
@@ -1901,7 +1894,7 @@ mod tests {
         let region = state.create_root_region(Budget::INFINITE);
         let scope = test_scope(region, Budget::INFINITE);
 
-        let (handle, mut stored_task) = scope
+        let (mut handle, mut stored_task) = scope
             .spawn(&mut state, &cx, |_| async {
                 std::panic::panic_any("oops");
             })

@@ -35,7 +35,7 @@
 //!
 //! // Stop the actor:
 //! handle.stop();
-//! let result = handle.join(&cx).await?;
+//! let result = (&mut handle).join(&cx).await?;
 //! assert_eq!(result.count, 15);
 //! ```
 
@@ -274,7 +274,7 @@ impl<A: Actor> ActorHandle<A> {
     ///
     /// Blocks until the actor loop completes (mailbox closed or cancelled),
     /// then returns the actor's final state or a join error.
-    pub async fn join(&self, cx: &Cx) -> Result<A, JoinError> {
+    pub async fn join(&mut self, cx: &Cx) -> Result<A, JoinError> {
         self.receiver.recv(cx).await.unwrap_or_else(|_| {
             // The oneshot was dropped without sending — the actor task was
             // cancelled or the runtime shut down. Propagate the actual
@@ -777,7 +777,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
         let (msg_tx, msg_rx) = mpsc::channel::<A::Message>(mailbox_capacity);
 
         // Create oneshot for returning the actor state
-        let (result_tx, mut result_rx) = oneshot::channel::<Result<A, JoinError>>();
+        let (result_tx, result_rx) = oneshot::channel::<Result<A, JoinError>>();
 
         // Create task record
         let task_id = self.create_task_record(state)?;
@@ -893,7 +893,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
 
         let actor = factory();
         let (msg_tx, msg_rx) = mpsc::channel::<A::Message>(mailbox_capacity);
-        let (result_tx, mut result_rx) = oneshot::channel::<Result<A, JoinError>>();
+        let (result_tx, result_rx) = oneshot::channel::<Result<A, JoinError>>();
         let task_id = self.create_task_record(state)?;
         let actor_id = ActorId::from_task(task_id);
         let actor_state = Arc::new(ActorStateCell::new(ActorState::Created));
@@ -2124,6 +2124,8 @@ mod tests {
 
     #[test]
     fn actor_id_clone_copy_eq_hash() {
+        use std::collections::HashSet;
+
         let id = ActorId::from_task(TaskId::new_for_test(1, 0));
         let dbg = format!("{id:?}");
         assert!(dbg.contains("ActorId"));
@@ -2136,7 +2138,6 @@ mod tests {
         assert_eq!(id, id3);
 
         // Hash
-        use std::collections::HashSet;
         let mut set = HashSet::new();
         set.insert(id);
         set.insert(ActorId::from_task(TaskId::new_for_test(2, 0)));

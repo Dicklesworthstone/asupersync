@@ -115,7 +115,7 @@ fn e2e_oneshot_rendezvous() {
     common::run_test_with_cx(|cx| async move {
         test_phase!("Oneshot Rendezvous");
 
-        let (tx, rx) = asupersync::channel::oneshot::channel::<i32>();
+        let (tx, mut rx) = asupersync::channel::oneshot::channel::<i32>();
 
         test_section!("Send single value");
         tx.send(&cx, 42).unwrap();

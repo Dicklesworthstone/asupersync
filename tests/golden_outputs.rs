@@ -485,7 +485,7 @@ struct SharedHandle<T> {
 }
 
 struct SharedInner<T> {
-    handle: TaskHandle<T>,
+    handle: Mutex<Option<TaskHandle<T>>>,
     state: Mutex<JoinState<T>>,
 }
 
@@ -499,14 +499,19 @@ impl<T> SharedHandle<T> {
     fn new(handle: TaskHandle<T>) -> Self {
         Self {
             inner: Arc::new(SharedInner {
-                handle,
+                handle: Mutex::new(Some(handle)),
                 state: Mutex::new(JoinState::Empty),
             }),
         }
     }
 
     fn task_id(&self) -> TaskId {
-        self.inner.handle.task_id()
+        self.inner
+            .handle
+            .lock()
+            .as_ref()
+            .expect("shared handle missing task handle")
+            .task_id()
     }
 
     /// Non-blocking check: returns the result if already cached in Ready state,
@@ -516,12 +521,21 @@ impl<T> SharedHandle<T> {
         T: Clone,
     {
         let state = self.inner.state.lock();
-        if let JoinState::Ready(result) = &*state {
-            return Some(result.clone());
+        match &*state {
+            JoinState::Ready(result) => return Some(result.clone()),
+            JoinState::InFlight => return None,
+            JoinState::Empty => {}
         }
         drop(state);
 
-        let result = match self.inner.handle.try_join() {
+        let try_join_result = {
+            let handle_guard = self.inner.handle.lock();
+            let handle = handle_guard.as_ref()?;
+            let result = handle.try_join();
+            drop(handle_guard);
+            result
+        };
+        let result = match try_join_result {
             Ok(Some(value)) => Some(Ok(value)),
             Ok(None) => None,
             Err(err) => Some(Err(err)),
@@ -554,7 +568,14 @@ impl<T> SharedHandle<T> {
         };
 
         if i_am_joiner {
-            let result = self.inner.handle.join(cx).await;
+            let mut handle = self
+                .inner
+                .handle
+                .lock()
+                .take()
+                .expect("shared handle missing task handle");
+            let result = handle.join(cx).await;
+            *self.inner.handle.lock() = Some(handle);
             *self.inner.state.lock() = JoinState::Ready(result.clone());
             result
         } else {
