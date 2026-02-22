@@ -128,6 +128,7 @@ impl TcpListener {
         state.last_would_block_at = Some(now);
 
         let exponent = (state.consecutive_would_block.saturating_sub(1) / 64).min(4);
+        drop(state);
         let backoff = REARMED_ACCEPT_BACKOFF_BASE.saturating_mul(1u32 << exponent);
         backoff.min(REARMED_ACCEPT_BACKOFF_CAP)
     }
@@ -155,22 +156,49 @@ impl TcpListener {
     }
 
     fn register_interest(&self, cx: &Context<'_>) -> io::Result<InterestRegistrationMode> {
-        let mut registration = self.registration.lock();
-
-        if let Some(existing) = registration.as_mut() {
-            // Re-arm reactor interest and conditionally update the waker in a
-            // single lock acquisition (will_wake guard skips the clone).
-            match existing.rearm(Interest::READABLE, cx.waker()) {
-                Ok(true) => return Ok(InterestRegistrationMode::ReactorArmed),
-                Ok(false) => {
-                    *registration = None;
-                }
-                Err(err) if err.kind() == io::ErrorKind::NotConnected => {
-                    *registration = None;
-                    return Ok(InterestRegistrationMode::FallbackPoll);
-                }
-                Err(err) => return Err(err),
+        let rearm_result = {
+            enum RearmDecision {
+                ReactorArmed,
+                ClearAndContinue,
+                ClearAndFallback,
+                Error(io::Error),
             }
+
+            let mut registration = self.registration.lock();
+            let decision = registration.as_mut().map(|existing| {
+                // Re-arm reactor interest and conditionally update the waker in a
+                // single lock acquisition (will_wake guard skips the clone).
+                match existing.rearm(Interest::READABLE, cx.waker()) {
+                    Ok(true) => RearmDecision::ReactorArmed,
+                    Ok(false) => RearmDecision::ClearAndContinue,
+                    Err(err) if err.kind() == io::ErrorKind::NotConnected => {
+                        RearmDecision::ClearAndFallback
+                    }
+                    Err(err) => RearmDecision::Error(err),
+                }
+            });
+
+            let result = match decision {
+                Some(RearmDecision::ReactorArmed) => {
+                    Some(Ok(InterestRegistrationMode::ReactorArmed))
+                }
+                Some(RearmDecision::ClearAndContinue) => {
+                    *registration = None;
+                    None
+                }
+                Some(RearmDecision::ClearAndFallback) => {
+                    *registration = None;
+                    Some(Ok(InterestRegistrationMode::FallbackPoll))
+                }
+                Some(RearmDecision::Error(err)) => Some(Err(err)),
+                None => None,
+            };
+            drop(registration);
+            result
+        };
+
+        if let Some(result) = rearm_result {
+            return result;
         }
 
         let Some(current) = Cx::current() else {
@@ -182,7 +210,9 @@ impl TcpListener {
 
         match driver.register(&self.inner, Interest::READABLE, cx.waker().clone()) {
             Ok(new_reg) => {
+                let mut registration = self.registration.lock();
                 *registration = Some(new_reg);
+                drop(registration);
                 Ok(InterestRegistrationMode::ReactorArmed)
             }
             Err(err) if err.kind() == io::ErrorKind::Unsupported => {
