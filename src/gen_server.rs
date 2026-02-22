@@ -856,7 +856,7 @@ impl<S: GenServer> GenServerHandle<S> {
             return Err(CallError::ServerStopped);
         }
 
-        let (reply_tx, mut reply_rx) = session::tracked_oneshot::<S::Reply>();
+        let (reply_tx, reply_rx) = session::tracked_oneshot::<S::Reply>();
         let reply_permit = reply_tx.reserve(cx);
         let envelope = Envelope::Call {
             request,
@@ -1122,7 +1122,7 @@ impl<S: GenServer> GenServerRef<S> {
             return Err(CallError::ServerStopped);
         }
 
-        let (reply_tx, mut reply_rx) = session::tracked_oneshot::<S::Reply>();
+        let (reply_tx, reply_rx) = session::tracked_oneshot::<S::Reply>();
         let reply_permit = reply_tx.reserve(cx);
         let envelope = Envelope::Call {
             request,

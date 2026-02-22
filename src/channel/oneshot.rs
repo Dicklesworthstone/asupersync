@@ -822,7 +822,7 @@ mod tests {
         init_test("value_is_moved_not_cloned");
         // Test that non-Clone types work
         let cx = test_cx();
-        let (tx, mut rx) = channel::<NonClone>();
+        let (tx, rx) = channel::<NonClone>();
 
         tx.send(&cx, NonClone(42)).expect("send should succeed");
         let value = block_on(rx.recv(&cx)).expect("recv should succeed");
@@ -900,7 +900,7 @@ mod tests {
     fn recv_cancel_after_pending_clears_registered_waker() {
         init_test("recv_cancel_after_pending_clears_registered_waker");
         let cx = test_cx();
-        let (_tx, mut rx) = channel::<i32>();
+        let (_tx, rx) = channel::<i32>();
         let inner = Arc::clone(&rx.inner);
 
         let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
@@ -1170,7 +1170,7 @@ mod tests {
     fn recv_future_drop_clears_stale_waker() {
         init_test("recv_future_drop_clears_stale_waker");
         let cx = test_cx();
-        let (tx, mut rx) = channel::<i32>();
+        let (tx, rx) = channel::<i32>();
         let inner = Arc::clone(&rx.inner);
 
         let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
@@ -1430,7 +1430,7 @@ mod tests {
     fn recv_repoll_same_waker_keeps_waiter_identity() {
         init_test("recv_repoll_same_waker_keeps_waiter_identity");
         let cx = test_cx();
-        let (_tx, mut rx) = channel::<i32>();
+        let (_tx, rx) = channel::<i32>();
         let inner = Arc::clone(&rx.inner);
 
         let recv_waker = counting_waker(Arc::new(AtomicUsize::new(0)));
