@@ -66,7 +66,7 @@ fn take_finished_fallbacks(state: &mut SleepState) -> Vec<std::thread::JoinHandl
                 .join,
         );
     }
-    
+
     let mut i = 0;
     while i < state.zombie_fallbacks.len() {
         if state.zombie_fallbacks[i].is_finished() {
@@ -75,7 +75,7 @@ fn take_finished_fallbacks(state: &mut SleepState) -> Vec<std::thread::JoinHandl
             i += 1;
         }
     }
-    
+
     finished
 }
 
@@ -282,7 +282,7 @@ impl Sleep {
     pub fn reset(&mut self, deadline: Time) {
         self.deadline = deadline;
         self.polled.set(false);
-        let (handle, driver, mut fallback_handles) = {
+        let (handle, driver, fallback_handles) = {
             let mut state = self.state.lock();
             let mut handles = std::mem::take(&mut state.zombie_fallbacks);
             if let Some(fallback) = state.fallback.take() {
@@ -318,7 +318,7 @@ impl Sleep {
     pub fn reset_after(&mut self, now: Time, duration: Duration) {
         self.deadline = now.saturating_add_nanos(duration_to_nanos(duration));
         self.polled.set(false);
-        let (handle, driver, mut fallback_handles) = {
+        let (handle, driver, fallback_handles) = {
             let mut state = self.state.lock();
             let mut handles = std::mem::take(&mut state.zombie_fallbacks);
             if let Some(fallback) = state.fallback.take() {
@@ -541,6 +541,7 @@ impl Future for Sleep {
                             if let Some(waker) = state.waker.take() {
                                 waker.wake();
                             }
+                            drop(state);
                             completed_for_thread.store(true, Ordering::Release);
                         });
                         let thread = handle.thread().clone();
@@ -566,7 +567,7 @@ impl Future for Sleep {
 
 impl Drop for Sleep {
     fn drop(&mut self) {
-        let (handle, driver, mut fallback_handles) = {
+        let (handle, driver, fallback_handles) = {
             let mut state = self.state.lock();
             // Clear waker to release task reference immediately, preventing
             // unbounded lifetime extension if background thread is running.

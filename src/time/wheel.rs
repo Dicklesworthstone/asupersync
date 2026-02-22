@@ -32,7 +32,7 @@
 use crate::types::Time;
 use smallvec::SmallVec;
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, hash_map::Entry};
 use std::task::Waker;
 use std::time::Duration;
 
@@ -488,9 +488,9 @@ impl TimerWheel {
     ///
     /// Returns true if the timer was active and is now cancelled.
     pub fn cancel(&mut self, handle: &TimerHandle) -> bool {
-        match self.active.get(&handle.id) {
-            Some(generation) if *generation == handle.generation => {
-                self.active.remove(&handle.id);
+        match self.active.entry(handle.id) {
+            Entry::Occupied(entry) if *entry.get() == handle.generation => {
+                entry.remove_entry();
                 true
             }
             _ => false,
@@ -515,14 +515,23 @@ impl TimerWheel {
         }
 
         for level in &self.levels {
-            for slot in &level.slots {
-                for entry in slot {
-                    if !self.is_live(entry) {
-                        continue;
+            for word_idx in 0..BITMAP_WORDS {
+                let mut word = level.occupied[word_idx];
+                while word != 0 {
+                    let bit_idx = word.trailing_zeros();
+                    let slot_idx = word_idx * 64 + bit_idx as usize;
+
+                    for entry in &level.slots[slot_idx] {
+                        if !self.is_live(entry) {
+                            continue;
+                        }
+                        min_deadline = Some(
+                            min_deadline
+                                .map_or(entry.deadline, |current| current.min(entry.deadline)),
+                        );
                     }
-                    min_deadline = Some(
-                        min_deadline.map_or(entry.deadline, |current| current.min(entry.deadline)),
-                    );
+
+                    word &= !(1u64 << bit_idx);
                 }
             }
         }
@@ -726,21 +735,29 @@ impl TimerWheel {
 
     fn promote_coalescing_window_entries(&mut self, boundary: Time, ready: &mut Vec<TimerEntry>) {
         for level in &mut self.levels {
-            for slot_idx in 0..SLOTS_PER_LEVEL {
-                let slot_empty = {
-                    let slot = &mut level.slots[slot_idx];
-                    let mut i = 0;
-                    while i < slot.len() {
-                        if slot[i].deadline <= boundary {
-                            ready.push(slot.swap_remove(i));
-                        } else {
-                            i += 1;
+            for word_idx in 0..BITMAP_WORDS {
+                let mut word = level.occupied[word_idx];
+                while word != 0 {
+                    let bit_idx = word.trailing_zeros();
+                    let slot_idx = word_idx * 64 + bit_idx as usize;
+
+                    let slot_empty = {
+                        let slot = &mut level.slots[slot_idx];
+                        let mut i = 0;
+                        while i < slot.len() {
+                            if slot[i].deadline <= boundary {
+                                ready.push(slot.swap_remove(i));
+                            } else {
+                                i += 1;
+                            }
                         }
+                        slot.is_empty()
+                    };
+                    if slot_empty {
+                        level.clear_occupied(slot_idx);
                     }
-                    slot.is_empty()
-                };
-                if slot_empty {
-                    level.clear_occupied(slot_idx);
+
+                    word &= !(1u64 << bit_idx);
                 }
             }
         }
@@ -1024,6 +1041,36 @@ mod tests {
         let count = counter.load(Ordering::SeqCst);
         crate::assert_with_log!(count == 0, "counter", 0, count);
         crate::test_complete!("wheel_cancel_prevents_fire");
+    }
+
+    #[test]
+    fn wheel_cancel_rejects_generation_mismatch_without_removing() {
+        init_test("wheel_cancel_rejects_generation_mismatch_without_removing");
+        let mut wheel = TimerWheel::new();
+        let waker = counter_waker(Arc::new(AtomicU64::new(0)));
+
+        let handle = wheel.register(Time::from_millis(5), waker);
+        let stale = TimerHandle {
+            id: handle.id,
+            generation: handle.generation.saturating_add(1),
+        };
+
+        let stale_cancelled = wheel.cancel(&stale);
+        crate::assert_with_log!(
+            !stale_cancelled,
+            "mismatched generation is rejected",
+            false,
+            stale_cancelled
+        );
+
+        let live_cancelled = wheel.cancel(&handle);
+        crate::assert_with_log!(
+            live_cancelled,
+            "live handle still cancellable after stale attempt",
+            true,
+            live_cancelled
+        );
+        crate::test_complete!("wheel_cancel_rejects_generation_mismatch_without_removing");
     }
 
     #[test]
