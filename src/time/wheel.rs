@@ -1132,6 +1132,42 @@ mod tests {
     }
 
     #[test]
+    fn wheel_register_wraps_id_and_generation_without_immediate_collision() {
+        init_test("wheel_register_wraps_id_and_generation_without_immediate_collision");
+        let mut wheel = TimerWheel::new();
+        wheel.next_id = u64::MAX;
+        wheel.next_generation = u64::MAX;
+
+        let h1 = wheel.register(
+            Time::from_millis(5),
+            counter_waker(Arc::new(AtomicU64::new(0))),
+        );
+        let h2 = wheel.register(
+            Time::from_millis(6),
+            counter_waker(Arc::new(AtomicU64::new(0))),
+        );
+
+        crate::assert_with_log!(h1.id == u64::MAX, "first id", u64::MAX, h1.id);
+        crate::assert_with_log!(
+            h1.generation == u64::MAX,
+            "first generation",
+            u64::MAX,
+            h1.generation
+        );
+        crate::assert_with_log!(h2.id == 0, "wrapped second id", 0, h2.id);
+        crate::assert_with_log!(
+            h2.generation == 0,
+            "wrapped second generation",
+            0,
+            h2.generation
+        );
+        crate::assert_with_log!(h1 != h2, "handles differ across wrap", true, h1 != h2);
+        crate::assert_with_log!(wheel.cancel(&h1), "first handle cancellable", true, true);
+        crate::assert_with_log!(wheel.cancel(&h2), "second handle cancellable", true, true);
+        crate::test_complete!("wheel_register_wraps_id_and_generation_without_immediate_collision");
+    }
+
+    #[test]
     fn wheel_overflow_promotes_when_in_range() {
         init_test("wheel_overflow_promotes_when_in_range");
         let mut wheel = TimerWheel::new();

@@ -731,6 +731,19 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_huge_task_count_with_truncated_payload_returns_eof() {
+        // Corrupt task_count in an otherwise valid header to emulate a crafted
+        // payload that claims an enormous number of tasks but provides no body.
+        let mut bytes = create_test_snapshot().to_bytes();
+        let task_count_offset = 4 + 1 + 8 + 1 + 8 + 8;
+        bytes[task_count_offset..task_count_offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        bytes.truncate(task_count_offset + 4);
+
+        let result = RegionSnapshot::from_bytes(&bytes);
+        assert_eq!(result.unwrap_err(), SnapshotError::UnexpectedEof);
+    }
+
+    #[test]
     fn content_hash_differs_for_different_snapshots() {
         let snap1 = create_test_snapshot();
         let mut snap2 = create_test_snapshot();
