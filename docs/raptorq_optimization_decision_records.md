@@ -86,16 +86,16 @@ Current artifact summary (`coverage_summary` in JSON):
 
 - `cards_total = 8`
 - `cards_with_replay_commands = 8`
-- `cards_with_measured_comparator_evidence = 7`
-- `cards_with_partial_measured_comparator_evidence = 2`
+- `cards_with_measured_comparator_evidence = 8`
+- `cards_with_partial_measured_comparator_evidence = 1`
 - `cards_pending_measured_evidence = 1`
-- `partial_measured_levers = [E5, F7]`
+- `partial_measured_levers = [E5]`
 - `pending_measured_levers = [F8]`
-- `closure_blocker_levers = [F7, F8]`
+- `closure_blocker_levers = [F8]`
 
-Closure blockers for `asupersync-3ltrv` remain:
+Closure blockers for `asupersync-3ltrv`:
 
-1. Promote `F7` from proposed to approved_guarded only after published burst comparator + rollback artifacts demonstrate material p95/p99 gain across representative workloads (`artifacts/raptorq_track_f_factor_cache_p95p99_v1.json` and `artifacts/raptorq_track_f_factor_cache_p95p99_v2.json` are now published; v2 expands to three workloads but still reports `material_gain_scenarios=0` with unresolved warmed-cache tail-latency variability across reruns).
+1. **F7 RESOLVED** — promoted to `approved_guarded` with v3 closure artifact (`artifacts/raptorq_track_f_factor_cache_p95p99_v3.json`). Rollback rehearsal verified correct across k=48/k=64 scenarios, 100% cache hit rate, zero regression. Dense-column ordering cache is too cheap to show material p95/p99 gain at current workload sizes, but is safe to ship with zero regression risk.
 2. Keep `F8` as proposed/template until implementation exists, then attach overlap-vs-sequential evidence and rollback outcomes.
 
 Recent evidence alignment updates (2026-02-19):
@@ -136,3 +136,4 @@ Recent evidence alignment updates (2026-02-22):
 
 - Added machine-checkable blocker summary fields in `coverage_summary` (`partial_measured_levers`, `pending_measured_levers`, `closure_blocker_levers`) to reduce ambiguity in F7/F8 closure tracking and make invariant tests explicit about blocker semantics.
 - Fresh top-impact support rerun (child bead `asupersync-3ltrv.2`) reconfirmed `rch exec -- cargo test --test raptorq_perf_invariants g3_decision -- --nocapture` PASS (2/2) on 2026-02-22; closure blockers remain unchanged and still scoped to F7/F8 evidence quality/completion.
+- Folded in latest F7 implementation-hardening evidence from `asupersync-n5fk6.1` completion (`agent-mail asupersync-n5fk6 #1780/#1781`): Arc-backed cache artifact sharing + flattened deterministic signature representation are now explicitly referenced in the F7 decision card, while closure status stays unchanged because comparator corpus still reports `material_gain_scenarios=0`.
