@@ -884,19 +884,20 @@ impl<P: Policy> Scope<'_, P> {
         mut h1: TaskHandle<T>,
         mut h2: TaskHandle<T>,
     ) -> Result<T, JoinError> {
-        let mut f1 = Box::pin(h1.join_with_drop_reason(cx, CancelReason::race_loser()));
-        let mut f2 = Box::pin(h2.join_with_drop_reason(cx, CancelReason::race_loser()));
+        let winner = {
+            let f1 = h1.join_with_drop_reason(cx, CancelReason::race_loser());
+            let mut f1 = std::pin::pin!(f1);
+            let f2 = h2.join_with_drop_reason(cx, CancelReason::race_loser());
+            let mut f2 = std::pin::pin!(f2);
+            Select::new(f1.as_mut(), f2.as_mut()).await
+        };
 
-        match Select::new(f1.as_mut(), f2.as_mut()).await {
+        match winner {
             Either::Left(res) => {
-                // Dropping f2 applies the loser cancel reason via JoinFuture::drop.
-                drop(f2);
                 let _ = h2.join(cx).await; // Drain h2
                 res
             }
             Either::Right(res) => {
-                // Dropping f1 applies the loser cancel reason via JoinFuture::drop.
-                drop(f1);
                 let _ = h1.join(cx).await; // Drain h1
                 res
             }
@@ -943,19 +944,22 @@ impl<P: Policy> Scope<'_, P> {
             .spawn_registered(state, cx, primary)
             .map_err(|_| JoinError::Cancelled(CancelReason::resource_unavailable()))?;
 
-        // 2. Race primary vs delay
-        // We reuse the join future if it doesn't complete, so we must pin it.
-        // We use plain join() because we don't want to cancel h1 if the delay fires.
-        let mut f1_primary = Box::pin(h1.join(cx));
+        // 2. Race primary vs delay.
+        // Scope the pinned join future so we can safely reuse h1 afterwards.
+        let primary_or_delay = {
+            let f1_primary = h1.join(cx);
+            let mut f1_primary = std::pin::pin!(f1_primary);
 
-        // Compute deadline
-        let now = cx
-            .timer_driver()
-            .map_or_else(crate::time::wall_now, |d| d.now());
-        let sleep_fut = crate::time::sleep(now, delay);
-        let mut sleep_pinned = std::pin::pin!(sleep_fut);
+            let now = cx
+                .timer_driver()
+                .map_or_else(crate::time::wall_now, |d| d.now());
+            let sleep_fut = crate::time::sleep(now, delay);
+            let mut sleep_pinned = std::pin::pin!(sleep_fut);
 
-        match Select::new(f1_primary.as_mut(), sleep_pinned.as_mut()).await {
+            Select::new(f1_primary.as_mut(), sleep_pinned.as_mut()).await
+        };
+
+        match primary_or_delay {
             Either::Left(res) => {
                 // Primary finished first
                 res
@@ -965,30 +969,26 @@ impl<P: Policy> Scope<'_, P> {
                 let Ok(mut h2) = self.spawn_registered(state, cx, backup) else {
                     // Backup admission failed after primary already started.
                     // Request cancellation on primary to avoid orphaned work.
-                    drop(f1_primary);
                     h1.abort_with_reason(CancelReason::resource_unavailable());
                     let _ = h1.join(cx).await; // Drain h1
                     return Err(JoinError::Cancelled(CancelReason::resource_unavailable()));
                 };
 
-                // Now race h1 and h2
-                // We recreate h1's join future with an explicit loser drop reason.
-                drop(f1_primary);
-                let mut f1_race =
-                    Box::pin(h1.join_with_drop_reason(cx, CancelReason::race_loser()));
-                let mut f2_race =
-                    Box::pin(h2.join_with_drop_reason(cx, CancelReason::race_loser()));
+                // Now race h1 and h2 with bounded future borrows.
+                let race_outcome = {
+                    let f1_race = h1.join_with_drop_reason(cx, CancelReason::race_loser());
+                    let mut f1_race = std::pin::pin!(f1_race);
+                    let f2_race = h2.join_with_drop_reason(cx, CancelReason::race_loser());
+                    let mut f2_race = std::pin::pin!(f2_race);
+                    Select::new(f1_race.as_mut(), f2_race.as_mut()).await
+                };
 
-                match Select::new(f1_race.as_mut(), f2_race.as_mut()).await {
+                match race_outcome {
                     Either::Left(res) => {
-                        // Dropping f2_race applies loser cancellation.
-                        drop(f2_race);
                         let _ = h2.join(cx).await; // Drain h2
                         res
                     }
                     Either::Right(res) => {
-                        // Dropping f1_race applies loser cancellation.
-                        drop(f1_race);
                         let _ = h1.join(cx).await; // Drain h1
                         res
                     }
