@@ -170,8 +170,9 @@ struct Waiter {
 ///
 /// # Poisoning
 ///
-/// If a panic occurs while holding a guard, the lock is poisoned. Subsequent
-/// acquisition attempts will return `RwLockError::Poisoned`.
+/// If a panic occurs while holding a **write** guard, the lock is poisoned.
+/// Subsequent acquisition attempts will return `RwLockError::Poisoned`.
+/// Read guards do not poison the lock since they cannot corrupt data.
 #[derive(Debug)]
 pub struct RwLock<T> {
     state: ParkingMutex<State>,
