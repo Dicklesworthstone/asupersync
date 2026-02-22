@@ -1967,6 +1967,8 @@ mod tests {
 
     #[test]
     fn frame_type_debug_clone_copy_eq_hash() {
+        use std::collections::HashSet;
+
         let ft = FrameType::Headers;
         let dbg = format!("{ft:?}");
         assert!(dbg.contains("Headers"));
@@ -1981,7 +1983,6 @@ mod tests {
         assert_ne!(FrameType::Data, FrameType::Settings);
 
         // Hash
-        use std::collections::HashSet;
         let mut set = HashSet::new();
         set.insert(FrameType::Data);
         set.insert(FrameType::Ping);

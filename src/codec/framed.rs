@@ -416,8 +416,9 @@ mod tests {
         let _ = Pin::new(&mut framed).poll_next(&mut cx);
         let parts = framed.into_parts();
         // The inner transport and codec should be accessible.
-        let _inner = parts.inner;
-        let _codec = parts.codec;
+        let inner = parts.inner;
+        assert_eq!(&inner.read_data, b"parts-test\n");
+        let _ = parts.codec;
     }
 
     #[test]

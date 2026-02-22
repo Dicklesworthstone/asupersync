@@ -1334,7 +1334,7 @@ mod tests {
 
     #[test]
     fn h3_qpack_mode_default_debug_copy() {
-        let mode: H3QpackMode = Default::default();
+        let mode: H3QpackMode = H3QpackMode::default();
         assert_eq!(mode, H3QpackMode::StaticOnly);
         let copied = mode; // Copy
         let cloned = mode;

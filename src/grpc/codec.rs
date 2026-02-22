@@ -399,7 +399,7 @@ mod tests {
             decoded.data == Bytes::from_static(b"abcde"),
             "decoded payload after completion",
             Bytes::from_static(b"abcde"),
-            decoded.data.clone()
+            decoded.data
         );
         let drained = buf.is_empty();
         crate::assert_with_log!(drained, "buffer fully consumed", true, drained);

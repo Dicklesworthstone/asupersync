@@ -974,6 +974,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn test_manifest_from_logger() {
         init_test("test_manifest_from_logger");
 

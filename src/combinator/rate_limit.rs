@@ -653,10 +653,12 @@ impl RateLimiter {
         let mut queue = self.wait_queue.write();
         if let Some(idx) = queue.iter().position(|e| e.id == entry_id) {
             let entry = queue.remove(idx).unwrap();
-            if let Some(Ok(())) = entry.result {
+            drop(queue);
+            if entry.result == Some(Ok(())) {
                 // Refund tokens if already granted but not consumed by the caller
                 let mut state = self.state.lock();
-                state.tokens = (state.tokens + f64::from(entry.cost)).min(f64::from(self.policy.burst));
+                state.tokens =
+                    (state.tokens + f64::from(entry.cost)).min(f64::from(self.policy.burst));
                 // We could decrement total_allowed here, but the operation was technically
                 // allowed from the rate limiter's perspective, just not consumed.
             }
@@ -1734,7 +1736,7 @@ mod tests {
         // 0.5 tokens/sec = 0.0005 tokens/ms
         let rl = RateLimiter::new(RateLimitPolicy {
             rate: 1,
-            period: Duration::from_millis(2000),
+            period: Duration::from_secs(2),
             burst: 1,
             ..Default::default()
         });

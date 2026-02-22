@@ -781,7 +781,7 @@ mod tests {
         // OracleViolation implements Error; verify via trait object.
         // We can't easily construct one without triggering a violation,
         // but we can verify the trait is implemented at compile time.
-        fn _assert_error<T: std::error::Error>() {}
-        _assert_error::<OracleViolation>();
+        fn assert_error_impl<T: std::error::Error>() {}
+        assert_error_impl::<OracleViolation>();
     }
 }

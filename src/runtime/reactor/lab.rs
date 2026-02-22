@@ -2353,7 +2353,11 @@ mod tests {
             assert!(!cfg.closed);
             assert!(!cfg.partitioned);
             let cloned = cfg.clone();
-            assert_eq!(cloned.error_probability, 0.0);
+            assert!(
+                (cloned.error_probability).abs() < f64::EPSILON,
+                "expected 0.0, got {}",
+                cloned.error_probability
+            );
             let dbg = format!("{cfg:?}");
             assert!(dbg.contains("FaultConfig"));
         }

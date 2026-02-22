@@ -1814,6 +1814,8 @@ mod tests {
 
     #[test]
     fn plan_hash_debug_clone_copy_eq_hash() {
+        use std::collections::HashSet;
+
         let mut dag = PlanDag::new();
         let a = dag.leaf("a");
         dag.set_root(a);
@@ -1830,7 +1832,6 @@ mod tests {
         assert_eq!(h, h3);
 
         // Hash: usable in HashSet
-        use std::collections::HashSet;
         let mut set = HashSet::new();
         set.insert(h);
         assert!(set.contains(&h));

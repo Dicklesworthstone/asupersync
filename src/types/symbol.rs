@@ -658,8 +658,8 @@ mod tests {
         use std::collections::HashSet;
         let src = SymbolKind::Source;
         let rep = SymbolKind::Repair;
-        let _cloned = src;
-        let _copied = src; // Copy
+        let cloned = src; // Copy
+        assert_eq!(cloned, src);
         assert_eq!(format!("{src}"), "source");
         assert_eq!(format!("{rep}"), "repair");
         let mut set = HashSet::new();

@@ -409,12 +409,13 @@ mod tests {
 
     #[test]
     fn event_id_debug_clone_copy_eq_hash() {
+        use std::collections::HashSet;
+
         let id = EventId::new(5);
         let id2 = id;
         assert_eq!(id, id2);
         assert!(format!("{id:?}").contains('5'));
 
-        use std::collections::HashSet;
         let mut set = HashSet::new();
         set.insert(id);
         set.insert(EventId::new(10));
@@ -447,13 +448,14 @@ mod tests {
 
     #[test]
     fn owner_key_debug_clone_copy_eq_hash_ord() {
+        use std::collections::HashSet;
+
         let task = TaskId::new_for_test(1, 0);
         let k1 = OwnerKey::Task(task);
         let k2 = k1;
         assert_eq!(k1, k2);
         assert!(format!("{k1:?}").contains("Task"));
 
-        use std::collections::HashSet;
         let mut set = HashSet::new();
         set.insert(k1);
         set.insert(OwnerKey::Timer(7));

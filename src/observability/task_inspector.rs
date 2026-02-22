@@ -797,12 +797,14 @@ mod tests {
 
     #[test]
     fn task_summary_with_data() {
-        let mut summary = TaskSummary::default();
-        summary.total_tasks = 10;
-        summary.running = 5;
-        summary.completed = 3;
-        summary.cancelling = 2;
-        summary.stuck_count = 1;
+        let mut summary = TaskSummary {
+            total_tasks: 10,
+            running: 5,
+            completed: 3,
+            cancelling: 2,
+            stuck_count: 1,
+            ..TaskSummary::default()
+        };
         summary.by_region.insert(RegionId::testing_default(), 10);
         assert_eq!(summary.by_region.len(), 1);
     }

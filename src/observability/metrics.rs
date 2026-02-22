@@ -568,6 +568,8 @@ mod tests {
 
     #[test]
     fn outcome_kind_debug_copy_eq_hash() {
+        use std::collections::HashSet;
+
         let ok = OutcomeKind::Ok;
         let err = OutcomeKind::Err;
         let canc = OutcomeKind::Cancelled;
@@ -585,7 +587,6 @@ mod tests {
         assert_eq!(ok, ok2);
 
         // Hash
-        use std::collections::HashSet;
         let mut set = HashSet::new();
         set.insert(ok);
         set.insert(err);

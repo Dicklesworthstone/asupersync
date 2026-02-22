@@ -682,8 +682,8 @@ mod tests {
         let policy = NoRetry::new();
         let dbg = format!("{policy:?}");
         assert!(dbg.contains("NoRetry"));
-        let _cloned = policy;
-        let _copied = policy; // Copy
+        let cloned = policy; // Copy
+        assert_eq!(format!("{cloned:?}"), format!("{policy:?}"));
         let default = NoRetry;
         let _ = format!("{default:?}");
     }

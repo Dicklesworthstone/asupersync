@@ -1289,8 +1289,10 @@ mod tests {
         assert_eq!(def.max_idle_timeout, None);
         assert!(!def.disable_active_migration);
 
-        let mut tp = TransportParameters::default();
-        tp.max_idle_timeout = Some(5000);
+        let tp = TransportParameters {
+            max_idle_timeout: Some(5000),
+            ..TransportParameters::default()
+        };
         let cloned = tp.clone();
         assert_eq!(cloned, tp);
         assert_ne!(cloned, def);

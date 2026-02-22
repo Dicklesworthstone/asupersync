@@ -1224,6 +1224,8 @@ mod tests {
 
     #[test]
     fn saga_op_kind_debug_clone_copy_eq_hash() {
+        use std::collections::HashSet;
+
         let op = SagaOpKind::Reserve;
         let dbg = format!("{op:?}");
         assert!(dbg.contains("Reserve"));
@@ -1236,7 +1238,6 @@ mod tests {
 
         assert_ne!(SagaOpKind::Reserve, SagaOpKind::Commit);
 
-        use std::collections::HashSet;
         let mut set = HashSet::new();
         set.insert(SagaOpKind::Reserve);
         set.insert(SagaOpKind::Send);

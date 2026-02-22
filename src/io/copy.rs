@@ -938,8 +938,6 @@ mod tests {
 
     #[test]
     fn copy_bidirectional_yields_on_fast_streams() {
-        init_test("copy_bidirectional_yields_on_fast_streams");
-
         // Use an infinitely fast, infinite stream.
         struct InfiniteStream;
         impl AsyncRead for InfiniteStream {
@@ -969,6 +967,8 @@ mod tests {
                 Poll::Ready(Ok(()))
             }
         }
+
+        init_test("copy_bidirectional_yields_on_fast_streams");
 
         let mut a = InfiniteStream;
         let mut b = InfiniteStream;

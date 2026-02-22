@@ -1658,6 +1658,8 @@ mod tests {
 
     #[test]
     fn algebraic_law_debug_clone_copy_eq_hash() {
+        use std::collections::HashSet;
+
         let law = AlgebraicLaw::Associativity;
         let dbg = format!("{law:?}");
         assert!(dbg.contains("Associativity"));
@@ -1670,7 +1672,6 @@ mod tests {
 
         assert_ne!(AlgebraicLaw::Associativity, AlgebraicLaw::Commutativity);
 
-        use std::collections::HashSet;
         let mut set = HashSet::new();
         set.insert(AlgebraicLaw::Associativity);
         set.insert(AlgebraicLaw::Commutativity);

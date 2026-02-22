@@ -777,6 +777,8 @@ mod tests {
 
     #[test]
     fn slab_token_debug_clone_copy_hash() {
+        use std::collections::HashSet;
+
         let t = SlabToken::from_usize(42);
         let dbg = format!("{t:?}");
         assert!(dbg.contains("SlabToken"));
@@ -789,7 +791,6 @@ mod tests {
         assert_eq!(t, t3);
 
         // Hash
-        use std::collections::HashSet;
         let mut set = HashSet::new();
         set.insert(t);
         set.insert(SlabToken::from_usize(99));

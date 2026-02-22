@@ -276,13 +276,14 @@ mod tests {
 
     #[test]
     fn method_debug_clone_eq_hash() {
+        use std::collections::HashSet;
+
         let m = Method::Get;
         let dbg = format!("{m:?}");
         assert!(dbg.contains("Get"));
         let cloned = m.clone();
         assert_eq!(m, cloned);
 
-        use std::collections::HashSet;
         let mut set = HashSet::new();
         set.insert(Method::Get);
         set.insert(Method::Post);
@@ -328,13 +329,14 @@ mod tests {
 
     #[test]
     fn version_debug_copy_eq_hash() {
+        use std::collections::HashSet;
+
         let v = Version::Http11;
         let dbg = format!("{v:?}");
         assert!(dbg.contains("Http11"));
         let copied = v;
         assert_eq!(v, copied);
 
-        use std::collections::HashSet;
         let mut set = HashSet::new();
         set.insert(Version::Http10);
         set.insert(Version::Http11);

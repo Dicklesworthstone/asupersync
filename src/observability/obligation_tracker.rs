@@ -558,10 +558,12 @@ mod tests {
 
     #[test]
     fn obligation_summary_with_entries() {
-        let mut summary = ObligationSummary::default();
-        summary.total_active = 5;
-        summary.potential_leaks = 2;
-        summary.age_warnings = 1;
+        let mut summary = ObligationSummary {
+            total_active: 5,
+            potential_leaks: 2,
+            age_warnings: 1,
+            ..ObligationSummary::default()
+        };
         summary.by_type.insert(
             "Lease".to_string(),
             TypeSummary {

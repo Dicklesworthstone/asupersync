@@ -1343,6 +1343,8 @@ mod tests {
 
     #[test]
     fn monitor_ref_debug_clone_copy_eq_hash_ord() {
+        use std::collections::HashSet;
+
         let r = MonitorRef::from_raw(42);
         let dbg = format!("{r:?}");
         assert!(dbg.contains("MonitorRef"));
@@ -1359,7 +1361,6 @@ mod tests {
         assert!(r < r4);
 
         // Hash
-        use std::collections::HashSet;
         let mut set = HashSet::new();
         set.insert(r);
         set.insert(r4);

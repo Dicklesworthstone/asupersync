@@ -724,6 +724,8 @@ mod tests {
 
     #[test]
     fn obligation_kind_debug_copy_hash_ord() {
+        use std::collections::HashSet;
+
         let k = ObligationKind::Lease;
         let dbg = format!("{k:?}");
         assert!(dbg.contains("Lease"));
@@ -733,7 +735,6 @@ mod tests {
         assert_eq!(k, k2);
 
         // Hash
-        use std::collections::HashSet;
         let mut set = HashSet::new();
         set.insert(ObligationKind::SendPermit);
         set.insert(ObligationKind::Ack);

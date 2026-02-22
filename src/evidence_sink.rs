@@ -329,7 +329,11 @@ mod tests {
         assert_eq!(entry.component, "scheduler");
         assert_eq!(entry.action, "cancel_lane");
         assert!(!entry.fallback_active);
-        assert_eq!(entry.calibration_score, 1.0);
+        assert!(
+            (entry.calibration_score - 1.0).abs() < f64::EPSILON,
+            "expected 1.0, got {}",
+            entry.calibration_score
+        );
         // posterior should sum to ~1.0
         let sum: f64 = entry.posterior.iter().sum();
         assert!((sum - 1.0).abs() < 1e-9, "posterior sum={sum}");
@@ -344,7 +348,11 @@ mod tests {
 
         let entry = &sink.entries()[0];
         assert!(entry.fallback_active);
-        assert_eq!(entry.calibration_score, 0.0);
+        assert!(
+            (entry.calibration_score).abs() < f64::EPSILON,
+            "expected 0.0, got {}",
+            entry.calibration_score
+        );
     }
 
     #[test]
@@ -357,7 +365,7 @@ mod tests {
         assert_eq!(entry.posterior.len(), 3);
         // denominator is max(1, 0+0+0) = 1, so all zeros
         for &p in &entry.posterior {
-            assert_eq!(p, 0.0);
+            assert!((p).abs() < f64::EPSILON, "expected 0.0, got {p}");
         }
     }
 
@@ -374,9 +382,17 @@ mod tests {
         assert!(!entry.fallback_active);
         assert_eq!(entry.top_features.len(), 2);
         assert_eq!(entry.top_features[0].0, "cleanup_poll_quota");
-        assert_eq!(entry.top_features[0].1, 5.0);
+        assert!(
+            (entry.top_features[0].1 - 5.0).abs() < f64::EPSILON,
+            "expected 5.0, got {}",
+            entry.top_features[0].1
+        );
         assert_eq!(entry.top_features[1].0, "cleanup_priority");
-        assert_eq!(entry.top_features[1].1, 2.0);
+        assert!(
+            (entry.top_features[1].1 - 2.0).abs() < f64::EPSILON,
+            "expected 2.0, got {}",
+            entry.top_features[1].1
+        );
     }
 
     #[test]
@@ -388,8 +404,16 @@ mod tests {
         let entry = &sink.entries()[0];
         assert_eq!(entry.component, "budget");
         assert_eq!(entry.action, "exhausted_poll");
-        assert_eq!(entry.top_features[0].1, 0.0); // polls_remaining
-        assert_eq!(entry.top_features[1].1, 500.0); // deadline_remaining_ms
+        assert!(
+            (entry.top_features[0].1).abs() < f64::EPSILON,
+            "expected 0.0, got {}",
+            entry.top_features[0].1
+        ); // polls_remaining
+        assert!(
+            (entry.top_features[1].1 - 500.0).abs() < f64::EPSILON,
+            "expected 500.0, got {}",
+            entry.top_features[1].1
+        ); // deadline_remaining_ms
     }
 
     #[test]
@@ -400,7 +424,10 @@ mod tests {
         let entry = &sink.entries()[0];
         assert_eq!(entry.action, "exhausted_time");
         // None deadline -> u64::MAX as f64
-        assert_eq!(entry.top_features[1].1, u64::MAX as f64);
+        #[allow(clippy::cast_precision_loss, clippy::float_cmp)]
+        {
+            assert_eq!(entry.top_features[1].1, u64::MAX as f64);
+        }
     }
 
     // ---- CollectorSink ----
@@ -470,8 +497,8 @@ mod tests {
 
         let entries = franken_evidence::export::read_jsonl(&path).unwrap();
         assert_eq!(entries.len(), 5);
-        for i in 0..5 {
-            assert_eq!(entries[i].component, format!("comp_{i}"));
+        for (i, entry) in entries.iter().enumerate().take(5) {
+            assert_eq!(entry.component, format!("comp_{i}"));
         }
     }
 

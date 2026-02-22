@@ -984,11 +984,12 @@ mod tests {
 
     #[test]
     fn header_name_eq_hash() {
+        use std::collections::HashSet;
+
         let a = HeaderName::from_static("x-foo");
         let b = HeaderName::from_string("X-Foo");
         assert_eq!(a, b);
 
-        use std::collections::HashSet;
         let mut set = HashSet::new();
         set.insert(a);
         assert!(set.contains(&b));

@@ -292,7 +292,11 @@ mod tests {
         assert_eq!(stats.hits, 0);
         assert_eq!(stats.misses, 0);
         assert_eq!(stats.evictions, 0);
-        assert_eq!(stats.hit_rate, 0.0);
+        assert!(
+            (stats.hit_rate).abs() < f64::EPSILON,
+            "expected 0.0, got {}",
+            stats.hit_rate
+        );
         let dbg = format!("{stats:?}");
         assert!(dbg.contains("CacheStats"), "{dbg}");
         let cloned = stats.clone();

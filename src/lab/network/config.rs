@@ -407,10 +407,26 @@ mod tests {
     #[test]
     fn network_conditions_ideal() {
         let c = NetworkConditions::ideal();
-        assert_eq!(c.packet_loss, 0.0);
-        assert_eq!(c.packet_corrupt, 0.0);
-        assert_eq!(c.packet_duplicate, 0.0);
-        assert_eq!(c.packet_reorder, 0.0);
+        assert!(
+            (c.packet_loss).abs() < f64::EPSILON,
+            "expected 0.0, got {}",
+            c.packet_loss
+        );
+        assert!(
+            (c.packet_corrupt).abs() < f64::EPSILON,
+            "expected 0.0, got {}",
+            c.packet_corrupt
+        );
+        assert!(
+            (c.packet_duplicate).abs() < f64::EPSILON,
+            "expected 0.0, got {}",
+            c.packet_duplicate
+        );
+        assert!(
+            (c.packet_reorder).abs() < f64::EPSILON,
+            "expected 0.0, got {}",
+            c.packet_reorder
+        );
         assert_eq!(c.max_in_flight, usize::MAX);
         assert!(c.bandwidth.is_none());
         assert!(c.jitter.is_none());
@@ -421,7 +437,11 @@ mod tests {
     fn network_conditions_local() {
         let c = NetworkConditions::local();
         assert!(matches!(c.latency, LatencyModel::Fixed(d) if d == Duration::from_millis(1)));
-        assert_eq!(c.packet_loss, 0.0);
+        assert!(
+            (c.packet_loss).abs() < f64::EPSILON,
+            "expected 0.0, got {}",
+            c.packet_loss
+        );
     }
 
     #[test]
@@ -516,9 +536,10 @@ mod tests {
         let uniform = JitterModel::Uniform {
             max: Duration::from_millis(5),
         };
+        let cloned = uniform.clone();
         let dbg = format!("{uniform:?}");
         assert!(dbg.contains("Uniform"), "{dbg}");
-        let _cloned = uniform;
+        assert!(format!("{cloned:?}").contains("Uniform"));
     }
 
     #[test]

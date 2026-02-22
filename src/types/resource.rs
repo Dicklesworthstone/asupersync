@@ -1067,7 +1067,11 @@ mod tests {
         let limits = ResourceLimits::default();
         let tracker = ResourceTracker::new(limits);
         // No usage, no limits → pressure = 0
-        assert_eq!(tracker.pressure(), 0.0);
+        assert!(
+            (tracker.pressure()).abs() < f64::EPSILON,
+            "expected 0.0, got {}",
+            tracker.pressure()
+        );
     }
 
     #[test]
@@ -1146,10 +1150,12 @@ mod tests {
             let t = tracker.lock();
             assert_eq!(t.usage().decoding_ops, 1);
             assert_eq!(t.usage().symbol_memory, 50);
+            drop(t);
         }
         drop(guard);
         let t = tracker.lock();
         assert_eq!(t.usage().decoding_ops, 0);
+        drop(t);
     }
 
     #[test]

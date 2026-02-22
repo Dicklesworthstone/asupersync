@@ -394,8 +394,8 @@ mod tests {
             let fut = async { 42 };
             let instrumented = fut.instrument(NoopSpan);
             // Can also use in_current_span
-            let _ = async { 1 }.in_current_span();
-            let _ = instrumented;
+            drop(async { 1 }.in_current_span());
+            drop(instrumented);
         }
     }
 }

@@ -3253,8 +3253,8 @@ macro_rules! assert_with_context {
 #[allow(unsafe_code)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -3894,9 +3894,11 @@ mod tests {
             vec!["no_leaks".to_string(), "quiescence".to_string()]
         );
         assert_eq!(manifest.failure_class, "assertion_failure");
-        assert!(manifest
-            .replay_command
-            .contains("cargo test helper_test -- --nocapture"));
+        assert!(
+            manifest
+                .replay_command
+                .contains("cargo test helper_test -- --nocapture")
+        );
         assert_eq!(
             manifest.artifact_paths,
             vec!["a.json".to_string(), "b.json".to_string()]
