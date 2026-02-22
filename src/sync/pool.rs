@@ -2793,6 +2793,40 @@ mod tests {
         crate::test_complete!("record_wait_time_accumulates_in_pool_stats");
     }
 
+    #[test]
+    fn acquire_timeout_reports_timeout_and_cleans_waiter_state() {
+        init_test("acquire_timeout_reports_timeout_and_cleans_waiter_state");
+
+        let pool = GenericPool::new(
+            simple_factory,
+            PoolConfig::with_max_size(1).acquire_timeout(Duration::from_millis(25)),
+        );
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+
+        // Hold the only slot so the next acquire must wait and hit timeout.
+        let held = futures_lite::future::block_on(pool.acquire(&cx)).expect("first acquire");
+
+        let timeout_start = std::time::Instant::now();
+        let result = futures_lite::future::block_on(pool.acquire(&cx));
+        let waited = timeout_start.elapsed();
+
+        assert!(
+            matches!(result, Err(PoolError::Timeout)),
+            "second acquire should timeout when pool remains exhausted"
+        );
+        assert!(
+            waited >= Duration::from_millis(10),
+            "timeout path should wait before failing; waited {:?}",
+            waited
+        );
+
+        // Waiter cleanup must run even on timeout.
+        assert_eq!(pool.stats().waiters, 0, "timeout should not leak waiters");
+
+        held.return_to_pool();
+        crate::test_complete!("acquire_timeout_reports_timeout_and_cleans_waiter_state");
+    }
+
     // ========================================================================
     // Health check tests (asupersync-cl94)
     // ========================================================================

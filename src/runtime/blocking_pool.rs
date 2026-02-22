@@ -647,7 +647,19 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
         }
     }) {
         Ok(handle) => {
-            inner.thread_handles.lock().push(handle);
+            let mut handles = inner.thread_handles.lock();
+            handles.push(handle);
+            
+            // Clean up finished thread handles to prevent unbounded memory growth
+            // during workload bursts where threads frequently spawn and retire.
+            let mut i = 0;
+            while i < handles.len() {
+                if handles[i].is_finished() {
+                    let _ = handles.swap_remove(i).join();
+                } else {
+                    i += 1;
+                }
+            }
         }
         Err(_) => {
             // Spawn failed — roll back the counter so active_threads
