@@ -578,7 +578,9 @@ pub struct RwLockWriteGuard<'a, T> {
 }
 
 unsafe impl<T: Send> Send for RwLockWriteGuard<'_, T> {}
-unsafe impl<T: Sync> Sync for RwLockWriteGuard<'_, T> {}
+// RwLockWriteGuard provides &mut T via DerefMut, so sharing the guard
+// across threads (Sync) requires T: Send + Sync — same as std.
+unsafe impl<T: Send + Sync> Sync for RwLockWriteGuard<'_, T> {}
 
 impl<T> Deref for RwLockWriteGuard<'_, T> {
     type Target = T;
