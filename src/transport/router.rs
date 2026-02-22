@@ -411,9 +411,10 @@ impl LoadBalancer {
 
         if matches!(self.strategy, LoadBalanceStrategy::Random)
             && n <= Self::RANDOM_FLOYD_SMALL_N_MAX
-            && let Some(selected) = self.select_n_random_all_healthy_small(endpoints, n)
         {
-            return selected;
+            if let Some(selected) = self.select_n_random_small_without_materializing(endpoints, n) {
+                return selected;
+            }
         }
 
         // Filter healthy endpoints first.
@@ -521,34 +522,50 @@ impl LoadBalancer {
         first_healthy
     }
 
-    /// Small-n all-healthy random selection using Floyd sampling.
+    /// Small-n random selection using Floyd sampling over healthy ranks.
     ///
-    /// Floyd's algorithm samples an exact `n`-subset without replacement from
-    /// `[0, population)`. We then apply a tiny Fisher-Yates permutation to keep
-    /// output ordering random while avoiding full-vector materialization.
-    fn select_n_random_all_healthy_small<'a>(
+    /// We sample healthy-rank indices without replacement (uniformly) and then
+    /// map those ranks back to endpoint references in a second pass.
+    ///
+    /// Returns `None` when concurrent endpoint-state changes make the sampled
+    /// rank mapping inconsistent, letting the caller fall back to the legacy
+    /// materialize-and-shuffle path.
+    fn select_n_random_small_without_materializing<'a>(
         &self,
         endpoints: &'a [Arc<Endpoint>],
         n: usize,
     ) -> Option<Vec<&'a Arc<Endpoint>>> {
-        if n == 0 || endpoints.len() < n {
+        if n == 0 {
+            return Some(Vec::new());
+        }
+        if endpoints.is_empty() {
             return None;
         }
 
-        if endpoints.iter().any(|endpoint| !endpoint.state().can_receive()) {
-            return None;
+        let mut healthy_count = 0usize;
+        for endpoint in endpoints {
+            if endpoint.state().can_receive() {
+                healthy_count += 1;
+            }
         }
-
-        let population = endpoints.len();
-        if n >= population {
-            return Some(endpoints.iter().collect());
+        if healthy_count == 0 {
+            return Some(Vec::new());
+        }
+        if healthy_count <= n {
+            let mut all_healthy = Vec::with_capacity(healthy_count);
+            for endpoint in endpoints {
+                if endpoint.state().can_receive() {
+                    all_healthy.push(endpoint);
+                }
+            }
+            return Some(all_healthy);
         }
 
         let mut seed = self.random_seed.fetch_add(n as u64, Ordering::Relaxed);
         let mut selected_indices = SmallVec::<[usize; Self::RANDOM_FLOYD_SMALL_N_MAX]>::new();
         selected_indices.reserve_exact(n);
 
-        for j in (population - n)..population {
+        for j in (healthy_count - n)..healthy_count {
             seed = Self::next_lcg(seed);
             let candidate = (seed as usize) % (j + 1);
             if selected_indices.contains(&candidate) {
@@ -564,12 +581,45 @@ impl LoadBalancer {
             selected_indices.swap(i, swap);
         }
 
-        Some(
-            selected_indices
-                .into_iter()
-                .map(|index| &endpoints[index])
-                .collect(),
-        )
+        let mut selected =
+            SmallVec::<[Option<&Arc<Endpoint>>; Self::RANDOM_FLOYD_SMALL_N_MAX]>::new();
+        selected.resize(n, None);
+
+        let mut rank_to_output_pos =
+            SmallVec::<[(usize, usize); Self::RANDOM_FLOYD_SMALL_N_MAX]>::with_capacity(n);
+        for (output_pos, &rank) in selected_indices.iter().enumerate() {
+            rank_to_output_pos.push((rank, output_pos));
+        }
+        rank_to_output_pos.sort_unstable_by_key(|&(rank, _)| rank);
+
+        let mut healthy_rank = 0usize;
+        let mut rank_cursor = 0usize;
+        let mut next_target_rank = rank_to_output_pos.first().map(|&(rank, _)| rank);
+
+        for endpoint in endpoints {
+            if !endpoint.state().can_receive() {
+                continue;
+            }
+            while next_target_rank == Some(healthy_rank) {
+                let output_pos = rank_to_output_pos[rank_cursor].1;
+                selected[output_pos] = Some(endpoint);
+                rank_cursor += 1;
+                if rank_cursor == n {
+                    break;
+                }
+                next_target_rank = Some(rank_to_output_pos[rank_cursor].0);
+            }
+            if rank_cursor == n {
+                break;
+            }
+            healthy_rank += 1;
+        }
+
+        if rank_cursor != n {
+            return None;
+        }
+
+        Some(selected.into_iter().flatten().collect())
     }
 }
 

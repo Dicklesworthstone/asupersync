@@ -490,7 +490,7 @@ impl TimerWheel {
     pub fn cancel(&mut self, handle: &TimerHandle) -> bool {
         match self.active.entry(handle.id) {
             Entry::Occupied(entry) if *entry.get() == handle.generation => {
-                entry.remove_entry();
+                entry.remove();
                 true
             }
             _ => false,

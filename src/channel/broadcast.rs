@@ -1140,18 +1140,21 @@ mod tests {
             delivered
         );
 
-        let inner = tx.channel.inner.lock();
+        let (total_sent, buffer_empty) = {
+            let inner = tx.channel.inner.lock();
+            (inner.total_sent, inner.buffer.is_empty())
+        };
         crate::assert_with_log!(
-            inner.total_sent == 0,
+            total_sent == 0,
             "total_sent unchanged after lock-contention drop race",
             0u64,
-            inner.total_sent
+            total_sent
         );
         crate::assert_with_log!(
-            inner.buffer.is_empty(),
+            buffer_empty,
             "buffer remains empty after lock-contention drop race",
             true,
-            inner.buffer.is_empty()
+            buffer_empty
         );
 
         crate::test_complete!(
