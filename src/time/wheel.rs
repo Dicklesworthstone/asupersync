@@ -51,6 +51,11 @@ const LEVEL_RESOLUTIONS_NS: [u64; LEVEL_COUNT] = [
     LEVEL0_RESOLUTION_NS * SLOTS_PER_LEVEL as u64 * SLOTS_PER_LEVEL as u64 * SLOTS_PER_LEVEL as u64,
 ];
 
+#[inline]
+fn duration_to_u64_nanos(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
 // =============================================================================
 // Configuration
 // =============================================================================
@@ -336,6 +341,8 @@ pub struct TimerWheel {
     active: HashMap<u64, u64>,
     config: TimerWheelConfig,
     coalescing: CoalescingConfig,
+    max_wheel_duration_ns: u64,
+    max_timer_duration_ns: u64,
 }
 
 impl TimerWheel {
@@ -360,6 +367,8 @@ impl TimerWheel {
     pub fn with_config(now: Time, config: TimerWheelConfig, coalescing: CoalescingConfig) -> Self {
         let now_nanos = now.as_nanos();
         let current_tick = now_nanos / LEVEL0_RESOLUTION_NS;
+        let max_wheel_duration_ns = duration_to_u64_nanos(config.max_wheel_duration);
+        let max_timer_duration_ns = duration_to_u64_nanos(config.max_timer_duration);
         let levels = std::array::from_fn(|idx| {
             let resolution_ns = LEVEL_RESOLUTIONS_NS[idx];
             let cursor = ((now_nanos / resolution_ns) % SLOTS_PER_LEVEL as u64) as usize;
@@ -376,6 +385,8 @@ impl TimerWheel {
             active: HashMap::with_capacity(64),
             config,
             coalescing,
+            max_wheel_duration_ns,
+            max_timer_duration_ns,
         }
     }
 
@@ -446,12 +457,7 @@ impl TimerWheel {
         let current = self.current_time();
         if deadline > current {
             let duration_ns = deadline.as_nanos().saturating_sub(current.as_nanos());
-            let max_ns = self
-                .config
-                .max_timer_duration
-                .as_nanos()
-                .min(u128::from(u64::MAX)) as u64;
-            if duration_ns > max_ns {
+            if duration_ns > self.max_timer_duration_ns {
                 return Err(TimerDurationExceeded {
                     duration: Duration::from_nanos(duration_ns),
                     max: self.config.max_timer_duration,
@@ -895,10 +901,7 @@ impl TimerWheel {
     ///
     /// Timers with deadlines beyond this range from the current time go to overflow.
     fn max_range_ns(&self) -> u64 {
-        self.config
-            .max_wheel_duration
-            .as_nanos()
-            .min(u128::from(u64::MAX)) as u64
+        self.max_wheel_duration_ns
     }
 
     /// Returns the physical wheel range based on level structure.
@@ -1208,6 +1211,22 @@ mod tests {
             err.max.as_secs()
         );
         crate::test_complete!("timer_beyond_max_duration_rejected");
+    }
+
+    #[test]
+    fn wheel_max_range_ns_tracks_configured_wheel_duration() {
+        init_test("wheel_max_range_ns_tracks_configured_wheel_duration");
+        let config = TimerWheelConfig::new().max_wheel_duration(Duration::from_millis(1234));
+        let wheel = TimerWheel::with_config(Time::ZERO, config, CoalescingConfig::default());
+
+        let expected = 1_234_000_000u64;
+        crate::assert_with_log!(
+            wheel.max_range_ns() == expected,
+            "max range follows configured duration",
+            expected,
+            wheel.max_range_ns()
+        );
+        crate::test_complete!("wheel_max_range_ns_tracks_configured_wheel_duration");
     }
 
     #[test]
