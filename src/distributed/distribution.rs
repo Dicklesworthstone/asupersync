@@ -181,28 +181,30 @@ impl SymbolDistributor {
         let mut in_flight: Vec<SendFuture<'_>> = Vec::with_capacity(parallelism);
         let mut symbols_sent_total = 0_u64;
 
-        let mut enqueue = |assignment: super::assignment::ReplicaAssignment| -> Option<SendFuture<'_>> {
-            let symbols_for_replica: Vec<AuthenticatedSymbol> = assignment
-                .symbol_indices
-                .iter()
-                .map(|&idx| {
-                    let sym = &encoded.symbols[idx];
-                    auth_context.sign_symbol(sym)
-                })
-                .collect();
+        let mut enqueue =
+            |assignment: super::assignment::ReplicaAssignment| -> Option<SendFuture<'_>> {
+                let symbols_for_replica: Vec<AuthenticatedSymbol> = assignment
+                    .symbol_indices
+                    .iter()
+                    .map(|&idx| {
+                        let sym = &encoded.symbols[idx];
+                        auth_context.sign_symbol(sym)
+                    })
+                    .collect();
 
-            if symbols_for_replica.is_empty() {
-                return None;
-            }
+                if symbols_for_replica.is_empty() {
+                    return None;
+                }
 
-            symbols_sent_total = symbols_sent_total.saturating_add(symbols_for_replica.len() as u64);
-            let replica_id = assignment.replica_id;
-            Some(Box::pin(async move {
-                transport
-                    .send_symbols(&replica_id, symbols_for_replica)
-                    .await
-            }))
-        };
+                symbols_sent_total =
+                    symbols_sent_total.saturating_add(symbols_for_replica.len() as u64);
+                let replica_id = assignment.replica_id;
+                Some(Box::pin(async move {
+                    transport
+                        .send_symbols(&replica_id, symbols_for_replica)
+                        .await
+                }))
+            };
 
         while in_flight.len() < parallelism {
             let Some(assignment) = assignment_iter.next() else {
@@ -518,10 +520,11 @@ mod tests {
         let auth_context = SecurityContext::for_testing(7);
         let transport = MockSuccessTransport;
 
-        let expected_symbols_sent: u64 = SymbolDistributor::compute_assignments(&encoded, &replicas)
-            .into_iter()
-            .map(|assignment| assignment.symbol_indices.len() as u64)
-            .sum();
+        let expected_symbols_sent: u64 =
+            SymbolDistributor::compute_assignments(&encoded, &replicas)
+                .into_iter()
+                .map(|assignment| assignment.symbol_indices.len() as u64)
+                .sum();
 
         let result = futures_lite::future::block_on(async {
             distributor
@@ -532,7 +535,10 @@ mod tests {
         assert!(result.quorum_achieved);
         assert_eq!(result.acks.len(), replicas.len());
         assert_eq!(distributor.metrics.distributions_total, 1);
-        assert_eq!(distributor.metrics.symbols_sent_total, expected_symbols_sent);
+        assert_eq!(
+            distributor.metrics.symbols_sent_total,
+            expected_symbols_sent
+        );
     }
 
     #[test]

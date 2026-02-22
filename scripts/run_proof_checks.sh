@@ -151,7 +151,7 @@ if command -v lake &>/dev/null; then
         bash -c "cd formal/lean && lake build"
 else
     echo "=== [skip] Lean proof build (lake not installed) ==="
-    echo "  Install elan/lean4 to enable: curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh"
+    echo "  Install elan/lean4 to enable: curl -sSf https://raw.githubusercontent.com/leanprover/elan/main/elan-init.sh | sh"
     echo
     RESULTS+=("{\"name\":\"Lean proof build\",\"category\":\"lean-proofs\",\"status\":\"skip\",\"elapsed_s\":0,\"log\":\"\"}")
 fi

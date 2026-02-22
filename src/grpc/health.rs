@@ -1,7 +1,7 @@
 //! gRPC Health Checking Protocol implementation.
 //!
 //! Implements the standard gRPC health checking protocol as defined in
-//! [grpc/grpc-proto](https://github.com/grpc/grpc-proto/blob/master/grpc/health/v1/health.proto).
+//! [grpc/grpc-proto](https://github.com/grpc/grpc-proto/blob/main/grpc/health/v1/health.proto).
 //!
 //! # Example
 //!
