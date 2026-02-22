@@ -551,14 +551,21 @@ impl TimerWheel {
         }
 
         for level in &self.levels {
-            if let Some(slot_idx) = level.next_occupied_circular() {
-                for entry in &level.slots[slot_idx] {
-                    if !self.is_live(entry) {
-                        continue;
+            for word_idx in 0..BITMAP_WORDS {
+                let mut word = level.occupied[word_idx];
+                while word != 0 {
+                    let bit_idx = word.trailing_zeros();
+                    let slot_idx = word_idx * 64 + bit_idx as usize;
+                    for entry in &level.slots[slot_idx] {
+                        if !self.is_live(entry) {
+                            continue;
+                        }
+                        min_deadline = Some(
+                            min_deadline
+                                .map_or(entry.deadline, |current| current.min(entry.deadline)),
+                        );
                     }
-                    min_deadline = Some(
-                        min_deadline.map_or(entry.deadline, |current| current.min(entry.deadline)),
-                    );
+                    word &= !(1u64 << bit_idx);
                 }
             }
         }

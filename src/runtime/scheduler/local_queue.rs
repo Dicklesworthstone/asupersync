@@ -320,7 +320,7 @@ impl Stealer {
             let mut remaining_attempts = stack.len();
             // Keep the common "few local tasks skipped" path allocation-free.
             let mut skipped_locals = SmallVec::<[TaskId; Self::SKIPPED_LOCALS_INLINE_CAP]>::new();
-            while remaining_attempts > 0 {
+            while remaining_attempts > 0 && skipped_locals.len() < Self::SKIPPED_LOCALS_INLINE_CAP {
                 remaining_attempts -= 1;
                 let Some((task_id, is_local)) = stack.steal_one_with_locality(arena) else {
                     break;
