@@ -283,7 +283,7 @@ enum DenseFactorCacheLookup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DenseFactorArtifact {
     dense_cols: Vec<usize>,
-    col_to_dense: Vec<usize>,
+    col_to_dense: DenseColIndexMap,
 }
 
 impl DenseFactorArtifact {
@@ -297,6 +297,12 @@ impl DenseFactorArtifact {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum DenseColIndexMap {
+    Direct(Vec<usize>),
+    SortedPairs(Vec<(usize, usize)>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct DenseFactorSignature {
     fingerprint: u64,
     unsolved: Vec<usize>,
@@ -307,7 +313,12 @@ struct DenseFactorSignature {
 impl DenseFactorSignature {
     fn from_equations(equations: &[Equation], dense_rows: &[usize], unsolved: &[usize]) -> Self {
         let mut row_offsets = Vec::with_capacity(dense_rows.len());
-        let mut row_terms_flat = Vec::new();
+        // Upper bound avoids growth reallocations in bursty decode signatures.
+        let row_terms_capacity = dense_rows
+            .iter()
+            .map(|&eq_idx| equations[eq_idx].terms.len())
+            .sum();
+        let mut row_terms_flat = Vec::with_capacity(row_terms_capacity);
         for &eq_idx in dense_rows {
             let mut unsolved_cursor = 0usize;
             for &(col, coef) in &equations[eq_idx].terms {
@@ -536,26 +547,58 @@ fn build_dense_core_rows(
 }
 
 const DENSE_COL_ABSENT: usize = usize::MAX;
+const DENSE_COL_DIRECT_MAP_RANGE_RATIO: usize = 8;
 
 #[inline]
-fn build_dense_col_index_map(unsolved: &[usize]) -> Vec<usize> {
+fn build_dense_col_index_map(unsolved: &[usize]) -> DenseColIndexMap {
     let Some(max_col) = unsolved.iter().copied().max() else {
-        return Vec::new();
+        return DenseColIndexMap::Direct(Vec::new());
     };
-    let mut col_to_dense = vec![DENSE_COL_ABSENT; max_col.saturating_add(1)];
-    for (dense_col, &col) in unsolved.iter().enumerate() {
-        col_to_dense[col] = dense_col;
+
+    let direct_map_max_col = unsolved
+        .len()
+        .saturating_mul(DENSE_COL_DIRECT_MAP_RANGE_RATIO);
+    if max_col <= direct_map_max_col {
+        let mut col_to_dense = vec![DENSE_COL_ABSENT; max_col.saturating_add(1)];
+        for (dense_col, &col) in unsolved.iter().enumerate() {
+            col_to_dense[col] = dense_col;
+        }
+        DenseColIndexMap::Direct(col_to_dense)
+    } else {
+        let mut pairs: Vec<(usize, usize)> = unsolved
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(dense_col, col)| (col, dense_col))
+            .collect();
+        pairs.sort_by_key(|(col, _)| *col);
+        DenseColIndexMap::SortedPairs(pairs)
     }
-    col_to_dense
 }
 
 #[inline]
-fn dense_col_index(col_to_dense: &[usize], col: usize) -> Option<usize> {
-    let dense_col = *col_to_dense.get(col)?;
+fn dense_col_index_from_direct(map: &[usize], col: usize) -> Option<usize> {
+    let dense_col = *map.get(col)?;
     if dense_col == DENSE_COL_ABSENT {
         return None;
     }
     Some(dense_col)
+}
+
+#[inline]
+fn dense_col_index_from_sorted_pairs(pairs: &[(usize, usize)], col: usize) -> Option<usize> {
+    let idx = pairs
+        .binary_search_by_key(&col, |(candidate_col, _)| *candidate_col)
+        .ok()?;
+    Some(pairs[idx].1)
+}
+
+#[inline]
+fn dense_col_index(col_to_dense: &DenseColIndexMap, col: usize) -> Option<usize> {
+    match col_to_dense {
+        DenseColIndexMap::Direct(map) => dense_col_index_from_direct(map, col),
+        DenseColIndexMap::SortedPairs(pairs) => dense_col_index_from_sorted_pairs(pairs, col),
+    }
 }
 
 fn sparse_first_dense_columns(
@@ -567,16 +610,39 @@ fn sparse_first_dense_columns(
         return unsolved.to_vec();
     }
 
-    let col_to_dense = build_dense_col_index_map(unsolved);
     let mut support = vec![0usize; unsolved.len()];
 
-    for &eq_idx in dense_rows {
-        for &(col, coef) in &equations[eq_idx].terms {
-            if coef.is_zero() {
-                continue;
+    // Hot-path optimization: runtime unsolved columns are deterministically
+    // sorted; use a two-pointer scan to avoid allocating an index map.
+    if unsolved.windows(2).all(|w| w[0] <= w[1]) {
+        for &eq_idx in dense_rows {
+            let mut unsolved_cursor = 0usize;
+            for &(col, coef) in &equations[eq_idx].terms {
+                if coef.is_zero() {
+                    continue;
+                }
+                while unsolved_cursor < unsolved.len() && unsolved[unsolved_cursor] < col {
+                    unsolved_cursor += 1;
+                }
+                if unsolved_cursor >= unsolved.len() {
+                    break;
+                }
+                if unsolved[unsolved_cursor] == col {
+                    support[unsolved_cursor] += 1;
+                }
             }
-            if let Some(dense_col) = dense_col_index(&col_to_dense, col) {
-                support[dense_col] += 1;
+        }
+    } else {
+        // Compatibility fallback for non-canonical caller input.
+        let col_to_dense = build_dense_col_index_map(unsolved);
+        for &eq_idx in dense_rows {
+            for &(col, coef) in &equations[eq_idx].terms {
+                if coef.is_zero() {
+                    continue;
+                }
+                if let Some(dense_col) = dense_col_index(&col_to_dense, col) {
+                    support[dense_col] += 1;
+                }
             }
         }
     }
@@ -2097,7 +2163,7 @@ fn first_mismatch_byte(expected: &[u8], actual: &[u8]) -> Option<usize> {
 fn rebuild_dense_matrix_from_equations(
     equations: &[Equation],
     dense_rows: &[usize],
-    col_to_dense: &[usize],
+    col_to_dense: &DenseColIndexMap,
     n_cols: usize,
     a: &mut [Gf256],
 ) {
@@ -2277,6 +2343,47 @@ mod tests {
 
         // supports: col 11 -> 1, col 2 -> 2, col 7 -> 3
         assert_eq!(ordered, vec![11, 2, 7]);
+    }
+
+    #[test]
+    fn sparse_first_dense_columns_sorted_fast_path_matches_expected() {
+        let equations = vec![
+            Equation::new(vec![7, 11], vec![Gf256::ONE, Gf256::ONE]),
+            Equation::new(vec![2, 7], vec![Gf256::ONE, Gf256::ONE]),
+            Equation::new(vec![7], vec![Gf256::ONE]),
+            Equation::new(vec![2], vec![Gf256::ONE]),
+        ];
+        let dense_rows = vec![0, 1, 2, 3];
+        let unsolved = vec![2, 7, 11];
+
+        let ordered = sparse_first_dense_columns(&equations, &dense_rows, &unsolved);
+
+        // supports: col 11 -> 1, col 2 -> 2, col 7 -> 3
+        assert_eq!(ordered, vec![11, 2, 7]);
+    }
+
+    #[test]
+    fn dense_col_index_map_uses_direct_representation_for_compact_range() {
+        let unsolved = vec![1, 2, 4];
+        let map = build_dense_col_index_map(&unsolved);
+
+        assert!(matches!(map, DenseColIndexMap::Direct(_)));
+        assert_eq!(dense_col_index(&map, 1), Some(0));
+        assert_eq!(dense_col_index(&map, 2), Some(1));
+        assert_eq!(dense_col_index(&map, 4), Some(2));
+        assert_eq!(dense_col_index(&map, 3), None);
+    }
+
+    #[test]
+    fn dense_col_index_map_uses_sorted_pairs_for_sparse_high_columns() {
+        let unsolved = vec![2, 7, 10_000];
+        let map = build_dense_col_index_map(&unsolved);
+
+        assert!(matches!(map, DenseColIndexMap::SortedPairs(_)));
+        assert_eq!(dense_col_index(&map, 2), Some(0));
+        assert_eq!(dense_col_index(&map, 7), Some(1));
+        assert_eq!(dense_col_index(&map, 10_000), Some(2));
+        assert_eq!(dense_col_index(&map, 9_999), None);
     }
 
     #[test]
