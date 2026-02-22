@@ -2816,12 +2816,17 @@ mod tests {
         );
         assert!(
             waited >= Duration::from_millis(10),
-            "timeout path should wait before failing; waited {:?}",
-            waited
+            "timeout path should wait before failing; waited {waited:?}"
         );
 
-        // Waiter cleanup must run even on timeout.
-        assert_eq!(pool.stats().waiters, 0, "timeout should not leak waiters");
+        // Waiter cleanup and wait-time accounting must run even on timeout.
+        let stats = pool.stats();
+        assert_eq!(stats.waiters, 0, "timeout should not leak waiters");
+        assert!(
+            stats.total_wait_time >= Duration::from_millis(10),
+            "timeout wait should be accounted in pool stats; got {got:?}",
+            got = stats.total_wait_time
+        );
 
         held.return_to_pool();
         crate::test_complete!("acquire_timeout_reports_timeout_and_cleans_waiter_state");

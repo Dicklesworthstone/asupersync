@@ -1823,7 +1823,15 @@ impl ThreeLaneWorker {
 
         trace!(task_id = ?task_id, worker_id = self.id, "executing task");
 
-        let (mut stored, wake_state, priority, task_cx, cx_inner, cached_waker, cached_cancel_waker) = {
+        let (
+            mut stored,
+            wake_state,
+            priority,
+            task_cx,
+            cx_inner,
+            cached_waker,
+            cached_cancel_waker,
+        ) = {
             // Fast path: single lock for global tasks (remove stored future + read record).
             let merged = self.with_task_table(|tt| {
                 let global_stored = tt.remove_stored_future(task_id)?;
@@ -1895,8 +1903,14 @@ impl ThreeLaneWorker {
                         cached_cancel_waker,
                     ))
                 });
-                let Some((wake_state, priority, task_cx, cx_inner, cached_waker, cached_cancel_waker)) =
-                    record_info
+                let Some((
+                    wake_state,
+                    priority,
+                    task_cx,
+                    cx_inner,
+                    cached_waker,
+                    cached_cancel_waker,
+                )) = record_info
                 else {
                     return;
                 };

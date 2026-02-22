@@ -337,14 +337,14 @@ impl WheelLevel {
             while word != 0 {
                 let bit_idx = word.trailing_zeros();
                 let slot = word_idx * 64 + bit_idx as usize;
-                
+
                 let dist = if slot >= self.cursor {
                     slot - self.cursor
                 } else {
                     slot + SLOTS_PER_LEVEL - self.cursor
                 };
 
-                if min_dist.map_or(true, |min| dist < min) {
+                if min_dist.is_none_or(|min| dist < min) {
                     min_dist = Some(dist);
                     best_slot = Some(slot);
                 }
@@ -557,8 +557,7 @@ impl TimerWheel {
                         continue;
                     }
                     min_deadline = Some(
-                        min_deadline
-                            .map_or(entry.deadline, |current| current.min(entry.deadline)),
+                        min_deadline.map_or(entry.deadline, |current| current.min(entry.deadline)),
                     );
                 }
             }
@@ -1228,8 +1227,8 @@ mod tests {
 
         let jump_nanos = jump.as_nanos();
         for level in &wheel.levels {
-            let expected_cursor = ((jump_nanos / level.resolution_ns) % SLOTS_PER_LEVEL as u64)
-                as usize;
+            let expected_cursor =
+                ((jump_nanos / level.resolution_ns) % SLOTS_PER_LEVEL as u64) as usize;
             crate::assert_with_log!(
                 level.cursor == expected_cursor,
                 "cursor realigned to jumped time",
@@ -1245,13 +1244,29 @@ mod tests {
         init_test("cancel_last_timer_purges_stale_storage");
         let mut wheel = TimerWheel::new();
 
-        let h1 = wheel.register(Time::from_millis(10), counter_waker(Arc::new(AtomicU64::new(0))));
-        let h2 = wheel.register(Time::from_millis(20), counter_waker(Arc::new(AtomicU64::new(0))));
+        let h1 = wheel.register(
+            Time::from_millis(10),
+            counter_waker(Arc::new(AtomicU64::new(0))),
+        );
+        let h2 = wheel.register(
+            Time::from_millis(20),
+            counter_waker(Arc::new(AtomicU64::new(0))),
+        );
 
         crate::assert_with_log!(wheel.cancel(&h1), "first cancel succeeds", true, true);
         crate::assert_with_log!(wheel.cancel(&h2), "second cancel succeeds", true, true);
-        crate::assert_with_log!(wheel.is_empty(), "wheel has no active timers", true, wheel.len());
-        crate::assert_with_log!(wheel.ready.is_empty(), "ready queue purged", true, wheel.ready.len());
+        crate::assert_with_log!(
+            wheel.is_empty(),
+            "wheel has no active timers",
+            true,
+            wheel.len()
+        );
+        crate::assert_with_log!(
+            wheel.ready.is_empty(),
+            "ready queue purged",
+            true,
+            wheel.ready.len()
+        );
         crate::assert_with_log!(
             wheel.overflow.is_empty(),
             "overflow queue purged",

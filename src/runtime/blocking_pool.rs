@@ -649,7 +649,7 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
         Ok(handle) => {
             let mut handles = inner.thread_handles.lock();
             handles.push(handle);
-            
+
             // Clean up finished thread handles to prevent unbounded memory growth
             // during workload bursts where threads frequently spawn and retire.
             let mut i = 0;
@@ -660,6 +660,7 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
                     i += 1;
                 }
             }
+            drop(handles);
         }
         Err(_) => {
             // Spawn failed — roll back the counter so active_threads
@@ -713,10 +714,12 @@ fn blocking_worker_loop(inner: &BlockingPoolInner) -> bool {
     loop {
         // Try to get work from the queue
         if let Some(task) = inner.queue.pop() {
+            inner.busy_threads.fetch_add(1, Ordering::Relaxed);
             inner.pending_count.fetch_sub(1, Ordering::Relaxed);
 
             // Check if task was cancelled before execution
             if task.cancelled.load(Ordering::Acquire) {
+                inner.busy_threads.fetch_sub(1, Ordering::Relaxed);
                 task.completion.signal_done();
                 continue;
             }
@@ -726,7 +729,6 @@ fn blocking_worker_loop(inner: &BlockingPoolInner) -> bool {
             // which would cause waiters to hang indefinitely and the
             // worker thread to die (losing on_thread_stop + active_threads
             // decrement).
-            inner.busy_threads.fetch_add(1, Ordering::Relaxed);
             let _result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task.work));
             inner.busy_threads.fetch_sub(1, Ordering::Relaxed);
 
@@ -989,7 +991,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "deadlocks: barrier(4) with 3 pool tasks + main thread hangs under current pool impl"]
     fn test_worker_idle_timeout_excess_threads_exit() {
         let options = BlockingPoolOptions {
             idle_timeout: Duration::from_millis(50),
