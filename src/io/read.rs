@@ -264,6 +264,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pin_project::pin_project;
+    use std::marker::PhantomPinned;
     use std::sync::Arc;
     use std::task::{Context, Wake, Waker};
 
@@ -356,5 +358,49 @@ mod tests {
         crate::assert_with_log!(filled == b"A", "filled", b"A", filled);
 
         crate::test_complete!("chain_does_not_switch_on_full_buffer");
+    }
+
+    #[pin_project]
+    struct PinnedReader<R> {
+        #[pin]
+        inner: R,
+        _pin: PhantomPinned,
+    }
+
+    impl<R> AsyncRead for PinnedReader<R>
+    where
+        R: AsyncRead,
+    {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            self.project().inner.poll_read(cx, buf)
+        }
+    }
+
+    #[test]
+    fn pin_wrapper_read_supports_non_unpin_inner() {
+        init_test("pin_wrapper_read_supports_non_unpin_inner");
+
+        let inner: &[u8] = b"ok";
+        let mut reader = Box::pin(PinnedReader {
+            inner,
+            _pin: PhantomPinned,
+        });
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut buf = [0u8; 2];
+        let mut read_buf = ReadBuf::new(&mut buf);
+
+        let poll = Pin::new(&mut reader).poll_read(&mut cx, &mut read_buf);
+        let ready = matches!(poll, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready, "poll ready", true, ready);
+        let filled = read_buf.filled();
+        crate::assert_with_log!(filled == b"ok", "filled", b"ok", filled);
+
+        crate::test_complete!("pin_wrapper_read_supports_non_unpin_inner");
     }
 }

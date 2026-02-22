@@ -257,6 +257,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pin_project::pin_project;
+    use std::marker::PhantomPinned;
     use std::sync::Arc;
     use std::task::{Context, Wake, Waker};
 
@@ -348,5 +350,58 @@ mod tests {
         crate::assert_with_log!(ready, "write 5", true, ready);
         crate::assert_with_log!(*output == b"boxed", "output", b"boxed", *output);
         crate::test_complete!("write_via_box");
+    }
+
+    #[pin_project]
+    struct PinnedWriter<W> {
+        #[pin]
+        inner: W,
+        _pin: PhantomPinned,
+    }
+
+    impl<W> AsyncWrite for PinnedWriter<W>
+    where
+        W: AsyncWrite,
+    {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.project().inner.poll_write(cx, buf)
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.project().inner.poll_flush(cx)
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.project().inner.poll_shutdown(cx)
+        }
+    }
+
+    #[test]
+    fn pin_wrapper_write_supports_non_unpin_inner() {
+        init_test("pin_wrapper_write_supports_non_unpin_inner");
+
+        let mut writer = Box::pin(PinnedWriter {
+            inner: Vec::<u8>::new(),
+            _pin: PhantomPinned,
+        });
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut writer).poll_write(&mut cx, b"ok");
+        let ready = matches!(poll, Poll::Ready(Ok(2)));
+        crate::assert_with_log!(ready, "write 2", true, ready);
+        crate::assert_with_log!(
+            writer.as_ref().get_ref().inner == b"ok",
+            "inner output",
+            b"ok",
+            writer.as_ref().get_ref().inner
+        );
+
+        crate::test_complete!("pin_wrapper_write_supports_non_unpin_inner");
     }
 }
