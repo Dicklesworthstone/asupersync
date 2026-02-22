@@ -584,6 +584,305 @@ pub fn qpack_static_plan_for_response(head: &H3ResponseHead) -> Vec<QpackFieldPl
     out
 }
 
+/// Encode a wire-level QPACK field section from a static/literal plan.
+///
+/// The current implementation emits a static-only field section prefix
+/// (`required_insert_count=0`, `base=0`) and supports:
+/// - Indexed field lines (static table)
+/// - Literal field lines with literal names (non-Huffman strings)
+pub fn qpack_encode_field_section(plan: &[QpackFieldPlan]) -> Result<Vec<u8>, H3NativeError> {
+    let mut out = Vec::new();
+    // Field section prefix: Required Insert Count = 0, Delta Base = 0.
+    qpack_encode_prefixed_int(&mut out, 0, 8, 0)?;
+    qpack_encode_prefixed_int(&mut out, 0, 7, 0)?;
+
+    for field in plan {
+        match field {
+            QpackFieldPlan::StaticIndex(index) => {
+                // Indexed field line: 1 T Index(6+), T=1 for static table.
+                qpack_encode_prefixed_int(&mut out, 0b1100_0000, 6, *index)?;
+            }
+            QpackFieldPlan::Literal { name, value } => {
+                // Literal field line with literal name: 001 N H NameLen(3+)
+                // N=0, H=0 (non-Huffman)
+                qpack_encode_string(&mut out, 0b0010_0000, 3, name)?;
+                // Value string literal: H=0 + ValueLen(7+)
+                qpack_encode_string(&mut out, 0, 7, value)?;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Decode a wire-level QPACK field section into static/literal planning items.
+///
+/// In `StaticOnly` mode, all dynamic references are rejected with
+/// `H3NativeError::QpackPolicy`.
+pub fn qpack_decode_field_section(
+    input: &[u8],
+    mode: H3QpackMode,
+) -> Result<Vec<QpackFieldPlan>, H3NativeError> {
+    let mut pos = 0usize;
+
+    // Field section prefix part 1: Required Insert Count (8-bit prefix int).
+    let first = *input.get(pos).ok_or(H3NativeError::UnexpectedEof)?;
+    pos += 1;
+    let (required_insert_count, ric_extra) = qpack_decode_prefixed_int(first, 8, &input[pos..])?;
+    pos += ric_extra;
+
+    // Field section prefix part 2: S + Delta Base (7-bit prefix int).
+    let second = *input.get(pos).ok_or(H3NativeError::UnexpectedEof)?;
+    pos += 1;
+    let sign = (second & 0x80) != 0;
+    let (delta_base, db_extra) = qpack_decode_prefixed_int(second, 7, &input[pos..])?;
+    pos += db_extra;
+
+    if mode == H3QpackMode::StaticOnly {
+        if required_insert_count != 0 {
+            return Err(H3NativeError::QpackPolicy(
+                "required insert count must be zero in static-only mode",
+            ));
+        }
+        if sign || delta_base != 0 {
+            return Err(H3NativeError::QpackPolicy(
+                "base must be zero in static-only mode",
+            ));
+        }
+    }
+
+    let mut out = Vec::new();
+    while pos < input.len() {
+        let b = input[pos];
+
+        if (b & 0x80) != 0 {
+            // Indexed field line: 1 T Index(6+)
+            let is_static = (b & 0x40) != 0;
+            let (index, extra) = qpack_decode_prefixed_int(b, 6, &input[pos + 1..])?;
+            pos += 1 + extra;
+            if !is_static {
+                return Err(H3NativeError::QpackPolicy(
+                    "dynamic qpack index references require dynamic table state",
+                ));
+            }
+            out.push(QpackFieldPlan::StaticIndex(index));
+            continue;
+        }
+
+        if (b & 0x40) != 0 {
+            // Literal field line with name reference: 01 N T NameIndex(4+)
+            let is_static = (b & 0x10) != 0;
+            let (name_index, extra) = qpack_decode_prefixed_int(b, 4, &input[pos + 1..])?;
+            pos += 1 + extra;
+            if !is_static {
+                return Err(H3NativeError::QpackPolicy(
+                    "dynamic qpack name references require dynamic table state",
+                ));
+            }
+            let name = qpack_static_name(name_index)
+                .ok_or(H3NativeError::InvalidFrame("unknown static qpack name index"))?;
+            let value_first = *input.get(pos).ok_or(H3NativeError::UnexpectedEof)?;
+            let (value, value_extra) = qpack_decode_string(value_first, 7, &input[pos + 1..])?;
+            pos += 1 + value_extra;
+            out.push(QpackFieldPlan::Literal {
+                name: name.to_string(),
+                value,
+            });
+            continue;
+        }
+
+        if (b & 0x20) != 0 {
+            // Literal field line with literal name: 001 N H NameLen(3+)
+            let (name, name_extra) = qpack_decode_string(b, 3, &input[pos + 1..])?;
+            pos += 1 + name_extra;
+
+            let value_first = *input.get(pos).ok_or(H3NativeError::UnexpectedEof)?;
+            let (value, value_extra) = qpack_decode_string(value_first, 7, &input[pos + 1..])?;
+            pos += 1 + value_extra;
+
+            out.push(QpackFieldPlan::Literal { name, value });
+            continue;
+        }
+
+        // Remaining line representations are post-base / dynamic variants:
+        // 0001.... indexed post-base, 0000.... literal post-base name ref.
+        return Err(H3NativeError::QpackPolicy(
+            "post-base/dynamic qpack line representations require dynamic table state",
+        ));
+    }
+
+    Ok(out)
+}
+
+/// Encode a validated request head into a wire-level QPACK field section.
+pub fn qpack_encode_request_field_section(
+    head: &H3RequestHead,
+) -> Result<Vec<u8>, H3NativeError> {
+    let plan = qpack_static_plan_for_request(head);
+    qpack_encode_field_section(&plan)
+}
+
+/// Encode a validated response head into a wire-level QPACK field section.
+pub fn qpack_encode_response_field_section(
+    head: &H3ResponseHead,
+) -> Result<Vec<u8>, H3NativeError> {
+    let plan = qpack_static_plan_for_response(head);
+    qpack_encode_field_section(&plan)
+}
+
+/// Expand a QPACK plan into concrete `(name, value)` header fields.
+///
+/// Static-table references are resolved using the subset needed by the native
+/// H3 mapping. Unknown static indices are rejected.
+pub fn qpack_plan_to_header_fields(
+    plan: &[QpackFieldPlan],
+) -> Result<Vec<(String, String)>, H3NativeError> {
+    let mut out = Vec::with_capacity(plan.len());
+    for field in plan {
+        match field {
+            QpackFieldPlan::StaticIndex(index) => {
+                let (name, value) = qpack_static_entry(*index)
+                    .ok_or(H3NativeError::InvalidFrame("unknown static qpack index"))?;
+                out.push((name.to_string(), value.to_string()));
+            }
+            QpackFieldPlan::Literal { name, value } => {
+                out.push((name.clone(), value.clone()));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn qpack_encode_prefixed_int(
+    out: &mut Vec<u8>,
+    prefix_bits: u8,
+    prefix_len: u8,
+    mut value: u64,
+) -> Result<(), H3NativeError> {
+    if !(1..=8).contains(&prefix_len) {
+        return Err(H3NativeError::InvalidFrame("invalid qpack integer prefix length"));
+    }
+    let max_in_prefix = (1u64 << prefix_len) - 1;
+    if value < max_in_prefix {
+        out.push(prefix_bits | (value as u8));
+        return Ok(());
+    }
+    out.push(prefix_bits | (max_in_prefix as u8));
+    value -= max_in_prefix;
+    while value >= 128 {
+        out.push(((value as u8) & 0x7F) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+    Ok(())
+}
+
+fn qpack_decode_prefixed_int(
+    first: u8,
+    prefix_len: u8,
+    input: &[u8],
+) -> Result<(u64, usize), H3NativeError> {
+    if !(1..=8).contains(&prefix_len) {
+        return Err(H3NativeError::InvalidFrame("invalid qpack integer prefix length"));
+    }
+    let mask = ((1u16 << prefix_len) - 1) as u8;
+    let mut value = u64::from(first & mask);
+    let max_in_prefix = u64::from(mask);
+    if value < max_in_prefix {
+        return Ok((value, 0));
+    }
+
+    let mut shift = 0u32;
+    let mut consumed = 0usize;
+    loop {
+        let byte = *input.get(consumed).ok_or(H3NativeError::UnexpectedEof)?;
+        consumed += 1;
+        let part = u64::from(byte & 0x7F);
+        let shifted = part
+            .checked_shl(shift)
+            .ok_or(H3NativeError::InvalidFrame("qpack integer overflow"))?;
+        value = value
+            .checked_add(shifted)
+            .ok_or(H3NativeError::InvalidFrame("qpack integer overflow"))?;
+        if (byte & 0x80) == 0 {
+            return Ok((value, consumed));
+        }
+        shift = shift.saturating_add(7);
+        if shift >= 64 {
+            return Err(H3NativeError::InvalidFrame("qpack integer overflow"));
+        }
+    }
+}
+
+fn qpack_encode_string(
+    out: &mut Vec<u8>,
+    prefix_bits: u8,
+    prefix_len: u8,
+    value: &str,
+) -> Result<(), H3NativeError> {
+    let bytes = value.as_bytes();
+    qpack_encode_prefixed_int(out, prefix_bits, prefix_len, bytes.len() as u64)?;
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn qpack_decode_string(
+    first: u8,
+    prefix_len: u8,
+    input: &[u8],
+) -> Result<(String, usize), H3NativeError> {
+    let huffman_bit = 1u8 << prefix_len;
+    if (first & huffman_bit) != 0 {
+        return Err(H3NativeError::InvalidFrame(
+            "qpack huffman strings are not supported in native static mode",
+        ));
+    }
+    let (len, extra) = qpack_decode_prefixed_int(first, prefix_len, input)?;
+    let len = len as usize;
+    if input.len().saturating_sub(extra) < len {
+        return Err(H3NativeError::UnexpectedEof);
+    }
+    let bytes = &input[extra..extra + len];
+    let value = std::str::from_utf8(bytes)
+        .map_err(|_| H3NativeError::InvalidFrame("qpack string is not valid utf-8"))?
+        .to_string();
+    Ok((value, extra + len))
+}
+
+fn qpack_static_name(index: u64) -> Option<&'static str> {
+    qpack_static_entry(index).map(|(name, _)| name)
+}
+
+fn qpack_static_entry(index: u64) -> Option<(&'static str, &'static str)> {
+    match index {
+        0 => Some((":authority", "")),
+        1 => Some((":path", "/")),
+        15 => Some((":method", "CONNECT")),
+        16 => Some((":method", "DELETE")),
+        17 => Some((":method", "GET")),
+        18 => Some((":method", "HEAD")),
+        19 => Some((":method", "OPTIONS")),
+        20 => Some((":method", "POST")),
+        21 => Some((":method", "PUT")),
+        22 => Some((":scheme", "http")),
+        23 => Some((":scheme", "https")),
+        24 => Some((":status", "103")),
+        25 => Some((":status", "200")),
+        26 => Some((":status", "304")),
+        27 => Some((":status", "404")),
+        28 => Some((":status", "503")),
+        63 => Some((":status", "100")),
+        64 => Some((":status", "204")),
+        65 => Some((":status", "206")),
+        66 => Some((":status", "302")),
+        67 => Some((":status", "400")),
+        68 => Some((":status", "403")),
+        69 => Some((":status", "421")),
+        70 => Some((":status", "425")),
+        71 => Some((":status", "500")),
+        _ => None,
+    }
+}
+
 fn qpack_static_method_index(method: &str) -> Option<u64> {
     match method {
         "CONNECT" => Some(15),
