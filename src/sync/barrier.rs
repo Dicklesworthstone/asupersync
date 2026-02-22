@@ -112,11 +112,17 @@ pub struct BarrierWaitFuture<'a> {
 impl Future for BarrierWaitFuture<'_> {
     type Output = Result<BarrierWaitResult, BarrierWaitError>;
 
+    #[allow(clippy::too_many_lines)]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // 1. Check cancellation first.
         if let Err(_e) = self.cx.checkpoint() {
             // If we were waiting, we need to unregister.
-            if let WaitState::Waiting { generation, id, slot } = self.state {
+            if let WaitState::Waiting {
+                generation,
+                id,
+                slot,
+            } = self.state
+            {
                 let mut state = self.barrier.state.lock();
 
                 // Only decrement if the generation hasn't changed (barrier hasn't tripped).
@@ -175,11 +181,19 @@ impl Future for BarrierWaitFuture<'_> {
                     let slot = state.waiters.len();
                     state.waiters.push((id, cx.waker().clone()));
                     drop(state);
-                    self.state = WaitState::Waiting { generation, id, slot };
+                    self.state = WaitState::Waiting {
+                        generation,
+                        id,
+                        slot,
+                    };
                     Poll::Pending
                 }
             }
-            WaitState::Waiting { generation, id, slot } => {
+            WaitState::Waiting {
+                generation,
+                id,
+                slot,
+            } => {
                 if state.generation == generation {
                     // Still waiting. Update waker if changed.
                     // O(1) fast path: use the remembered slot index.
@@ -233,7 +247,12 @@ impl Future for BarrierWaitFuture<'_> {
 
 impl Drop for BarrierWaitFuture<'_> {
     fn drop(&mut self) {
-        if let WaitState::Waiting { generation, id, slot } = self.state {
+        if let WaitState::Waiting {
+            generation,
+            id,
+            slot,
+        } = self.state
+        {
             let mut state = self.barrier.state.lock();
 
             // Only clean up if the generation hasn't changed (barrier hasn't tripped).

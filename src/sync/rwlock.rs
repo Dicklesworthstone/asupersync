@@ -56,6 +56,8 @@
 //! write.push(4);
 //! ```
 
+#![allow(unsafe_code)]
+
 use parking_lot::Mutex as ParkingMutex;
 use smallvec::SmallVec;
 use std::cell::UnsafeCell;
@@ -63,8 +65,8 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use crate::cx::Cx;

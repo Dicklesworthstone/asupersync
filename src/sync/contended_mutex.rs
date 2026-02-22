@@ -123,12 +123,13 @@ mod inner {
         /// Acquires the mutex, tracking contention metrics.
         pub fn lock(&self) -> LockResult<ContendedMutexGuard<'_, T>> {
             let start = Instant::now();
-            let contended = matches!(
-                self.inner.try_lock(),
-                Err(std::sync::TryLockError::WouldBlock)
-            );
 
-            let result = self.inner.lock();
+            let (result, contended) = match self.inner.try_lock() {
+                Ok(guard) => (Ok(guard), false),
+                Err(std::sync::TryLockError::Poisoned(poison)) => (Err(poison), false),
+                Err(std::sync::TryLockError::WouldBlock) => (self.inner.lock(), true),
+            };
+
             let wait_ns = start.elapsed().as_nanos() as u64;
 
             self.metrics.acquisitions.fetch_add(1, Ordering::Relaxed);

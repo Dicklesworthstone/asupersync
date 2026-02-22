@@ -29,8 +29,8 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use crate::cx::Cx;
@@ -232,7 +232,7 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
         if !state.locked {
             // Acquire lock
             state.locked = true;
-            
+
             // Remove ourselves from the queue if we were still in it,
             // to prevent our stale record from eating future wakeups.
             if let Some(id) = self.waiter_id {

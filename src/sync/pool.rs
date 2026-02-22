@@ -805,18 +805,23 @@ where
         }
 
         let total_including_creating = state.active + state.idle.len() + state.creating;
-        let available = state.idle.len() + self.pool.config.max_size.saturating_sub(total_including_creating);
+        let available = state.idle.len()
+            + self
+                .pool
+                .config
+                .max_size
+                .saturating_sub(total_including_creating);
 
-        let position = match *self.waiter_id {
-            Some(id) => state.waiters.iter().position(|w| w.id == id),
-            None => {
+        let position = self.waiter_id.map_or_else(
+            || {
                 if state.waiters.is_empty() {
                     Some(0)
                 } else {
                     Some(state.waiters.len())
                 }
-            }
-        };
+            },
+            |id| state.waiters.iter().position(|w| w.id == id),
+        );
 
         if let Some(pos) = position {
             if pos < available {
@@ -1134,7 +1139,7 @@ where
             let mut state = self.state.lock();
             state.active = state.active.saturating_sub(1);
             state.total_acquisitions = state.total_acquisitions.saturating_sub(1);
-            
+
             let total = state.active + state.idle.len() + state.creating;
             let available = state.idle.len() + self.config.max_size.saturating_sub(total);
             if available > 0 && available - 1 < state.waiters.len() {
@@ -1184,6 +1189,7 @@ where
                         });
                         wake_count += 1;
                     }
+                    drop(state);
                 }
                 PoolReturn::Discard { hold_duration } => {
                     // Record metrics for the discard (destroyed as unhealthy)
@@ -1195,12 +1201,13 @@ where
 
                     let mut state = self.state.lock();
                     state.active = state.active.saturating_sub(1);
+                    drop(state);
                     wake_count += 1;
                 }
             }
         }
         drop(rx);
-        
+
         if wake_count > 0 {
             let state = self.state.lock();
             let total = state.active + state.idle.len() + state.creating;
@@ -1210,7 +1217,7 @@ where
                 waiters_to_wake.push(w.waker.clone());
             }
         }
-        
+
         for waker in waiters_to_wake {
             waker.wake();
         }
@@ -1226,8 +1233,6 @@ where
         let mut idle_timeout_evictions = 0u64;
         #[cfg(feature = "metrics")]
         let mut max_lifetime_evictions = 0u64;
-
-        let before_len = state.idle.len();
 
         state.idle.retain(|idle| {
             let idle_ok = now.duration_since(idle.idle_since) < self.config.idle_timeout;
@@ -1245,8 +1250,6 @@ where
             idle_ok && lifetime_ok
         });
 
-        let evictions = before_len - state.idle.len();
-        
         // Evictions don't increase `available` window, so we don't need to wake anyone.
         // The slot is just converted from idle to can_create, so the currently
         // authorized task will just create instead of reusing.
@@ -1331,7 +1334,7 @@ where
                 created_at: Instant::now(),
             });
             state.total_created += 1;
-            
+
             let total = state.active + state.idle.len() + state.creating;
             let available = state.idle.len() + self.config.max_size.saturating_sub(total);
             if available > 0 && available - 1 < state.waiters.len() {
@@ -1417,13 +1420,12 @@ where
     type Error = PoolError;
 
     #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
+    #[allow(clippy::too_many_lines)]
     fn acquire<'a>(
         &'a self,
         cx: &'a Cx,
     ) -> PoolFuture<'a, Result<PooledResource<Self::Resource>, Self::Error>> {
         Box::pin(async move {
-            let acquire_start = Instant::now();
-
             struct WaiterCleanup<'a, R, F>
             where
                 R: Send + 'static,
@@ -1440,28 +1442,34 @@ where
             {
                 fn drop(&mut self) {
                     if let Some(id) = self.waiter_id {
-                        let waker = {
-                            let mut state = self.pool.state.lock();
-                            let pos = state.waiters.iter().position(|w| w.id == id);
-                            state.waiters.retain(|w| w.id != id);
+                        let mut state = self.pool.state.lock();
+                        let pos = state.waiters.iter().position(|w| w.id == id);
+                        state.waiters.retain(|w| w.id != id);
 
-                            if !state.closed {
-                                let total_including_creating = state.active + state.idle.len() + state.creating;
-                                let available = state.idle.len() + self.pool.config.max_size.saturating_sub(total_including_creating);
-                                
-                                if let Some(p) = pos {
-                                    if p < available && available > 0 && available - 1 < state.waiters.len() {
-                                        Some(state.waiters[available - 1].waker.clone())
-                                    } else {
-                                        None
-                                    }
+                        let waker = if state.closed {
+                            None
+                        } else {
+                            let total_including_creating =
+                                state.active + state.idle.len() + state.creating;
+                            let available = state.idle.len()
+                                + self
+                                    .pool
+                                    .config
+                                    .max_size
+                                    .saturating_sub(total_including_creating);
+
+                            pos.and_then(|p| {
+                                if p < available
+                                    && available > 0
+                                    && available - 1 < state.waiters.len()
+                                {
+                                    Some(state.waiters[available - 1].waker.clone())
                                 } else {
                                     None
                                 }
-                            } else {
-                                None
-                            }
+                            })
                         };
+                        drop(state);
 
                         if let Some(w) = waker {
                             w.wake();
@@ -1471,6 +1479,11 @@ where
                 }
             }
 
+            let get_now = || {
+                cx.timer_driver()
+                    .map_or_else(crate::time::wall_now, |d| d.now())
+            };
+            let acquire_start = get_now();
             let mut cleanup = WaiterCleanup {
                 pool: self,
                 waiter_id: None,
@@ -1499,7 +1512,8 @@ where
                         self.return_wakers.lock().retain(|(wid, _)| *wid != id);
                     }
 
-                    let acquire_duration = acquire_start.elapsed();
+                    let acquire_duration =
+                        Duration::from_nanos(get_now().duration_since(acquire_start));
 
                     // Record metrics
                     #[cfg(feature = "metrics")]
@@ -1527,7 +1541,8 @@ where
 
                     let resource = self.create_resource().await?;
                     create_slot.commit();
-                    let acquire_duration = acquire_start.elapsed();
+                    let acquire_duration =
+                        Duration::from_nanos(get_now().duration_since(acquire_start));
 
                     // Record metrics for create and acquire
                     #[cfg(feature = "metrics")]
@@ -1542,7 +1557,8 @@ where
                 }
 
                 // Check for timeout
-                let elapsed = acquire_start.elapsed();
+                let now = get_now();
+                let elapsed = Duration::from_nanos(now.duration_since(acquire_start));
                 if elapsed >= self.config.acquire_timeout {
                     #[cfg(feature = "metrics")]
                     if let Some(ref metrics) = self.metrics {
@@ -1557,13 +1573,30 @@ where
                 }
 
                 // Wait for a resource to become available
-                let wait_started = Instant::now();
-                WaitForNotification {
+                let wait_started = now;
+                let wait_fut = WaitForNotification {
                     pool: self,
                     waiter_id: &mut cleanup.waiter_id,
+                };
+                match crate::time::timeout(
+                    now,
+                    self.config.acquire_timeout.saturating_sub(elapsed),
+                    wait_fut,
+                )
+                .await
+                {
+                    Ok(()) => {}
+                    Err(_) => {
+                        #[cfg(feature = "metrics")]
+                        if let Some(ref metrics) = self.metrics {
+                            metrics.record_timeout(Duration::from_nanos(
+                                get_now().duration_since(wait_started),
+                            ));
+                        }
+                        return Err(PoolError::Timeout);
+                    }
                 }
-                .await;
-                self.record_wait_time(wait_started.elapsed());
+                self.record_wait_time(Duration::from_nanos(get_now().duration_since(wait_started)));
             }
         })
     }

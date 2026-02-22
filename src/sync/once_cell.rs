@@ -410,10 +410,10 @@ impl<T> OnceCell<T> {
         };
 
         while self.state.load(Ordering::Acquire) == INITIALIZING {
-            guard = self
-                .cvar
-                .wait(guard)
-                .expect("condvar wait failed");
+            guard = match self.cvar.wait(guard) {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
         }
         drop(guard);
     }
@@ -1085,6 +1085,38 @@ mod tests {
     }
 
     #[test]
+    fn wait_for_init_blocking_recovers_from_poisoned_condvar_wait() {
+        init_test("wait_for_init_blocking_recovers_from_poisoned_condvar_wait");
+        let cell = Arc::new(OnceCell::<u32>::new());
+        cell.state.store(INITIALIZING, Ordering::Release);
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = cell.waiters.lock().expect("waiters lock");
+            panic!("intentional poison");
+        }));
+
+        let waiter = {
+            let cell = Arc::clone(&cell);
+            thread::spawn(move || {
+                cell.wait_for_init_blocking();
+            })
+        };
+
+        thread::sleep(std::time::Duration::from_millis(20));
+        cell.state.store(UNINIT, Ordering::Release);
+        cell.cvar.notify_all();
+
+        let waiter_joined = waiter.join();
+        crate::assert_with_log!(
+            waiter_joined.is_ok(),
+            "poisoned condvar wait should recover without panic",
+            true,
+            waiter_joined.is_ok()
+        );
+        crate::test_complete!("wait_for_init_blocking_recovers_from_poisoned_condvar_wait");
+    }
+
+    #[test]
     fn concurrent_init_only_runs_once() {
         init_test("concurrent_init_only_runs_once");
         let cell = Arc::new(OnceCell::<i32>::new());
@@ -1146,7 +1178,13 @@ mod tests {
     fn clone_copies_value() {
         init_test("clone_copies_value");
         let cell = OnceCell::with_value(42);
-        let cloned = cell;
+        let cloned = cell.clone();
+        crate::assert_with_log!(
+            cell.get() == Some(&42),
+            "original value retained after clone",
+            Some(&42),
+            cell.get()
+        );
         crate::assert_with_log!(
             cloned.get() == Some(&42),
             "cloned value",
