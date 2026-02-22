@@ -220,6 +220,14 @@ pub struct DecodeStats {
     pub factor_cache_entries: usize,
     /// Bounded capacity used by the dense-factor cache policy.
     pub factor_cache_capacity: usize,
+    /// True when the wavefront decode pipeline was used.
+    pub wavefront_active: bool,
+    /// Number of bounded assembly+peel batches processed by the wavefront pipeline.
+    pub wavefront_batches: usize,
+    /// Number of symbols peeled during assembly batches (overlap region).
+    pub wavefront_overlap_peeled: usize,
+    /// Wavefront batch size used for assembly+peel fusion.
+    pub wavefront_batch_size: usize,
 }
 
 /// Result of successful decoding.
@@ -1262,6 +1270,182 @@ impl InactivationDecoder {
             source,
             stats: state.stats,
         })
+    }
+
+    /// Decode using the bounded wavefront pipeline.
+    ///
+    /// Instead of sequential assembly→peel→solve, this pipeline fuses
+    /// assembly and peeling into bounded batches: symbols are assembled in
+    /// chunks of `batch_size`, and after each chunk the peeling queue is
+    /// drained. This reduces pipeline bubbles by overlapping assembly with
+    /// peeling, so degree-1 equations discovered early are solved while
+    /// remaining symbols are still being assembled.
+    ///
+    /// The solve phase (inactivation + Gaussian elimination) runs after
+    /// all batches are processed, identical to the sequential path.
+    ///
+    /// Correctness: produces identical results to `decode()` because
+    /// peeling order is deterministic (FIFO queue, same equation ordering)
+    /// and the dense solve phase sees the same final state.
+    ///
+    /// `batch_size` controls the wavefront width. Smaller batches increase
+    /// overlap but add per-batch overhead. A batch size of 0 means "use
+    /// all symbols at once" (equivalent to sequential mode).
+    pub fn decode_wavefront(
+        &self,
+        symbols: &[ReceivedSymbol],
+        batch_size: usize,
+    ) -> Result<DecodeResult, DecodeError> {
+        let k = self.params.k;
+        let symbol_size = self.params.symbol_size;
+        let l = self.params.l;
+
+        self.validate_input(symbols)?;
+
+        // A batch_size of 0 falls back to sequential (single batch = all symbols).
+        let effective_batch = if batch_size == 0 { symbols.len() } else { batch_size };
+
+        // Initialize state with empty equations; we'll add them in batches.
+        let active_cols: BTreeSet<usize> = (0..l).collect();
+        let mut state = DecoderState {
+            params: self.params.clone(),
+            equations: Vec::with_capacity(symbols.len()),
+            rhs: Vec::with_capacity(symbols.len()),
+            solved: vec![None; l],
+            active_cols,
+            inactive_cols: BTreeSet::new(),
+            stats: DecodeStats::default(),
+        };
+        state.stats.wavefront_active = true;
+        state.stats.wavefront_batch_size = effective_batch;
+
+        // Wavefront: assemble symbols in bounded batches and peel after each.
+        let mut total_overlap_peeled = 0usize;
+        let mut batch_count = 0usize;
+        let mut queue = VecDeque::new();
+        let mut queued = Vec::new();
+
+        for chunk in symbols.chunks(effective_batch) {
+            let base_eq_idx = state.equations.len();
+            // Assembly: add this batch of symbols as equations.
+            for sym in chunk {
+                let eq = Equation::new(sym.columns.clone(), sym.coefficients.clone());
+                state.equations.push(eq);
+                state.rhs.push(sym.data.clone());
+            }
+            queued.resize(state.equations.len(), false);
+
+            // Scan newly added equations for degree-1 candidates.
+            for idx in base_eq_idx..state.equations.len() {
+                if !queued[idx] && active_degree_one_col(&state, &state.equations[idx]).is_some() {
+                    queue.push_back(idx);
+                    queued[idx] = true;
+                    state.stats.peel_queue_pushes += 1;
+                }
+            }
+            state.stats.peel_frontier_peak = state.stats.peel_frontier_peak.max(queue.len());
+
+            // Peel: drain the queue after this batch.
+            let peeled_before = state.stats.peeled;
+            Self::peel_from_queue(&mut state, &mut queue, &mut queued);
+            let peeled_this_batch = state.stats.peeled - peeled_before;
+            if batch_count > 0 {
+                // Only count overlap peeling from non-first batches,
+                // since the first batch has no prior assembly to overlap with.
+                total_overlap_peeled += peeled_this_batch;
+            }
+            batch_count += 1;
+        }
+
+        state.stats.wavefront_batches = batch_count;
+        state.stats.wavefront_overlap_peeled = total_overlap_peeled;
+
+        // Phase 2: Inactivation + Gaussian elimination (same as sequential).
+        self.inactivate_and_solve(&mut state)?;
+
+        // Extract results.
+        let intermediate: Vec<Vec<u8>> = state
+            .solved
+            .into_iter()
+            .map(|opt| opt.unwrap_or_else(|| vec![0u8; symbol_size]))
+            .collect();
+        self.verify_decoded_output(symbols, &intermediate)?;
+
+        let source: Vec<Vec<u8>> = intermediate[..k].to_vec();
+
+        Ok(DecodeResult {
+            intermediate,
+            source,
+            stats: state.stats,
+        })
+    }
+
+    /// Peel from an existing queue, extending as new degree-1 equations are discovered.
+    ///
+    /// This is the core peeling loop factored out so it can be called
+    /// incrementally by the wavefront pipeline after each assembly batch.
+    fn peel_from_queue(
+        state: &mut DecoderState,
+        queue: &mut VecDeque<usize>,
+        queued: &mut [bool],
+    ) {
+        while let Some(eq_idx) = queue.pop_front() {
+            state.stats.peel_queue_pops += 1;
+            queued[eq_idx] = false;
+
+            let Some(col) = active_degree_one_col(state, &state.equations[eq_idx]) else {
+                continue;
+            };
+
+            // Solve this equation.
+            let (_col, coef) = state.equations[eq_idx].terms[0];
+            state.equations[eq_idx].used = true;
+
+            let mut solution = std::mem::take(&mut state.rhs[eq_idx]);
+            if coef != Gf256::ONE {
+                let inv = coef.inv();
+                crate::raptorq::gf256::gf256_mul_slice(&mut solution, inv);
+            }
+
+            state.active_cols.remove(&col);
+            state.stats.peeled += 1;
+
+            // Propagate to other equations.
+            for i in 0..state.equations.len() {
+                let eq = &state.equations[i];
+                if eq.used {
+                    continue;
+                }
+                let eq_coef = eq.coef(col);
+                if eq_coef.is_zero() {
+                    continue;
+                }
+                gf256_addmul_slice(&mut state.rhs[i], &solution, eq_coef);
+                if let Ok(pos) = state.equations[i]
+                    .terms
+                    .binary_search_by_key(&col, |(c, _)| *c)
+                {
+                    state.equations[i].terms.remove(pos);
+                }
+
+                if !queued[i]
+                    && !state.equations[i].used
+                    && state.equations[i].degree() == 1
+                {
+                    let next_col = state.equations[i].terms[0].0;
+                    if state.active_cols.contains(&next_col)
+                        && state.solved[next_col].is_none()
+                    {
+                        queue.push_back(i);
+                        queued[i] = true;
+                        state.stats.peel_queue_pushes += 1;
+                    }
+                }
+            }
+
+            state.stats.peel_frontier_peak = state.stats.peel_frontier_peak.max(queue.len());
+            state.solved[col] = Some(solution);
+        }
     }
 
     /// Decode from received symbols with proof artifact capture.
@@ -4246,5 +4430,166 @@ mod tests {
             l,
             "peeled + inactivated must equal L ({l})"
         );
+    }
+
+    // ========================================================================
+    // F8: Wavefront decode pipeline tests
+    // ========================================================================
+
+    #[test]
+    fn wavefront_decode_matches_sequential() {
+        // Verify that wavefront decode produces identical source symbols
+        // to sequential decode for a variety of batch sizes.
+        let k = 16;
+        let symbol_size = 64;
+        let seed = 0xF8_0001u64;
+
+        let source = make_source_data(k, symbol_size);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+        let mut received = decoder.constraint_symbols();
+        for esi in 0..(k as u32) {
+            received.push(ReceivedSymbol::source(esi, source[esi as usize].clone()));
+        }
+        // Add a few repair symbols for robustness.
+        for esi in (k as u32)..(k as u32 + 4) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        let sequential = decoder.decode(&received).expect("sequential decode");
+
+        for batch_size in [1, 2, 4, 8, 16, 0] {
+            let wavefront = decoder
+                .decode_wavefront(&received, batch_size)
+                .expect(&format!("wavefront decode batch_size={batch_size}"));
+
+            for (i, (seq_sym, wf_sym)) in sequential
+                .source
+                .iter()
+                .zip(wavefront.source.iter())
+                .enumerate()
+            {
+                assert_eq!(
+                    seq_sym, wf_sym,
+                    "source symbol {i} mismatch at batch_size={batch_size}"
+                );
+            }
+
+            assert!(wavefront.stats.wavefront_active);
+            assert_eq!(wavefront.stats.wavefront_batch_size, if batch_size == 0 { received.len() } else { batch_size });
+            assert!(wavefront.stats.wavefront_batches > 0);
+        }
+    }
+
+    #[test]
+    fn wavefront_decode_with_loss_matches_sequential() {
+        // Verify wavefront correctness under symbol loss (repair-only decode).
+        let k = 8;
+        let symbol_size = 32;
+        let seed = 0xF8_0002u64;
+
+        let source = make_source_data(k, symbol_size);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        let mut received = decoder.constraint_symbols();
+        // Only repair symbols — no source symbols.
+        for esi in (k as u32)..(k as u32 + l as u32) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        let sequential = decoder.decode(&received).expect("sequential decode");
+
+        for batch_size in [1, 4, 8] {
+            let wavefront = decoder
+                .decode_wavefront(&received, batch_size)
+                .expect(&format!("wavefront batch_size={batch_size}"));
+
+            for (i, (seq_sym, wf_sym)) in sequential
+                .source
+                .iter()
+                .zip(wavefront.source.iter())
+                .enumerate()
+            {
+                assert_eq!(
+                    seq_sym, wf_sym,
+                    "source symbol {i} mismatch at batch_size={batch_size} (repair-only)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wavefront_overlap_peeling_is_tracked() {
+        // With batch_size=1, each symbol is assembled and peeled individually.
+        // Some peeling should happen during assembly batches (overlap).
+        let k = 16;
+        let symbol_size = 64;
+        let seed = 0xF8_0003u64;
+
+        let source = make_source_data(k, symbol_size);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+        let mut received = decoder.constraint_symbols();
+        for esi in 0..(k as u32) {
+            received.push(ReceivedSymbol::source(esi, source[esi as usize].clone()));
+        }
+        for esi in (k as u32)..(k as u32 + 4) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        let wavefront = decoder
+            .decode_wavefront(&received, 1)
+            .expect("wavefront batch_size=1");
+
+        assert!(wavefront.stats.wavefront_active);
+        assert_eq!(wavefront.stats.wavefront_batch_size, 1);
+        assert_eq!(wavefront.stats.wavefront_batches, received.len());
+        // With source symbols fed one at a time, some should peel during
+        // the assembly batches (overlap region).
+        // We don't assert a specific count since it depends on equation structure.
+        assert!(
+            wavefront.stats.peeled > 0,
+            "some symbols should peel in wavefront mode"
+        );
+    }
+
+    #[test]
+    fn wavefront_sequential_fallback_batch_zero() {
+        // batch_size=0 should behave identically to sequential decode.
+        let k = 8;
+        let symbol_size = 32;
+        let seed = 0xF8_0004u64;
+
+        let source = make_source_data(k, symbol_size);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+        let mut received = decoder.constraint_symbols();
+        for esi in 0..(k as u32) {
+            received.push(ReceivedSymbol::source(esi, source[esi as usize].clone()));
+        }
+        for esi in (k as u32)..(k as u32 + 2) {
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        let sequential = decoder.decode(&received).expect("sequential");
+        let wavefront = decoder.decode_wavefront(&received, 0).expect("wavefront batch_size=0");
+
+        assert_eq!(sequential.source, wavefront.source);
+        assert!(wavefront.stats.wavefront_active);
+        assert_eq!(wavefront.stats.wavefront_batches, 1);
+        assert_eq!(wavefront.stats.wavefront_batch_size, received.len());
     }
 }
