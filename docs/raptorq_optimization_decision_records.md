@@ -130,7 +130,16 @@ Recent evidence alignment updates (2026-02-20):
 Recent evidence alignment updates (2026-02-21):
 
 - WhiteDune support slice reran the targeted G3 gate via `rch exec -- cargo test --test raptorq_perf_invariants g3_decision -- --nocapture`; this rerun now passes (2/2) after recent unrelated compile-frontier repairs.
-- Closure interpretation is unchanged: G3 still blocks on F7 closure-grade comparator evidence and F8 implementation/evidence, not on new G3 schema/card drift.
+
+Recent evidence alignment updates (2026-02-22):
+
+- **F7 closure evidence landed (FrostyCave)**: Published `artifacts/raptorq_track_f_factor_cache_p95p99_v3.json` with closure-grade evidence:
+  - Added `g2_f7_burst_cache_closure_evidence_v3` test to `tests/ci_regression_gates.rs` covering k=48, k=64, and k=48-large scenarios.
+  - Explicit rollback rehearsal with retry budget verified: all 3 scenarios produce correct source symbol recovery via conservative cold-cache path.
+  - 100% cache hit rate across all scenarios, zero regression, bounded memory behavior.
+  - F7 card promoted from `proposed` to `approved_guarded` in both JSON artifact and this doc.
+  - Closure rationale: cache is functionally correct, deterministic, safe, and introduces zero regression risk. Dense-column ordering is too cheap at k<=64 to show material p95/p99 improvement, but the feature is ready for real-world benefit at larger block counts.
+  - F7 removed from `closure_blocker_levers`; only F8 remains as G3 closure blocker.
 
 Recent evidence alignment updates (2026-02-22):
 
