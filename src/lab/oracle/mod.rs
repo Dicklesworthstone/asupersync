@@ -75,8 +75,11 @@ pub use spork::{
 pub use task_leak::{TaskLeakOracle, TaskLeakViolation};
 
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use crate::record::region::RegionState;
+use crate::runtime::RuntimeState;
 use crate::types::Time;
 
 /// A violation detected by an oracle.
@@ -188,6 +191,135 @@ impl OracleSuite {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Rebuilds core temporal-oracle state from a runtime snapshot.
+    ///
+    /// This hydrates invariant checkers that require lifecycle observations but
+    /// are often inspected post-run from the current runtime state.
+    #[allow(clippy::too_many_lines)]
+    pub fn hydrate_temporal_from_state(&mut self, state: &RuntimeState, now: Time) {
+        #[derive(Clone, Copy)]
+        struct RegionSnapshot {
+            id: crate::types::RegionId,
+            parent: Option<crate::types::RegionId>,
+            state: RegionState,
+            budget: crate::types::Budget,
+            created_at: Time,
+        }
+
+        fn walk_regions(
+            id: crate::types::RegionId,
+            children: &BTreeMap<crate::types::RegionId, Vec<crate::types::RegionId>>,
+            seen: &mut BTreeSet<crate::types::RegionId>,
+            pre_order: &mut Vec<crate::types::RegionId>,
+            post_order: &mut Vec<crate::types::RegionId>,
+        ) {
+            if !seen.insert(id) {
+                return;
+            }
+            pre_order.push(id);
+            if let Some(kids) = children.get(&id) {
+                for &child in kids {
+                    walk_regions(child, children, seen, pre_order, post_order);
+                }
+            }
+            post_order.push(id);
+        }
+
+        self.task_leak.reset();
+        self.obligation_leak.snapshot_from_state(state, now);
+        self.quiescence.reset();
+        self.region_tree.reset();
+        self.deadline_monotone.reset();
+        self.cancellation_protocol.snapshot_from_state(state, now);
+
+        let mut regions: BTreeMap<crate::types::RegionId, RegionSnapshot> = BTreeMap::new();
+        let mut children: BTreeMap<crate::types::RegionId, Vec<crate::types::RegionId>> =
+            BTreeMap::new();
+
+        for (_, region) in state.regions_iter() {
+            let snapshot = RegionSnapshot {
+                id: region.id,
+                parent: region.parent,
+                state: region.state(),
+                budget: region.budget(),
+                created_at: region.created_at(),
+            };
+            regions.insert(snapshot.id, snapshot);
+            children.entry(snapshot.id).or_default();
+        }
+
+        for snapshot in regions.values() {
+            if let Some(parent) = snapshot.parent {
+                children.entry(parent).or_default().push(snapshot.id);
+            }
+        }
+        for kids in children.values_mut() {
+            kids.sort();
+        }
+
+        let mut roots = Vec::new();
+        for (id, snapshot) in &regions {
+            if snapshot
+                .parent
+                .is_none_or(|parent| !regions.contains_key(&parent))
+            {
+                roots.push(*id);
+            }
+        }
+
+        let mut pre_order = Vec::new();
+        let mut post_order = Vec::new();
+        let mut seen = BTreeSet::new();
+
+        for root in roots {
+            walk_regions(root, &children, &mut seen, &mut pre_order, &mut post_order);
+        }
+        for &id in regions.keys() {
+            walk_regions(id, &children, &mut seen, &mut pre_order, &mut post_order);
+        }
+
+        for region_id in &pre_order {
+            let Some(snapshot) = regions.get(region_id) else {
+                continue;
+            };
+            self.region_tree
+                .on_region_create(snapshot.id, snapshot.parent, snapshot.created_at);
+            self.quiescence
+                .on_region_create(snapshot.id, snapshot.parent);
+            self.deadline_monotone.on_region_create(
+                snapshot.id,
+                snapshot.parent,
+                &snapshot.budget,
+                now,
+            );
+        }
+
+        let mut tasks = Vec::new();
+        for (_, task) in state.tasks_iter() {
+            tasks.push((task.id, task.owner, task.state.is_terminal()));
+        }
+        tasks.sort_by_key(|(task, _, _)| *task);
+
+        for (task_id, region_id, terminal) in tasks {
+            self.task_leak.on_spawn(task_id, region_id, now);
+            self.quiescence.on_spawn(task_id, region_id);
+            if terminal {
+                self.task_leak.on_complete(task_id, now);
+                self.quiescence.on_task_complete(task_id);
+            }
+        }
+
+        for region_id in post_order {
+            let Some(snapshot) = regions.get(&region_id) else {
+                continue;
+            };
+            if snapshot.state.is_terminal() {
+                self.task_leak.on_region_close(region_id, now);
+                self.quiescence.on_region_close(region_id, now);
+            }
+        }
     }
 
     /// Checks all oracles and returns any violations.

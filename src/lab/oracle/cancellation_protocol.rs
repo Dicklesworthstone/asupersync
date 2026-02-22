@@ -38,6 +38,7 @@
 //! ```
 
 use crate::record::task::TaskState;
+use crate::runtime::RuntimeState;
 use crate::types::{CancelKind, CancelReason, RegionId, TaskId, Time};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -486,6 +487,80 @@ impl CancellationProtocolOracle {
     /// semantics directly; this hook exists for symmetry with other oracles
     /// and for conformance tests that model region close events.
     pub fn on_region_close(&mut self, _region: RegionId, _time: Time) {}
+
+    /// Rebuilds oracle state from a runtime snapshot.
+    ///
+    /// This snapshot path is intentionally conservative: it captures the
+    /// current cancellation topology and task cancellation states without
+    /// replaying full transition histories.
+    pub fn snapshot_from_state(&mut self, state: &RuntimeState, now: Time) {
+        self.reset();
+
+        let mut regions = Vec::new();
+        for (_, region) in state.regions_iter() {
+            regions.push((region.id, region.parent, region.cancel_reason()));
+        }
+        regions.sort_by_key(|(id, _, _)| *id);
+
+        for (region, parent, _) in &regions {
+            self.region_parents.insert(*region, *parent);
+            self.region_children.entry(*region).or_default();
+        }
+        for (region, parent, _) in &regions {
+            if let Some(parent_id) = parent {
+                self.region_children
+                    .entry(*parent_id)
+                    .or_default()
+                    .push(*region);
+            }
+        }
+        for children in self.region_children.values_mut() {
+            children.sort();
+        }
+        for (region, _, reason) in regions {
+            if let Some(cancel_reason) = reason {
+                self.cancelled_regions.insert(region, cancel_reason);
+            }
+        }
+
+        let mut tasks = Vec::new();
+        for (_, task) in state.tasks_iter() {
+            let state_kind = TaskStateKind::from_task_state(&task.state);
+            let cancel_reason = match &task.state {
+                TaskState::CancelRequested { reason, .. }
+                | TaskState::Cancelling { reason, .. }
+                | TaskState::Finalizing { reason, .. } => Some(reason.clone()),
+                TaskState::Completed(crate::types::Outcome::Cancelled(reason)) => {
+                    Some(reason.clone())
+                }
+                _ => None,
+            };
+            let mask_depth = task
+                .cx_inner
+                .as_ref()
+                .map_or(0, |inner| inner.read().mask_depth);
+            tasks.push((task.id, task.owner, state_kind, cancel_reason, mask_depth));
+        }
+        tasks.sort_by_key(|(task, _, _, _, _)| *task);
+
+        for (task, region, state_kind, cancel_reason, mask_depth) in tasks {
+            self.tasks.insert(
+                task,
+                TaskProtocolRecord {
+                    current_state: state_kind,
+                    cancel_request: cancel_reason.map(|reason| CancelRequestRecord {
+                        requested_at: now,
+                        reason,
+                        polls_since: 0,
+                        acknowledged: !matches!(state_kind, TaskStateKind::CancelRequested),
+                    }),
+                    transitions: Vec::new(),
+                    mask_depth,
+                },
+            );
+            self.task_regions.insert(task, region);
+        }
+    }
 
     /// Validates a single state transition (static version for borrow checker).
     fn validate_transition_static(

@@ -27,7 +27,7 @@ use crate::trace::event::TraceEventKind;
 use crate::trace::recorder::TraceRecorder;
 use crate::trace::replay::{ReplayEvent, ReplayTrace, TraceMetadata};
 use crate::trace::scoring::seed_fingerprint;
-use crate::trace::{TraceData, TraceEvent};
+use crate::trace::{TraceData, TraceEvent, check_refinement_firewall};
 use crate::trace::{canonicalize::trace_fingerprint, certificate::TraceCertificate};
 use crate::types::Time;
 use crate::types::{ObligationId, RegionId, TaskId};
@@ -113,6 +113,20 @@ pub struct LabRunReport {
     /// This is distinct from the oracle suite: it's a small set of runtime-level
     /// checks (e.g., obligation leaks, futurelocks, quiescence violations).
     pub invariant_violations: Vec<String>,
+    /// Temporal-oracle invariants that failed in this report.
+    pub temporal_invariant_failures: Vec<String>,
+    /// Minimized divergent-prefix length for temporal failures, when available.
+    pub temporal_counterexample_prefix_len: Option<usize>,
+    /// First failed refinement-firewall rule id, when present.
+    pub refinement_firewall_rule_id: Option<String>,
+    /// Event index where refinement-firewall first failed.
+    pub refinement_firewall_event_index: Option<usize>,
+    /// Event sequence where refinement-firewall first failed.
+    pub refinement_firewall_event_seq: Option<u64>,
+    /// Deterministic minimal counterexample prefix length for refinement failures.
+    pub refinement_counterexample_prefix_len: Option<usize>,
+    /// Whether refinement checks were skipped due to trace-buffer truncation.
+    pub refinement_firewall_skipped_due_to_trace_truncation: bool,
 }
 
 impl LabRunReport {
@@ -138,9 +152,30 @@ impl LabRunReport {
             },
             "oracles": self.oracle_report.to_json(),
             "invariants": self.invariant_violations,
+            "temporal": {
+                "failed_invariants": self.temporal_invariant_failures,
+                "counterexample_prefix_len": self.temporal_counterexample_prefix_len,
+            },
+            "refinement_firewall": {
+                "rule_id": self.refinement_firewall_rule_id,
+                "event_index": self.refinement_firewall_event_index,
+                "event_seq": self.refinement_firewall_event_seq,
+                "counterexample_prefix_len": self.refinement_counterexample_prefix_len,
+                "skipped_due_to_trace_truncation": self.refinement_firewall_skipped_due_to_trace_truncation,
+            },
         })
     }
 }
+
+const TEMPORAL_ORACLE_INVARIANTS: &[&str] = &[
+    "task_leak",
+    "obligation_leak",
+    "quiescence",
+    "cancellation_protocol",
+    "loser_drain",
+    "region_tree",
+    "deadline_monotone",
+];
 
 // ---------------------------------------------------------------------------
 // Spork app harness report schema (bd-11dm5)
@@ -1141,7 +1176,9 @@ impl LabRuntime {
     /// Returns `None` for passing reports.
     #[must_use]
     pub fn build_crashpack_for_report(&self, run: &LabRunReport) -> Option<CrashPack> {
-        let has_failure = !run.oracle_report.all_passed() || !run.invariant_violations.is_empty();
+        let has_failure = !run.oracle_report.all_passed()
+            || !run.invariant_violations.is_empty()
+            || run.refinement_firewall_rule_id.is_some();
         if !has_failure {
             return None;
         }
@@ -1186,6 +1223,14 @@ impl LabRuntime {
                 .iter()
                 .map(|entry| entry.invariant.clone()),
         );
+        if let Some(rule_id) = &run.refinement_firewall_rule_id {
+            oracle_violations.push(format!("refinement_firewall:{rule_id}"));
+        }
+        if let Some(prefix_len) = run.refinement_counterexample_prefix_len {
+            oracle_violations.push(format!(
+                "refinement_firewall:minimal_counterexample_prefix_len={prefix_len}"
+            ));
+        }
         oracle_violations.sort();
         oracle_violations.dedup();
 
@@ -1258,12 +1303,57 @@ impl LabRuntime {
         }
         certificate.set_schedule_hash(schedule_hash);
 
+        self.oracles.hydrate_temporal_from_state(&self.state, now);
         let oracle_report = self.oracles.report(now);
-        let invariant_violations = self
+        let temporal_invariant_failures = oracle_report
+            .failures()
+            .into_iter()
+            .filter(|entry| TEMPORAL_ORACLE_INVARIANTS.contains(&entry.invariant.as_str()))
+            .map(|entry| entry.invariant.clone())
+            .collect::<Vec<_>>();
+        let temporal_counterexample_prefix_len = if temporal_invariant_failures.is_empty() {
+            None
+        } else {
+            let prefix_len = self.auto_divergent_prefix().len();
+            (prefix_len > 0).then_some(prefix_len)
+        };
+        let refinement_firewall_skipped_due_to_trace_truncation =
+            self.trace().total_pushed() > trace_events.len() as u64;
+        let refinement_violation = if refinement_firewall_skipped_due_to_trace_truncation {
+            None
+        } else {
+            check_refinement_firewall(&trace_events).first_violation
+        };
+        let refinement_violation = refinement_violation.as_ref();
+        let refinement_firewall_rule_id = refinement_violation.map(|v| v.rule_id.to_owned());
+        let refinement_firewall_event_index = refinement_violation.map(|v| v.event_index);
+        let refinement_firewall_event_seq = refinement_violation.map(|v| v.event_seq);
+        let refinement_counterexample_prefix_len =
+            refinement_firewall_event_index.map(|idx| idx + 1);
+
+        let mut invariant_violations = self
             .check_invariants()
             .into_iter()
             .map(|v| v.to_string())
             .collect::<Vec<_>>();
+        for invariant in &temporal_invariant_failures {
+            invariant_violations.push(format!("temporal:{invariant}"));
+        }
+        if let Some(prefix_len) = temporal_counterexample_prefix_len {
+            invariant_violations.push(format!(
+                "temporal:minimal_divergent_prefix_len={prefix_len}"
+            ));
+        }
+        if let Some(rule_id) = &refinement_firewall_rule_id {
+            invariant_violations.push(format!("refinement_firewall:{rule_id}"));
+        }
+        if let Some(prefix_len) = refinement_counterexample_prefix_len {
+            invariant_violations.push(format!(
+                "refinement_firewall:minimal_counterexample_prefix_len={prefix_len}"
+            ));
+        }
+        invariant_violations.sort();
+        invariant_violations.dedup();
 
         LabRunReport {
             seed,
@@ -1280,6 +1370,13 @@ impl LabRuntime {
             },
             oracle_report,
             invariant_violations,
+            temporal_invariant_failures,
+            temporal_counterexample_prefix_len,
+            refinement_firewall_rule_id,
+            refinement_firewall_event_index,
+            refinement_firewall_event_seq,
+            refinement_counterexample_prefix_len,
+            refinement_firewall_skipped_due_to_trace_truncation,
         }
     }
 
@@ -2952,6 +3049,269 @@ mod tests {
     }
 
     #[test]
+    fn report_hydrates_temporal_oracles_from_state_snapshot() {
+        init_test("report_hydrates_temporal_oracles_from_state_snapshot");
+        let mut runtime = LabRuntime::with_seed(31);
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let (_task, _handle) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+
+        // Force-close the region while a task is still live to simulate a
+        // temporal invariant break that must be surfaced by report hydration.
+        runtime
+            .state
+            .region(root)
+            .expect("region exists")
+            .set_state(crate::record::region::RegionState::Closed);
+
+        let report = runtime.report();
+        let task_leak = report
+            .oracle_report
+            .entry("task_leak")
+            .expect("task_leak entry");
+        let quiescence = report
+            .oracle_report
+            .entry("quiescence")
+            .expect("quiescence entry");
+
+        crate::assert_with_log!(
+            !task_leak.passed,
+            "task_leak failed",
+            false,
+            task_leak.passed
+        );
+        crate::assert_with_log!(
+            !quiescence.passed,
+            "quiescence failed",
+            false,
+            quiescence.passed
+        );
+        let has_temporal_tag = report
+            .invariant_violations
+            .iter()
+            .any(|v| v == "temporal:task_leak");
+        crate::assert_with_log!(
+            has_temporal_tag,
+            "temporal marker present",
+            true,
+            has_temporal_tag
+        );
+        let temporal_failed = report
+            .temporal_invariant_failures
+            .iter()
+            .any(|v| v == "task_leak");
+        crate::assert_with_log!(
+            temporal_failed,
+            "temporal failure surfaced",
+            true,
+            temporal_failed
+        );
+        crate::test_complete!("report_hydrates_temporal_oracles_from_state_snapshot");
+    }
+
+    #[test]
+    fn report_hydrates_cancellation_propagation_from_state_snapshot() {
+        init_test("report_hydrates_cancellation_propagation_from_state_snapshot");
+        let mut runtime = LabRuntime::with_seed(32);
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let _child = runtime
+            .state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("create child");
+
+        runtime
+            .state
+            .region(root)
+            .expect("root exists")
+            .cancel_request(crate::types::CancelReason::shutdown());
+
+        let report = runtime.report();
+        let cancellation = report
+            .oracle_report
+            .entry("cancellation_protocol")
+            .expect("cancellation_protocol entry");
+        crate::assert_with_log!(
+            !cancellation.passed,
+            "cancellation_protocol failed",
+            false,
+            cancellation.passed
+        );
+        let has_temporal_tag = report
+            .invariant_violations
+            .iter()
+            .any(|v| v == "temporal:cancellation_protocol");
+        crate::assert_with_log!(
+            has_temporal_tag,
+            "temporal cancellation marker present",
+            true,
+            has_temporal_tag
+        );
+        crate::test_complete!("report_hydrates_cancellation_propagation_from_state_snapshot");
+    }
+
+    #[test]
+    fn report_surfaces_refinement_firewall_violation_from_trace_snapshot() {
+        init_test("report_surfaces_refinement_firewall_violation_from_trace_snapshot");
+        let mut runtime = LabRuntime::with_seed(33);
+        let region = RegionId::new_for_test(41, 0);
+        let task = TaskId::new_for_test(7, 0);
+
+        runtime
+            .state
+            .trace
+            .push_event(TraceEvent::spawn(1, Time::ZERO, task, region));
+        runtime
+            .state
+            .trace
+            .push_event(TraceEvent::spawn(2, Time::ZERO, task, region));
+
+        let report = runtime.report();
+        crate::assert_with_log!(
+            report.refinement_firewall_rule_id.as_deref() == Some("RFW-SPAWN-001"),
+            "refinement rule id surfaced",
+            Some("RFW-SPAWN-001"),
+            report.refinement_firewall_rule_id.as_deref()
+        );
+        crate::assert_with_log!(
+            report.refinement_firewall_event_index == Some(1),
+            "refinement event index surfaced",
+            Some(1usize),
+            report.refinement_firewall_event_index
+        );
+        crate::assert_with_log!(
+            report.refinement_counterexample_prefix_len == Some(2),
+            "refinement prefix len surfaced",
+            Some(2usize),
+            report.refinement_counterexample_prefix_len
+        );
+        let has_marker = report
+            .invariant_violations
+            .iter()
+            .any(|v| v == "refinement_firewall:RFW-SPAWN-001");
+        crate::assert_with_log!(
+            has_marker,
+            "refinement invariant marker present",
+            true,
+            has_marker
+        );
+        let json = report.to_json();
+        crate::assert_with_log!(
+            json["refinement_firewall"]["rule_id"] == "RFW-SPAWN-001",
+            "refinement json rule id",
+            "RFW-SPAWN-001",
+            json["refinement_firewall"]["rule_id"]
+        );
+        crate::assert_with_log!(
+            json["refinement_firewall"]["counterexample_prefix_len"] == 2,
+            "refinement json prefix len",
+            2,
+            json["refinement_firewall"]["counterexample_prefix_len"]
+        );
+        crate::assert_with_log!(
+            json["refinement_firewall"]["skipped_due_to_trace_truncation"] == false,
+            "refinement json not skipped",
+            false,
+            json["refinement_firewall"]["skipped_due_to_trace_truncation"]
+        );
+        crate::test_complete!("report_surfaces_refinement_firewall_violation_from_trace_snapshot");
+    }
+
+    #[test]
+    fn report_skips_refinement_firewall_when_trace_buffer_is_truncated() {
+        init_test("report_skips_refinement_firewall_when_trace_buffer_is_truncated");
+        let config = LabConfig::new(35).trace_capacity(1);
+        let mut runtime = LabRuntime::new(config);
+        let region = RegionId::new_for_test(43, 0);
+        let task = TaskId::new_for_test(9, 0);
+
+        runtime
+            .state
+            .trace
+            .push_event(TraceEvent::spawn(1, Time::ZERO, task, region));
+        runtime
+            .state
+            .trace
+            .push_event(TraceEvent::complete(2, Time::ZERO, task, region));
+
+        let report = runtime.report();
+        crate::assert_with_log!(
+            report.refinement_firewall_skipped_due_to_trace_truncation,
+            "refinement skipped on truncated trace",
+            true,
+            report.refinement_firewall_skipped_due_to_trace_truncation
+        );
+        crate::assert_with_log!(
+            report.refinement_firewall_rule_id.is_none(),
+            "no refinement violation when skipped",
+            true,
+            report.refinement_firewall_rule_id.is_none()
+        );
+        let has_refinement_marker = report
+            .invariant_violations
+            .iter()
+            .any(|v| v.starts_with("refinement_firewall:"));
+        crate::assert_with_log!(
+            !has_refinement_marker,
+            "no refinement markers when skipped",
+            false,
+            has_refinement_marker
+        );
+        let json = report.to_json();
+        crate::assert_with_log!(
+            json["refinement_firewall"]["skipped_due_to_trace_truncation"] == true,
+            "refinement skipped flag serialized",
+            true,
+            json["refinement_firewall"]["skipped_due_to_trace_truncation"]
+        );
+        crate::test_complete!("report_skips_refinement_firewall_when_trace_buffer_is_truncated");
+    }
+
+    #[test]
+    fn crashpack_includes_refinement_firewall_markers() {
+        init_test("crashpack_includes_refinement_firewall_markers");
+        let mut runtime = LabRuntime::with_seed(34);
+        let region = RegionId::new_for_test(42, 0);
+        let task = TaskId::new_for_test(8, 0);
+
+        runtime
+            .state
+            .trace
+            .push_event(TraceEvent::spawn(1, Time::ZERO, task, region));
+        runtime
+            .state
+            .trace
+            .push_event(TraceEvent::spawn(2, Time::ZERO, task, region));
+
+        let run = runtime.report();
+        let crashpack = runtime
+            .build_crashpack_for_report(&run)
+            .expect("refinement-firewall failure should build crashpack");
+        let has_rule_marker = crashpack
+            .oracle_violations
+            .iter()
+            .any(|entry| entry == "refinement_firewall:RFW-SPAWN-001");
+        crate::assert_with_log!(
+            has_rule_marker,
+            "crashpack includes refinement rule marker",
+            true,
+            has_rule_marker
+        );
+        let has_prefix_marker = crashpack
+            .oracle_violations
+            .iter()
+            .any(|entry| entry == "refinement_firewall:minimal_counterexample_prefix_len=2");
+        crate::assert_with_log!(
+            has_prefix_marker,
+            "crashpack includes refinement prefix marker",
+            true,
+            has_prefix_marker
+        );
+        crate::test_complete!("crashpack_includes_refinement_firewall_markers");
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)]
     fn obligation_trace_events_emitted() {
         init_test("obligation_trace_events_emitted");
@@ -3232,6 +3592,14 @@ mod tests {
         assert!(
             json["run"]["invariants"].is_array(),
             "run.invariants must be an array"
+        );
+        assert!(
+            json["run"]["refinement_firewall"].is_object(),
+            "run.refinement_firewall must be an object"
+        );
+        assert!(
+            json["run"]["refinement_firewall"]["skipped_due_to_trace_truncation"].is_boolean(),
+            "run.refinement_firewall.skipped_due_to_trace_truncation must be a boolean"
         );
         assert!(
             json["attachments"].is_array(),
