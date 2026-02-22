@@ -92,20 +92,23 @@ impl TcpListener {
                 Poll::Ready(TcpStream::from_std(stream).map(|stream| (stream, addr)))
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                let rearmed_backoff = self.note_accept_would_block();
+                self.note_accept_would_block();
                 let mode = match self.register_interest(cx) {
                     Ok(mode) => mode,
                     Err(err) => return Poll::Ready(Err(err)),
                 };
                 if mode == InterestRegistrationMode::FallbackPoll {
                     // No reactor-backed readiness available for this task context.
-                    // Back off before re-waking to avoid pegging a CPU core.
-                    std::thread::sleep(FALLBACK_ACCEPT_BACKOFF);
-                    cx.waker().wake_by_ref();
-                } else {
-                    // With reactor wake storms, progressively back off repeated WouldBlock polls.
-                    std::thread::sleep(rearmed_backoff);
+                    // Schedule a delayed wakeup on a background thread to avoid
+                    // blocking the runtime worker.
+                    let waker = cx.waker().clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(FALLBACK_ACCEPT_BACKOFF);
+                        waker.wake();
+                    });
                 }
+                // ReactorArmed: the reactor is re-armed and will wake us on
+                // actual readiness; no sleep needed.
                 Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
