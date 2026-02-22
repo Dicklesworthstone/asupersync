@@ -117,6 +117,7 @@ pub struct TraceBufferHandle {
 struct TraceBufferInner {
     buffer: Mutex<TraceBuffer>,
     next_seq: AtomicU64,
+    total_pushed: AtomicU64,
 }
 
 impl TraceBufferHandle {
@@ -127,6 +128,7 @@ impl TraceBufferHandle {
             inner: Arc::new(TraceBufferInner {
                 buffer: Mutex::new(TraceBuffer::new(capacity)),
                 next_seq: AtomicU64::new(0),
+                total_pushed: AtomicU64::new(0),
             }),
         }
     }
@@ -139,8 +141,11 @@ impl TraceBufferHandle {
 
     /// Pushes a trace event into the buffer.
     pub fn push_event(&self, event: TraceEvent) {
-        let mut buffer = self.inner.buffer.lock();
-        buffer.push(event);
+        {
+            let mut buffer = self.inner.buffer.lock();
+            buffer.push(event);
+        }
+        self.inner.total_pushed.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Returns a snapshot of buffered events in order (oldest to newest).
@@ -155,6 +160,15 @@ impl TraceBufferHandle {
     pub fn len(&self) -> usize {
         let buffer = self.inner.buffer.lock();
         buffer.len()
+    }
+
+    /// Returns the total number of events pushed since creation.
+    ///
+    /// This includes events that may no longer be present in the ring buffer
+    /// due to capacity eviction.
+    #[must_use]
+    pub fn total_pushed(&self) -> u64 {
+        self.inner.total_pushed.load(Ordering::Relaxed)
     }
 
     /// Returns true if the buffer is empty.
@@ -315,9 +329,11 @@ mod tests {
         let handle = TraceBufferHandle::new(4);
         assert!(handle.is_empty());
         assert_eq!(handle.len(), 0);
+        assert_eq!(handle.total_pushed(), 0);
         handle.push_event(make_event(1));
         assert!(!handle.is_empty());
         assert_eq!(handle.len(), 1);
+        assert_eq!(handle.total_pushed(), 1);
     }
 
     #[test]
@@ -325,5 +341,19 @@ mod tests {
         let handle = TraceBufferHandle::new(4);
         let snap = handle.snapshot();
         assert!(snap.is_empty());
+    }
+
+    #[test]
+    fn trace_buffer_handle_total_pushed_tracks_evictions() {
+        let handle = TraceBufferHandle::new(2);
+        handle.push_event(make_event(1));
+        handle.push_event(make_event(2));
+        handle.push_event(make_event(3));
+        assert_eq!(handle.total_pushed(), 3);
+        assert_eq!(handle.len(), 2);
+        let snap = handle.snapshot();
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap[0].seq, 2);
+        assert_eq!(snap[1].seq, 3);
     }
 }

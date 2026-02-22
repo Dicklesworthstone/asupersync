@@ -63,6 +63,7 @@ pub mod independence;
 pub mod integrity;
 pub mod minimizer;
 pub mod recorder;
+pub mod refinement_firewall;
 pub mod replay;
 pub mod replayer;
 pub mod scoring;
@@ -131,6 +132,10 @@ pub use minimizer::{
 pub use recorder::{
     DEFAULT_MAX_FILE_SIZE, DEFAULT_MAX_MEMORY, LimitAction, LimitKind, LimitReached,
     RecorderConfig, TraceRecorder,
+};
+pub use refinement_firewall::{
+    RefinementFirewallReport, RefinementViolation, check_refinement_firewall,
+    first_counterexample_prefix, first_refinement_violation, verify_refinement_firewall,
 };
 pub use replay::{
     CompactRegionId, CompactTaskId, REPLAY_SCHEMA_VERSION, ReplayEvent, ReplayTrace,
