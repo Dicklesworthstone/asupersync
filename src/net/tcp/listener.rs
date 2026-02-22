@@ -16,12 +16,31 @@ use std::io;
 use std::net::{self, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
+
+const FALLBACK_ACCEPT_BACKOFF: Duration = Duration::from_millis(4);
+const REARMED_ACCEPT_BACKOFF_BASE: Duration = Duration::from_millis(2);
+const REARMED_ACCEPT_BACKOFF_CAP: Duration = Duration::from_millis(32);
+const ACCEPT_STORM_WINDOW: Duration = Duration::from_millis(25);
 
 /// A TCP listener.
 #[derive(Debug)]
 pub struct TcpListener {
     pub(crate) inner: net::TcpListener,
     registration: Mutex<Option<IoRegistration>>,
+    accept_storm: Mutex<AcceptStormState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InterestRegistrationMode {
+    ReactorArmed,
+    FallbackPoll,
+}
+
+#[derive(Debug, Default)]
+struct AcceptStormState {
+    consecutive_would_block: u32,
+    last_would_block_at: Option<Instant>,
 }
 
 impl TcpListener {
@@ -32,6 +51,7 @@ impl TcpListener {
         Ok(Self {
             inner,
             registration: Mutex::new(None),
+            accept_storm: Mutex::new(AcceptStormState::default()),
         })
     }
 
@@ -68,16 +88,54 @@ impl TcpListener {
     pub fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<(TcpStream, SocketAddr)>> {
         match self.inner.accept() {
             Ok((stream, addr)) => {
+                self.reset_accept_storm();
                 Poll::Ready(TcpStream::from_std(stream).map(|stream| (stream, addr)))
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(err) = self.register_interest(cx) {
-                    return Poll::Ready(Err(err));
+                let rearmed_backoff = self.note_accept_would_block();
+                let mode = match self.register_interest(cx) {
+                    Ok(mode) => mode,
+                    Err(err) => return Poll::Ready(Err(err)),
+                };
+                if mode == InterestRegistrationMode::FallbackPoll {
+                    // No reactor-backed readiness available for this task context.
+                    // Back off before re-waking to avoid pegging a CPU core.
+                    std::thread::sleep(FALLBACK_ACCEPT_BACKOFF);
+                    cx.waker().wake_by_ref();
+                } else {
+                    // With reactor wake storms, progressively back off repeated WouldBlock polls.
+                    std::thread::sleep(rearmed_backoff);
                 }
                 Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
         }
+    }
+
+    fn note_accept_would_block(&self) -> Duration {
+        let mut state = self.accept_storm.lock();
+        let now = Instant::now();
+
+        if let Some(last) = state.last_would_block_at {
+            if now.saturating_duration_since(last) <= ACCEPT_STORM_WINDOW {
+                state.consecutive_would_block = state.consecutive_would_block.saturating_add(1);
+            } else {
+                state.consecutive_would_block = 1;
+            }
+        } else {
+            state.consecutive_would_block = 1;
+        }
+        state.last_would_block_at = Some(now);
+
+        let exponent = (state.consecutive_would_block.saturating_sub(1) / 64).min(4);
+        let backoff = REARMED_ACCEPT_BACKOFF_BASE.saturating_mul(1u32 << exponent);
+        backoff.min(REARMED_ACCEPT_BACKOFF_CAP)
+    }
+
+    fn reset_accept_storm(&self) {
+        let mut state = self.accept_storm.lock();
+        state.consecutive_would_block = 0;
+        state.last_would_block_at = None;
     }
 
     /// Get local address.
@@ -96,52 +154,41 @@ impl TcpListener {
         Incoming { listener: self }
     }
 
-    fn register_interest(&self, cx: &Context<'_>) -> io::Result<()> {
+    fn register_interest(&self, cx: &Context<'_>) -> io::Result<InterestRegistrationMode> {
         let mut registration = self.registration.lock();
 
         if let Some(existing) = registration.as_mut() {
             // Re-arm reactor interest and conditionally update the waker in a
             // single lock acquisition (will_wake guard skips the clone).
             match existing.rearm(Interest::READABLE, cx.waker()) {
-                Ok(true) => return Ok(()),
+                Ok(true) => return Ok(InterestRegistrationMode::ReactorArmed),
                 Ok(false) => {
                     *registration = None;
                 }
                 Err(err) if err.kind() == io::ErrorKind::NotConnected => {
                     *registration = None;
-                    cx.waker().wake_by_ref();
-                    return Ok(());
+                    return Ok(InterestRegistrationMode::FallbackPoll);
                 }
                 Err(err) => return Err(err),
             }
         }
 
         let Some(current) = Cx::current() else {
-            drop(registration);
-            cx.waker().wake_by_ref();
-            return Ok(());
+            return Ok(InterestRegistrationMode::FallbackPoll);
         };
         let Some(driver) = current.io_driver_handle() else {
-            drop(registration);
-            cx.waker().wake_by_ref();
-            return Ok(());
+            return Ok(InterestRegistrationMode::FallbackPoll);
         };
 
         match driver.register(&self.inner, Interest::READABLE, cx.waker().clone()) {
             Ok(new_reg) => {
                 *registration = Some(new_reg);
-                drop(registration);
-                Ok(())
+                Ok(InterestRegistrationMode::ReactorArmed)
             }
             Err(err) if err.kind() == io::ErrorKind::Unsupported => {
-                drop(registration);
-                cx.waker().wake_by_ref();
-                Ok(())
+                Ok(InterestRegistrationMode::FallbackPoll)
             }
-            Err(err) => {
-                drop(registration);
-                Err(err)
-            }
+            Err(err) => Err(err),
         }
     }
 }
