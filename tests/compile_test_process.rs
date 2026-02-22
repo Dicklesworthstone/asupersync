@@ -1,9 +1,14 @@
-use asupersync::process::Command;
+//! Compile-only smoke test for process command API.
 
-async fn run_command() -> std::io::Result<()> {
-    let output = Command::new("echo")
-        .arg("hello")
-        .output()
-        .await?;
+use asupersync::process::Command;
+use asupersync::process::ProcessError;
+
+fn run_command() -> Result<(), ProcessError> {
+    let _output = Command::new("echo").arg("hello").output()?;
     Ok(())
+}
+
+#[test]
+fn process_command_api_compiles() {
+    run_command().expect("process command should run");
 }

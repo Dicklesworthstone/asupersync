@@ -648,7 +648,12 @@ mod tests {
             );
             for (ra, rb) in report_a.metrics.iter().zip(report_b.metrics.iter()) {
                 assert_eq!(ra.metric, rb.metric);
-                assert_eq!(ra.e_value, rb.e_value);
+                assert!(
+                    (ra.e_value - rb.e_value).abs() < f64::EPSILON,
+                    "expected {}, got {}",
+                    rb.e_value,
+                    ra.e_value
+                );
                 assert_eq!(ra.verdict, rb.verdict);
             }
         }

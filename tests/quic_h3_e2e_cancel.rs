@@ -383,8 +383,7 @@ fn reset_stream_send_during_active_transfer() {
             err,
             NativeQuicConnectionError::Stream(QuicStreamError::InconsistentReset { .. })
         ),
-        "expected InconsistentReset, got: {:?}",
-        err
+        "expected InconsistentReset, got: {err:?}"
     );
 
     // Attempting to reset with final_size below sent bytes should fail.
@@ -401,8 +400,7 @@ fn reset_stream_send_during_active_transfer() {
             err,
             NativeQuicConnectionError::Stream(QuicStreamError::InvalidFinalSize { .. })
         ),
-        "expected InvalidFinalSize, got: {:?}",
-        err
+        "expected InvalidFinalSize, got: {err:?}"
     );
 }
 
@@ -622,8 +620,7 @@ fn finalize_after_begin_close_via_poll() {
         assert_eq!(
             pair.client.state(),
             QuicConnectionState::Draining,
-            "should still be Draining at +{}us",
-            step
+            "should still be Draining at +{step}us"
         );
     }
 

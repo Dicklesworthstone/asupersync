@@ -87,7 +87,11 @@ Current artifact summary (`coverage_summary` in JSON):
 - `cards_total = 8`
 - `cards_with_replay_commands = 8`
 - `cards_with_measured_comparator_evidence = 7`
+- `cards_with_partial_measured_comparator_evidence = 2`
 - `cards_pending_measured_evidence = 1`
+- `partial_measured_levers = [E5, F7]`
+- `pending_measured_levers = [F8]`
+- `closure_blocker_levers = [F7, F8]`
 
 Closure blockers for `asupersync-3ltrv` remain:
 
@@ -122,3 +126,13 @@ Recent evidence alignment updates (2026-02-20):
 - Added eleventh-slice F7 comparator/rollback artifact publication: `artifacts/raptorq_track_f_factor_cache_p95p99_v1.json` generated from deterministic burst comparator command `cargo test --test ci_regression_gates g2_f7_burst_cache_p95p99_report -- --nocapture` plus rollback rehearsal command `cargo test --test ci_regression_gates g2_f7_factor_cache_observed -- --nocapture` (both PASS). G3 blocker wording was tightened: F7 now has concrete comparator+rollback artifacts but still needs closure-grade material p95/p99 gain across broader workload coverage.
 - Added twelfth-slice F7 multi-scenario comparator publication: `artifacts/raptorq_track_f_factor_cache_p95p99_v2.json` generated from `cargo test --test ci_regression_gates g2_f7_burst_cache_p95p99_multiscenario_report -- --nocapture` + rollback rehearsal command `cargo test --test ci_regression_gates g2_f7_factor_cache_observed -- --nocapture` (PASS). Coverage is broader (3 deterministic burst workloads), but current outcome is still non-closure-grade (`material_gain_scenarios=0`) with unresolved warmed-cache tail-latency variability across reruns.
 - Removed stale compile-mismatch blocker text and reconciled closure blockers to current state (E5 publication/sign-off cleared; F7/F8 remain).
+
+Recent evidence alignment updates (2026-02-21):
+
+- WhiteDune support slice reran the targeted G3 gate via `rch exec -- cargo test --test raptorq_perf_invariants g3_decision -- --nocapture`; this rerun now passes (2/2) after recent unrelated compile-frontier repairs.
+- Closure interpretation is unchanged: G3 still blocks on F7 closure-grade comparator evidence and F8 implementation/evidence, not on new G3 schema/card drift.
+
+Recent evidence alignment updates (2026-02-22):
+
+- Added machine-checkable blocker summary fields in `coverage_summary` (`partial_measured_levers`, `pending_measured_levers`, `closure_blocker_levers`) to reduce ambiguity in F7/F8 closure tracking and make invariant tests explicit about blocker semantics.
+- Fresh top-impact support rerun (child bead `asupersync-3ltrv.2`) reconfirmed `rch exec -- cargo test --test raptorq_perf_invariants g3_decision -- --nocapture` PASS (2/2) on 2026-02-22; closure blockers remain unchanged and still scoped to F7/F8 evidence quality/completion.

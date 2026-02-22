@@ -270,8 +270,8 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
             } else {
                 let progress = decoder.progress();
                 return Err(Error::insufficient_symbols(
-                    progress.symbols_received as u32,
-                    progress.symbols_needed_estimate as u32,
+                    usize_to_u32_saturating(progress.symbols_received),
+                    usize_to_u32_saturating(progress.symbols_needed_estimate),
                 ));
             }
         }
@@ -336,6 +336,10 @@ fn sender_pool_bounds(
         configured_pool_size.min(needed_symbols),
         configured_pool_size.max(needed_symbols),
     )
+}
+
+fn usize_to_u32_saturating(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 /// Synchronous single-poll for sending a symbol.
@@ -561,6 +565,12 @@ mod tests {
             max, 1500,
             "max pool should expand to full source+repair demand"
         );
+    }
+
+    #[test]
+    fn usize_to_u32_saturating_caps_large_values() {
+        assert_eq!(usize_to_u32_saturating(42), 42);
+        assert_eq!(usize_to_u32_saturating(usize::MAX), u32::MAX);
     }
 
     #[test]

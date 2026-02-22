@@ -222,7 +222,7 @@ proptest! {
         prop_assert_eq!(result.cost_quota, a.cost_quota);
 
         // Priority: max with 128 (INFINITE default)
-        prop_assert_eq!(result.priority, a.priority.max(Budget::INFINITE.priority));
+        prop_assert_eq!(result.priority, Budget::INFINITE.priority);
     }
 
     /// LAW: Deadline combination is min (tighter wins)

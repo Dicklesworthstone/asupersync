@@ -1493,6 +1493,137 @@ fn g3_decision_records_schema_and_high_impact_lever_coverage() {
         observed_levers, expected_levers,
         "decision cards must cover C5/C6/E4/E5/F5/F6/F7/F8"
     );
+
+    let coverage = artifact["coverage_summary"]
+        .as_object()
+        .expect("coverage_summary must be an object");
+    assert_eq!(
+        coverage
+            .get("cards_total")
+            .and_then(serde_json::Value::as_u64),
+        Some(cards.len() as u64),
+        "cards_total must match decision_cards length"
+    );
+    assert_eq!(
+        coverage
+            .get("cards_with_replay_commands")
+            .and_then(serde_json::Value::as_u64),
+        Some(cards.len() as u64),
+        "all G3 cards must include deterministic replay commands"
+    );
+    assert_eq!(
+        coverage
+            .get("cards_with_conservative_comparator")
+            .and_then(serde_json::Value::as_u64),
+        Some(cards.len() as u64),
+        "all G3 cards must include conservative comparator entries"
+    );
+
+    let partial_measured_levers = coverage
+        .get("partial_measured_levers")
+        .and_then(serde_json::Value::as_array)
+        .expect("coverage_summary.partial_measured_levers must be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("partial_measured_levers entries must be strings")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        partial_measured_levers,
+        BTreeSet::from(["E5".to_string(), "F7".to_string()]),
+        "partial_measured_levers must reflect current closure blockers"
+    );
+
+    let pending_measured_levers = coverage
+        .get("pending_measured_levers")
+        .and_then(serde_json::Value::as_array)
+        .expect("coverage_summary.pending_measured_levers must be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("pending_measured_levers entries must be strings")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        pending_measured_levers,
+        BTreeSet::from(["F8".to_string()]),
+        "pending_measured_levers must identify unresolved measured-evidence card(s)"
+    );
+    assert_eq!(
+        coverage
+            .get("cards_pending_measured_evidence")
+            .and_then(serde_json::Value::as_u64),
+        Some(pending_measured_levers.len() as u64),
+        "cards_pending_measured_evidence must match pending_measured_levers length"
+    );
+    assert_eq!(
+        coverage
+            .get("cards_with_partial_measured_comparator_evidence")
+            .and_then(serde_json::Value::as_u64),
+        Some(partial_measured_levers.len() as u64),
+        "cards_with_partial_measured_comparator_evidence must match partial_measured_levers length"
+    );
+    assert_eq!(
+        coverage
+            .get("cards_with_measured_comparator_evidence")
+            .and_then(serde_json::Value::as_u64),
+        Some((cards.len() - pending_measured_levers.len()) as u64),
+        "cards_with_measured_comparator_evidence must match cards_total - cards_pending_measured_evidence"
+    );
+
+    let closure_blocker_levers = coverage
+        .get("closure_blocker_levers")
+        .and_then(serde_json::Value::as_array)
+        .expect("coverage_summary.closure_blocker_levers must be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("closure_blocker_levers entries must be strings")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        closure_blocker_levers,
+        BTreeSet::from(["F7".to_string(), "F8".to_string()]),
+        "closure_blocker_levers must match current G3 blockers"
+    );
+
+    let f7_card = cards
+        .iter()
+        .find(|card| card["lever_code"].as_str() == Some("F7"))
+        .expect("decision cards must include F7");
+    assert_eq!(
+        f7_card["measured_comparator_evidence"]["status"].as_str(),
+        Some("partial"),
+        "F7 should remain in partial measured-evidence state until closure-grade gain is proven"
+    );
+    assert!(
+        !f7_card["measured_comparator_evidence"]["pending_blockers"]
+            .as_array()
+            .expect("F7 measured_comparator_evidence.pending_blockers must be an array")
+            .is_empty(),
+        "F7 partial measured-evidence state must include pending blockers"
+    );
+
+    let f8_card = cards
+        .iter()
+        .find(|card| card["lever_code"].as_str() == Some("F8"))
+        .expect("decision cards must include F8");
+    assert_eq!(
+        f8_card["status"].as_str(),
+        Some("proposed"),
+        "F8 must remain proposed while implementation/evidence are pending"
+    );
+    assert!(
+        f8_card.get("measured_comparator_evidence").is_none(),
+        "F8 should not declare measured_comparator_evidence before implementation"
+    );
 }
 
 /// Validate baseline/profile and decision-record docs cross-link correctly.
@@ -1977,6 +2108,7 @@ fn g7_expected_loss_contract_schema_and_coverage() {
 
 /// Validate G7 deterministic decision replay samples are complete and coherent.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn g7_expected_loss_contract_replay_bundle_is_well_formed() {
     let artifact: serde_json::Value = serde_json::from_str(RAPTORQ_G7_EXPECTED_LOSS_JSON)
         .expect("G7 expected-loss artifact must be valid JSON");
@@ -2570,7 +2702,7 @@ fn f4_campaign_benchmark_surface_tokens() {
 fn f4_heavy_loss_activates_gaussian_path() {
     let k = 32;
     let symbol_size = 1024;
-    let seed = 0xF4_1E_0001;
+    let seed = 0xF41E_0001;
     let source = make_source_data(k, symbol_size, seed);
     let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
@@ -2611,7 +2743,7 @@ fn f4_heavy_loss_activates_gaussian_path() {
 fn f4_all_repair_activates_dense_elimination() {
     let k = 16;
     let symbol_size = 1024;
-    let seed = 0xF4_1E_0002;
+    let seed = 0xF41E_0002;
     let source = make_source_data(k, symbol_size, seed);
     let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
@@ -2649,7 +2781,7 @@ fn f4_all_repair_activates_dense_elimination() {
 fn f4_low_loss_peels_efficiently() {
     let k = 32;
     let symbol_size = 1024;
-    let seed = 0xF4_1E_0003;
+    let seed = 0xF41E_0003;
     let source = make_source_data(k, symbol_size, seed);
     let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
@@ -2682,14 +2814,12 @@ fn f4_low_loss_peels_efficiently() {
 fn f4_multi_seed_repair_heavy_sweep() {
     let k = 32;
     let symbol_size = 1024;
-    let base_seed = 0xF4_5E_0001u64;
+    let base_seed = 0xF45E_0001_u64;
     let seeds: Vec<u64> = (0..8u64)
         .map(|i| base_seed.wrapping_add(i.wrapping_mul(0x9E37_79B9)))
         .collect();
 
     let mut successes = 0u32;
-    let mut stats_vec: Vec<(u64, usize, usize, usize)> = Vec::new();
-
     for &seed in &seeds {
         let source = make_source_data(k, symbol_size, seed);
         let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
@@ -2705,12 +2835,6 @@ fn f4_multi_seed_repair_heavy_sweep() {
                 .all(|(i, s)| s == &source[i]);
             if correct {
                 successes += 1;
-                stats_vec.push((
-                    seed,
-                    result.stats.peeled,
-                    result.stats.inactivated,
-                    result.stats.gauss_ops,
-                ));
             }
         }
     }
@@ -2748,7 +2872,7 @@ fn f4_multi_seed_repair_heavy_sweep() {
 fn f4_factor_cache_stats_bounded() {
     let k = 32;
     let symbol_size = 1024;
-    let seed = 0xF4_CA_0001;
+    let seed = 0xF4CA_0001;
     let source = make_source_data(k, symbol_size, seed);
     let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
@@ -2803,7 +2927,7 @@ fn f4_campaign_covers_required_lever_observability() {
 fn f6_regime_stats_populated_after_decode() {
     let k = 16;
     let symbol_size = 64;
-    let seed = 0xF6_01_0001u64;
+    let seed = 0xF601_0001_u64;
 
     let source = make_source_data(k, symbol_size, seed);
     let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
@@ -2832,7 +2956,7 @@ fn f6_regime_stats_populated_after_decode() {
 fn f6_first_decode_is_stable_with_zero_deltas() {
     let k = 8;
     let symbol_size = 32;
-    let seed = 0xF6_01_0002u64;
+    let seed = 0xF601_0002_u64;
 
     let source = make_source_data(k, symbol_size, seed);
     let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
@@ -2862,7 +2986,7 @@ fn f6_first_decode_is_stable_with_zero_deltas() {
 fn f6_window_bounded_across_decodes() {
     let k = 8;
     let symbol_size = 32;
-    let seed = 0xF6_01_0003u64;
+    let seed = 0xF601_0003_u64;
 
     let source = make_source_data(k, symbol_size, seed);
     let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
@@ -2902,7 +3026,7 @@ fn f6_window_bounded_across_decodes() {
 fn f6_retuning_deltas_always_bounded() {
     let k = 8;
     let symbol_size = 32;
-    let seed = 0xF6_01_0004u64;
+    let seed = 0xF601_0004_u64;
 
     let source = make_source_data(k, symbol_size, seed);
     let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
@@ -2938,7 +3062,7 @@ fn f6_retuning_deltas_always_bounded() {
 fn f6_deterministic_replay_across_decoders() {
     let k = 16;
     let symbol_size = 64;
-    let seed = 0xF6_01_0005u64;
+    let seed = 0xF601_0005_u64;
 
     let source = make_source_data(k, symbol_size, seed);
     let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();

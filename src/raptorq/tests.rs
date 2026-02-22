@@ -2001,6 +2001,7 @@ mod failure_modes {
         let mut received = decoder.constraint_symbols();
 
         // Keep only second half of source symbols
+        #[allow(clippy::needless_range_loop)]
         for i in (k / 2)..k {
             received.push(ReceivedSymbol::source(i as u32, source[i].clone()));
         }
@@ -2225,6 +2226,7 @@ mod encoder_invariants {
 
     /// repair_symbol_into with a larger buffer writes into the prefix.
     #[test]
+    #[allow(clippy::cast_sign_loss)]
     fn repair_symbol_into_with_oversized_buffer() {
         let k = 4;
         let symbol_size = 16;

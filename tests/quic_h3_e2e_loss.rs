@@ -168,7 +168,7 @@ fn selective_ack_with_gaps_odd_only() {
                 true,
                 t_base + i * 100,
             )
-            .expect(&format!("send pn {i}"));
+            .unwrap_or_else(|_| panic!("send pn {i}"));
     }
 
     let bif_before = pair.client.transport().bytes_in_flight();
@@ -237,7 +237,7 @@ fn selective_ack_via_explicit_ranges() {
                 true,
                 t_base + i * 100,
             )
-            .expect(&format!("send pn {i}"));
+            .unwrap_or_else(|_| panic!("send pn {i}"));
     }
 
     pair.clock.advance(20_000);
@@ -275,6 +275,7 @@ fn selective_ack_via_explicit_ranges() {
 // ===========================================================================
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn loss_detection_via_time_threshold() {
     let mut rng = DetRng::new(0xE3_0003);
     let mut pair = ConnectionPair::new(&mut rng);
@@ -474,9 +475,7 @@ fn pto_fire_after_timeout() {
     let after_pto_timeout = pto_deadline2 - pair.clock.now();
     assert!(
         after_pto_timeout > base_pto_timeout,
-        "PTO should be backed off: {} > {}",
-        after_pto_timeout,
-        base_pto_timeout
+        "PTO should be backed off: {after_pto_timeout} > {base_pto_timeout}"
     );
 }
 
@@ -515,9 +514,7 @@ fn pto_backoff_capping() {
     assert_eq!(
         timeout_at_10,
         base_timeout * 1024,
-        "PTO at count=10 should be 1024x base: {} == {} * 1024",
-        timeout_at_10,
-        base_timeout
+        "PTO at count=10 should be 1024x base: {timeout_at_10} == {base_timeout} * 1024"
     );
 
     // Fire 5 more PTOs (total 15).
@@ -530,8 +527,7 @@ fn pto_backoff_capping() {
     // Should still be capped at 2^10 = 1024x (min(15, 10) = 10).
     assert_eq!(
         timeout_at_15, timeout_at_10,
-        "PTO at count=15 should be capped at same as count=10: {} == {}",
-        timeout_at_15, timeout_at_10
+        "PTO at count=15 should be capped at same as count=10: {timeout_at_15} == {timeout_at_10}"
     );
 }
 
@@ -573,9 +569,7 @@ fn congestion_window_reduction_on_loss() {
     let cwnd_after_growth = t.congestion_window_bytes();
     assert!(
         cwnd_after_growth > initial_cwnd,
-        "cwnd should have grown in slow start: {} > {}",
-        cwnd_after_growth,
-        initial_cwnd
+        "cwnd should have grown in slow start: {cwnd_after_growth} > {initial_cwnd}"
     );
 
     // Now send packets that will trigger packet-threshold loss.
@@ -606,8 +600,7 @@ fn congestion_window_reduction_on_loss() {
     let expected_reduced = (inflated / 2).max(min_cwnd);
     assert_eq!(
         cwnd_after_loss, expected_reduced,
-        "cwnd should be halved after ack-then-loss: {} == {}",
-        cwnd_after_loss, expected_reduced
+        "cwnd should be halved after ack-then-loss: {cwnd_after_loss} == {expected_reduced}"
     );
     assert_eq!(
         ssthresh_after_loss, cwnd_after_loss,
@@ -647,7 +640,7 @@ fn rtt_estimation_with_variable_delays() {
                 true,
                 t_send,
             )
-            .expect(&format!("send pn {pn}"));
+            .unwrap_or_else(|_| panic!("send pn {pn}"));
 
         t_current += rtt;
         pair.clock.advance(rtt);
@@ -655,7 +648,7 @@ fn rtt_estimation_with_variable_delays() {
         let ack = pair
             .client
             .on_ack_received(cx, PacketNumberSpace::ApplicationData, &[pn], 0, t_current)
-            .expect(&format!("ack pn {pn}"));
+            .unwrap_or_else(|_| panic!("ack pn {pn}"));
         assert_eq!(ack.acked_packets, 1);
 
         let srtt = pair
@@ -675,9 +668,8 @@ fn rtt_estimation_with_variable_delays() {
     // between min and max RTT samples.
     let final_srtt = prev_srtt.expect("final srtt");
     assert!(
-        final_srtt >= 20_000 && final_srtt <= 40_000,
-        "smoothed RTT should be between min and max samples: {}",
-        final_srtt
+        (20_000..=40_000).contains(&final_srtt),
+        "smoothed RTT should be between min and max samples: {final_srtt}"
     );
 
     // Verify RTT variance is also populated.
@@ -921,9 +913,7 @@ fn recovery_from_sustained_loss() {
     let cwnd_after_recovery = t.congestion_window_bytes();
     assert!(
         cwnd_after_recovery > cwnd_before_recovery,
-        "Phase 3: cwnd should grow during recovery: {} > {}",
-        cwnd_after_recovery,
-        cwnd_before_recovery
+        "Phase 3: cwnd should grow during recovery: {cwnd_after_recovery} > {cwnd_before_recovery}"
     );
 
     // --- Phase 4: Normal resumed ---
@@ -935,16 +925,13 @@ fn recovery_from_sustained_loss() {
     let cwnd_post = t.congestion_window_bytes();
     assert!(
         cwnd_post > cwnd_pre,
-        "Phase 4: cwnd should continue growing: {} > {}",
-        cwnd_post,
-        cwnd_pre
+        "Phase 4: cwnd should continue growing: {cwnd_post} > {cwnd_pre}"
     );
     let growth = cwnd_post - cwnd_pre;
     // Additive increase: growth = (1200 * 1200) / cwnd, which is small.
     assert!(
         growth < 1200,
-        "Phase 4: congestion avoidance growth should be sub-linear: {} < 1200",
-        growth
+        "Phase 4: congestion avoidance growth should be sub-linear: {growth} < 1200"
     );
 }
 
@@ -992,21 +979,17 @@ fn pto_counter_resets_on_ack() {
     // The reset timeout (backoff=1x) should be drastically smaller than
     // the backed-off timeout (backoff=32x). Specifically it should be
     // the backed-off value / 32, give or take RTT estimate changes.
+    let backed_off_div16 = backed_off_timeout / 16;
     assert!(
-        reset_timeout < backed_off_timeout / 16,
-        "PTO should be reset (much smaller than backed-off): {} < {} / 16 = {}",
-        reset_timeout,
-        backed_off_timeout,
-        backed_off_timeout / 16
+        reset_timeout < backed_off_div16,
+        "PTO should be reset (much smaller than backed-off): {reset_timeout} < {backed_off_timeout} / 16 = {backed_off_div16}"
     );
 
     // Verify the reset timeout is close to a 1x base (within 2x of the
     // original base, accounting for RTT EWMA drift).
     assert!(
         reset_timeout <= base_timeout * 2,
-        "Reset PTO should be within 2x of original base: {} <= {} * 2",
-        reset_timeout,
-        base_timeout
+        "Reset PTO should be within 2x of original base: {reset_timeout} <= {base_timeout} * 2"
     );
 }
 
@@ -1060,7 +1043,7 @@ fn non_in_flight_packets_excluded_from_tracking() {
                 true,
                 t0 + i * 100,
             )
-            .expect(&format!("send pn {i}"));
+            .unwrap_or_else(|_| panic!("send pn {i}"));
     }
     assert_eq!(
         transport.transport().bytes_in_flight(),

@@ -144,6 +144,7 @@ impl ConnectionPair {
 // ===========================================================================
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn full_request_response_cycle() {
     let mut rng = DetRng::new(0xE4_0001);
     let mut pair = ConnectionPair::new(&mut rng);
@@ -221,7 +222,7 @@ fn full_request_response_cycle() {
 
     // Client sends DATA frame.
     let body_data: Vec<u8> = (0..256).map(|_| (rng.next_u64() & 0xFF) as u8).collect();
-    let data_frame = H3Frame::Data(body_data.clone());
+    let data_frame = H3Frame::Data(body_data);
     req_stream_state
         .on_frame(&data_frame)
         .expect("client data ok");
@@ -377,8 +378,7 @@ fn multiple_concurrent_requests() {
     }
 
     // Verify all streams ended independently.
-    for i in 0..4 {
-        let state = &stream_states[i];
+    for (i, state) in stream_states.iter().enumerate().take(4) {
         // After mark_end_stream, further frames should be rejected.
         let err = state
             .clone()
@@ -437,7 +437,7 @@ fn control_stream_settings_exchange() {
 
     let mut client_ctrl = H3ControlState::new();
     let client_settings_frame = client_ctrl
-        .build_local_settings(client_settings.clone())
+        .build_local_settings(client_settings)
         .expect("client build settings");
 
     // Verify the frame is indeed a Settings frame.
@@ -446,7 +446,7 @@ fn control_stream_settings_exchange() {
             assert_eq!(s.max_field_section_size, Some(16384));
             assert_eq!(s.enable_connect_protocol, Some(true));
         }
-        other => panic!("expected Settings frame, got {:?}", other),
+        other => panic!("expected Settings frame, got {other:?}"),
     }
 
     // Server processes client SETTINGS.
@@ -466,7 +466,7 @@ fn control_stream_settings_exchange() {
 
     let mut server_ctrl = H3ControlState::new();
     let server_settings_frame = server_ctrl
-        .build_local_settings(server_settings.clone())
+        .build_local_settings(server_settings)
         .expect("server build settings");
 
     // Client processes server SETTINGS.
@@ -920,6 +920,7 @@ fn request_stream_state_transitions() {
 // ===========================================================================
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn qpack_static_table_plan_coverage() {
     let _rng = DetRng::new(0xE4_0009);
 
@@ -957,9 +958,7 @@ fn qpack_static_table_plan_coverage() {
         let plan = qpack_static_plan_for_request(&head);
         assert!(
             plan.contains(&QpackFieldPlan::StaticIndex(*expected_idx)),
-            "method {} should map to static index {}",
-            method,
-            expected_idx
+            "method {method} should map to static index {expected_idx}"
         );
     }
 
@@ -1105,9 +1104,7 @@ fn qpack_static_table_plan_coverage() {
         assert_eq!(
             resp_plan[0],
             QpackFieldPlan::StaticIndex(*expected_idx),
-            "status {} should map to static index {}",
-            status,
-            expected_idx
+            "status {status} should map to static index {expected_idx}"
         );
     }
 
@@ -1122,8 +1119,7 @@ fn qpack_static_table_plan_coverage() {
                 name: ":status".to_string(),
                 value: status.to_string(),
             },
-            "status {} should produce Literal",
-            status
+            "status {status} should produce Literal"
         );
     }
 
@@ -1256,6 +1252,7 @@ fn multi_frame_wire_sequential_decode() {
 // ===========================================================================
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn full_h3_lifecycle_over_quic_streams() {
     let mut rng = DetRng::new(0xE4_000C);
     let mut pair = ConnectionPair::new(&mut rng);

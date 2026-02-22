@@ -13,9 +13,9 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 
 use asupersync::raptorq::decoder::{DecodeStats, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::{
-    Gf256, Gf256ProfilePackId, Gf256ProfilePackManifestSnapshot, dual_addmul_kernel_decision,
-    dual_mul_kernel_decision, gf256_add_slice, gf256_addmul_slice, gf256_addmul_slices2,
-    gf256_mul_slice, gf256_mul_slices2, gf256_profile_pack_manifest_snapshot,
+    Gf256, Gf256ProfileFallbackReason, Gf256ProfilePackId, Gf256ProfilePackManifestSnapshot,
+    dual_addmul_kernel_decision, dual_mul_kernel_decision, gf256_add_slice, gf256_addmul_slice,
+    gf256_addmul_slices2, gf256_mul_slice, gf256_mul_slices2, gf256_profile_pack_manifest_snapshot,
 };
 use asupersync::raptorq::linalg::{DenseRow, GaussianSolver, row_scale_add, row_xor};
 use asupersync::raptorq::systematic::SystematicEncoder;
@@ -96,8 +96,7 @@ fn emit_track_e_policy_log(scenario: &Gf256BenchScenario) {
         policy.profile_pack.as_str(),
         policy
             .fallback_reason
-            .map(|reason| reason.as_str())
-            .unwrap_or("none"),
+            .map_or("none", Gf256ProfileFallbackReason::as_str),
         csv_profile_pack_ids(policy.rejected_candidates),
         manifest.profile_pack_catalog.len(),
         manifest.tuning_candidate_catalog.len(),
@@ -167,8 +166,7 @@ fn emit_track_e_policy_probe_log(
         policy.profile_pack.as_str(),
         policy
             .fallback_reason
-            .map(|reason| reason.as_str())
-            .unwrap_or("none"),
+            .map_or("none", Gf256ProfileFallbackReason::as_str),
         csv_profile_pack_ids(policy.rejected_candidates),
         manifest.profile_pack_catalog.len(),
         manifest.tuning_candidate_catalog.len(),
@@ -207,16 +205,16 @@ fn emit_track_e_policy_probe_log(
 fn selected_candidate_fields(
     manifest: &Gf256ProfilePackManifestSnapshot,
 ) -> (usize, usize, usize, &'static str) {
-    if let Some(candidate) = manifest.active_selected_tuning_candidate {
-        (
-            candidate.tile_bytes,
-            candidate.unroll,
-            candidate.prefetch_distance,
-            candidate.fusion_shape,
-        )
-    } else {
-        (0, 0, 0, "unknown")
-    }
+    manifest
+        .active_selected_tuning_candidate
+        .map_or((0, 0, 0, "unknown"), |candidate| {
+            (
+                candidate.tile_bytes,
+                candidate.unroll,
+                candidate.prefetch_distance,
+                candidate.fusion_shape,
+            )
+        })
 }
 
 fn csv_profile_pack_ids(ids: &[Gf256ProfilePackId]) -> String {
@@ -1070,14 +1068,14 @@ fn compute_drop_indices(k: usize, loss_fraction: f64, loss_pattern: &str, seed: 
     let n_drop = ((k as f64) * loss_fraction).round() as usize;
     let n_drop = n_drop.min(k);
     match loss_pattern {
-        "uniform" => (0..n_drop).collect(),
-        "clustered" => (0..n_drop).collect(),
         "alternating" => {
             let mut indices: Vec<usize> = (0..k).filter(|i| i % 2 != 0).collect();
             // If we need more drops, add even indices deterministically.
             let mut extra_seed = seed;
             while indices.len() < n_drop && indices.len() < k {
-                extra_seed = extra_seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                extra_seed = extra_seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
                 let candidate = (extra_seed as usize) % k;
                 if !indices.contains(&candidate) {
                     indices.push(candidate);

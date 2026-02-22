@@ -1327,6 +1327,7 @@ fn assert_cross_entity_assumption_catalog(contract: &Value) -> BTreeSet<String> 
     ids
 }
 
+#[allow(clippy::too_many_lines)]
 fn assert_cross_entity_theorem_chain(
     contract: &Value,
     theorem_index: &BTreeMap<String, u64>,

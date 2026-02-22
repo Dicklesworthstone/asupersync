@@ -118,12 +118,12 @@ fn repro_race_leak() {
             let race_future = cx.race(vec![
                 {
                     let cx = cx.clone();
-                    let handle = winner_handle;
+                    let mut handle = winner_handle;
                     Box::pin(async move { handle.join(&cx).await })
                 },
                 {
                     let cx = cx.clone();
-                    let handle = loser_handle;
+                    let mut handle = loser_handle;
                     Box::pin(async move { handle.join(&cx).await })
                 },
             ]);

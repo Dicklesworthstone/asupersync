@@ -18,8 +18,8 @@ mod common;
 
 use asupersync::raptorq::decoder::{DecodeStats, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::regression::{
-    emit_regression_log, RegressionMonitor, RegressionReport, RegressionVerdict, G8_REPLAY_REF,
-    G8_SCHEMA_VERSION,
+    G8_REPLAY_REF, G8_SCHEMA_VERSION, RegressionMonitor, RegressionReport, RegressionVerdict,
+    emit_regression_log,
 };
 use asupersync::raptorq::systematic::SystematicEncoder;
 use asupersync::util::DetRng;
@@ -155,9 +155,7 @@ fn emit_gate_log(
         .or(stats.hard_regime_branch)
         .unwrap_or("unknown");
     let policy_mode = stats.policy_mode.unwrap_or("unknown");
-    let overall_verdict = report
-        .map(|r| r.overall_verdict.label())
-        .unwrap_or("unchecked");
+    let overall_verdict = report.map_or("unchecked", |r| r.overall_verdict.label());
     let regressed_count = report.map_or(0, |r| r.regressed_count);
     let warning_count = report.map_or(0, |r| r.warning_count);
     let total_observations = report.map_or(0, |r| r.total_observations);
@@ -194,6 +192,7 @@ fn emit_gate_log(
     );
 }
 
+#[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
 fn percentile_nearest_rank(values: &[f64], percentile: usize) -> f64 {
     assert!(!values.is_empty(), "percentile input must be non-empty");
     assert!(
@@ -388,8 +387,7 @@ fn g2_calibration_phase_completes() {
 
     assert!(
         monitor.is_calibrated(),
-        "G2: monitor must be calibrated after {} runs",
-        GATE_CALIBRATION_RUNS
+        "G2: monitor must be calibrated after {GATE_CALIBRATION_RUNS} runs"
     );
     assert_eq!(
         monitor.total_observations(),
@@ -804,6 +802,7 @@ fn g2_conservative_vs_radical_overhead_report() {
 /// deterministic burst-decode p50/p95/p99 timing comparison between
 /// conservative cold path and warmed cache-reuse path, with rollback proxy.
 #[test]
+#[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
 fn g2_f7_burst_cache_p95p99_report() {
     const SAMPLE_COUNT: usize = 25;
     const BASE_EXTRA_REPAIR: usize = 6;
@@ -834,7 +833,7 @@ fn g2_f7_burst_cache_p95p99_report() {
                     build_decode_received(&source, &encoder, decoder, &drop, extra_repair);
                 match decoder.decode(&received) {
                     Ok(result) => return result,
-                    Err(err) if err.is_recoverable() && attempt < MAX_RECOVERABLE_RETRIES => continue,
+                    Err(err) if err.is_recoverable() && attempt < MAX_RECOVERABLE_RETRIES => {}
                     Err(err) => panic!(
                         "F7 comparator decode failed for seed={seed} sample={i} attempt={attempt}: {err:?}"
                     ),
@@ -962,6 +961,7 @@ fn g2_f7_burst_cache_p95p99_report() {
 /// between conservative cold path and warmed cache-reuse path, with rollback
 /// proxy measurements and per-scenario material-gain deltas.
 #[test]
+#[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
 fn g2_f7_burst_cache_p95p99_multiscenario_report() {
     #[derive(Clone, Copy)]
     struct Scenario {
@@ -1043,9 +1043,7 @@ fn g2_f7_burst_cache_p95p99_multiscenario_report() {
                         build_decode_received(&source, &encoder, decoder, &drop, extra_repair);
                     match decoder.decode(&received) {
                         Ok(result) => return result,
-                        Err(err) if err.is_recoverable() && attempt < MAX_RECOVERABLE_RETRIES => {
-                            continue;
-                        }
+                        Err(err) if err.is_recoverable() && attempt < MAX_RECOVERABLE_RETRIES => {}
                         Err(err) => panic!(
                             "F7 multi-scenario decode failed \
                              scenario={} seed={seed} sample={i} attempt={attempt}: {err:?}",
@@ -1574,14 +1572,18 @@ fn g2_regression_report_metadata() {
 #[test]
 fn g2_gate_runtime_bounded() {
     // Verify the gate parameters are bounded for CI adoption.
-    assert!(
-        GATE_CALIBRATION_RUNS <= 50,
-        "G2: calibration runs must be bounded for CI runtime"
-    );
-    assert!(
-        GATE_CHECK_RUNS <= 50,
-        "G2: check runs must be bounded for CI runtime"
-    );
+    const {
+        assert!(
+            GATE_CALIBRATION_RUNS <= 50,
+            "G2: calibration runs must be bounded for CI runtime"
+        );
+    }
+    const {
+        assert!(
+            GATE_CHECK_RUNS <= 50,
+            "G2: check runs must be bounded for CI runtime"
+        );
+    }
 
     // Total decodes per scenario = calibration + check.
     let total_per_scenario = GATE_CALIBRATION_RUNS + GATE_CHECK_RUNS;
