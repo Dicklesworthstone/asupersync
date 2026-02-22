@@ -599,6 +599,9 @@ pub fn qpack_encode_field_section(plan: &[QpackFieldPlan]) -> Result<Vec<u8>, H3
     for field in plan {
         match field {
             QpackFieldPlan::StaticIndex(index) => {
+                if qpack_static_entry(*index).is_none() {
+                    return Err(H3NativeError::InvalidFrame("unknown static qpack index"));
+                }
                 // Indexed field line: 1 T Index(6+), T=1 for static table.
                 qpack_encode_prefixed_int(&mut out, 0b1100_0000, 6, *index)?;
             }
@@ -664,6 +667,9 @@ pub fn qpack_decode_field_section(
                     "dynamic qpack index references require dynamic table state",
                 ));
             }
+            if qpack_static_entry(index).is_none() {
+                return Err(H3NativeError::InvalidFrame("unknown static qpack index"));
+            }
             out.push(QpackFieldPlan::StaticIndex(index));
             continue;
         }
@@ -678,8 +684,9 @@ pub fn qpack_decode_field_section(
                     "dynamic qpack name references require dynamic table state",
                 ));
             }
-            let name = qpack_static_name(name_index)
-                .ok_or(H3NativeError::InvalidFrame("unknown static qpack name index"))?;
+            let name = qpack_static_name(name_index).ok_or(H3NativeError::InvalidFrame(
+                "unknown static qpack name index",
+            ))?;
             let value_first = *input.get(pos).ok_or(H3NativeError::UnexpectedEof)?;
             let (value, value_extra) = qpack_decode_string(value_first, 7, &input[pos + 1..])?;
             pos += 1 + value_extra;
@@ -714,9 +721,7 @@ pub fn qpack_decode_field_section(
 }
 
 /// Encode a validated request head into a wire-level QPACK field section.
-pub fn qpack_encode_request_field_section(
-    head: &H3RequestHead,
-) -> Result<Vec<u8>, H3NativeError> {
+pub fn qpack_encode_request_field_section(head: &H3RequestHead) -> Result<Vec<u8>, H3NativeError> {
     let plan = qpack_static_plan_for_request(head);
     qpack_encode_field_section(&plan)
 }
@@ -759,7 +764,9 @@ fn qpack_encode_prefixed_int(
     mut value: u64,
 ) -> Result<(), H3NativeError> {
     if !(1..=8).contains(&prefix_len) {
-        return Err(H3NativeError::InvalidFrame("invalid qpack integer prefix length"));
+        return Err(H3NativeError::InvalidFrame(
+            "invalid qpack integer prefix length",
+        ));
     }
     let max_in_prefix = (1u64 << prefix_len) - 1;
     if value < max_in_prefix {
@@ -782,7 +789,9 @@ fn qpack_decode_prefixed_int(
     input: &[u8],
 ) -> Result<(u64, usize), H3NativeError> {
     if !(1..=8).contains(&prefix_len) {
-        return Err(H3NativeError::InvalidFrame("invalid qpack integer prefix length"));
+        return Err(H3NativeError::InvalidFrame(
+            "invalid qpack integer prefix length",
+        ));
     }
     let mask = ((1u16 << prefix_len) - 1) as u8;
     let mut value = u64::from(first & mask);
@@ -2244,6 +2253,130 @@ mod tests {
                 name: ":status".to_string(),
                 value: "201".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn qpack_wire_roundtrip_static_and_literal_field_lines() {
+        let plan = vec![
+            QpackFieldPlan::StaticIndex(17), // :method GET
+            QpackFieldPlan::StaticIndex(23), // :scheme https
+            QpackFieldPlan::StaticIndex(1),  // :path /
+            QpackFieldPlan::Literal {
+                name: ":authority".to_string(),
+                value: "example.com".to_string(),
+            },
+            QpackFieldPlan::Literal {
+                name: "accept".to_string(),
+                value: "application/json".to_string(),
+            },
+        ];
+
+        let encoded = qpack_encode_field_section(&plan).expect("encode");
+        let decoded =
+            qpack_decode_field_section(&encoded, H3QpackMode::StaticOnly).expect("decode");
+        assert_eq!(decoded, plan);
+
+        let headers = qpack_plan_to_header_fields(&decoded).expect("expand headers");
+        assert_eq!(headers[0], (":method".to_string(), "GET".to_string()));
+        assert_eq!(headers[1], (":scheme".to_string(), "https".to_string()));
+        assert_eq!(headers[2], (":path".to_string(), "/".to_string()));
+        assert_eq!(
+            headers[3],
+            (":authority".to_string(), "example.com".to_string())
+        );
+        assert_eq!(
+            headers[4],
+            ("accept".to_string(), "application/json".to_string())
+        );
+    }
+
+    #[test]
+    fn qpack_wire_request_and_response_helpers_roundtrip() {
+        let request = H3RequestHead::new(
+            H3PseudoHeaders {
+                method: Some("POST".to_string()),
+                scheme: Some("https".to_string()),
+                authority: Some("api.example.com".to_string()),
+                path: Some("/upload".to_string()),
+                status: None,
+            },
+            vec![("content-type".to_string(), "application/json".to_string())],
+        )
+        .expect("request");
+        let request_plan = qpack_static_plan_for_request(&request);
+        let request_wire = qpack_encode_request_field_section(&request).expect("request encode");
+        let request_decoded = qpack_decode_field_section(&request_wire, H3QpackMode::StaticOnly)
+            .expect("request decode");
+        assert_eq!(request_decoded, request_plan);
+
+        let response = H3ResponseHead::new(
+            200,
+            vec![("content-type".to_string(), "text/plain".to_string())],
+        )
+        .expect("response");
+        let response_plan = qpack_static_plan_for_response(&response);
+        let response_wire =
+            qpack_encode_response_field_section(&response).expect("response encode");
+        let response_decoded = qpack_decode_field_section(&response_wire, H3QpackMode::StaticOnly)
+            .expect("response decode");
+        assert_eq!(response_decoded, response_plan);
+    }
+
+    #[test]
+    fn qpack_wire_static_only_rejects_required_insert_count() {
+        // required_insert_count = 1, base = 0, then indexed static(:method GET).
+        let wire = [0x01u8, 0x00, 0xD1];
+        let err = qpack_decode_field_section(&wire, H3QpackMode::StaticOnly).expect_err("reject");
+        assert_eq!(
+            err,
+            H3NativeError::QpackPolicy("required insert count must be zero in static-only mode")
+        );
+    }
+
+    #[test]
+    fn qpack_wire_rejects_huffman_strings_in_static_mode() {
+        // Field section prefix (RIC=0, base=0), then:
+        // literal-with-name-reference (static :authority index=0), value with H=1.
+        let wire = [0x00u8, 0x00, 0x50, 0x83, 0xaa, 0xbb, 0xcc];
+        let err = qpack_decode_field_section(&wire, H3QpackMode::StaticOnly).expect_err("reject");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame(
+                "qpack huffman strings are not supported in native static mode",
+            )
+        );
+    }
+
+    #[test]
+    fn qpack_plan_to_header_fields_rejects_unknown_static_index() {
+        let err = qpack_plan_to_header_fields(&[QpackFieldPlan::StaticIndex(999)])
+            .expect_err("unknown static index");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("unknown static qpack index")
+        );
+    }
+
+    #[test]
+    fn qpack_wire_decode_rejects_unknown_static_index() {
+        // Field section prefix (RIC=0, base=0), then indexed static with index=72
+        // encoded as 63 + continuation byte 9.
+        let wire = [0x00u8, 0x00, 0xFF, 0x09];
+        let err = qpack_decode_field_section(&wire, H3QpackMode::StaticOnly).expect_err("reject");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("unknown static qpack index")
+        );
+    }
+
+    #[test]
+    fn qpack_wire_encode_rejects_unknown_static_index() {
+        let err = qpack_encode_field_section(&[QpackFieldPlan::StaticIndex(999)])
+            .expect_err("unknown static index");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("unknown static qpack index")
         );
     }
 

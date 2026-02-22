@@ -1,0 +1,73 @@
+{
+  "schema_version": "quic-h3-interop-capture-corpus-v1",
+  "owner_bead": "asupersync-10vww",
+  "generated_at_utc": "2026-02-22T19:05:00Z",
+  "qpack_mode": "StaticOnly",
+  "notes": [
+    "Black-box fixture corpus for native HTTP/3 QPACK field-section interop regression checks.",
+    "Fixtures are wire-level field sections intentionally constrained to static-table/literal forms accepted by native static mode.",
+    "Each fixture records an external stack label to preserve interop intent and corpus evolution history."
+  ],
+  "fixtures": [
+    {
+      "id": "qh3-qpack-get-root-authority-quiche",
+      "external_stack": "quiche",
+      "capture_kind": "black-box-fixture",
+      "wire_hex": "0000d1d7c1500b6578616d706c652e636f6d",
+      "expect_decode": "ok",
+      "expected_plan": [
+        { "kind": "static", "index": 17 },
+        { "kind": "static", "index": 23 },
+        { "kind": "static", "index": 1 },
+        { "kind": "literal", "name": ":authority", "value": "example.com" }
+      ]
+    },
+    {
+      "id": "qh3-qpack-post-upload-json-nghttp3",
+      "external_stack": "nghttp3",
+      "capture_kind": "black-box-fixture",
+      "wire_hex": "0000d4d751072f75706c6f6164500f6170692e6578616d706c652e636f6d2705636f6e74656e742d74797065106170706c69636174696f6e2f6a736f6e",
+      "expect_decode": "ok",
+      "expected_plan": [
+        { "kind": "static", "index": 20 },
+        { "kind": "static", "index": 23 },
+        { "kind": "literal", "name": ":path", "value": "/upload" },
+        { "kind": "literal", "name": ":authority", "value": "api.example.com" },
+        { "kind": "literal", "name": "content-type", "value": "application/json" }
+      ]
+    },
+    {
+      "id": "qh3-qpack-response-200-text-msquic",
+      "external_stack": "msquic",
+      "capture_kind": "black-box-fixture",
+      "wire_hex": "0000d92705636f6e74656e742d747970650a746578742f706c61696e",
+      "expect_decode": "ok",
+      "expected_plan": [
+        { "kind": "static", "index": 25 },
+        { "kind": "literal", "name": "content-type", "value": "text/plain" }
+      ]
+    },
+    {
+      "id": "qh3-qpack-dynamic-prefix-rejected-neqo",
+      "external_stack": "neqo",
+      "capture_kind": "black-box-fixture",
+      "wire_hex": "010080",
+      "expect_decode": "error",
+      "expected_error": {
+        "variant": "QpackPolicy",
+        "message": "required insert count must be zero in static-only mode"
+      }
+    },
+    {
+      "id": "qh3-qpack-huffman-rejected-lsquic",
+      "external_stack": "lsquic",
+      "capture_kind": "black-box-fixture",
+      "wire_hex": "00005083aabbcc",
+      "expect_decode": "error",
+      "expected_error": {
+        "variant": "InvalidFrame",
+        "message": "qpack huffman strings are not supported in native static mode"
+      }
+    }
+  ]
+}
