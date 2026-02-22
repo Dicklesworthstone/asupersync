@@ -295,6 +295,19 @@ impl RecoveryCollector {
         self.cancelled = true;
     }
 
+    /// Clears per-attempt collection state so the collector can be reused.
+    fn reset_for_attempt(&mut self, params: ObjectParams) {
+        self.collected.clear();
+        self.esi_to_idx.clear();
+        self.object_params = Some(params);
+        self.progress.symbols_needed = params.min_symbols_for_decode();
+        self.progress.symbols_collected = 0;
+        self.progress.replicas_queried = 0;
+        self.progress.replicas_responded = 0;
+        self.progress.phase = RecoveryPhase::Collecting;
+        self.metrics = CollectionMetrics::default();
+    }
+
     /// Adds a collected symbol, deduplicating by ESI.
     ///
     /// If an existing symbol for the same ESI is found but is unverified,
@@ -423,6 +436,11 @@ pub struct StateDecoder {
     seen_esi: HashSet<u32>,
 }
 
+#[inline]
+fn saturating_symbol_count(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
 impl StateDecoder {
     /// Creates a new decoder with the given configuration.
     #[must_use]
@@ -449,7 +467,7 @@ impl StateDecoder {
 
         // Update state
         if let DecoderState::Accumulating { received, .. } = &mut self.decoder_state {
-            *received = self.symbols.len() as u32;
+            *received = saturating_symbol_count(self.symbols.len());
         }
 
         Ok(())
@@ -464,7 +482,7 @@ impl StateDecoder {
     /// Returns the number of symbols received.
     #[must_use]
     pub fn symbols_received(&self) -> u32 {
-        self.symbols.len() as u32
+        saturating_symbol_count(self.symbols.len())
     }
 
     /// Returns the minimum symbols needed for decoding.
@@ -493,7 +511,10 @@ impl StateDecoder {
             self.decoder_state = DecoderState::Failed {
                 reason: format!("insufficient: have {}, need {k}", self.symbols.len()),
             };
-            return Err(Error::insufficient_symbols(self.symbols.len() as u32, k));
+            return Err(Error::insufficient_symbols(
+                saturating_symbol_count(self.symbols.len()),
+                k,
+            ));
         }
 
         let config = DecodingConfig {
@@ -658,17 +679,37 @@ impl RecoveryOrchestrator {
             return Err(Error::new(ErrorKind::RecoveryFailed)
                 .with_message("recovery session was cancelled"));
         }
+
+        let max_attempts = self.config.max_attempts.max(1);
+        if self.attempt >= max_attempts {
+            return Err(Error::new(ErrorKind::RecoveryFailed)
+                .with_message(format!("recovery attempts exhausted ({max_attempts})")));
+        }
+
         self.recovering = true;
         self.attempt += 1;
 
         let _ = trigger.region_id(); // validate trigger
 
-        // Set object params on collector.
-        self.collector.object_params = Some(params);
+        // Each attempt must start from a clean slate. Reusing stale symbols
+        // can incorrectly satisfy decode thresholds on later attempts.
+        self.collector.reset_for_attempt(params);
+        self.decoder.reset();
 
         // Feed symbols to collector (deduplication).
         for cs in symbols {
-            self.collector.add_collected(cs.clone());
+            match self.collector.add_collected_with_verify(cs.clone()) {
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::CorruptedSymbol => {
+                    // A single corrupt symbol must not fail the entire attempt.
+                    // Continue collecting valid symbols and let can_decode()
+                    // decide whether recovery is still possible.
+                }
+                Err(e) => {
+                    self.recovering = false;
+                    return Err(e);
+                }
+            }
         }
 
         if !self.collector.can_decode() {
@@ -906,6 +947,16 @@ mod tests {
     }
 
     #[test]
+    fn saturating_symbol_count_clamps_large_usize() {
+        assert_eq!(saturating_symbol_count(0), 0);
+        assert_eq!(saturating_symbol_count(u32::MAX as usize), u32::MAX);
+        assert_eq!(saturating_symbol_count(usize::MAX), u32::MAX);
+        if usize::BITS > u32::BITS {
+            assert_eq!(saturating_symbol_count((u32::MAX as usize) + 1), u32::MAX);
+        }
+    }
+
+    #[test]
     fn decoder_deduplicates() {
         let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
 
@@ -1075,6 +1126,64 @@ mod tests {
         assert!(!result.contributing_replicas.is_empty());
         assert_eq!(result.snapshot.region_id, snapshot.region_id);
         assert_eq!(result.snapshot.sequence, snapshot.sequence);
+    }
+
+    #[test]
+    fn orchestrator_ignores_single_corrupt_symbol_when_valid_set_is_sufficient() {
+        let snapshot = create_test_snapshot();
+        let encoded = encode_test_snapshot(&snapshot);
+
+        let mut symbols: Vec<CollectedSymbol> = encoded
+            .symbols
+            .iter()
+            .enumerate()
+            .map(|(i, s)| CollectedSymbol {
+                symbol: s.clone(),
+                tag: AuthenticationTag::zero(),
+                source_replica: format!("r{}", i % 3),
+                collected_at: Time::ZERO,
+                verified: false,
+            })
+            .collect();
+
+        // Deliberately inject one out-of-range ESI.
+        symbols.push(CollectedSymbol {
+            symbol: Symbol::new_for_test(1, 0, 60_000, &[0u8; 16]),
+            tag: AuthenticationTag::zero(),
+            source_replica: "faulty".to_string(),
+            collected_at: Time::ZERO,
+            verified: false,
+        });
+
+        let trigger = RecoveryTrigger::ManualTrigger {
+            region_id: RegionId::new_for_test(1, 0),
+            initiator: "test".to_string(),
+            reason: None,
+        };
+
+        let mut orchestrator = RecoveryOrchestrator::new(
+            RecoveryConfig::default(),
+            RecoveryDecodingConfig {
+                verify_integrity: false,
+                ..Default::default()
+            },
+        );
+
+        let result = orchestrator.recover_from_symbols(
+            &trigger,
+            &symbols,
+            encoded.params,
+            Duration::from_millis(10),
+        );
+
+        assert!(
+            result.is_ok(),
+            "recovery should tolerate one corrupt symbol"
+        );
+        assert_eq!(orchestrator.collector.metrics.symbols_corrupt, 1);
+        let recovered = result.unwrap();
+        assert_eq!(recovered.snapshot.region_id, snapshot.region_id);
+        assert_eq!(recovered.snapshot.sequence, snapshot.sequence);
     }
 
     #[test]
@@ -1502,6 +1611,90 @@ mod tests {
     }
 
     #[test]
+    fn orchestrator_attempts_are_isolated() {
+        let snapshot = create_test_snapshot();
+        let encoded = encode_test_snapshot(&snapshot);
+
+        let good_symbols: Vec<CollectedSymbol> = encoded
+            .symbols
+            .iter()
+            .map(|s| CollectedSymbol {
+                symbol: s.clone(),
+                tag: AuthenticationTag::zero(),
+                source_replica: "r1".to_string(),
+                collected_at: Time::ZERO,
+                verified: false,
+            })
+            .collect();
+
+        let trigger = RecoveryTrigger::ManualTrigger {
+            region_id: RegionId::new_for_test(1, 0),
+            initiator: "test".to_string(),
+            reason: None,
+        };
+
+        let mut orchestrator = RecoveryOrchestrator::new(
+            RecoveryConfig::default(),
+            RecoveryDecodingConfig {
+                verify_integrity: false,
+                ..Default::default()
+            },
+        );
+
+        // First attempt succeeds with valid symbols.
+        let first = orchestrator.recover_from_symbols(
+            &trigger,
+            &good_symbols,
+            encoded.params,
+            Duration::from_millis(1),
+        );
+        assert!(first.is_ok());
+
+        // Second attempt with no symbols must fail; stale symbols from attempt #1
+        // must not leak into attempt #2.
+        let second = orchestrator.recover_from_symbols(
+            &trigger,
+            &[],
+            encoded.params,
+            Duration::from_millis(1),
+        );
+        assert!(second.is_err());
+        assert_eq!(orchestrator.attempt, 2);
+    }
+
+    #[test]
+    fn orchestrator_enforces_max_attempts() {
+        let trigger = RecoveryTrigger::ManualTrigger {
+            region_id: RegionId::new_for_test(1, 0),
+            initiator: "test".to_string(),
+            reason: None,
+        };
+        let params = ObjectParams::new(ObjectId::new_for_test(1), 1000, 128, 1, 10);
+
+        let mut orchestrator = RecoveryOrchestrator::new(
+            RecoveryConfig {
+                max_attempts: 1,
+                ..RecoveryConfig::default()
+            },
+            RecoveryDecodingConfig::default(),
+        );
+
+        let first = orchestrator.recover_from_symbols(&trigger, &[], params, Duration::ZERO);
+        assert!(first.is_err());
+        assert_eq!(orchestrator.attempt, 1);
+
+        let second = orchestrator.recover_from_symbols(&trigger, &[], params, Duration::ZERO);
+        assert!(second.is_err());
+        assert_eq!(orchestrator.attempt, 1);
+        let err = second.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::RecoveryFailed);
+        assert!(
+            err.to_string().contains("attempts exhausted"),
+            "unexpected max-attempts error: {err}"
+        );
+    }
+
+    #[test]
     fn orchestrator_cancel_after_start() {
         let snapshot = create_test_snapshot();
         let encoded = encode_test_snapshot(&snapshot);
@@ -1746,8 +1939,7 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::RecoveryFailed);
         assert!(
             err.to_string().contains("cancelled"),
-            "error message must mention cancellation: {}",
-            err
+            "error message must mention cancellation: {err}"
         );
     }
 
