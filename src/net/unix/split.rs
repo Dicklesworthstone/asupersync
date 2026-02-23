@@ -211,6 +211,10 @@ impl UnixStreamInner {
             guard.write_waker = Some(cx.waker().clone());
         }
 
+        let mut dropped_reg = None;
+        let mut early_return = None;
+        let mut wakers_to_wake = None;
+
         // Destructure to enable independent field borrows through the MutexGuard.
         {
             let SplitIoState {
@@ -223,18 +227,28 @@ impl UnixStreamInner {
                 let waker = combined_waker(read_waker.as_ref(), write_waker.as_ref());
                 // Single lock in io_driver: re-arm interest + refresh waker.
                 match reg.rearm(combined_interest, &waker) {
-                    Ok(true) => return Ok(()),
+                    Ok(true) => early_return = Some(Ok(())),
                     Ok(false) => {
-                        *registration = None;
+                        dropped_reg = registration.take();
                     }
                     Err(err) if err.kind() == io::ErrorKind::NotConnected => {
-                        *registration = None;
-                        cx.waker().wake_by_ref();
-                        return Ok(());
+                        dropped_reg = registration.take();
+                        wakers_to_wake = Some((read_waker.clone(), write_waker.clone()));
+                        early_return = Some(Ok(()));
                     }
-                    Err(err) => return Err(err),
+                    Err(err) => early_return = Some(Err(err)),
                 }
             }
+        }
+
+        if let Some(res) = early_return {
+            drop(guard);
+            drop(dropped_reg);
+            if let Some((rw, ww)) = wakers_to_wake {
+                if let Some(w) = rw { w.wake(); }
+                if let Some(w) = ww { w.wake(); }
+            }
+            return res;
         }
 
         // Build combined waker while still holding the lock. We keep the lock
@@ -270,6 +284,66 @@ impl UnixStreamInner {
         };
         drop(guard);
         result
+    }
+
+    fn clear_waiter_on_drop(&self, interest: Interest) {
+        let mut guard = self.state.lock();
+
+        if interest.is_readable() {
+            guard.read_waker = None;
+        }
+        if interest.is_writable() {
+            guard.write_waker = None;
+        }
+
+        let desired_interest = registration_interest(
+            guard.read_waker.is_some(),
+            guard.write_waker.is_some(),
+            Interest::empty(),
+        );
+
+        let mut clear_registration = desired_interest.is_empty();
+        let mut wakers_to_wake = None;
+
+        if !clear_registration {
+            let combined = combined_waker(guard.read_waker.as_ref(), guard.write_waker.as_ref());
+            let is_some = guard.registration.is_some();
+            let rearm_ok = guard
+                .registration
+                .as_mut()
+                .is_some_and(|reg| matches!(reg.rearm(desired_interest, &combined), Ok(true)));
+
+            if is_some {
+                if !rearm_ok {
+                    clear_registration = true;
+                    wakers_to_wake = Some((guard.read_waker.clone(), guard.write_waker.clone()));
+                }
+            } else {
+                // Surviving waiter but no registration: wake it so poll paths
+                // can attempt fresh registration or surface terminal errors.
+                wakers_to_wake = Some((guard.read_waker.clone(), guard.write_waker.clone()));
+            }
+        }
+
+        let dropped_reg = if clear_registration {
+            guard.registration.take()
+        } else {
+            None
+        };
+
+        drop(guard);
+        drop(dropped_reg);
+
+        if let Some((rw, ww)) = wakers_to_wake {
+            if let Some(w) = rw { w.wake(); }
+            if let Some(w) = ww { w.wake(); }
+        }
+    }
+}
+
+impl Drop for OwnedReadHalf {
+    fn drop(&mut self) {
+        self.inner.clear_waiter_on_drop(Interest::READABLE);
     }
 }
 
@@ -424,6 +498,7 @@ impl AsyncWrite for OwnedWriteHalf {
 
 impl Drop for OwnedWriteHalf {
     fn drop(&mut self) {
+        self.inner.clear_waiter_on_drop(Interest::WRITABLE);
         if self.shutdown_on_drop {
             let _ = self.inner.stream.shutdown(Shutdown::Write);
         }

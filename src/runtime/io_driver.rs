@@ -299,17 +299,23 @@ impl IoDriver {
         self.stats.polls += 1;
         self.stats.events_received += n as u64;
 
+        let mut wakers = Vec::with_capacity(self.events.len());
+
         // Dispatch wakers for ready events
         for event in &self.events {
             let interest = self.interests.get(&event.token).copied();
             on_event(event, interest);
             let slab_token = SlabToken::from_usize(event.token.0);
             if let Some(waker) = self.wakers.get(slab_token) {
-                waker.wake_by_ref();
+                wakers.push(waker.clone());
                 self.stats.wakers_dispatched += 1;
             } else {
                 self.stats.unknown_tokens += 1;
             }
+        }
+
+        for waker in wakers {
+            waker.wake();
         }
 
         Ok(n)
@@ -320,17 +326,18 @@ impl IoDriver {
         std::mem::take(&mut self.events)
     }
 
-    /// Restores the events buffer and dispatches wakers for the events it contains.
-    pub(crate) fn restore_and_dispatch<F>(&mut self, mut events: Events, mut on_event: F)
+    /// Restores the events buffer and returns wakers for the events it contains.
+    pub(crate) fn restore_and_extract_wakers<F>(&mut self, mut events: Events, mut on_event: F) -> Vec<Waker>
     where
         F: FnMut(&Event, Option<Interest>),
     {
+        let mut wakers = Vec::with_capacity(events.len());
         for event in &events {
             let interest = self.interests.get(&event.token).copied();
             on_event(event, interest);
             let slab_token = SlabToken::from_usize(event.token.0);
             if let Some(waker) = self.wakers.get(slab_token) {
-                waker.wake_by_ref();
+                wakers.push(waker.clone());
                 self.stats.wakers_dispatched += 1;
             } else {
                 self.stats.unknown_tokens += 1;
@@ -339,6 +346,7 @@ impl IoDriver {
 
         events.clear();
         self.events = events;
+        wakers
     }
 
     /// Restores the events buffer without dispatching wakers.
@@ -499,19 +507,26 @@ impl IoDriverHandle {
         let poll_result = self.reactor.poll(&mut events, timeout);
 
         // 3. Re-acquire lock to dispatch wakers and restore the buffer
-        let mut driver = self.inner.lock();
+        let wakers = {
+            let mut driver = self.inner.lock();
 
-        // Update stats and dispatch if poll succeeded
-        if let Ok(n) = poll_result {
-            driver.stats.polls += 1;
-            driver.stats.events_received += n as u64;
-            driver.restore_and_dispatch(events, on_event);
-            Ok(n)
-        } else {
-            // Restore buffer even on error, but do not dispatch readiness.
-            driver.restore_events_only(events);
-            poll_result
+            // Update stats and dispatch if poll succeeded
+            if let Ok(n) = poll_result {
+                driver.stats.polls += 1;
+                driver.stats.events_received += n as u64;
+                driver.restore_and_extract_wakers(events, on_event)
+            } else {
+                // Restore buffer even on error, but do not dispatch readiness.
+                driver.restore_events_only(events);
+                Vec::new()
+            }
+        };
+
+        for waker in wakers {
+            waker.wake();
         }
+
+        poll_result
     }
 
     /// Attempts to process pending I/O events exclusively.
@@ -535,18 +550,24 @@ impl IoDriverHandle {
 
             let poll_result = self.reactor.poll(&mut events, timeout);
 
-            let mut driver = self.inner.lock();
-            let result = if let Ok(n) = poll_result {
-                driver.stats.polls += 1;
-                driver.stats.events_received += n as u64;
-                driver.restore_and_dispatch(events, on_event);
-                Ok(n)
-            } else {
-                driver.restore_events_only(events);
-                poll_result
+            let wakers = {
+                let mut driver = self.inner.lock();
+                if let Ok(n) = poll_result {
+                    driver.stats.polls += 1;
+                    driver.stats.events_received += n as u64;
+                    driver.restore_and_extract_wakers(events, on_event)
+                } else {
+                    driver.restore_events_only(events);
+                    Vec::new()
+                }
             };
+            
+            for waker in wakers {
+                waker.wake();
+            }
+            
             self.is_polling.store(false, Ordering::Release);
-            result
+            poll_result
         } else {
             Ok(0)
         }

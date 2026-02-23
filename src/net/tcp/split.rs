@@ -216,6 +216,7 @@ impl TcpStreamInner {
 
         let mut dropped_reg = None;
         let mut early_return = None;
+        let mut wakers_to_wake = None;
 
         // Destructure to enable independent field borrows through the MutexGuard.
         {
@@ -235,12 +236,7 @@ impl TcpStreamInner {
                     }
                     Err(err) if err.kind() == io::ErrorKind::NotConnected => {
                         dropped_reg = registration.take();
-                        if let Some(w) = read_waker.as_ref() {
-                            w.wake_by_ref();
-                        }
-                        if let Some(w) = write_waker.as_ref() {
-                            w.wake_by_ref();
-                        }
+                        wakers_to_wake = Some((read_waker.clone(), write_waker.clone()));
                         early_return = Some(Ok(()));
                     }
                     Err(err) => early_return = Some(Err(err)),
@@ -251,6 +247,10 @@ impl TcpStreamInner {
         if let Some(res) = early_return {
             drop(guard);
             drop(dropped_reg);
+            if let Some((rw, ww)) = wakers_to_wake {
+                if let Some(w) = rw { w.wake(); }
+                if let Some(w) = ww { w.wake(); }
+            }
             return res;
         }
 
@@ -311,6 +311,8 @@ impl TcpStreamInner {
         );
 
         let mut clear_registration = desired_interest.is_empty();
+        let mut wakers_to_wake = None;
+
         if !clear_registration {
             let combined = combined_waker(guard.read_waker.as_ref(), guard.write_waker.as_ref());
             let is_some = guard.registration.is_some();
@@ -322,22 +324,12 @@ impl TcpStreamInner {
             if is_some {
                 if !rearm_ok {
                     clear_registration = true;
-                    if let Some(w) = guard.read_waker.as_ref() {
-                        w.wake_by_ref();
-                    }
-                    if let Some(w) = guard.write_waker.as_ref() {
-                        w.wake_by_ref();
-                    }
+                    wakers_to_wake = Some((guard.read_waker.clone(), guard.write_waker.clone()));
                 }
             } else {
                 // Surviving waiter but no registration: wake it so poll paths
                 // can attempt fresh registration or surface terminal errors.
-                if let Some(w) = guard.read_waker.as_ref() {
-                    w.wake_by_ref();
-                }
-                if let Some(w) = guard.write_waker.as_ref() {
-                    w.wake_by_ref();
-                }
+                wakers_to_wake = Some((guard.read_waker.clone(), guard.write_waker.clone()));
             }
         }
 
@@ -349,6 +341,11 @@ impl TcpStreamInner {
 
         drop(guard);
         drop(dropped_reg);
+
+        if let Some((rw, ww)) = wakers_to_wake {
+            if let Some(w) = rw { w.wake(); }
+            if let Some(w) = ww { w.wake(); }
+        }
     }
 }
 
