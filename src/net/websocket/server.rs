@@ -410,10 +410,29 @@ where
                     // Ignore non-close frames during close
                 }
                 None => {
-                    let n = self.read_more().await?;
-                    if n == 0 {
+                    let now = std::time::Instant::now();
+                    if now >= deadline {
                         self.close_handshake.force_close(CloseReason::going_away());
                         break;
+                    }
+                    let remaining = deadline - now;
+                    let time_now = crate::cx::Cx::current()
+                        .and_then(|current| current.timer_driver())
+                        .map_or_else(crate::time::wall_now, |driver| driver.now());
+                    
+                    match crate::time::timeout(time_now, remaining, self.read_more()).await {
+                        Ok(Ok(n)) => {
+                            if n == 0 {
+                                self.close_handshake.force_close(CloseReason::going_away());
+                                break;
+                            }
+                        }
+                        Ok(Err(e)) => return Err(e),
+                        Err(_) => {
+                            // Timeout elapsed
+                            self.close_handshake.force_close(CloseReason::going_away());
+                            break;
+                        }
                     }
                 }
             }
