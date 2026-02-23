@@ -770,9 +770,12 @@ impl RegionRecord {
         if transitioned {
             self.trace_state_change(RegionState::Closed);
             self.clear_heap();
-            let mut notify = self.close_notify.lock();
-            notify.closed = true;
-            if let Some(waker) = notify.waker.take() {
+            let waker = {
+                let mut notify = self.close_notify.lock();
+                notify.closed = true;
+                notify.waker.take()
+            };
+            if let Some(waker) = waker {
                 waker.wake();
             }
         }
@@ -1009,9 +1012,12 @@ impl RegionRecord {
         // Ensure heap is reclaimed if the snapshot forces the region closed
         if state == RegionState::Closed && prev_state != RegionState::Closed {
             self.clear_heap();
-            let mut notify = self.close_notify.lock();
-            notify.closed = true;
-            if let Some(waker) = notify.waker.take() {
+            let waker = {
+                let mut notify = self.close_notify.lock();
+                notify.closed = true;
+                notify.waker.take()
+            };
+            if let Some(waker) = waker {
                 waker.wake();
             }
         }

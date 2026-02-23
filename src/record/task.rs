@@ -573,11 +573,16 @@ impl TaskRecord {
             }
         }
         if let Some(inner) = &self.cx_inner {
-            let guard = inner.read();
-            if guard.cancel_requested {
-                if let Some(waker) = guard.cancel_waker.clone() {
-                    waker.wake_by_ref();
+            let waker = {
+                let guard = inner.read();
+                if guard.cancel_requested {
+                    guard.cancel_waker.clone()
+                } else {
+                    None
                 }
+            };
+            if let Some(waker) = waker {
+                waker.wake_by_ref();
             }
         }
         result
