@@ -1,6 +1,6 @@
 [package]
 name = "franken-decision"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2024"
 license-file = "../LICENSE"
 description = "Decision Contract schema and runtime for FrankenSuite."
@@ -8,8 +8,8 @@ repository = "https://github.com/Dicklesworthstone/asupersync"
 keywords = ["decision", "contract", "bayesian", "loss-matrix"]
 
 [dependencies]
-franken-kernel = { version = "0.2.5", path = "../franken_kernel" }
-franken-evidence = { version = "0.2.5", path = "../franken_evidence" }
+franken-kernel = { version = "0.2.6", path = "../franken_kernel" }
+franken-evidence = { version = "0.2.6", path = "../franken_evidence" }
 serde = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]

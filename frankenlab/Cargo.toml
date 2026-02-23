@@ -1,6 +1,6 @@
 [package]
 name = "frankenlab"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2024"
 license-file = "../LICENSE"
 description = "Deterministic testing harness for async Rust: record, replay, and minimize concurrency bugs."
@@ -13,7 +13,7 @@ name = "frankenlab"
 path = "src/main.rs"
 
 [dependencies]
-asupersync = { version = "0.2.5", path = "..", features = ["cli", "test-internals"] }
+asupersync = { version = "0.2.6", path = "..", features = ["cli", "test-internals"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
