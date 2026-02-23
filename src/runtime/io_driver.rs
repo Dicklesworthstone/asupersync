@@ -391,6 +391,7 @@ impl IoDriver {
 pub struct IoDriverHandle {
     inner: Arc<Mutex<IoDriver>>,
     reactor: Arc<dyn Reactor>,
+    is_polling: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for IoDriverHandle {
@@ -409,6 +410,7 @@ impl IoDriverHandle {
         Self {
             inner: Arc::new(Mutex::new(IoDriver::new(reactor.clone()))),
             reactor,
+            is_polling: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -421,6 +423,7 @@ impl IoDriverHandle {
                 events_capacity,
             ))),
             reactor,
+            is_polling: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -507,6 +510,44 @@ impl IoDriverHandle {
             // Restore buffer even on error, but do not dispatch readiness.
             driver.restore_events_only(events);
             poll_result
+        }
+    }
+
+    /// Attempts to process pending I/O events exclusively.
+    ///
+    /// Returns `Ok(0)` immediately if another thread is already polling the reactor.
+    /// This prevents multiple threads from blocking in the reactor and consuming empty
+    /// event buffers, maintaining the Leader/Follower pattern efficiently.
+    pub fn try_turn_with<F>(&self, timeout: Option<Duration>, mut on_event: F) -> io::Result<usize>
+    where
+        F: FnMut(&Event, Option<Interest>),
+    {
+        if self.is_polling.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            let mut events = {
+                let mut driver = self.inner.lock();
+                if driver.is_empty() {
+                    self.is_polling.store(false, Ordering::Release);
+                    return Ok(0);
+                }
+                driver.take_events()
+            };
+
+            let poll_result = self.reactor.poll(&mut events, timeout);
+
+            let mut driver = self.inner.lock();
+            let result = if let Ok(n) = poll_result {
+                driver.stats.polls += 1;
+                driver.stats.events_received += n as u64;
+                driver.restore_and_dispatch(events, on_event);
+                Ok(n)
+            } else {
+                driver.restore_events_only(events);
+                poll_result
+            };
+            self.is_polling.store(false, Ordering::Release);
+            result
+        } else {
+            Ok(0)
         }
     }
 

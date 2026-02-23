@@ -1060,17 +1060,37 @@ impl ThreeLaneWorker {
             }
 
             // PHASE 5: Drive I/O (Leader/Follower pattern)
-            // If we can acquire the IO driver lock, we become the I/O leader
+            // If we can acquire the IO driver polling lock, we become the I/O leader
             // and poll the reactor for ready events (e.g. TCP connect completion).
+            let mut io_leader = false;
             if let Some(io) = &self.io_driver {
-                // Single try_lock to avoid double lock acquisition (is_empty
-                // also locks the inner Mutex).  Check emptiness inside the
-                // critical section to eliminate the TOCTOU race.
-                if let Some(mut driver) = io.try_lock() {
-                    if !driver.is_empty() {
-                        let _ = driver.turn_with(Some(Duration::from_millis(1)), |_, _| {});
-                        continue;
+                let now = self.timer_driver.as_ref().map_or(Time::ZERO, TimerDriverHandle::now);
+                let local_deadline = self.local.lock().next_deadline();
+                let timer_deadline = self.timer_driver.as_ref().and_then(TimerDriverHandle::next_deadline);
+                let global_deadline = self.global.peek_earliest_deadline();
+                
+                let next_deadline = [timer_deadline, local_deadline, global_deadline]
+                    .into_iter()
+                    .flatten()
+                    .min();
+
+                let timeout = if let Some(deadline) = next_deadline {
+                    if deadline > now {
+                        Some(Duration::from_nanos(deadline.duration_since(now)))
+                    } else {
+                        Some(Duration::ZERO)
                     }
+                } else {
+                    None
+                };
+
+                // We only block in I/O if we have no fast_queue work
+                let io_timeout = if self.fast_queue.is_empty() { timeout } else { Some(Duration::ZERO) };
+
+                if io.try_turn_with(io_timeout, |_, _| {}).is_ok_and(|n| n > 0 || io_timeout != Some(Duration::ZERO)) {
+                    io_leader = true;
+                    // We polled I/O, so we might have woken tasks. Continue loop.
+                    continue;
                 }
             }
 
@@ -1119,11 +1139,9 @@ impl ThreeLaneWorker {
                     if local_has_runnable || local_ready_has_work {
                         break;
                     }
-                    // Park with timeout based on next timer deadline or IO polling needs.
-                    let has_io = self.io_driver.is_some();
-
-                    // Calculate earliest deadline from all sources.
-                    // local_deadline was pre-computed above (same lock acquisition).
+                    // Park with timeout based on next timer deadline.
+                    // If we are the IO leader, we shouldn't even be here (we'd block in epoll).
+                    // If we are a follower, we just park until a deadline or woken.
                     let timer_deadline = self
                         .timer_driver
                         .as_ref()
@@ -1148,12 +1166,13 @@ impl ThreeLaneWorker {
                             // If deadline is due or passed, don't park - break to process timers/tasks.
                             break;
                         }
-                    } else if has_io {
-                        // No pending timers but IO driver is active;
-                        // use short timeout so we periodically poll the reactor.
-                        self.parker.park_timeout(Duration::from_millis(1));
+                    } else if io_leader {
+                        // Leader doesn't park here; it parks in epoll.
+                        // (But wait, if we got here, io.try_turn_with didn't match).
+                        // This branch is rarely hit for the leader unless io.try_turn_with returned 0 events.
+                        self.parker.park();
                     } else {
-                        // No timer driver and no IO, park indefinitely.
+                        // Followers park indefinitely.
                         self.parker.park();
                     }
                     // After waking, re-check queues by continuing the loop.
