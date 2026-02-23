@@ -44,6 +44,7 @@ use crate::runtime::reactor::{
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::Waker;
 use std::time::Duration;
