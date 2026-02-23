@@ -539,7 +539,7 @@ impl IoDriverHandle {
         F: FnMut(&Event, Option<Interest>),
     {
         if self.is_polling.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
-            let mut events = {
+            let events = {
                 let mut driver = self.inner.lock();
                 if driver.is_empty() {
                     self.is_polling.store(false, Ordering::Release);
@@ -548,10 +548,30 @@ impl IoDriverHandle {
                 driver.take_events()
             };
 
-            let poll_result = self.reactor.poll(&mut events, timeout);
+            struct PollingGuard<'a> {
+                handle: &'a IoDriverHandle,
+                events: Option<Events>,
+            }
+            impl Drop for PollingGuard<'_> {
+                fn drop(&mut self) {
+                    self.handle.is_polling.store(false, Ordering::Release);
+                    if let Some(events) = self.events.take() {
+                        let mut driver = self.handle.inner.lock();
+                        driver.restore_events_only(events);
+                    }
+                }
+            }
+
+            let mut guard = PollingGuard {
+                handle: self,
+                events: Some(events),
+            };
+
+            let poll_result = self.reactor.poll(guard.events.as_mut().unwrap(), timeout);
 
             let wakers = {
                 let mut driver = self.inner.lock();
+                let events = guard.events.take().unwrap(); // Take events from guard
                 if let Ok(n) = poll_result {
                     driver.stats.polls += 1;
                     driver.stats.events_received += n as u64;
@@ -566,7 +586,6 @@ impl IoDriverHandle {
                 waker.wake();
             }
             
-            self.is_polling.store(false, Ordering::Release);
             poll_result
         } else {
             Ok(0)

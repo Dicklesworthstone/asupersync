@@ -2312,6 +2312,9 @@ impl RuntimeState {
                                 // Advance parent in next iteration
                                 current = Some(parent_id);
                             }
+
+                            // Cleanup: Remove the closed region from the arena to prevent memory leaks
+                            self.regions.remove(region_id.arena_index());
                         }
                     }
                 }
