@@ -108,3 +108,13 @@ repro_*.rs
 
 # Claude local settings
 .claude/settings.local.json
+
+# Profiling artifacts directory (callgrind, cachegrind, etc.)
+artifacts/
+
+# UBS (Ultimate Bug Scanner) output
+ubs_output.txt
+
+# Generic scratch output
+output.txt
+*.diff
