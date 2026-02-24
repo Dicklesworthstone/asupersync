@@ -855,11 +855,14 @@ impl TimerWheel {
                 self.active.remove(&entry.id);
                 wakers.push(entry.waker);
             } else {
-                i += 1;
+                let entry = ready.swap_remove(i);
+                self.insert_entry(entry);
             }
         }
 
         // Put the vec back — retains its capacity for the next tick.
+        let mut new_ready = std::mem::take(&mut self.ready);
+        ready.append(&mut new_ready);
         self.ready = ready;
         if self.active.is_empty() {
             self.purge_inactive_storage();
