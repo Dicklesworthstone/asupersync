@@ -497,18 +497,38 @@ impl IoDriverHandle {
         F: FnMut(&Event, Option<Interest>),
     {
         // 1. Lock driver and take the events buffer to use for polling
-        let mut events = {
+        let events = {
             let mut driver = self.inner.lock();
             driver.take_events()
         };
 
+        struct PollingGuard<'a> {
+            handle: &'a IoDriverHandle,
+            events: Option<Events>,
+        }
+
+        impl Drop for PollingGuard<'_> {
+            fn drop(&mut self) {
+                if let Some(events) = self.events.take() {
+                    let mut driver = self.handle.inner.lock();
+                    driver.restore_events_only(events);
+                }
+            }
+        }
+
+        let mut guard = PollingGuard {
+            handle: self,
+            events: Some(events),
+        };
+
         // 2. Poll the reactor without holding the driver lock.
         // This allows other threads to acquire the lock for `register`/`deregister`.
-        let poll_result = self.reactor.poll(&mut events, timeout);
+        let poll_result = self.reactor.poll(guard.events.as_mut().unwrap(), timeout);
 
         // 3. Re-acquire lock to dispatch wakers and restore the buffer
         let wakers = {
             let mut driver = self.inner.lock();
+            let events = guard.events.take().unwrap(); // Take events from guard
 
             // Update stats and dispatch if poll succeeded
             if let Ok(n) = poll_result {
@@ -751,7 +771,10 @@ impl IoRegistration {
                             self.deregistered = true;
                             Ok(())
                         }
-                        Err(_second_err) => Err(first_err),
+                        Err(_second_err) => {
+                            self.deregistered = true;
+                            Err(first_err)
+                        }
                     }
                 }
             }
