@@ -820,12 +820,11 @@ impl<P: Policy> Scope<'_, P> {
         }
 
         impl<'a, Fut: Future> Future for RegionRunner<'a, Fut> {
-            type Output = (Fut::Output, &'a mut RuntimeState);
+            type Output = (std::thread::Result<Fut::Output>, &'a mut RuntimeState);
 
             fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-                // SAFETY: RegionRunner is pinned, so projecting to fut is safe.
-                let this = unsafe { self.get_unchecked_mut() };
-                let fut = unsafe { Pin::new_unchecked(&mut this.fut) };
+                let this = self.get_mut();
+                let fut = Pin::new(&mut this.fut);
                 match fut.poll(cx) {
                     Poll::Ready(res) => {
                         let state = this.state.take().expect("polled after ready");
@@ -1026,7 +1025,11 @@ impl<P: Policy> Scope<'_, P> {
             let sleep_fut = crate::time::sleep(now, delay);
             let mut sleep_pinned = std::pin::pin!(sleep_fut);
 
-            Select::new(f1_primary.as_mut(), sleep_pinned.as_mut()).await
+            let res = Select::new(f1_primary.as_mut(), sleep_pinned.as_mut()).await;
+            if matches!(res, Either::Right(())) {
+                f1_primary.defuse_drop_abort();
+            }
+            res
         };
 
         match primary_or_delay {

@@ -180,14 +180,16 @@ impl<T> TaskHandle<T> {
 
     /// Aborts the task (requests cancellation) with an explicit reason.
     ///
-    /// The reason is only set if none is already present, to avoid clobbering
-    /// more specific cancellation attribution.
+    /// If a reason is already present, this request strengthens it using
+    /// [`CancelReason::strengthen`], preserving deterministic attribution.
     pub fn abort_with_reason(&self, reason: CancelReason) {
         if let Some(inner) = self.inner.upgrade() {
             let cancel_waker = {
                 let mut lock = inner.write();
                 lock.cancel_requested = true;
-                if lock.cancel_reason.is_none() {
+                if let Some(existing) = &mut lock.cancel_reason {
+                    existing.strengthen(&reason);
+                } else {
                     lock.cancel_reason = Some(reason);
                 }
                 lock.cancel_waker.clone()
@@ -230,7 +232,9 @@ impl<T> JoinFuture<'_, T> {
             let cancel_waker = {
                 let mut lock = inner.write();
                 lock.cancel_requested = true;
-                if lock.cancel_reason.is_none() {
+                if let Some(existing) = &mut lock.cancel_reason {
+                    existing.strengthen(&reason);
+                } else {
                     lock.cancel_reason = Some(reason);
                 }
                 lock.cancel_waker.clone()
@@ -239,6 +243,11 @@ impl<T> JoinFuture<'_, T> {
                 waker.wake_by_ref();
             }
         }
+    }
+
+    /// Prevents drop-triggered abort for internal combinator control flow.
+    pub(crate) fn defuse_drop_abort(&mut self) {
+        self.completed = true;
     }
 }
 
