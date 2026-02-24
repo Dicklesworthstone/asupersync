@@ -557,8 +557,14 @@ impl Http1Client {
                     }
                 }
 
-                // RFC 7230/9110: responses with these status codes have no body.
-                let no_body_status = matches!(status, 100..=199 | 204 | 304);
+                // RFC 9110: 1xx are informational responses. Keep reading
+                // until a final response is received, except 101 which is final.
+                if (100..=199).contains(&status) && status != 101 {
+                    continue;
+                }
+
+                // Responses with these status codes have no body.
+                let no_body_status = (100..=199).contains(&status) || matches!(status, 204 | 304);
                 let kind = if no_body_status || request_method == Method::Head {
                     ClientBodyKind::Empty
                 } else {
@@ -1180,6 +1186,58 @@ mod tests {
         assert_eq!(resp.status, 200);
         assert!(resp.body.is_empty());
         assert!(resp.trailers.is_empty());
+    }
+
+    #[test]
+    fn request_streaming_skips_informational_response() {
+        let response_bytes = b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+        let io = TestIo::new(response_bytes);
+
+        let req = Request {
+            method: Method::Post,
+            uri: "/upload".to_string(),
+            version: Version::Http11,
+            headers: vec![("Host".to_string(), "example.com".to_string())],
+            body: b"data".to_vec(),
+            trailers: Vec::new(),
+            peer_addr: None,
+        };
+
+        let mut resp = block_on(Http1Client::request_streaming(io, req)).expect("streaming resp");
+        assert_eq!(resp.head.status, 200);
+
+        let mut collected = Vec::new();
+        while let Some(frame) = poll_body(&mut resp.body) {
+            let frame = frame.expect("frame ok");
+            if let Frame::Data(mut buf) = frame {
+                while buf.has_remaining() {
+                    let chunk = buf.chunk();
+                    collected.extend_from_slice(chunk);
+                    buf.advance(chunk.len());
+                }
+            }
+        }
+        assert_eq!(collected, b"hello");
+    }
+
+    #[test]
+    fn request_skips_informational_response() {
+        let response_bytes = b"HTTP/1.1 103 Early Hints\r\nLink: </a.css>; rel=preload\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+        let io = TestIo::new(response_bytes);
+
+        let req = Request {
+            method: Method::Get,
+            uri: "/".to_string(),
+            version: Version::Http11,
+            headers: vec![("Host".to_string(), "example.com".to_string())],
+            body: Vec::new(),
+            trailers: Vec::new(),
+            peer_addr: None,
+        };
+
+        let resp = block_on(Http1Client::request(io, req)).expect("response");
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, b"ok");
     }
 
     #[test]
