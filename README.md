@@ -40,6 +40,9 @@ cargo add asupersync --git https://github.com/Dicklesworthstone/asupersync
 | **Bounded cleanup** | Cleanup budgets are *sufficient conditions*, not hopes |
 | **No silent drops** | Two-phase effects (reserve/commit) make data loss impossible for primitives |
 | **Deterministic testing** | Lab runtime: virtual time, deterministic scheduling, trace replay |
+| **Adaptive preemption fairness** | Deterministic EXP3/Hedge policy tunes cancel streak limits with regret-bounded updates |
+| **Drain progress certificates** | Variance-adaptive Azuma/Freedman bounds classify drain phase and confidence to quiescence |
+| **Spectral early warnings** | Wait-graph spectral monitor combines conformal bounds and anytime-valid evidence |
 | **Capability security** | All effects flow through explicit `Cx`; no ambient authority |
 
 ---
@@ -131,6 +134,8 @@ Running → CancelRequested → Cancelling → Finalizing → Completed(Cancelle
 
 Primitives publish *cancellation responsiveness bounds*. Budgets are sufficient conditions for completion.
 
+Cancellation progress is continuously certifiable. `ProgressCertificate` tracks potential descent, classifies the current drain regime (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`), and emits variance-adaptive concentration bounds (Freedman with Azuma as a conservative baseline). This turns "is shutdown actually converging?" into a measurable claim instead of a guess.
+
 ### 3. Two-Phase Effects Prevent Data Loss
 
 Anywhere cancellation could lose data, Asupersync uses reserve/commit:
@@ -187,6 +192,39 @@ combine(b1, b2) =
 ```
 
 This is the kind of structure that lets us reason about cancellation protocols and bounded cleanup with proof-friendly, compositional rules.
+
+### Regret-Bounded Adaptive Cancel Preemption (Deterministic EXP3/Hedge)
+
+Scheduler preemption is not fixed to one static cancel streak limit. Workers can run a deterministic EXP3/Hedge-style policy over a bounded set of candidate limits (for example, `{4, 8, 16, 32}`), then update weights at fixed epoch boundaries from observed reward (Lyapunov decrease + fairness + deadline pressure):
+
+```text
+p_t(a) = (1 - γ) * w_t(a)/Σ_b w_t(b) + γ/K
+w_{t+1}(a) = w_t(a) * exp((γ / K) * r̂_t(a))
+```
+
+with importance-weighted reward `r̂_t(a_t) = r_t / p_t(a_t)` for the selected action.
+
+Why it helps: cancel-heavy workloads and latency-heavy workloads need different preemption pressure. This controller adapts online while preserving deterministic replay semantics and bounded starvation envelopes.
+
+### Variance-Adaptive Drain Certificates (Azuma + Freedman + Phase Classification)
+
+Cancellation drain progress is monitored as a martingale-style certificate over potential deltas. The runtime reports both a worst-case Azuma bound and a variance-adaptive Freedman bound:
+
+```text
+P(M_t - M_0 ≥ x) ≤ exp(-x² / (2(V_t + c x / 3)))
+```
+
+where `V_t` is predictable variation and `c` bounds one-step increments.
+
+The same monitor classifies operational drain regime (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`) so operators can distinguish "normal long tail" from "true stall".
+
+Why it helps: shutdown and fail-fast behavior can be audited with explicit confidence numbers and phase labels, instead of timeout heuristics.
+
+### Spectral Wait-Graph Early Warning (Cheeger/Fiedler + Conformal + E-Process)
+
+Asupersync treats the task wait-for graph as a dynamic signal. The monitor tracks the Fiedler trajectory (algebraic connectivity), spectral gap/radius, and a nonparametric indicator stack (autocorrelation, variance ratio, flicker, skewness, Kendall tau, Spearman rho, Hoeffding's D, distance correlation), then calibrates forward risk with split conformal bounds and an anytime-valid deterioration e-process.
+
+Why it helps: structural degradation is detected before hard deadlock/disconnect events, with calibrated thresholds and continuously valid evidence rather than brittle one-off alarms.
 
 ### DPOR-Style Schedule Exploration (Mazurkiewicz Traces, Foata Fingerprints)
 
@@ -454,6 +492,7 @@ Scheduler behavior is intentionally explicit:
 - Workers track fairness telemetry (`fairness_yields`, `max_cancel_streak`) so starvation claims can be checked against runtime counters, not guesses (`src/runtime/scheduler/three_lane.rs`).
 - Local dispatch uses single-lock multi-lane pops (`try_local_any_lane` and `pop_any_lane_with_hint`) to reduce lock traffic on the hot path while keeping lane ordering rules intact (`src/runtime/scheduler/three_lane.rs`).
 - An optional Lyapunov governor can steer lane ordering from periodic runtime snapshots. It is off by default, and when enabled it runs at a configurable interval (`governor_interval`, default `32`) (`src/runtime/config.rs`, `src/runtime/builder.rs`, `src/runtime/scheduler/three_lane.rs`).
+- Adaptive cancel preemption is available as a deterministic no-regret online controller: workers run an EXP3/Hedge-style policy over candidate cancel-streak limits, updating from reward signals that blend Lyapunov decrease, fairness pressure, and deadline pressure (`src/runtime/scheduler/three_lane.rs`, `src/runtime/config.rs`, `src/runtime/builder.rs`).
 - When governor mode is enabled, scheduling suggestions can be modulated by a decision contract with Bayesian posterior updates over `healthy`, `congested`, `unstable`, and `partitioned` runtime states (`src/runtime/scheduler/decision_contract.rs`, `src/runtime/scheduler/three_lane.rs`).
 - Dispatch follows an explicit multi-phase path: global lanes, fast ready paths, one local-lane lock acquisition, steal attempts, then fallback cancel handling (`src/runtime/scheduler/three_lane.rs`).
 - Worker wakeups are coordinated through round-robin targeted unparks, with a bitmask fast path when worker count is a power of two (`src/runtime/scheduler/three_lane.rs`).
@@ -742,6 +781,8 @@ The lab runtime includes dedicated failure detectors and recovery artifacts, so 
 
 `src/observability/task_inspector.rs` introspects live task state: blocked reasons, obligation holdings, budget usage, and cancellation status. `src/observability/diagnostics.rs` produces structured explanations: `CancellationExplanation` traces the full cancel propagation chain, `TaskBlockedExplanation` identifies what a task is waiting on, and `ObligationLeak` pinpoints which obligation was not resolved and by whom.
 
+For structural runtime risk, diagnostics also maintain a spectral health monitor over the live task wait graph (`src/observability/spectral_health.rs`, `src/observability/diagnostics.rs`). It tracks the Fiedler trend and classifies early-warning severity (`none/watch/warning/critical`) using a multi-signal ensemble: autocorrelation (critical slowing), variance growth, flicker, skewness, Kendall tau, Spearman rho, Hoeffding's D, distance correlation, split-conformal lower bounds, and an anytime-valid deterioration e-process.
+
 ---
 
 ## Proc Macros
@@ -830,6 +871,9 @@ Asupersync has formal semantics backing its engineering.
 | **Obligations** | Linear logic: resources used exactly once | No leaks, static checking possible |
 | **Traces** | Mazurkiewicz equivalence (partial orders) | Optimal DPOR, stable replay |
 | **Cancellation** | Two-player game with budgets | Completeness theorem: sufficient budgets guarantee termination |
+| **Adaptive scheduling** | EXP3/Hedge no-regret online learning | Dynamic preemption control without fairness blind spots |
+| **Drain certificates** | Martingales + Freedman/Azuma concentration | Quantified confidence that cancellation drain reaches quiescence |
+| **Structural diagnostics** | Spectral graph theory + conformal + e-processes | Early warning on wait-graph fragmentation with calibrated alarms |
 
 See [`asupersync_v4_formal_semantics.md`](./asupersync_v4_formal_semantics.md) for the complete operational semantics.
 
@@ -838,6 +882,18 @@ See [`asupersync_v4_formal_semantics.md`](./asupersync_v4_formal_semantics.md) f
 ## "Alien Artifact" Quality Algorithms
 
 Asupersync is intentionally "math-forward": it uses advanced math and theory-grade CS where it buys real guarantees (determinism, cancel-correctness, bounded cleanup, and reproducible concurrency debugging). This is not aspirational; the mechanisms below are implemented in the codebase today.
+
+### Online Control of Cancel Preemption (EXP3/Hedge)
+
+`src/runtime/scheduler/three_lane.rs` includes a deterministic EXP3/Hedge controller that selects cancel-streak limits per epoch from observed reward (progress + fairness + deadline components). This is the scheduler's online-control layer: it adapts to workload regime shifts while preserving deterministic replay and explicit fairness bounds.
+
+### Martingale Drain Certificates (Freedman + Azuma + Phase Labels)
+
+`src/cancel/progress_certificate.rs` models cancellation drain as a stochastic progress process with auditable evidence, variance estimation, and concentration bounds. Freedman provides a tighter variance-aware bound; Azuma remains as conservative reference. Verdicts include phase classification (`warmup`, `rapid_drain`, `slow_tail`, `stalled`, `quiescent`) for operational clarity.
+
+### Spectral Bifurcation Warnings on the Wait Graph
+
+`src/observability/spectral_health.rs` computes Laplacian-spectrum diagnostics and an early-warning severity model (`none/watch/warning/critical`) over the live wait graph. It combines spectral trend analysis, nonparametric dependence tests, split-conformal next-step bounds, and an anytime-valid e-process, so structural degradation can be detected with calibrated confidence before hard failures.
 
 ### Mazurkiewicz Trace Monoid + Foata Normal Form (DPOR Equivalence Classes)
 
