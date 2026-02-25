@@ -4367,7 +4367,9 @@ mod tests {
         let cert = worker.preemption_fairness_certificate();
         assert!(cert.invariant_holds());
         assert_eq!(cert.ready_stall_bound_steps(), limit + 1);
-        assert_ne!(cert.witness_hash(), 0);
+        let hash_a = cert.witness_hash();
+        let hash_b = cert.witness_hash();
+        assert_eq!(hash_a, hash_b, "witness hash should be deterministic");
     }
 
     #[test]

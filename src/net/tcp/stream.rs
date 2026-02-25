@@ -152,7 +152,7 @@ impl TcpStream {
             } else {
                 Domain::IPV6
             };
-            
+
             let socket = match Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
                 Ok(s) => s,
                 Err(e) => {
@@ -165,7 +165,6 @@ impl TcpStream {
                 Ok(stream) => return Ok(stream),
                 Err(e) => {
                     last_err = Some(e);
-                    continue;
                 }
             }
         }
@@ -191,7 +190,10 @@ impl TcpStream {
     }
 
     /// Connect with timeout.
-    pub async fn connect_timeout<A: ToSocketAddrs + Send + 'static>(addr: A, timeout_duration: Duration) -> io::Result<Self> {
+    pub async fn connect_timeout<A: ToSocketAddrs + Send + 'static>(
+        addr: A,
+        timeout_duration: Duration,
+    ) -> io::Result<Self> {
         let connect_future = std::pin::pin!(Self::connect(addr));
         match timeout(timeout_now(), timeout_duration, connect_future).await {
             Ok(Ok(stream)) => Ok(stream),
@@ -431,7 +433,8 @@ async fn wait_for_connect_fallback(socket: &Socket) -> io::Result<()> {
             Err(err) if err.kind() == io::ErrorKind::NotConnected => {
                 // Sleep briefly to avoid busy loop when no reactor is available.
                 let now = Cx::current().map_or_else(crate::time::wall_now, |c| {
-                    c.timer_driver().map_or_else(crate::time::wall_now, |d| d.now())
+                    c.timer_driver()
+                        .map_or_else(crate::time::wall_now, |d| d.now())
                 });
                 crate::time::sleep(now, Duration::from_millis(1)).await;
             }

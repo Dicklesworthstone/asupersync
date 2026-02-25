@@ -45,6 +45,7 @@ pub mod obligation_tracker;
 #[cfg(feature = "metrics")]
 pub mod otel;
 pub mod resource_accounting;
+pub mod spectral_health;
 pub mod task_inspector;
 
 pub use collector::LogCollector;

@@ -120,7 +120,8 @@ async fn wait_for_connect_fallback(socket: &Socket) -> io::Result<()> {
             Ok(_) => return Ok(()),
             Err(err) if err.kind() == io::ErrorKind::NotConnected => {
                 let now = Cx::current().map_or_else(crate::time::wall_now, |c| {
-                    c.timer_driver().map_or_else(crate::time::wall_now, |d| d.now())
+                    c.timer_driver()
+                        .map_or_else(crate::time::wall_now, |d| d.now())
                 });
                 crate::time::sleep(now, Duration::from_millis(1)).await;
             }

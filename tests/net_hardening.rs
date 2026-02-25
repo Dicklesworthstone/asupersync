@@ -139,9 +139,11 @@ fn tcp_connect_timeout_fires() {
 
     block_on(async {
         // RFC 5737 TEST-NET: guaranteed non-routable.
-        let result =
-            TcpStream::connect_timeout("192.0.2.1:80".parse::<std::net::SocketAddr>().unwrap(), Duration::from_millis(200))
-                .await;
+        let result = TcpStream::connect_timeout(
+            "192.0.2.1:80".parse::<std::net::SocketAddr>().unwrap(),
+            Duration::from_millis(200),
+        )
+        .await;
         assert!(result.is_err(), "should timeout or fail");
         let err = result.unwrap_err();
         // May be TimedOut or other OS-dependent error for non-routable.

@@ -4314,8 +4314,7 @@ mod tests {
                     reason.any_truncated()
                 );
             }
-            other => {
-                crate::tracing_compat::error!("expected CancelRequested, got {:?}", other);
+            _other => {
                 unreachable!("expected CancelRequested");
             }
         }
@@ -4376,8 +4375,7 @@ mod tests {
                     reason.any_truncated()
                 );
             }
-            other => {
-                crate::tracing_compat::error!("expected CancelRequested, got {:?}", other);
+            _other => {
                 unreachable!("expected CancelRequested");
             }
         }

@@ -222,7 +222,11 @@ where
                 }
                 Err(ref e) if is_transient_accept_error(e) => {
                     transient_accept_streak = transient_accept_streak.saturating_add(1);
-                    crate::time::sleep(crate::time::wall_now(), transient_accept_backoff_delay(transient_accept_streak)).await;
+                    crate::time::sleep(
+                        crate::time::wall_now(),
+                        transient_accept_backoff_delay(transient_accept_streak),
+                    )
+                    .await;
                     continue;
                 }
                 Err(e) => return Err(e),
