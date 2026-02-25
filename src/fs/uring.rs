@@ -215,7 +215,8 @@ impl IoUringFile {
     /// The caller must ensure that `fd` is a valid, open file descriptor
     /// that is not used elsewhere.
     pub unsafe fn from_raw_fd(fd: RawFd) -> io::Result<Self> {
-        let owned_fd = OwnedFd::from_raw_fd(fd);
+        // SAFETY: caller guarantees fd is valid and not used elsewhere
+        let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
         let ring = IoUring::new(DEFAULT_ENTRIES)?;
 
         Ok(Self {

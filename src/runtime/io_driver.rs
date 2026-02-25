@@ -540,14 +540,6 @@ impl IoDriverHandle {
         driver.stats().clone()
     }
 
-    /// Wakes the underlying reactor from a blocking poll.
-    ///
-    /// This may be called from any thread and is used by scheduler wake
-    /// coordination to nudge the I/O leader after cross-thread task injection.
-    pub fn wake(&self) -> io::Result<()> {
-        self.reactor.wake()
-    }
-
     /// Processes pending I/O events with a per-event callback.
     ///
     /// This implementation releases the driver lock during the blocking poll,
