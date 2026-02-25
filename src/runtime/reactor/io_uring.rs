@@ -77,14 +77,16 @@ mod imp {
             interest: Interest,
         ) -> io::Result<()> {
             let mut ring = self.ring.lock();
-            submit_poll_entry(&mut ring, raw_fd, interest, token.0 as u64)?;
+            let user_data = token_to_user_data(token)?;
+            submit_poll_entry(&mut ring, raw_fd, interest, user_data)?;
             ring.submit()?;
             Ok(())
         }
 
         fn submit_poll_remove(&self, token: Token) -> io::Result<()> {
             let mut ring = self.ring.lock();
-            let entry = opcode::PollRemove::new(token.0 as u64)
+            let target_user_data = token_to_user_data(token)?;
+            let entry = opcode::PollRemove::new(target_user_data)
                 .build()
                 .user_data(REMOVE_USER_DATA);
             // SAFETY: PollRemove takes ownership of user_data only; no external buffers.
@@ -262,7 +264,9 @@ mod imp {
                     continue;
                 }
 
-                let key = Token::new(user_data as usize);
+                let Some(key) = user_data_to_token(user_data) else {
+                    continue;
+                };
                 let interest = if res >= 0 {
                     poll_mask_to_interest(res as u32)
                 } else {
@@ -365,6 +369,29 @@ mod imp {
         io::Error::new(io::ErrorKind::WouldBlock, "submission queue full")
     }
 
+    fn token_to_user_data(token: Token) -> io::Result<u64> {
+        let user_data = u64::try_from(token.0).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "token does not fit in io_uring user_data",
+            )
+        })?;
+        if user_data == WAKE_USER_DATA || user_data == REMOVE_USER_DATA {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "token value is reserved for io_uring internal bookkeeping",
+            ));
+        }
+        Ok(user_data)
+    }
+
+    fn user_data_to_token(user_data: u64) -> Option<Token> {
+        if user_data == WAKE_USER_DATA || user_data == REMOVE_USER_DATA {
+            return None;
+        }
+        usize::try_from(user_data).ok().map(Token::new)
+    }
+
     fn create_eventfd() -> io::Result<OwnedFd> {
         let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
         if fd < 0 {
@@ -434,6 +461,24 @@ mod imp {
         }
 
         #[test]
+        fn test_token_to_user_data_rejects_reserved_values() {
+            let err = token_to_user_data(Token::new(usize::MAX))
+                .expect_err("WAKE_USER_DATA sentinel must be rejected");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+            let err = token_to_user_data(Token::new(usize::MAX - 1))
+                .expect_err("REMOVE_USER_DATA sentinel must be rejected");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        }
+
+        #[test]
+        fn test_user_data_to_token_ignores_internal_sentinels() {
+            assert!(user_data_to_token(WAKE_USER_DATA).is_none());
+            assert!(user_data_to_token(REMOVE_USER_DATA).is_none());
+            assert_eq!(user_data_to_token(7), Some(Token::new(7)));
+        }
+
+        #[test]
         fn test_register_modify_deregister_tracks_count() {
             let Some(reactor) = new_or_skip() else {
                 return;
@@ -472,6 +517,31 @@ mod imp {
             assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
 
             reactor.deregister(key).expect("deregister should succeed");
+        }
+
+        #[test]
+        fn test_register_rejects_reserved_token_values() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+
+            let (left, _right) = UnixStream::pair().expect("unix stream pair");
+
+            let err = reactor
+                .register(&left, Token::new(usize::MAX), Interest::READABLE)
+                .expect_err("reserved wake token should fail registration");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+            let err = reactor
+                .register(&left, Token::new(usize::MAX - 1), Interest::READABLE)
+                .expect_err("reserved remove token should fail registration");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+            assert_eq!(
+                reactor.registration_count(),
+                0,
+                "reserved token registration attempts must not leak bookkeeping entries"
+            );
         }
 
         #[test]

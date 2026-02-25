@@ -1,13 +1,11 @@
-//! Linux io_uring-based reactor implementation (stub).
+//! Legacy compatibility shim for Linux io_uring reactor naming.
 //!
-//! This module will provide [`UringReactor`], a reactor implementation that uses
-//! Linux io_uring for high-performance async I/O. This is a future feature
-//! tracked by bead asupersync-8jx5.
+//! New code should prefer [`crate::runtime::reactor::IoUringReactor`].
 //!
 //! # Status
 //!
-//! This is currently a stub module. The io_uring reactor implementation is
-//! planned for Phase 2 of the project.
+//! This module keeps the historical `UringReactor` name for old call sites.
+//! It intentionally reports unsupported behavior when used directly.
 //!
 //! # Future Capabilities
 //!
@@ -33,7 +31,7 @@ use super::token::Token;
 ///
 /// # Status
 ///
-/// This is currently unimplemented. See bead asupersync-8jx5 for tracking.
+/// Legacy compatibility type for older call sites.
 #[derive(Debug)]
 pub struct UringReactor {
     _private: (),
@@ -44,11 +42,11 @@ impl UringReactor {
     ///
     /// # Errors
     ///
-    /// Returns an error indicating that io_uring is not yet implemented.
+    /// Returns an error indicating that this legacy shim is unsupported.
     pub fn new() -> io::Result<Self> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "io_uring reactor not yet implemented (see bead asupersync-8jx5)",
+            "UringReactor legacy shim is unsupported; use IoUringReactor",
         ))
     }
 
@@ -101,7 +99,7 @@ impl super::Reactor for UringReactor {
     fn register(&self, _source: &dyn Source, _token: Token, _interest: Interest) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "io_uring reactor not yet implemented",
+            "UringReactor legacy shim is unsupported; use IoUringReactor",
         ))
     }
 
@@ -113,14 +111,14 @@ impl super::Reactor for UringReactor {
     ) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "io_uring reactor not yet implemented",
+            "UringReactor legacy shim is unsupported; use IoUringReactor",
         ))
     }
 
     fn deregister(&self, _source: &dyn Source) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "io_uring reactor not yet implemented",
+            "UringReactor legacy shim is unsupported; use IoUringReactor",
         ))
     }
 
@@ -131,14 +129,14 @@ impl super::Reactor for UringReactor {
     ) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "io_uring reactor not yet implemented",
+            "UringReactor legacy shim is unsupported; use IoUringReactor",
         ))
     }
 
     fn wake(&self) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "io_uring reactor not yet implemented",
+            "UringReactor legacy shim is unsupported; use IoUringReactor",
         ))
     }
 }

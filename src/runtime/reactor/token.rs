@@ -69,23 +69,57 @@ impl SlabToken {
 
     /// Packs the token into a single usize for reactor APIs (mio compatibility).
     ///
-    /// The generation is stored in the upper 32 bits and the index in the lower 32 bits.
-    /// This representation is compatible with epoll_event.data.u64.
+    /// On 64-bit platforms: generation is in upper 32 bits, index in lower 32 bits.
+    /// On 32-bit platforms: generation is in upper 8 bits, index in lower 24 bits.
     #[must_use]
     pub const fn to_usize(self) -> usize {
-        ((self.generation as usize) << 32) | (self.index as usize)
+        #[cfg(target_pointer_width = "64")]
+        {
+            ((self.generation as usize) << 32) | (self.index as usize)
+        }
+        #[cfg(target_pointer_width = "32")]
+        {
+            ((self.generation as usize & 0xFF) << 24) | (self.index as usize & 0xFF_FFFF)
+        }
+        #[cfg(not(any(target_pointer_width = "64", target_pointer_width = "32")))]
+        {
+            0 // Fallback for unsupported platforms
+        }
     }
 
     /// Unpacks a usize into a token.
-    ///
-    /// The generation is extracted from the upper 32 bits and the index from the lower 32 bits.
     #[must_use]
     pub const fn from_usize(val: usize) -> Self {
-        Self {
-            index: val as u32,
-            generation: (val >> 32) as u32,
+        #[cfg(target_pointer_width = "64")]
+        {
+            Self {
+                index: val as u32,
+                generation: (val >> 32) as u32,
+            }
+        }
+        #[cfg(target_pointer_width = "32")]
+        {
+            Self {
+                index: (val & 0xFF_FFFF) as u32,
+                generation: (val >> 24) as u32,
+            }
+        }
+        #[cfg(not(any(target_pointer_width = "64", target_pointer_width = "32")))]
+        {
+            Self {
+                index: 0,
+                generation: 0,
+            }
         }
     }
+
+    /// The maximum generation value supported on this platform.
+    #[cfg(target_pointer_width = "64")]
+    pub const MAX_GENERATION: u32 = u32::MAX;
+
+    /// The maximum generation value supported on this platform.
+    #[cfg(target_pointer_width = "32")]
+    pub const MAX_GENERATION: u32 = 0xFF;
 
     /// Returns an invalid token that will never match any slab entry.
     #[must_use]
@@ -263,7 +297,7 @@ impl TokenSlab {
         match entry {
             Entry::Occupied { .. } => {
                 // Increment generation to invalidate stale tokens.
-                let new_generation = current_generation.wrapping_add(1);
+                let new_generation = current_generation.wrapping_add(1) & SlabToken::MAX_GENERATION;
 
                 // Take the waker and convert to vacant.
                 let old_entry = std::mem::replace(
@@ -329,7 +363,7 @@ impl TokenSlab {
                 let token = SlabToken::new(index as u32, *generation);
                 if !f(token, waker) {
                     // Convert to vacant.
-                    let new_generation = generation.wrapping_add(1);
+                    let new_generation = generation.wrapping_add(1) & SlabToken::MAX_GENERATION;
                     *entry = Entry::Vacant {
                         next_free: self.free_head,
                         generation: new_generation,
