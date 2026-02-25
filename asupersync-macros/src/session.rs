@@ -96,13 +96,13 @@ impl Parse for ProtocolDef {
         while !content.is_empty() {
             if content.peek(Ident) {
                 let fork = content.fork();
-                if let Ok(ident) = fork.parse::<Ident>() {
-                    if ident == "msg" {
-                        let _: Ident = content.parse()?;
-                        let msg = parse_message_def(&content)?;
-                        messages.push(msg);
-                        continue;
-                    }
+                if let Ok(ident) = fork.parse::<Ident>()
+                    && ident == "msg"
+                {
+                    let _: Ident = content.parse()?;
+                    let msg = parse_message_def(&content)?;
+                    messages.push(msg);
+                    continue;
                 }
             }
             break;

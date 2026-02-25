@@ -20,6 +20,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+macro_rules! skeleton_placeholder {
+    () => {
+        panic!(
+            "asupersync_v4_api_skeleton.rs is a design skeleton; use src/ runtime implementation"
+        )
+    };
+}
+
 // ============================================================================
 // PART 1: IDENTIFIERS
 // ============================================================================
@@ -51,17 +59,30 @@ pub enum Outcome<T, E> {
 }
 
 impl<T, E> Outcome<T, E> {
-    pub fn is_terminal(&self) -> bool { true } // All variants are terminal
-    
-    pub fn is_ok(&self) -> bool { matches!(self, Self::Ok(_)) }
-    pub fn is_err(&self) -> bool { matches!(self, Self::Err(_)) }
-    pub fn is_cancelled(&self) -> bool { matches!(self, Self::Cancelled(_)) }
-    pub fn is_panicked(&self) -> bool { matches!(self, Self::Panicked(_)) }
-    
-    pub fn ok(self) -> Option<T> {
-        match self { Self::Ok(v) => Some(v), _ => None }
+    pub fn is_terminal(&self) -> bool {
+        true
+    } // All variants are terminal
+
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Self::Ok(_))
     }
-    
+    pub fn is_err(&self) -> bool {
+        matches!(self, Self::Err(_))
+    }
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled(_))
+    }
+    pub fn is_panicked(&self) -> bool {
+        matches!(self, Self::Panicked(_))
+    }
+
+    pub fn ok(self) -> Option<T> {
+        match self {
+            Self::Ok(v) => Some(v),
+            _ => None,
+        }
+    }
+
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Outcome<U, E> {
         match self {
             Self::Ok(v) => Outcome::Ok(f(v)),
@@ -70,7 +91,7 @@ impl<T, E> Outcome<T, E> {
             Self::Panicked(p) => Outcome::Panicked(p),
         }
     }
-    
+
     pub fn map_err<F>(self, f: impl FnOnce(E) -> F) -> Outcome<T, F> {
         match self {
             Self::Ok(v) => Outcome::Ok(v),
@@ -79,7 +100,7 @@ impl<T, E> Outcome<T, E> {
             Self::Panicked(p) => Outcome::Panicked(p),
         }
     }
-    
+
     /// Convert to standard Result, collapsing Cancelled/Panicked into Err
     pub fn into_result(self) -> Result<T, OutcomeError<E>> {
         match self {
@@ -108,19 +129,34 @@ pub struct CancelReason {
 
 impl CancelReason {
     pub const fn user(msg: &'static str) -> Self {
-        Self { kind: CancelKind::User, message: Some(msg) }
+        Self {
+            kind: CancelKind::User,
+            message: Some(msg),
+        }
     }
     pub const fn timeout() -> Self {
-        Self { kind: CancelKind::Timeout, message: None }
+        Self {
+            kind: CancelKind::Timeout,
+            message: None,
+        }
     }
     pub const fn parent() -> Self {
-        Self { kind: CancelKind::ParentCancelled, message: None }
+        Self {
+            kind: CancelKind::ParentCancelled,
+            message: None,
+        }
     }
     pub const fn sibling_failed() -> Self {
-        Self { kind: CancelKind::FailFast, message: None }
+        Self {
+            kind: CancelKind::FailFast,
+            message: None,
+        }
     }
     pub const fn shutdown() -> Self {
-        Self { kind: CancelKind::Shutdown, message: None }
+        Self {
+            kind: CancelKind::Shutdown,
+            message: None,
+        }
     }
 }
 
@@ -165,7 +201,7 @@ impl Budget {
         cost_quota: None,
         priority: 0,
     };
-    
+
     /// Combine two budgets: min of quotas, max of priority.
     pub fn combine(&self, child: &Budget) -> Budget {
         Budget {
@@ -175,26 +211,26 @@ impl Budget {
             priority: self.priority.max(child.priority),
         }
     }
-    
+
     pub fn with_deadline(mut self, deadline: Instant) -> Self {
         self.deadline = Some(min_opt(self.deadline, Some(deadline)).unwrap());
         self
     }
-    
+
     pub fn with_timeout(self, duration: Duration) -> Self {
         self.with_deadline(Instant::now() + duration)
     }
-    
+
     pub fn with_priority(mut self, priority: u8) -> Self {
         self.priority = priority;
         self
     }
-    
+
     /// Check if deadline has passed.
     pub fn is_expired(&self, now: Instant) -> bool {
         self.deadline.map(|d| now >= d).unwrap_or(false)
     }
-    
+
     /// Remaining time until deadline (None if no deadline or already passed).
     pub fn remaining(&self, now: Instant) -> Option<Duration> {
         self.deadline.and_then(|d| d.checked_duration_since(now))
@@ -236,59 +272,67 @@ pub(crate) struct CxInner {
 
 impl Cx {
     // === Identity ===
-    
-    pub fn region_id(&self) -> RegionId { self.inner.region_id }
-    pub fn task_id(&self) -> TaskId { self.inner.task_id }
-    
+
+    pub fn region_id(&self) -> RegionId {
+        self.inner.region_id
+    }
+    pub fn task_id(&self) -> TaskId {
+        self.inner.task_id
+    }
+
     // === Budget ===
-    
-    pub fn budget(&self) -> &Budget { &self.inner.budget }
-    pub fn now(&self) -> Instant { self.inner.runtime.now() }
-    
+
+    pub fn budget(&self) -> &Budget {
+        &self.inner.budget
+    }
+    pub fn now(&self) -> Instant {
+        self.inner.runtime.now()
+    }
+
     // === Cancellation ===
-    
+
     /// Non-blocking check: has cancellation been requested?
     pub fn is_cancel_requested(&self) -> bool {
-        todo!()
+        skeleton_placeholder!()
     }
-    
+
     /// Cancellation checkpoint. Returns Err(CancelReason) if cancelled.
     /// This is THE primary way to make code cancellation-aware.
     pub async fn checkpoint(&self) -> Result<(), CancelReason> {
-        todo!()
+        skeleton_placeholder!()
     }
-    
+
     /// Run a future with cancellation masked (bounded by budget).
     /// Use sparingly — only for critical sections that must complete.
     pub async fn masked<F, T>(&self, fut: F) -> T
     where
         F: Future<Output = T>,
     {
-        todo!()
+        skeleton_placeholder!()
     }
-    
+
     // === Scheduling ===
-    
+
     /// Yield to the scheduler.
     pub async fn yield_now(&self) {
-        todo!()
+        skeleton_placeholder!()
     }
-    
+
     /// Sleep until the given instant.
     pub async fn sleep_until(&self, deadline: Instant) {
-        todo!()
+        skeleton_placeholder!()
     }
-    
+
     /// Sleep for a duration.
     pub async fn sleep(&self, duration: Duration) {
         self.sleep_until(self.now() + duration).await
     }
-    
+
     // === Tracing ===
-    
+
     /// Emit a trace event.
     pub fn trace(&self, event: TraceEvent) {
-        todo!()
+        skeleton_placeholder!()
     }
 }
 
@@ -301,29 +345,67 @@ impl Cx {
 #[derive(Debug, Clone)]
 pub enum TraceEvent {
     // Task lifecycle
-    TaskSpawned { region: RegionId, task: TaskId, name: Option<&'static str> },
-    TaskCompleted { task: TaskId, outcome_kind: &'static str },
-    
+    TaskSpawned {
+        region: RegionId,
+        task: TaskId,
+        name: Option<&'static str>,
+    },
+    TaskCompleted {
+        task: TaskId,
+        outcome_kind: &'static str,
+    },
+
     // Cancellation
-    CancelRequested { target: RegionId, reason: CancelReason },
-    CancelAcknowledged { task: TaskId },
-    
+    CancelRequested {
+        target: RegionId,
+        reason: CancelReason,
+    },
+    CancelAcknowledged {
+        task: TaskId,
+    },
+
     // Obligations
-    ObligationCreated { id: ObligationId, kind: &'static str, holder: TaskId },
-    ObligationResolved { id: ObligationId, how: &'static str },
-    ObligationLeaked { id: ObligationId }, // Should never happen in correct code
-    
+    ObligationCreated {
+        id: ObligationId,
+        kind: &'static str,
+        holder: TaskId,
+    },
+    ObligationResolved {
+        id: ObligationId,
+        how: &'static str,
+    },
+    ObligationLeaked {
+        id: ObligationId,
+    }, // Should never happen in correct code
+
     // Finalizers
-    FinalizerRegistered { region: RegionId, index: usize },
-    FinalizerCompleted { region: RegionId, index: usize },
-    
+    FinalizerRegistered {
+        region: RegionId,
+        index: usize,
+    },
+    FinalizerCompleted {
+        region: RegionId,
+        index: usize,
+    },
+
     // Region lifecycle
-    RegionOpened { id: RegionId, parent: Option<RegionId> },
-    RegionClosing { id: RegionId },
-    RegionClosed { id: RegionId, outcome_kind: &'static str },
-    
+    RegionOpened {
+        id: RegionId,
+        parent: Option<RegionId>,
+    },
+    RegionClosing {
+        id: RegionId,
+    },
+    RegionClosed {
+        id: RegionId,
+        outcome_kind: &'static str,
+    },
+
     // Custom
-    Custom { name: &'static str, payload: String },
+    Custom {
+        name: &'static str,
+        payload: String,
+    },
 }
 
 // ============================================================================
@@ -333,14 +415,11 @@ pub enum TraceEvent {
 /// Policy determines how a region handles child outcomes.
 pub trait Policy: Clone + Send + Sync + 'static {
     type Error: Send + 'static;
-    
+
     /// Called when a child reaches a terminal state.
-    fn on_child_outcome<T>(
-        &self,
-        child: TaskId,
-        outcome: &Outcome<T, Self::Error>,
-    ) -> PolicyAction;
-    
+    fn on_child_outcome<T>(&self, child: TaskId, outcome: &Outcome<T, Self::Error>)
+    -> PolicyAction;
+
     /// Compute the region's outcome from its children.
     fn aggregate_outcomes<T>(
         &self,
@@ -368,7 +447,7 @@ pub struct FailFast;
 
 impl Policy for FailFast {
     type Error = Box<dyn std::error::Error + Send + Sync>;
-    
+
     fn on_child_outcome<T>(&self, _: TaskId, outcome: &Outcome<T, Self::Error>) -> PolicyAction {
         match outcome {
             Outcome::Ok(_) | Outcome::Cancelled(_) => PolicyAction::Continue,
@@ -377,17 +456,18 @@ impl Policy for FailFast {
             }
         }
     }
-    
-    fn aggregate_outcomes<T>(&self, outcomes: &[Outcome<T, Self::Error>]) -> AggregateDecision<Self::Error> {
+
+    fn aggregate_outcomes<T>(
+        &self,
+        outcomes: &[Outcome<T, Self::Error>],
+    ) -> AggregateDecision<Self::Error> {
         for o in outcomes {
             match o {
                 Outcome::Panicked(p) => return AggregateDecision::Panicked(p.clone()),
                 Outcome::Cancelled(r) => return AggregateDecision::Cancelled(r.clone()),
                 Outcome::Err(_) => {
                     // Can't clone Box<dyn Error>, so we just report first error
-                    return AggregateDecision::FirstError(
-                        "child task failed".into()
-                    );
+                    return AggregateDecision::FirstError("child task failed".into());
                 }
                 Outcome::Ok(_) => continue,
             }
@@ -402,12 +482,15 @@ pub struct CollectAll;
 
 impl Policy for CollectAll {
     type Error = Box<dyn std::error::Error + Send + Sync>;
-    
+
     fn on_child_outcome<T>(&self, _: TaskId, _: &Outcome<T, Self::Error>) -> PolicyAction {
         PolicyAction::Continue // Never cancel siblings
     }
-    
-    fn aggregate_outcomes<T>(&self, outcomes: &[Outcome<T, Self::Error>]) -> AggregateDecision<Self::Error> {
+
+    fn aggregate_outcomes<T>(
+        &self,
+        outcomes: &[Outcome<T, Self::Error>],
+    ) -> AggregateDecision<Self::Error> {
         // Same as FailFast for aggregation, just different on_child behavior
         FailFast.aggregate_outcomes(outcomes)
     }
@@ -429,11 +512,11 @@ pub struct Scope<'r, P: Policy = FailFast> {
 impl<'r, P: Policy> Scope<'r, P> {
     /// Access the capability context for this scope.
     pub fn cx(&self) -> Cx {
-        todo!()
+        skeleton_placeholder!()
     }
-    
+
     // === Tier 1: Fibers (same-thread, borrowing) ===
-    
+
     /// Spawn a fiber that can borrow from the current scope.
     /// Fibers run on the same thread and cannot be Send.
     pub fn spawn_fiber<F, T>(&self, f: F) -> FiberHandle<'r, T>
@@ -441,11 +524,11 @@ impl<'r, P: Policy> Scope<'r, P> {
         F: FnOnce(Cx) -> Pin<Box<dyn Future<Output = T> + 'r>>,
         T: 'r,
     {
-        todo!()
+        skeleton_placeholder!()
     }
-    
+
     // === Tier 2: Tasks (parallel, Send) ===
-    
+
     /// Spawn a parallel task. The future must be Send.
     pub fn spawn<F, Fut, T, E>(&self, f: F) -> TaskHandle<'r, T, E>
     where
@@ -454,9 +537,9 @@ impl<'r, P: Policy> Scope<'r, P> {
         T: Send + 'static,
         E: Send + 'static,
     {
-        todo!()
+        skeleton_placeholder!()
     }
-    
+
     /// Spawn with a name (for debugging/tracing).
     pub fn spawn_named<F, Fut, T, E>(&self, name: &'static str, f: F) -> TaskHandle<'r, T, E>
     where
@@ -465,11 +548,11 @@ impl<'r, P: Policy> Scope<'r, P> {
         T: Send + 'static,
         E: Send + 'static,
     {
-        todo!()
+        skeleton_placeholder!()
     }
-    
+
     // === Tier 3: Child regions ===
-    
+
     /// Create a child region with its own policy.
     pub async fn region<P2, F, Fut, T>(&self, policy: P2, f: F) -> Outcome<T, P2::Error>
     where
@@ -477,11 +560,11 @@ impl<'r, P: Policy> Scope<'r, P> {
         F: FnOnce(Scope<'_, P2>) -> Fut,
         Fut: Future<Output = Outcome<T, P2::Error>>,
     {
-        todo!()
+        skeleton_placeholder!()
     }
-    
+
     // === Combinators ===
-    
+
     /// Join two handles, waiting for both.
     pub async fn join<T1, T2, E>(
         &self,
@@ -493,9 +576,9 @@ impl<'r, P: Policy> Scope<'r, P> {
         T2: Send,
         E: Send,
     {
-        todo!()
+        skeleton_placeholder!()
     }
-    
+
     /// Race two handles, cancelling the loser.
     pub async fn race<T, E>(
         &self,
@@ -506,9 +589,9 @@ impl<'r, P: Policy> Scope<'r, P> {
         T: Send,
         E: Send,
     {
-        todo!()
+        skeleton_placeholder!()
     }
-    
+
     /// Run with a timeout.
     pub async fn timeout<T, E>(
         &self,
@@ -519,33 +602,33 @@ impl<'r, P: Policy> Scope<'r, P> {
         T: Send,
         E: Send,
     {
-        todo!()
+        skeleton_placeholder!()
     }
-    
+
     // === Finalization ===
-    
+
     /// Register an async finalizer (runs during region close, LIFO).
     pub fn defer<F, Fut>(&self, f: F)
     where
         F: FnOnce(Cx) -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        todo!()
+        skeleton_placeholder!()
     }
-    
+
     /// Register a sync finalizer.
     pub fn defer_sync<F>(&self, f: F)
     where
         F: FnOnce() + Send + 'static,
     {
-        todo!()
+        skeleton_placeholder!()
     }
-    
+
     // === Cancellation ===
-    
+
     /// Request cancellation of this region and all descendants.
     pub fn cancel(&self, reason: CancelReason) {
-        todo!()
+        skeleton_placeholder!()
     }
 }
 
@@ -560,11 +643,11 @@ impl<'r, T> FiberHandle<'r, T> {
     where
         T: 'r,
     {
-        todo!()
+        skeleton_placeholder!()
     }
-    
+
     pub fn cancel(&self, reason: CancelReason) {
-        todo!()
+        skeleton_placeholder!()
     }
 }
 
@@ -575,21 +658,23 @@ pub struct TaskHandle<'r, T, E> {
 }
 
 impl<'r, T, E> TaskHandle<'r, T, E> {
-    pub fn task_id(&self) -> TaskId { self.task_id }
-    
+    pub fn task_id(&self) -> TaskId {
+        self.task_id
+    }
+
     /// Wait for the task to complete.
     pub async fn join(self) -> Outcome<T, E> {
-        todo!()
+        skeleton_placeholder!()
     }
-    
+
     /// Request cancellation.
     pub fn cancel(&self, reason: CancelReason) {
-        todo!()
+        skeleton_placeholder!()
     }
-    
+
     /// Check if complete (non-blocking).
     pub fn is_complete(&self) -> bool {
-        todo!()
+        skeleton_placeholder!()
     }
 }
 
@@ -605,7 +690,7 @@ pub mod channel {
 
     /// A bounded channel with two-phase send (reserve/commit).
     pub fn bounded<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
-        todo!()
+        skeleton_placeholder!()
     }
 
     pub struct Sender<T> {
@@ -615,14 +700,14 @@ pub mod channel {
     impl<T> Sender<T> {
         /// Reserve a slot. Returns a permit that must be committed or dropped.
         pub async fn reserve(&self, cx: &Cx) -> Result<SendPermit<T>, ChannelClosed> {
-            todo!()
+            skeleton_placeholder!()
         }
-        
+
         /// Try to reserve without blocking.
         pub fn try_reserve(&self) -> Result<SendPermit<T>, TryReserveError> {
-            todo!()
+            skeleton_placeholder!()
         }
-        
+
         /// Convenience: reserve + send in one call (still two-phase internally).
         pub async fn send(&self, cx: &Cx, value: T) -> Result<(), SendError<T>> {
             let permit = self.reserve(cx).await.map_err(|_| SendError(value))?;
@@ -632,7 +717,9 @@ pub mod channel {
     }
 
     impl<T> Clone for Sender<T> {
-        fn clone(&self) -> Self { todo!() }
+        fn clone(&self) -> Self {
+            skeleton_placeholder!()
+        }
     }
 
     /// A permit to send one message. This is a linear obligation.
@@ -656,9 +743,9 @@ pub mod channel {
     impl<T> SendPermit<T> {
         /// Commit the send. Consumes the permit.
         pub fn send(self, value: T) {
-            todo!()
+            skeleton_placeholder!()
         }
-        
+
         /// Explicitly abort. Equivalent to drop but more intentional.
         pub fn abort(self) {
             drop(self)
@@ -679,9 +766,9 @@ pub mod channel {
     impl<T> Receiver<T> {
         /// Receive with acknowledgment token.
         pub async fn recv(&self, cx: &Cx) -> Result<(T, Ack), ChannelClosed> {
-            todo!()
+            skeleton_placeholder!()
         }
-        
+
         /// Receive without ack (auto-commits).
         pub async fn recv_auto(&self, cx: &Cx) -> Result<T, ChannelClosed> {
             let (value, ack) = self.recv(cx).await?;
@@ -698,9 +785,9 @@ pub mod channel {
 
     impl Ack {
         pub fn commit(self) {
-            todo!()
+            skeleton_placeholder!()
         }
-        
+
         pub fn nack(self) {
             drop(self)
         }
@@ -714,10 +801,10 @@ pub mod channel {
 
     #[derive(Debug)]
     pub struct ChannelClosed;
-    
+
     #[derive(Debug)]
     pub struct SendError<T>(pub T);
-    
+
     #[derive(Debug)]
     pub enum TryReserveError {
         Full,
@@ -730,15 +817,18 @@ pub mod channel {
 // ============================================================================
 
 pub mod stream {
-    use super::*;
     use super::channel::Ack;
+    use super::*;
 
     /// An async stream with backpressure via acks.
     pub trait AckStream {
         type Item;
-        
+
         /// Get next item with its ack token.
-        fn next<'a>(&'a mut self, cx: &'a Cx) -> Pin<Box<dyn Future<Output = Option<(Self::Item, Ack)>> + Send + 'a>>;
+        fn next<'a>(
+            &'a mut self,
+            cx: &'a Cx,
+        ) -> Pin<Box<dyn Future<Output = Option<(Self::Item, Ack)>> + Send + 'a>>;
     }
 
     /// Combinators for ack streams.
@@ -749,7 +839,7 @@ pub mod stream {
         {
             Map { stream: self, f }
         }
-        
+
         fn filter<F>(self, f: F) -> Filter<Self, F>
         where
             F: FnMut(&Self::Item) -> bool,
@@ -782,14 +872,18 @@ pub mod actor {
     pub trait Actor: Send + 'static {
         type Message: Send;
         type Error: Send;
-        
-        fn handle(&mut self, msg: Self::Message, cx: &Cx) -> impl Future<Output = Result<(), Self::Error>> + Send;
-        
+
+        fn handle(
+            &mut self,
+            msg: Self::Message,
+            cx: &Cx,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
         /// Called on startup.
         fn on_start(&mut self, _cx: &Cx) -> impl Future<Output = ()> + Send {
             async {}
         }
-        
+
         /// Called before shutdown.
         fn on_stop(&mut self, _cx: &Cx) -> impl Future<Output = ()> + Send {
             async {}
@@ -804,17 +898,19 @@ pub mod actor {
     impl<A: Actor> ActorRef<A> {
         /// Send a message (two-phase).
         pub async fn send(&self, cx: &Cx, msg: A::Message) -> Result<(), ActorStopped> {
-            todo!()
+            skeleton_placeholder!()
         }
-        
+
         /// Request graceful stop.
         pub fn stop(&self) {
-            todo!()
+            skeleton_placeholder!()
         }
     }
 
     impl<A: Actor> Clone for ActorRef<A> {
-        fn clone(&self) -> Self { todo!() }
+        fn clone(&self) -> Self {
+            skeleton_placeholder!()
+        }
     }
 
     #[derive(Debug)]
@@ -841,7 +937,7 @@ pub mod actor {
         A: Actor,
         P: Policy,
     {
-        todo!()
+        skeleton_placeholder!()
     }
 }
 
@@ -891,14 +987,14 @@ pub mod remote {
         pub fn remaining(&self, now: Instant) -> Option<Duration> {
             self.expires_at.checked_duration_since(now)
         }
-        
+
         pub fn is_expired(&self, now: Instant) -> bool {
             now >= self.expires_at
         }
-        
+
         /// Attempt to renew the lease.
         pub async fn renew(&mut self, cx: &Cx, duration: Duration) -> Result<(), LeaseExpired> {
-            todo!()
+            skeleton_placeholder!()
         }
     }
 
@@ -906,18 +1002,24 @@ pub mod remote {
     pub struct LeaseExpired;
 
     impl<T: NamedTask> RemoteHandle<T> {
-        pub fn invocation_id(&self) -> InvocationId { self.invocation_id }
-        pub fn lease(&self) -> &Lease { &self.lease }
-        pub fn lease_mut(&mut self) -> &mut Lease { &mut self.lease }
-        
+        pub fn invocation_id(&self) -> InvocationId {
+            self.invocation_id
+        }
+        pub fn lease(&self) -> &Lease {
+            &self.lease
+        }
+        pub fn lease_mut(&mut self) -> &mut Lease {
+            &mut self.lease
+        }
+
         /// Wait for the remote task to complete.
         pub async fn join(self, cx: &Cx) -> Outcome<T::Output, T::Error> {
-            todo!()
+            skeleton_placeholder!()
         }
-        
+
         /// Request cancellation of the remote task (best-effort).
         pub async fn cancel(&self, cx: &Cx) -> Result<(), RemoteError> {
-            todo!()
+            skeleton_placeholder!()
         }
     }
 
@@ -934,7 +1036,7 @@ pub mod remote {
         input: T::Input,
         lease_duration: Duration,
     ) -> Result<RemoteHandle<T>, RemoteError> {
-        todo!()
+        skeleton_placeholder!()
     }
 
     // Serde placeholder
@@ -964,7 +1066,9 @@ pub(crate) struct RuntimeInner {
 }
 
 impl RuntimeInner {
-    fn now(&self) -> Instant { todo!() }
+    fn now(&self) -> Instant {
+        skeleton_placeholder!()
+    }
 }
 
 /// The Asupersync runtime.
@@ -986,31 +1090,33 @@ impl RuntimeBuilder {
             enable_io: true,
         }
     }
-    
+
     pub fn workers(mut self, n: usize) -> Self {
         self.workers = n;
         self
     }
-    
+
     pub fn enable_io(mut self, enable: bool) -> Self {
         self.enable_io = enable;
         self
     }
-    
+
     pub fn build(self) -> Runtime {
-        todo!()
+        skeleton_placeholder!()
     }
 }
 
 impl Default for RuntimeBuilder {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Runtime {
     pub fn new() -> Self {
         RuntimeBuilder::new().build()
     }
-    
+
     /// Run a scoped computation to completion.
     pub fn run<P, F, Fut, T>(&self, policy: P, f: F) -> Outcome<T, P::Error>
     where
@@ -1019,17 +1125,19 @@ impl Runtime {
         Fut: Future<Output = Outcome<T, P::Error>>,
         T: Send + 'static,
     {
-        todo!()
+        skeleton_placeholder!()
     }
-    
+
     /// Block on a single future (simple entrypoint).
     pub fn block_on<F: Future>(&self, fut: F) -> F::Output {
-        todo!()
+        skeleton_placeholder!()
     }
 }
 
 impl Default for Runtime {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ============================================================================
@@ -1056,36 +1164,39 @@ pub mod lab {
                 obligation_panic_on_leak: true,
             }
         }
-        
+
         /// Configure whether leaked obligations panic.
         pub fn panic_on_obligation_leak(mut self, panic: bool) -> Self {
             self.obligation_panic_on_leak = panic;
             self
         }
-        
+
         /// Advance virtual time.
         pub fn advance(&mut self, nanos: u64) {
             self.virtual_time += nanos;
         }
-        
+
         /// Run until no task can make progress.
         pub fn run_until_stalled(&mut self) {
-            todo!()
+            skeleton_placeholder!()
         }
-        
+
         /// Get captured trace.
         pub fn trace(&self) -> &[TraceEvent] {
             &self.trace
         }
-        
+
         /// Run a scoped test.
         pub fn test<P, F, T>(&mut self, policy: P, f: F) -> Outcome<T, P::Error>
         where
             P: Policy,
-            F: for<'r> FnOnce(Scope<'r, P>) -> Pin<Box<dyn Future<Output = Outcome<T, P::Error>> + 'r>>,
+            F: for<'r> FnOnce(
+                Scope<'r, P>,
+            )
+                -> Pin<Box<dyn Future<Output = Outcome<T, P::Error>> + 'r>>,
             T: 'static,
         {
-            todo!()
+            skeleton_placeholder!()
         }
     }
 
@@ -1106,14 +1217,17 @@ pub mod lab {
 
     impl Explorer {
         pub fn new(seed: u64, max_schedules: usize) -> Self {
-            Self { seed, max_schedules }
+            Self {
+                seed,
+                max_schedules,
+            }
         }
-        
+
         pub fn explore<F, T>(&self, test: F) -> ExplorationReport<T>
         where
             F: Fn(&mut LabRuntime) -> T,
         {
-            todo!()
+            skeleton_placeholder!()
         }
     }
 
@@ -1143,15 +1257,19 @@ pub mod lab {
     pub fn no_task_leaks(trace: &[TraceEvent]) -> bool {
         let mut spawned = std::collections::HashSet::new();
         let mut completed = std::collections::HashSet::new();
-        
+
         for event in trace {
             match event {
-                TraceEvent::TaskSpawned { task, .. } => { spawned.insert(*task); }
-                TraceEvent::TaskCompleted { task, .. } => { completed.insert(*task); }
+                TraceEvent::TaskSpawned { task, .. } => {
+                    spawned.insert(*task);
+                }
+                TraceEvent::TaskCompleted { task, .. } => {
+                    completed.insert(*task);
+                }
                 _ => {}
             }
         }
-        
+
         spawned == completed
     }
 
@@ -1169,7 +1287,7 @@ pub mod lab {
     pub fn all_finalizers_ran(trace: &[TraceEvent]) -> bool {
         let mut registered = std::collections::HashSet::new();
         let mut completed = std::collections::HashSet::new();
-        
+
         for event in trace {
             match event {
                 TraceEvent::FinalizerRegistered { region, index } => {
@@ -1181,7 +1299,7 @@ pub mod lab {
                 _ => {}
             }
         }
-        
+
         registered == completed
     }
 
@@ -1189,7 +1307,7 @@ pub mod lab {
     pub fn quiescence_on_close(trace: &[TraceEvent]) -> bool {
         // Would need to track region->children relationships
         // and verify ordering in trace
-        todo!()
+        skeleton_placeholder!()
     }
 }
 
@@ -1202,7 +1320,7 @@ pub mod lab {
 macro_rules! join {
     ($scope:expr, $($fut:expr),+ $(,)?) => {
         // Expands to nested scope.join() calls
-        todo!()
+        skeleton_placeholder!()
     };
 }
 
@@ -1210,7 +1328,7 @@ macro_rules! join {
 #[macro_export]
 macro_rules! race {
     ($scope:expr, $($fut:expr),+ $(,)?) => {
-        todo!()
+        skeleton_placeholder!()
     };
 }
 
@@ -1227,7 +1345,7 @@ mod tests {
         let ok: Outcome<i32, &str> = Outcome::Ok(1);
         let err: Outcome<i32, &str> = Outcome::Err("e");
         let cancel: Outcome<i32, &str> = Outcome::Cancelled(CancelReason::timeout());
-        
+
         assert!(ok.is_ok());
         assert!(err.is_err());
         assert!(cancel.is_cancelled());
@@ -1238,7 +1356,7 @@ mod tests {
         let parent = Budget::UNLIMITED.with_timeout(Duration::from_secs(10));
         let child = Budget::UNLIMITED.with_timeout(Duration::from_secs(5));
         let combined = parent.combine(&child);
-        
+
         // Child's tighter deadline wins
         assert!(combined.deadline.unwrap() <= parent.deadline.unwrap());
     }

@@ -226,10 +226,10 @@ fn generate_scope(input: &ScopeInput) -> TokenStream2 {
 
 fn return_span(stmts: &[Stmt]) -> Option<proc_macro2::Span> {
     for stmt in stmts {
-        if let Stmt::Expr(expr, _) = stmt {
-            if matches!(expr, Expr::Return(_)) {
-                return Some(expr.span());
-            }
+        if let Stmt::Expr(expr, _) = stmt
+            && matches!(expr, Expr::Return(_))
+        {
+            return Some(expr.span());
         }
     }
     None
