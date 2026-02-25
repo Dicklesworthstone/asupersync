@@ -528,6 +528,11 @@ impl IoDriverHandle {
         driver.waker_count()
     }
 
+    /// Wakes the underlying reactor from another thread.
+    pub fn wake(&self) -> io::Result<()> {
+        self.reactor.wake()
+    }
+
     /// Returns a snapshot of the current I/O stats.
     #[must_use]
     pub fn stats(&self) -> IoStats {
