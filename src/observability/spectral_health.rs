@@ -1428,7 +1428,7 @@ fn spearman_rho(values: &[f64]) -> Option<f64> {
 /// Computes 1-based average ranks (midrank method) for a slice of values.
 ///
 /// Handles ties by assigning each member of a tie group the average of
-/// the ranks the group spans. Used by [`hoeffding_d`].
+/// the ranks the group spans. Used by [`spearman_rho`] and [`hoeffding_d`].
 #[must_use]
 fn average_rank_f64(values: &[f64]) -> Vec<f64> {
     let n = values.len();
@@ -3235,18 +3235,15 @@ mod tests {
     }
 
     #[test]
-    fn distance_corr_captures_magnitude() {
-        // Two series with same ranks but different magnitudes.
-        // dCor should differentiate them because it uses raw distances.
+    fn distance_corr_linear_any_slope() {
+        // dCor measures dependence strength, not slope magnitude.
+        // Any perfectly linear series (regardless of slope) gives dCor = 1.0.
         let small_drop: Vec<f64> = (0..8).map(|i| f64::from(i).mul_add(-0.01, 1.0)).collect();
         let big_drop: Vec<f64> = (0..8).map(|i| f64::from(i).mul_add(-0.5, 1.0)).collect();
 
         let dc_small = distance_correlation(&small_drop).unwrap();
         let dc_big = distance_correlation(&big_drop).unwrap();
 
-        // Both are perfectly linear, so both should be 1.0.
-        // The key value of dCor isn't distinguishing linear slopes
-        // (both have dCor=1), but rather detecting non-linear patterns.
         assert!(
             dc_small > 0.99,
             "linear should give dCor~1.0, got {dc_small}"
