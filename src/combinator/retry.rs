@@ -412,7 +412,8 @@ pub struct RetryState {
 impl RetryState {
     /// Creates a new retry state with the given policy.
     #[must_use]
-    pub fn new(policy: RetryPolicy) -> Self {
+    pub fn new(mut policy: RetryPolicy) -> Self {
+        policy.max_attempts = policy.max_attempts.max(1);
         Self {
             attempt: 0,
             total_delay: Duration::ZERO,

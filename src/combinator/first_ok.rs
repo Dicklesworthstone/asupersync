@@ -410,15 +410,68 @@ pub const fn first_ok_still_possible(
 /// the second operation only starts after the first fails.
 #[macro_export]
 macro_rules! first_ok {
+    (@count $head:expr $(, $tail:expr)*) => {
+        1usize $(+ $crate::first_ok!(@count $tail))*
+    };
     ($($operation:expr),+ $(,)?) => {{
-        // Placeholder: in real implementation, this tries operations sequentially
-        $(let _ = $operation;)+
+        async move {
+            let __first_ok_total = $crate::first_ok!(@count $($operation),+);
+            let mut __first_ok_failures = ::std::vec::Vec::with_capacity(__first_ok_total);
+            let mut __first_ok_index = 0usize;
+
+            $(
+                match ($operation).await {
+                    $crate::types::Outcome::Ok(__first_ok_value) => {
+                        return $crate::combinator::first_ok::FirstOkResult::success(
+                            __first_ok_index,
+                            __first_ok_value,
+                            __first_ok_failures,
+                            __first_ok_total,
+                        );
+                    }
+                    $crate::types::Outcome::Err(__first_ok_error) => {
+                        __first_ok_failures.push((
+                            __first_ok_index,
+                            $crate::combinator::first_ok::FirstOkFailure::Error(__first_ok_error),
+                        ));
+                    }
+                    $crate::types::Outcome::Cancelled(__first_ok_reason) => {
+                        __first_ok_failures.push((
+                            __first_ok_index,
+                            $crate::combinator::first_ok::FirstOkFailure::Cancelled(__first_ok_reason),
+                        ));
+                        return $crate::combinator::first_ok::FirstOkResult::failure(
+                            __first_ok_failures,
+                            __first_ok_total,
+                        );
+                    }
+                    $crate::types::Outcome::Panicked(__first_ok_payload) => {
+                        __first_ok_failures.push((
+                            __first_ok_index,
+                            $crate::combinator::first_ok::FirstOkFailure::Panicked(__first_ok_payload),
+                        ));
+                        return $crate::combinator::first_ok::FirstOkResult::failure(
+                            __first_ok_failures,
+                            __first_ok_total,
+                        );
+                    }
+                }
+                __first_ok_index += 1;
+            )+
+
+            $crate::combinator::first_ok::FirstOkResult::failure(
+                __first_ok_failures,
+                __first_ok_total,
+            )
+        }
     }};
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn first_ok_first_succeeds() {
@@ -682,6 +735,51 @@ mod tests {
             r1.success.as_ref().unwrap().index,
             r2.success.as_ref().unwrap().index
         );
+    }
+
+    #[test]
+    fn first_ok_macro_returns_first_success() {
+        let result = futures_lite::future::block_on(first_ok!(
+            async { Outcome::<i32, &str>::Err("e1") },
+            async { Outcome::<i32, &str>::Ok(42) },
+            async { Outcome::<i32, &str>::Err("never reached") },
+        ));
+
+        assert!(result.is_success());
+        let success = result.success.expect("success expected");
+        assert_eq!(success.index, 1);
+        assert_eq!(success.value, 42);
+        assert_eq!(result.failures.len(), 1);
+    }
+
+    #[test]
+    fn first_ok_macro_short_circuits_late_operations() {
+        let touched = Arc::new(AtomicUsize::new(0));
+        let touched_late = Arc::clone(&touched);
+        let result = futures_lite::future::block_on(first_ok!(
+            async { Outcome::<i32, &str>::Err("e1") },
+            async { Outcome::<i32, &str>::Ok(7) },
+            async move {
+                touched_late.fetch_add(1, Ordering::Relaxed);
+                Outcome::<i32, &str>::Err("late")
+            },
+        ));
+
+        assert!(result.is_success());
+        assert_eq!(touched.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn first_ok_macro_stops_on_cancelled() {
+        let result = futures_lite::future::block_on(first_ok!(
+            async { Outcome::<i32, &str>::Err("e1") },
+            async { Outcome::<i32, &str>::Cancelled(CancelReason::timeout()) },
+            async { Outcome::<i32, &str>::Ok(99) },
+        ));
+
+        assert!(!result.is_success());
+        assert!(result.was_cancelled);
+        assert_eq!(result.failures.len(), 2);
     }
 
     #[test]

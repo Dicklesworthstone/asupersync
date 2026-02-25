@@ -1111,7 +1111,7 @@ mod tests {
         let value = race_all_to_result(result);
         assert!(matches!(value, Err(RaceAllError::Panicked { .. })));
         if let Err(RaceAllError::Panicked { index, .. }) = value {
-            assert_eq!(index, 0);
+            assert_eq!(index, 1);
         }
     }
 

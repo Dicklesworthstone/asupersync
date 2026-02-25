@@ -375,17 +375,18 @@ pub fn quorum_to_result<T, E>(result: QuorumResult<T, E>) -> Result<Vec<T>, Quor
         });
     }
 
+    // Check for panics first (highest severity).
+    // A panic in any branch (winner or loser) is a catastrophic failure and must propagate.
+    for (_, failure) in &result.failures {
+        if let QuorumFailure::Panicked(p) = failure {
+            return Err(QuorumError::Panicked(p.clone()));
+        }
+    }
+
     if result.quorum_met {
         // Return successful values (without indices)
         Ok(result.successes.into_iter().map(|(_, v)| v).collect())
     } else {
-        // Check for panics first (highest severity)
-        for (_, failure) in &result.failures {
-            if let QuorumFailure::Panicked(p) = failure {
-                return Err(QuorumError::Panicked(p.clone()));
-            }
-        }
-
         // Check for cancellations (but not quorum-met cancellations, which are expected)
         for (_, failure) in &result.failures {
             if let QuorumFailure::Cancelled(r) = failure {

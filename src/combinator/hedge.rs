@@ -10,13 +10,15 @@
 //! P99 latencies often exceed P50 by 10-100x. Hedging trades compute cost for latency:
 //! - Primary starts immediately
 //! - If deadline expires without completion, backup launches
-//! - First to complete wins; loser is cancelled and drained
+//! - First to complete wins; loser is cancelled
 //! - Total latency bounded by min(primary, backup) rather than max
 //!
-//! # Critical Invariant: Losers Are Drained
+//! # Semantics Note
 //!
-//! Like race, hedge guarantees that the losing operation (whether primary or backup)
-//! is cancelled AND drained before returning:
+//! This standalone future returns as soon as a winner is known. The losing branch
+//! is dropped and represented as `Outcome::Cancelled(CancelReason::race_loser())`.
+//! Runtime-level integrations that require explicit loser draining must enforce
+//! that policy externally.
 //!
 //! ```text
 //! hedge(primary, backup_fn, deadline):
@@ -27,7 +29,6 @@
 //!         t2 <- spawn(backup_fn())
 //!         (winner, loser) <- select_first_complete(t1, t2)
 //!         cancel(loser)
-//!         await(loser)  // CRITICAL: drain the loser
 //!         return winner.outcome
 //! ```
 //!
@@ -40,7 +41,7 @@
 //! # Cancellation Handling
 //!
 //! - If caller requests cancel before primary completes: cancel primary, never spawn backup
-//! - If caller requests cancel during race: cancel both, drain both
+//! - If caller requests cancel during race: cancel both (loser surfaced as cancelled outcome)
 
 use crate::cx::Cx;
 use crate::time::Sleep;
@@ -484,8 +485,7 @@ where
                 // Primary finished.
                 return Poll::Ready(if this.backup.is_some() {
                     // Backup was running, so this was a race.
-                    // Note: We are dropping backup here, which cancels it.
-                    // We are NOT awaiting draining, as discussed in design limitations.
+                    // Dropping backup cancels it; loser is represented as race-loser cancellation.
                     HedgeResult::primary_won(
                         outcome,
                         Outcome::Cancelled(CancelReason::race_loser()),
