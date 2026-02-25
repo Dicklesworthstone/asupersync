@@ -928,14 +928,14 @@ impl CircuitBreaker {
                 Ok(value)
             }
             Err(e) => {
+                let error_str = if self.policy.failure_predicate.is_all_errors() {
+                    String::new()
+                } else {
+                    e.to_string()
+                };
+
                 if let Some(p) = guard.permit.take() {
-                    // For AllErrors predicate, skip the to_string() heap allocation
-                    // entirely — record_failure will short-circuit without inspecting it.
-                    if self.policy.failure_predicate.is_all_errors() {
-                        self.record_failure(p, "", now);
-                    } else {
-                        self.record_failure(p, &e.to_string(), now);
-                    }
+                    self.record_failure(p, &error_str, now);
                 }
                 Err(CircuitBreakerError::Inner(e))
             }
