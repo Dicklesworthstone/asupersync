@@ -12,7 +12,7 @@
 //! - `GET /debug` — HTML dashboard with auto-refresh
 //! - `GET /debug/snapshot` — Current runtime snapshot as JSON
 //! - `GET /debug/trace` — Recent trace events as JSON
-//! - `GET /debug/ws` — WebSocket endpoint (Phase 1, returns a 501 placeholder)
+//! - `GET /debug/ws` — WebSocket endpoint (upgrade + one-shot JSON push)
 //!
 //! # Example
 //!
@@ -39,6 +39,8 @@ use std::thread;
 
 use crate::runtime::RuntimeSnapshot;
 use crate::tracing_compat::info;
+use base64::Engine as _;
+use sha1::{Digest, Sha1};
 
 /// Function that produces a runtime snapshot on demand.
 pub type SnapshotFn = Arc<dyn Fn() -> RuntimeSnapshot + Send + Sync>;
@@ -208,6 +210,7 @@ fn handle_connection(mut stream: TcpStream, snapshot_fn: &SnapshotFn) {
     }
     let method = parts[0];
     let path = parts[1];
+    let headers = read_headers(&mut reader);
 
     // Only handle GET requests.
     if method != "GET" {
@@ -249,14 +252,119 @@ fn handle_connection(mut stream: TcpStream, snapshot_fn: &SnapshotFn) {
             }
         }
         "/debug/ws" => {
-            // Phase 0: WebSocket is not yet implemented; return a helpful message.
-            let body = r#"{"error":"WebSocket not implemented (Phase 0)","hint":"Use /debug/snapshot for polling"}"#;
-            let _ = write_response(&mut stream, 501, "application/json", body.as_bytes());
+            if let Err(err) = handle_websocket(&mut stream, &headers, snapshot_fn) {
+                let body = format!("{{\"error\":\"websocket upgrade failed: {err}\"}}");
+                let _ = write_response(&mut stream, 400, "application/json", body.as_bytes());
+            }
         }
         _ => {
             let _ = write_response(&mut stream, 404, "text/plain", b"Not Found");
         }
     }
+}
+
+fn read_headers(reader: &mut BufReader<&TcpStream>) -> Vec<(String, String)> {
+    let mut headers = Vec::with_capacity(16);
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                let trimmed = line.trim_end_matches(['\r', '\n']);
+                if trimmed.is_empty() {
+                    break;
+                }
+                if let Some((key, value)) = trimmed.split_once(':') {
+                    headers.push((key.trim().to_ascii_lowercase(), value.trim().to_string()));
+                }
+            }
+        }
+    }
+    headers
+}
+
+fn header_value<'a>(headers: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
+}
+
+fn websocket_accept_key(client_key: &str) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(client_key.as_bytes());
+    hasher.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    let digest = hasher.finalize();
+    base64::engine::general_purpose::STANDARD.encode(digest)
+}
+
+fn write_ws_text_frame(stream: &mut TcpStream, payload: &[u8]) -> std::io::Result<()> {
+    let len = payload.len();
+    let mut header = [0u8; 10];
+    header[0] = 0x81; // FIN + text
+
+    let header_len = if len < 126 {
+        header[1] = len as u8;
+        2
+    } else if u16::try_from(len).is_ok() {
+        header[1] = 126;
+        header[2..4].copy_from_slice(&(len as u16).to_be_bytes());
+        4
+    } else {
+        header[1] = 127;
+        header[2..10].copy_from_slice(&(len as u64).to_be_bytes());
+        10
+    };
+
+    stream.write_all(&header[..header_len])?;
+    stream.write_all(payload)?;
+    Ok(())
+}
+
+fn handle_websocket(
+    stream: &mut TcpStream,
+    headers: &[(String, String)],
+    snapshot_fn: &SnapshotFn,
+) -> std::io::Result<()> {
+    let upgrade = header_value(headers, "upgrade").unwrap_or_default();
+    let connection = header_value(headers, "connection").unwrap_or_default();
+    let key = header_value(headers, "sec-websocket-key")
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing key"))?;
+    let version = header_value(headers, "sec-websocket-version").unwrap_or_default();
+
+    if !upgrade.eq_ignore_ascii_case("websocket")
+        || !connection
+            .split(',')
+            .any(|part| part.trim().eq_ignore_ascii_case("upgrade"))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "missing websocket upgrade headers",
+        ));
+    }
+    if version != "13" {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "unsupported websocket version",
+        ));
+    }
+
+    let accept = websocket_accept_key(key.trim());
+    write!(
+        stream,
+        "HTTP/1.1 101 Switching Protocols\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Accept: {accept}\r\n\
+         \r\n"
+    )?;
+
+    let snapshot = snapshot_fn();
+    let payload = serde_json::to_vec(&snapshot).map_err(std::io::Error::other)?;
+    write_ws_text_frame(stream, &payload)?;
+    // Normal closure after one push keeps this debug endpoint lightweight.
+    stream.write_all(&[0x88, 0x00])?;
+    stream.flush()
 }
 
 fn write_response(
@@ -267,6 +375,7 @@ fn write_response(
 ) -> std::io::Result<()> {
     let status_text = match status {
         200 => "OK",
+        400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
         500 => "Internal Server Error",
@@ -304,6 +413,7 @@ const DASHBOARD_HTML: &str = include_str!("../../assets/dashboard.html");
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
 
     fn test_snapshot() -> RuntimeSnapshot {
         RuntimeSnapshot {
@@ -470,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn websocket_returns_501() {
+    fn websocket_upgrade_and_frame_push() {
         let snapshot_fn: SnapshotFn = Arc::new(test_snapshot);
         let mut server = DebugServer::with_config(
             0,
@@ -484,21 +594,33 @@ mod tests {
 
         let addr = server.local_addr.unwrap();
         let mut stream = TcpStream::connect(addr).unwrap();
-        write!(stream, "GET /debug/ws HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        write!(
+            stream,
+            "GET /debug/ws HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             Sec-WebSocket-Version: 13\r\n\
+             \r\n"
+        )
+        .unwrap();
         stream.flush().unwrap();
 
-        let mut response = String::new();
-        let mut reader = BufReader::new(&stream);
-        loop {
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => response.push_str(&line),
-            }
-        }
-
-        assert!(response.contains("501"));
-        assert!(response.contains("Not Implemented"));
+        let mut buf = [0u8; 4096];
+        let n = stream.read(&mut buf).unwrap();
+        let resp = &buf[..n];
+        let text = String::from_utf8_lossy(resp);
+        assert!(text.contains("101 Switching Protocols"), "response: {text}");
+        assert!(text.contains("Sec-WebSocket-Accept"), "response: {text}");
+        let header_end = resp
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("websocket header terminator should exist");
+        assert!(
+            n > header_end + 4 + 2,
+            "expected frame bytes after websocket upgrade"
+        );
 
         server.stop();
     }
