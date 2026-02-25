@@ -7,6 +7,7 @@
 
 use crate::bytes::{BufMut, Bytes, BytesMut};
 use crate::codec::{Decoder, Encoder};
+use std::fmt;
 
 use super::status::GrpcError;
 
@@ -165,8 +166,25 @@ pub trait Codec: Send + 'static {
     fn decode(&mut self, buf: &Bytes) -> Result<Self::Decode, Self::Error>;
 }
 
+/// Function signature for frame-level compression hooks.
+pub type FrameCompressor = fn(&[u8]) -> Result<Bytes, GrpcError>;
+
+/// Function signature for frame-level decompression hooks.
+pub type FrameDecompressor = fn(&[u8], usize) -> Result<Bytes, GrpcError>;
+
+#[allow(clippy::unnecessary_wraps)]
+fn identity_frame_compress(input: &[u8]) -> Result<Bytes, GrpcError> {
+    Ok(Bytes::copy_from_slice(input))
+}
+
+fn identity_frame_decompress(input: &[u8], max_size: usize) -> Result<Bytes, GrpcError> {
+    if input.len() > max_size {
+        return Err(GrpcError::MessageTooLarge);
+    }
+    Ok(Bytes::copy_from_slice(input))
+}
+
 /// A codec that wraps another codec with gRPC framing.
-#[derive(Debug)]
 pub struct FramedCodec<C> {
     /// The inner codec for message serialization.
     inner: C,
@@ -174,6 +192,22 @@ pub struct FramedCodec<C> {
     framing: GrpcCodec,
     /// Whether to use compression.
     use_compression: bool,
+    /// Optional frame-level compressor.
+    compressor: Option<FrameCompressor>,
+    /// Optional frame-level decompressor.
+    decompressor: Option<FrameDecompressor>,
+}
+
+impl<C: fmt::Debug> fmt::Debug for FramedCodec<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FramedCodec")
+            .field("inner", &self.inner)
+            .field("framing", &self.framing)
+            .field("use_compression", &self.use_compression)
+            .field("has_compressor", &self.compressor.is_some())
+            .field("has_decompressor", &self.decompressor.is_some())
+            .finish()
+    }
 }
 
 impl<C: Codec> FramedCodec<C> {
@@ -184,6 +218,8 @@ impl<C: Codec> FramedCodec<C> {
             inner,
             framing: GrpcCodec::new(),
             use_compression: false,
+            compressor: None,
+            decompressor: None,
         }
     }
 
@@ -194,6 +230,8 @@ impl<C: Codec> FramedCodec<C> {
             inner,
             framing: GrpcCodec::with_max_size(max_size),
             use_compression: false,
+            compressor: None,
+            decompressor: None,
         }
     }
 
@@ -202,6 +240,30 @@ impl<C: Codec> FramedCodec<C> {
     pub fn with_compression(mut self) -> Self {
         self.use_compression = true;
         self
+    }
+
+    /// Configure explicit frame-level compression/decompression hooks.
+    ///
+    /// The hooks are stateless functions used per message frame.
+    #[must_use]
+    pub fn with_frame_codec(
+        mut self,
+        compressor: FrameCompressor,
+        decompressor: FrameDecompressor,
+    ) -> Self {
+        self.use_compression = true;
+        self.compressor = Some(compressor);
+        self.decompressor = Some(decompressor);
+        self
+    }
+
+    /// Configure identity frame hooks.
+    ///
+    /// Useful for integration tests that require handling of the compressed flag
+    /// without introducing a specific wire compression algorithm.
+    #[must_use]
+    pub fn with_identity_frame_codec(self) -> Self {
+        self.with_frame_codec(identity_frame_compress, identity_frame_decompress)
     }
 
     /// Get a reference to the inner codec.
@@ -226,14 +288,18 @@ impl<C: Codec> FramedCodec<C> {
             .encode(item)
             .map_err(|e| GrpcError::invalid_message(e.to_string()))?;
 
-        // Compression has not been implemented yet; fail explicitly instead of
-        // silently emitting uncompressed frames when compression was requested.
-        if self.use_compression {
-            return Err(GrpcError::compression("compression not supported"));
-        }
-
-        // Create framed message.
-        let message = GrpcMessage::new(data);
+        let message = if self.use_compression {
+            let compressor = self.compressor.ok_or_else(|| {
+                GrpcError::compression("compression requested but no frame compressor configured")
+            })?;
+            let compressed = compressor(data.as_ref())?;
+            if compressed.len() > self.framing.max_message_size() {
+                return Err(GrpcError::MessageTooLarge);
+            }
+            GrpcMessage::compressed(compressed)
+        } else {
+            GrpcMessage::new(data)
+        };
 
         // Encode with framing
         self.framing.encode(message, dst)
@@ -248,8 +314,12 @@ impl<C: Codec> FramedCodec<C> {
 
         // Handle compression
         let data = if message.compressed {
-            // TODO: Implement decompression
-            return Err(GrpcError::compression("compression not supported"));
+            let decompressor = self.decompressor.ok_or_else(|| {
+                GrpcError::compression(
+                    "compressed frame received but no frame decompressor configured",
+                )
+            })?;
+            decompressor(message.data.as_ref(), self.framing.max_message_size())?
         } else {
             message.data
         };
@@ -505,5 +575,62 @@ mod tests {
         let drained = buf.is_empty();
         crate::assert_with_log!(drained, "compressed frame consumed", true, drained);
         crate::test_complete!("test_framed_codec_decode_rejects_compressed_frame");
+    }
+
+    #[test]
+    fn test_framed_codec_identity_frame_codec_roundtrip() {
+        init_test("test_framed_codec_identity_frame_codec_roundtrip");
+        let mut codec = FramedCodec::new(IdentityCodec).with_identity_frame_codec();
+        let mut buf = BytesMut::new();
+        let original = Bytes::from_static(b"compressed-passthrough");
+
+        codec
+            .encode_message(&original, &mut buf)
+            .expect("encode must succeed");
+
+        // Ensure compressed flag is set when frame compression is enabled.
+        crate::assert_with_log!(
+            buf.first().copied() == Some(1),
+            "compressed flag set",
+            Some(1u8),
+            buf.first().copied()
+        );
+
+        let decoded = codec
+            .decode_message(&mut buf)
+            .expect("decode must succeed")
+            .expect("frame must decode");
+        crate::assert_with_log!(decoded == original, "decoded", original, decoded);
+        crate::test_complete!("test_framed_codec_identity_frame_codec_roundtrip");
+    }
+
+    #[test]
+    fn test_framed_codec_custom_decompressor_enforces_size() {
+        init_test("test_framed_codec_custom_decompressor_enforces_size");
+
+        fn passthrough_compress(input: &[u8]) -> Result<Bytes, GrpcError> {
+            Ok(Bytes::copy_from_slice(input))
+        }
+
+        fn expanding_decompress(_input: &[u8], max_size: usize) -> Result<Bytes, GrpcError> {
+            let expanded = vec![7u8; max_size.saturating_add(1)];
+            if expanded.len() > max_size {
+                return Err(GrpcError::MessageTooLarge);
+            }
+            Ok(Bytes::from(expanded))
+        }
+
+        let mut codec = FramedCodec::with_max_size(IdentityCodec, 8)
+            .with_frame_codec(passthrough_compress, expanding_decompress);
+
+        let mut buf = BytesMut::new();
+        buf.put_u8(1);
+        buf.put_u32(3);
+        buf.extend_from_slice(b"abc");
+
+        let result = codec.decode_message(&mut buf);
+        let ok = matches!(result, Err(GrpcError::MessageTooLarge));
+        crate::assert_with_log!(ok, "decompress overflow rejected", true, ok);
+        crate::test_complete!("test_framed_codec_custom_decompressor_enforces_size");
     }
 }

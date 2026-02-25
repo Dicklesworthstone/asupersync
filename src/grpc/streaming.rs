@@ -6,10 +6,11 @@
 //! - Client streaming: stream of requests, single response
 //! - Bidirectional streaming: stream of requests and responses
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 use crate::bytes::Bytes;
 
@@ -236,8 +237,12 @@ pub trait Streaming: Send {
 /// A streaming request body.
 #[derive(Debug)]
 pub struct StreamingRequest<T> {
-    /// Phantom data for the message type.
-    _marker: PhantomData<T>,
+    /// Buffered stream items.
+    items: VecDeque<Result<T, Status>>,
+    /// Whether no further items will arrive.
+    closed: bool,
+    /// Last waker waiting for a new item.
+    waiter: Option<Waker>,
 }
 
 impl<T> StreamingRequest<T> {
@@ -245,7 +250,50 @@ impl<T> StreamingRequest<T> {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            _marker: PhantomData,
+            items: VecDeque::new(),
+            closed: true,
+            waiter: None,
+        }
+    }
+
+    /// Creates an open request stream that may receive additional items.
+    #[must_use]
+    pub fn open() -> Self {
+        Self {
+            items: VecDeque::new(),
+            closed: false,
+            waiter: None,
+        }
+    }
+
+    /// Pushes a message into the stream queue.
+    ///
+    /// Returns an error if the stream has been closed.
+    pub fn push(&mut self, item: T) -> Result<(), Status> {
+        self.push_result(Ok(item))
+    }
+
+    /// Pushes a pre-constructed stream result.
+    ///
+    /// Returns an error if the stream has been closed.
+    pub fn push_result(&mut self, item: Result<T, Status>) -> Result<(), Status> {
+        if self.closed {
+            return Err(Status::failed_precondition(
+                "cannot push to a closed streaming request",
+            ));
+        }
+        self.items.push_back(item);
+        if let Some(waiter) = self.waiter.take() {
+            waiter.wake();
+        }
+        Ok(())
+    }
+
+    /// Closes the stream. Remaining buffered items can still be consumed.
+    pub fn close(&mut self) {
+        self.closed = true;
+        if let Some(waiter) = self.waiter.take() {
+            waiter.wake();
         }
     }
 }
@@ -256,15 +304,22 @@ impl<T> Default for StreamingRequest<T> {
     }
 }
 
-impl<T: Send> Streaming for StreamingRequest<T> {
+impl<T: Send + std::marker::Unpin> Streaming for StreamingRequest<T> {
     type Message = T;
 
     fn poll_next(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Self::Message, Status>>> {
-        // This is a placeholder - actual implementation would poll the underlying stream
-        Poll::Ready(None)
+        let this = self.get_mut();
+        if let Some(next) = this.items.pop_front() {
+            return Poll::Ready(Some(next));
+        }
+        if this.closed {
+            return Poll::Ready(None);
+        }
+        this.waiter = Some(cx.waker().clone());
+        Poll::Pending
     }
 }
 
@@ -385,8 +440,12 @@ where
 
 /// A stream of responses from the server.
 pub struct ResponseStream<T> {
-    /// Inner stream state.
-    _marker: PhantomData<T>,
+    /// Buffered stream items.
+    items: VecDeque<Result<T, Status>>,
+    /// Whether the stream is terminal.
+    closed: bool,
+    /// Last pending poll waker.
+    waiter: Option<Waker>,
 }
 
 impl<T> ResponseStream<T> {
@@ -394,7 +453,41 @@ impl<T> ResponseStream<T> {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            _marker: PhantomData,
+            items: VecDeque::new(),
+            closed: true,
+            waiter: None,
+        }
+    }
+
+    /// Creates an open stream.
+    #[must_use]
+    pub fn open() -> Self {
+        Self {
+            items: VecDeque::new(),
+            closed: false,
+            waiter: None,
+        }
+    }
+
+    /// Enqueue a streamed response item.
+    pub fn push(&mut self, item: Result<T, Status>) -> Result<(), Status> {
+        if self.closed {
+            return Err(Status::failed_precondition(
+                "cannot push to a closed response stream",
+            ));
+        }
+        self.items.push_back(item);
+        if let Some(waiter) = self.waiter.take() {
+            waiter.wake();
+        }
+        Ok(())
+    }
+
+    /// Mark stream completion.
+    pub fn close(&mut self) {
+        self.closed = true;
+        if let Some(waiter) = self.waiter.take() {
+            waiter.wake();
         }
     }
 }
@@ -405,20 +498,32 @@ impl<T> Default for ResponseStream<T> {
     }
 }
 
-impl<T: Send> Streaming for ResponseStream<T> {
+impl<T: Send + std::marker::Unpin> Streaming for ResponseStream<T> {
     type Message = T;
 
     fn poll_next(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Self::Message, Status>>> {
-        Poll::Ready(None)
+        let this = self.get_mut();
+        if let Some(next) = this.items.pop_front() {
+            return Poll::Ready(Some(next));
+        }
+        if this.closed {
+            return Poll::Ready(None);
+        }
+        this.waiter = Some(cx.waker().clone());
+        Poll::Pending
     }
 }
 
 /// A sink for sending requests to the server.
 #[derive(Debug)]
 pub struct RequestSink<T> {
+    /// Whether the sink has been closed.
+    closed: bool,
+    /// Number of sent items.
+    sent_count: usize,
     /// Phantom data for the message type.
     _marker: PhantomData<T>,
 }
@@ -428,21 +533,32 @@ impl<T> RequestSink<T> {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            closed: false,
+            sent_count: 0,
             _marker: PhantomData,
         }
+    }
+
+    /// Returns the number of successfully sent items.
+    #[must_use]
+    pub const fn sent_count(&self) -> usize {
+        self.sent_count
     }
 
     /// Send a message.
     #[allow(clippy::unused_async)]
     pub async fn send(&mut self, _item: T) -> Result<(), GrpcError> {
-        // Placeholder implementation
+        if self.closed {
+            return Err(GrpcError::protocol("request sink is already closed"));
+        }
+        self.sent_count += 1;
         Ok(())
     }
 
     /// Close the sink and wait for the response.
     #[allow(clippy::unused_async)]
-    pub async fn close(self) -> Result<(), GrpcError> {
-        // Placeholder implementation
+    pub async fn close(&mut self) -> Result<(), GrpcError> {
+        self.closed = true;
         Ok(())
     }
 }
@@ -456,6 +572,18 @@ impl<T> Default for RequestSink<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::task::{Wake, Waker};
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(NoopWaker))
+    }
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -627,5 +755,71 @@ mod tests {
         assert!(dbg2.contains("Binary"), "{dbg2}");
         let cloned2 = binary;
         assert!(matches!(cloned2, MetadataValue::Binary(_)));
+    }
+
+    #[test]
+    fn streaming_request_open_push_poll_close() {
+        init_test("streaming_request_open_push_poll_close");
+        let mut stream = StreamingRequest::<u32>::open();
+        stream.push(7).expect("push succeeds");
+        stream.push(9).expect("push succeeds");
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Pin::new(&mut stream);
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(Some(Ok(7)))
+        ));
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(Some(Ok(9)))
+        ));
+
+        stream.close();
+        let mut pinned = Pin::new(&mut stream);
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+        crate::test_complete!("streaming_request_open_push_poll_close");
+    }
+
+    #[test]
+    fn response_stream_push_and_close() {
+        init_test("response_stream_push_and_close");
+        let mut stream = ResponseStream::<u32>::open();
+        stream.push(Ok(11)).expect("push succeeds");
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Pin::new(&mut stream);
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(Some(Ok(11)))
+        ));
+
+        stream.close();
+        let mut pinned = Pin::new(&mut stream);
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+        crate::test_complete!("response_stream_push_and_close");
+    }
+
+    #[test]
+    fn request_sink_send_rejects_after_close() {
+        init_test("request_sink_send_rejects_after_close");
+        futures_lite::future::block_on(async {
+            let mut sink = RequestSink::<u32>::new();
+            sink.send(1).await.expect("first send must succeed");
+            assert_eq!(sink.sent_count(), 1);
+            sink.close().await.expect("close must succeed");
+
+            let err = sink.send(2).await.expect_err("send after close must fail");
+            assert!(matches!(err, GrpcError::Protocol(_)));
+        });
+        crate::test_complete!("request_sink_send_rejects_after_close");
     }
 }
