@@ -343,7 +343,7 @@ impl Future for Notified<'_> {
                 // Check if generation changed.
                 let current_gen = self.notify.generation.load(Ordering::Acquire);
                 if current_gen != self.initial_generation {
-                    self.cleanup();
+                    self.remove_and_baton_pass();
                     self.state = NotifiedState::Done;
                     return Poll::Ready(());
                 }
@@ -388,13 +388,50 @@ impl Future for Notified<'_> {
 }
 
 impl Notified<'_> {
-    /// Cleanup waiter registration.
-    fn cleanup(&mut self) {
+    /// Cleanup waiter registration and baton-pass notify_one tokens if necessary.
+    fn remove_and_baton_pass(&mut self) {
         if let Some(index) = self.waiter_index.take() {
             let mut waiters = self.notify.waiters.lock();
 
+            // Check if notify_one() selected us before we remove the entry.
+            let (was_notified, notified_generation) = if index < waiters.entries.len() {
+                let entry = &waiters.entries[index];
+                (entry.notified, entry.generation)
+            } else {
+                (false, self.initial_generation)
+            };
+
             waiters.remove(index);
-            drop(waiters);
+
+            if was_notified {
+                let was_broadcast_notify = notified_generation != self.initial_generation;
+                if was_broadcast_notify {
+                    // notify_waiters is edge-triggered for currently waiting tasks only.
+                    // If a broadcast-notified waiter is cancelled, do not convert that
+                    // event into a stored token for future waiters.
+                    return;
+                }
+
+                // We were marked notified by notify_one() but the future was
+                // dropped before consuming it (e.g. cancelled by select!),
+                // OR we are consuming a broadcast instead!
+                // Pass the notification to the next waiter to prevent a lost wakeup.
+                for entry in &mut waiters.entries {
+                    if !entry.notified && entry.waker.is_some() {
+                        entry.notified = true;
+                        if let Some(waker) = entry.waker.take() {
+                            waiters.active -= 1;
+                            drop(waiters);
+                            waker.wake();
+                            return;
+                        }
+                    }
+                }
+                // No active waiter found — re-store the notification.
+                self.notify
+                    .stored_notifications
+                    .fetch_add(1, Ordering::Release);
+            }
         }
     }
 }
@@ -402,50 +439,7 @@ impl Notified<'_> {
 impl Drop for Notified<'_> {
     fn drop(&mut self) {
         if self.state == NotifiedState::Waiting {
-            if let Some(index) = self.waiter_index.take() {
-                let mut waiters = self.notify.waiters.lock();
-
-                // Check if notify_one() selected us before we remove the entry.
-                let (was_notified, notified_generation) = if index < waiters.entries.len() {
-                    let entry = &waiters.entries[index];
-                    (entry.notified, entry.generation)
-                } else {
-                    (false, self.initial_generation)
-                };
-
-                waiters.remove(index);
-
-                if was_notified {
-                    let was_broadcast_notify = notified_generation != self.initial_generation;
-                    if was_broadcast_notify {
-                        // notify_waiters is edge-triggered for currently waiting tasks only.
-                        // If a broadcast-notified waiter is cancelled, do not convert that
-                        // event into a stored token for future waiters.
-                        return;
-                    }
-
-                    // We were marked notified by notify_one() but the future was
-                    // dropped before consuming it (e.g. cancelled by select!).
-                    // Pass the notification to the next waiter to prevent a lost
-                    // wakeup — same baton-passing pattern as LockFuture::drop.
-                    for entry in &mut waiters.entries {
-                        if !entry.notified && entry.waker.is_some() {
-                            entry.notified = true;
-                            if let Some(waker) = entry.waker.take() {
-                                waiters.active -= 1;
-                                drop(waiters);
-                                waker.wake();
-                                return;
-                            }
-                        }
-                    }
-                    // No active waiter found — re-store the notification so the
-                    // next call to notified().await receives it.
-                    self.notify
-                        .stored_notifications
-                        .fetch_add(1, Ordering::Release);
-                }
-            }
+            self.remove_and_baton_pass();
         }
     }
 }

@@ -679,23 +679,24 @@ impl<T> Receiver<T> {
     #[inline]
     pub fn try_recv(&self) -> Result<T, RecvError> {
         let mut inner = self.shared.inner.lock();
-        match inner.queue.pop_front() {
-            Some(value) => {
-                inner.recv_waker = None;
-                let next_waker = inner.take_next_sender_waker();
-                drop(inner);
-                if let Some(w) = next_waker {
-                    w.wake();
-                }
-                Ok(value)
+        if let Some(value) = inner.queue.pop_front() {
+            inner.recv_waker = None;
+            let next_waker = inner.take_next_sender_waker();
+            drop(inner);
+            if let Some(w) = next_waker {
+                w.wake();
             }
-            None => {
-                if self.shared.sender_count.load(Ordering::Acquire) == 0 {
-                    inner.recv_waker = None;
-                    Err(RecvError::Disconnected)
-                } else {
-                    Err(RecvError::Empty)
-                }
+            Ok(value)
+        } else {
+            let disconnected = self.shared.sender_count.load(Ordering::Acquire) == 0;
+            if disconnected {
+                inner.recv_waker = None;
+            }
+            drop(inner);
+            if disconnected {
+                Err(RecvError::Disconnected)
+            } else {
+                Err(RecvError::Empty)
             }
         }
     }

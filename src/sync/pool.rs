@@ -1568,24 +1568,22 @@ where
                     pool: self,
                     waiter_id: &mut cleanup.waiter_id,
                 };
-                match crate::time::timeout(
+                if crate::time::timeout(
                     now,
                     self.config.acquire_timeout.saturating_sub(elapsed),
                     wait_fut,
                 )
                 .await
+                .is_err()
                 {
-                    Ok(()) => {}
-                    Err(_) => {
-                        let wait_duration =
-                            Duration::from_nanos(get_now().duration_since(wait_started));
-                        #[cfg(feature = "metrics")]
-                        if let Some(ref metrics) = self.metrics {
-                            metrics.record_timeout(wait_duration);
-                        }
-                        self.record_wait_time(wait_duration);
-                        return Err(PoolError::Timeout);
+                    let wait_duration =
+                        Duration::from_nanos(get_now().duration_since(wait_started));
+                    #[cfg(feature = "metrics")]
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.record_timeout(wait_duration);
                     }
+                    self.record_wait_time(wait_duration);
+                    return Err(PoolError::Timeout);
                 }
                 self.record_wait_time(Duration::from_nanos(get_now().duration_since(wait_started)));
             }
