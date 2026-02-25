@@ -1492,6 +1492,9 @@ impl LabRuntime {
         let _cx_guard = crate::cx::Cx::set_current(current_cx);
 
         // 4. Poll the task
+        if self.steps < 100 {
+            println!("Executing {:?} at step {} (worker_hint={})", task_id, self.steps, worker_hint);
+        }
         let result = if let Some(stored) = self.state.get_stored_future(task_id) {
             stored.poll(&mut cx)
         } else {
