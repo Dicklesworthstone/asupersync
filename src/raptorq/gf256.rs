@@ -338,6 +338,61 @@ impl DualKernelDecision {
     }
 }
 
+/// Deterministic reason label for a dual-kernel dispatch decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DualKernelDecisionReason {
+    /// Policy mode forced sequential behavior.
+    ForcedSequentialMode,
+    /// Policy mode forced fused behavior.
+    ForcedFusedMode,
+    /// Policy window is misconfigured (`min_total > max_total`).
+    InvalidWindowConfiguration,
+    /// Total lane bytes are below configured minimum.
+    TotalBelowWindow,
+    /// Total lane bytes are above configured maximum.
+    TotalAboveWindow,
+    /// Minimum per-lane bytes requirement was not met (addmul policy).
+    LaneBelowMinFloor,
+    /// Lane-length ratio exceeded configured maximum.
+    LaneRatioExceeded,
+    /// All auto-policy gates passed.
+    EligibleAutoWindow,
+}
+
+impl DualKernelDecisionReason {
+    /// Stable machine-readable identifier for structured logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ForcedSequentialMode => "forced-sequential-mode",
+            Self::ForcedFusedMode => "forced-fused-mode",
+            Self::InvalidWindowConfiguration => "invalid-window-configuration",
+            Self::TotalBelowWindow => "total-below-window",
+            Self::TotalAboveWindow => "total-above-window",
+            Self::LaneBelowMinFloor => "lane-below-min-floor",
+            Self::LaneRatioExceeded => "lane-ratio-exceeded",
+            Self::EligibleAutoWindow => "eligible-auto-window",
+        }
+    }
+}
+
+/// Deterministic decision + reason detail for a dual-kernel lane pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DualKernelDecisionDetail {
+    /// Chosen dispatch decision.
+    pub decision: DualKernelDecision,
+    /// Deterministic reason label for the decision.
+    pub reason: DualKernelDecisionReason,
+}
+
+impl DualKernelDecisionDetail {
+    /// Returns true when the decision selects fused dual-lane execution.
+    #[must_use]
+    pub const fn is_fused(self) -> bool {
+        self.decision.is_fused()
+    }
+}
+
 /// Snapshot of the active deterministic dual-kernel policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DualKernelPolicySnapshot {
@@ -967,22 +1022,55 @@ fn in_window(total: usize, min_total: usize, max_total: usize) -> bool {
 }
 
 #[inline]
-fn dual_mul_decision_with_policy(
+fn window_gate_reason(
+    total: usize,
+    min_total: usize,
+    max_total: usize,
+) -> Option<DualKernelDecisionReason> {
+    if min_total > max_total {
+        Some(DualKernelDecisionReason::InvalidWindowConfiguration)
+    } else if total < min_total {
+        Some(DualKernelDecisionReason::TotalBelowWindow)
+    } else if total > max_total {
+        Some(DualKernelDecisionReason::TotalAboveWindow)
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn dual_mul_decision_detail_with_policy(
     policy: &DualKernelPolicy,
     len_a: usize,
     len_b: usize,
-) -> DualKernelDecision {
+) -> DualKernelDecisionDetail {
     match policy.mode {
-        DualKernelOverride::ForceSequential => DualKernelDecision::Sequential,
-        DualKernelOverride::ForceFused => DualKernelDecision::Fused,
+        DualKernelOverride::ForceSequential => DualKernelDecisionDetail {
+            decision: DualKernelDecision::Sequential,
+            reason: DualKernelDecisionReason::ForcedSequentialMode,
+        },
+        DualKernelOverride::ForceFused => DualKernelDecisionDetail {
+            decision: DualKernelDecision::Fused,
+            reason: DualKernelDecisionReason::ForcedFusedMode,
+        },
         DualKernelOverride::Auto => {
             let total = len_a.saturating_add(len_b);
-            if in_window(total, policy.mul_min_total, policy.mul_max_total)
-                && lane_ratio_within(len_a, len_b, policy.max_lane_ratio)
+            if let Some(reason) = window_gate_reason(total, policy.mul_min_total, policy.mul_max_total)
             {
-                DualKernelDecision::Fused
-            } else {
-                DualKernelDecision::Sequential
+                return DualKernelDecisionDetail {
+                    decision: DualKernelDecision::Sequential,
+                    reason,
+                };
+            }
+            if !lane_ratio_within(len_a, len_b, policy.max_lane_ratio) {
+                return DualKernelDecisionDetail {
+                    decision: DualKernelDecision::Sequential,
+                    reason: DualKernelDecisionReason::LaneRatioExceeded,
+                };
+            }
+            DualKernelDecisionDetail {
+                decision: DualKernelDecision::Fused,
+                reason: DualKernelDecisionReason::EligibleAutoWindow,
             }
         }
     }
@@ -990,27 +1078,49 @@ fn dual_mul_decision_with_policy(
 
 #[inline]
 fn should_use_dual_mul_fused(len_a: usize, len_b: usize) -> bool {
-    dual_mul_kernel_decision(len_a, len_b).is_fused()
+    dual_mul_kernel_decision_detail(len_a, len_b).is_fused()
 }
 
 #[inline]
-fn dual_addmul_decision_with_policy(
+fn dual_addmul_decision_detail_with_policy(
     policy: &DualKernelPolicy,
     len_a: usize,
     len_b: usize,
-) -> DualKernelDecision {
+) -> DualKernelDecisionDetail {
     match policy.mode {
-        DualKernelOverride::ForceSequential => DualKernelDecision::Sequential,
-        DualKernelOverride::ForceFused => DualKernelDecision::Fused,
+        DualKernelOverride::ForceSequential => DualKernelDecisionDetail {
+            decision: DualKernelDecision::Sequential,
+            reason: DualKernelDecisionReason::ForcedSequentialMode,
+        },
+        DualKernelOverride::ForceFused => DualKernelDecisionDetail {
+            decision: DualKernelDecision::Fused,
+            reason: DualKernelDecisionReason::ForcedFusedMode,
+        },
         DualKernelOverride::Auto => {
             let total = len_a.saturating_add(len_b);
-            if in_window(total, policy.addmul_min_total, policy.addmul_max_total)
-                && len_a.min(len_b) >= policy.addmul_min_lane
-                && lane_ratio_within(len_a, len_b, policy.max_lane_ratio)
+            if let Some(reason) =
+                window_gate_reason(total, policy.addmul_min_total, policy.addmul_max_total)
             {
-                DualKernelDecision::Fused
-            } else {
-                DualKernelDecision::Sequential
+                return DualKernelDecisionDetail {
+                    decision: DualKernelDecision::Sequential,
+                    reason,
+                };
+            }
+            if len_a.min(len_b) < policy.addmul_min_lane {
+                return DualKernelDecisionDetail {
+                    decision: DualKernelDecision::Sequential,
+                    reason: DualKernelDecisionReason::LaneBelowMinFloor,
+                };
+            }
+            if !lane_ratio_within(len_a, len_b, policy.max_lane_ratio) {
+                return DualKernelDecisionDetail {
+                    decision: DualKernelDecision::Sequential,
+                    reason: DualKernelDecisionReason::LaneRatioExceeded,
+                };
+            }
+            DualKernelDecisionDetail {
+                decision: DualKernelDecision::Fused,
+                reason: DualKernelDecisionReason::EligibleAutoWindow,
             }
         }
     }
@@ -1062,18 +1172,30 @@ pub fn gf256_profile_pack_manifest_snapshot() -> Gf256ProfilePackManifestSnapsho
 /// Returns the deterministic dual-lane decision for dual-mul path lengths.
 #[must_use]
 pub fn dual_mul_kernel_decision(len_a: usize, len_b: usize) -> DualKernelDecision {
-    dual_mul_decision_with_policy(dual_policy(), len_a, len_b)
+    dual_mul_kernel_decision_detail(len_a, len_b).decision
+}
+
+/// Returns deterministic dual-lane decision details for dual-mul path lengths.
+#[must_use]
+pub fn dual_mul_kernel_decision_detail(len_a: usize, len_b: usize) -> DualKernelDecisionDetail {
+    dual_mul_decision_detail_with_policy(dual_policy(), len_a, len_b)
 }
 
 /// Returns the deterministic dual-lane decision for dual-addmul path lengths.
 #[must_use]
 pub fn dual_addmul_kernel_decision(len_a: usize, len_b: usize) -> DualKernelDecision {
-    dual_addmul_decision_with_policy(dual_policy(), len_a, len_b)
+    dual_addmul_kernel_decision_detail(len_a, len_b).decision
+}
+
+/// Returns deterministic dual-lane decision details for dual-addmul path lengths.
+#[must_use]
+pub fn dual_addmul_kernel_decision_detail(len_a: usize, len_b: usize) -> DualKernelDecisionDetail {
+    dual_addmul_decision_detail_with_policy(dual_policy(), len_a, len_b)
 }
 
 #[inline]
 fn should_use_dual_addmul_fused(len_a: usize, len_b: usize) -> bool {
-    dual_addmul_kernel_decision(len_a, len_b).is_fused()
+    dual_addmul_kernel_decision_detail(len_a, len_b).is_fused()
 }
 /// Returns the active runtime-selected GF(256) bulk kernel family.
 #[must_use]
@@ -2724,13 +2846,113 @@ mod tests {
             max_lane_ratio: 8,
         };
         assert_eq!(
-            dual_addmul_decision_with_policy(&policy, 12288, 1536),
+            dual_addmul_decision_detail_with_policy(&policy, 12288, 1536).decision,
             DualKernelDecision::Sequential,
             "{context}"
         );
         assert_eq!(
-            dual_addmul_decision_with_policy(&policy, 12288, 2048),
+            dual_addmul_decision_detail_with_policy(&policy, 12288, 2048).decision,
             DualKernelDecision::Fused,
+            "{context}"
+        );
+    }
+
+    #[test]
+    fn dual_policy_decision_reasons_cover_forced_and_gate_failures() {
+        let seed = 0u64;
+        let replay_ref = "replay:rq-u-gf256-dual-policy-v4";
+        let context = failure_context(
+            "RQ-U-GF256-DUAL-POLICY",
+            seed,
+            "dual_policy_decision_reasons_cover_forced_and_gate_failures",
+            replay_ref,
+        );
+        let base = DualKernelPolicy {
+            profile_pack: Gf256ProfilePackId::X86Avx2BalancedV1,
+            architecture_class: Gf256ArchitectureClass::X86Avx2,
+            tuning_corpus_id: GF256_PROFILE_TUNING_CORPUS_ID,
+            selected_tuning_candidate_id: X86_SELECTED_TUNING_CANDIDATE,
+            rejected_tuning_candidate_ids: X86_REJECTED_TUNING_CANDIDATES,
+            fallback_reason: None,
+            rejected_candidates: REJECTED_PROFILE_X86_AVX2,
+            replay_pointer: GF256_PROFILE_PACK_REPLAY_POINTER,
+            command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
+            mode: DualKernelOverride::Auto,
+            mul_min_total: 8 * 1024,
+            mul_max_total: 24 * 1024,
+            addmul_min_total: 12 * 1024,
+            addmul_max_total: 16 * 1024,
+            addmul_min_lane: 2 * 1024,
+            max_lane_ratio: 8,
+        };
+
+        let eligible = dual_addmul_decision_detail_with_policy(&base, 12288, 2048);
+        assert_eq!(eligible.decision, DualKernelDecision::Fused, "{context}");
+        assert_eq!(
+            eligible.reason,
+            DualKernelDecisionReason::EligibleAutoWindow,
+            "{context}"
+        );
+
+        let below_floor = dual_addmul_decision_detail_with_policy(&base, 12288, 1536);
+        assert_eq!(below_floor.decision, DualKernelDecision::Sequential, "{context}");
+        assert_eq!(
+            below_floor.reason,
+            DualKernelDecisionReason::LaneBelowMinFloor,
+            "{context}"
+        );
+
+        let below_window = dual_addmul_decision_detail_with_policy(&base, 4096, 4096);
+        assert_eq!(
+            below_window.reason,
+            DualKernelDecisionReason::TotalBelowWindow,
+            "{context}"
+        );
+
+        let above_window = dual_addmul_decision_detail_with_policy(&base, 15360, 15360);
+        assert_eq!(
+            above_window.reason,
+            DualKernelDecisionReason::TotalAboveWindow,
+            "{context}"
+        );
+
+        let ratio_policy = DualKernelPolicy {
+            addmul_max_total: 32 * 1024,
+            ..base
+        };
+        let ratio_exceeded = dual_addmul_decision_detail_with_policy(&ratio_policy, 22528, 2048);
+        assert_eq!(
+            ratio_exceeded.reason,
+            DualKernelDecisionReason::LaneRatioExceeded,
+            "{context}"
+        );
+
+        let force_seq = DualKernelPolicy {
+            mode: DualKernelOverride::ForceSequential,
+            ..base
+        };
+        let force_seq_detail = dual_addmul_decision_detail_with_policy(&force_seq, 12288, 12288);
+        assert_eq!(
+            force_seq_detail.reason,
+            DualKernelDecisionReason::ForcedSequentialMode,
+            "{context}"
+        );
+
+        let force_fused = DualKernelPolicy {
+            mode: DualKernelOverride::ForceFused,
+            ..base
+        };
+        let force_fused_detail =
+            dual_mul_decision_detail_with_policy(&force_fused, 4096, 4096);
+        assert_eq!(
+            force_fused_detail.reason,
+            DualKernelDecisionReason::ForcedFusedMode,
+            "{context}"
+        );
+
+        assert_eq!(
+            DualKernelDecisionReason::LaneBelowMinFloor.as_str(),
+            "lane-below-min-floor",
             "{context}"
         );
     }
