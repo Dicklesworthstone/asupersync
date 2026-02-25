@@ -106,8 +106,9 @@ repro_*.rs
 # Agent coordination config
 .agent-mail.yaml
 
-# Claude local settings
+# Claude local settings and worktrees
 .claude/settings.local.json
+.claude/worktrees/
 
 # Profiling artifacts directory (callgrind, cachegrind, etc.)
 artifacts/
