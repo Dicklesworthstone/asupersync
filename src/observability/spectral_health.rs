@@ -817,6 +817,11 @@ impl fmt::Display for EarlyWarningSeverity {
 /// 6. **Hoeffding's D**: nonparametric independence test that catches *any*
 ///    dependence structure — including U-shaped, oscillatory, and non-monotone
 ///    patterns that Kendall's tau would miss (Hoeffding, 1948).
+/// 7. **Spearman's rho**: rank correlation that weights large rank displacements
+///    quadratically, complementing Kendall's tau's pairwise concordance approach.
+/// 8. **Distance correlation**: operates on raw metric distances rather than ranks,
+///    capturing magnitude and acceleration information that rank transforms discard
+///    (Székely, Rizzo & Bakirov, 2007). dCor = 0 iff independence.
 #[derive(Debug, Clone)]
 pub struct BifurcationWarning {
     /// Current spectral trend direction.
@@ -839,11 +844,22 @@ pub struct BifurcationWarning {
     /// Range `[-1, 1]`. Strong negative values indicate monotone deterioration.
     /// More robust than linear R² for non-linear monotone trends.
     pub kendall_tau: Option<f64>,
+    /// Spearman's rho rank correlation coefficient.
+    /// Range `[-1, 1]`. Weights large rank displacements more heavily than
+    /// Kendall's tau (quadratic vs linear penalty), so it is more sensitive
+    /// to a few extreme outlier shifts while tau is more robust to them.
+    pub spearman_rho: Option<f64>,
     /// Hoeffding's D independence statistic.
     /// Range `[-0.5, 1]` where `0` means independence and positive values
     /// indicate dependence (of *any* form — monotone, U-shaped, oscillatory).
     /// Complements Kendall's tau by detecting non-monotone patterns.
     pub hoeffding_d: Option<f64>,
+    /// Distance correlation between time index and observed values.
+    /// Range `[0, 1]` where `0` means independence and `1` means perfect
+    /// dependence. Unlike rank-based methods (Kendall, Spearman), this
+    /// operates on raw metric distances, capturing magnitude and acceleration
+    /// information that rank transforms discard.
+    pub distance_corr: Option<f64>,
     /// Sample skewness of the Fiedler history window.
     /// Asymmetry growth near bifurcation points (Scheffer et al., 2009).
     pub skewness: Option<f64>,
@@ -882,8 +898,14 @@ impl fmt::Display for BifurcationWarning {
         if let Some(kt) = self.kendall_tau {
             write!(f, ", kendall_tau={kt:.3}")?;
         }
+        if let Some(sr) = self.spearman_rho {
+            write!(f, ", spearman_rho={sr:.3}")?;
+        }
         if let Some(hd) = self.hoeffding_d {
             write!(f, ", hoeffding_d={hd:.4}")?;
+        }
+        if let Some(dc) = self.distance_corr {
+            write!(f, ", dcor={dc:.4}")?;
         }
         if let Some(sk) = self.skewness {
             write!(f, ", skew={sk:.3}")?;
@@ -1012,8 +1034,11 @@ impl SpectralHistory {
         let variance_growth = variance_ratio
             .is_some_and(|vr| vr >= thresholds.variance_growth_ratio_threshold && vr.is_finite());
 
-        // (4) Kendall's tau: nonparametric monotone trend test.
+        // (4) Kendall's tau and Spearman's rho: nonparametric monotone trend tests.
+        // Tau uses pairwise concordance (robust), rho uses squared rank differences
+        // (sensitive to large displacements). Both provide corroborating evidence.
         let kendall_tau_val = kendall_tau(&values);
+        let spearman_rho_val = spearman_rho(&values);
 
         // (5) Skewness: asymmetry growth near bifurcation.
         let skewness = sample_skewness(&values);
@@ -1022,19 +1047,25 @@ impl SpectralHistory {
         // Catches non-monotone dependence that Kendall's tau would miss.
         let hoeffding_d_val = hoeffding_d(&values);
 
+        // (5c) Distance correlation: operates on raw metric distances, not ranks.
+        // Captures magnitude/acceleration info that rank methods discard.
+        let distance_corr_val = distance_correlation(&values);
+
         // (6) Conformal prediction + e-process.
         let conformal_lower_bound_next =
             split_conformal_lower_next(&values, thresholds.conformal_alpha);
         let deterioration_e_value = deterioration_eprocess(&values, thresholds.eprocess_lambda);
 
         // --- Trend classification ---
-        // Uses Kendall's tau in addition to linear slope for more robust detection.
+        // Uses Kendall's tau and Spearman's rho alongside slope for robust detection.
         let strong_kendall_decline = kendall_tau_val.is_some_and(|kt| kt < -0.5);
+        let strong_spearman_decline = spearman_rho_val.is_some_and(|sr| sr < -0.5);
         let trend = if oscillation_ratio > thresholds.oscillation_ratio_threshold {
             SpectralTrend::Oscillating
         } else if slope < thresholds.bifurcation_rate_threshold
             || (slope < 0.0 && critical_slowing)
             || (slope < 0.0 && strong_kendall_decline)
+            || (slope < 0.0 && strong_spearman_decline)
         {
             SpectralTrend::Deteriorating
         } else if slope > -thresholds.bifurcation_rate_threshold {
@@ -1080,12 +1111,21 @@ impl SpectralHistory {
         if strong_kendall_decline {
             active_indicators += 1;
         }
+        if strong_spearman_decline {
+            active_indicators += 1;
+        }
         if skewness.is_some_and(|sk| sk.abs() > 1.0) {
             active_indicators += 1;
         }
         if hoeffding_d_val.is_some_and(|d| d > 0.03) {
             active_indicators += 1;
             if hoeffding_d_val.is_some_and(|d| d > 0.10) {
+                strong_indicators += 1;
+            }
+        }
+        if distance_corr_val.is_some_and(|dc| dc > 0.5) {
+            active_indicators += 1;
+            if distance_corr_val.is_some_and(|dc| dc > 0.8) {
                 strong_indicators += 1;
             }
         }
@@ -1107,26 +1147,37 @@ impl SpectralHistory {
         };
 
         // Confidence blends linear fit consistency with all indicator signals.
-        // Weights: r2=0.25, slowing=0.12, variance=0.12, kendall=0.12,
-        //          hoeffding=0.12, oscillation=0.12, e_process=0.15 → sum=1.00
+        // All 10 indicators weighted equally at 0.10 → sum=1.00
         let r2 = linear_regression_r_squared(&values).clamp(0.0, 1.0);
         let slowing_signal = if critical_slowing { 1.0 } else { 0.0 };
         let variance_signal = if variance_growth { 1.0 } else { 0.0 };
         let e_signal = (deterioration_e_value.ln_1p() / 4.0).clamp(0.0, 1.0);
         let kendall_signal = kendall_tau_val.map_or(0.0, |kt| (-kt).clamp(0.0, 1.0));
+        let spearman_signal = spearman_rho_val.map_or(0.0, |sr| (-sr).clamp(0.0, 1.0));
         let hoeffding_signal = hoeffding_d_val.map_or(0.0, |d| d.clamp(0.0, 1.0));
-        let confidence = 0.12f64
+        let dcor_signal = distance_corr_val.map_or(0.0, |dc| dc.clamp(0.0, 1.0));
+        let skewness_signal = skewness.map_or(0.0, |sk| (sk.abs() / 2.0).clamp(0.0, 1.0));
+        let confidence = 0.10f64
             .mul_add(
                 oscillation_ratio.min(1.0),
-                0.15f64.mul_add(
+                0.10f64.mul_add(
                     e_signal,
-                    0.12f64.mul_add(
-                        hoeffding_signal,
-                        0.12f64.mul_add(
-                            kendall_signal,
-                            0.12f64.mul_add(
-                                variance_signal,
-                                0.12f64.mul_add(slowing_signal, 0.25 * r2),
+                    0.10f64.mul_add(
+                        skewness_signal,
+                        0.10f64.mul_add(
+                            dcor_signal,
+                            0.10f64.mul_add(
+                                hoeffding_signal,
+                                0.10f64.mul_add(
+                                    spearman_signal,
+                                    0.10f64.mul_add(
+                                        kendall_signal,
+                                        0.10f64.mul_add(
+                                            variance_signal,
+                                            0.10f64.mul_add(slowing_signal, 0.10 * r2),
+                                        ),
+                                    ),
+                                ),
                             ),
                         ),
                     ),
@@ -1143,7 +1194,9 @@ impl SpectralHistory {
             variance_ratio,
             flicker_score: oscillation_ratio,
             kendall_tau: kendall_tau_val,
+            spearman_rho: spearman_rho_val,
             hoeffding_d: hoeffding_d_val,
+            distance_corr: distance_corr_val,
             skewness,
             return_rate,
             conformal_lower_bound_next,
@@ -1317,6 +1370,60 @@ fn kendall_tau(values: &[f64]) -> Option<f64> {
     Some((concordant - discordant) as f64 / total as f64)
 }
 
+/// Spearman's rank correlation coefficient for time-series trend detection.
+///
+/// Measures the strength and direction of the monotone association between
+/// time index and observed values using rank correlation. Range
+/// `[-1, 1]` where `-1` means perfectly monotone decreasing and `+1` means
+/// perfectly monotone increasing.
+///
+/// Compared to Kendall's tau:
+/// - Spearman's rho is Pearson correlation on ranks, making it sensitive to
+///   larger rank displacements.
+/// - Kendall's tau counts concordant/discordant pairs uniformly, making it
+///   more robust to isolated outliers.
+/// - When both agree on direction and magnitude, the evidence is stronger
+///   than either alone.
+///
+/// Complexity: `O(n log n)` (dominated by the sort in `average_rank_f64`).
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+fn spearman_rho(values: &[f64]) -> Option<f64> {
+    let n = values.len();
+    if n < 3 {
+        return None;
+    }
+
+    let value_ranks = average_rank_f64(values);
+    let n_f = n as f64;
+    let mean_time_rank = (n_f + 1.0) * 0.5;
+    let mean_value_rank = value_ranks.iter().sum::<f64>() / n_f;
+
+    let mut covariance = 0.0_f64;
+    let mut time_variance = 0.0_f64;
+    let mut value_variance = 0.0_f64;
+
+    for (idx, &value_rank) in value_ranks.iter().enumerate() {
+        let time_rank = idx as f64 + 1.0;
+        let dt = time_rank - mean_time_rank;
+        let dv = value_rank - mean_value_rank;
+        covariance += dt * dv;
+        time_variance += dt * dt;
+        value_variance += dv * dv;
+    }
+
+    if time_variance <= f64::EPSILON || value_variance <= f64::EPSILON {
+        return None;
+    }
+
+    let rho = covariance / (time_variance.sqrt() * value_variance.sqrt());
+    if rho.is_finite() {
+        Some(rho.clamp(-1.0, 1.0))
+    } else {
+        None
+    }
+}
+
 /// Computes 1-based average ranks (midrank method) for a slice of values.
 ///
 /// Handles ties by assigning each member of a tie group the average of
@@ -1426,6 +1533,117 @@ fn hoeffding_d(values: &[f64]) -> Option<f64> {
     let numer = 30.0 * (n_f - 2.0).mul_add(inner, d2);
 
     Some(numer / denom)
+}
+
+/// Distance correlation between the time index and observed values.
+///
+/// Unlike rank-based methods (Kendall, Spearman, Hoeffding), distance
+/// correlation operates on the raw metric distances between observations.
+/// This preserves magnitude and acceleration information that rank
+/// transforms discard — for example, a sudden large drop in the Fiedler
+/// value looks the same as a small drop in rank space, but distance
+/// correlation captures the difference.
+///
+/// dCor(X,Y) = 0 if and only if X and Y are independent (for finite
+/// first moments), making it a true test of independence with no
+/// blind spots for non-linear patterns.
+///
+/// Range `[0, 1]`. Requires at least 4 observations (3 produces
+/// degenerate double-centering).
+///
+/// Complexity: `O(n²)`. For our history windows (≤ 64 values) this is
+/// negligible.
+///
+/// Reference: Székely, G.J., Rizzo, M.L. & Bakirov, N.K. (2007).
+/// "Measuring and testing dependence by correlation of distances."
+/// *Annals of Statistics*, 35(6), 2769–2794.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+fn distance_correlation(values: &[f64]) -> Option<f64> {
+    let n = values.len();
+    if n < 4 {
+        return None;
+    }
+    let n_f = n as f64;
+
+    // Distance matrices. For time-series: x = [0, 1, ..., n-1], y = values.
+    // Time distance matrix: a[i][j] = |i - j|
+    // Value distance matrix: b[i][j] = |values[i] - values[j]|
+
+    // Compute row means, column means, and grand mean for both matrices
+    // in O(n²) without materializing the full matrix.
+
+    // --- Time axis (a_ij = |i - j|) ---
+    // Row mean of row i: (1/n) * sum_j |i - j|
+    let mut a_row_mean = vec![0.0_f64; n];
+    for (i, row_mean) in a_row_mean.iter_mut().enumerate() {
+        let i_f = i as f64;
+        let mut row_sum = 0.0_f64;
+        for j in 0..n {
+            row_sum += (i_f - j as f64).abs();
+        }
+        *row_mean = row_sum / n_f;
+    }
+    let a_grand_mean: f64 = a_row_mean.iter().sum::<f64>() / n_f;
+    // For symmetric distance matrices, col_mean == row_mean.
+
+    // --- Value axis (b_ij = |values[i] - values[j]|) ---
+    let mut b_row_mean = vec![0.0_f64; n];
+    for (i, row_mean) in b_row_mean.iter_mut().enumerate() {
+        let value_i = values[i];
+        let mut row_sum = 0.0_f64;
+        for &value_j in values {
+            row_sum += (value_i - value_j).abs();
+        }
+        *row_mean = row_sum / n_f;
+    }
+    let b_grand_mean: f64 = b_row_mean.iter().sum::<f64>() / n_f;
+
+    // Double-centered elements:
+    //   A_ij = a_ij - row_mean_i - col_mean_j + grand_mean
+    //   B_ij = b_ij - row_mean_i - col_mean_j + grand_mean
+    //
+    // We need: dCov² = (1/n²) * sum_ij A_ij * B_ij
+    //          dVar_x² = (1/n²) * sum_ij A_ij²
+    //          dVar_y² = (1/n²) * sum_ij B_ij²
+    let mut dcov_sq = 0.0_f64;
+    let mut dvar_time_sq = 0.0_f64;
+    let mut dvar_value_sq = 0.0_f64;
+
+    for (i, &value_i) in values.iter().enumerate() {
+        let i_f = i as f64;
+        for (j, &value_j) in values.iter().enumerate() {
+            let a_ij = (i_f - j as f64).abs() - a_row_mean[i] - a_row_mean[j] + a_grand_mean;
+            let b_ij = (value_i - value_j).abs() - b_row_mean[i] - b_row_mean[j] + b_grand_mean;
+            dcov_sq += a_ij * b_ij;
+            dvar_time_sq += a_ij * a_ij;
+            dvar_value_sq += b_ij * b_ij;
+        }
+    }
+
+    dcov_sq /= n_f * n_f;
+    dvar_time_sq /= n_f * n_f;
+    dvar_value_sq /= n_f * n_f;
+
+    if dvar_time_sq <= 0.0 || dvar_value_sq <= 0.0 {
+        return Some(0.0);
+    }
+
+    // dCor = sqrt(dCov² / sqrt(dVar_x² * dVar_y²)).
+    // Numerical noise can drive `dcov_sq` slightly negative for nearly
+    // independent windows; clamp to 0 because dCov² is non-negative by
+    // definition.
+    let denom = (dvar_time_sq * dvar_value_sq).sqrt();
+    if denom <= 0.0 {
+        return Some(0.0);
+    }
+    let dcor = (dcov_sq / denom).max(0.0).sqrt();
+
+    if dcor.is_finite() {
+        Some(dcor.clamp(0.0, 1.0))
+    } else {
+        None
+    }
 }
 
 /// Sample skewness (Fisher's definition).
@@ -2367,7 +2585,9 @@ mod tests {
             variance_ratio: Some(1.4),
             flicker_score: 0.2,
             kendall_tau: Some(-0.7),
+            spearman_rho: Some(-0.85),
             hoeffding_d: Some(0.085),
+            distance_corr: Some(0.72),
             skewness: Some(-0.3),
             return_rate: Some(0.2),
             conformal_lower_bound_next: Some(0.03),
@@ -2382,7 +2602,9 @@ mod tests {
         assert!(s.contains("warning"));
         assert!(s.contains("return_rate"));
         assert!(s.contains("kendall_tau"));
+        assert!(s.contains("spearman_rho"));
         assert!(s.contains("hoeffding_d"));
+        assert!(s.contains("dcor"));
 
         let bw_no_ttc = BifurcationWarning {
             trend: SpectralTrend::Stable,
@@ -2393,7 +2615,9 @@ mod tests {
             variance_ratio: None,
             flicker_score: 0.0,
             kendall_tau: None,
+            spearman_rho: None,
             hoeffding_d: None,
+            distance_corr: None,
             skewness: None,
             return_rate: None,
             conformal_lower_bound_next: None,
@@ -2868,5 +3092,203 @@ mod tests {
             d > 0.0,
             "parabola should have positive Hoeffding's D, got {d}"
         );
+    }
+
+    // -- Spearman's rho -------------------------------------------------------
+
+    #[test]
+    fn spearman_rho_perfect_increasing() {
+        let values = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let rho = spearman_rho(&values);
+        assert!(rho.is_some());
+        assert!(
+            (rho.unwrap() - 1.0).abs() < 1e-10,
+            "perfect increase: rho should be 1.0, got {rho:?}"
+        );
+    }
+
+    #[test]
+    fn spearman_rho_perfect_decreasing() {
+        let values = vec![5.0, 4.0, 3.0, 2.0, 1.0];
+        let rho = spearman_rho(&values);
+        assert!(rho.is_some());
+        assert!(
+            (rho.unwrap() - (-1.0)).abs() < 1e-10,
+            "perfect decrease: rho should be -1.0, got {rho:?}"
+        );
+    }
+
+    #[test]
+    fn spearman_rho_constant() {
+        // Constant data yields zero variance in value ranks, so rho is undefined.
+        let values = vec![3.0, 3.0, 3.0, 3.0, 3.0];
+        assert!(spearman_rho(&values).is_none());
+    }
+
+    #[test]
+    fn spearman_rho_insufficient() {
+        assert!(spearman_rho(&[1.0, 2.0]).is_none());
+        assert!(spearman_rho(&[1.0]).is_none());
+        assert!(spearman_rho(&[]).is_none());
+    }
+
+    #[test]
+    fn spearman_rho_agrees_with_kendall_direction() {
+        // For monotone data, tau and rho should have the same sign.
+        let dec = vec![1.0, 0.9, 0.85, 0.7, 0.5, 0.3];
+        let tau = kendall_tau(&dec).unwrap();
+        let rho = spearman_rho(&dec).unwrap();
+        assert!(
+            tau < 0.0 && rho < 0.0,
+            "both should be negative: tau={tau}, rho={rho}"
+        );
+    }
+
+    #[test]
+    fn spearman_rho_in_warning() {
+        let thresholds = SpectralThresholds::default();
+        let mut history = SpectralHistory::new(8);
+
+        for i in 0..6_i32 {
+            history.record(f64::from(i).mul_add(-0.15, 1.0));
+        }
+
+        let warning = history.analyze(&thresholds).unwrap();
+        assert!(
+            warning.spearman_rho.is_some(),
+            "should compute Spearman's rho"
+        );
+        let rho = warning.spearman_rho.unwrap();
+        assert!(
+            rho < -0.5,
+            "monotone decrease should give strongly negative rho, got {rho}"
+        );
+    }
+
+    #[test]
+    fn spearman_rho_exponential_decay() {
+        // Exponential decay is monotone: rho should be -1.0.
+        let values: Vec<f64> = (0..10).map(|i| 100.0 * 0.7_f64.powi(i)).collect();
+        let rho = spearman_rho(&values).unwrap();
+        assert!(
+            (rho - (-1.0)).abs() < 1e-10,
+            "exponential decay is monotone: rho should be -1.0, got {rho}"
+        );
+    }
+
+    // -- Distance correlation -------------------------------------------------
+
+    #[test]
+    fn distance_corr_perfect_linear_increasing() {
+        let values: Vec<f64> = (0..10).map(f64::from).collect();
+        let dc = distance_correlation(&values).unwrap();
+        assert!(
+            (dc - 1.0).abs() < 1e-10,
+            "perfect linear increase: dCor should be 1.0, got {dc}"
+        );
+    }
+
+    #[test]
+    fn distance_corr_perfect_linear_decreasing() {
+        let values: Vec<f64> = (0..10).rev().map(f64::from).collect();
+        let dc = distance_correlation(&values).unwrap();
+        assert!(
+            (dc - 1.0).abs() < 1e-10,
+            "perfect linear decrease: dCor should be 1.0, got {dc}"
+        );
+    }
+
+    #[test]
+    fn distance_corr_constant() {
+        let values = vec![5.0; 10];
+        let dc = distance_correlation(&values).unwrap();
+        assert!(
+            dc.abs() < 1e-10,
+            "constant data: dCor should be 0.0, got {dc}"
+        );
+    }
+
+    #[test]
+    fn distance_corr_insufficient() {
+        assert!(distance_correlation(&[1.0, 2.0, 3.0]).is_none());
+        assert!(distance_correlation(&[1.0, 2.0]).is_none());
+        assert!(distance_correlation(&[1.0]).is_none());
+        assert!(distance_correlation(&[]).is_none());
+    }
+
+    #[test]
+    fn distance_corr_quadratic_detects_nonmonotone() {
+        // Quadratic: strong non-monotone dependence.
+        // Rank-based methods struggle, but dCor should detect it.
+        let values: Vec<f64> = (0..9)
+            .map(|i| {
+                let x = f64::from(i) - 4.0;
+                x * x
+            })
+            .collect();
+        let dc = distance_correlation(&values).unwrap();
+        assert!(
+            dc > 0.3,
+            "quadratic should show dependence in dCor, got {dc}"
+        );
+    }
+
+    #[test]
+    fn distance_corr_captures_magnitude() {
+        // Two series with same ranks but different magnitudes.
+        // dCor should differentiate them because it uses raw distances.
+        let small_drop: Vec<f64> = (0..8).map(|i| f64::from(i).mul_add(-0.01, 1.0)).collect();
+        let big_drop: Vec<f64> = (0..8).map(|i| f64::from(i).mul_add(-0.5, 1.0)).collect();
+
+        let dc_small = distance_correlation(&small_drop).unwrap();
+        let dc_big = distance_correlation(&big_drop).unwrap();
+
+        // Both are perfectly linear, so both should be 1.0.
+        // The key value of dCor isn't distinguishing linear slopes
+        // (both have dCor=1), but rather detecting non-linear patterns.
+        assert!(
+            dc_small > 0.99,
+            "linear should give dCor~1.0, got {dc_small}"
+        );
+        assert!(dc_big > 0.99, "linear should give dCor~1.0, got {dc_big}");
+    }
+
+    #[test]
+    fn distance_corr_in_warning() {
+        let thresholds = SpectralThresholds::default();
+        let mut history = SpectralHistory::new(8);
+
+        for i in 0..6_i32 {
+            history.record(f64::from(i).mul_add(-0.15, 1.0));
+        }
+
+        let warning = history.analyze(&thresholds).unwrap();
+        assert!(
+            warning.distance_corr.is_some(),
+            "should compute distance correlation"
+        );
+        let dc = warning.distance_corr.unwrap();
+        assert!(
+            dc > 0.5,
+            "monotone deterioration should show high dCor, got {dc}"
+        );
+    }
+
+    #[test]
+    fn distance_corr_range_0_to_1() {
+        // Various patterns — dCor should always be in [0, 1].
+        let patterns: Vec<Vec<f64>> = vec![
+            (0..10).map(f64::from).collect(),
+            (0..10).rev().map(f64::from).collect(),
+            vec![1.0, 5.0, 2.0, 8.0, 3.0, 7.0, 4.0, 6.0],
+            (0..9).map(|i| (f64::from(i) - 4.0).powi(2)).collect(),
+        ];
+        for (idx, vals) in patterns.iter().enumerate() {
+            let dc = distance_correlation(vals).unwrap();
+            assert!(
+                (0.0..=1.0).contains(&dc),
+                "pattern {idx}: dCor should be in [0,1], got {dc}"
+            );
+        }
     }
 }
