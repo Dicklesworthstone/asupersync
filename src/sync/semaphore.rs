@@ -242,8 +242,7 @@ impl Drop for AcquireFuture<'_, '_> {
                 let mut state = self.semaphore.state.lock();
                 // If we are at the front, we need to wake the next waiter when we leave,
                 // otherwise the signal (permits available) might be lost.
-                let waker = remove_waiter_and_take_next_waker(&mut state, waiter_id);
-                if state.permits > 0 { waker } else { None }
+                remove_waiter_and_take_next_waker(&mut state, waiter_id)
             };
             if let Some(next) = next_waker {
                 next.wake();
@@ -262,8 +261,7 @@ impl<'a> Future for AcquireFuture<'a, '_> {
                     let mut state = self.semaphore.state.lock();
                     // If we are at the front, we need to wake the next waiter when we leave,
                     // otherwise the signal (permits available) might be lost.
-                    let waker = remove_waiter_and_take_next_waker(&mut state, waiter_id);
-                    if state.permits > 0 { waker } else { None }
+                    remove_waiter_and_take_next_waker(&mut state, waiter_id)
                 };
                 // Clear waiter_id so Drop doesn't try to remove it again
                 self.waiter_id = None;
@@ -482,8 +480,7 @@ impl Drop for OwnedAcquireFuture {
                 let mut state = self.semaphore.state.lock();
                 // If we are at the front, we need to wake the next waiter when we leave,
                 // otherwise the signal (permits available) might be lost.
-                let waker = remove_waiter_and_take_next_waker(&mut state, waiter_id);
-                if state.permits > 0 { waker } else { None }
+                remove_waiter_and_take_next_waker(&mut state, waiter_id)
             };
             if let Some(next) = next_waker {
                 next.wake();
@@ -502,8 +499,7 @@ impl Future for OwnedAcquireFuture {
                     let mut state = self.semaphore.state.lock();
                     // If we are at the front, we need to wake the next waiter when we leave,
                     // otherwise the signal (permits available) might be lost.
-                    let waker = remove_waiter_and_take_next_waker(&mut state, waiter_id);
-                    if state.permits > 0 { waker } else { None }
+                    remove_waiter_and_take_next_waker(&mut state, waiter_id)
                 };
                 self.waiter_id = None;
                 if let Some(next) = next_waker {

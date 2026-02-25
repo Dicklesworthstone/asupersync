@@ -964,11 +964,15 @@ impl<P: Policy> Scope<'_, P> {
 
         match winner {
             Either::Left(res) => {
-                let _ = h2.join(cx).await; // Drain h2
+                if let Err(JoinError::Panicked(p)) = h2.join(cx).await {
+                    return Err(JoinError::Panicked(p));
+                }
                 res
             }
             Either::Right(res) => {
-                let _ = h1.join(cx).await; // Drain h1
+                if let Err(JoinError::Panicked(p)) = h1.join(cx).await {
+                    return Err(JoinError::Panicked(p));
+                }
                 res
             }
         }
@@ -1073,11 +1077,15 @@ impl<P: Policy> Scope<'_, P> {
 
                 match race_outcome {
                     Either::Left(res) => {
-                        let _ = h2.join(cx).await; // Drain h2
+                        if let Err(JoinError::Panicked(p)) = h2.join(cx).await {
+                            return Err(JoinError::Panicked(p));
+                        }
                         res
                     }
                     Either::Right(res) => {
-                        let _ = h1.join(cx).await; // Drain h1
+                        if let Err(JoinError::Panicked(p)) = h1.join(cx).await {
+                            return Err(JoinError::Panicked(p));
+                        }
                         res
                     }
                 }
@@ -1128,7 +1136,9 @@ impl<P: Policy> Scope<'_, P> {
 
         for (i, handle) in handles.iter_mut().enumerate() {
             if i != winner_idx {
-                let _ = handle.join(cx).await;
+                if let Err(JoinError::Panicked(p)) = handle.join(cx).await {
+                    return Err(JoinError::Panicked(p));
+                }
             }
         }
 

@@ -653,6 +653,7 @@ impl<T> Receiver<T> {
         let mut inner = self.shared.inner.lock();
 
         if let Some(value) = inner.queue.pop_front() {
+            inner.recv_waker = None;
             let next_waker = inner.take_next_sender_waker();
             drop(inner);
             if let Some(w) = next_waker {
@@ -662,6 +663,7 @@ impl<T> Receiver<T> {
         }
 
         if self.shared.sender_count.load(Ordering::Acquire) == 0 {
+            inner.recv_waker = None;
             return Poll::Ready(Err(RecvError::Disconnected));
         }
 
@@ -677,23 +679,25 @@ impl<T> Receiver<T> {
     #[inline]
     pub fn try_recv(&self) -> Result<T, RecvError> {
         let mut inner = self.shared.inner.lock();
-        inner.queue.pop_front().map_or_else(
-            || {
-                if self.shared.sender_count.load(Ordering::Acquire) == 0 {
-                    Err(RecvError::Disconnected)
-                } else {
-                    Err(RecvError::Empty)
-                }
-            },
-            |value| {
+        match inner.queue.pop_front() {
+            Some(value) => {
+                inner.recv_waker = None;
                 let next_waker = inner.take_next_sender_waker();
                 drop(inner);
                 if let Some(w) = next_waker {
                     w.wake();
                 }
                 Ok(value)
-            },
-        )
+            }
+            None => {
+                if self.shared.sender_count.load(Ordering::Acquire) == 0 {
+                    inner.recv_waker = None;
+                    Err(RecvError::Disconnected)
+                } else {
+                    Err(RecvError::Empty)
+                }
+            }
+        }
     }
 
     /// Returns true if all senders have been dropped.

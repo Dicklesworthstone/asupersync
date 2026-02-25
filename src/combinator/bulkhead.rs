@@ -576,11 +576,6 @@ impl Bulkhead {
             .store(self.policy.max_concurrent, Ordering::Release);
 
         let mut queue = self.queue.write();
-        for entry in queue.iter_mut() {
-            if entry.result.is_none() {
-                entry.result = Some(Err(RejectionReason::Cancelled));
-            }
-        }
         queue.clear();
         drop(queue);
         self.pending_queue_count.store(0, Ordering::Relaxed);

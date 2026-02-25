@@ -302,10 +302,6 @@ pub trait Pool: Send + Sync {
 ///     fn create(&self) -> Pin<Box<dyn Future<Output = Result<Self::Resource, Self::Error>> + Send + '_>> {
 ///         Box::pin(async { PgConnection::connect(&self.url).await })
 ///     }
-///
-///     fn destroy(&self, conn: Self::Resource) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-///         Box::pin(async move { conn.close().await.ok(); })
-///     }
 /// }
 /// ```
 pub trait AsyncResourceFactory: Send + Sync {
@@ -325,13 +321,6 @@ pub trait AsyncResourceFactory: Send + Sync {
     fn create(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Self::Resource, Self::Error>> + Send + '_>>;
-
-    /// Destroy a resource (optional cleanup before drop).
-    ///
-    /// The default implementation simply drops the resource.
-    fn destroy(&self, _resource: Self::Resource) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        Box::pin(async {})
-    }
 }
 
 /// Pool usage statistics.
@@ -1588,12 +1577,12 @@ where
                 {
                     Ok(()) => {}
                     Err(_) => {
+                        let wait_duration = Duration::from_nanos(get_now().duration_since(wait_started));
                         #[cfg(feature = "metrics")]
                         if let Some(ref metrics) = self.metrics {
-                            metrics.record_timeout(Duration::from_nanos(
-                                get_now().duration_since(wait_started),
-                            ));
+                            metrics.record_timeout(wait_duration);
                         }
+                        self.record_wait_time(wait_duration);
                         return Err(PoolError::Timeout);
                     }
                 }

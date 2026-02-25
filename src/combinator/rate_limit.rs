@@ -687,11 +687,6 @@ impl RateLimiter {
         }
 
         let mut queue = self.wait_queue.write();
-        for entry in queue.iter_mut() {
-            if entry.result.is_none() {
-                entry.result = Some(Err(RejectionReason::Cancelled));
-            }
-        }
         queue.clear();
     }
 }
@@ -749,32 +744,6 @@ impl SlidingWindowRateLimiter {
         &self.policy.name
     }
 
-    /// Calculate current usage within the window.
-    #[allow(clippy::cast_possible_truncation)]
-    fn current_usage(&self, _now: Time) -> u32 {
-        // O(1): read the running total maintained by try_acquire and cleanup_old.
-        self.window_cost.load(Ordering::Relaxed)
-    }
-
-    /// Clean up old entries outside the window.
-    #[allow(clippy::significant_drop_tightening, clippy::cast_possible_truncation)]
-    fn cleanup_old(&self, now: Time) {
-        let now_millis = now.as_millis();
-        let period_millis = duration_to_millis_saturating(self.policy.period);
-        let mut window = self.window.write();
-
-        while let Some((t, c)) = window.front() {
-            // Remove entries where (now - t) >= period, i.e., entry is outside the window
-            if now_millis.saturating_sub(*t) >= period_millis {
-                let evicted_cost = *c;
-                window.pop_front();
-                self.window_cost.fetch_sub(evicted_cost, Ordering::Relaxed);
-            } else {
-                break;
-            }
-        }
-    }
-
     /// Try to acquire without waiting.
     #[must_use]
     #[allow(clippy::significant_drop_tightening, clippy::cast_possible_truncation)]
@@ -800,8 +769,10 @@ impl SlidingWindowRateLimiter {
         let usage = self.window_cost.load(Ordering::Relaxed);
 
         if usage.saturating_add(cost) <= self.policy.rate {
-            window.push_back((now_millis, cost));
-            self.window_cost.fetch_add(cost, Ordering::Relaxed);
+            if cost > 0 {
+                window.push_back((now_millis, cost));
+                self.window_cost.fetch_add(cost, Ordering::Relaxed);
+            }
             drop(window);
             self.total_allowed.fetch_add(1, Ordering::Relaxed);
             true

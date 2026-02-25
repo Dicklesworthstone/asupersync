@@ -315,23 +315,24 @@ pub enum RaceAllError<E> {
         /// Index of the winning branch that was cancelled.
         winner_index: usize,
     },
-    /// The winner panicked.
+    /// A branch panicked.
     Panicked {
         /// The panic payload.
         payload: PanicPayload,
-        /// Index of the winning branch that panicked.
-        winner_index: usize,
+        /// Index of the branch that panicked.
+        index: usize,
     },
 }
 
 impl<E> RaceAllError<E> {
-    /// Returns the winner index for any error variant.
+    /// Returns the index for any error variant (the winning branch, or the branch that panicked).
     #[must_use]
     pub const fn winner_index(&self) -> usize {
         match self {
-            Self::Error { winner_index, .. }
-            | Self::Cancelled { winner_index, .. }
-            | Self::Panicked { winner_index, .. } => *winner_index,
+            Self::Error { winner_index, .. } | Self::Cancelled { winner_index, .. } => {
+                *winner_index
+            }
+            Self::Panicked { index, .. } => *index,
         }
     }
 
@@ -375,11 +376,8 @@ impl<E: fmt::Display> fmt::Display for RaceAllError<E> {
                     "race winner at index {winner_index} was cancelled: {reason}"
                 )
             }
-            Self::Panicked {
-                payload,
-                winner_index,
-            } => {
-                write!(f, "race winner at index {winner_index} panicked: {payload}")
+            Self::Panicked { payload, index } => {
+                write!(f, "race branch at index {index} panicked: {payload}")
             }
         }
     }
@@ -483,7 +481,11 @@ pub fn race2_to_result<T, E>(
     o1: Outcome<T, E>,
     o2: Outcome<T, E>,
 ) -> Result<T, RaceError<E>> {
-    let (winner_outcome, which_won, _loser_outcome) = race2_outcomes(winner, o1, o2);
+    let (winner_outcome, which_won, loser_outcome) = race2_outcomes(winner, o1, o2);
+
+    if let Outcome::Panicked(p) = loser_outcome {
+        return Err(RaceError::Panicked(p));
+    }
 
     match winner_outcome {
         Outcome::Ok(v) => Ok(v),
@@ -592,6 +594,15 @@ pub fn race_all_outcomes<T, E>(
 /// assert_eq!(value.unwrap(), 42);
 /// ```
 pub fn race_all_to_result<T, E>(result: RaceAllResult<T, E>) -> Result<T, RaceAllError<E>> {
+    for (i, loser_outcome) in result.loser_outcomes {
+        if let Outcome::Panicked(p) = loser_outcome {
+            return Err(RaceAllError::Panicked {
+                payload: p,
+                index: i,
+            });
+        }
+    }
+
     match result.winner_outcome {
         Outcome::Ok(v) => Ok(v),
         Outcome::Err(e) => Err(RaceAllError::Error {
@@ -604,7 +615,7 @@ pub fn race_all_to_result<T, E>(result: RaceAllResult<T, E>) -> Result<T, RaceAl
         }),
         Outcome::Panicked(p) => Err(RaceAllError::Panicked {
             payload: p,
-            winner_index: result.winner_index,
+            index: result.winner_index,
         }),
     }
 }
@@ -974,7 +985,7 @@ mod tests {
 
         let err: RaceAllError<&str> = RaceAllError::Panicked {
             payload: PanicPayload::new("boom"),
-            winner_index: 0,
+            index: 0,
         };
         assert!(!err.is_error());
         assert!(!err.is_cancelled());
@@ -1001,7 +1012,7 @@ mod tests {
 
         let err: RaceAllError<&str> = RaceAllError::Panicked {
             payload: PanicPayload::new("crash"),
-            winner_index: 0,
+            index: 0,
         };
         assert!(err.to_string().contains("panicked"));
         assert!(err.to_string().contains("index 0"));
@@ -1067,8 +1078,8 @@ mod tests {
 
         let result = make_race_all_result(0, outcomes);
         assert!(matches!(result, Err(RaceAllError::Panicked { .. })));
-        if let Err(RaceAllError::Panicked { winner_index, .. }) = result {
-            assert_eq!(winner_index, 0);
+        if let Err(RaceAllError::Panicked { index, .. }) = result {
+            assert_eq!(index, 0);
         } else {
             panic!("Expected Panicked");
         }
@@ -1099,8 +1110,8 @@ mod tests {
 
         let value = race_all_to_result(result);
         assert!(matches!(value, Err(RaceAllError::Panicked { .. })));
-        if let Err(RaceAllError::Panicked { winner_index, .. }) = value {
-            assert_eq!(winner_index, 1);
+        if let Err(RaceAllError::Panicked { index, .. }) = value {
+            assert_eq!(index, 0);
         }
     }
 
