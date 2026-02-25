@@ -1577,7 +1577,8 @@ where
                 {
                     Ok(()) => {}
                     Err(_) => {
-                        let wait_duration = Duration::from_nanos(get_now().duration_since(wait_started));
+                        let wait_duration =
+                            Duration::from_nanos(get_now().duration_since(wait_started));
                         #[cfg(feature = "metrics")]
                         if let Some(ref metrics) = self.metrics {
                             metrics.record_timeout(wait_duration);
