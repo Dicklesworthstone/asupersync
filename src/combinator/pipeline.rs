@@ -684,10 +684,10 @@ pub fn pipeline_to_result<T, E>(result: PipelineResult<T, E>) -> Result<T, Pipel
     }
 }
 
-/// Macro for creating a sequential pipeline (not yet implemented).
+/// Macro for creating a sequential async pipeline.
 ///
-/// In the full implementation, this chains stages with cancellation checks.
-/// Use [`pipeline_n_outcomes`] or [`pipeline_with_final`] for now.
+/// Each stage is invoked as `stage(cx, value)` and must return a future whose
+/// output becomes the next stage input.
 ///
 /// # Example (API shape)
 /// ```ignore
@@ -700,9 +700,16 @@ pub fn pipeline_to_result<T, E>(result: PipelineResult<T, E>) -> Result<T, Pipel
 #[macro_export]
 macro_rules! pipeline {
     ($cx:expr, $input:expr, $($stage:expr),+ $(,)?) => {
-        compile_error!(
-            "pipeline! macro not yet implemented; use pipeline_n_outcomes or pipeline_with_final instead"
-        )
+        {
+            let __pipeline_cx = &$cx;
+            async move {
+                let mut __pipeline_value = $input;
+                $(
+                    __pipeline_value = ($stage)(__pipeline_cx, __pipeline_value).await;
+                )+
+                __pipeline_value
+            }
+        }
     };
 }
 
@@ -758,6 +765,16 @@ mod tests {
 
         assert_eq!(p1.config.check_cancellation, p2.config.check_cancellation);
         assert_eq!(p1.config.check_cancellation, p3.config.check_cancellation);
+    }
+
+    #[test]
+    fn pipeline_macro_chains_stages_sequentially() {
+        let cx = crate::cx::Cx::for_testing();
+        let fut = crate::pipeline!(cx, 2usize, |_, x| async move { x + 3 }, |_, x| async move {
+            x * 4
+        });
+        let out = futures_lite::future::block_on(fut);
+        assert_eq!(out, 20);
     }
 
     // =========================================================================
