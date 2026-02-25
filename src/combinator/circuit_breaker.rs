@@ -520,7 +520,7 @@ impl CircuitBreaker {
                         match self.state_bits.compare_exchange_weak(
                             current_bits,
                             new_state.to_bits(),
-                            Ordering::Release,
+                            Ordering::Acquire,
                             Ordering::Acquire,
                         ) {
                             Ok(_) => return Ok(Permit::Probe),

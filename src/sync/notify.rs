@@ -278,7 +278,7 @@ impl Future for Notified<'_> {
                     match self.notify.stored_notifications.compare_exchange_weak(
                         stored,
                         stored - 1,
-                        Ordering::Release,
+                        Ordering::Acquire,
                         Ordering::Acquire,
                     ) {
                         Ok(_) => {
@@ -308,7 +308,7 @@ impl Future for Notified<'_> {
                         match self.notify.stored_notifications.compare_exchange_weak(
                             stored,
                             stored - 1,
-                            Ordering::Release,
+                            Ordering::Acquire,
                             Ordering::Acquire,
                         ) {
                             Ok(_) => {
