@@ -25,9 +25,9 @@
 
 use std::io;
 
+use super::Interest;
 use super::source::Source;
 use super::token::Token;
-use super::Interest;
 
 /// io_uring-based reactor for Linux modern async I/O.
 ///
@@ -55,8 +55,45 @@ impl UringReactor {
     /// Checks if io_uring is available on this system.
     #[must_use]
     pub fn is_available() -> bool {
-        // TODO: Check kernel version and io_uring availability
-        false
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            linux_kernel_supports_uring() && !linux_io_uring_disabled()
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_kernel_supports_uring() -> bool {
+    let Ok(release) = std::fs::read_to_string("/proc/sys/kernel/osrelease") else {
+        return false;
+    };
+    let mut parts = release
+        .trim()
+        .split(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .next()
+        .unwrap_or_default()
+        .split('.');
+    let major = parts
+        .next()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+    let minor = parts
+        .next()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+    major > 5 || (major == 5 && minor >= 1)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_io_uring_disabled() -> bool {
+    match std::fs::read_to_string("/proc/sys/kernel/io_uring_disabled") {
+        Ok(raw) => raw.trim().parse::<u32>().is_ok_and(|flag| flag > 0),
+        Err(_) => false,
     }
 }
 
@@ -87,7 +124,11 @@ impl super::Reactor for UringReactor {
         ))
     }
 
-    fn poll(&self, _events: &mut super::Events, _timeout: Option<std::time::Duration>) -> io::Result<()> {
+    fn poll(
+        &self,
+        _events: &mut super::Events,
+        _timeout: Option<std::time::Duration>,
+    ) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "io_uring reactor not yet implemented",
@@ -115,8 +156,15 @@ mod tests {
     }
 
     #[test]
-    fn test_is_available_returns_false() {
+    fn test_is_available_platform_contract() {
+        #[cfg(not(target_os = "linux"))]
         assert!(!UringReactor::is_available());
+
+        #[cfg(target_os = "linux")]
+        {
+            // Availability depends on kernel version and io_uring policy.
+            let _ = UringReactor::is_available();
+        }
     }
 
     #[cfg(unix)]

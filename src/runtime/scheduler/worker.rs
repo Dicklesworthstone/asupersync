@@ -133,23 +133,19 @@ impl Worker {
             }
 
             // 4. Drive I/O (Leader/Follower pattern)
-            // If we can acquire the IO driver lock, we become the I/O leader.
-            // The leader polls the reactor with a short timeout.
+            // If we can acquire the I/O leader role, we poll the reactor with a short timeout.
             if let Some(io) = &self.io_driver {
-                if let Some(mut driver) = io.try_lock() {
-                    // Poll with a short timeout to check for I/O events without
-                    // spinning too hot, but returning frequently to check for new tasks.
-                    //
-                    // Note: Ideally we would block indefinitely and be woken by `spawn`,
-                    // but that requires integrating the Parker with the Reactor.
-                    // For now, a short timeout (1ms) serves as a "busy-wait with sleep".
-                    let now = self
-                        .timer_driver
-                        .as_ref()
-                        .map_or(Time::ZERO, TimerDriverHandle::now);
-                    let trace = &self.trace;
-                    let seen = &mut self.seen_io_tokens;
-                    let _ = driver.turn_with(Some(Duration::from_millis(1)), |event, interest| {
+                let now = self
+                    .timer_driver
+                    .as_ref()
+                    .map_or(Time::ZERO, TimerDriverHandle::now);
+                let trace = &self.trace;
+                let seen = &mut self.seen_io_tokens;
+
+                // try_turn_with handles leader election via an atomic flag and drops the
+                // inner lock during the blocking poll, allowing concurrent registrations.
+                if let Ok(Some(_)) =
+                    io.try_turn_with(Some(Duration::from_millis(1)), |event, interest| {
                         let io_token = event.token.0 as u64;
                         let interest_bits = interest.unwrap_or(event.ready).bits();
                         if seen.insert(io_token) {
@@ -168,9 +164,9 @@ impl Worker {
                             io_token,
                             event.ready.bits(),
                         ));
-                    });
-
-                    // Loop back to check queues (tasks might have been woken by I/O)
+                    })
+                {
+                    // We were the leader and polled the reactor. Loop back to check queues.
                     continue;
                 }
             }

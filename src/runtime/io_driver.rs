@@ -331,27 +331,43 @@ impl IoDriver {
     /// Restores the events buffer and returns wakers for the events it contains.
     pub(crate) fn restore_and_extract_wakers<F>(
         &mut self,
-        mut events: Events,
+        events: Events,
         mut on_event: F,
     ) -> Vec<Waker>
     where
         F: FnMut(&Event, Option<Interest>),
     {
-        let mut wakers = Vec::with_capacity(events.len());
-        for event in &events {
-            let interest = self.interests.get(&event.token).copied();
+        struct Restorer<'a> {
+            driver: &'a mut IoDriver,
+            events: Option<Events>,
+        }
+        impl Drop for Restorer<'_> {
+            fn drop(&mut self) {
+                if let Some(mut events) = self.events.take() {
+                    events.clear();
+                    self.driver.events = events;
+                }
+            }
+        }
+        let restorer = Restorer {
+            driver: self,
+            events: Some(events),
+        };
+
+        let events_ref = restorer.events.as_ref().unwrap();
+        let mut wakers = Vec::with_capacity(events_ref.len());
+        for event in events_ref {
+            let interest = restorer.driver.interests.get(&event.token).copied();
             on_event(event, interest);
             let slab_key = SlabToken::from_usize(event.token.0);
-            if let Some(waker) = self.wakers.get(slab_key) {
+            if let Some(waker) = restorer.driver.wakers.get(slab_key) {
                 wakers.push(waker.clone());
-                self.stats.wakers_dispatched += 1;
+                restorer.driver.stats.wakers_dispatched += 1;
             } else {
-                self.stats.unknown_tokens += 1;
+                restorer.driver.stats.unknown_tokens += 1;
             }
         }
 
-        events.clear();
-        self.events = events;
         wakers
     }
 
