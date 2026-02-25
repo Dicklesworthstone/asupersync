@@ -215,7 +215,7 @@ impl EpollReactor {
 
 #[inline]
 fn should_resize_poll_events(current: usize, target: usize) -> bool {
-    current < target || current >= target.saturating_mul(4)
+    current < target || target.checked_mul(4).is_some_and(|t4| current >= t4)
 }
 
 impl Reactor for EpollReactor {
@@ -402,9 +402,8 @@ impl Reactor for EpollReactor {
 
         self.poller.wait(&mut poll_events, timeout)?;
 
-        // Convert polling events to our Event type.
-        // `Events` may drop entries when capacity is reached, so the return
-        // value must reflect events actually stored, not raw epoll events seen.
+        // Convert polling events to our Event type. We always preserve all
+        // observed poll events in `Events`.
         for poll_event in poll_events.iter() {
             let token = Token(poll_event.key);
             let interest = Self::poll_event_to_interest(&poll_event);
@@ -791,8 +790,13 @@ mod tests {
             .poll(&mut events, Some(Duration::from_millis(100)))
             .expect("poll failed");
 
-        crate::assert_with_log!(events.is_empty(), "events empty", true, events.is_empty());
-        crate::assert_with_log!(count == 0, "count is stored events", 0usize, count);
+        crate::assert_with_log!(
+            !events.is_empty(),
+            "events not empty",
+            false,
+            events.is_empty()
+        );
+        crate::assert_with_log!(count == 1, "count is stored events", 1usize, count);
 
         reactor.deregister(token).expect("deregister failed");
         crate::test_complete!("poll_zero_capacity_reports_zero_events_stored");
@@ -819,23 +823,23 @@ mod tests {
     #[test]
     fn poll_events_resize_hysteresis_saturates_at_usize_max() {
         init_test("poll_events_resize_hysteresis_saturates_at_usize_max");
-        let target = usize::MAX;
-        let near_max = usize::MAX - 1;
+        let target = usize::MAX - 1;
+        let current_max = usize::MAX;
 
-        let no_resize = should_resize_poll_events(near_max, target);
-        let yes_resize = should_resize_poll_events(target, target);
+        let no_resize_at_max = should_resize_poll_events(current_max, target);
+        let no_resize_at_equal = should_resize_poll_events(target, target);
 
         crate::assert_with_log!(
-            !no_resize,
+            !no_resize_at_max,
             "near-max current stays within hysteresis",
             true,
-            !no_resize
+            !no_resize_at_max
         );
         crate::assert_with_log!(
-            yes_resize,
-            "equal current/target resizes safely at usize::MAX",
+            !no_resize_at_equal,
+            "equal current/target does not resize",
             true,
-            yes_resize
+            !no_resize_at_equal
         );
         crate::test_complete!("poll_events_resize_hysteresis_saturates_at_usize_max");
     }

@@ -544,47 +544,16 @@ impl IoDriverHandle {
     ///
     /// This implementation releases the driver lock during the blocking poll,
     /// allowing other threads to register I/O sources concurrently.
+    ///
+    /// If another thread is already polling, this call returns `Ok(0)` and
+    /// does not attempt a second concurrent poll. Callers that need explicit
+    /// contention signaling can use [`try_turn_with`](Self::try_turn_with).
     pub fn turn_with<F>(&self, timeout: Option<Duration>, on_event: F) -> io::Result<usize>
     where
         F: FnMut(&Event, Option<Interest>),
     {
-        // 1. Lock driver and take the events buffer to use for polling
-        let events = {
-            let mut driver = self.inner.lock();
-            driver.take_events()
-        };
-
-        let mut guard = PollingGuard::new(self, events, false);
-
-        // 2. Poll the reactor without holding the driver lock.
-        // This allows other threads to acquire the lock for `register`/`deregister`.
-        let poll_result = self.reactor.poll(guard.events_mut(), timeout);
-
-        // 3. Re-acquire lock to dispatch wakers and restore the buffer
-        let wakers = {
-            let mut driver = self.inner.lock();
-            let events = guard.take_events();
-
-            // Update stats and dispatch if poll succeeded
-            if let Ok(n) = poll_result {
-                driver.stats.polls += 1;
-                driver.stats.events_received += n as u64;
-                let wakers = driver.restore_and_extract_wakers(events, on_event);
-                drop(driver);
-                wakers
-            } else {
-                // Restore buffer even on error, but do not dispatch readiness.
-                driver.restore_events_only(events);
-                drop(driver);
-                Vec::new()
-            }
-        };
-
-        for waker in wakers {
-            waker.wake();
-        }
-
-        poll_result
+        self.try_turn_with(timeout, on_event)
+            .map(|polled| polled.unwrap_or(0))
     }
 
     /// Attempts to process pending I/O events exclusively.
@@ -851,8 +820,8 @@ mod tests {
     use super::*;
     use crate::runtime::reactor::{Event, Interest, LabReactor, Token};
     use crate::test_utils::init_test_logging;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar, Mutex as StdMutex};
     use std::task::Wake;
 
     /// A simple waker that sets a flag and counts wakes.
@@ -1067,6 +1036,82 @@ mod tests {
                 events.push(Event::readable(token));
             }
             Err(io::Error::other("injected poll failure"))
+        }
+
+        fn wake(&self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn registration_count(&self) -> usize {
+            0
+        }
+    }
+
+    struct BlockingFirstPollReactor {
+        poll_calls: AtomicUsize,
+        started: StdMutex<bool>,
+        started_cv: Condvar,
+        release_first_poll: AtomicBool,
+    }
+
+    impl BlockingFirstPollReactor {
+        fn new() -> Self {
+            Self {
+                poll_calls: AtomicUsize::new(0),
+                started: StdMutex::new(false),
+                started_cv: Condvar::new(),
+                release_first_poll: AtomicBool::new(false),
+            }
+        }
+
+        fn wait_until_first_poll_started(&self) {
+            let mut started_guard = self.started.lock().expect("started lock");
+            while !*started_guard {
+                started_guard = self.started_cv.wait(started_guard).expect("started wait");
+            }
+            drop(started_guard);
+        }
+
+        fn release_first_poll(&self) {
+            self.release_first_poll.store(true, Ordering::Release);
+        }
+
+        fn poll_calls(&self) -> usize {
+            self.poll_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Reactor for BlockingFirstPollReactor {
+        fn register(
+            &self,
+            _source: &dyn Source,
+            _token: Token,
+            _interest: Interest,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn modify(&self, _token: Token, _interest: Interest) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn deregister(&self, _token: Token) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn poll(&self, _events: &mut Events, _timeout: Option<Duration>) -> io::Result<usize> {
+            let call = self.poll_calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                {
+                    let mut started = self.started.lock().expect("started lock");
+                    *started = true;
+                }
+                self.started_cv.notify_all();
+                while !self.release_first_poll.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+            }
+            Ok(0)
         }
 
         fn wake(&self) -> io::Result<()> {
@@ -1612,6 +1657,44 @@ mod tests {
             driver.waker_count()
         );
         crate::test_complete!("io_driver_handle_turn_with_poll_error_does_not_dispatch");
+    }
+
+    #[test]
+    fn io_driver_handle_turn_with_skips_concurrent_poll() {
+        init_test("io_driver_handle_turn_with_skips_concurrent_poll");
+        let reactor = Arc::new(BlockingFirstPollReactor::new());
+        let reactor_handle: Arc<dyn Reactor> = reactor.clone();
+        let driver = IoDriverHandle::new(reactor_handle);
+        let driver_clone = driver.clone();
+
+        let join = std::thread::spawn(move || {
+            let result = driver_clone.try_turn_with(Some(Duration::ZERO), |_event, _interest| {});
+            crate::assert_with_log!(
+                matches!(result, Ok(Some(0))),
+                "leader poll completes",
+                true,
+                matches!(result, Ok(Some(0)))
+            );
+        });
+
+        reactor.wait_until_first_poll_started();
+
+        // With an in-flight poll, turn_with must not start a second concurrent poll.
+        let busy_turn = driver
+            .turn_with(Some(Duration::ZERO), |_event, _interest| {})
+            .expect("turn_with should return Ok when busy");
+        crate::assert_with_log!(busy_turn == 0, "busy turn returns zero", 0usize, busy_turn);
+        crate::assert_with_log!(
+            reactor.poll_calls() == 1,
+            "no second concurrent poll",
+            1usize,
+            reactor.poll_calls()
+        );
+
+        reactor.release_first_poll();
+        join.join().expect("poll thread should join");
+
+        crate::test_complete!("io_driver_handle_turn_with_skips_concurrent_poll");
     }
 
     #[test]

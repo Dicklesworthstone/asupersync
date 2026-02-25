@@ -274,7 +274,8 @@ pub struct Events {
 impl Events {
     /// Creates a new events buffer with the given capacity.
     ///
-    /// The capacity limits the maximum number of events that can be stored.
+    /// The capacity is an initial allocation hint for event storage.
+    /// The buffer may grow if more events are pushed.
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
@@ -290,11 +291,12 @@ impl Events {
 
     /// Pushes an event.
     ///
-    /// The container drops events when capacity is reached.
+    /// The container will grow if necessary. Capacity limits should be enforced
+    /// by the reactor's poll batch size, not by dropping events here (which
+    /// would be fatal for edge-triggered notifications).
     pub(crate) fn push(&mut self, event: Event) {
-        if self.inner.len() < self.capacity {
-            self.inner.push(event);
-        }
+        self.inner.push(event);
+        self.capacity = self.inner.capacity();
     }
 
     /// Returns the number of events.
@@ -309,7 +311,7 @@ impl Events {
         self.inner.is_empty()
     }
 
-    /// Returns the capacity (maximum number of events).
+    /// Returns the current storage capacity.
     #[must_use]
     pub fn capacity(&self) -> usize {
         self.capacity
@@ -896,11 +898,11 @@ mod tests {
 
         crate::assert_with_log!(events.len() == 5, "len grew", 5usize, events.len());
 
-        // Capacity might be larger due to Vec growth strategy
+        // Capacity should track actual backing storage growth.
         crate::assert_with_log!(
-            events.capacity() == 3,
-            "target capacity field remains unchanged",
-            3usize,
+            events.capacity() >= events.len(),
+            "capacity tracks growth",
+            true,
             events.capacity()
         );
 
@@ -972,9 +974,9 @@ mod tests {
         );
         crate::assert_with_log!(events.is_empty(), "len zero", 0usize, events.len());
 
-        // Should be silently dropped
+        // Should grow dynamically despite initial capacity of 0
         events.push(Event::readable(Token::new(1)));
-        crate::assert_with_log!(events.is_empty(), "len stays zero", 0usize, events.len());
+        crate::assert_with_log!(events.len() == 1, "len grew", 1usize, events.len());
         crate::test_complete!("events_zero_capacity");
     }
 

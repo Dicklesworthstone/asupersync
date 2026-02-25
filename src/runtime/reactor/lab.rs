@@ -1353,11 +1353,11 @@ mod tests {
 
         let mut events = crate::runtime::reactor::Events::with_capacity(1);
         let count = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
-        crate::assert_with_log!(count == 1, "stored count", 1usize, count);
+        crate::assert_with_log!(count == 2, "stored count", 2usize, count);
         crate::assert_with_log!(
-            events.iter().count() == 1,
+            events.iter().count() == 2,
             "stored len",
-            1usize,
+            2usize,
             events.len()
         );
         crate::test_complete!("poll_returns_stored_count_when_capacity_saturates");
