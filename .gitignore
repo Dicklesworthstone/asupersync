@@ -114,8 +114,28 @@ repro_*.rs
 artifacts/
 
 # UBS (Ultimate Bug Scanner) output
-ubs_output.txt
+ubs_*.txt
 
 # Generic scratch output
 output.txt
 *.diff
+
+# Cargo expand output
+/expanded.rs
+
+# Root-level scratch test files and their compiled binaries
+/test_*.rs
+/test_debug.rs
+/test_rank.rs
+/test_rng
+/test_rng.rs
+/test_seed
+/test_seed.rs
+/test_seed_*
+/test_vecdeque.rs
+
+# One-off test runner scripts
+/run_test.sh
+
+# Standalone bug reproduction / debugging harnesses
+src/channel/deadlock_test.rs
