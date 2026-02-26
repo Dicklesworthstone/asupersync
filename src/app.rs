@@ -111,10 +111,21 @@ impl CompiledApp {
             cx
         };
 
-        let supervisor = self
-            .compiled_supervisor
-            .spawn(state, effective_cx, root_region, effective_budget)
-            .map_err(AppSpawnError::SpawnFailed)?;
+        let supervisor =
+            match self
+                .compiled_supervisor
+                .spawn(state, effective_cx, root_region, effective_budget)
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    // Clean up the root region we allocated to prevent a region leak.
+                    if let Some(record) = state.region(root_region) {
+                        record.begin_close(None);
+                        record.begin_drain();
+                    }
+                    return Err(AppSpawnError::SpawnFailed(e));
+                }
+            };
 
         cx.trace("app_started");
 
@@ -333,9 +344,11 @@ impl AppHandle {
     pub fn stop(mut self, state: &mut RuntimeState) -> Result<StoppedApp, AppStopError> {
         let reason = CancelReason::new(CancelKind::Shutdown);
 
-        let region_record = state
-            .region(self.root_region)
-            .ok_or(AppStopError::RegionNotFound(self.root_region))?;
+        let Some(region_record) = state.region(self.root_region) else {
+            // Defuse drop bomb — caller has no recourse if the region is gone.
+            self.resolved = true;
+            return Err(AppStopError::RegionNotFound(self.root_region));
+        };
 
         let current_state = region_record.state();
         if current_state == RegionState::Closed {
@@ -379,9 +392,11 @@ impl AppHandle {
     /// this polls the region state; in async runtimes, this would await
     /// region completion.
     pub fn join(mut self, state: &RuntimeState) -> Result<StoppedApp, AppStopError> {
-        let region_record = state
-            .region(self.root_region)
-            .ok_or(AppStopError::RegionNotFound(self.root_region))?;
+        let Some(region_record) = state.region(self.root_region) else {
+            // Defuse drop bomb — caller has no recourse if the region is gone.
+            self.resolved = true;
+            return Err(AppStopError::RegionNotFound(self.root_region));
+        };
 
         // Phase 0: synchronous check. Region must already be in terminal state
         // or the caller must have driven the runtime to completion.
@@ -1911,5 +1926,55 @@ mod tests {
         assert_eq!(history, vec!["fresh start"], "clear must reset history");
 
         crate::test_complete!("example_chat_clear_resets_history");
+    }
+
+    // --- Regression tests for audit-found bugs ---
+
+    #[test]
+    fn stop_region_not_found_does_not_panic() {
+        // BUG: stop() returned Err without defusing the drop bomb, causing
+        // a panic ("APP HANDLE LEAKED") when the consumed AppHandle was dropped.
+        init_test("stop_region_not_found_does_not_panic");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::new(
+            root,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+
+        let spec = AppSpec::new("phantom").child(make_child("w"));
+        let handle = spec.start(&mut state, &cx, root).expect("start ok");
+
+        // Use a fresh RuntimeState where the handle's root region doesn't exist.
+        let mut empty_state = RuntimeState::new();
+
+        // This must NOT panic — the drop bomb should be defused on the error path.
+        let result = handle.stop(&mut empty_state);
+        assert!(result.is_err(), "expected RegionNotFound error");
+        crate::test_complete!("stop_region_not_found_does_not_panic");
+    }
+
+    #[test]
+    fn join_region_not_found_does_not_panic() {
+        // Same drop-bomb bug as stop(), but on the join() path.
+        init_test("join_region_not_found_does_not_panic");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let cx = Cx::new(
+            root,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+
+        let spec = AppSpec::new("phantom_join").child(make_child("w"));
+        let handle = spec.start(&mut state, &cx, root).expect("start ok");
+
+        // Use a fresh RuntimeState where the handle's root region doesn't exist.
+        let empty_state = RuntimeState::new();
+
+        let result = handle.join(&empty_state);
+        assert!(result.is_err(), "expected RegionNotFound error");
+        crate::test_complete!("join_region_not_found_does_not_panic");
     }
 }
