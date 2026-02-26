@@ -251,7 +251,7 @@ fn map_rdkafka_error(err: &RdKafkaError, message: Option<&BorrowedMessage<'_>>) 
     match err {
         RdKafkaError::ClientConfig(_, _, _, msg) => KafkaError::Config(msg.clone()),
         RdKafkaError::MessageProduction(code) => {
-            map_error_code(*code, message.map(|msg| msg.topic()))
+            map_error_code(*code, message.map(rdkafka::Message::topic))
         }
         RdKafkaError::Canceled => KafkaError::Cancelled,
         _ => KafkaError::Broker(err.to_string()),

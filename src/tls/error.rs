@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn test_io_error_source() {
         init_test("test_io_error_source");
-        let io_err = io::Error::new(io::ErrorKind::Other, "boom");
+        let io_err = io::Error::other("boom");
         let err = TlsError::from(io_err);
         crate::assert_with_log!(
             err.source().is_some(),

@@ -360,7 +360,7 @@ impl LoadBalancer {
                         return Some(endpoint);
                     }
                 }
-                Some(*available.last().unwrap())
+                available.last().copied()
             }
 
             LoadBalanceStrategy::LeastConnections => {

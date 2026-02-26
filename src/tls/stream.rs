@@ -398,6 +398,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+
         if self.state == TlsState::Closed {
             return Poll::Ready(Ok(()));
         }
@@ -424,6 +428,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
                         trace!(bytes = n, "TLS read");
                         return Poll::Ready(Ok(()));
                     }
+                    // Reader EOF: no more plaintext can arrive.
+                    self.state = TlsState::Closed;
+                    return Poll::Ready(Ok(()));
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
                 Err(e) => return Poll::Ready(Err(e)),
@@ -635,7 +642,7 @@ mod tests {
     fn tls_state_clone_and_copy() {
         let state = TlsState::Ready;
         let copied = state; // Copy
-        let cloned = state.clone(); // Clone
+        let cloned = state; // Clone
         assert_eq!(state, copied);
         assert_eq!(state, cloned);
     }

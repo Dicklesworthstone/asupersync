@@ -850,8 +850,8 @@ impl SlidingWindowRateLimiter {
     pub fn reset(&self) {
         let mut window = self.window.write();
         window.clear();
-        drop(window);
         self.window_cost.store(0, Ordering::Relaxed);
+        drop(window);
     }
 }
 

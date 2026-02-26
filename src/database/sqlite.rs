@@ -141,6 +141,7 @@ impl SqliteValue {
     }
 
     /// Tries to get the value as an integer.
+    #[must_use]
     pub fn as_integer(&self) -> Option<i64> {
         match self {
             Self::Integer(v) => Some(*v),
@@ -149,6 +150,7 @@ impl SqliteValue {
     }
 
     /// Tries to get the value as a real (floating point).
+    #[must_use]
     pub fn as_real(&self) -> Option<f64> {
         match self {
             Self::Real(v) => Some(*v),
@@ -158,6 +160,7 @@ impl SqliteValue {
     }
 
     /// Tries to get the value as text.
+    #[must_use]
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Self::Text(v) => Some(v),
@@ -166,6 +169,7 @@ impl SqliteValue {
     }
 
     /// Tries to get the value as a blob.
+    #[must_use]
     pub fn as_blob(&self) -> Option<&[u8]> {
         match self {
             Self::Blob(v) => Some(v),
@@ -562,8 +566,11 @@ impl SqliteConnection {
                     .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
 
                 // Build column map
-                let column_names: Vec<String> =
-                    stmt.column_names().iter().map(|s| s.to_string()).collect();
+                let column_names: Vec<String> = stmt
+                    .column_names()
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect();
                 let columns: BTreeMap<String, usize> = column_names
                     .iter()
                     .enumerate()
@@ -711,7 +718,7 @@ pub struct SqliteTransaction<'a> {
     finished: bool,
 }
 
-impl<'a> SqliteTransaction<'a> {
+impl SqliteTransaction<'_> {
     /// Commits the transaction.
     ///
     /// # Cancellation
@@ -811,11 +818,11 @@ impl rusqlite::ToSql for SqliteValue {
     fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
         use rusqlite::types::ToSqlOutput;
         match self {
-            SqliteValue::Null => Ok(ToSqlOutput::Owned(rusqlite::types::Value::Null)),
-            SqliteValue::Integer(v) => Ok(ToSqlOutput::Owned(rusqlite::types::Value::Integer(*v))),
-            SqliteValue::Real(v) => Ok(ToSqlOutput::Owned(rusqlite::types::Value::Real(*v))),
-            SqliteValue::Text(v) => Ok(ToSqlOutput::Owned(rusqlite::types::Value::Text(v.clone()))),
-            SqliteValue::Blob(v) => Ok(ToSqlOutput::Owned(rusqlite::types::Value::Blob(v.clone()))),
+            Self::Null => Ok(ToSqlOutput::Owned(rusqlite::types::Value::Null)),
+            Self::Integer(v) => Ok(ToSqlOutput::Owned(rusqlite::types::Value::Integer(*v))),
+            Self::Real(v) => Ok(ToSqlOutput::Owned(rusqlite::types::Value::Real(*v))),
+            Self::Text(v) => Ok(ToSqlOutput::Owned(rusqlite::types::Value::Text(v.clone()))),
+            Self::Blob(v) => Ok(ToSqlOutput::Owned(rusqlite::types::Value::Blob(v.clone()))),
         }
     }
 }
@@ -963,7 +970,7 @@ mod tests {
     #[test]
     fn sqlite_error_source_io_returns_some() {
         use std::error::Error;
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "disk failure");
+        let io_err = std::io::Error::other("disk failure");
         let err = SqliteError::Io(io_err);
         assert!(err.source().is_some());
     }
@@ -1224,7 +1231,7 @@ mod tests {
                     .inner
                     .lock()
                     .get()
-                    .map_or(false, rusqlite::Connection::is_autocommit)
+                    .is_ok_and(rusqlite::Connection::is_autocommit)
                 {
                     break;
                 }
@@ -1239,7 +1246,7 @@ mod tests {
                 conn.inner
                     .lock()
                     .get()
-                    .map_or(false, rusqlite::Connection::is_autocommit),
+                    .is_ok_and(rusqlite::Connection::is_autocommit),
                 "connection should return to autocommit after cancelled commit drop path"
             );
         });

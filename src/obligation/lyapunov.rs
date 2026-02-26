@@ -377,7 +377,7 @@ impl StateSnapshot {
         self.live_tasks == 0
             && self.pending_obligations == 0
             && self.draining_regions == 0
-            && self.deadline_pressure == 0.0
+            && self.deadline_pressure.abs() < f64::EPSILON
     }
 
     /// Sets the ready queue depth signal.
@@ -449,7 +449,7 @@ impl PotentialRecord {
     /// Returns true if the potential is zero (quiescent).
     #[must_use]
     pub fn is_zero(&self) -> bool {
-        self.total == 0.0
+        self.total.abs() < f64::EPSILON
     }
 }
 

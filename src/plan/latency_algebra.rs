@@ -209,7 +209,7 @@ impl PiecewiseLinearCurve {
     #[must_use]
     pub fn rate_latency(rate: f64, latency: f64) -> Self {
         debug_assert!(rate >= 0.0 && latency >= 0.0);
-        if latency == 0.0 {
+        if latency.abs() < f64::EPSILON {
             return Self::affine(rate, 0.0);
         }
         Self {

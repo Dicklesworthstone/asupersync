@@ -1175,7 +1175,7 @@ mod tests {
         fn adapter_is_cloneable_with_clone_provider() {
             let provider = FixedCxProvider::for_testing();
             let adapter = TowerAdapterWithProvider::with_provider(AddOneService, provider);
-            let _cloned = adapter.clone();
+            let _cloned = adapter;
         }
 
         #[test]

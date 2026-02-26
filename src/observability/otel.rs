@@ -234,7 +234,10 @@ impl CardinalityTracker {
     /// Get current cardinality for a metric.
     #[cfg(test)]
     fn cardinality(&self, metric: &str) -> usize {
-        self.seen.read().get(metric).map_or(0, |s| s.len())
+        self.seen
+            .read()
+            .get(metric)
+            .map_or(0, std::collections::HashSet::len)
     }
 }
 
@@ -1247,7 +1250,7 @@ mod tests {
     #[test]
     fn otel_metrics_with_config() {
         let exporter = OtelInMemoryExporter::default();
-        let reader = PeriodicReader::builder(exporter.clone()).build();
+        let reader = PeriodicReader::builder(exporter).build();
         let provider = SdkMeterProvider::builder().with_reader(reader).build();
         let meter = provider.meter("asupersync");
 
@@ -1304,7 +1307,7 @@ mod tests {
     #[test]
     fn drop_labels_filtered() {
         let exporter = OtelInMemoryExporter::default();
-        let reader = PeriodicReader::builder(exporter.clone()).build();
+        let reader = PeriodicReader::builder(exporter).build();
         let provider = SdkMeterProvider::builder().with_reader(reader).build();
         let meter = provider.meter("asupersync");
 
@@ -1475,7 +1478,7 @@ mod exporter_tests {
         let dbg = format!("{config:?}");
         assert!(dbg.contains("MetricsConfig"));
 
-        let cloned = config.clone();
+        let cloned = config;
         assert_eq!(cloned.max_cardinality, 1000);
     }
 
@@ -1488,7 +1491,7 @@ mod exporter_tests {
         let dbg = format!("{config:?}");
         assert!(dbg.contains("SamplingConfig"));
 
-        let cloned = config.clone();
+        let cloned = config;
         assert!((cloned.sample_rate - 1.0).abs() < f64::EPSILON);
     }
 
@@ -1531,7 +1534,7 @@ mod exporter_tests {
 
     #[test]
     fn null_exporter_debug_default() {
-        let exporter = NullExporter::default();
+        let exporter = NullExporter;
         let dbg = format!("{exporter:?}");
         assert!(dbg.contains("NullExporter"));
     }

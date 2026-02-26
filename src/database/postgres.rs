@@ -238,6 +238,7 @@ impl PgValue {
     }
 
     /// Try to get as bool.
+    #[must_use]
     pub fn as_bool(&self) -> Option<bool> {
         match self {
             Self::Bool(v) => Some(*v),
@@ -246,6 +247,7 @@ impl PgValue {
     }
 
     /// Try to get as i32.
+    #[must_use]
     pub fn as_i32(&self) -> Option<i32> {
         match self {
             Self::Int4(v) => Some(*v),
@@ -255,6 +257,7 @@ impl PgValue {
     }
 
     /// Try to get as i64.
+    #[must_use]
     pub fn as_i64(&self) -> Option<i64> {
         match self {
             Self::Int8(v) => Some(*v),
@@ -265,6 +268,7 @@ impl PgValue {
     }
 
     /// Try to get as f64.
+    #[must_use]
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             Self::Float8(v) => Some(*v),
@@ -274,6 +278,7 @@ impl PgValue {
     }
 
     /// Try to get as string.
+    #[must_use]
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Self::Text(v) => Some(v),
@@ -282,6 +287,7 @@ impl PgValue {
     }
 
     /// Try to get as bytes.
+    #[must_use]
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
             Self::Bytes(v) => Some(v),
@@ -631,7 +637,7 @@ impl ScramAuth {
 
         // RFC 5802: escape '=' as '=3D' and ',' as '=2C' in username
         let escaped_username = username.replace('=', "=3D").replace(',', "=2C");
-        let client_first_bare = format!("n={},r={}", escaped_username, client_nonce);
+        let client_first_bare = format!("n={escaped_username},r={client_nonce}");
 
         Self {
             username: username.to_string(),
@@ -705,7 +711,7 @@ impl ScramAuth {
         // Build client-final-message-without-proof
         let channel_binding =
             base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"n,,");
-        let client_final_without_proof = format!("c={},r={}", channel_binding, full_nonce);
+        let client_final_without_proof = format!("c={channel_binding},r={full_nonce}");
 
         // Build auth message
         let auth_message = format!(
@@ -725,7 +731,7 @@ impl ScramAuth {
             base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &client_proof);
 
         // Build client-final-message
-        let client_final = format!("{},p={}", client_final_without_proof, client_proof_b64);
+        let client_final = format!("{client_final_without_proof},p={client_proof_b64}");
         Ok(client_final.into_bytes())
     }
 
@@ -817,13 +823,13 @@ impl ScramAuth {
 
         // HMAC = H(outer || H(inner || data))
         let mut hasher = Sha256::new();
-        hasher.update(&inner);
+        hasher.update(inner);
         hasher.update(data);
         let inner_hash = hasher.finalize();
 
         let mut hasher = Sha256::new();
-        hasher.update(&outer);
-        hasher.update(&inner_hash);
+        hasher.update(outer);
+        hasher.update(inner_hash);
         hasher.finalize().to_vec()
     }
 
@@ -1122,11 +1128,10 @@ impl PgConnection {
                                 })?;
                                 self.authenticate_scram(cx, &options.user, password).await?;
                                 return Ok(());
-                            } else {
-                                return Err(PgError::UnsupportedAuth(format!(
-                                    "SASL mechanisms: {mechanisms:?}"
-                                )));
                             }
+                            return Err(PgError::UnsupportedAuth(format!(
+                                "SASL mechanisms: {mechanisms:?}"
+                            )));
                         }
                         11 => {
                             // AuthenticationSASLContinue - handled in authenticate_scram
@@ -1644,7 +1649,7 @@ impl PgConnection {
 
         // PostgreSQL messages should not exceed 1 GiB in practice.
         const MAX_MESSAGE_LEN: i32 = 1_073_741_824;
-        if len_i32 < 4 || len_i32 > MAX_MESSAGE_LEN {
+        if !(4..=MAX_MESSAGE_LEN).contains(&len_i32) {
             return Err(PgError::Protocol(format!(
                 "invalid message length: {len_i32}"
             )));
@@ -1858,7 +1863,7 @@ pub struct PgTransaction<'a> {
     finished: bool,
 }
 
-impl<'a> PgTransaction<'a> {
+impl PgTransaction<'_> {
     /// Commit the transaction.
     pub async fn commit(mut self, cx: &Cx) -> Outcome<(), PgError> {
         if self.finished {
@@ -1921,7 +1926,7 @@ impl Drop for PgTransaction<'_> {
 
 mod hex {
     pub fn decode(s: &str) -> Result<Vec<u8>, String> {
-        if s.len() % 2 != 0 {
+        if !s.len().is_multiple_of(2) {
             return Err("odd length".to_string());
         }
 
@@ -2275,7 +2280,7 @@ mod tests {
             ],
         );
         assert_eq!(row.get_i32("i").unwrap(), 42);
-        assert_eq!(row.get_bool("b").unwrap(), false);
+        assert!(!row.get_bool("b").unwrap());
         assert_eq!(row.get_str("s").unwrap(), "hello");
         assert_eq!(row.get_i64("big").unwrap(), 99);
 
@@ -2383,7 +2388,7 @@ mod tests {
         // column_id
         data.extend_from_slice(&1i16.to_be_bytes());
         // type_oid (INT4)
-        data.extend_from_slice(&(oid::INT4 as u32).to_be_bytes());
+        data.extend_from_slice(&oid::INT4.to_be_bytes());
         // type_size
         data.extend_from_slice(&4i16.to_be_bytes());
         // type_modifier
@@ -2409,7 +2414,7 @@ mod tests {
         data.extend_from_slice(b"name\0");
         data.extend_from_slice(&0u32.to_be_bytes()); // table_oid
         data.extend_from_slice(&0i16.to_be_bytes()); // column_id
-        data.extend_from_slice(&(oid::TEXT as u32).to_be_bytes());
+        data.extend_from_slice(&oid::TEXT.to_be_bytes());
         data.extend_from_slice(&(-1i16).to_be_bytes()); // type_size
         data.extend_from_slice(&(-1i32).to_be_bytes()); // type_modifier
         data.extend_from_slice(&0i16.to_be_bytes()); // format_code
@@ -2417,7 +2422,7 @@ mod tests {
         data.extend_from_slice(b"age\0");
         data.extend_from_slice(&0u32.to_be_bytes());
         data.extend_from_slice(&0i16.to_be_bytes());
-        data.extend_from_slice(&(oid::INT4 as u32).to_be_bytes());
+        data.extend_from_slice(&oid::INT4.to_be_bytes());
         data.extend_from_slice(&4i16.to_be_bytes());
         data.extend_from_slice(&(-1i32).to_be_bytes());
         data.extend_from_slice(&0i16.to_be_bytes());
@@ -2837,7 +2842,7 @@ mod tests {
     #[test]
     fn pg_error_source_io_only() {
         use std::error::Error;
-        let io_err = PgError::Io(io::Error::new(io::ErrorKind::Other, "test"));
+        let io_err = PgError::Io(io::Error::other("test"));
         assert!(io_err.source().is_some());
 
         let proto = PgError::Protocol("x".to_string());
@@ -2878,7 +2883,7 @@ mod tests {
         let dbg = format!("{s:?}");
         assert!(dbg.contains("Prefer"), "{dbg}");
         let copied: SslMode = s;
-        let cloned = s.clone();
+        let cloned = s;
         assert_eq!(copied, cloned);
         assert_ne!(s, SslMode::Disable);
     }
@@ -2889,7 +2894,7 @@ mod tests {
         let dbg = format!("{m:?}");
         assert!(dbg.contains("Query"), "{dbg}");
         let copied: FrontendMessage = m;
-        let cloned = m.clone();
+        let cloned = m;
         assert_eq!(copied, cloned);
         assert_ne!(m, FrontendMessage::Terminate);
     }
@@ -2900,7 +2905,7 @@ mod tests {
         let dbg = format!("{m:?}");
         assert!(dbg.contains("ReadyForQuery"), "{dbg}");
         let copied: BackendMessage = m;
-        let cloned = m.clone();
+        let cloned = m;
         assert_eq!(copied, cloned);
         assert_ne!(m, BackendMessage::DataRow);
     }

@@ -802,7 +802,7 @@ mod tests {
 
         // Test hash by adding to HashSet
         let mut set = std::collections::BTreeSet::new();
-        set.insert(pin1.clone());
+        set.insert(pin1);
         assert!(set.contains(&pin2));
         assert!(!set.contains(&pin3));
     }
@@ -815,7 +815,7 @@ mod tests {
             let key = PrivateKey::from_pkcs8_der(vec![0u8; 32]);
             let debug_str = format!("{key:?}");
             assert!(debug_str.contains("redacted"));
-            assert!(!debug_str.contains("0"));
+            assert!(!debug_str.contains('0'));
         }
     }
 

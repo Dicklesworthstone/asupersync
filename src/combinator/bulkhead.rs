@@ -577,8 +577,8 @@ impl Bulkhead {
 
         let mut queue = self.queue.write();
         queue.clear();
-        drop(queue);
         self.pending_queue_count.store(0, Ordering::Relaxed);
+        drop(queue);
     }
 }
 

@@ -350,7 +350,7 @@ mod tests {
 
     // Self-signed test certificate and key (for testing only)
     // Generated with: openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj "/CN=localhost"
-    const TEST_CERT_PEM: &[u8] = br#"-----BEGIN CERTIFICATE-----
+    const TEST_CERT_PEM: &[u8] = br"-----BEGIN CERTIFICATE-----
 MIIDCTCCAfGgAwIBAgIUILC2ZkjRHPrfcHhzefebjS2lOzcwDQYJKoZIhvcNAQEL
 BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDEyODIyMzkwMVoXDTI3MDEy
 ODIyMzkwMVowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEF
@@ -368,9 +368,9 @@ XZ8FjFINtbcRjUIbi2qIf6iOn2+DLTCJjZfFxGEDtXVlBBx1TjaJz6j/oIAgPEWg
 EiKoSldjL6VzfrQPcMBv0uHCUDGBeB3VcMhCkdxdz/w2vQNZD813iF1R1yhlITv9
 wwAjs13JGIDbcjI4zLsz9cPltIHkicvVm35hdJy6ALlJCe3rcOjb36QFodU7K4tw
 uWkd54q5y+R18MtvvQ==
------END CERTIFICATE-----"#;
+-----END CERTIFICATE-----";
 
-    const TEST_KEY_PEM: &[u8] = br#"-----BEGIN PRIVATE KEY-----
+    const TEST_KEY_PEM: &[u8] = br"-----BEGIN PRIVATE KEY-----
 MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDxf1BH3WiYUgZv
 OI8WocIi3mwvkFOkwFhMsvohTUBqWvqyj1oHUkulamHNhdD+tQEJK+IG/nKtIvQs
 PvHqHDcbzfOo16oIZldMoiC/imSTpy4oq119hwC5XW5OJ3XDfV+SejLCrm5FZ3GQ
@@ -397,7 +397,7 @@ W+vv+kiEHwGfMEbPrALYu/eGFY9qAbv/RgvZAz3zsQKBgBgiHqIb6EYoD8vcRyBz
 qP4j9OjdFe5BIjpj4GcEhTO02cWe40bWQ5Ut7zj2C7IdaUdCVQjg8k9FzeDrikK7
 XDJ6t6uzuOdQSZwBxiZ9npt3GBzqLI3qiWhTMaD1+4ca3/SBUwPcGBbqPovdpKEv
 W7n9v0wIyo4e/O0DO2fczXZD
------END PRIVATE KEY-----"#;
+-----END PRIVATE KEY-----";
 
     #[test]
     fn test_builder_new() {

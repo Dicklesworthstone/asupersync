@@ -79,7 +79,7 @@ pub enum ScoreError {
 impl OpportunityScore {
     /// Creates a new score, validating inputs.
     pub fn new(impact: f64, confidence: f64, effort: f64) -> Result<Self, ScoreError> {
-        if effort == 0.0 {
+        if effort.abs() < f64::EPSILON {
             return Err(ScoreError::ZeroEffort);
         }
         if !(1.0..=5.0).contains(&impact) {

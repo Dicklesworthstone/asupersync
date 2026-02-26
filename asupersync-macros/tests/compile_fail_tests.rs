@@ -1,3 +1,5 @@
+#![doc = "Compile-fail tests for structured-concurrency proc macros."]
+
 #[test]
 fn compile_fail() {
     let t = trybuild::TestCases::new();
