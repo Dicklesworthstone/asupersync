@@ -335,7 +335,9 @@ fn bench_state_snapshot(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("from_runtime_state", n), &n, |b, &n| {
             let state = setup_runtime_state(n);
             b.iter(|| {
-                let guard = state.lock().expect("runtime state lock poisoned");
+                let guard = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 black_box(StateSnapshot::from_runtime_state(&guard))
             })
         });

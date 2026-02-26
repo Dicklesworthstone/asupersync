@@ -35,11 +35,15 @@ impl TaskSource {
     {
         match self {
             Self::RuntimeState(state) => {
-                let mut state = state.lock().expect("runtime state lock poisoned");
+                let mut state = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 f(state.tasks_arena_mut())
             }
             Self::TaskTable(tasks) => {
-                let mut tasks = tasks.lock().expect("task table lock poisoned");
+                let mut tasks = tasks
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 f(tasks.tasks_arena_mut())
             }
         }
@@ -431,7 +435,9 @@ mod tests {
         let queue = LocalQueue::new(Arc::clone(&state));
 
         {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let record = guard.task_mut(task(1)).expect("task record missing");
             record.mark_local();
             drop(guard);
@@ -449,7 +455,9 @@ mod tests {
         let state = LocalQueue::test_state(3);
         let queue = LocalQueue::new(Arc::clone(&state));
         {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             for id in [1_u32, 2_u32, 3_u32] {
                 let record = guard.task_mut(task(id)).expect("task record missing");
                 record.mark_local();
@@ -482,7 +490,9 @@ mod tests {
         let queue = LocalQueue::new(Arc::clone(&state));
 
         {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let record = guard.task_mut(task(0)).expect("task record missing");
             record.mark_local();
             drop(guard);
@@ -706,7 +716,9 @@ mod tests {
         let dest = LocalQueue::new(Arc::clone(&state));
 
         {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             for id in [0, 1] {
                 if let Some(record) = guard.task_mut(task(id)) {
                     record.mark_local();
@@ -748,7 +760,9 @@ mod tests {
         let src = LocalQueue::new(Arc::clone(&state));
         let dest = LocalQueue::new(Arc::clone(&state));
         {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             for id in [1_u32, 2_u32] {
                 let record = guard.task_mut(task(id)).expect("task record missing");
                 record.mark_local();
@@ -780,7 +794,9 @@ mod tests {
         let dest = LocalQueue::new_with_task_table(Arc::clone(&tasks));
 
         {
-            let mut guard = tasks.lock().expect("task table lock poisoned");
+            let mut guard = tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let record = guard.task_mut(task(1)).expect("task record missing");
             record.mark_local();
             drop(guard);
@@ -810,7 +826,9 @@ mod tests {
         let dest = LocalQueue::new(Arc::clone(&state));
 
         {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             for id in 0..=6 {
                 let record = guard.task_mut(task(id)).expect("task record missing");
                 record.mark_local();

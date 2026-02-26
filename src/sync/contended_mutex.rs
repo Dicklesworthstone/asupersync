@@ -11,7 +11,7 @@
 //!
 //! let m = ContendedMutex::new("tasks", 42);
 //! {
-//!     let guard = m.lock().expect("poisoned");
+//!     let guard = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 //!     // use *guard
 //! }
 //!
@@ -373,7 +373,7 @@ mod tests {
         init_test("basic_lock_unlock");
         let m = ContendedMutex::new("test", 42);
         {
-            let guard = m.lock().expect("poisoned");
+            let guard = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             crate::assert_with_log!(*guard == 42, "value", 42, *guard);
             drop(guard);
         }
@@ -385,10 +385,10 @@ mod tests {
         init_test("mutate_through_guard");
         let m = ContendedMutex::new("test", 0);
         {
-            let mut guard = m.lock().expect("poisoned");
+            let mut guard = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             *guard = 99;
         }
-        let guard = m.lock().expect("poisoned");
+        let guard = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::assert_with_log!(*guard == 99, "mutated value", 99, *guard);
         drop(guard);
         crate::test_complete!("mutate_through_guard");
@@ -408,7 +408,7 @@ mod tests {
     fn try_lock_fails_when_held() {
         init_test("try_lock_fails_when_held");
         let m = ContendedMutex::new("test", 42);
-        let _guard = m.lock().expect("poisoned");
+        let _guard = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let is_err = m.try_lock().is_err();
         crate::assert_with_log!(is_err, "try_lock fails", true, is_err);
         crate::test_complete!("try_lock_fails_when_held");
@@ -436,7 +436,7 @@ mod tests {
         init_test("reset_metrics_no_panic");
         let m = ContendedMutex::new("test", 0);
         {
-            let _g = m.lock().expect("poisoned");
+            let _g = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         m.reset_metrics();
         let snap = m.snapshot();
@@ -456,7 +456,7 @@ mod tests {
         init_test("metrics_track_acquisitions");
         let m = ContendedMutex::new("test", 0);
         for _ in 0..10 {
-            let _g = m.lock().expect("poisoned");
+            let _g = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         let snap = m.snapshot();
         crate::assert_with_log!(
@@ -474,7 +474,7 @@ mod tests {
         init_test("metrics_track_hold_time");
         let m = ContendedMutex::new("test", 0);
         {
-            let _g = m.lock().expect("poisoned");
+            let _g = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let snap = m.snapshot();
@@ -501,11 +501,11 @@ mod tests {
         let m = Arc::new(ContendedMutex::new("test", 0));
 
         // Hold the lock while another thread tries to acquire
-        let guard = m.lock().expect("poisoned");
+        let guard = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let m2 = Arc::clone(&m);
         let handle = thread::spawn(move || {
-            let _g = m2.lock().expect("poisoned");
+            let _g = m2.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         });
 
         // Give the other thread time to contend
@@ -530,7 +530,7 @@ mod tests {
         init_test("reset_clears_all_metrics");
         let m = ContendedMutex::new("test", 0);
         {
-            let _g = m.lock().expect("poisoned");
+            let _g = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         let before = m.snapshot();
         crate::assert_with_log!(
@@ -565,7 +565,7 @@ mod tests {
         let m2 = Arc::clone(&m);
 
         let poisoner = thread::spawn(move || {
-            let _guard = m2.lock().expect("initial lock should succeed");
+            let _guard = m2.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             panic!("intentional poison");
         });
         let _ = poisoner.join();
@@ -612,7 +612,7 @@ mod tests {
     #[test]
     fn contended_mutex_guard_debug() {
         let m = ContendedMutex::new("test", 42_i32);
-        let guard = m.lock().expect("poisoned");
+        let guard = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dbg = format!("{guard:?}");
         assert!(dbg.contains("ContendedMutexGuard"));
         drop(guard);
@@ -624,7 +624,7 @@ mod tests {
         let m = Arc::new(ContendedMutex::new("test", 7u32));
         let m2 = Arc::clone(&m);
         let poisoner = std::thread::spawn(move || {
-            let _guard = m2.lock().expect("should succeed");
+            let _guard = m2.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             panic!("deliberate poison");
         });
         let _ = poisoner.join();
@@ -649,7 +649,7 @@ mod tests {
         let m2 = Arc::clone(&m);
 
         let handle = std::thread::spawn(move || {
-            let _guard = m2.lock().expect("should succeed");
+            let _guard = m2.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             std::thread::sleep(std::time::Duration::from_millis(5));
             panic!("panic while holding guard");
         });

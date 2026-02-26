@@ -747,7 +747,9 @@ impl ThreeLaneScheduler {
 
         // Get IO driver and timer driver from runtime state
         let (io_driver, timer_driver) = {
-            let guard = state.lock().expect("lock poisoned");
+            let guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             (guard.io_driver_handle(), guard.timer_driver_handle())
         };
 
@@ -951,10 +953,13 @@ impl ThreeLaneScheduler {
     #[inline]
     fn with_task_table_ref<R, F: FnOnce(&TaskTable) -> R>(&self, f: F) -> R {
         if let Some(tt) = &self.task_table {
-            let guard = tt.lock().expect("lock poisoned");
+            let guard = tt.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             f(&guard)
         } else {
-            let state = self.state.lock().expect("lock poisoned");
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             f(&state.tasks)
         }
     }
@@ -1472,10 +1477,13 @@ impl ThreeLaneWorker {
     #[inline]
     fn with_task_table<R, F: FnOnce(&mut TaskTable) -> R>(&self, f: F) -> R {
         if let Some(tt) = &self.task_table {
-            let mut guard = tt.lock().expect("lock poisoned");
+            let mut guard = tt.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             f(&mut guard)
         } else {
-            let mut state = self.state.lock().expect("lock poisoned");
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             f(&mut state.tasks)
         }
     }
@@ -1484,10 +1492,13 @@ impl ThreeLaneWorker {
     #[inline]
     fn with_task_table_ref<R, F: FnOnce(&TaskTable) -> R>(&self, f: F) -> R {
         if let Some(tt) = &self.task_table {
-            let guard = tt.lock().expect("lock poisoned");
+            let guard = tt.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             f(&guard)
         } else {
-            let state = self.state.lock().expect("lock poisoned");
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             f(&state.tasks)
         }
     }
@@ -1565,7 +1576,10 @@ impl ThreeLaneWorker {
 
     fn capture_adaptive_snapshot(&self) -> AdaptiveEpochSnapshot {
         let snapshot = {
-            let state = self.state.lock().expect("lock poisoned");
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             StateSnapshot::from_runtime_state(&state)
         };
         AdaptiveEpochSnapshot {
@@ -2015,7 +2029,10 @@ impl ThreeLaneWorker {
         self.steps_since_snapshot = 0;
 
         // Take a snapshot under the state lock (bounded work, no allocs).
-        let state = self.state.lock().expect("lock poisoned");
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let snapshot = StateSnapshot::from_runtime_state(&state);
         let (wait_graph_nodes, wait_graph_edges, trapped_wait_cycle) =
             if self.spectral_monitor.is_some() {
@@ -2561,7 +2578,11 @@ impl ThreeLaneWorker {
 
                     // 2. Wake waiters and process finalizers (requires full RuntimeState lock)
                     // We expect success here; poisoning aborts the thread, which is acceptable during panic unwind.
-                    let mut state = self.worker.state.lock().expect("poisoned");
+                    let mut state = self
+                        .worker
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     let waiters = state.task_completed(self.task_id);
                     let finalizers = state.drain_ready_async_finalizers();
 
@@ -2776,7 +2797,10 @@ impl ThreeLaneWorker {
                 // Map Outcome<(), ()> to Outcome<(), Error> for record.complete()
                 let task_outcome = outcome
                     .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
-                let mut state = self.state.lock().expect("lock poisoned");
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let cancel_ack = Self::consume_cancel_ack_locked(&mut state, task_id);
                 if let Some(record) = state.task_mut(task_id) {
                     if !record.state.is_terminal() {
@@ -2942,7 +2966,10 @@ impl ThreeLaneWorker {
 
     fn schedule_ready_finalizers(&self) -> bool {
         let tasks = {
-            let mut state = self.state.lock().expect("lock poisoned");
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.drain_ready_async_finalizers()
         };
         if tasks.is_empty() {
@@ -3403,14 +3430,18 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
             task_id
         };
         let waiter_id = {
-            let mut guard = state.lock().expect("lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (waiter_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -3418,7 +3449,9 @@ mod tests {
         };
 
         {
-            let mut guard = state.lock().expect("lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(record) = guard.task_mut(task_id) {
                 record.add_waiter(waiter_id);
             }
@@ -3429,7 +3462,11 @@ mod tests {
 
         worker.execute(task_id);
 
-        let completed = state.lock().expect("poisoned").task(task_id).is_none();
+        let completed = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .task(task_id)
+            .is_none();
         assert!(completed, "task should be removed after completion");
 
         let scheduled_task = worker.global.pop_ready().map(|pt| pt.task);
@@ -3753,7 +3790,9 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -3791,7 +3830,9 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -3827,7 +3868,9 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -3962,7 +4005,9 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -3996,7 +4041,9 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -4029,7 +4076,9 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -4063,7 +4112,9 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -4140,7 +4191,9 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (task_id, _handle) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -4149,7 +4202,9 @@ mod tests {
 
         // Get the wake_state for direct manipulation
         let wake_state = {
-            let guard = state.lock().expect("lock poisoned");
+            let guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard
                 .task(task_id)
                 .map(|r| Arc::clone(&r.wake_state))
@@ -4635,14 +4690,18 @@ mod tests {
 
         // Create two tasks in the region
         let task_id1 = {
-            let mut guard = state.lock().expect("lock");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
             id
         };
         let task_id2 = {
-            let mut guard = state.lock().expect("lock");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -4651,7 +4710,10 @@ mod tests {
 
         // Not quiescent: 2 live tasks
         assert!(
-            !state.lock().expect("lock").is_quiescent(),
+            !state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_quiescent(),
             "should not be quiescent with live tasks"
         );
 
@@ -4668,7 +4730,9 @@ mod tests {
         worker.execute(task_id2);
 
         // After both tasks complete, the task table should be empty
-        let guard = state.lock().expect("lock");
+        let guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(
             guard.task(task_id1).is_none(),
             "task1 should be removed after completion"
@@ -5737,14 +5801,18 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
             id
         };
         let waiter_id = {
-            let mut guard = state.lock().expect("lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -5756,7 +5824,9 @@ mod tests {
         };
 
         {
-            let mut guard = state.lock().expect("lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(record) = guard.task_mut(task_id) {
                 record.add_waiter(waiter_id);
             }
@@ -5791,14 +5861,18 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
             id
         };
         let waiter_id = {
-            let mut guard = state.lock().expect("lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -5810,7 +5884,9 @@ mod tests {
         };
 
         {
-            let mut guard = state.lock().expect("lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(record) = guard.task_mut(task_id) {
                 record.add_waiter(waiter_id);
             }
@@ -5848,14 +5924,18 @@ mod tests {
             .create_root_region(Budget::INFINITE);
 
         let task_id = {
-            let mut guard = state.lock().expect("lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
             id
         };
         let waiter_id = {
-            let mut guard = state.lock().expect("lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (id, _) = guard
                 .create_task(region, Budget::INFINITE, async {})
                 .expect("create task");
@@ -5863,7 +5943,9 @@ mod tests {
         };
 
         {
-            let mut guard = state.lock().expect("lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(record) = guard.task_mut(task_id) {
                 record.add_waiter(waiter_id);
             }
@@ -5902,7 +5984,9 @@ mod tests {
 
         // 2. Create a task pinned to Worker 0
         let task_id = {
-            let mut guard = state.lock().expect("lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let region = guard.create_root_region(Budget::INFINITE);
             let (tid, _) = guard
                 .create_task(region, Budget::INFINITE, async { 1 })
@@ -6081,7 +6165,9 @@ mod tests {
 
         // Reset wake_state so we can inject again.
         {
-            let tt = task_table.lock().unwrap();
+            let tt = task_table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(record) = tt.task(task_id) {
                 record.wake_state.clear();
             }
@@ -6109,7 +6195,9 @@ mod tests {
             Budget::INFINITE,
         )));
         {
-            let mut tt = task_table.lock().unwrap();
+            let mut tt = task_table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(record) = tt.task_mut(task_id) {
                 record.cx_inner = Some(cx_inner.clone());
             }

@@ -74,7 +74,9 @@ impl Worker {
         shutdown: Arc<AtomicBool>,
     ) -> Self {
         let (io_driver, trace, timer_driver, metrics) = {
-            let guard = state.lock().expect("runtime state lock poisoned");
+            let guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             (
                 guard.io_driver_handle(),
                 guard.trace_handle(),
@@ -232,7 +234,7 @@ impl Worker {
                         .worker
                         .state
                         .lock()
-                        .expect("runtime state lock poisoned");
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if let Some(record) = state.task_mut(self.task_id) {
                         if !record.state.is_terminal() {
                             record.complete(crate::types::Outcome::Panicked(
@@ -310,7 +312,10 @@ impl Worker {
         let local_task = crate::runtime::local::remove_local_task(task_id);
 
         let (mut stored, task_cx, wake_state, cached_waker) = {
-            let mut state = self.state.lock().expect("runtime state lock poisoned");
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
 
             if let Some(local_task) = local_task {
                 // Local task found — single lock acquisition for record info
@@ -381,7 +386,10 @@ impl Worker {
                 // Map Outcome<(), ()> to Outcome<(), Error> for record.complete()
                 let task_outcome = outcome
                     .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
-                let mut state = self.state.lock().expect("runtime state lock poisoned");
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let cancel_ack = Self::consume_cancel_ack_locked(&mut state, task_id);
                 if let Some(record) = state.task_mut(task_id) {
                     if !record.state.is_terminal() {
@@ -491,7 +499,10 @@ impl Worker {
 
                 match stored {
                     AnyStoredTask::Global(t) => {
-                        let mut state = self.state.lock().expect("runtime state lock poisoned");
+                        let mut state = self
+                            .state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         state.store_spawned_task(task_id, t);
                         // Cache waker back in the task record for reuse on next poll
                         if let Some(record) = state.task_mut(task_id) {
@@ -503,7 +514,10 @@ impl Worker {
                     AnyStoredTask::Local(t) => {
                         crate::runtime::local::store_local_task(task_id, t);
                         // Cache waker for local tasks too (record is in global state)
-                        let mut state = self.state.lock().expect("runtime state lock poisoned");
+                        let mut state = self
+                            .state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         if let Some(record) = state.task_mut(task_id) {
                             record.cached_waker = Some((waker, 0));
                         }
@@ -533,7 +547,10 @@ impl Worker {
 
     fn schedule_ready_finalizers(&self) -> bool {
         let tasks = {
-            let mut state = self.state.lock().expect("runtime state lock poisoned");
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.drain_ready_async_finalizers()
         };
         if tasks.is_empty() {
@@ -1206,7 +1223,9 @@ mod tests {
         let waiter_task = TaskId::new_for_test(1, 0);
 
         {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let panicking_record = TaskRecord::new(
                 panicking_task,
                 RegionId::new_for_test(0, 0),
@@ -1248,7 +1267,9 @@ mod tests {
         );
 
         {
-            let guard = state.lock().expect("runtime state lock poisoned");
+            let guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             assert!(
                 guard.task(panicking_task).is_none(),
                 "panicking task should be completed and removed from runtime state"
@@ -1278,7 +1299,9 @@ mod tests {
         let waiter_task = TaskId::new_for_test(1, 0);
 
         {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let completing_record = TaskRecord::new(
                 completing_task,
                 RegionId::new_for_test(0, 0),
@@ -1318,7 +1341,9 @@ mod tests {
         );
 
         {
-            let guard = state.lock().expect("runtime state lock poisoned");
+            let guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             assert!(
                 guard.task(completing_task).is_none(),
                 "completed task should be removed from runtime state"
@@ -1357,7 +1382,9 @@ mod tests {
         let waiter_task = TaskId::new_for_test(1, 0);
 
         {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let panicking_record = TaskRecord::new(
                 panicking_task,
                 RegionId::new_for_test(0, 0),
@@ -1396,7 +1423,9 @@ mod tests {
         }));
         assert!(result.is_err(), "panicking task should propagate unwind");
 
-        let guard = state.lock().expect("runtime state lock poisoned");
+        let guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let waiter_notified = guard
             .task(waiter_task)
             .expect("waiter task should exist")

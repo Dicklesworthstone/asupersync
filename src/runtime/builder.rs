@@ -813,7 +813,7 @@ impl Runtime {
             .inner
             .state
             .lock()
-            .expect("runtime state lock poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.is_quiescent()
     }
 
@@ -994,7 +994,9 @@ impl RuntimeInner {
             },
         ));
         let root_region = {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(observability) = config.observability.clone() {
                 guard.set_observability_config(observability);
             }
@@ -1072,7 +1074,9 @@ impl RuntimeInner {
 
         let blocking_pool = Self::create_blocking_pool(&config);
         if let Some(pool) = blocking_pool.as_ref() {
-            let mut guard = state.lock().expect("runtime state lock poisoned");
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.set_blocking_pool(pool.handle());
         }
 
@@ -1144,7 +1148,9 @@ impl RuntimeInner {
                     if dm_shutdown_clone.load(std::sync::atomic::Ordering::Relaxed) {
                         break;
                     }
-                    let guard = dm_state.lock().expect("runtime state lock poisoned");
+                    let guard = dm_state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     let now = guard.now;
                     monitor.check(now, guard.tasks_iter().map(|(_, record)| record));
                 }
@@ -1169,7 +1175,10 @@ impl RuntimeInner {
         };
 
         let task_id = {
-            let mut guard = self.state.lock().expect("runtime state lock poisoned");
+            let mut guard = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (task_id, _handle) = guard.create_task(self.root_region, Budget::new(), wrapped)?;
             task_id
         };
@@ -1442,7 +1451,7 @@ mod tests {
                 .inner
                 .state
                 .lock()
-                .expect("runtime state lock poisoned")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .live_task_count();
             if live_tasks == 0 {
                 return;
@@ -1499,7 +1508,7 @@ mod tests {
                 .inner
                 .state
                 .lock()
-                .expect("runtime state lock poisoned");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             parity_counts(guard.trace.snapshot())
         };
         assert_eq!(
@@ -1558,7 +1567,7 @@ mod tests {
                 .inner
                 .state
                 .lock()
-                .expect("runtime state lock poisoned");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             parity_counts(guard.trace.snapshot())
         };
         assert!(
@@ -1602,7 +1611,7 @@ mod tests {
                 .inner
                 .state
                 .lock()
-                .expect("runtime state lock poisoned");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let region = runtime.inner.root_region;
             let _ = guard
                 .create_task(region, Budget::INFINITE, async {
@@ -1616,7 +1625,7 @@ mod tests {
                 .inner
                 .state
                 .lock()
-                .expect("runtime state lock poisoned");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             parity_counts(guard.trace.snapshot())
         };
         assert!(
@@ -1796,11 +1805,11 @@ mod tests {
     #[cfg(feature = "config-file")]
     #[test]
     fn from_toml_str_builds_runtime() {
-        let toml = r#"
+        let toml = r"
 [scheduler]
 worker_threads = 2
 poll_budget = 32
-"#;
+";
         let runtime = RuntimeBuilder::from_toml_str(toml)
             .expect("from_toml_str")
             .build()
@@ -1812,10 +1821,10 @@ poll_budget = 32
     #[cfg(feature = "config-file")]
     #[test]
     fn from_toml_str_with_programmatic_override() {
-        let toml = r#"
+        let toml = r"
 [scheduler]
 worker_threads = 8
-"#;
+";
         let runtime = RuntimeBuilder::from_toml_str(toml)
             .expect("from_toml_str")
             .worker_threads(2) // programmatic override
@@ -1837,10 +1846,10 @@ worker_threads = 8
         use crate::runtime::env_config::*;
         // TOML says 16, env says 8, programmatic says 2.
         with_envs(&[(ENV_WORKER_THREADS, "8")], || {
-            let toml = r#"
+            let toml = r"
 [scheduler]
 worker_threads = 16
-"#;
+";
             let runtime = RuntimeBuilder::from_toml_str(toml)
                 .expect("from_toml_str")
                 .with_env_overrides()
@@ -1858,10 +1867,10 @@ worker_threads = 16
         use crate::runtime::env_config::*;
         // TOML says 16, env says 8.
         with_envs(&[(ENV_WORKER_THREADS, "8")], || {
-            let toml = r#"
+            let toml = r"
 [scheduler]
 worker_threads = 16
-"#;
+";
             let runtime = RuntimeBuilder::from_toml_str(toml)
                 .expect("from_toml_str")
                 .with_env_overrides()

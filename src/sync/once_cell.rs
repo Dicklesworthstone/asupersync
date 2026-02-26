@@ -1091,7 +1091,10 @@ mod tests {
         cell.state.store(INITIALIZING, Ordering::Release);
 
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = cell.waiters.lock().expect("waiters lock");
+            let _guard = cell
+                .waiters
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             panic!("intentional poison");
         }));
 

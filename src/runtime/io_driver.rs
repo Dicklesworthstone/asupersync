@@ -1081,7 +1081,10 @@ mod tests {
         }
 
         fn wait_until_first_poll_started(&self) {
-            let mut started_guard = self.started.lock().expect("started lock");
+            let mut started_guard = self
+                .started
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             while !*started_guard {
                 started_guard = self.started_cv.wait(started_guard).expect("started wait");
             }
@@ -1119,7 +1122,10 @@ mod tests {
             let call = self.poll_calls.fetch_add(1, Ordering::SeqCst);
             if call == 0 {
                 {
-                    let mut started = self.started.lock().expect("started lock");
+                    let mut started = self
+                        .started
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     *started = true;
                 }
                 self.started_cv.notify_all();

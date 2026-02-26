@@ -355,7 +355,10 @@ impl<'a> ShardGuard<'a> {
     pub fn tasks_only(shards: &'a ShardedState) -> Self {
         #[cfg(debug_assertions)]
         lock_order::before_lock(LockShard::Tasks);
-        let tasks = shards.tasks.lock().expect("tasks lock poisoned");
+        let tasks = shards
+            .tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(debug_assertions)]
         lock_order::after_lock(LockShard::Tasks);
         Self {
@@ -375,7 +378,10 @@ impl<'a> ShardGuard<'a> {
     pub fn regions_only(shards: &'a ShardedState) -> Self {
         #[cfg(debug_assertions)]
         lock_order::before_lock(LockShard::Regions);
-        let regions = shards.regions.lock().expect("regions lock poisoned");
+        let regions = shards
+            .regions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(debug_assertions)]
         lock_order::after_lock(LockShard::Regions);
         Self {
@@ -419,12 +425,18 @@ impl<'a> ShardGuard<'a> {
         // Acquire in order: B→A→C (D is lock-free)
         #[cfg(debug_assertions)]
         lock_order::before_lock(LockShard::Regions);
-        let regions = shards.regions.lock().expect("regions lock poisoned");
+        let regions = shards
+            .regions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(debug_assertions)]
         lock_order::after_lock(LockShard::Regions);
         #[cfg(debug_assertions)]
         lock_order::before_lock(LockShard::Tasks);
-        let tasks = shards.tasks.lock().expect("tasks lock poisoned");
+        let tasks = shards
+            .tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(debug_assertions)]
         lock_order::after_lock(LockShard::Tasks);
         #[cfg(debug_assertions)]
@@ -461,12 +473,18 @@ impl<'a> ShardGuard<'a> {
         // Acquire in order: B→A→C (D is lock-free)
         #[cfg(debug_assertions)]
         lock_order::before_lock(LockShard::Regions);
-        let regions = shards.regions.lock().expect("regions lock poisoned");
+        let regions = shards
+            .regions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(debug_assertions)]
         lock_order::after_lock(LockShard::Regions);
         #[cfg(debug_assertions)]
         lock_order::before_lock(LockShard::Tasks);
-        let tasks = shards.tasks.lock().expect("tasks lock poisoned");
+        let tasks = shards
+            .tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(debug_assertions)]
         lock_order::after_lock(LockShard::Tasks);
         #[cfg(debug_assertions)]
@@ -498,7 +516,10 @@ impl<'a> ShardGuard<'a> {
         // Acquire in order: B→C (D is lock-free, A not needed for creation)
         #[cfg(debug_assertions)]
         lock_order::before_lock(LockShard::Regions);
-        let regions = shards.regions.lock().expect("regions lock poisoned");
+        let regions = shards
+            .regions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(debug_assertions)]
         lock_order::after_lock(LockShard::Regions);
         #[cfg(debug_assertions)]
@@ -536,12 +557,18 @@ impl<'a> ShardGuard<'a> {
         // Acquire in order: B→A→C (D is lock-free)
         #[cfg(debug_assertions)]
         lock_order::before_lock(LockShard::Regions);
-        let regions = shards.regions.lock().expect("regions lock poisoned");
+        let regions = shards
+            .regions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(debug_assertions)]
         lock_order::after_lock(LockShard::Regions);
         #[cfg(debug_assertions)]
         lock_order::before_lock(LockShard::Tasks);
-        let tasks = shards.tasks.lock().expect("tasks lock poisoned");
+        let tasks = shards
+            .tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(debug_assertions)]
         lock_order::after_lock(LockShard::Tasks);
         #[cfg(debug_assertions)]
@@ -571,12 +598,18 @@ impl<'a> ShardGuard<'a> {
         // Acquire in order: B→A (E read-only, D lock-free, C not needed)
         #[cfg(debug_assertions)]
         lock_order::before_lock(LockShard::Regions);
-        let regions = shards.regions.lock().expect("regions lock poisoned");
+        let regions = shards
+            .regions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(debug_assertions)]
         lock_order::after_lock(LockShard::Regions);
         #[cfg(debug_assertions)]
         lock_order::before_lock(LockShard::Tasks);
-        let tasks = shards.tasks.lock().expect("tasks lock poisoned");
+        let tasks = shards
+            .tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(debug_assertions)]
         lock_order::after_lock(LockShard::Tasks);
 
@@ -598,12 +631,18 @@ impl<'a> ShardGuard<'a> {
         // Acquire in order: B→A→C
         #[cfg(debug_assertions)]
         lock_order::before_lock(LockShard::Regions);
-        let regions = shards.regions.lock().expect("regions lock poisoned");
+        let regions = shards
+            .regions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(debug_assertions)]
         lock_order::after_lock(LockShard::Regions);
         #[cfg(debug_assertions)]
         lock_order::before_lock(LockShard::Tasks);
-        let tasks = shards.tasks.lock().expect("tasks lock poisoned");
+        let tasks = shards
+            .tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(debug_assertions)]
         lock_order::after_lock(LockShard::Tasks);
         #[cfg(debug_assertions)]
