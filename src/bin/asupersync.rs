@@ -4,7 +4,7 @@
 use asupersync::Time;
 use asupersync::cli::{
     CliError, ColorChoice, CommonArgs, ExitCode, Output, OutputFormat, Outputtable,
-    parse_color_choice, parse_output_format,
+    WorkspaceScanReport, parse_color_choice, parse_output_format, scan_workspace,
 };
 use asupersync::trace::{
     CompressionMode, IssueSeverity, ReplayEvent, TRACE_FILE_VERSION, TRACE_MAGIC, TraceFileError,
@@ -78,6 +78,8 @@ enum Command {
     Conformance(ConformanceArgs),
     /// FrankenLab scenario testing (bd-1hu19.4)
     Lab(LabArgs),
+    /// Doctor tooling for deterministic workspace diagnostics
+    Doctor(DoctorArgs),
 }
 
 #[derive(Args, Debug)]
@@ -211,6 +213,27 @@ struct LabExploreArgs {
     /// Output results as JSON
     #[arg(long = "json", action = ArgAction::SetTrue)]
     json: bool,
+}
+
+// =========================================================================
+
+#[derive(Args, Debug)]
+struct DoctorArgs {
+    #[command(subcommand)]
+    command: DoctorCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum DoctorCommand {
+    /// Scan workspace topology and capability-flow surfaces
+    ScanWorkspace(DoctorScanWorkspaceArgs),
+}
+
+#[derive(Args, Debug)]
+struct DoctorScanWorkspaceArgs {
+    /// Workspace root to scan
+    #[arg(long = "root", default_value = ".")]
+    root: PathBuf,
 }
 
 // =========================================================================
@@ -482,6 +505,7 @@ fn run(command: Command, output: &mut Output) -> Result<(), CliError> {
         Command::Trace(trace_args) => run_trace(trace_args, output),
         Command::Conformance(args) => run_conformance(args, output),
         Command::Lab(args) => run_lab(args, output),
+        Command::Doctor(args) => run_doctor(args, output),
     }
 }
 
@@ -539,6 +563,29 @@ fn run_lab(args: LabArgs, output: &mut Output) -> Result<(), CliError> {
         LabCommand::Replay(replay_args) => lab_replay(&replay_args, output),
         LabCommand::Explore(explore_args) => lab_explore(&explore_args, output),
     }
+}
+
+fn run_doctor(args: DoctorArgs, output: &mut Output) -> Result<(), CliError> {
+    match args.command {
+        DoctorCommand::ScanWorkspace(scan_args) => doctor_scan_workspace(&scan_args, output),
+    }
+}
+
+fn doctor_scan_workspace(
+    args: &DoctorScanWorkspaceArgs,
+    output: &mut Output,
+) -> Result<(), CliError> {
+    let report: WorkspaceScanReport = scan_workspace(&args.root).map_err(|err| {
+        CliError::new("doctor_scan_error", "Failed to scan workspace")
+            .detail(err.to_string())
+            .context("root", args.root.display().to_string())
+            .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+
+    output.write(&report).map_err(|err| {
+        CliError::new("output_error", "Failed to write output").detail(err.to_string())
+    })?;
+    Ok(())
 }
 
 fn load_scenario(path: &Path) -> Result<asupersync::lab::scenario::Scenario, CliError> {
