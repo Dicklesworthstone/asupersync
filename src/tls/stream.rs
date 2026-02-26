@@ -490,6 +490,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         if n == 0 && !buf.is_empty() {
             while self.conn.wants_write() {
                 match self.poll_write_tls(cx) {
+                    Poll::Ready(Ok(0)) => break,
                     Poll::Ready(Ok(_)) => {}
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                     Poll::Pending => return Poll::Pending,
