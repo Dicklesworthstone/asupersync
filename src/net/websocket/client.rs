@@ -651,7 +651,11 @@ impl WebSocket<TcpStream> {
         }
 
         // Connect TCP
-        let addr = format!("{}:{}", parsed.host, parsed.port);
+        let addr = if parsed.host.contains(':') {
+            format!("[{}]:{}", parsed.host, parsed.port)
+        } else {
+            format!("{}:{}", parsed.host, parsed.port)
+        };
         let tcp = TcpStream::connect(addr).await?;
 
         if config.nodelay {
