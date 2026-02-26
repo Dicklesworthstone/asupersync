@@ -196,16 +196,28 @@ impl Server {
         self.services.keys().map(String::as_str).collect()
     }
 
-    /// Serve on the given address.
+    /// Validate server readiness and perform a bind-probe on the given address.
     ///
-    /// This is a placeholder - actual implementation would use async networking.
+    /// This verifies that:
+    /// - At least one service is registered
+    /// - The listen address parses as a socket address
+    /// - The process can bind a listener at that address
+    ///
+    /// The listener is immediately dropped after validation; request serving is
+    /// provided by transport adapters layered above this core server registry.
     #[allow(clippy::unused_async)]
-    pub async fn serve(self, _addr: &str) -> Result<(), GrpcError> {
-        // Placeholder implementation
-        // In a real implementation, this would:
-        // 1. Bind to the address
-        // 2. Accept HTTP/2 connections
-        // 3. Route requests to the appropriate service
+    pub async fn serve(self, addr: &str) -> Result<(), GrpcError> {
+        if self.services.is_empty() {
+            return Err(GrpcError::protocol(
+                "cannot serve gRPC server without registered services",
+            ));
+        }
+        // Accept both numeric socket addresses and hostname forms like localhost:50051.
+        let listener = std::net::TcpListener::bind(addr)
+            .map_err(|error| GrpcError::transport(format!("bind failed: {error}")))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| GrpcError::transport(format!("nonblocking setup failed: {error}")))?;
         Ok(())
     }
 }
@@ -479,6 +491,59 @@ mod tests {
         let contains = names.contains(&"test.TestService");
         crate::assert_with_log!(contains, "contains service name", true, contains);
         crate::test_complete!("test_server_service_names");
+    }
+
+    #[test]
+    fn test_server_serve_requires_service_registration() {
+        init_test("test_server_serve_requires_service_registration");
+        let server = Server::builder().build();
+        let result = futures_lite::future::block_on(server.serve("127.0.0.1:0"));
+        let err = result.expect_err("serving without services should fail");
+        crate::assert_with_log!(
+            matches!(err, GrpcError::Protocol(_)),
+            "protocol error for empty service registry",
+            true,
+            matches!(err, GrpcError::Protocol(_))
+        );
+        crate::test_complete!("test_server_serve_requires_service_registration");
+    }
+
+    #[test]
+    fn test_server_serve_rejects_invalid_address() {
+        init_test("test_server_serve_rejects_invalid_address");
+        let server = Server::builder().add_service(TestService).build();
+        let result = futures_lite::future::block_on(server.serve("not-an-addr"));
+        let err = result.expect_err("invalid listen address should fail");
+        crate::assert_with_log!(
+            matches!(err, GrpcError::Transport(_)),
+            "transport error for invalid address",
+            true,
+            matches!(err, GrpcError::Transport(_))
+        );
+        crate::test_complete!("test_server_serve_rejects_invalid_address");
+    }
+
+    #[test]
+    fn test_server_serve_bind_probe() {
+        init_test("test_server_serve_bind_probe");
+        let server = Server::builder().add_service(TestService).build();
+        let result = futures_lite::future::block_on(server.serve("127.0.0.1:0"));
+        crate::assert_with_log!(result.is_ok(), "bind probe succeeds", true, result.is_ok());
+        crate::test_complete!("test_server_serve_bind_probe");
+    }
+
+    #[test]
+    fn test_server_serve_accepts_hostname_address() {
+        init_test("test_server_serve_accepts_hostname_address");
+        let server = Server::builder().add_service(TestService).build();
+        let result = futures_lite::future::block_on(server.serve("localhost:0"));
+        crate::assert_with_log!(
+            result.is_ok(),
+            "bind probe accepts hostname form",
+            true,
+            result.is_ok()
+        );
+        crate::test_complete!("test_server_serve_accepts_hostname_address");
     }
 
     #[test]

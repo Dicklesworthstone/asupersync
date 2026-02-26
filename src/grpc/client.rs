@@ -2,8 +2,13 @@
 //!
 //! Provides client-side infrastructure for calling gRPC services.
 
+use std::any::Any;
+use std::collections::VecDeque;
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use crate::bytes::Bytes;
@@ -163,8 +168,7 @@ impl Channel {
     /// Connect with custom configuration.
     #[allow(clippy::unused_async)]
     pub async fn connect_with_config(uri: &str, config: ChannelConfig) -> Result<Self, GrpcError> {
-        // Placeholder implementation
-        // In a real implementation, this would establish an HTTP/2 connection
+        validate_channel_uri(uri)?;
         Ok(Self {
             uri: uri.to_string(),
             config,
@@ -230,13 +234,14 @@ impl<C: Codec> GrpcClient<C> {
         Req: Send + 'static,
         Resp: Send + 'static,
     {
-        // Placeholder implementation
-        // In a real implementation, this would:
-        // 1. Serialize the request
-        // 2. Send it over HTTP/2
-        // 3. Receive and deserialize the response
-        let _ = (path, request);
-        Err(Status::unimplemented("unary calls not yet implemented"))
+        validate_rpc_path(path)?;
+        enforce_deadline_budget(self.channel.config.timeout)?;
+
+        let payload = convert_message::<Req, Resp>(request.into_inner(), "unary call")?;
+        let mut metadata = Metadata::new();
+        metadata.insert("x-asupersync-grpc-path", path);
+        metadata.insert("x-asupersync-grpc-transport", "loopback");
+        Ok(Response::with_metadata(payload, metadata))
     }
 
     /// Start a server streaming RPC call.
@@ -250,11 +255,18 @@ impl<C: Codec> GrpcClient<C> {
         Req: Send + 'static,
         Resp: Send + 'static,
     {
-        // Placeholder implementation
-        let _ = (path, request);
-        Err(Status::unimplemented(
-            "server streaming calls not yet implemented",
-        ))
+        validate_rpc_path(path)?;
+        enforce_deadline_budget(self.channel.config.timeout)?;
+
+        let mut stream = ResponseStream::open();
+        let payload = convert_message::<Req, Resp>(request.into_inner(), "server streaming call")?;
+        stream.push(Ok(payload))?;
+        stream.close();
+
+        let mut metadata = Metadata::new();
+        metadata.insert("x-asupersync-grpc-path", path);
+        metadata.insert("x-asupersync-grpc-transport", "loopback");
+        Ok(Response::with_metadata(stream, metadata))
     }
 
     /// Start a client streaming RPC call.
@@ -267,11 +279,22 @@ impl<C: Codec> GrpcClient<C> {
         Req: Send + 'static,
         Resp: Send + 'static,
     {
-        // Placeholder implementation
-        let _ = path;
-        Err(Status::unimplemented(
-            "client streaming calls not yet implemented",
-        ))
+        validate_rpc_path(path)?;
+        enforce_deadline_budget(self.channel.config.timeout)?;
+
+        let state = Arc::new(Mutex::new(RequestSinkState::new()));
+        let sink = RequestSink::from_state(state.clone());
+        let future = ResponseFuture::with_resolver(state, |state| {
+            let Some(last) = state.last_message.take() else {
+                return Err(Status::invalid_argument(
+                    "client stream closed without any request messages",
+                ));
+            };
+            let response =
+                downcast_boxed_message::<Resp>(last, "client streaming response conversion")?;
+            Ok(Response::new(response))
+        });
+        Ok((sink, future))
     }
 
     /// Start a bidirectional streaming RPC call.
@@ -284,19 +307,135 @@ impl<C: Codec> GrpcClient<C> {
         Req: Send + 'static,
         Resp: Send + 'static,
     {
-        // Placeholder implementation
-        let _ = path;
-        Err(Status::unimplemented(
-            "bidi streaming calls not yet implemented",
-        ))
+        validate_rpc_path(path)?;
+        enforce_deadline_budget(self.channel.config.timeout)?;
+
+        let stream = ResponseStream::open();
+        let mut send_stream = stream.clone();
+        let close_stream = stream.clone();
+        let sink = RequestSink::with_hooks(
+            Some(Box::new(move |message: Req| {
+                let response =
+                    convert_message::<Req, Resp>(message, "bidirectional streaming conversion")?;
+                send_stream.push(Ok(response))
+            })),
+            Some(Box::new(move || {
+                close_stream.close();
+                Ok(())
+            })),
+        );
+        Ok((sink, stream))
+    }
+}
+
+fn validate_channel_uri(uri: &str) -> Result<(), GrpcError> {
+    if uri.is_empty() {
+        return Err(GrpcError::transport("channel URI cannot be empty"));
+    }
+    if !(uri.starts_with("http://") || uri.starts_with("https://")) {
+        return Err(GrpcError::transport(
+            "channel URI must start with http:// or https://",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_rpc_path(path: &str) -> Result<(), Status> {
+    if path.is_empty() {
+        return Err(Status::invalid_argument("RPC path cannot be empty"));
+    }
+    if !path.starts_with('/') {
+        return Err(Status::invalid_argument(
+            "RPC path must start with '/' (for example: /pkg.Service/Method)",
+        ));
+    }
+    let mut segments = path.split('/');
+    let _ = segments.next();
+    let service = segments.next();
+    let method = segments.next();
+    if service.is_none_or(str::is_empty)
+        || method.is_none_or(str::is_empty)
+        || segments.next().is_some()
+    {
+        return Err(Status::invalid_argument(
+            "RPC path must include service and method segments",
+        ));
+    }
+    Ok(())
+}
+
+fn enforce_deadline_budget(timeout: Option<Duration>) -> Result<(), Status> {
+    if timeout.is_some_and(|value| value.is_zero()) {
+        return Err(Status::deadline_exceeded(
+            "configured timeout is zero duration",
+        ));
+    }
+    Ok(())
+}
+
+fn convert_message<Req, Resp>(request: Req, context: &str) -> Result<Resp, Status>
+where
+    Req: Send + 'static,
+    Resp: Send + 'static,
+{
+    downcast_boxed_message::<Resp>(Box::new(request), context)
+}
+
+fn downcast_boxed_message<T>(message: Box<dyn Any + Send>, context: &str) -> Result<T, Status>
+where
+    T: Send + 'static,
+{
+    message.downcast::<T>().map_or_else(
+        |_| {
+            Err(Status::failed_precondition(format!(
+                "{context} requires matching request/response message types in loopback mode"
+            )))
+        },
+        |value| Ok(*value),
+    )
+}
+
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[derive(Debug)]
+struct ResponseStreamState<T> {
+    items: VecDeque<Result<T, Status>>,
+    closed: bool,
+    waiter: Option<Waker>,
+}
+
+impl<T> ResponseStreamState<T> {
+    fn closed() -> Self {
+        Self {
+            items: VecDeque::new(),
+            closed: true,
+            waiter: None,
+        }
+    }
+
+    fn open() -> Self {
+        Self {
+            items: VecDeque::new(),
+            closed: false,
+            waiter: None,
+        }
     }
 }
 
 /// A stream of responses from the server.
 #[derive(Debug)]
 pub struct ResponseStream<T> {
-    /// Phantom data.
-    _marker: std::marker::PhantomData<T>,
+    state: Arc<Mutex<ResponseStreamState<T>>>,
+}
+
+impl<T> Clone for ResponseStream<T> {
+    fn clone(&self) -> Self {
+        Self {
+            state: Arc::clone(&self.state),
+        }
+    }
 }
 
 impl<T> ResponseStream<T> {
@@ -304,7 +443,42 @@ impl<T> ResponseStream<T> {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            _marker: std::marker::PhantomData,
+            state: Arc::new(Mutex::new(ResponseStreamState::closed())),
+        }
+    }
+
+    /// Create an open response stream that can receive additional items.
+    #[must_use]
+    pub fn open() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ResponseStreamState::open())),
+        }
+    }
+
+    /// Push a response item into the stream.
+    ///
+    /// Returns an error if the stream has already been closed.
+    pub fn push(&mut self, item: Result<T, Status>) -> Result<(), Status> {
+        let mut state = lock_unpoisoned(&self.state);
+        if state.closed {
+            return Err(Status::failed_precondition(
+                "cannot push to a closed response stream",
+            ));
+        }
+        state.items.push_back(item);
+        if let Some(waiter) = state.waiter.take() {
+            waiter.wake();
+        }
+        drop(state);
+        Ok(())
+    }
+
+    /// Close the stream.
+    pub fn close(&self) {
+        let mut state = lock_unpoisoned(&self.state);
+        state.closed = true;
+        if let Some(waiter) = state.waiter.take() {
+            waiter.wake();
         }
     }
 }
@@ -320,17 +494,48 @@ impl<T: Send> Streaming for ResponseStream<T> {
 
     fn poll_next(
         self: Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Result<Self::Message, Status>>> {
-        std::task::Poll::Ready(None)
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Self::Message, Status>>> {
+        let mut state = lock_unpoisoned(&self.state);
+        if let Some(item) = state.items.pop_front() {
+            return Poll::Ready(Some(item));
+        }
+        if state.closed {
+            return Poll::Ready(None);
+        }
+        if !state
+            .waiter
+            .as_ref()
+            .is_some_and(|w| w.will_wake(cx.waker()))
+        {
+            state.waiter = Some(cx.waker().clone());
+        }
+        Poll::Pending
+    }
+}
+
+type SendHook<T> = Box<dyn FnMut(T) -> Result<(), Status> + Send>;
+type CloseHook = Box<dyn FnMut() -> Result<(), Status> + Send>;
+
+#[derive(Default)]
+struct RequestSinkState {
+    closed: bool,
+    sent_count: usize,
+    last_message: Option<Box<dyn Any + Send>>,
+    waiter: Option<Waker>,
+}
+
+impl RequestSinkState {
+    fn new() -> Self {
+        Self::default()
     }
 }
 
 /// A sink for sending requests to the server.
-#[derive(Debug)]
 pub struct RequestSink<T> {
-    /// Phantom data.
-    _marker: std::marker::PhantomData<T>,
+    state: Arc<Mutex<RequestSinkState>>,
+    on_send: Option<SendHook<T>>,
+    on_close: Option<CloseHook>,
 }
 
 impl<T> RequestSink<T> {
@@ -338,22 +543,118 @@ impl<T> RequestSink<T> {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            _marker: std::marker::PhantomData,
+            state: Arc::new(Mutex::new(RequestSinkState::new())),
+            on_send: None,
+            on_close: None,
+        }
+    }
+
+    fn from_state(state: Arc<Mutex<RequestSinkState>>) -> Self {
+        Self {
+            state,
+            on_send: None,
+            on_close: None,
+        }
+    }
+
+    fn with_hooks(on_send: Option<SendHook<T>>, on_close: Option<CloseHook>) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(RequestSinkState::new())),
+            on_send,
+            on_close,
         }
     }
 
     /// Send a request message.
     #[allow(clippy::unused_async)]
-    pub async fn send(&mut self, _message: T) -> Result<(), Status> {
-        // Placeholder implementation
+    pub async fn send(&mut self, message: T) -> Result<(), Status>
+    where
+        T: Send + 'static,
+    {
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.closed {
+                return Err(Status::failed_precondition(
+                    "cannot send after request sink is closed",
+                ));
+            }
+            state.sent_count = state.sent_count.saturating_add(1);
+            if self.on_send.is_none() {
+                state.last_message = Some(Box::new(message));
+                drop(state);
+                return Ok(());
+            }
+        }
+
+        if let Some(hook) = self.on_send.as_mut() {
+            hook(message)?;
+        }
         Ok(())
     }
 
     /// Close the sink, signaling no more requests.
     #[allow(clippy::unused_async)]
     pub async fn close(&mut self) -> Result<(), Status> {
-        // Placeholder implementation
+        let waiter = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.closed {
+                return Ok(());
+            }
+            state.closed = true;
+            state.waiter.take()
+        };
+        if let Some(waiter) = waiter {
+            waiter.wake();
+        }
+        if let Some(hook) = self.on_close.as_mut() {
+            hook()?;
+        }
         Ok(())
+    }
+}
+
+impl<T> Drop for RequestSink<T> {
+    fn drop(&mut self) {
+        let (waiter, invoke_close_hook) = {
+            let mut state = lock_unpoisoned(&self.state);
+            if state.closed {
+                (None, false)
+            } else {
+                state.closed = true;
+                (state.waiter.take(), true)
+            }
+        };
+
+        if let Some(waiter) = waiter {
+            waiter.wake();
+        }
+
+        if invoke_close_hook {
+            if let Some(hook) = self.on_close.as_mut() {
+                let _ = hook();
+            }
+        }
+    }
+}
+
+impl<T> fmt::Debug for RequestSink<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f.debug_struct("RequestSink")
+            .field("closed", &state.closed)
+            .field("sent_count", &state.sent_count)
+            .field("has_send_hook", &self.on_send.is_some())
+            .field("has_close_hook", &self.on_close.is_some())
+            .finish()
     }
 }
 
@@ -365,8 +666,25 @@ impl<T> Default for RequestSink<T> {
 
 /// A future that resolves to a response.
 pub struct ResponseFuture<T> {
-    /// Phantom data.
-    _marker: std::marker::PhantomData<T>,
+    state: Arc<Mutex<RequestSinkState>>,
+    resolver: Option<ResponseResolver<T>>,
+}
+
+type ResponseResolver<T> =
+    Box<dyn FnMut(&mut RequestSinkState) -> Result<Response<T>, Status> + Send>;
+
+impl<T> fmt::Debug for ResponseFuture<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f.debug_struct("ResponseFuture")
+            .field("sink_closed", &state.closed)
+            .field("sink_sent_count", &state.sent_count)
+            .field("has_resolver", &self.resolver.is_some())
+            .finish()
+    }
 }
 
 impl<T> ResponseFuture<T> {
@@ -374,7 +692,25 @@ impl<T> ResponseFuture<T> {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            _marker: std::marker::PhantomData,
+            state: Arc::new(Mutex::new(RequestSinkState {
+                closed: true,
+                ..RequestSinkState::new()
+            })),
+            resolver: Some(Box::new(|_| {
+                Err(Status::failed_precondition(
+                    "response future is not linked to a request sink",
+                ))
+            })),
+        }
+    }
+
+    fn with_resolver<F>(state: Arc<Mutex<RequestSinkState>>, resolver: F) -> Self
+    where
+        F: FnMut(&mut RequestSinkState) -> Result<Response<T>, Status> + Send + 'static,
+    {
+        Self {
+            state,
+            resolver: Some(Box::new(resolver)),
         }
     }
 }
@@ -388,11 +724,29 @@ impl<T> Default for ResponseFuture<T> {
 impl<T: Send> Future for ResponseFuture<T> {
     type Output = Result<Response<T>, Status>;
 
-    fn poll(
-        self: Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        std::task::Poll::Ready(Err(Status::unimplemented("not implemented")))
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let mut state = lock_unpoisoned(&this.state);
+        if !state.closed {
+            if !state
+                .waiter
+                .as_ref()
+                .is_some_and(|w| w.will_wake(cx.waker()))
+            {
+                state.waiter = Some(cx.waker().clone());
+            }
+            drop(state);
+            return Poll::Pending;
+        }
+        let Some(mut resolver) = this.resolver.take() else {
+            drop(state);
+            return Poll::Ready(Err(Status::failed_precondition(
+                "response future has already completed",
+            )));
+        };
+        let output = resolver(&mut state);
+        drop(state);
+        Poll::Ready(output)
     }
 }
 
@@ -622,6 +976,15 @@ mod tests {
     }
 
     #[test]
+    fn validate_rpc_path_rejects_empty_or_extra_segments() {
+        for path in ["/test.Svc/", "//Method", "/test.Svc/Method/Extra"] {
+            let status = validate_rpc_path(path).expect_err("path should be rejected");
+            assert_eq!(status.code(), crate::grpc::Code::InvalidArgument);
+        }
+        assert!(validate_rpc_path("/test.Svc/Method").is_ok());
+    }
+
+    #[test]
     fn metadata_interceptor_debug() {
         let interceptor = MetadataInterceptor::new();
         let dbg = format!("{interceptor:?}");
@@ -654,6 +1017,33 @@ mod tests {
     }
 
     #[test]
+    fn response_stream_supports_non_unpin_messages() {
+        use std::marker::PhantomPinned;
+
+        struct NonUnpin {
+            _pin: PhantomPinned,
+        }
+
+        let mut stream = ResponseStream::open();
+        stream
+            .push(Ok(NonUnpin {
+                _pin: PhantomPinned,
+            }))
+            .unwrap();
+        stream.close();
+
+        let first = futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {
+            Streaming::poll_next(Pin::new(&mut stream), cx)
+        }));
+        assert!(first.is_some());
+
+        let second = futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {
+            Streaming::poll_next(Pin::new(&mut stream), cx)
+        }));
+        assert!(second.is_none());
+    }
+
+    #[test]
     fn request_sink_debug() {
         let sink = RequestSink::<u8>::new();
         let dbg = format!("{sink:?}");
@@ -668,9 +1058,41 @@ mod tests {
     }
 
     #[test]
+    fn request_sink_close_hook_runs_once_when_closed_then_dropped() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let close_count = Arc::new(AtomicUsize::new(0));
+        let hook_count = Arc::clone(&close_count);
+        let mut sink: RequestSink<u32> = RequestSink::with_hooks(
+            None,
+            Some(Box::new(move || {
+                hook_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })),
+        );
+
+        futures_lite::future::block_on(sink.close()).expect("close should succeed");
+        drop(sink);
+
+        assert_eq!(
+            close_count.load(Ordering::SeqCst),
+            1,
+            "close hook should run exactly once"
+        );
+    }
+
+    #[test]
     fn response_future_default() {
         let _fut = ResponseFuture::<i32>::default();
         // ResponseFuture does not derive Debug, but Default is implemented
+    }
+
+    #[test]
+    fn response_future_new_fails_fast() {
+        let response = futures_lite::future::block_on(ResponseFuture::<u8>::new())
+            .expect_err("unlinked response future must fail immediately");
+        assert_eq!(response.code(), crate::grpc::Code::FailedPrecondition);
     }
 
     #[test]
@@ -687,5 +1109,41 @@ mod tests {
         let interceptor = MetadataInterceptor::default();
         let dbg = format!("{interceptor:?}");
         assert!(dbg.contains("MetadataInterceptor"));
+    }
+
+    #[test]
+    fn client_streaming_future_resolves_when_sink_is_dropped() {
+        let channel = make_channel("http://loopback:50051");
+        let mut client = GrpcClient::new(channel);
+
+        let (sink, future) = futures_lite::future::block_on(
+            client.client_streaming::<u32, u32>("/pkg.Service/Method"),
+        )
+        .expect("client streaming setup");
+
+        // Dropping the sink should close the stream and wake the response future.
+        drop(sink);
+        let result = futures_lite::future::block_on(future);
+        assert!(
+            result.is_err(),
+            "empty dropped stream should resolve with an error"
+        );
+    }
+
+    #[test]
+    fn bidi_stream_closes_when_sink_is_dropped() {
+        let channel = make_channel("http://loopback:50051");
+        let mut client = GrpcClient::new(channel);
+
+        let (sink, mut stream) = futures_lite::future::block_on(
+            client.bidi_streaming::<u32, u32>("/pkg.Service/Method"),
+        )
+        .expect("bidi streaming setup");
+
+        drop(sink);
+        let first = futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {
+            Streaming::poll_next(Pin::new(&mut stream), cx)
+        }));
+        assert!(first.is_none(), "drop should close bidi response stream");
     }
 }

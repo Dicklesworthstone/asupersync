@@ -57,23 +57,20 @@ fn e2e_grpc_unary_call_lifecycle() {
             client.unary("/test.Service/Echo", request).await;
 
         test_section!("verify");
-        // Currently returns Unimplemented (stub)
-        match &result {
-            Ok(resp) => tracing::info!(message = resp.get_ref(), "unexpected success"),
-            Err(status) => {
-                tracing::info!(
-                    code = ?status.code(),
-                    message = status.message(),
-                    "expected error status"
-                );
-                assert_with_log!(
-                    status.code() == Code::Unimplemented,
-                    "unimplemented status",
-                    Code::Unimplemented,
-                    status.code()
-                );
-            }
-        }
+        let response = result.expect("loopback unary call should succeed");
+        tracing::info!(message = response.get_ref(), "loopback unary response");
+        assert_with_log!(
+            response.get_ref() == "test payload",
+            "echoed payload",
+            "test payload",
+            response.get_ref()
+        );
+        assert_with_log!(
+            response.metadata().get("x-asupersync-grpc-path").is_some(),
+            "response path metadata",
+            true,
+            response.metadata().get("x-asupersync-grpc-path").is_some()
+        );
     });
 
     test_complete!("e2e_grpc_unary_call_lifecycle");

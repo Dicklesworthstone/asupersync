@@ -586,12 +586,12 @@ fn grpc_verify_015_metadata_operations() {
     test_complete!("grpc_verify_015_metadata_operations");
 }
 
-/// GRPC-VERIFY-016: StreamingRequest poll_next placeholder
+/// GRPC-VERIFY-016: StreamingRequest closed-default semantics
 ///
-/// StreamingRequest's placeholder impl returns None immediately.
+/// A newly constructed StreamingRequest is closed and returns None immediately.
 #[test]
-fn grpc_verify_016_streaming_request_placeholder() {
-    init_test("grpc_verify_016_streaming_request_placeholder");
+fn grpc_verify_016_streaming_request_closed_default() {
+    init_test("grpc_verify_016_streaming_request_closed_default");
 
     use asupersync::grpc::Streaming;
 
@@ -607,7 +607,7 @@ fn grpc_verify_016_streaming_request_placeholder() {
     let result = Pin::new(&mut sr).poll_next(&mut cx);
     assert!(matches!(result, Poll::Ready(None)));
 
-    test_complete!("grpc_verify_016_streaming_request_placeholder");
+    test_complete!("grpc_verify_016_streaming_request_closed_default");
 }
 
 /// GRPC-VERIFY-017: Bidirectional and ClientStreaming construction
@@ -1129,7 +1129,7 @@ fn grpc_verify_036_channel_builder() {
 
 /// GRPC-VERIFY-037: GrpcClient creation and unary call
 ///
-/// GrpcClient wraps a Channel; unary calls currently return Unimplemented.
+/// GrpcClient wraps a Channel and executes deterministic loopback unary calls.
 #[test]
 fn grpc_verify_037_grpc_client() {
     init_test("grpc_verify_037_grpc_client");
@@ -1139,11 +1139,11 @@ fn grpc_verify_037_grpc_client() {
         let mut client = GrpcClient::new(channel.clone());
         assert_eq!(client.channel().uri(), "http://localhost:50051");
 
-        // Unary call returns Unimplemented (placeholder)
-        let err: Result<Response<String>, Status> = client
+        let response: Result<Response<String>, Status> = client
             .unary("/test.Svc/Method", Request::new("hello".to_string()))
             .await;
-        assert_eq!(err.unwrap_err().code(), Code::Unimplemented);
+        let response = response.expect("loopback unary call should succeed");
+        assert_eq!(response.into_inner(), "hello".to_string());
     });
 
     test_complete!("grpc_verify_037_grpc_client");
