@@ -57,3 +57,5 @@ pub use rwlock::{
 pub use semaphore::{
     AcquireError, OwnedSemaphorePermit, Semaphore, SemaphorePermit, TryAcquireError,
 };
+#[cfg(test)]
+mod notify_lost_bug_test;
