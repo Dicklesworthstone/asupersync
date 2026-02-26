@@ -809,6 +809,10 @@ fn io_cancel_010_region_close_waits_for_io_obligations() {
     if let Some(task) = runtime.state.task_mut(task_id) {
         task.complete(Outcome::Cancelled(cancel_reason));
     }
+    if let Some(region_record) = runtime.state.regions.get(region.arena_index()) {
+        region_record.remove_task(task_id);
+        runtime.state.remove_task(task_id);
+    }
 
     let can_close_with_pending = runtime.state.can_region_complete_close(region);
     assert!(
@@ -829,28 +833,12 @@ fn io_cancel_010_region_close_waits_for_io_obligations() {
 
     io_op.cancel(&mut runtime.state).expect("cancel io op");
 
-    let pending_after = runtime
-        .state
-        .regions
-        .get(region.arena_index())
-        .expect("region")
-        .pending_obligations();
-    assert_eq!(
-        pending_after, 0,
-        "pending obligations should clear after io cancel"
-    );
-
-    // `abort_obligation` triggers `advance_region_state`, so the region should now be closed.
-    let state_after = runtime
-        .state
-        .regions
-        .get(region.arena_index())
-        .expect("region")
-        .state();
-    assert_eq!(
-        state_after,
-        asupersync::record::region::RegionState::Closed,
-        "region should close after io obligations resolve"
+    // `abort_obligation` triggers `advance_region_state`, so the region should now be closed
+    // and reclaimed from the arena.
+    let region_exists = runtime.state.regions.get(region.arena_index()).is_some();
+    assert!(
+        !region_exists,
+        "region should be closed and reclaimed after io obligations resolve"
     );
 
     test_complete!("io_cancel_010_region_close_waits_for_io_obligations");

@@ -47,6 +47,7 @@ Framework integrations should wrap `Cx` to provide least-privilege access.
 ```ignore
 use asupersync::cx::cap::CapSet;
 use asupersync::web::request_region::RequestContext;
+use asupersync::web::Response;
 
 type RequestCaps = CapSet<true, true, false, false, false>;
 
@@ -54,7 +55,8 @@ async fn handler(ctx: &RequestContext<'_>) -> Response {
     let cx = ctx.cx_narrow::<RequestCaps>();
     cx.checkpoint()?;
     // spawn/time allowed; IO/remote not exposed
-    todo!()
+    cx.trace("request handled");
+    Response::default()
 }
 ```
 
@@ -957,7 +959,7 @@ Status note:
 Compile a deterministic supervisor topology:
 
 ```no_run
-use asupersync::Budget;
+use asupersync::{Budget, TaskId};
 use asupersync::supervision::{
     ChildSpec, RestartConfig, SupervisionStrategy, SupervisorBuilder,
 };
@@ -965,7 +967,7 @@ use asupersync::supervision::{
 let compiled = SupervisorBuilder::new("counter_root")
     .child(
         ChildSpec::new("counter_service", |_scope, _state, _cx| {
-            unimplemented!("spawn child task/actor and return TaskId");
+            Ok(TaskId::new_ephemeral())
         })
         .with_restart(SupervisionStrategy::Restart(RestartConfig::default()))
         .with_shutdown_budget(Budget::INFINITE.with_poll_quota(1_000)),

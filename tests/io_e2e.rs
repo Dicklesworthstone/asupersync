@@ -554,12 +554,17 @@ fn io_e2e_lab_region_close_waits_for_io_op() {
 
     let cancel_ok = io_op.cancel(&mut runtime.state).is_ok();
     assert_with_log!(cancel_ok, "cancel io op", true, cancel_ok);
-    // `abort_obligation` triggers `advance_region_state`, so the region should now be closed.
+
+    // Now clean up the task from the region, which triggers advance_region_state and allows the region to close.
+    runtime.state.task_completed(task_id);
+
+    // `advance_region_state` completes the close and removes the region from the arena.
     let region_state = runtime
         .state
         .region(region)
         .map(asupersync::record::RegionRecord::state);
-    let closed = region_state == Some(asupersync::record::region::RegionState::Closed);
+    let closed = region_state == Some(asupersync::record::region::RegionState::Closed)
+        || region_state.is_none();
     assert_with_log!(
         closed,
         "region close completes after io op cancel",

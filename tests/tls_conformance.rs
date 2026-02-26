@@ -370,6 +370,46 @@ W7n9v0wIyo4e/O0DO2fczXZD
         test_complete!("tls_close_notify_shutdowns_streams");
     }
 
+    #[test]
+    fn zero_length_read_returns_immediately() {
+        init_test_logging();
+        test_phase!("tls_zero_length_read_returns_immediately");
+
+        let (client, server) = handshake_pair(make_connector(), make_acceptor(), 6281);
+        let mut client = client.unwrap();
+        let mut server = server.unwrap();
+
+        futures_lite::future::block_on(async {
+            let mut empty = [];
+            server.read_exact(&mut empty).await.unwrap();
+
+            client.shutdown().await.unwrap();
+        });
+
+        test_complete!("tls_zero_length_read_returns_immediately");
+    }
+
+    #[test]
+    fn close_notify_causes_peer_eof_read() {
+        init_test_logging();
+        test_phase!("tls_close_notify_causes_peer_eof_read");
+
+        let (client, server) = handshake_pair(make_connector(), make_acceptor(), 6282);
+        let mut client = client.unwrap();
+        let mut server = server.unwrap();
+
+        futures_lite::future::block_on(async {
+            client.shutdown().await.unwrap();
+
+            let mut buf = Vec::new();
+            let n = server.read_to_end(&mut buf).await.unwrap();
+            assert_eq!(n, 0, "peer close_notify should surface as EOF");
+            assert!(buf.is_empty());
+        });
+
+        test_complete!("tls_close_notify_causes_peer_eof_read");
+    }
+
     // -----------------------------------------------------------------------
     // ALPN negotiation
     // -----------------------------------------------------------------------

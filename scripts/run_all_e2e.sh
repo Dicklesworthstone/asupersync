@@ -673,7 +673,7 @@ for name in "${SUITE_ORDER[@]}"; do
     if [[ "$summary_schema_ok" -eq 0 ]]; then
         contract_violation=1
     fi
-    if [[ "$RESULTS[$name]" == "FAIL" || "$RESULTS[$name]" == "TIMEOUT" ]]; then
+    if [[ "${RESULTS[$name]}" == "FAIL" || "${RESULTS[$name]}" == "TIMEOUT" ]]; then
         if [[ "$replay_verified" -eq 0 || "$artifact_complete" -eq 0 ]]; then
             contract_violation=1
         fi
