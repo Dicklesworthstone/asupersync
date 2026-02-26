@@ -118,19 +118,23 @@ impl WsUrl {
             .map_or((rest, "/"), |idx| (&rest[..idx], &rest[idx..]));
 
         // Parse host and port
-        let (host, port) = if let Some(bracket_end) = host_port.find(']') {
-            // IPv6: [::1]:8080
-            let host = &host_port[1..bracket_end];
-            let port = if host_port.len() > bracket_end + 1
-                && host_port.as_bytes()[bracket_end + 1] == b':'
-            {
-                host_port[bracket_end + 2..]
-                    .parse()
-                    .map_err(|_| HandshakeError::InvalidUrl("invalid port".into()))?
+        let (host, port) = if host_port.starts_with('[') {
+            if let Some(bracket_end) = host_port.find(']') {
+                // IPv6: [::1]:8080
+                let host = &host_port[1..bracket_end];
+                let port = if host_port.len() > bracket_end + 1
+                    && host_port.as_bytes()[bracket_end + 1] == b':'
+                {
+                    host_port[bracket_end + 2..]
+                        .parse()
+                        .map_err(|_| HandshakeError::InvalidUrl("invalid port".into()))?
+                } else {
+                    default_port
+                };
+                (host.to_string(), port)
             } else {
-                default_port
-            };
-            (host.to_string(), port)
+                return Err(HandshakeError::InvalidUrl("missing closing bracket for IPv6 address".into()));
+            }
         } else if let Some(colon_idx) = host_port.rfind(':') {
             // host:port
             let host = &host_port[..colon_idx];
@@ -158,10 +162,16 @@ impl WsUrl {
     #[must_use]
     pub fn host_header(&self) -> String {
         let default_port = if self.tls { 443 } else { 80 };
-        if self.port == default_port {
-            self.host.clone()
+        let host_str = if self.host.contains(':') {
+            format!("[{}]", self.host)
         } else {
-            format!("{}:{}", self.host, self.port)
+            self.host.clone()
+        };
+
+        if self.port == default_port {
+            host_str
+        } else {
+            format!("{}:{}", host_str, self.port)
         }
     }
 }

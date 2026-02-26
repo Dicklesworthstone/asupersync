@@ -186,42 +186,7 @@ impl Default for CloseReason {
     }
 }
 
-impl CloseCode {
-    /// Parse a close code from a u16 value.
-    ///
-    /// Returns `None` for unknown codes in valid ranges (1000-4999).
-    /// Custom codes (3000-3999, 4000-4999) are accepted.
-    #[must_use]
-    pub fn from_u16(code: u16) -> Option<Self> {
-        match code {
-            1000 => Some(Self::Normal),
-            1001 => Some(Self::GoingAway),
-            1002 => Some(Self::ProtocolError),
-            1003 => Some(Self::Unsupported),
-            1004 => Some(Self::Reserved),
-            1005 => Some(Self::NoStatusReceived),
-            1006 => Some(Self::Abnormal),
-            1007 => Some(Self::InvalidPayload),
-            1008 => Some(Self::PolicyViolation),
-            1009 => Some(Self::MessageTooBig),
-            1010 => Some(Self::MandatoryExtension),
-            1011 => Some(Self::InternalError),
-            1015 => Some(Self::TlsHandshake),
-            _ => None,
-        }
-    }
 
-    /// Check if a raw code value is valid for sending.
-    ///
-    /// Valid ranges per RFC 6455:
-    /// - 1000-1003, 1007-1011: Standard codes
-    /// - 3000-3999: Registered (IANA)
-    /// - 4000-4999: Private use
-    #[must_use]
-    pub fn is_valid_code(code: u16) -> bool {
-        matches!(code, 1000..=1003 | 1007..=1011 | 3000..=4999)
-    }
-}
 
 /// State of the close handshake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
