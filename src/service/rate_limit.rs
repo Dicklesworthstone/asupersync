@@ -221,8 +221,9 @@ impl<S> RateLimit<S> {
         let period_nanos = self.period.as_nanos().min(u128::from(u64::MAX)) as u64;
 
         if period_nanos == 0 {
-            // Zero period means "no throttling": keep the bucket full.
-            self.tokens = self.rate;
+            // Zero period means "no throttling": always make at least one token
+            // available so poll_ready never stalls even when rate == 0.
+            self.tokens = self.rate.max(1);
             self.last_refill = Some(now);
             return;
         }

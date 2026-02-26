@@ -175,6 +175,10 @@ impl NatsConfig {
             config.host = url.to_string();
         }
 
+        if config.host.is_empty() {
+            return Err(NatsError::InvalidUrl("host must not be empty".to_string()));
+        }
+
         Ok(config)
     }
 }
@@ -303,6 +307,21 @@ fn extract_json_bool(json: &str, key: &str) -> Option<bool> {
     } else {
         None
     }
+}
+
+fn validate_nats_token(value: &str, field: &str) -> Result<(), NatsError> {
+    if value.is_empty() {
+        return Err(NatsError::Protocol(format!("{field} must not be empty")));
+    }
+    if value
+        .chars()
+        .any(|ch| ch.is_ascii_control() || ch.is_whitespace())
+    {
+        return Err(NatsError::Protocol(format!(
+            "{field} contains illegal whitespace/control characters"
+        )));
+    }
+    Ok(())
 }
 
 /// Generate a random suffix for unique inbox subjects using capability-based entropy.
@@ -661,6 +680,11 @@ impl NatsClient {
             .next()
             .ok_or_else(|| NatsError::Protocol(format!("malformed MSG header: {header}")))?;
         let fourth = parts.next();
+        if parts.next().is_some() {
+            return Err(NatsError::Protocol(format!(
+                "malformed MSG header (too many fields): {header}"
+            )));
+        }
 
         let subject = subject_str.to_string();
         let sid: u64 = sid_str
@@ -690,6 +714,11 @@ impl NatsClient {
 
         if buf.len() < total_len {
             return Ok(None); // Need more data
+        }
+        if buf[payload_end] != b'\r' || buf[payload_end + 1] != b'\n' {
+            return Err(NatsError::Protocol(
+                "malformed MSG payload terminator".to_string(),
+            ));
         }
 
         let payload = buf[payload_start..payload_end].to_vec();
@@ -736,6 +765,7 @@ impl NatsClient {
         if !self.connected {
             return Err(NatsError::NotConnected);
         }
+        validate_nats_token(subject, "subject")?;
 
         if payload.len() > self.config.max_payload {
             return Err(NatsError::Protocol(format!(
@@ -770,6 +800,8 @@ impl NatsClient {
         if !self.connected {
             return Err(NatsError::NotConnected);
         }
+        validate_nats_token(subject, "subject")?;
+        validate_nats_token(reply_to, "reply-to subject")?;
 
         if payload.len() > self.config.max_payload {
             return Err(NatsError::Protocol(format!(
@@ -803,6 +835,7 @@ impl NatsClient {
         if !self.connected {
             return Err(NatsError::NotConnected);
         }
+        validate_nats_token(subject, "subject")?;
 
         // Generate unique inbox subject
         let inbox = format!(
@@ -875,6 +908,7 @@ impl NatsClient {
         if !self.connected {
             return Err(NatsError::NotConnected);
         }
+        validate_nats_token(subject, "subject")?;
 
         let sid = self.next_sid.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(256); // Bounded for backpressure
@@ -918,6 +952,8 @@ impl NatsClient {
         if !self.connected {
             return Err(NatsError::NotConnected);
         }
+        validate_nats_token(subject, "subject")?;
+        validate_nats_token(queue_group, "queue group")?;
 
         let sid = self.next_sid.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(256);
@@ -1242,6 +1278,12 @@ mod tests {
     }
 
     #[test]
+    fn test_config_invalid_empty_host() {
+        let result = NatsConfig::from_url("nats://:4222");
+        assert!(matches!(result, Err(NatsError::InvalidUrl(_))));
+    }
+
+    #[test]
     fn test_nats_error_display() {
         assert_eq!(
             format!("{}", NatsError::Cancelled),
@@ -1265,6 +1307,15 @@ mod tests {
             format!("{}", NatsError::InvalidUrl("bad".to_string())),
             "Invalid NATS URL: bad"
         );
+    }
+
+    #[test]
+    fn test_validate_nats_token_rejects_whitespace_and_controls() {
+        assert!(validate_nats_token("foo.bar", "subject").is_ok());
+        assert!(validate_nats_token("", "subject").is_err());
+        assert!(validate_nats_token("foo bar", "subject").is_err());
+        assert!(validate_nats_token("foo\r\nPUB x 1\r\nx", "subject").is_err());
+        assert!(validate_nats_token("queue\tgroup", "queue group").is_err());
     }
 
     #[test]
