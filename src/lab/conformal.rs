@@ -44,6 +44,17 @@ fn count_to_f64(count: usize) -> f64 {
     f64::from(count.min(u32::MAX as usize) as u32)
 }
 
+fn assert_valid_alpha(alpha: f64) {
+    assert!(
+        alpha.is_finite() && alpha > 0.0 && alpha < 1.0,
+        "alpha must be finite and in (0, 1), got {alpha}"
+    );
+}
+
+fn assert_valid_min_samples(min_samples: usize) {
+    assert!(min_samples > 0, "min_calibration_samples must be > 0");
+}
+
 /// Configuration for the conformal calibrator.
 #[derive(Debug, Clone)]
 pub struct ConformalConfig {
@@ -66,10 +77,7 @@ impl ConformalConfig {
     /// Create a config with the given miscoverage rate.
     #[must_use]
     pub fn new(alpha: f64) -> Self {
-        debug_assert!(
-            alpha > 0.0 && alpha < 1.0,
-            "alpha must be in (0, 1), got {alpha}"
-        );
+        assert_valid_alpha(alpha);
         Self {
             alpha,
             ..Default::default()
@@ -332,6 +340,8 @@ impl ConformalCalibrator {
     /// Create a new calibrator with the given config.
     #[must_use]
     pub fn new(config: ConformalConfig) -> Self {
+        assert_valid_alpha(config.alpha);
+        assert_valid_min_samples(config.min_calibration_samples);
         Self {
             config,
             calibrations: BTreeMap::new(),
@@ -571,10 +581,7 @@ impl HealthThresholdConfig {
     /// Create a config with the given miscoverage rate and mode.
     #[must_use]
     pub fn new(alpha: f64, mode: ThresholdMode) -> Self {
-        debug_assert!(
-            alpha > 0.0 && alpha < 1.0,
-            "alpha must be in (0, 1), got {alpha}"
-        );
+        assert_valid_alpha(alpha);
         Self {
             alpha,
             mode,
@@ -697,6 +704,8 @@ impl HealthThresholdCalibrator {
     /// Create a new calibrator with the given config.
     #[must_use]
     pub fn new(config: HealthThresholdConfig) -> Self {
+        assert_valid_alpha(config.alpha);
+        assert_valid_min_samples(config.min_calibration_samples);
         Self {
             config,
             metrics: BTreeMap::new(),
@@ -1551,6 +1560,34 @@ mod tests {
         let c2 = c;
         assert!((c2.alpha - 0.05).abs() < f64::EPSILON);
         assert_eq!(c2.min_calibration_samples, 5);
+    }
+
+    #[test]
+    #[should_panic(expected = "alpha must be finite and in (0, 1)")]
+    fn conformal_config_rejects_invalid_alpha() {
+        let _ = ConformalConfig::new(1.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "min_calibration_samples must be > 0")]
+    fn conformal_calibrator_rejects_zero_min_samples() {
+        let mut cfg = ConformalConfig::new(0.05);
+        cfg.min_calibration_samples = 0;
+        let _ = ConformalCalibrator::new(cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "alpha must be finite and in (0, 1)")]
+    fn health_threshold_config_rejects_invalid_alpha() {
+        let _ = HealthThresholdConfig::new(0.0, ThresholdMode::Upper);
+    }
+
+    #[test]
+    #[should_panic(expected = "min_calibration_samples must be > 0")]
+    fn health_threshold_calibrator_rejects_zero_min_samples() {
+        let mut cfg = HealthThresholdConfig::new(0.05, ThresholdMode::Upper);
+        cfg.min_calibration_samples = 0;
+        let _ = HealthThresholdCalibrator::new(cfg);
     }
 
     #[test]

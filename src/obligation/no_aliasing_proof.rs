@@ -1084,6 +1084,28 @@ impl NoAliasingProver {
             return;
         }
 
+        // Pre: self-transfers are treated as invalid proof events.
+        // They preserve ownership but hide delegation bugs in traces.
+        if transfer.from == transfer.to {
+            self.counterexamples.push(Counterexample {
+                violation: ViolationKind::SelfTransfer,
+                obligation,
+                time,
+                description: format!(
+                    "self-transfer on {obligation:?} from {:?} to {:?} is disallowed",
+                    transfer.from, transfer.to,
+                ),
+            });
+            self.steps.push(ProofStep {
+                lemma: Lemma::TransferExclusivity,
+                obligation,
+                time,
+                verified: false,
+                description: "self-transfer is disallowed".to_string(),
+            });
+            return;
+        }
+
         // Transition: atomically update holder.
         self.ghost.active.get_mut(&obligation).unwrap().holder = transfer.to;
 
@@ -1391,6 +1413,37 @@ mod tests {
         let violations = prover.counterexamples.len();
         crate::assert_with_log!(violations == 0, "no violations", 0, violations);
         crate::test_complete!("lemma2_chain_transfer");
+    }
+
+    #[test]
+    fn lemma2_rejects_self_transfer() {
+        init_test("lemma2_rejects_self_transfer");
+        let events = vec![reserve(0, o(0), ObligationKind::SendPermit, t(0), r(0))];
+
+        let mut prover = NoAliasingProver::new();
+        for event in &events {
+            prover.process_event(event);
+        }
+
+        prover.apply_transfer(&TransferEvent {
+            obligation: o(0),
+            from: t(0),
+            to: t(0),
+            time: Time::from_nanos(5),
+        });
+
+        let self_transfer_count = prover
+            .counterexamples
+            .iter()
+            .filter(|c| c.violation == ViolationKind::SelfTransfer)
+            .count();
+        crate::assert_with_log!(
+            self_transfer_count == 1,
+            "1 self-transfer violation",
+            1,
+            self_transfer_count
+        );
+        crate::test_complete!("lemma2_rejects_self_transfer");
     }
 
     #[test]

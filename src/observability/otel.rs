@@ -223,10 +223,20 @@ impl CardinalityTracker {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
+        // Treat label sets as order-insensitive. Different construction order of
+        // equivalent labels should map to the same cardinality bucket.
+        let mut normalized: Vec<(&str, String)> = labels
+            .iter()
+            .map(|kv| (kv.key.as_str(), format!("{:?}", kv.value)))
+            .collect();
+        normalized.sort_unstable_by(|(a_key, a_val), (b_key, b_val)| {
+            a_key.cmp(b_key).then_with(|| a_val.cmp(b_val))
+        });
+
         let mut hasher = DefaultHasher::new();
-        for kv in labels {
-            kv.key.as_str().hash(&mut hasher);
-            format!("{:?}", kv.value).hash(&mut hasher);
+        for (key, value) in normalized {
+            key.hash(&mut hasher);
+            value.hash(&mut hasher);
         }
         hasher.finish()
     }
@@ -1302,6 +1312,28 @@ mod tests {
         // Next should exceed
         let labels = [KeyValue::new("id", "new")];
         assert!(tracker.would_exceed("test", &labels, 5));
+    }
+
+    #[test]
+    fn cardinality_label_order_is_ignored() {
+        let tracker = CardinalityTracker::new();
+
+        let labels_a = [
+            KeyValue::new("outcome", "ok"),
+            KeyValue::new("region", "root"),
+        ];
+        let labels_b = [
+            KeyValue::new("region", "root"),
+            KeyValue::new("outcome", "ok"),
+        ];
+
+        tracker.record("test", &labels_a);
+        assert!(
+            !tracker.would_exceed("test", &labels_b, 1),
+            "label order should not increase cardinality"
+        );
+        tracker.record("test", &labels_b);
+        assert_eq!(tracker.cardinality("test"), 1);
     }
 
     #[test]

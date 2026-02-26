@@ -589,7 +589,7 @@ impl ProgressCertificate {
         #[allow(clippy::cast_precision_loss)]
         let t_f = t as f64;
         let expected_remaining = t_f.mul_add(-mean_credit, initial);
-        let lambda = expected_remaining.abs();
+        let lambda = expected_remaining.max(0.0);
 
         // Azuma–Hoeffding: P(Sₜ ≥ lambda) ≤ exp(-2·lambda² / (t·c²))
         let exponent = -2.0 * lambda * lambda / (t_f * step_bound * step_bound);
@@ -641,8 +641,7 @@ impl ProgressCertificate {
         let initial = self.initial_potential.unwrap_or(0.0);
         let t_f = t as f64;
         let expected_remaining = t_f.mul_add(-mean_credit, initial);
-
-        let lambda = expected_remaining.abs();
+        let lambda = expected_remaining.max(0.0);
 
         // Use empirical variance if available, else fall back to worst-case
         // (which makes Freedman equivalent to Azuma).
@@ -759,7 +758,7 @@ impl ProgressCertificate {
             // Safety factor of 2 for variance.
             #[allow(clippy::cast_sign_loss)]
             let extra = (2.0 * t_rem).ceil().max(0.0) as usize;
-            let total_t = steps_with_deltas + extra;
+            let total_t = steps_with_deltas.saturating_add(extra);
             let tail = self.freedman_bound(total_t, mean_credit, effective_step_bound);
             (1.0 - tail).clamp(0.0, 1.0)
         });
@@ -1454,6 +1453,44 @@ mod tests {
             (0.0..=1.0).contains(&verdict.azuma_bound),
             "azuma bound should be in [0, 1], got {}",
             verdict.azuma_bound,
+        );
+    }
+
+    #[test]
+    fn bounds_do_not_overstate_confidence_after_expected_overshoot() {
+        // Construct a sequence with a large rebound then sharp drop so the
+        // average-credit extrapolation overshoots below zero while current
+        // potential remains positive.
+        let config = ProgressConfig {
+            max_step_bound: 250.0,
+            min_observations: 4,
+            ..ProgressConfig::default()
+        };
+        let mut cert = ProgressCertificate::new(config);
+
+        // Potentials: 100 -> 200 (increase), 200 -> 0 (large credit), 0 -> 10.
+        // total_credit = 200 over 3 deltas => mean_credit ≈ 66.7.
+        // expected_remaining = 100 - 3*66.7 < 0, so lambda must clamp to 0.
+        cert.observe(100.0);
+        cert.observe(200.0);
+        cert.observe(0.0);
+        cert.observe(10.0);
+
+        let verdict = cert.verdict();
+        assert!(
+            (verdict.azuma_bound - 1.0).abs() < 1e-12,
+            "azuma should be 1.0 when expected_remaining < 0, got {}",
+            verdict.azuma_bound
+        );
+        assert!(
+            (verdict.freedman_bound - 1.0).abs() < 1e-12,
+            "freedman should be 1.0 when expected_remaining < 0, got {}",
+            verdict.freedman_bound
+        );
+        assert!(
+            verdict.confidence_bound <= 1e-12,
+            "confidence should be near zero when tail bound is 1, got {}",
+            verdict.confidence_bound
         );
     }
 
