@@ -2096,17 +2096,16 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_packet_header_rejects_oversized_packet() {
-        let oversized = MAX_PACKET_SIZE + 1;
-        let header = [
-            u8::try_from(oversized & 0xFF).expect("low byte fits"),
-            u8::try_from((oversized >> 8) & 0xFF).expect("mid byte fits"),
-            u8::try_from((oversized >> 16) & 0xFF).expect("high byte fits"),
-            0x00,
-        ];
-        let err = MySqlConnection::decode_packet_header(header, 0x00).unwrap_err();
-        assert!(matches!(err, MySqlError::Protocol(_)));
-        assert!(format!("{err}").contains("exceeds maximum"));
+    fn test_decode_packet_header_accepts_max_packet_size() {
+        // MAX_PACKET_SIZE = 0xFFFFFF is the largest value representable in
+        // the 3-byte length field. The `> MAX_PACKET_SIZE` guard in
+        // decode_packet_header is unreachable with valid 3-byte encoding
+        // but is kept as defense-in-depth documentation.
+        let header = [0xFF, 0xFF, 0xFF, 0x00];
+        let (len, seq) =
+            MySqlConnection::decode_packet_header(header, 0x00).expect("max size accepted");
+        assert_eq!(len, MAX_PACKET_SIZE);
+        assert_eq!(seq, 0x00);
     }
 
     #[test]
