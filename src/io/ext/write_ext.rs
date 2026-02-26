@@ -41,6 +41,7 @@ pub trait AsyncWriteExt: AsyncWrite {
             writer: self,
             buf,
             pos: 0,
+            yield_counter: 0,
         }
     }
 
@@ -50,7 +51,11 @@ pub trait AsyncWriteExt: AsyncWrite {
         Self: Unpin,
         B: Buf + Unpin + ?Sized,
     {
-        WriteAllBuf { writer: self, buf }
+        WriteAllBuf {
+            writer: self,
+            buf,
+            yield_counter: 0,
+        }
     }
 
     /// Write a single byte.
@@ -96,6 +101,7 @@ pub struct WriteAll<'a, W: ?Sized> {
     writer: &'a mut W,
     buf: &'a [u8],
     pos: usize,
+    yield_counter: u8,
 }
 
 impl<W> Future for WriteAll<'_, W>
@@ -108,8 +114,18 @@ where
         let this = self.get_mut();
 
         while this.pos < this.buf.len() {
+            if this.yield_counter > 32 {
+                this.yield_counter = 0;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            this.yield_counter += 1;
+
             match Pin::new(&mut *this.writer).poll_write(cx, &this.buf[this.pos..]) {
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    this.yield_counter = 0;
+                    return Poll::Pending;
+                }
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                 Poll::Ready(Ok(n)) => {
                     if n == 0 {
@@ -128,6 +144,7 @@ where
 pub struct WriteAllBuf<'a, W: ?Sized, B: ?Sized> {
     writer: &'a mut W,
     buf: &'a mut B,
+    yield_counter: u8,
 }
 
 impl<W, B> Future for WriteAllBuf<'_, W, B>
@@ -140,12 +157,22 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         while this.buf.remaining() > 0 {
+            if this.yield_counter > 32 {
+                this.yield_counter = 0;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            this.yield_counter += 1;
+
             let chunk = this.buf.chunk();
             if chunk.is_empty() {
                 return Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)));
             }
             match Pin::new(&mut *this.writer).poll_write(cx, chunk) {
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    this.yield_counter = 0;
+                    return Poll::Pending;
+                }
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                 Poll::Ready(Ok(n)) => {
                     if n == 0 {

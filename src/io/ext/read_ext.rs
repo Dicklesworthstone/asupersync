@@ -30,6 +30,7 @@ pub trait AsyncReadExt: AsyncRead {
             reader: self,
             buf,
             start_len,
+            yield_counter: 0,
         }
     }
 
@@ -45,6 +46,7 @@ pub trait AsyncReadExt: AsyncRead {
             pending_utf8: Vec::new(),
             read: 0,
             start_len,
+            yield_counter: 0,
         }
     }
 
@@ -146,6 +148,7 @@ pub struct ReadToEnd<'a, R: ?Sized> {
     reader: &'a mut R,
     buf: &'a mut Vec<u8>,
     start_len: usize,
+    yield_counter: u8,
 }
 
 impl<R> Future for ReadToEnd<'_, R>
@@ -159,10 +162,20 @@ where
         let this = self.get_mut();
 
         loop {
+            if this.yield_counter > 32 {
+                this.yield_counter = 0;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            this.yield_counter += 1;
+
             let mut local = [0u8; CHUNK];
             let mut read_buf = ReadBuf::new(&mut local);
             match Pin::new(&mut *this.reader).poll_read(cx, &mut read_buf) {
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    this.yield_counter = 0;
+                    return Poll::Pending;
+                }
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                 Poll::Ready(Ok(())) => {
                     let n = read_buf.filled().len();
@@ -183,6 +196,7 @@ pub struct ReadToString<'a, R: ?Sized> {
     pending_utf8: Vec<u8>,
     read: usize,
     start_len: usize,
+    yield_counter: u8,
 }
 
 impl<R: ?Sized> ReadToString<'_, R> {
@@ -229,10 +243,20 @@ where
         let this = self.get_mut();
 
         loop {
+            if this.yield_counter > 32 {
+                this.yield_counter = 0;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            this.yield_counter += 1;
+
             let mut local = [0u8; CHUNK];
             let mut read_buf = ReadBuf::new(&mut local);
             match Pin::new(&mut *this.reader).poll_read(cx, &mut read_buf) {
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    this.yield_counter = 0;
+                    return Poll::Pending;
+                }
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                 Poll::Ready(Ok(())) => {
                     let n = read_buf.filled().len();
