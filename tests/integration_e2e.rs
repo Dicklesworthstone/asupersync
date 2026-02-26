@@ -655,15 +655,33 @@ fn e2e_severity_lattice_nested_combinators() {
         assert!(as_result.is_err(), "join_all with any Err → Err");
     }
 
-    test_section!("race-takes-first-ok");
+    test_section!("race-loser-panic-dominates");
     {
-        // race picks the winner; if winner is Ok, returns Ok
+        // if any loser panics, the race panics, even if winner is Ok
         let result = make_race_all_result(
             1, // winner_index = 1 (the Ok(42))
             vec![
                 Outcome::<i32, &str>::Err("fail1"),
                 Outcome::Ok(42),
                 Outcome::Panicked(PanicPayload::new("panic")),
+            ],
+        );
+        let err = result.expect_err("race should panic due to loser panic");
+        assert!(matches!(
+            err,
+            asupersync::combinator::race::RaceAllError::Panicked { .. }
+        ));
+    }
+
+    test_section!("race-takes-first-ok");
+    {
+        // race picks the winner; if winner is Ok and no loser panics, returns Ok
+        let result = make_race_all_result(
+            1, // winner_index = 1 (the Ok(42))
+            vec![
+                Outcome::<i32, &str>::Err("fail1"),
+                Outcome::Ok(42),
+                Outcome::Cancelled(CancelReason::user("cancel")),
             ],
         );
         let val = result.expect("race should pick Ok(42)");

@@ -965,15 +965,17 @@ impl<P: Policy> Scope<'_, P> {
         match winner {
             Either::Left(res) => {
                 if let Err(JoinError::Panicked(p)) = h2.join(cx).await {
-                    return Err(JoinError::Panicked(p));
+                    Err(JoinError::Panicked(p))
+                } else {
+                    res
                 }
-                res
             }
             Either::Right(res) => {
                 if let Err(JoinError::Panicked(p)) = h1.join(cx).await {
-                    return Err(JoinError::Panicked(p));
+                    Err(JoinError::Panicked(p))
+                } else {
+                    res
                 }
-                res
             }
         }
     }
@@ -1078,15 +1080,17 @@ impl<P: Policy> Scope<'_, P> {
                 match race_outcome {
                     Either::Left(res) => {
                         if let Err(JoinError::Panicked(p)) = h2.join(cx).await {
-                            return Err(JoinError::Panicked(p));
+                            Err(JoinError::Panicked(p))
+                        } else {
+                            res
                         }
-                        res
                     }
                     Either::Right(res) => {
                         if let Err(JoinError::Panicked(p)) = h1.join(cx).await {
-                            return Err(JoinError::Panicked(p));
+                            Err(JoinError::Panicked(p))
+                        } else {
+                            res
                         }
-                        res
                     }
                 }
             }
@@ -1109,8 +1113,6 @@ impl<P: Policy> Scope<'_, P> {
         cx: &Cx,
         handles: Vec<TaskHandle<T>>,
     ) -> Result<(T, usize), JoinError> {
-        use crate::combinator::select::SelectAll;
-
         let mut handles = handles;
         if handles.is_empty() {
             return Err(JoinError::Cancelled(CancelReason::user(
@@ -1118,31 +1120,88 @@ impl<P: Policy> Scope<'_, P> {
             )));
         }
 
-        let futures: Vec<_> = handles
+        let mut futures: Vec<_> = handles
             .iter_mut()
             .map(|h| Box::pin(h.join_with_drop_reason(cx, CancelReason::race_loser())))
             .collect();
+        let mut ready_results: Vec<Option<Result<T, JoinError>>> = std::iter::repeat_with(|| None)
+            .take(futures.len())
+            .collect();
+        let mut winner_idx = None;
 
-        let (result, winner_idx) = SelectAll::new(futures).await;
+        // Poll every candidate in each round and keep all same-round ready
+        // outcomes. This prevents losing loser panic outcomes when multiple
+        // tasks become ready in the same poll.
+        let winner_idx = std::future::poll_fn(|poll_cx| {
+            for (i, future) in futures.iter_mut().enumerate() {
+                if ready_results[i].is_some() {
+                    continue;
+                }
+                if let std::task::Poll::Ready(res) = future.as_mut().poll(poll_cx) {
+                    ready_results[i] = Some(res);
+                    if winner_idx.is_none() {
+                        winner_idx = Some(i);
+                    }
+                }
+            }
 
-        // Cancel and drain losers
-        // Note: Losers were already aborted when SelectAll dropped their futures.
-        // The abort reason was set to RaceLost by JoinFuture::drop.
+            winner_idx.map_or(std::task::Poll::Pending, std::task::Poll::Ready)
+        })
+        .await;
+
+        let winner_result = ready_results[winner_idx]
+            .take()
+            .expect("winner index must have a ready result");
+
+        // Release mutable borrows of handles held by JoinFuture values before
+        // explicit loser cancellation/join.
+        drop(futures);
+
+        // Drain completed losers first so terminal panic outcomes are not
+        // obscured by strengthening cancellation reasons on already-finished tasks.
+        let mut loser_panic = None;
+        let mut pending_loser_indices = Vec::new();
         for (i, handle) in handles.iter_mut().enumerate() {
-            if i != winner_idx {
-                handle.abort_with_reason(CancelReason::race_loser());
+            if i == winner_idx {
+                continue;
+            }
+            if let Some(res) = ready_results[i].take() {
+                if let Err(JoinError::Panicked(p)) = res {
+                    if loser_panic.is_none() {
+                        loser_panic = Some(p);
+                    }
+                }
+            } else if handle.is_finished() {
+                let res = handle.join(cx).await;
+                if let Err(JoinError::Panicked(p)) = res {
+                    if loser_panic.is_none() {
+                        loser_panic = Some(p);
+                    }
+                }
+            } else {
+                pending_loser_indices.push(i);
             }
         }
 
-        for (i, handle) in handles.iter_mut().enumerate() {
-            if i != winner_idx {
-                if let Err(JoinError::Panicked(p)) = handle.join(cx).await {
-                    return Err(JoinError::Panicked(p));
+        // Cancel and drain unfinished losers.
+        // Note: Losers may also already have a race-loser reason from dropped
+        // join futures; strengthening keeps attribution deterministic.
+        for &idx in &pending_loser_indices {
+            handles[idx].abort_with_reason(CancelReason::race_loser());
+        }
+        for idx in pending_loser_indices {
+            let res = handles[idx].join(cx).await;
+            if let Err(JoinError::Panicked(p)) = res {
+                if loser_panic.is_none() {
+                    loser_panic = Some(p);
                 }
             }
         }
 
-        result.map(|val| (val, winner_idx))
+        loser_panic.map_or_else(
+            || winner_result.map(|val| (val, winner_idx)),
+            |p| Err(JoinError::Panicked(p)),
+        )
     }
 
     /// Joins multiple tasks, waiting for all to complete.
@@ -2149,6 +2208,76 @@ mod tests {
             }
             res => unreachable!("Expected Ready(Ok((1, 0))), got {res:?}"),
         }
+    }
+
+    #[test]
+    fn race_surfaces_loser_panic_even_if_winner_succeeds() {
+        use std::sync::Arc;
+        use std::task::{Context, Waker};
+
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        let (h1, mut t1) = scope.spawn(&mut state, &cx, |_| async { 1_i32 }).unwrap();
+        let (h2, mut t2) = scope
+            .spawn(&mut state, &cx, |_| async {
+                std::panic::panic_any("loser panic");
+            })
+            .unwrap();
+
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut poll_cx = Context::from_waker(&waker);
+        assert!(t1.poll(&mut poll_cx).is_ready());
+        assert!(t2.poll(&mut poll_cx).is_ready());
+
+        let result = block_on(scope.race(&cx, h1, h2));
+        assert!(
+            matches!(result, Err(JoinError::Panicked(_))),
+            "loser panic must dominate race result, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn race_all_surfaces_simultaneous_loser_panic() {
+        use std::sync::Arc;
+        use std::task::{Context, Waker};
+
+        struct NoopWaker;
+        impl std::task::Wake for NoopWaker {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        let (h1, mut t1) = scope.spawn(&mut state, &cx, |_| async { 1_i32 }).unwrap();
+        let (h2, mut t2) = scope
+            .spawn(&mut state, &cx, |_| async {
+                std::panic::panic_any("simultaneous loser panic");
+            })
+            .unwrap();
+        let (h3, mut t3) = scope.spawn(&mut state, &cx, |_| async { 3_i32 }).unwrap();
+
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut poll_cx = Context::from_waker(&waker);
+        assert!(t1.poll(&mut poll_cx).is_ready());
+        assert!(t2.poll(&mut poll_cx).is_ready());
+        assert!(t3.poll(&mut poll_cx).is_ready());
+
+        let result = block_on(scope.race_all(&cx, vec![h1, h2, h3]));
+        assert!(
+            matches!(result, Err(JoinError::Panicked(_))),
+            "simultaneous loser panic must dominate race_all result, got {result:?}"
+        );
     }
 
     #[test]

@@ -232,12 +232,17 @@ pub fn make_timed_result<T, E>(
         return TimedResult::Completed(outcome);
     }
 
-    // If the timed-out operation panicked while being drained, surface that panic
-    // instead of masking it as a plain timeout.
-    if matches!(outcome, Outcome::Panicked(_)) {
-        TimedResult::Completed(outcome)
-    } else {
-        TimedResult::TimedOut(TimeoutError::new(deadline))
+    match outcome {
+        Outcome::Ok(_) | Outcome::Err(_) | Outcome::Panicked(_) => {
+            // Do not drop successful results, application errors, or panics.
+            // Even if the deadline passed, the operation reached a terminal state
+            // other than cancellation, so we surface that outcome to prevent data loss.
+            TimedResult::Completed(outcome)
+        }
+        Outcome::Cancelled(_) => {
+            // It was cancelled (presumably by the timeout or parent).
+            TimedResult::TimedOut(TimeoutError::new(deadline))
+        }
     }
 }
 

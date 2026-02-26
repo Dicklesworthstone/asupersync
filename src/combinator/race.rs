@@ -483,23 +483,25 @@ pub fn race2_to_result<T, E>(
 ) -> Result<T, RaceError<E>> {
     let (winner_outcome, which_won, loser_outcome) = race2_outcomes(winner, o1, o2);
 
-    let winner_outcome = match winner_outcome {
-        Outcome::Panicked(p) => return Err(RaceError::Panicked(p)),
-        other => other,
-    };
+    if let Outcome::Panicked(p) = winner_outcome {
+        return Err(RaceError::Panicked(p));
+    }
 
     if let Outcome::Panicked(p) = loser_outcome {
         return Err(RaceError::Panicked(p));
     }
 
+    if let Outcome::Ok(v) = winner_outcome {
+        return Ok(v);
+    }
+
     match winner_outcome {
-        Outcome::Ok(v) => Ok(v),
         Outcome::Err(e) => match which_won {
             RaceWinner::First => Err(RaceError::First(e)),
             RaceWinner::Second => Err(RaceError::Second(e)),
         },
         Outcome::Cancelled(r) => Err(RaceError::Cancelled(r)),
-        Outcome::Panicked(_) => unreachable!(),
+        _ => unreachable!(),
     }
 }
 
@@ -599,15 +601,12 @@ pub fn race_all_outcomes<T, E>(
 /// assert_eq!(value.unwrap(), 42);
 /// ```
 pub fn race_all_to_result<T, E>(result: RaceAllResult<T, E>) -> Result<T, RaceAllError<E>> {
-    let winner_outcome = match result.winner_outcome {
-        Outcome::Panicked(p) => {
-            return Err(RaceAllError::Panicked {
-                payload: p,
-                index: result.winner_index,
-            });
-        }
-        other => other,
-    };
+    if let Outcome::Panicked(p) = result.winner_outcome {
+        return Err(RaceAllError::Panicked {
+            payload: p,
+            index: result.winner_index,
+        });
+    }
 
     for (i, loser_outcome) in result.loser_outcomes {
         if let Outcome::Panicked(p) = loser_outcome {
@@ -618,8 +617,11 @@ pub fn race_all_to_result<T, E>(result: RaceAllResult<T, E>) -> Result<T, RaceAl
         }
     }
 
-    match winner_outcome {
-        Outcome::Ok(v) => Ok(v),
+    if let Outcome::Ok(v) = result.winner_outcome {
+        return Ok(v);
+    }
+
+    match result.winner_outcome {
         Outcome::Err(e) => Err(RaceAllError::Error {
             error: e,
             winner_index: result.winner_index,
@@ -628,7 +630,7 @@ pub fn race_all_to_result<T, E>(result: RaceAllResult<T, E>) -> Result<T, RaceAl
             reason: r,
             winner_index: result.winner_index,
         }),
-        Outcome::Panicked(_) => unreachable!(),
+        _ => unreachable!(),
     }
 }
 
