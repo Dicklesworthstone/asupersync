@@ -875,20 +875,20 @@ fn object_params_for_payload(
 }
 
 fn type_id_hash<T: 'static>() -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = crate::util::DetHasher::default();
     TypeId::of::<T>().hash(&mut hasher);
     hasher.finish()
 }
 
 fn schema_hash<T: 'static>(version: u32) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = crate::util::DetHasher::default();
     std::any::type_name::<T>().hash(&mut hasher);
     version.hash(&mut hasher);
     hasher.finish()
 }
 
 fn object_id_from_bytes<T: 'static>(bytes: &[u8]) -> ObjectId {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = crate::util::DetHasher::default();
     bytes.hash(&mut hasher);
     std::any::type_name::<T>().hash(&mut hasher);
     let hash = hasher.finish();

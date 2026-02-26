@@ -58,9 +58,9 @@
 
 use crate::trace::event::{TraceData, TraceEvent, TraceEventKind};
 use crate::trace::independence::independent;
+use crate::util::DetHasher;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// A trace in Foata normal form: layers of mutually independent events.
@@ -139,7 +139,7 @@ impl FoataTrace {
     /// produce identical fingerprints.
     #[must_use]
     pub fn fingerprint(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = DetHasher::default();
         for (layer_idx, layer) in self.layers.iter().enumerate() {
             layer_idx.hash(&mut hasher);
             layer.len().hash(&mut hasher);
@@ -418,7 +418,7 @@ pub fn trace_fingerprint(events: &[TraceEvent]) -> u64 {
         layer_indices[layer].push(idx);
     }
 
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = DetHasher::default();
     for (layer_idx, indices) in layer_indices.iter_mut().enumerate() {
         indices.sort_by(|&a, &b| event_cmp(&events[a], &events[b]));
         layer_idx.hash(&mut hasher);
@@ -540,7 +540,7 @@ fn event_sort_key(event: &TraceEvent) -> (u8, u64, u64, u64) {
             (k, task_key, 0, 0)
         }
         TraceData::Message(msg) => {
-            let mut h = DefaultHasher::new();
+            let mut h = DetHasher::default();
             msg.hash(&mut h);
             (k, h.finish(), 0, 0)
         }

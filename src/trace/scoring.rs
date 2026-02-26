@@ -22,9 +22,10 @@
 //! explanations for why one node outranks another.
 
 use crate::trace::gf2::{BoundaryMatrix, PersistencePairs};
+use crate::util::DetHasher;
 use std::collections::BTreeSet;
 use std::fmt::Write;
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::{Hash, Hasher};
 
 /// A deterministic priority score for an exploration node.
 ///
@@ -224,7 +225,7 @@ pub fn score_persistence(
 /// Compute a deterministic fingerprint for a seed value.
 #[must_use]
 pub fn seed_fingerprint(seed: u64) -> u64 {
-    let mut h = DefaultHasher::new();
+    let mut h = DetHasher::default();
     seed.hash(&mut h);
     h.finish()
 }

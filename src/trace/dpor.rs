@@ -547,7 +547,7 @@ impl SleepSet {
     /// reversing this specific race".
     fn bp_key(bp: &BacktrackPoint, events: &[TraceEvent]) -> u64 {
         use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut hasher = crate::util::DetHasher::default();
         bp.divergence_index.hash(&mut hasher);
         bp.race.earlier.hash(&mut hasher);
         bp.race.later.hash(&mut hasher);

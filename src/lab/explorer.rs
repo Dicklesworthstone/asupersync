@@ -28,8 +28,8 @@ use crate::trace::event_structure::TracePoset;
 use crate::trace::scoring::{
     ClassId, EvidenceLedger, TopologicalScore, score_persistence, seed_fingerprint,
 };
+use crate::util::DetHasher;
 use serde::Serialize;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::io;
@@ -1178,7 +1178,7 @@ impl TopologyExplorer {
 }
 
 fn derive_seed(seed: u64, class: ClassId, index: u64) -> u64 {
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = DetHasher::default();
     seed.hash(&mut hasher);
     class.birth.hash(&mut hasher);
     class.death.hash(&mut hasher);

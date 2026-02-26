@@ -295,7 +295,7 @@ const GOLDEN_TRACE_FIXTURE_LAB: &str = r#"{
     "canonical_prefix_layers": 4,
     "canonical_prefix_events": 16
   },
-  "fingerprint": 13498101483502120188,
+  "fingerprint": 5286518520354602670,
   "event_count": 7,
   "canonical_prefix": [
     [
@@ -307,13 +307,13 @@ const GOLDEN_TRACE_FIXTURE_LAB: &str = r#"{
       },
       {
         "kind": 29,
-        "primary": 1358076884962059318,
+        "primary": 17841621336708427690,
         "secondary": 0,
         "tertiary": 0
       },
       {
         "kind": 29,
-        "primary": 1358076884962059318,
+        "primary": 17841621336708427690,
         "secondary": 0,
         "tertiary": 0
       }

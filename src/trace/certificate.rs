@@ -72,7 +72,7 @@ impl TraceCertificate {
     /// Record an event into the certificate.
     pub fn record_event(&mut self, event: &TraceEvent) {
         // Incremental hash: mix event kind + seq into running hash.
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut hasher = crate::util::DetHasher::default();
         self.event_hash.hash(&mut hasher);
         (event.kind as u8).hash(&mut hasher);
         event.seq.hash(&mut hasher);
