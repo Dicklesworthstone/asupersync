@@ -527,16 +527,26 @@ fn run_trace(args: TraceArgs, output: &mut Output) -> Result<(), CliError> {
         }
         TraceCommand::Verify(args) => {
             let out = trace_verify(&args.file, args.quick, args.strict, args.monotonic)?;
+            let valid = out.valid;
             output.write(&out).map_err(|e| {
                 CliError::new("output_error", "Failed to write output").detail(e.to_string())
             })?;
+            if !valid {
+                return Err(CliError::new("verification_failed", "Trace verification failed")
+                    .exit_code(ExitCode::TEST_FAILURE));
+            }
             Ok(())
         }
         TraceCommand::Diff(args) => {
             let out = trace_diff(&args.file_a, &args.file_b)?;
+            let diverged = out.diverged;
             output.write(&out).map_err(|e| {
                 CliError::new("output_error", "Failed to write output").detail(e.to_string())
             })?;
+            if diverged {
+                return Err(CliError::new("trace_divergence", "Traces diverged")
+                    .exit_code(ExitCode::TRACE_MISMATCH));
+            }
             Ok(())
         }
         TraceCommand::Export(args) => {
@@ -1248,13 +1258,18 @@ fn file_size(path: &Path) -> Result<u64, CliError> {
 }
 
 fn compute_duration_nanos(reader: &mut TraceReader) -> Result<Option<u64>, TraceFileError> {
+    let mut min: Option<u64> = None;
     let mut max: Option<u64> = None;
     while let Some(event) = reader.read_event()? {
         if let Some(time) = replay_event_time_nanos(&event) {
+            min = Some(min.map_or(time, |prev| prev.min(time)));
             max = Some(max.map_or(time, |prev| prev.max(time)));
         }
     }
-    Ok(max)
+    Ok(match (min, max) {
+        (Some(lo), Some(hi)) => Some(hi.saturating_sub(lo)),
+        _ => None,
+    })
 }
 
 fn replay_event_time_nanos(event: &ReplayEvent) -> Option<u64> {
