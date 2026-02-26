@@ -1398,8 +1398,9 @@ impl<Caps> Cx<Caps> {
     ///
     /// # Note
     ///
-    /// This is currently a placeholder. The full implementation will write
-    /// to the trace buffer maintained by the runtime.
+    /// When a trace buffer is attached to this `Cx`, this writes a structured
+    /// user trace event into that buffer and also emits to the log collector.
+    /// Without a trace buffer, it still records the log entry.
     pub fn trace(&self, message: &str) {
         self.log(LogEntry::trace(message));
         let Some(trace) = self.trace_buffer() else {

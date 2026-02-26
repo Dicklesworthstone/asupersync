@@ -4,18 +4,33 @@
 //! structured fields across asynchronous boundaries.
 
 use crate::types::{RegionId, TaskId};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::marker::PhantomData;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+#[derive(Clone)]
+struct ContextStackEntry {
+    id: u64,
+    context: DiagnosticContext,
+}
+
+thread_local! {
+    static CONTEXT_STACK: RefCell<Vec<ContextStackEntry>> = const { RefCell::new(Vec::new()) };
+}
+
+static NEXT_CONTEXT_GUARD_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A unique identifier for a span within a trace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SpanId(pub u64);
 
 impl SpanId {
-    /// Generates a new random span ID.
+    /// Generates a new monotonically increasing span ID.
     pub fn new() -> Self {
-        // In a real implementation, this would use a CSPRNG or snowflake
+        // Deterministic sequence keeps lab replays stable and avoids ambient RNG.
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         Self(NEXT_ID.fetch_add(1, Ordering::Relaxed))
     }
@@ -133,19 +148,37 @@ impl DiagnosticContext {
         merged
     }
 
-    /// Enters the context, returning a guard.
+    /// Enters the context, pushing it on a thread-local context stack.
     ///
-    /// (For Phase 0, this is a placeholder as we don't have thread-local
-    /// context storage yet).
+    /// The returned guard restores the previous context when dropped.
     #[must_use]
     pub fn enter(&self) -> ContextGuard<'_> {
-        ContextGuard { _ctx: self }
+        let guard_id = NEXT_CONTEXT_GUARD_ID.fetch_add(1, Ordering::Relaxed);
+        CONTEXT_STACK.with(|stack| {
+            stack.borrow_mut().push(ContextStackEntry {
+                id: guard_id,
+                context: self.clone(),
+            });
+        });
+        ContextGuard {
+            _ctx: self,
+            id: guard_id,
+            active: true,
+            _not_send: PhantomData,
+        }
     }
 
-    /// Returns the current thread-local context (placeholder).
+    /// Returns the current thread-local context.
+    ///
+    /// If no context is currently entered on this thread, returns an empty context.
     #[must_use]
     pub fn current() -> Self {
-        Self::new()
+        CONTEXT_STACK.with(|stack| {
+            stack
+                .borrow()
+                .last()
+                .map_or_else(Self::new, |entry| entry.context.clone())
+        })
     }
 
     // Accessors
@@ -189,11 +222,23 @@ impl DiagnosticContext {
 /// Guard for an active diagnostic context.
 pub struct ContextGuard<'a> {
     _ctx: &'a DiagnosticContext,
+    id: u64,
+    active: bool,
+    _not_send: PhantomData<Rc<()>>,
 }
 
 impl Drop for ContextGuard<'_> {
     fn drop(&mut self) {
-        // In full implementation: pop from thread-local stack
+        if !self.active {
+            return;
+        }
+        CONTEXT_STACK.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            if let Some(pos) = stack.iter().rposition(|entry| entry.id == self.id) {
+                stack.remove(pos);
+            }
+        });
+        self.active = false;
     }
 }
 
@@ -268,6 +313,61 @@ mod tests {
         assert_eq!(merged.task_id(), Some(tid)); // Preserved
         assert_eq!(merged.custom("b"), Some("2")); // Added
         assert_eq!(merged.custom("a"), Some("override")); // Overridden
+    }
+
+    #[test]
+    fn context_enter_sets_current_and_restores_on_drop() {
+        let base = DiagnosticContext::new().with_custom("request_id", "abc123");
+        assert!(DiagnosticContext::current().custom("request_id").is_none());
+
+        {
+            let _guard = base.enter();
+            let current = DiagnosticContext::current();
+            assert_eq!(current.custom("request_id"), Some("abc123"));
+        }
+
+        assert!(DiagnosticContext::current().custom("request_id").is_none());
+    }
+
+    #[test]
+    fn context_enter_nested_restores_parent() {
+        let outer = DiagnosticContext::new().with_custom("scope", "outer");
+        let inner = DiagnosticContext::new().with_custom("scope", "inner");
+
+        let outer_guard = outer.enter();
+        assert_eq!(DiagnosticContext::current().custom("scope"), Some("outer"));
+
+        {
+            let _inner_guard = inner.enter();
+            assert_eq!(DiagnosticContext::current().custom("scope"), Some("inner"));
+        }
+
+        assert_eq!(DiagnosticContext::current().custom("scope"), Some("outer"));
+        drop(outer_guard);
+        assert!(DiagnosticContext::current().custom("scope").is_none());
+    }
+
+    #[test]
+    fn context_enter_out_of_order_drop_preserves_top() {
+        let outer = DiagnosticContext::new().with_custom("scope", "outer");
+        let middle = DiagnosticContext::new().with_custom("scope", "middle");
+        let inner = DiagnosticContext::new().with_custom("scope", "inner");
+
+        let outer_guard = outer.enter();
+        let middle_guard = middle.enter();
+        let inner_guard = inner.enter();
+        assert_eq!(DiagnosticContext::current().custom("scope"), Some("inner"));
+
+        // Drop middle first; top-of-stack should remain unchanged.
+        drop(middle_guard);
+        assert_eq!(DiagnosticContext::current().custom("scope"), Some("inner"));
+
+        // Dropping inner should restore the remaining outer context.
+        drop(inner_guard);
+        assert_eq!(DiagnosticContext::current().custom("scope"), Some("outer"));
+
+        drop(outer_guard);
+        assert!(DiagnosticContext::current().custom("scope").is_none());
     }
 
     // =========================================================================
