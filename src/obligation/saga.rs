@@ -548,9 +548,10 @@ impl MonotoneSagaExecutor {
                         )
                     };
                     total_steps += result.step_count;
-                    if !result.coordination_free {
-                        barrier_count += result.step_count;
-                    }
+                    // Only count barriers for batches that were originally
+                    // coordinated—not coordination-free batches that fell back
+                    // due to a monotonicity violation (they still used join
+                    // semantics, so no actual barriers were inserted).
                     batch_results.push(result);
                 }
                 SagaBatch::Coordinated(step) => {
@@ -607,12 +608,22 @@ impl MonotoneSagaExecutor {
             *state = Lattice::join(state, &step_state);
             merge_count += 1;
 
+            // Detect conflicts produced by join.
+            if state.is_conflict() && fallback_reason.is_none() {
+                *fallback_reason = Some(format!(
+                    "conflict at coordination-free step '{}' ({}): {before} ⊔ {step_state} = Conflict",
+                    step.label, step.op,
+                ));
+            }
+
             // Post-hoc monotonicity validation.
             if self.validate_monotonicity {
                 if let Err(reason) = executor.validate_monotonicity(step, &before, state) {
                     *fallback_reason = Some(reason);
-                    // Continue executing remaining steps sequentially
-                    // (already past the violation point).
+                    // Continue executing remaining steps with join semantics.
+                    // The violation is recorded but does not change execution
+                    // within this batch; the flag prevents future batches from
+                    // using the coordination-free path.
                 }
             }
         }
@@ -1032,6 +1043,13 @@ mod tests {
                 .unwrap()
                 .contains("simulated")
         );
+        // Regression: coordination-free batches that fall back due to
+        // monotonicity violations should NOT inflate barrier_count, because
+        // they still executed with join semantics (no actual barriers).
+        assert_eq!(
+            result.barrier_count, 0,
+            "fallback batches must not inflate barrier_count"
+        );
     }
 
     #[test]
@@ -1052,6 +1070,44 @@ mod tests {
         let result = executor.execute(&exec_plan, &mut step_exec);
         assert_eq!(result.final_state, LatticeState::Conflict);
         assert!(!result.is_clean());
+    }
+
+    #[test]
+    fn coordination_free_batch_detects_conflict() {
+        // Regression: monotone steps whose join produces Conflict must
+        // set fallback_reason and report calm_optimized = false.
+        let plan = SagaPlan::new(
+            "cf_conflict",
+            vec![
+                // Both monotone, so they land in one CoordinationFree batch.
+                SagaStep::with_override(SagaOpKind::Reserve, "s1", Monotonicity::Monotone),
+                SagaStep::with_override(SagaOpKind::Reserve, "s2", Monotonicity::Monotone),
+            ],
+        );
+        let exec_plan = SagaExecutionPlan::from_plan(&plan);
+        let executor = MonotoneSagaExecutor::new();
+        // Executor returns Committed then Aborted → join = Conflict.
+        let mut step_exec =
+            FixedExecutor::new(vec![LatticeState::Committed, LatticeState::Aborted]);
+
+        let result = executor.execute(&exec_plan, &mut step_exec);
+        assert_eq!(result.final_state, LatticeState::Conflict);
+        assert!(
+            !result.calm_optimized,
+            "coordination-free batch with Conflict must not claim calm_optimized"
+        );
+        assert!(
+            result.fallback_reason.is_some(),
+            "coordination-free batch with Conflict must set fallback_reason"
+        );
+        assert!(
+            result
+                .fallback_reason
+                .as_ref()
+                .unwrap()
+                .contains("Conflict"),
+            "fallback_reason should mention Conflict"
+        );
     }
 
     // -- Order independence for monotone batches ----------------------------

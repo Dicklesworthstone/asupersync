@@ -674,7 +674,7 @@ impl RoutingEntry {
     pub fn is_expired(&self, now: Time) -> bool {
         self.ttl.is_some_and(|ttl| {
             let expiry = self.created_at.saturating_add_nanos(ttl.as_nanos());
-            now > expiry
+            now >= expiry
         })
     }
 
@@ -933,22 +933,86 @@ impl SymbolRouter {
         self
     }
 
+    fn local_candidates(&self, entry: &RoutingEntry) -> Vec<Arc<Endpoint>> {
+        if !self.prefer_local {
+            return Vec::new();
+        }
+        let Some(local) = self.local_region else {
+            return Vec::new();
+        };
+        entry
+            .endpoints
+            .iter()
+            .filter(|endpoint| endpoint.region == Some(local) && endpoint.state().can_receive())
+            .cloned()
+            .collect()
+    }
+
+    fn select_preferred_endpoint(
+        &self,
+        entry: &RoutingEntry,
+        object_id: ObjectId,
+    ) -> Option<Arc<Endpoint>> {
+        let local = self.local_candidates(entry);
+        if !local.is_empty() {
+            return entry.load_balancer.select(&local, Some(object_id)).cloned();
+        }
+        entry.select_endpoint(Some(object_id))
+    }
+
+    fn select_preferred_endpoints(
+        &self,
+        entry: &RoutingEntry,
+        object_id: ObjectId,
+        count: usize,
+    ) -> Vec<Arc<Endpoint>> {
+        let local = self.local_candidates(entry);
+        if local.is_empty() {
+            return entry.select_endpoints(count, Some(object_id));
+        }
+
+        let local_take = local.len().min(count);
+        let mut selected = entry
+            .load_balancer
+            .select_n(&local, local_take, Some(object_id))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if selected.len() >= count {
+            return selected;
+        }
+
+        let Some(local_region) = self.local_region else {
+            return entry.select_endpoints(count, Some(object_id));
+        };
+        let non_local = entry
+            .endpoints
+            .iter()
+            .filter(|endpoint| {
+                endpoint.region != Some(local_region) && endpoint.state().can_receive()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let remaining = count - selected.len();
+        let mut tail = entry
+            .load_balancer
+            .select_n(&non_local, remaining, Some(object_id))
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        selected.append(&mut tail);
+        selected
+    }
+
     /// Routes a symbol to an endpoint.
     pub fn route(&self, symbol: &Symbol) -> Result<RouteResult, RoutingError> {
         let object_id = symbol.object_id();
         let primary_key = RouteKey::Object(object_id);
 
         if let Some(entry) = self.table.lookup_without_default(&primary_key) {
-            if let Some(endpoint) = entry.select_endpoint(Some(object_id)) {
-                // Check local preference
-                if self.prefer_local {
-                    if let Some(local) = self.local_region {
-                        if endpoint.region == Some(local) {
-                            // Prefer this endpoint
-                        }
-                    }
-                }
-
+            if let Some(endpoint) = self.select_preferred_endpoint(&entry, object_id) {
                 return Ok(RouteResult {
                     endpoint,
                     matched_key: primary_key,
@@ -1006,7 +1070,7 @@ impl SymbolRouter {
             };
 
         // Select multiple endpoints
-        let endpoints = entry.select_endpoints(count, Some(object_id));
+        let endpoints = self.select_preferred_endpoints(&entry, object_id, count);
 
         if endpoints.is_empty() {
             return Err(RoutingError::NoHealthyEndpoints { object_id });
@@ -2008,6 +2072,7 @@ mod tests {
         let entry = RoutingEntry::new(vec![], Time::from_secs(100)).with_ttl(Time::from_secs(60));
 
         assert!(!entry.is_expired(Time::from_secs(150)));
+        assert!(entry.is_expired(Time::from_secs(160)));
         assert!(entry.is_expired(Time::from_secs(170)));
     }
 
@@ -2093,6 +2158,36 @@ mod tests {
         assert_eq!(result.endpoint.id, backup.id);
     }
 
+    #[test]
+    fn test_symbol_router_local_preference_unicast() {
+        let table = Arc::new(RoutingTable::new());
+        let local_region = RegionId::new_for_test(7, 0);
+        let remote_region = RegionId::new_for_test(8, 0);
+
+        let remote = table.register_endpoint(
+            test_endpoint(1)
+                .with_region(remote_region)
+                .with_state(EndpointState::Healthy),
+        );
+        let local = table.register_endpoint(
+            test_endpoint(2)
+                .with_region(local_region)
+                .with_state(EndpointState::Healthy),
+        );
+
+        let object_id = ObjectId::new_for_test(42);
+        let entry = RoutingEntry::new(vec![remote, local.clone()], Time::ZERO)
+            .with_strategy(LoadBalanceStrategy::FirstAvailable);
+        table.add_route(RouteKey::Object(object_id), entry);
+
+        let router = SymbolRouter::new(table).with_local_preference(local_region);
+        let symbol = Symbol::new_for_test(42, 0, 0, &[1, 2, 3]);
+        let result = router.route(&symbol).expect("route with local preference");
+
+        assert_eq!(result.endpoint.id, local.id);
+        assert!(!result.is_fallback);
+    }
+
     // Test 11: SymbolRouter multicast
     #[test]
     fn test_symbol_router_multicast() {
@@ -2111,6 +2206,47 @@ mod tests {
 
         assert!(results.is_ok());
         assert_eq!(results.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_symbol_router_local_preference_multicast_fills_local_first() {
+        let table = Arc::new(RoutingTable::new());
+        let local_region = RegionId::new_for_test(11, 0);
+        let remote_region = RegionId::new_for_test(12, 0);
+
+        let local_a = table.register_endpoint(
+            test_endpoint(1)
+                .with_region(local_region)
+                .with_state(EndpointState::Healthy),
+        );
+        let remote = table.register_endpoint(
+            test_endpoint(2)
+                .with_region(remote_region)
+                .with_state(EndpointState::Healthy),
+        );
+        let local_b = table.register_endpoint(
+            test_endpoint(3)
+                .with_region(local_region)
+                .with_state(EndpointState::Healthy),
+        );
+
+        let object_id = ObjectId::new_for_test(9);
+        let entry = RoutingEntry::new(vec![local_a.clone(), remote, local_b.clone()], Time::ZERO)
+            .with_strategy(LoadBalanceStrategy::RoundRobin);
+        table.add_route(RouteKey::Object(object_id), entry);
+
+        let router = SymbolRouter::new(table).with_local_preference(local_region);
+        let symbol = Symbol::new_for_test(9, 0, 0, &[9]);
+        let multicast_routes = router
+            .route_multicast(&symbol, 2)
+            .expect("multicast with local preference");
+
+        let selected: HashSet<_> = multicast_routes
+            .into_iter()
+            .map(|route| route.endpoint.id)
+            .collect();
+        let expected: HashSet<_> = [local_a.id, local_b.id].into_iter().collect();
+        assert_eq!(selected, expected);
     }
 
     // Test 12: DispatchResult quorum check

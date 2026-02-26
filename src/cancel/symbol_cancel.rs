@@ -175,7 +175,12 @@ impl SymbolCancelToken {
         let nanos = self.state.cancelled_at.load(Ordering::Acquire);
         if nanos == 0 {
             if self.is_cancelled() {
-                Some(Time::ZERO)
+                // If it's cancelled but nanos is 0, we caught it in the middle of
+                // the cancel() function. Wait for the reason lock to ensure
+                // the cancel() function has finished updating cancelled_at.
+                let _guard = self.state.reason.read();
+                let nanos_sync = self.state.cancelled_at.load(Ordering::Acquire);
+                Some(Time::from_nanos(nanos_sync))
             } else {
                 None
             }

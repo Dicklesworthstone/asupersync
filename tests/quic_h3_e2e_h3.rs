@@ -1033,13 +1033,15 @@ fn request_stream_state_transitions() {
         .expect("initial HEADERS");
     st2.mark_end_stream().expect("headers-only end stream");
 
-    // -- Second HEADERS without DATA is rejected (invalid trailers) --
+    // -- Third HEADERS is rejected (only initial + trailers allowed) --
     let mut st3 = H3RequestStreamState::new();
     st3.on_frame(&H3Frame::Headers(vec![0x80]))
         .expect("initial HEADERS");
+    st3.on_frame(&H3Frame::Headers(vec![0x81]))
+        .expect("trailing HEADERS");
     let err = st3
-        .on_frame(&H3Frame::Headers(vec![0x81]))
-        .expect_err("second headers without data");
+        .on_frame(&H3Frame::Headers(vec![0x82]))
+        .expect_err("third headers");
     assert_eq!(
         err,
         H3NativeError::ControlProtocol("invalid HEADERS ordering on request stream")

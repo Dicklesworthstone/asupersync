@@ -451,8 +451,9 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
         let dequeued = self
             .waiter_id
             .is_some_and(|id| !state.writer_queue.iter().any(|w| w.id == id));
-        let can_acquire =
-            !state.writer_active && state.readers == 0 && (dequeued || state.writer_waiters == 1);
+        let can_acquire = !state.writer_active
+            && state.readers == 0
+            && (dequeued || state.writer_queue.is_empty());
 
         if can_acquire {
             state.writer_active = true;
@@ -785,8 +786,9 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
         let dequeued = self
             .waiter_id
             .is_some_and(|id| !state.writer_queue.iter().any(|w| w.id == id));
-        let can_acquire =
-            !state.writer_active && state.readers == 0 && (dequeued || state.writer_waiters == 1);
+        let can_acquire = !state.writer_active
+            && state.readers == 0
+            && (dequeued || state.writer_queue.is_empty());
 
         if can_acquire {
             state.writer_active = true;

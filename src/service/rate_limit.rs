@@ -769,6 +769,16 @@ mod tests {
         assert!(dbg.contains("RateLimitFuture"));
     }
 
+    struct TrackWaker(Arc<AtomicBool>);
+    impl Wake for TrackWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
     /// Regression test: Sleep must register a waker when tokens are exhausted.
     ///
     /// Previously, `Sleep::with_time_getter()` was used, which returns Pending
@@ -780,17 +790,7 @@ mod tests {
         init_test("exhausted_tokens_register_waker_not_hang");
         let woken = Arc::new(AtomicBool::new(false));
 
-        struct TrackWaker(Arc<AtomicBool>);
-        impl Wake for TrackWaker {
-            fn wake(self: Arc<Self>) {
-                self.0.store(true, Ordering::SeqCst);
-            }
-            fn wake_by_ref(self: &Arc<Self>) {
-                self.0.store(true, Ordering::SeqCst);
-            }
-        }
-
-        let waker: Waker = Arc::new(TrackWaker(woken.clone())).into();
+        let waker: Waker = Arc::new(TrackWaker(woken)).into();
         let mut cx = Context::from_waker(&waker);
 
         // Create a rate limiter with 1 token, custom time getter.

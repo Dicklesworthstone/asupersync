@@ -574,6 +574,7 @@ impl SymbolDeduplicator {
         // treat the symbol as unique but skip recording to bound memory.
         if !objects.contains_key(&object_id) && objects.len() >= self.config.max_objects {
             drop(objects);
+            self.unique_symbols.fetch_add(1, Ordering::Relaxed);
             return true;
         }
 
@@ -592,6 +593,7 @@ impl SymbolDeduplicator {
         // Enforce max_symbols_per_object: stop recording beyond the limit.
         if state.seen.len() >= self.config.max_symbols_per_object {
             drop(objects);
+            self.unique_symbols.fetch_add(1, Ordering::Relaxed);
             return true;
         }
 
@@ -2097,6 +2099,12 @@ mod tests {
             2,
             stats.objects_tracked
         );
+        crate::assert_with_log!(
+            stats.unique_symbols == 3,
+            "all unique symbols counted",
+            3,
+            stats.unique_symbols
+        );
 
         crate::test_complete!("dedup_enforces_max_objects");
     }
@@ -2131,6 +2139,12 @@ mod tests {
             "only 3 symbols tracked",
             3,
             stats.symbols_tracked
+        );
+        crate::assert_with_log!(
+            stats.unique_symbols == 4,
+            "all unique symbols counted",
+            4,
+            stats.unique_symbols
         );
 
         crate::test_complete!("dedup_enforces_max_symbols_per_object");

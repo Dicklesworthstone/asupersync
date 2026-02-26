@@ -272,7 +272,7 @@ impl SymbolDistributor {
         let quorum_result: QuorumResult<ReplicaAck, ReplicaFailure> =
             quorum_outcomes(required, outcomes);
 
-        self.metrics.distributions_total += 1;
+        self.metrics.distributions_total = self.metrics.distributions_total.saturating_add(1);
         self.metrics.symbols_sent_total = self
             .metrics
             .symbols_sent_total
@@ -293,14 +293,21 @@ impl SymbolDistributor {
             })
             .collect();
 
-        self.metrics.acks_received_total += acks.len() as u64;
+        self.metrics.acks_received_total = self
+            .metrics
+            .acks_received_total
+            .saturating_add(acks.len() as u64);
 
         if quorum_result.quorum_met {
-            self.metrics.distributions_successful += 1;
-            self.metrics.quorum_achieved_count += 1;
+            self.metrics.distributions_successful =
+                self.metrics.distributions_successful.saturating_add(1);
+            self.metrics.quorum_achieved_count =
+                self.metrics.quorum_achieved_count.saturating_add(1);
         } else {
-            self.metrics.distributions_failed += 1;
-            self.metrics.quorum_missed_count += 1;
+            self.metrics.distributions_failed =
+                self.metrics.distributions_failed.saturating_add(1);
+            self.metrics.quorum_missed_count =
+                self.metrics.quorum_missed_count.saturating_add(1);
         }
 
         DistributionResult {

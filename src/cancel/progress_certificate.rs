@@ -525,8 +525,12 @@ impl ProgressCertificate {
         // Alpha = 2 / (8 + 1) ≈ 0.222. The EMA tracks whether the credit
         // rate is accelerating (rapid drain) or decelerating (slow tail).
         if step > 0 {
-            const EMA_ALPHA: f64 = 2.0 / 9.0;
-            self.ema_credit = EMA_ALPHA.mul_add(credit, (1.0 - EMA_ALPHA) * self.ema_credit);
+            if self.total_deltas == 1 {
+                self.ema_credit = credit;
+            } else {
+                const EMA_ALPHA: f64 = 2.0 / 9.0;
+                self.ema_credit = EMA_ALPHA.mul_add(credit, (1.0 - EMA_ALPHA) * self.ema_credit);
+            }
         }
 
         // Stall run: count consecutive non-decreasing steps at the tail.

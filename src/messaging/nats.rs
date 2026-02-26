@@ -126,6 +126,8 @@ impl NatsConfig {
     /// Create config from a NATS URL.
     ///
     /// Format: `nats://[user:password@]host[:port]`
+    ///
+    /// Also supports bracketed IPv6 hosts, e.g. `nats://[::1]:4222`.
     pub fn from_url(url: &str) -> Result<Self, NatsError> {
         let url = url
             .strip_prefix("nats://")
@@ -134,7 +136,7 @@ impl NatsConfig {
         let mut config = Self::default();
 
         // Parse credentials if present
-        let url = if let Some((creds, rest)) = url.split_once('@') {
+        let url = if let Some((creds, rest)) = url.rsplit_once('@') {
             if let Some((user, pass)) = creds.split_once(':') {
                 config.user = Some(user.to_string());
                 config.password = Some(pass.to_string());
@@ -148,11 +150,27 @@ impl NatsConfig {
         };
 
         // Parse host:port
-        if let Some((host, port)) = url.split_once(':') {
-            config.host = host.to_string();
-            config.port = port
-                .parse()
-                .map_err(|_| NatsError::InvalidUrl(format!("invalid port: {port}")))?;
+        if let Some(rest) = url.strip_prefix('[') {
+            let (host_body, after_host) = rest
+                .split_once(']')
+                .ok_or_else(|| NatsError::InvalidUrl("invalid IPv6 host".to_string()))?;
+            config.host = format!("[{host_body}]");
+            if let Some(port) = after_host.strip_prefix(':') {
+                config.port = port
+                    .parse()
+                    .map_err(|_| NatsError::InvalidUrl(format!("invalid port: {port}")))?;
+            } else if !after_host.is_empty() {
+                return Err(NatsError::InvalidUrl(format!("invalid host/port: {url}")));
+            }
+        } else if url.matches(':').count() <= 1 {
+            if let Some((host, port)) = url.rsplit_once(':') {
+                config.host = host.to_string();
+                config.port = port
+                    .parse()
+                    .map_err(|_| NatsError::InvalidUrl(format!("invalid port: {port}")))?;
+            } else if !url.is_empty() {
+                config.host = url.to_string();
+            }
         } else if !url.is_empty() {
             config.host = url.to_string();
         }
@@ -1158,6 +1176,22 @@ mod tests {
         let config = NatsConfig::from_url("nats://localhost").unwrap();
         assert_eq!(config.host, "localhost");
         assert_eq!(config.port, 4222); // Default port
+    }
+
+    #[test]
+    fn test_config_from_url_ipv6() {
+        let config = NatsConfig::from_url("nats://[::1]:4333").unwrap();
+        assert_eq!(config.host, "[::1]");
+        assert_eq!(config.port, 4333);
+    }
+
+    #[test]
+    fn test_config_from_url_password_with_at_sign() {
+        let config = NatsConfig::from_url("nats://user:pa@ss@localhost:4222").unwrap();
+        assert_eq!(config.user.as_deref(), Some("user"));
+        assert_eq!(config.password.as_deref(), Some("pa@ss"));
+        assert_eq!(config.host, "localhost");
+        assert_eq!(config.port, 4222);
     }
 
     #[test]

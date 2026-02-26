@@ -895,7 +895,9 @@ impl NoAliasingProver {
         };
 
         // Kind/region agreement checks.
+        let mut mismatch_detected = false;
         if entry.kind != kind {
+            mismatch_detected = true;
             self.counterexamples.push(Counterexample {
                 violation: ViolationKind::KindDisagreement,
                 obligation,
@@ -907,6 +909,7 @@ impl NoAliasingProver {
             });
         }
         if entry.region != region {
+            mismatch_detected = true;
             self.counterexamples.push(Counterexample {
                 violation: ViolationKind::RegionDisagreement,
                 obligation,
@@ -936,8 +939,14 @@ impl NoAliasingProver {
             lemma: Lemma::DropSafety,
             obligation,
             time,
-            verified: true,
-            description: format!("drop consumed {obligation:?}, ErrorFlag signaled (leak)",),
+            verified: !mismatch_detected,
+            description: if mismatch_detected {
+                format!(
+                    "drop consumed {obligation:?}, ErrorFlag signaled (leak), but kind/region agreement failed"
+                )
+            } else {
+                format!("drop consumed {obligation:?}, ErrorFlag signaled (leak)")
+            },
         });
     }
 
@@ -1725,6 +1734,66 @@ mod tests {
         let verified = result.is_verified();
         crate::assert_with_log!(!verified, "double leak rejected", false, verified);
         crate::test_complete!("lemma5_rejects_double_leak");
+    }
+
+    #[test]
+    fn lemma5_kind_mismatch_marks_failed_drop_step() {
+        init_test("lemma5_kind_mismatch_marks_failed_drop_step");
+        let events = vec![
+            reserve(0, o(0), ObligationKind::SendPermit, t(0), r(0)),
+            leak(5, o(0), r(0), ObligationKind::Ack), // WRONG KIND!
+        ];
+
+        let mut prover = NoAliasingProver::new();
+        let result = prover.check(&events);
+        crate::assert_with_log!(
+            !result.is_verified(),
+            "kind mismatch on leak rejected",
+            false,
+            result.is_verified()
+        );
+
+        let has_failed_drop_step = result
+            .steps
+            .iter()
+            .any(|step| step.lemma == Lemma::DropSafety && !step.verified);
+        crate::assert_with_log!(
+            has_failed_drop_step,
+            "drop mismatch produces failed DropSafety step",
+            true,
+            has_failed_drop_step
+        );
+        crate::test_complete!("lemma5_kind_mismatch_marks_failed_drop_step");
+    }
+
+    #[test]
+    fn lemma5_region_mismatch_marks_failed_drop_step() {
+        init_test("lemma5_region_mismatch_marks_failed_drop_step");
+        let events = vec![
+            reserve(0, o(0), ObligationKind::SendPermit, t(0), r(0)),
+            leak(5, o(0), r(1), ObligationKind::SendPermit), // WRONG REGION!
+        ];
+
+        let mut prover = NoAliasingProver::new();
+        let result = prover.check(&events);
+        crate::assert_with_log!(
+            !result.is_verified(),
+            "region mismatch on leak rejected",
+            false,
+            result.is_verified()
+        );
+
+        let has_failed_drop_step = result
+            .steps
+            .iter()
+            .any(|step| step.lemma == Lemma::DropSafety && !step.verified);
+        crate::assert_with_log!(
+            has_failed_drop_step,
+            "region mismatch produces failed DropSafety step",
+            true,
+            has_failed_drop_step
+        );
+        crate::test_complete!("lemma5_region_mismatch_marks_failed_drop_step");
     }
 
     // ========================================================================

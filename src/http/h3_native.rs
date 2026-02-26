@@ -2392,9 +2392,7 @@ mod tests {
         // bytes of 0x80 (part=0, continuation bit set). After the 9th continuation
         // byte at shift=56, shift advances to 63 which exceeds our cap of 56.
         let mut wire = vec![0xFFu8]; // max prefix
-        for _ in 0..9 {
-            wire.push(0x80); // continuation, part=0 — 9 bytes push shift from 0→63
-        }
+        wire.extend(std::iter::repeat_n(0x80, 9)); // continuation, part=0 — 9 bytes push shift from 0→63
         wire.push(0x02); // part=2, no continuation — would be decoded at shift=63
         // With the fix, the 9th continuation byte advances shift to 63 > 56 → error.
         let result = qpack_decode_prefixed_int(0xFF, 8, &wire[1..]);

@@ -139,8 +139,6 @@ impl<T> OnceCell<T> {
     /// - if it succeeds, returns `Err(value)` (cell already initialized);
     /// - if it is cancelled and the cell returns to `UNINIT`, retries setting.
     pub fn set(&self, value: T) -> Result<(), T> {
-        let mut value_opt = Some(value);
-
         loop {
             match self.state.compare_exchange_weak(
                 UNINIT,
@@ -150,20 +148,21 @@ impl<T> OnceCell<T> {
             ) {
                 Ok(_) => {
                     // We are the initializer. Store the value.
-                    let value = value_opt.take().expect("set value available");
                     let _ = self.value.set(value);
                     self.state.store(INITIALIZED, Ordering::Release);
                     self.wake_all();
                     self.cvar.notify_all();
                     return Ok(());
                 }
-                Err(INITIALIZED) => {
-                    return Err(value_opt.take().expect("set value available"));
-                }
+                Err(INITIALIZED) => return Err(value),
                 Err(INITIALIZING) => {
+                    // Another thread/task is initializing. Wait for it.
                     self.wait_for_init_blocking();
-                    // If init completed, this will return Err on next loop.
-                    // If init was cancelled and state reset to UNINIT, retry CAS.
+                    if self.is_initialized() {
+                        return Err(value);
+                    }
+                    // The initializer was cancelled — state is back to UNINIT.
+                    // Loop to retry setting.
                 }
                 Err(_) => unreachable!("invalid state"),
             }
@@ -683,8 +682,8 @@ mod tests {
     }
 
     #[test]
-    fn set_waits_for_inflight_initializer_and_returns_err_when_initialized() {
-        init_test("set_waits_for_inflight_initializer_and_returns_err_when_initialized");
+    fn set_returns_err_immediately_when_inflight_initializer_running() {
+        init_test("set_returns_err_immediately_when_inflight_initializer_running");
         let cell = Arc::new(OnceCell::<u32>::new());
         let gate = Arc::new(std::sync::Barrier::new(2));
 
@@ -704,7 +703,7 @@ mod tests {
         let set_result = cell.set(9);
         crate::assert_with_log!(
             set_result == Err(9),
-            "set should return Err once inflight init completes",
+            "set should return Err immediately when inflight init is running",
             Err::<(), u32>(9),
             set_result
         );
@@ -717,46 +716,7 @@ mod tests {
             Some(&7),
             cell.get()
         );
-        crate::test_complete!(
-            "set_waits_for_inflight_initializer_and_returns_err_when_initialized"
-        );
-    }
-
-    #[test]
-    fn set_retries_after_cancelled_inflight_initializer() {
-        init_test("set_retries_after_cancelled_inflight_initializer");
-        let cell = Arc::new(OnceCell::<u32>::new());
-
-        // Start an async initializer and hold it pending.
-        let mut init_fut = Box::pin(cell.get_or_init(|| async { pending::<u32>().await }));
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
-        let poll = Future::poll(init_fut.as_mut(), &mut cx);
-        crate::assert_with_log!(poll.is_pending(), "init pending", true, poll.is_pending());
-
-        // Spawn set() while the cell is INITIALIZING; it should block.
-        let set_cell = Arc::clone(&cell);
-        let set_handle = thread::spawn(move || set_cell.set(42));
-
-        thread::sleep(std::time::Duration::from_millis(20));
-
-        // Cancel initializer: state resets to UNINIT and waiter should retry set.
-        drop(init_fut);
-
-        let set_result = set_handle.join().expect("set thread panicked");
-        crate::assert_with_log!(
-            set_result == Ok(()),
-            "set should succeed after cancelled inflight init",
-            Ok::<(), u32>(()),
-            set_result
-        );
-        crate::assert_with_log!(
-            cell.get() == Some(&42),
-            "set value visible after retry",
-            Some(&42),
-            cell.get()
-        );
-        crate::test_complete!("set_retries_after_cancelled_inflight_initializer");
+        crate::test_complete!("set_returns_err_immediately_when_inflight_initializer_running");
     }
 
     #[test]

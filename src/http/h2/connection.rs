@@ -1495,7 +1495,10 @@ mod tests {
 
         // Third stream should be refused (exceeds peer limit).
         let result = conn.open_stream(headers, false);
-        assert!(result.is_err(), "third stream must be refused when peer MaxConcurrentStreams=2");
+        assert!(
+            result.is_err(),
+            "third stream must be refused when peer MaxConcurrentStreams=2"
+        );
     }
 
     #[test]

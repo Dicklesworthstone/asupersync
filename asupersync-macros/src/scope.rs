@@ -225,14 +225,42 @@ fn generate_scope(input: &ScopeInput) -> TokenStream2 {
 }
 
 fn return_span(stmts: &[Stmt]) -> Option<proc_macro2::Span> {
-    for stmt in stmts {
-        if let Stmt::Expr(expr, _) = stmt
-            && matches!(expr, Expr::Return(_))
-        {
-            return Some(expr.span());
+    use syn::visit::Visit;
+
+    struct ReturnVisitor {
+        span: Option<proc_macro2::Span>,
+    }
+
+    impl<'ast> Visit<'ast> for ReturnVisitor {
+        fn visit_expr_return(&mut self, node: &'ast syn::ExprReturn) {
+            if self.span.is_none() {
+                self.span = Some(node.span());
+            }
+            // Continue visiting in case there are other things,
+            // but we only need the first one.
+            syn::visit::visit_expr_return(self, node);
+        }
+
+        // We shouldn't look inside nested closures or async blocks,
+        // because a return inside them is perfectly valid and returns
+        // from the closure, not the scope body!
+        fn visit_expr_closure(&mut self, _node: &'ast syn::ExprClosure) {
+            // Do not traverse into closures
+        }
+
+        fn visit_expr_async(&mut self, _node: &'ast syn::ExprAsync) {
+            // Do not traverse into nested async blocks
         }
     }
-    None
+
+    let mut visitor = ReturnVisitor { span: None };
+    for stmt in stmts {
+        visitor.visit_stmt(stmt);
+        if visitor.span.is_some() {
+            break;
+        }
+    }
+    visitor.span
 }
 
 #[cfg(test)]

@@ -259,6 +259,10 @@ impl LossRecovery {
         let loss_delay = self.loss_delay_micros();
         let time_threshold = now_micros.saturating_sub(loss_delay);
         let mut event = AckEvent::empty();
+        // RFC 9002 B.5: Only grow cwnd for packets sent AFTER the recovery
+        // epoch started. Packets sent during recovery (sent_time <=
+        // congestion_recovery_start_time) must not contribute to cwnd growth.
+        let mut acked_bytes_for_growth: u64 = 0;
 
         let mut retained = VecDeque::with_capacity(self.sent_packets.len());
         while let Some(pkt) = self.sent_packets.pop_front() {
@@ -272,6 +276,13 @@ impl LossRecovery {
                 if pkt.in_flight {
                     event.acked_bytes = event.acked_bytes.saturating_add(pkt.bytes);
                     self.bytes_in_flight = self.bytes_in_flight.saturating_sub(pkt.bytes);
+                    let in_recovery = self
+                        .congestion_recovery_start_time
+                        .is_some_and(|t| pkt.time_sent_micros <= t);
+                    if !in_recovery {
+                        acked_bytes_for_growth =
+                            acked_bytes_for_growth.saturating_add(pkt.bytes);
+                    }
                 }
                 let sample = now_micros.saturating_sub(pkt.time_sent_micros);
                 if pkt.ack_eliciting {
@@ -306,7 +317,9 @@ impl LossRecovery {
 
         if event.acked_packets > 0 {
             self.pto_count = 0;
-            self.on_ack_congestion(event.acked_bytes);
+            if acked_bytes_for_growth > 0 {
+                self.on_ack_congestion(acked_bytes_for_growth);
+            }
         }
         if event.lost_packets > 0 {
             self.on_loss_congestion(now_micros);

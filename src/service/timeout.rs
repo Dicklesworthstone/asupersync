@@ -208,11 +208,17 @@ impl<F> TimeoutFuture<F> {
     }
 
     /// Creates a new timeout future with a custom time source.
+    ///
+    /// The `time_getter` is used by the `Timeout` service to compute the
+    /// deadline, but the sleep itself uses `Sleep::new` (without time_getter)
+    /// so that waker registration works correctly. Using
+    /// `Sleep::with_time_getter` would skip waker registration, causing the
+    /// timeout to never fire if the inner future stays pending.
     #[must_use]
-    pub fn with_time_getter(inner: F, deadline: Time, time_getter: fn() -> Time) -> Self {
+    pub fn with_time_getter(inner: F, deadline: Time, _time_getter: fn() -> Time) -> Self {
         Self {
             inner,
-            sleep: Sleep::with_time_getter(deadline, time_getter),
+            sleep: Sleep::new(deadline),
         }
     }
 
@@ -268,22 +274,11 @@ where
             Poll::Pending => {}
         }
 
-        if let Some(getter) = this.sleep.time_getter {
-            let now = getter();
-            if this.sleep.poll_with_time(now).is_ready() {
-                Poll::Ready(Err(TimeoutError::Elapsed(Elapsed::new(
-                    this.sleep.deadline(),
-                ))))
-            } else {
-                Poll::Pending
-            }
-        } else {
-            match Pin::new(&mut this.sleep).poll(cx) {
-                Poll::Ready(()) => Poll::Ready(Err(TimeoutError::Elapsed(Elapsed::new(
-                    this.sleep.deadline(),
-                )))),
-                Poll::Pending => Poll::Pending,
-            }
+        match Pin::new(&mut this.sleep).poll(cx) {
+            Poll::Ready(()) => Poll::Ready(Err(TimeoutError::Elapsed(Elapsed::new(
+                this.sleep.deadline(),
+            )))),
+            Poll::Pending => Poll::Pending,
         }
     }
 }

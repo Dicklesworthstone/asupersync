@@ -109,6 +109,8 @@ fn remove_waiter_and_take_next_waker(state: &mut SemaphoreState, waiter_id: u64)
     {
         // O(1) removal: the waiter is at the front of the FIFO queue (common case).
         state.waiters.pop_front();
+        // Unconditionally pass the baton to the next waiter to prevent lost wakeups.
+        // Spurious wakeups are harmless.
         front_waiter_waker(state)
     } else {
         // Non-front waiter: targeted removal stops at first match instead of

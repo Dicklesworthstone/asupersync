@@ -699,7 +699,8 @@ impl RegionBridge {
     ///
     /// Returns [`SyncResult::NotNeeded`] if in local mode or no changes pending.
     pub fn sync(&mut self) -> Result<SyncResult, Error> {
-        if !self.mode.is_replicated() || !self.sync_state.sync_pending {
+        if !self.mode.is_replicated() || !self.sync_state.sync_pending || self.distributed.is_none()
+        {
             return Ok(SyncResult::NotNeeded);
         }
 
@@ -800,6 +801,7 @@ impl RegionBridge {
 
         self.sync_state.last_synced_sequence = snapshot.sequence;
         self.sync_state.sync_pending = false;
+        self.sync_state.pending_ops = 0;
 
         Ok(())
     }
@@ -1244,6 +1246,8 @@ mod tests {
     #[test]
     fn apply_snapshot_updates_sync_state() {
         let mut bridge = create_local_bridge();
+        bridge.sync_state.sync_pending = true;
+        bridge.sync_state.pending_ops = 7;
 
         let snap = RegionSnapshot {
             region_id: bridge.id(),
@@ -1265,6 +1269,8 @@ mod tests {
 
         bridge.apply_snapshot(&snap).unwrap();
         assert_eq!(bridge.sync_state.last_synced_sequence, 42);
+        assert!(!bridge.sync_state.sync_pending);
+        assert_eq!(bridge.sync_state.pending_ops, 0);
     }
 
     #[test]
@@ -1767,6 +1773,28 @@ mod tests {
         assert!(
             matches!(sync, SyncResult::NotNeeded),
             "hybrid mode without distributed record must report NotNeeded"
+        );
+    }
+
+    /// Regression: Hybrid mode sync stays NotNeeded when sync_pending is
+    /// set but there is no distributed record to sync to. Without the
+    /// distributed record, creating a snapshot is wasteful.
+    #[test]
+    fn hybrid_mode_sync_not_needed_with_pending_ops() {
+        let mut bridge = RegionBridge::with_mode(
+            RegionId::new_for_test(1, 0),
+            None,
+            Budget::default(),
+            RegionMode::hybrid(3),
+        );
+        // Simulate pending ops without going through the full close path.
+        bridge.sync_state.sync_pending = true;
+        bridge.sync_state.pending_ops = 3;
+
+        let sync = bridge.sync().unwrap();
+        assert!(
+            matches!(sync, SyncResult::NotNeeded),
+            "hybrid mode without distributed record must report NotNeeded even with pending ops"
         );
     }
 }

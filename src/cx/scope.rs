@@ -582,6 +582,7 @@ impl<P: Policy> Scope<'_, P> {
     ///     *counter_clone.borrow_mut() += 1;
     /// });
     /// ```
+    #[allow(clippy::too_many_lines)]
     pub fn spawn_local<F, Fut, Caps>(
         &self,
         state: &mut RuntimeState,
@@ -597,23 +598,47 @@ impl<P: Policy> Scope<'_, P> {
         use crate::runtime::stored_task::LocalStoredTask;
         use crate::runtime::task_handle::JoinError;
 
-        // Use the infrastructure helper to create the record, channel, etc.
-        let (task_id, handle, base_cx_full, result_tx) =
-            state.create_task_infrastructure(self.region, self.budget)?;
+        // Create oneshot channel for result delivery
+        let (result_tx, rx) = oneshot::channel::<Result<Fut::Output, JoinError>>();
 
-        // Ensure child contexts inherit capability wiring (no-globals).
-        // Note: create_task_infrastructure already attached `Cx` to the TaskRecord; update it
-        // so other runtime paths observe the same capability set.
-        let child_cx_full = base_cx_full
-            .with_registry_handle(cx.registry_handle())
-            .with_remote_cap_handle(cx.remote_cap_handle())
-            .with_blocking_pool_handle(cx.blocking_pool_handle())
-            .with_evidence_sink(cx.evidence_sink_handle());
+        // Create task record
+        let task_id = self.create_task_record(state)?;
+
+        // Trace task spawn event
+        let _span = debug_span!(
+            "task_spawn",
+            task_id = ?task_id,
+            region_id = ?self.region,
+            initial_state = "Created",
+            budget_deadline = ?self.budget.deadline,
+            budget_poll_quota = self.budget.poll_quota,
+            budget_cost_quota = ?self.budget.cost_quota,
+            budget_priority = self.budget.priority,
+            budget_source = "scope_local"
+        )
+        .entered();
+        debug!(
+            task_id = ?task_id,
+            region_id = ?self.region,
+            initial_state = "Created",
+            budget_deadline = ?self.budget.deadline,
+            budget_poll_quota = self.budget.poll_quota,
+            budget_cost_quota = ?self.budget.cost_quota,
+            budget_priority = self.budget.priority,
+            budget_source = "scope_local",
+            "local task spawned"
+        );
+
+        let (child_cx, child_cx_full) = self.build_child_task_cx(state, cx, task_id);
+
+        // Create the TaskHandle
+        let handle = TaskHandle::new(task_id, rx, Arc::downgrade(&child_cx.inner));
+
+        // Set the shared inner state in the TaskRecord
         if let Some(record) = state.task_mut(task_id) {
+            record.set_cx_inner(child_cx.inner.clone());
             record.set_cx(child_cx_full.clone());
         }
-
-        let child_cx = child_cx_full.retype::<Caps>();
 
         // Capture child_cx for result sending
         let cx_for_send = child_cx_full;
@@ -1054,8 +1079,10 @@ impl<P: Policy> Scope<'_, P> {
                     if crate::runtime::scheduler::three_lane::current_worker_id().is_some() {
                         // In scheduler-backed runtime execution, fully drain the
                         // cancelled primary before returning.
-                        if let Err(JoinError::Panicked(p)) = h1.join(cx).await {
-                            return Err(JoinError::Panicked(p));
+                        match h1.join(cx).await {
+                            Ok(res) => return Ok(res),
+                            Err(JoinError::Panicked(p)) => return Err(JoinError::Panicked(p)),
+                            Err(JoinError::Cancelled(_)) => {}
                         }
                     } else {
                         // In no-scheduler contexts (e.g. direct unit-test block_on),
@@ -1064,10 +1091,12 @@ impl<P: Policy> Scope<'_, P> {
                         let mut drain = Box::pin(h1.join(cx));
                         let waker = std::task::Waker::noop();
                         let mut poll_cx = Context::from_waker(waker);
-                        if let std::task::Poll::Ready(Err(JoinError::Panicked(p))) =
-                            drain.as_mut().poll(&mut poll_cx)
-                        {
-                            return Err(JoinError::Panicked(p));
+                        match drain.as_mut().poll(&mut poll_cx) {
+                            std::task::Poll::Ready(Ok(res)) => return Ok(res),
+                            std::task::Poll::Ready(Err(JoinError::Panicked(p))) => {
+                                return Err(JoinError::Panicked(p));
+                            }
+                            _ => {}
                         }
                     }
 

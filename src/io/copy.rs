@@ -100,7 +100,11 @@ where
 
             // If read is done and buffer is empty, we're finished
             if this.read_done {
-                return Poll::Ready(Ok(this.total));
+                match Pin::new(&mut *this.writer).poll_flush(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                    Poll::Ready(Ok(())) => return Poll::Ready(Ok(this.total)),
+                }
             }
 
             // Read more data
@@ -217,7 +221,11 @@ where
             };
 
             if buf.is_empty() {
-                return Poll::Ready(Ok(this.total));
+                match Pin::new(&mut *this.writer).poll_flush(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                    Poll::Ready(Ok(())) => return Poll::Ready(Ok(this.total)),
+                }
             }
 
             let n = match Pin::new(&mut *this.writer).poll_write(cx, buf) {
@@ -326,7 +334,11 @@ where
 
             // If read is done and buffer is empty, we're finished
             if this.read_done {
-                return Poll::Ready(Ok(this.total));
+                match Pin::new(&mut *this.writer).poll_flush(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                    Poll::Ready(Ok(())) => return Poll::Ready(Ok(this.total)),
+                }
             }
 
             // Read more data
@@ -392,6 +404,7 @@ where
 struct TransferState {
     read_done: bool,
     shutdown_done: bool,
+    need_flush: bool,
     pos: usize,
     cap: usize,
 }
@@ -442,6 +455,7 @@ where
                 Poll::Ready(Ok(n)) => {
                     state.pos += n;
                     self.a_to_b_total += n as u64;
+                    state.need_flush = true;
                     return TransferResult::Progress;
                 }
             }
@@ -469,7 +483,20 @@ where
 
         let mut read_buf = ReadBuf::new(&mut self.a_to_b_buf);
         match Pin::new(&mut *self.a).poll_read(cx, &mut read_buf) {
-            Poll::Pending => TransferResult::Pending,
+            Poll::Pending => {
+                if state.need_flush {
+                    match Pin::new(&mut *self.b).poll_flush(cx) {
+                        Poll::Ready(Ok(())) => {
+                            state.need_flush = false;
+                            TransferResult::Progress
+                        }
+                        Poll::Ready(Err(e)) => TransferResult::Error(e),
+                        Poll::Pending => TransferResult::Pending,
+                    }
+                } else {
+                    TransferResult::Pending
+                }
+            }
             Poll::Ready(Err(err)) => TransferResult::Error(err),
             Poll::Ready(Ok(())) => {
                 let n = read_buf.filled().len();
@@ -499,6 +526,7 @@ where
                 Poll::Ready(Ok(n)) => {
                     state.pos += n;
                     self.b_to_a_total += n as u64;
+                    state.need_flush = true;
                     return TransferResult::Progress;
                 }
             }
@@ -525,7 +553,20 @@ where
 
         let mut read_buf = ReadBuf::new(&mut self.b_to_a_buf);
         match Pin::new(&mut *self.b).poll_read(cx, &mut read_buf) {
-            Poll::Pending => TransferResult::Pending,
+            Poll::Pending => {
+                if state.need_flush {
+                    match Pin::new(&mut *self.a).poll_flush(cx) {
+                        Poll::Ready(Ok(())) => {
+                            state.need_flush = false;
+                            TransferResult::Progress
+                        }
+                        Poll::Ready(Err(e)) => TransferResult::Error(e),
+                        Poll::Pending => TransferResult::Pending,
+                    }
+                } else {
+                    TransferResult::Pending
+                }
+            }
             Poll::Ready(Err(err)) => TransferResult::Error(err),
             Poll::Ready(Ok(())) => {
                 let n = read_buf.filled().len();

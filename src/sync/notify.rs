@@ -83,13 +83,19 @@ impl WaiterSlab {
     #[inline]
     fn insert(&mut self, entry: WaiterEntry) -> usize {
         let is_active = entry.waker.is_some();
-        let index = if let Some(idx) = self.free_slots.pop() {
-            self.entries[idx] = entry;
-            idx
-        } else {
-            let idx = self.entries.len();
-            self.entries.push(entry);
-            idx
+        let index = loop {
+            if let Some(idx) = self.free_slots.pop() {
+                if idx < self.entries.len() {
+                    self.entries[idx] = entry;
+                    break idx;
+                }
+                // idx >= len means this slot was truncated away during a previous shrink.
+                // Ignore it and keep popping.
+            } else {
+                let idx = self.entries.len();
+                self.entries.push(entry);
+                break idx;
+            }
         };
         if is_active {
             self.active += 1;
@@ -115,12 +121,11 @@ impl WaiterSlab {
             .last()
             .is_some_and(|e| e.waker.is_none() && !e.notified)
         {
-            let tail_idx = self.entries.len() - 1;
             self.entries.pop();
-            // Remove tail_idx from free_slots since the slot no longer exists.
-            if let Some(pos) = self.free_slots.iter().position(|&i| i == tail_idx) {
-                self.free_slots.swap_remove(pos);
-            }
+            // We do NOT explicitly remove the popped index from `free_slots` here
+            // to avoid an O(N^2) penalty when shrinking many cancelled waiters.
+            // Stale `free_slots` indices (>= self.entries.len()) are harmlessly
+            // ignored and discarded by `insert()` during its pop loop.
         }
     }
 
