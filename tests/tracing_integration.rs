@@ -265,8 +265,7 @@ mod tests {
             _ctx: Context<'_, S>,
         ) {
             if attrs.metadata().name() == "region" {
-                let mut spans = self.spans.lock();
-                spans.push(format!("region_new: {:?}", attrs));
+                self.spans.lock().push(format!("region_new: {:?}", attrs));
             }
         }
 
@@ -276,13 +275,13 @@ mod tests {
             values: &tracing::span::Record<'_>,
             _ctx: Context<'_, S>,
         ) {
-            let mut spans = self.spans.lock();
-            spans.push(format!("region_record: {:?}", values));
+            self.spans
+                .lock()
+                .push(format!("region_record: {:?}", values));
         }
 
         fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-            let mut spans = self.spans.lock();
-            spans.push(format!("event: {:?}", event));
+            self.spans.lock().push(format!("event: {:?}", event));
         }
     }
 
@@ -313,7 +312,12 @@ mod tests {
                     "> 0",
                     span_count
                 );
-                let creation = spans.iter().find(|s| s.contains("region_new")).unwrap();
+                let creation = spans
+                    .iter()
+                    .find(|s| s.contains("region_new"))
+                    .unwrap()
+                    .clone();
+                drop(spans);
                 assert_with_log!(
                     creation.contains("region_id"),
                     "region_new should include region_id",
@@ -334,8 +338,8 @@ mod tests {
 
             // Check for update
             {
-                let spans = spans.lock();
                 let has_closing = spans
+                    .lock()
                     .iter()
                     .any(|s| s.contains("region_record") && s.contains("Closing"));
                 assert_with_log!(
@@ -351,8 +355,8 @@ mod tests {
 
             // Check for final update
             {
-                let spans = spans.lock();
                 let has_closed = spans
+                    .lock()
                     .iter()
                     .any(|s| s.contains("region_record") && s.contains("Closed"));
                 assert_with_log!(has_closed, "should record Closed state", true, has_closed);
@@ -382,8 +386,8 @@ mod tests {
 
             // Check for log
             {
-                let logs = logs.lock();
                 let has_task_log = logs
+                    .lock()
                     .iter()
                     .any(|s| s.contains("event") && s.contains("task created"));
                 assert_with_log!(
