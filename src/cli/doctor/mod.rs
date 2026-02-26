@@ -499,7 +499,7 @@ edition = "2024"
         );
         write_file(
             &root.join("crate_a/src/lib.rs"),
-            "use asupersync::{Cx, Scope};\nuse asupersync::channel::mpsc;\n",
+            "use asupersync::Cx;\nuse asupersync::Scope;\nuse asupersync::channel::mpsc;\n",
         );
         write_file(
             &root.join("crate_b/Cargo.toml"),
@@ -608,7 +608,7 @@ edition = "2024"
         );
         write_file(
             &root.join("src/lib.rs"),
-            "use asupersync::{Cx, Budget, Outcome};\n",
+            "use asupersync::Cx;\nuse asupersync::Budget;\nuse asupersync::Outcome;\n",
         );
 
         let report = scan_workspace(root).expect("scan workspace");

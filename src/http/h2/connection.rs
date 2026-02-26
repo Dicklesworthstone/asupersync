@@ -858,6 +858,9 @@ impl Connection {
                 Setting::HeaderTableSize(size) => {
                     self.hpack_encoder.set_max_table_size(*size as usize);
                 }
+                Setting::MaxConcurrentStreams(max) => {
+                    self.streams.set_max_concurrent_streams(*max);
+                }
                 Setting::MaxFrameSize(size) => {
                     // Update frame codec when we have one
                     let _ = size;
@@ -1465,6 +1468,34 @@ mod tests {
         // Remote settings should be updated
         assert_eq!(conn.remote_settings().max_concurrent_streams, 100);
         assert_eq!(conn.remote_settings().initial_window_size, 32768);
+    }
+
+    /// Regression: peer's MaxConcurrentStreams must constrain stream creation,
+    /// not just be stored in remote_settings. Without forwarding to StreamStore,
+    /// the local side could exceed the peer's limit (RFC 7540 §5.1.2 violation).
+    #[test]
+    fn settings_max_concurrent_streams_constrains_open_stream() {
+        let mut conn = Connection::client(Settings::client());
+        // Simulate receiving server settings with max_concurrent_streams = 2.
+        let settings = SettingsFrame::new(vec![Setting::MaxConcurrentStreams(2)]);
+        conn.process_frame(Frame::Settings(settings)).unwrap();
+        // Drain ACK.
+        let _ = conn.next_frame();
+
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+
+        // Open 2 streams (should succeed).
+        conn.open_stream(headers.clone(), false).unwrap();
+        conn.open_stream(headers.clone(), false).unwrap();
+
+        // Third stream should be refused (exceeds peer limit).
+        let result = conn.open_stream(headers, false);
+        assert!(result.is_err(), "third stream must be refused when peer MaxConcurrentStreams=2");
     }
 
     #[test]

@@ -816,7 +816,11 @@ fn qpack_decode_prefixed_int(
             return Ok((value, consumed));
         }
         shift = shift.saturating_add(7);
-        if shift >= 64 {
+        // Cap at shift 56 to prevent silent truncation: checked_shl(63)
+        // succeeds but silently drops high bits (e.g. 2u64 << 63 = 0).
+        // Any legitimate u64 value fits within 9 continuation bytes
+        // (prefix bits + 9×7 = prefix + 63 bits).
+        if shift > 56 {
             return Err(H3NativeError::InvalidFrame("qpack integer overflow"));
         }
     }
@@ -961,8 +965,11 @@ impl H3RequestStreamState {
                     self.header_blocks_seen = 1;
                     return Ok(());
                 }
-                // A second HEADERS block is interpreted as trailers and must follow DATA.
-                if self.header_blocks_seen == 1 && self.saw_data {
+                // A second HEADERS block is interpreted as trailers.
+                // RFC 9114 §4.1: message format is HEADERS + DATA* + HEADERS?
+                // where DATA* means zero or more DATA frames, so trailers are
+                // valid immediately after the initial HEADERS with no DATA.
+                if self.header_blocks_seen == 1 {
                     self.header_blocks_seen = 2;
                     return Ok(());
                 }
@@ -2072,18 +2079,14 @@ mod tests {
     // --- 3. Request stream state gaps ---
 
     #[test]
-    fn request_stream_second_headers_without_data_error() {
+    fn request_stream_trailers_without_data_valid() {
         let mut st = H3RequestStreamState::new();
         st.on_frame(&H3Frame::Headers(vec![0x80]))
             .expect("first HEADERS");
-        // Second HEADERS without any intervening DATA.
-        let err = st
-            .on_frame(&H3Frame::Headers(vec![0x81]))
-            .expect_err("must fail");
-        assert_eq!(
-            err,
-            H3NativeError::ControlProtocol("invalid HEADERS ordering on request stream")
-        );
+        // RFC 9114 §4.1: trailers are valid without intervening DATA
+        // (message format is HEADERS + DATA* + HEADERS? where DATA* = zero or more).
+        st.on_frame(&H3Frame::Headers(vec![0x81]))
+            .expect("trailers without DATA must succeed per RFC 9114");
     }
 
     #[test]
@@ -2377,6 +2380,27 @@ mod tests {
         assert_eq!(
             err,
             H3NativeError::InvalidFrame("unknown static qpack index")
+        );
+    }
+
+    #[test]
+    fn qpack_prefixed_int_rejects_high_shift_truncation() {
+        // Build a QPACK integer with 9 continuation bytes that push shift to 63.
+        // At shift=63, checked_shl(63) silently truncates (e.g., 2u64 << 63 = 0)
+        // because checked_shl only checks shift >= bit_width, not result overflow.
+        // prefix_len=8, first byte = 0xFF (max prefix = 255), then 9 continuation
+        // bytes of 0x80 (part=0, continuation bit set). After the 9th continuation
+        // byte at shift=56, shift advances to 63 which exceeds our cap of 56.
+        let mut wire = vec![0xFFu8]; // max prefix
+        for _ in 0..9 {
+            wire.push(0x80); // continuation, part=0 — 9 bytes push shift from 0→63
+        }
+        wire.push(0x02); // part=2, no continuation — would be decoded at shift=63
+        // With the fix, the 9th continuation byte advances shift to 63 > 56 → error.
+        let result = qpack_decode_prefixed_int(0xFF, 8, &wire[1..]);
+        assert!(
+            result.is_err(),
+            "must reject integer that would silently truncate at high shifts"
         );
     }
 

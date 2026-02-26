@@ -38,7 +38,7 @@ pub struct RaptorQConfig {
 impl RaptorQConfig {
     /// Validates the configuration for basic sanity.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.encoding.repair_overhead < 1.0 {
+        if !self.encoding.repair_overhead.is_finite() || self.encoding.repair_overhead < 1.0 {
             return Err(ConfigError::InvalidRepairOverhead);
         }
 
@@ -1130,6 +1130,32 @@ default_timeout_ms = 5000
             config.validate(),
             Err(ConfigError::InvalidRepairOverhead)
         ));
+    }
+
+    /// Regression: NaN and Infinity must be rejected for repair_overhead.
+    /// NaN passes `< 1.0` check (all NaN comparisons are false) but would
+    /// produce 0 repair symbols; Infinity would cause resource exhaustion.
+    #[test]
+    fn repair_overhead_rejects_nan_and_infinity() {
+        let mut config = RaptorQConfig::default();
+
+        config.encoding.repair_overhead = f64::NAN;
+        assert!(
+            matches!(config.validate(), Err(ConfigError::InvalidRepairOverhead)),
+            "NaN must be rejected"
+        );
+
+        config.encoding.repair_overhead = f64::INFINITY;
+        assert!(
+            matches!(config.validate(), Err(ConfigError::InvalidRepairOverhead)),
+            "Infinity must be rejected"
+        );
+
+        config.encoding.repair_overhead = f64::NEG_INFINITY;
+        assert!(
+            matches!(config.validate(), Err(ConfigError::InvalidRepairOverhead)),
+            "Negative infinity must be rejected"
+        );
     }
 
     /// Invariant: validation rejects symbol_size < 8.
