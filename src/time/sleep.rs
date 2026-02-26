@@ -416,11 +416,12 @@ impl Future for Sleep {
 
                 let mut state = self.state.lock();
                 let finished_handles = take_finished_fallbacks(&mut state);
-                if !state
+                let waker_changed = !state
                     .waker
                     .as_ref()
-                    .is_some_and(|w| w.will_wake(cx.waker()))
-                {
+                    .is_some_and(|w| w.will_wake(cx.waker()));
+
+                if waker_changed {
                     state.waker = Some(cx.waker().clone());
                 }
 
@@ -462,9 +463,22 @@ impl Future for Sleep {
 
                     state.timer_driver = Some(timer.clone());
 
-                    // Register or update timer in the driver's wheel
-                    if let Some(handle) = state.timer_handle.take() {
+                    if state.timer_handle.is_none() {
+                        // Register new timer
+                        let handle = timer.register(self.deadline, cx.waker().clone());
+                        if let Some(trace) = trace.as_ref() {
+                            let seq = trace.next_seq();
+                            trace.push_event(TraceEvent::timer_scheduled(
+                                seq,
+                                now,
+                                handle.id(),
+                                self.deadline,
+                            ));
+                        }
+                        state.timer_handle = Some(handle);
+                    } else if waker_changed {
                         // Update existing timer with new waker
+                        let handle = state.timer_handle.take().unwrap();
                         let old_id = handle.id();
                         let new_handle = timer.update(&handle, self.deadline, cx.waker().clone());
                         if let Some(trace) = trace.as_ref() {
@@ -479,19 +493,6 @@ impl Future for Sleep {
                             ));
                         }
                         state.timer_handle = Some(new_handle);
-                    } else {
-                        // Register new timer
-                        let handle = timer.register(self.deadline, cx.waker().clone());
-                        if let Some(trace) = trace.as_ref() {
-                            let seq = trace.next_seq();
-                            trace.push_event(TraceEvent::timer_scheduled(
-                                seq,
-                                now,
-                                handle.id(),
-                                self.deadline,
-                            ));
-                        }
-                        state.timer_handle = Some(handle);
                     }
                 } else {
                     // No timer driver; cancel any existing registration.

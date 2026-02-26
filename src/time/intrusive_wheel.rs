@@ -945,14 +945,13 @@ impl<const SLOTS: usize> WheelLevel<SLOTS> {
         wakers
     }
 
-    /// Advances cursor by one and drains the slot at the old cursor position.
+    /// Advances cursor by one and drains the slot at the new cursor position.
     ///
     /// Returns the nodes from the drained slot and whether the cursor wrapped around.
     fn advance_and_drain(&mut self) -> (Vec<NonNull<TimerNode>>, bool) {
-        let old_cursor = self.cursor;
         self.cursor = (self.cursor + 1) % SLOTS;
         let wrapped = self.cursor == 0;
-        let nodes = unsafe { self.slots[old_cursor].drain_nodes() };
+        let nodes = unsafe { self.slots[self.cursor].drain_nodes() };
         (nodes, wrapped)
     }
 }

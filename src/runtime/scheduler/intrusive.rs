@@ -448,17 +448,23 @@ impl IntrusiveStack {
     /// have already proven the source queue contains no local tasks.
     #[inline]
     pub(crate) fn push_assume_non_local(&mut self, task_id: TaskId, arena: &mut Arena<TaskRecord>) {
-        let Some(record) = arena.get_mut(task_id.arena_index()) else {
+        let Some(record) = arena.get(task_id.arena_index()) else {
             return;
         };
 
         if record.is_in_queue() {
             return;
         }
-        debug_assert!(
-            !record.is_local(),
-            "push_assume_non_local received local task {task_id:?}"
-        );
+        if record.is_local() {
+            // Harden against callers that violate the contract in release builds.
+            // Fall back to the safe path that maintains local_count invariants.
+            self.push(task_id, arena);
+            return;
+        }
+
+        let Some(record) = arena.get_mut(task_id.arena_index()) else {
+            return;
+        };
 
         match self.top {
             None => {
@@ -651,10 +657,12 @@ impl IntrusiveStack {
                 let Some(record) = arena.get_mut(bottom_id.arena_index()) else {
                     break;
                 };
-                debug_assert!(
-                    !record.is_local(),
-                    "steal_batch_into_non_local encountered local task {bottom_id:?}"
-                );
+                if record.is_local() {
+                    // Source queue contract was violated; repair the local-task
+                    // summary and stop this fast path to avoid stealing !Send work.
+                    self.local_count = self.local_count.max(1);
+                    break;
+                }
                 record.prev_in_queue
             };
 
@@ -758,10 +766,12 @@ impl IntrusiveStack {
 
         let prev_up = {
             let record = arena.get_mut(bottom_id.arena_index())?;
-            debug_assert!(
-                !record.is_local(),
-                "steal_one_assume_non_local encountered local task {bottom_id:?}"
-            );
+            if record.is_local() {
+                // Source queue contract was violated; repair the local-task
+                // summary and refuse to steal this task.
+                self.local_count = self.local_count.max(1);
+                return None;
+            }
             let prev_up = record.prev_in_queue; // Points up to newer task
             record.clear_queue_links();
             prev_up
@@ -1336,5 +1346,62 @@ mod tests {
         let _ = stack.pop(&mut arena); // Remove task 1
         assert!(stack.contains(task(0), &arena));
         assert!(!stack.contains(task(1), &arena));
+    }
+
+    #[test]
+    fn stack_steal_one_assume_non_local_rejects_local_when_counter_stale() {
+        let mut arena = setup_arena(1);
+        let mut stack = IntrusiveStack::new(QUEUE_TAG_READY);
+
+        arena
+            .get_mut(task(0).arena_index())
+            .expect("task record missing")
+            .mark_local();
+        stack.push(task(0), &mut arena);
+        assert!(stack.has_local_tasks());
+
+        // Simulate stale bookkeeping (e.g., contract violation elsewhere).
+        stack.local_count = 0;
+        assert!(!stack.has_local_tasks());
+
+        // Fast-path non-local steal must refuse to steal local tasks.
+        let stolen = stack.steal_one_assume_non_local(&mut arena);
+        assert!(stolen.is_none());
+        assert!(stack.has_local_tasks(), "local_count should self-heal");
+        assert_eq!(stack.len(), 1);
+        assert_eq!(stack.pop(&mut arena), Some(task(0)));
+    }
+
+    #[test]
+    fn stack_steal_batch_into_non_local_rejects_local_when_counter_stale() {
+        let mut arena = setup_arena(3);
+        let mut src = IntrusiveStack::new(QUEUE_TAG_READY);
+        let mut dest = IntrusiveStack::new(QUEUE_TAG_CANCEL);
+
+        arena
+            .get_mut(task(0).arena_index())
+            .expect("task record missing")
+            .mark_local();
+
+        // Keep local task at bottom (oldest).
+        src.push(task(0), &mut arena);
+        src.push(task(1), &mut arena);
+        src.push(task(2), &mut arena);
+        assert!(src.has_local_tasks());
+
+        // Simulate stale bookkeeping.
+        src.local_count = 0;
+        assert!(!src.has_local_tasks());
+
+        let stolen = src.steal_batch_into_non_local(3, &mut arena, &mut dest);
+        assert_eq!(stolen, 0, "must not steal local task via fast path");
+        assert!(src.has_local_tasks(), "local_count should self-heal");
+        assert_eq!(dest.len(), 0, "destination remains untouched");
+
+        // Source order remains intact for owner pop.
+        assert_eq!(src.pop(&mut arena), Some(task(2)));
+        assert_eq!(src.pop(&mut arena), Some(task(1)));
+        assert_eq!(src.pop(&mut arena), Some(task(0)));
+        assert_eq!(src.pop(&mut arena), None);
     }
 }

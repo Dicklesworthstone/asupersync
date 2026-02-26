@@ -30,9 +30,8 @@
 use std::task::Waker;
 
 // SlabToken encodes two u32 fields (index + generation) into usize.
-// This representation is only lossless on 64-bit targets.
-#[cfg(not(target_pointer_width = "64"))]
-compile_error!("reactor token encoding requires 64-bit usize targets");
+// On 64-bit targets, this is completely lossless (32 bits each).
+// On 32-bit targets, it uses 24 bits for the index and 8 bits for the generation.
 
 /// Compact identifier for registered I/O sources.
 ///
@@ -207,6 +206,11 @@ impl TokenSlab {
         if self.free_head == FREE_LIST_END {
             // Allocate a new slot.
             let index = self.entries.len() as u32;
+            #[cfg(target_pointer_width = "32")]
+            assert!(
+                index <= 0xFF_FFFF,
+                "TokenSlab capacity exceeded 16.7M entries on 32-bit platform"
+            );
             let generation = 0;
 
             self.entries.push(Entry::Occupied { waker, generation });

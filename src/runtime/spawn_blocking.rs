@@ -199,6 +199,14 @@ where
     result
 }
 
+struct FallbackGuard;
+
+impl Drop for FallbackGuard {
+    fn drop(&mut self) {
+        FALLBACK_THREAD_COUNT.fetch_sub(1, Ordering::Release);
+    }
+}
+
 pub(crate) async fn spawn_blocking_on_thread<F, T>(f: F) -> T
 where
     F: FnOnce() -> T + Send + 'static,
@@ -231,13 +239,13 @@ where
     let thread_result = thread::Builder::new()
         .name("asupersync-blocking".to_string())
         .spawn(move || {
+            let _guard = FallbackGuard;
             let f = f_for_thread
                 .lock()
                 .take()
                 .expect("spawn_blocking_on_thread fn missing");
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
             tx.send(result);
-            FALLBACK_THREAD_COUNT.fetch_sub(1, Ordering::Release);
         });
 
     match thread_result {

@@ -140,6 +140,11 @@ impl TaskTable {
 
     /// Stores a spawned task's future for later polling.
     pub fn store_spawned_task(&mut self, task_id: TaskId, stored: StoredTask) {
+        // Keep table invariants strict: every stored future must correspond to
+        // an existing live task record.
+        if self.tasks.get(task_id.arena_index()).is_none() {
+            return;
+        }
         let slot = task_id.arena_index().index() as usize;
         if slot >= self.stored_futures.len() {
             self.stored_futures.resize_with(slot + 1, || None);
@@ -364,5 +369,19 @@ mod tests {
         let canonical_id = TaskId::from_arena(idx);
         let record = table.task(canonical_id).expect("task should exist");
         assert_eq!(record.id, canonical_id);
+    }
+
+    #[test]
+    fn store_spawned_task_ignores_unknown_task_id() {
+        use crate::runtime::stored_task::StoredTask;
+        use crate::types::Outcome;
+
+        let mut table = TaskTable::new();
+        let unknown = TaskId::from_arena(ArenaIndex::new(4242, 0));
+        table.store_spawned_task(unknown, StoredTask::new(async { Outcome::Ok(()) }));
+
+        assert_eq!(table.live_task_count(), 0);
+        assert_eq!(table.stored_future_count(), 0);
+        assert!(table.get_stored_future(unknown).is_none());
     }
 }

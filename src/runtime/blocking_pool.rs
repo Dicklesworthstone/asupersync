@@ -110,6 +110,8 @@ struct BlockingPoolInner {
     pending_count: AtomicUsize,
     /// Next task ID for tracking.
     next_task_id: AtomicU64,
+    /// Monotonic worker thread sequence for deterministic naming.
+    next_thread_id: AtomicU64,
     /// Work queue.
     queue: SegQueue<BlockingTask>,
     /// Shutdown flag.
@@ -301,6 +303,7 @@ impl BlockingPool {
             busy_threads: AtomicUsize::new(0),
             pending_count: AtomicUsize::new(0),
             next_task_id: AtomicU64::new(1),
+            next_thread_id: AtomicU64::new(1),
             queue: SegQueue::new(),
             shutdown: AtomicBool::new(false),
             condvar: Condvar::new(),
@@ -610,25 +613,9 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
     }
 
     let inner_clone = Arc::clone(inner);
-    // Thread ID is just for naming, not logic, so fetch_add is fine here (it might skip numbers if we race, but that's fine)
-    // We use a separate counter for IDs or just use the current active count?
-    // The original code used active_threads fetch_add for both count and ID.
-    // We already incremented active_threads.
-    // Let's use next_task_id or a generic counter for names if we want unique names?
-    // The original used: let thread_id = inner.active_threads.fetch_add(1, ...);
-    // Which was the bug (unconditional inc).
-    // We can just use the value we got from CAS + 1 as ID, but ID uniqueness isn't guaranteed if threads die.
-    // Let's generate a unique ID for naming to avoid confusion.
-    // We'll reuse next_task_id logic or add a thread_seq counter?
-    // inner has no thread_seq.
-    // We can use the address or just a random number?
-    // Or just accept that names might collide if we rely on active count?
-    // Actually, `active_threads` fluctuates.
-    // Let's rely on the fact that `spawn` is rare.
-    // I'll assume `active_threads` is "good enough" for an ID or just use a placeholder.
-    // Wait, I can't add fields to `BlockingPoolInner`.
-    // I will use `active_threads` value as the ID hint.
-    let thread_id = inner.active_threads.load(Ordering::Relaxed);
+    // `next_thread_id` is monotonic and decoupled from active-thread accounting,
+    // so names stay unique even as workers retire and respawn.
+    let thread_id = inner.next_thread_id.fetch_add(1, Ordering::Relaxed);
     let name = format!("{}-blocking-{}", inner.thread_name_prefix, thread_id);
 
     match thread::Builder::new().name(name).spawn(move || {
@@ -1321,6 +1308,7 @@ mod tests {
             busy_threads: AtomicUsize::new(0),
             pending_count: AtomicUsize::new(0),
             next_task_id: AtomicU64::new(1),
+            next_thread_id: AtomicU64::new(1),
             queue: SegQueue::new(),
             shutdown: AtomicBool::new(false),
             condvar: Condvar::new(),
@@ -1421,6 +1409,7 @@ mod tests {
             busy_threads: AtomicUsize::new(0),
             pending_count: AtomicUsize::new(0),
             next_task_id: AtomicU64::new(1),
+            next_thread_id: AtomicU64::new(1),
             queue: SegQueue::new(),
             shutdown: AtomicBool::new(false),
             condvar: Condvar::new(),
@@ -1455,6 +1444,7 @@ mod tests {
             busy_threads: AtomicUsize::new(0),
             pending_count: AtomicUsize::new(0),
             next_task_id: AtomicU64::new(1),
+            next_thread_id: AtomicU64::new(1),
             queue: SegQueue::new(),
             shutdown: AtomicBool::new(false),
             condvar: Condvar::new(),

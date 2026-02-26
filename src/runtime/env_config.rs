@@ -656,10 +656,10 @@ max_threads = 64
 
     #[test]
     fn parse_toml_partial_config() {
-        let toml_str = r#"
+        let toml_str = r"
 [scheduler]
 worker_threads = 4
-"#;
+";
         let parsed = parse_toml_str(toml_str).unwrap();
         assert_eq!(parsed.scheduler.worker_threads, Some(4));
         assert_eq!(parsed.scheduler.poll_budget, None);
@@ -694,7 +694,7 @@ worker_threads = "not_a_number"
 
     #[test]
     fn apply_toml_overrides_config() {
-        let toml_str = r#"
+        let toml_str = r"
 [scheduler]
 worker_threads = 16
 poll_budget = 512
@@ -703,7 +703,7 @@ adaptive_cancel_streak_epoch_steps = 64
 
 [blocking]
 max_threads = 128
-"#;
+";
         let parsed = parse_toml_str(toml_str).unwrap();
         let mut config = RuntimeConfig::default();
         apply_toml_config(&mut config, &parsed);
@@ -734,11 +734,11 @@ max_threads = 128
         let path = dir.path().join("runtime.toml");
         std::fs::write(
             &path,
-            r#"
+            r"
 [scheduler]
 worker_threads = 2
 poll_budget = 64
-"#,
+",
         )
         .unwrap();
 
