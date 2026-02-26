@@ -131,7 +131,7 @@ impl DebugServer {
     pub fn start(&mut self) -> std::io::Result<()> {
         let bind = format!("{}:{}", self.config.bind_addr, self.port);
         let listener = TcpListener::bind(&bind)?;
-        listener.set_nonblocking(false)?;
+        listener.set_nonblocking(true)?;
 
         let local_addr = listener.local_addr()?;
         self.local_addr = Some(local_addr);
@@ -173,24 +173,23 @@ impl Drop for DebugServer {
 // =========================================================================
 
 fn serve_loop(listener: &TcpListener, snapshot_fn: &SnapshotFn, running: &AtomicBool) {
-    // Set a timeout so we can check the running flag periodically.
-    let _ = listener.set_nonblocking(false);
-
-    for stream in listener.incoming() {
-        if !running.load(Ordering::Relaxed) {
-            break;
-        }
-        match stream {
-            Ok(stream) => {
+    while running.load(Ordering::Relaxed) {
+        match listener.accept() {
+            Ok((stream, _peer)) => {
                 let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
                 let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
                 handle_connection(stream, snapshot_fn);
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Nonblocking accept lets stop() terminate promptly even with no traffic.
+                thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             Err(_) => {
                 if !running.load(Ordering::Relaxed) {
                     break;
                 }
+                thread::sleep(std::time::Duration::from_millis(25));
             }
         }
     }
@@ -607,8 +606,8 @@ mod tests {
         .unwrap();
         stream.flush().unwrap();
 
-        let mut buf = [0u8; 4096];
-        let n = stream.read(&mut buf).unwrap();
+        let mut buf = Vec::new();
+        let n = stream.read_to_end(&mut buf).unwrap();
         let resp = &buf[..n];
         let text = String::from_utf8_lossy(resp);
         assert!(text.contains("101 Switching Protocols"), "response: {text}");
@@ -623,6 +622,37 @@ mod tests {
         );
 
         server.stop();
+    }
+
+    #[test]
+    fn stop_eventually_closes_listener() {
+        let snapshot_fn: SnapshotFn = Arc::new(test_snapshot);
+        let mut server = DebugServer::with_config(
+            0,
+            snapshot_fn,
+            DebugServerConfig {
+                print_url: false,
+                ..Default::default()
+            },
+        );
+        server.start().unwrap();
+
+        let addr = server.local_addr.unwrap();
+        server.stop();
+
+        let mut listener_closed = false;
+        for _ in 0..20 {
+            if TcpStream::connect(addr).is_err() {
+                listener_closed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+
+        assert!(
+            listener_closed,
+            "listener should close shortly after stop()"
+        );
     }
 
     #[test]
