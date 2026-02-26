@@ -731,9 +731,7 @@ impl Encoder<Frame> for FrameCodec {
 
         // Write mask key and payload
         if should_mask {
-            // Generate a mask key (for simplicity, use a simple pattern)
-            // In production, this should use a cryptographic RNG
-            let mask_key = generate_mask_key();
+            let mask_key = generate_mask_key().map_err(WsError::Io)?;
             dst.put_slice(&mask_key);
 
             // Apply mask to payload and write
@@ -762,11 +760,11 @@ pub fn apply_mask(payload: &mut [u8], mask_key: [u8; 4]) {
 ///
 /// RFC 6455 §5.3 requires masking keys to be derived from a strong source of
 /// entropy to prevent cross-protocol attacks via intermediary cache poisoning.
-fn generate_mask_key() -> [u8; 4] {
+fn generate_mask_key() -> io::Result<[u8; 4]> {
     let mut key = [0u8; 4];
     check_ambient_entropy("websocket_mask");
-    getrandom::fill(&mut key).expect("OS RNG unavailable");
-    key
+    getrandom::fill(&mut key).map_err(io::Error::other)?;
+    Ok(key)
 }
 
 /// Close codes defined by RFC 6455.

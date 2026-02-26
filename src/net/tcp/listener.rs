@@ -92,15 +92,23 @@ impl TcpListener {
                 Poll::Ready(TcpStream::from_std(stream).map(|stream| (stream, addr)))
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                self.note_accept_would_block();
+                let storm_backoff = self.note_accept_would_block();
                 let mode = match self.register_interest(cx) {
                     Ok(mode) => mode,
                     Err(err) => return Poll::Ready(Err(err)),
                 };
-                if mode == InterestRegistrationMode::FallbackPoll {
-                    // No reactor-backed readiness available for this task context.
+
+                let delay = if mode == InterestRegistrationMode::FallbackPoll {
+                    FALLBACK_ACCEPT_BACKOFF.max(storm_backoff)
+                } else if storm_backoff > REARMED_ACCEPT_BACKOFF_BASE {
+                    storm_backoff
+                } else {
+                    Duration::ZERO
+                };
+
+                if delay > Duration::ZERO {
                     if let Some(timer) = Cx::current().and_then(|c| c.timer_driver()) {
-                        let deadline = timer.now() + FALLBACK_ACCEPT_BACKOFF;
+                        let deadline = timer.now() + delay;
                         let _ = timer.register(deadline, cx.waker().clone());
                     } else {
                         // Schedule a delayed wakeup on a background thread to avoid
@@ -109,13 +117,13 @@ impl TcpListener {
                         let _ = std::thread::Builder::new()
                             .name("accept-fallback".into())
                             .spawn(move || {
-                                std::thread::sleep(FALLBACK_ACCEPT_BACKOFF);
+                                std::thread::sleep(delay);
                                 waker.wake();
                             });
                     }
                 }
                 // ReactorArmed: the reactor is re-armed and will wake us on
-                // actual readiness; no sleep needed.
+                // actual readiness; no sleep needed (unless an accept storm triggered a delay).
                 Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),

@@ -133,8 +133,13 @@ impl WsUrl {
                 };
                 (host.to_string(), port)
             } else {
-                return Err(HandshakeError::InvalidUrl("missing closing bracket for IPv6 address".into()));
+                return Err(HandshakeError::InvalidUrl(
+                    "missing closing bracket for IPv6 address".into(),
+                ));
             }
+        } else if host_port.matches(':').count() > 1 {
+            // Unbracketed IPv6 address - cannot safely have a port (ambiguous)
+            (host_port.to_string(), default_port)
         } else if let Some(colon_idx) = host_port.rfind(':') {
             // host:port
             let host = &host_port[..colon_idx];

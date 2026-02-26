@@ -186,8 +186,6 @@ impl Default for CloseReason {
     }
 }
 
-
-
 /// State of the close handshake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CloseState {
@@ -411,6 +409,15 @@ impl CloseHandshake {
                 // Duplicate or unexpected close frame - ignore
                 Ok(None)
             }
+        }
+    }
+
+    /// Mark that the close response frame has been successfully sent.
+    ///
+    /// Transitions `CloseReceived` -> `Closed`. In all other states this is a no-op.
+    pub fn mark_response_sent(&mut self) {
+        if self.state == CloseState::CloseReceived {
+            self.state = CloseState::Closed;
         }
     }
 
@@ -672,6 +679,20 @@ mod tests {
         let frame = handshake.initiate(CloseReason::normal());
         assert!(frame.is_some());
         assert_eq!(handshake.state(), CloseState::Closed);
+    }
+
+    #[test]
+    fn handshake_mark_response_sent_closes_after_receiving_peer_close() {
+        let mut handshake = CloseHandshake::new();
+
+        let peer_close = Frame::close(Some(1000), Some("bye"));
+        let response = handshake.receive_close(&peer_close).unwrap();
+        assert!(response.is_some());
+        assert_eq!(handshake.state(), CloseState::CloseReceived);
+
+        handshake.mark_response_sent();
+        assert_eq!(handshake.state(), CloseState::Closed);
+        assert!(handshake.is_closed());
     }
 
     #[test]
