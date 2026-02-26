@@ -663,16 +663,16 @@ proptest! {
         }
     }
 
-    /// Priority is max: meet(a, b).priority >= a.priority AND >= b.priority.
+    /// Priority is min: meet(a, b).priority == a.priority.min(b.priority).
     #[test]
-    fn budget_priority_is_max(a in arb_budget_val(), b in arb_budget_val()) {
+    fn budget_priority_is_min(a in arb_budget_val(), b in arb_budget_val()) {
         init_test_logging();
         let combined = a.combine(b);
-        let expected_min = a.priority.max(b.priority);
-        prop_assert!(
-            combined.priority >= expected_min,
-            "combined priority {} < max({}, {}) = {}",
-            combined.priority, a.priority, b.priority, expected_min
+        let expected_min = a.priority.min(b.priority);
+        prop_assert_eq!(
+            combined.priority, expected_min,
+            "combined priority {} != min({}, {})",
+            combined.priority, a.priority, b.priority
         );
     }
 
