@@ -705,8 +705,8 @@ impl ScramAuth {
         let salted_password = self.pbkdf2_sha256(&self.password, &salt, iterations);
 
         // Compute client key and stored key
-        let client_key = self.hmac_sha256(&salted_password, b"Client Key");
-        let stored_key = self.sha256(&client_key);
+        let client_key = Self::hmac_sha256(&salted_password, b"Client Key");
+        let stored_key = Self::sha256(&client_key);
 
         // Build client-final-message-without-proof
         let channel_binding =
@@ -721,7 +721,7 @@ impl ScramAuth {
         self.auth_message = Some(auth_message.clone());
 
         // Compute client signature and proof
-        let client_signature = self.hmac_sha256(&stored_key, auth_message.as_bytes());
+        let client_signature = Self::hmac_sha256(&stored_key, auth_message.as_bytes());
         let client_proof: Vec<u8> = client_key
             .iter()
             .zip(client_signature.iter())
@@ -756,11 +756,11 @@ impl ScramAuth {
             PgError::AuthenticationFailed("SCRAM state error: missing iterations".to_string())
         })?;
         let salted_password = self.pbkdf2_sha256(&self.password, salt, iterations);
-        let server_key = self.hmac_sha256(&salted_password, b"Server Key");
+        let server_key = Self::hmac_sha256(&salted_password, b"Server Key");
         let auth_message = self.auth_message.as_ref().ok_or_else(|| {
             PgError::AuthenticationFailed("SCRAM state error: missing auth_message".to_string())
         })?;
-        let expected_sig = self.hmac_sha256(&server_key, auth_message.as_bytes());
+        let expected_sig = Self::hmac_sha256(&server_key, auth_message.as_bytes());
 
         if server_sig != expected_sig {
             return Err(PgError::AuthenticationFailed(
@@ -780,12 +780,12 @@ impl ScramAuth {
         let mut salt_with_block = salt.to_vec();
         salt_with_block.extend_from_slice(&1u32.to_be_bytes());
 
-        let mut u = self.hmac_sha256(password.as_bytes(), &salt_with_block);
+        let mut u = Self::hmac_sha256(password.as_bytes(), &salt_with_block);
         result.copy_from_slice(&u);
 
         // U_2 ... U_iterations
         for _ in 1..iterations {
-            u = self.hmac_sha256(password.as_bytes(), &u);
+            u = Self::hmac_sha256(password.as_bytes(), &u);
             for (r, ui) in result.iter_mut().zip(u.iter()) {
                 *r ^= ui;
             }
@@ -795,7 +795,7 @@ impl ScramAuth {
     }
 
     /// HMAC-SHA256.
-    fn hmac_sha256(&self, key: &[u8], data: &[u8]) -> Vec<u8> {
+    fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
         use sha2::{Digest, Sha256};
 
         const BLOCK_SIZE: usize = 64; // SHA-256 block size
@@ -834,7 +834,7 @@ impl ScramAuth {
     }
 
     /// SHA-256 hash.
-    fn sha256(&self, data: &[u8]) -> Vec<u8> {
+    fn sha256(data: &[u8]) -> Vec<u8> {
         use sha2::{Digest, Sha256};
         Sha256::digest(data).to_vec()
     }
@@ -1121,7 +1121,7 @@ impl PgConnection {
                         }
                         10 => {
                             // AuthenticationSASL
-                            let mechanisms = self.read_sasl_mechanisms(&mut reader)?;
+                            let mechanisms = Self::read_sasl_mechanisms(&mut reader)?;
                             if mechanisms.contains(&"SCRAM-SHA-256".to_string()) {
                                 let password = options.password.as_ref().ok_or_else(|| {
                                     PgError::AuthenticationFailed("password required".to_string())
@@ -1161,7 +1161,7 @@ impl PgConnection {
     }
 
     /// Read SASL mechanism list.
-    fn read_sasl_mechanisms(&self, reader: &mut MessageReader<'_>) -> Result<Vec<String>, PgError> {
+    fn read_sasl_mechanisms(reader: &mut MessageReader<'_>) -> Result<Vec<String>, PgError> {
         let mut mechanisms = Vec::new();
         loop {
             let mech = reader.read_cstring()?;
@@ -1414,9 +1414,8 @@ impl PgConnection {
                         Ok(e) => e,
                     };
                     loop {
-                        let (drain_type, drain_data) = match self.read_message().await {
-                            Ok(m) => m,
-                            Err(_) => break,
+                        let Ok((drain_type, drain_data)) = self.read_message().await else {
+                            break;
                         };
                         if drain_type == b'Z' {
                             if !drain_data.is_empty() {
@@ -1517,9 +1516,8 @@ impl PgConnection {
                         Ok(e) => e,
                     };
                     loop {
-                        let (drain_type, drain_data) = match self.read_message().await {
-                            Ok(m) => m,
-                            Err(_) => break,
+                        let Ok((drain_type, drain_data)) = self.read_message().await else {
+                            break;
                         };
                         if drain_type == b'Z' {
                             if !drain_data.is_empty() {
@@ -1986,7 +1984,7 @@ mod tests {
     #[test]
     fn test_message_buffer() {
         let mut buf = MessageBuffer::new();
-        buf.write_i32(196608);
+        buf.write_i32(196_608);
         buf.write_cstring("user");
         buf.write_cstring("testuser");
         buf.write_byte(0);
@@ -2336,7 +2334,7 @@ mod tests {
     #[test]
     fn message_buffer_startup_no_type_byte() {
         let mut buf = MessageBuffer::new();
-        buf.write_i32(196608); // protocol version 3.0
+        buf.write_i32(196_608); // protocol version 3.0
         buf.write_cstring("user");
         buf.write_cstring("test");
         buf.write_byte(0);
@@ -2346,7 +2344,7 @@ mod tests {
         assert_eq!(len as usize, msg.len());
         // protocol version at bytes 4-7
         let version = i32::from_be_bytes([msg[4], msg[5], msg[6], msg[7]]);
-        assert_eq!(version, 196608);
+        assert_eq!(version, 196_608);
     }
 
     #[test]

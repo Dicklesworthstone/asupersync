@@ -249,7 +249,7 @@ mod tests {
     #[test]
     fn display_certificate_not_yet_valid() {
         let err = TlsError::CertificateNotYetValid {
-            valid_from: 9999999999,
+            valid_from: 9_999_999_999,
             description: "leaf cert".into(),
         };
         let msg = err.to_string();

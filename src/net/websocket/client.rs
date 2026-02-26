@@ -451,6 +451,7 @@ where
                         // Handle close handshake
                         if let Some(response) = self.close_handshake.receive_close(&frame)? {
                             self.send_frame(response).await?;
+                            self.close_handshake.mark_response_sent();
                         }
                         let reason = CloseReason::parse(&frame.payload).ok();
                         return Ok(Some(Message::Close(reason)));
@@ -491,11 +492,18 @@ where
         self.initiate_close(reason).await?;
 
         // Wait for close response (with timeout)
-        let timeout = self.close_handshake.close_timeout();
-        let deadline = std::time::Instant::now() + timeout;
+        let timeout_duration = self.close_handshake.close_timeout();
+        let initial_time = crate::cx::Cx::current()
+            .and_then(|current| current.timer_driver())
+            .map_or_else(crate::time::wall_now, |driver| driver.now());
+        let deadline = initial_time + timeout_duration;
 
         while !self.close_handshake.is_closed() {
-            if std::time::Instant::now() >= deadline {
+            let time_now = crate::cx::Cx::current()
+                .and_then(|current| current.timer_driver())
+                .map_or_else(crate::time::wall_now, |driver| driver.now());
+
+            if time_now >= deadline {
                 self.close_handshake.force_close(CloseReason::going_away());
                 break;
             }
@@ -509,15 +517,16 @@ where
                     // Ignore non-close frames during close
                 }
                 None => {
-                    let now = std::time::Instant::now();
-                    if now >= deadline {
-                        self.close_handshake.force_close(CloseReason::going_away());
-                        break;
-                    }
-                    let remaining = deadline - now;
                     let time_now = crate::cx::Cx::current()
                         .and_then(|current| current.timer_driver())
                         .map_or_else(crate::time::wall_now, |driver| driver.now());
+
+                    if time_now >= deadline {
+                        self.close_handshake.force_close(CloseReason::going_away());
+                        break;
+                    }
+                    let remaining =
+                        std::time::Duration::from_nanos(deadline.duration_since(time_now));
 
                     match crate::time::timeout(time_now, remaining, self.read_more()).await {
                         Ok(Ok(n)) => {

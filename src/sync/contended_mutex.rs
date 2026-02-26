@@ -87,18 +87,7 @@ mod inner {
 
     impl Metrics {
         fn update_max(current: &AtomicU64, value: u64) {
-            let mut old = current.load(Ordering::Relaxed);
-            while value > old {
-                match current.compare_exchange_weak(
-                    old,
-                    value,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => break,
-                    Err(actual) => old = actual,
-                }
-            }
+            current.fetch_max(value, Ordering::Relaxed);
         }
     }
 
@@ -570,8 +559,8 @@ mod tests {
         });
         let _ = poisoner.join();
 
-        let poisoned = m.lock().expect_err("lock should be poisoned");
-        drop(poisoned.into_inner());
+        let poison_err = m.lock().expect_err("lock should be poisoned");
+        drop(poison_err.into_inner());
 
         let snap = m.snapshot();
         crate::assert_with_log!(

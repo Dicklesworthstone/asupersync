@@ -824,7 +824,7 @@ mod tests {
         use super::super::error::TlsError;
 
         let expired = TlsError::CertificateExpired {
-            expired_at: 1000000,
+            expired_at: 1_000_000,
             description: "test cert".to_string(),
         };
         let display = format!("{expired}");
@@ -832,7 +832,7 @@ mod tests {
         assert!(display.contains("1000000"));
 
         let not_yet = TlsError::CertificateNotYetValid {
-            valid_from: 2000000,
+            valid_from: 2_000_000,
             description: "test cert".to_string(),
         };
         let display = format!("{not_yet}");

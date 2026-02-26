@@ -327,6 +327,7 @@ impl fmt::Debug for SqliteConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SqliteConnection")
             .field("open", &self.inner.lock().conn.is_some())
+            .field("pool", &self.pool)
             .finish()
     }
 }
@@ -460,9 +461,12 @@ impl SqliteConnection {
                 let params_refs: Vec<&dyn rusqlite::ToSql> =
                     params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
 
-                conn.execute(&sql, params_refs.as_slice())
+                let res = conn
+                    .execute(&sql, params_refs.as_slice())
                     .map(|n| n as u64)
-                    .map_err(|e| SqliteError::Sqlite(e.to_string()))
+                    .map_err(|e| SqliteError::Sqlite(e.to_string()));
+                drop(guard);
+                res
             })();
             let _ = permit.send(result);
         });
@@ -506,8 +510,11 @@ impl SqliteConnection {
             let result = (|| {
                 let guard = inner.lock();
                 let conn = guard.get()?;
-                conn.execute_batch(&sql)
-                    .map_err(|e| SqliteError::Sqlite(e.to_string()))
+                let res = conn
+                    .execute_batch(&sql)
+                    .map_err(|e| SqliteError::Sqlite(e.to_string()));
+                drop(guard);
+                res
             })();
             let _ = permit.send(result);
         });
@@ -598,7 +605,9 @@ impl SqliteConnection {
                     }
                     result.push(SqliteRow::new(Arc::clone(&columns), values));
                 }
-
+                drop(rows);
+                drop(stmt);
+                drop(guard);
                 Ok(result)
             })();
             let _ = permit.send(result);
@@ -698,8 +707,7 @@ impl SqliteConnection {
 
     /// Closes the connection.
     pub fn close(&self) -> Result<(), SqliteError> {
-        let mut guard = self.inner.lock();
-        guard.close();
+        self.inner.lock().close();
         Ok(())
     }
 
@@ -1214,9 +1222,8 @@ mod tests {
                 other => panic!("create table failed: {other:?}"),
             }
 
-            let tx = match conn.begin(&cx).await {
-                Outcome::Ok(tx) => tx,
-                _ => panic!("begin failed"),
+            let Outcome::Ok(tx) = conn.begin(&cx).await else {
+                panic!("begin failed");
             };
 
             match tx.commit(&cancelled_cx).await {
