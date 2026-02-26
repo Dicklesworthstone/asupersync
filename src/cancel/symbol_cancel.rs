@@ -883,6 +883,8 @@ pub struct CleanupCoordinator {
     pending: RwLock<HashMap<ObjectId, PendingSymbolSet>>,
     /// Cleanup handlers by object ID.
     handlers: RwLock<HashMap<ObjectId, Box<dyn CleanupHandler>>>,
+    /// Completed object IDs that no longer accept pending symbols.
+    completed: RwLock<HashSet<ObjectId>>,
     /// Default cleanup budget.
     default_budget: Budget,
 }
@@ -894,6 +896,7 @@ impl CleanupCoordinator {
         Self {
             pending: RwLock::new(HashMap::new()),
             handlers: RwLock::new(HashMap::new()),
+            completed: RwLock::new(HashSet::new()),
             default_budget: Budget::new().with_poll_quota(1000),
         }
     }
@@ -908,7 +911,16 @@ impl CleanupCoordinator {
     /// Registers symbols as pending for an object.
     #[allow(clippy::significant_drop_tightening)]
     pub fn register_pending(&self, object_id: ObjectId, symbol: Symbol, now: Time) {
+        if self.completed.read().contains(&object_id) {
+            return;
+        }
+
         let mut pending = self.pending.write();
+        // Double check after acquiring the lock to avoid races
+        if self.completed.read().contains(&object_id) {
+            return;
+        }
+
         let set = pending
             .entry(object_id)
             .or_insert_with(|| PendingSymbolSet {
@@ -929,10 +941,9 @@ impl CleanupCoordinator {
 
     /// Clears pending symbols for an object (e.g., after successful decode).
     pub fn clear_pending(&self, object_id: &ObjectId) -> Option<usize> {
-        self.pending
-            .write()
-            .remove(object_id)
-            .map(|set| set.symbols.len())
+        let mut pending = self.pending.write();
+        self.completed.write().insert(*object_id);
+        pending.remove(object_id).map(|set| set.symbols.len())
     }
 
     /// Triggers cleanup for a cancelled object.
@@ -948,8 +959,12 @@ impl CleanupCoordinator {
         // while holding the handlers lock (avoids re-entrant deadlocks).
         let handler = self.handlers.write().remove(&object_id);
 
-        // Get pending symbols
-        let pending_set = self.pending.write().remove(&object_id);
+        // Get pending symbols and mark as completed
+        let pending_set = {
+            let mut pending = self.pending.write();
+            self.completed.write().insert(object_id);
+            pending.remove(&object_id)
+        };
 
         if let Some(set) = pending_set {
             symbols_cleaned = set.symbols.len();
