@@ -197,6 +197,9 @@ struct LossRecovery {
     congestion_window_bytes: u64,
     ssthresh_bytes: u64,
     max_datagram_size: u64,
+    /// RFC 9002 Appendix B.6: Tracks start of the current congestion recovery
+    /// epoch so that cwnd is reduced at most once per round-trip.
+    congestion_recovery_start_time: Option<u64>,
 }
 
 impl Default for LossRecovery {
@@ -211,6 +214,7 @@ impl Default for LossRecovery {
             congestion_window_bytes: 12_000,
             ssthresh_bytes: u64::MAX,
             max_datagram_size: 1_200,
+            congestion_recovery_start_time: None,
         }
     }
 }
@@ -305,16 +309,16 @@ impl LossRecovery {
             self.on_ack_congestion(event.acked_bytes);
         }
         if event.lost_packets > 0 {
-            self.on_loss_congestion();
+            self.on_loss_congestion(now_micros);
         }
         event
     }
 
     fn loss_delay_micros(&self) -> u64 {
-        let base_rtt = self
-            .rtt
-            .latest_rtt_micros()
-            .unwrap_or_else(|| self.rtt.smoothed_rtt_micros().unwrap_or(333_000));
+        // RFC 9002 Section 6.1.2: loss_delay = max(latest_rtt, smoothed_rtt)
+        let latest = self.rtt.latest_rtt_micros().unwrap_or(333_000);
+        let smoothed = self.rtt.smoothed_rtt_micros().unwrap_or(333_000);
+        let base_rtt = latest.max(smoothed);
         ((9 * base_rtt) / 8).max(1_000)
     }
 
@@ -330,7 +334,14 @@ impl LossRecovery {
         }
     }
 
-    fn on_loss_congestion(&mut self) {
+    fn on_loss_congestion(&mut self, now_micros: u64) {
+        // RFC 9002 Appendix B.6: Only reduce cwnd once per recovery epoch.
+        if let Some(recovery_start) = self.congestion_recovery_start_time {
+            if now_micros <= recovery_start {
+                return;
+            }
+        }
+        self.congestion_recovery_start_time = Some(now_micros);
         let min_cwnd = self.max_datagram_size.saturating_mul(2);
         let reduced = (self.congestion_window_bytes / 2).max(min_cwnd);
         self.ssthresh_bytes = reduced;
@@ -730,6 +741,37 @@ mod tests {
         t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 5, 10_200));
         let _ = t.on_ack_received(PacketNumberSpace::ApplicationData, &[5], 0, 20_050);
         assert!(t.congestion_window_bytes() <= t.ssthresh_bytes());
+    }
+
+    #[test]
+    fn congestion_recovery_epoch_prevents_double_reduction() {
+        // RFC 9002 Appendix B.6: cwnd should only be halved once per
+        // recovery round-trip, even if multiple ACKs report losses.
+        let mut t = QuicTransportMachine::new();
+
+        // Send packets 1-6 in quick succession.
+        for pn in 1..=6 {
+            t.on_packet_sent(sent(
+                PacketNumberSpace::ApplicationData,
+                pn,
+                10_000 + pn * 10,
+            ));
+        }
+
+        // ACK pn 5 at time 20000 — triggers packet-threshold loss for pn 1 and 2.
+        let event1 = t.on_ack_received(PacketNumberSpace::ApplicationData, &[5], 0, 20_000);
+        assert!(event1.lost_packets > 0, "first ACK should detect losses");
+        let cwnd_after_first_loss = t.congestion_window_bytes();
+
+        // ACK pn 6 at the same time (20000) — triggers more losses (pn 3).
+        // Should NOT reduce cwnd again because we're in the same recovery epoch.
+        let event2 = t.on_ack_received(PacketNumberSpace::ApplicationData, &[6], 0, 20_000);
+        assert!(event2.lost_packets > 0, "second ACK should detect losses");
+        assert_eq!(
+            t.congestion_window_bytes(),
+            cwnd_after_first_loss,
+            "cwnd must not be reduced twice in the same recovery epoch"
+        );
     }
 
     #[test]

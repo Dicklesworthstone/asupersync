@@ -45,7 +45,7 @@ impl ErrorCode {
         match value {
             0x0 => Self::NoError,
             0x1 => Self::ProtocolError,
-            0x2 => Self::InternalError,
+            // 0x2 (InternalError) handled by wildcard below
             0x3 => Self::FlowControlError,
             0x4 => Self::SettingsTimeout,
             0x5 => Self::StreamClosed,
