@@ -299,7 +299,7 @@ impl RespValue {
                     })?;
                     let start_data = end + 2;
                     let end_data = start_data.saturating_add(len);
-                    let end_crlf = end_data + 2;
+                    let end_crlf = end_data.saturating_add(2);
                     if buf.len() < end_crlf {
                         return Ok(Decoded::NeedMore);
                     }
@@ -900,6 +900,12 @@ impl Pipeline<'_> {
     /// Execute the pipeline and return all responses.
     pub async fn exec(self, cx: &Cx) -> Result<Vec<RespValue>, RedisError> {
         let mut conn = self.client.acquire(cx).await?;
+
+        // Ensure AUTH/SELECT have been run on this connection.
+        if let Err(e) = conn.ensure_initialized(cx).await {
+            conn.discard();
+            return Err(e);
+        }
 
         // Write all commands in one go to reduce syscalls.
         let total_len: usize = self.encoded.iter().map(Vec::len).sum();

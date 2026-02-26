@@ -864,12 +864,15 @@ fn object_params_for_payload(
 ) -> ObjectParams {
     let max_block_size = max_block_size.max(usize::from(symbol_size));
     let blocks = (payload_len as usize).div_ceil(max_block_size).max(1);
-    let symbols_per_block = max_block_size.div_ceil(usize::from(symbol_size)) as u16;
+    let symbols_per_block = max_block_size.div_ceil(usize::from(symbol_size));
+    // Saturate to prevent silent truncation on extreme configurations.
+    let blocks = blocks.min(u8::MAX as usize) as u8;
+    let symbols_per_block = symbols_per_block.min(u16::MAX as usize) as u16;
     ObjectParams::new(
         object_id,
         payload_len,
         symbol_size,
-        blocks as u8,
+        blocks,
         symbols_per_block,
     )
 }
