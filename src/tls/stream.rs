@@ -500,7 +500,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
             #[cfg(feature = "tracing-integration")]
             trace!(bytes = retry, "TLS write retry after flush");
             if retry == 0 {
-                // Buffer still full after flushing; signal backpressure
+                // Buffer still full after flushing.  Schedule an immediate
+                // re-poll so we don't hang — the flush loop above may have
+                // completed entirely via Ready, leaving no waker registered.
+                cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
             return Poll::Ready(Ok(retry));
