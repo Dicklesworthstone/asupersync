@@ -190,7 +190,7 @@ where
 {
     type Response = S::Response;
     type Error = ConcurrencyLimitError<S::Error>;
-    type Future = ConcurrencyLimitFuture<S::Future>;
+    type Future = ConcurrencyLimitFuture<S::Future, S::Error>;
 
     #[inline]
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -252,11 +252,18 @@ where
 
     #[inline]
     fn call(&mut self, req: Request) -> Self::Future {
-        // Take the permit that was acquired in poll_ready
-        let State::Ready(permit) = std::mem::replace(&mut self.state, State::Idle) else {
-            panic!("poll_ready must be called before call");
+        // Take the permit acquired in poll_ready.
+        let state = std::mem::replace(&mut self.state, State::Idle);
+        let permit = match state {
+            State::Ready(permit) => permit,
+            other => {
+                // Preserve in-flight acquisition state on contract misuse.
+                self.state = other;
+                return ConcurrencyLimitFuture::immediate_error(
+                    ConcurrencyLimitError::LimitExceeded,
+                );
+            }
         };
-
         ConcurrencyLimitFuture::new(self.inner.call(req), permit)
     }
 }
@@ -265,46 +272,86 @@ where
 ///
 /// This future holds a permit for the duration of the inner service call.
 /// When the future completes (or is dropped), the permit is released.
-pub struct ConcurrencyLimitFuture<F> {
-    inner: F,
-    /// The permit is held until the future completes or is dropped.
-    _permit: OwnedSemaphorePermit,
+#[pin_project::pin_project(project = ConcurrencyLimitFutureProj)]
+pub struct ConcurrencyLimitFuture<F, E> {
+    #[pin]
+    state: ConcurrencyLimitFutureState<F, E>,
 }
 
-impl<F> ConcurrencyLimitFuture<F> {
+#[pin_project::pin_project(project = ConcurrencyLimitFutureStateProj)]
+enum ConcurrencyLimitFutureState<F, E> {
+    Inner {
+        #[pin]
+        future: F,
+        /// Held while the inner future is pending; dropped on completion.
+        permit: Option<OwnedSemaphorePermit>,
+    },
+    Error {
+        err: Option<ConcurrencyLimitError<E>>,
+    },
+}
+
+impl<F, E> ConcurrencyLimitFuture<F, E> {
     /// Creates a new concurrency-limited future.
     #[must_use]
     pub fn new(inner: F, permit: OwnedSemaphorePermit) -> Self {
         Self {
-            inner,
-            _permit: permit,
+            state: ConcurrencyLimitFutureState::Inner {
+                future: inner,
+                permit: Some(permit),
+            },
+        }
+    }
+
+    /// Creates a future that resolves immediately to a limiter error.
+    #[must_use]
+    pub fn immediate_error(err: ConcurrencyLimitError<E>) -> Self {
+        Self {
+            state: ConcurrencyLimitFutureState::Error { err: Some(err) },
         }
     }
 }
 
-impl<F, T, E> Future for ConcurrencyLimitFuture<F>
+impl<F, T, E> Future for ConcurrencyLimitFuture<F, E>
 where
-    F: Future<Output = Result<T, E>> + Unpin,
+    F: Future<Output = Result<T, E>>,
 {
     type Output = Result<T, ConcurrencyLimitError<E>>;
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        match Pin::new(&mut this.inner).poll(cx) {
-            Poll::Ready(Ok(response)) => Poll::Ready(Ok(response)),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(ConcurrencyLimitError::Inner(e))),
-            Poll::Pending => Poll::Pending,
+        match self.project().state.project() {
+            ConcurrencyLimitFutureStateProj::Inner { future, permit } => match future.poll(cx) {
+                Poll::Ready(Ok(response)) => {
+                    let _ = permit.take();
+                    Poll::Ready(Ok(response))
+                }
+                Poll::Ready(Err(e)) => {
+                    let _ = permit.take();
+                    Poll::Ready(Err(ConcurrencyLimitError::Inner(e)))
+                }
+                Poll::Pending => Poll::Pending,
+            },
+            ConcurrencyLimitFutureStateProj::Error { err } => {
+                let err = err.take().unwrap_or(ConcurrencyLimitError::LimitExceeded);
+                Poll::Ready(Err(err))
+            }
         }
-        // Permit is automatically released when future is dropped
     }
 }
 
-impl<F: std::fmt::Debug> std::fmt::Debug for ConcurrencyLimitFuture<F> {
+impl<F: std::fmt::Debug, E> std::fmt::Debug for ConcurrencyLimitFuture<F, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ConcurrencyLimitFuture")
-            .field("inner", &self.inner)
-            .finish_non_exhaustive()
+        match &self.state {
+            ConcurrencyLimitFutureState::Inner { future, .. } => f
+                .debug_struct("ConcurrencyLimitFuture")
+                .field("inner", future)
+                .finish_non_exhaustive(),
+            ConcurrencyLimitFutureState::Error { .. } => f
+                .debug_struct("ConcurrencyLimitFuture")
+                .field("state", &"Error")
+                .finish(),
+        }
     }
 }
 
@@ -522,6 +569,24 @@ mod tests {
     }
 
     #[test]
+    fn call_without_poll_ready_returns_limit_exceeded() {
+        init_test("call_without_poll_ready_returns_limit_exceeded");
+        let layer = ConcurrencyLimitLayer::new(1);
+        let mut svc = layer.layer(EchoService);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut future = svc.call(7);
+        let result = Pin::new(&mut future).poll(&mut cx);
+        let limited = matches!(
+            result,
+            Poll::Ready(Err(ConcurrencyLimitError::LimitExceeded))
+        );
+        crate::assert_with_log!(limited, "limit exceeded", true, limited);
+        crate::test_complete!("call_without_poll_ready_returns_limit_exceeded");
+    }
+
+    #[test]
     fn future_releases_permit_on_completion() {
         init_test("future_releases_permit_on_completion");
         let layer = ConcurrencyLimitLayer::new(2);
@@ -545,6 +610,35 @@ mod tests {
         let available = svc.available();
         crate::assert_with_log!(available == 2, "available", 2, available);
         crate::test_complete!("future_releases_permit_on_completion");
+    }
+
+    #[test]
+    fn future_releases_permit_when_ready_even_if_retained() {
+        init_test("future_releases_permit_when_ready_even_if_retained");
+        let layer = ConcurrencyLimitLayer::new(1);
+        let mut svc = layer.layer(EchoService);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let ready = svc.poll_ready(&mut cx);
+        let ready_ok = matches!(ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready_ok, "ready ok", true, ready_ok);
+        let available = svc.available();
+        crate::assert_with_log!(available == 0, "available", 0, available);
+
+        let mut future = svc.call(7);
+        let result = Pin::new(&mut future).poll(&mut cx);
+        let ok = matches!(result, Poll::Ready(Ok(7)));
+        crate::assert_with_log!(ok, "result ok", true, ok);
+
+        // Permit should be released as soon as the response is ready, even if
+        // the completed future value is still retained by the caller.
+        let available = svc.available();
+        crate::assert_with_log!(available == 1, "available", 1, available);
+
+        // Keep the future alive until here to ensure the release is not drop-coupled.
+        let _still_retained = future;
+        crate::test_complete!("future_releases_permit_when_ready_even_if_retained");
     }
 
     #[test]
@@ -717,7 +811,7 @@ mod tests {
     fn concurrency_limit_future_debug() {
         let sem = Arc::new(Semaphore::new(1));
         let permit = OwnedSemaphorePermit::try_acquire_arc(&sem, 1).unwrap();
-        let future =
+        let future: ConcurrencyLimitFuture<_, std::convert::Infallible> =
             ConcurrencyLimitFuture::new(ready(Ok::<i32, std::convert::Infallible>(42)), permit);
         let dbg = format!("{future:?}");
         assert!(dbg.contains("ConcurrencyLimitFuture"));
