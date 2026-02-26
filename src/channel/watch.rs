@@ -261,12 +261,13 @@ impl<T> Sender<T> {
             return Err(SendError::Closed(value));
         }
 
-        {
+        let _old_value = {
             let mut guard = self.inner.value.write();
-            guard.0 = value;
+            let old = std::mem::replace(&mut guard.0, value);
             guard.1 = guard.1.wrapping_add(1);
             self.inner.version.store(guard.1, Ordering::Release);
-        }
+            old
+        };
 
         self.inner.wake_all_waiters();
 

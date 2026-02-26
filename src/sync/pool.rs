@@ -775,6 +775,7 @@ where
 {
     pool: &'a GenericPool<R, F>,
     waiter_id: &'b mut Option<u64>,
+    cx: &'a Cx,
 }
 
 impl<R, F> Future for WaitForNotification<'_, '_, R, F>
@@ -785,6 +786,10 @@ where
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.cx.checkpoint().is_err() {
+            return Poll::Ready(());
+        }
+
         self.pool.process_returns();
 
         let mut state = self.pool.state.lock();
@@ -1567,6 +1572,7 @@ where
                 let wait_fut = WaitForNotification {
                     pool: self,
                     waiter_id: &mut cleanup.waiter_id,
+                    cx,
                 };
                 if crate::time::timeout(
                     now,

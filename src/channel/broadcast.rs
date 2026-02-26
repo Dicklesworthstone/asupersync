@@ -247,9 +247,11 @@ impl<T: Clone> SendPermit<'_, T> {
             return 0;
         }
 
-        if inner.buffer.len() == inner.capacity {
-            inner.buffer.pop_front();
-        }
+        let _popped = if inner.buffer.len() == inner.capacity {
+            inner.buffer.pop_front()
+        } else {
+            None
+        };
 
         let index = inner.total_sent;
         inner.buffer.push_back(Slot { msg, index });
