@@ -69,4 +69,6 @@ pub use signal::{Signal, SignalError, signal};
 
 // Unix-specific signal helpers
 #[cfg(unix)]
-pub use signal::{sigchld, sighup, sigint, sigquit, sigterm, sigusr1, sigusr2, sigwinch};
+pub use signal::{
+    sigalrm, sigchld, sighup, sigint, sigpipe, sigquit, sigterm, sigusr1, sigusr2, sigwinch,
+};

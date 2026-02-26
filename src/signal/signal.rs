@@ -7,7 +7,7 @@
 //! # Design
 //!
 //! On Unix, a global dispatcher thread is installed once and receives process
-//! signals via `signal-hook`. Delivered signals are faned out to per-kind async
+//! signals via `signal-hook`. Delivered signals are fanned out to per-kind async
 //! waiters using `Notify` + monotone delivery counters.
 
 use std::io;
@@ -133,7 +133,7 @@ impl SignalDispatcher {
 }
 
 #[cfg(unix)]
-fn all_signal_kinds() -> [SignalKind; 8] {
+fn all_signal_kinds() -> [SignalKind; 10] {
     [
         SignalKind::Interrupt,
         SignalKind::Terminate,
@@ -143,6 +143,8 @@ fn all_signal_kinds() -> [SignalKind; 8] {
         SignalKind::User2,
         SignalKind::Child,
         SignalKind::WindowChange,
+        SignalKind::Pipe,
+        SignalKind::Alarm,
     ]
 }
 
@@ -164,6 +166,10 @@ fn signal_kind_from_raw(raw: i32) -> Option<SignalKind> {
         Some(SignalKind::Child)
     } else if raw == libc::SIGWINCH {
         Some(SignalKind::WindowChange)
+    } else if raw == libc::SIGPIPE {
+        Some(SignalKind::Pipe)
+    } else if raw == libc::SIGALRM {
+        Some(SignalKind::Alarm)
     } else {
         None
     }
@@ -375,6 +381,26 @@ pub fn sigwinch() -> io::Result<Signal> {
     signal(SignalKind::window_change())
 }
 
+/// Creates a stream for SIGPIPE.
+///
+/// # Errors
+///
+/// Returns an error if signal handling is not available.
+#[cfg(unix)]
+pub fn sigpipe() -> io::Result<Signal> {
+    signal(SignalKind::pipe())
+}
+
+/// Creates a stream for SIGALRM.
+///
+/// # Errors
+///
+/// Returns an error if signal handling is not available.
+#[cfg(unix)]
+pub fn sigalrm() -> io::Result<Signal> {
+    signal(SignalKind::alarm())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,6 +462,10 @@ mod tests {
         crate::assert_with_log!(sigchld_ok, "sigchld ok", true, sigchld_ok);
         let sigwinch_ok = sigwinch().is_ok();
         crate::assert_with_log!(sigwinch_ok, "sigwinch ok", true, sigwinch_ok);
+        let sigpipe_ok = sigpipe().is_ok();
+        crate::assert_with_log!(sigpipe_ok, "sigpipe ok", true, sigpipe_ok);
+        let sigalrm_ok = sigalrm().is_ok();
+        crate::assert_with_log!(sigalrm_ok, "sigalrm ok", true, sigalrm_ok);
         crate::test_complete!("unix_signal_helpers");
     }
 
@@ -450,5 +480,26 @@ mod tests {
         let got = futures_lite::future::block_on(stream.recv());
         crate::assert_with_log!(got.is_some(), "recv returns delivery", true, got.is_some());
         crate::test_complete!("signal_recv_observes_delivery");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_raw_signal_mapping_covers_pipe_and_alarm() {
+        init_test("unix_raw_signal_mapping_covers_pipe_and_alarm");
+        let pipe = signal_kind_from_raw(libc::SIGPIPE);
+        crate::assert_with_log!(
+            pipe == Some(SignalKind::Pipe),
+            "SIGPIPE mapped",
+            Some(SignalKind::Pipe),
+            pipe
+        );
+        let alarm = signal_kind_from_raw(libc::SIGALRM);
+        crate::assert_with_log!(
+            alarm == Some(SignalKind::Alarm),
+            "SIGALRM mapped",
+            Some(SignalKind::Alarm),
+            alarm
+        );
+        crate::test_complete!("unix_raw_signal_mapping_covers_pipe_and_alarm");
     }
 }
