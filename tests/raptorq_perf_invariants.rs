@@ -3584,7 +3584,7 @@ fn f6_regime_stats_populated_after_decode() {
 /// F6 invariant: first decode has window_len=1, stable phase, zero deltas.
 #[test]
 fn f6_first_decode_is_stable_with_zero_deltas() {
-    let k = 8;
+    let k = 16;
     let symbol_size = 32;
     let seed = 0xF601_0002_u64;
 
@@ -3592,7 +3592,8 @@ fn f6_first_decode_is_stable_with_zero_deltas() {
     let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
 
-    let received = build_decode_received(&source, &encoder, &decoder, &[], 0);
+    let drop: Vec<usize> = vec![0, 3, 7];
+    let received = build_decode_received(&source, &encoder, &decoder, &drop, 4);
     let result = decoder.decode(&received).expect("decode should succeed");
 
     assert!(
@@ -3614,7 +3615,7 @@ fn f6_first_decode_is_stable_with_zero_deltas() {
 /// accumulate window entries without exceeding capacity.
 #[test]
 fn f6_window_bounded_across_decodes() {
-    let k = 8;
+    let k = 16;
     let symbol_size = 32;
     let seed = 0xF601_0003_u64;
 
@@ -3622,7 +3623,8 @@ fn f6_window_bounded_across_decodes() {
     let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
 
-    let received = build_decode_received(&source, &encoder, &decoder, &[], 0);
+    let drop: Vec<usize> = vec![0, 3, 7];
+    let received = build_decode_received(&source, &encoder, &decoder, &drop, 4);
 
     let mut last_replay_ref = None;
     // Decode 50 times on the same decoder instance.
@@ -3654,7 +3656,7 @@ fn f6_window_bounded_across_decodes() {
 /// F6 invariant: retuning deltas are always within bounded caps.
 #[test]
 fn f6_retuning_deltas_always_bounded() {
-    let k = 8;
+    let k = 16;
     let symbol_size = 32;
     let seed = 0xF601_0004_u64;
 
@@ -3662,7 +3664,8 @@ fn f6_retuning_deltas_always_bounded() {
     let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
 
-    let received = build_decode_received(&source, &encoder, &decoder, &[], 0);
+    let drop: Vec<usize> = vec![0, 3, 7];
+    let received = build_decode_received(&source, &encoder, &decoder, &drop, 4);
 
     // Repeated decodes — verify policy feature bounds after each.
     for i in 0..100 {
