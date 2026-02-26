@@ -365,8 +365,8 @@ impl CancellationProtocolOracle {
             .or_insert_with(TaskProtocolRecord::new);
 
         if let Some(ref mut existing) = record.cancel_request {
-            // Check monotonicity: new reason should be >= existing reason
-            if reason.kind < existing.reason.kind {
+            // Check monotonicity: new reason severity should be >= existing
+            if reason.kind.severity() < existing.reason.kind.severity() {
                 self.violations
                     .push(CancellationProtocolViolation::NonMonotonicCancel {
                         task,
