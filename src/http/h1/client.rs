@@ -489,8 +489,12 @@ impl crate::codec::Encoder<Request> for Http1ClientCodec {
             return Ok(());
         }
 
-        if !has_content_length && !req.body.is_empty() {
-            let _ = write!(head, "Content-Length: {}\r\n", req.body.len());
+        if !has_content_length {
+            if !req.body.is_empty() {
+                let _ = write!(head, "Content-Length: {}\r\n", req.body.len());
+            } else if req.method == Method::Post || req.method == Method::Put {
+                let _ = write!(head, "Content-Length: 0\r\n");
+            }
         }
 
         head.push_str("\r\n");

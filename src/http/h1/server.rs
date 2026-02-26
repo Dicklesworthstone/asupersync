@@ -208,7 +208,7 @@ where
     async fn read_next<T>(
         &self,
         framed: &mut Framed<T, Http1Codec>,
-        state: &ConnectionState,
+        _state: &ConnectionState,
     ) -> Option<ReadOutcome>
     where
         T: AsyncRead + AsyncWrite + Unpin,
@@ -240,15 +240,11 @@ where
             }
         });
 
-        if state.requests_served > 0 {
-            if let Some(idle_timeout) = self.config.idle_timeout {
-                let now = Cx::current()
-                    .and_then(|cx| cx.timer_driver())
-                    .map_or_else(wall_now, |timer| timer.now());
-                timeout(now, idle_timeout, read_future).await.ok()
-            } else {
-                Some(read_future.await)
-            }
+        if let Some(idle_timeout) = self.config.idle_timeout {
+            let now = Cx::current()
+                .and_then(|cx| cx.timer_driver())
+                .map_or_else(wall_now, |timer| timer.now());
+            timeout(now, idle_timeout, read_future).await.ok()
         } else {
             Some(read_future.await)
         }
@@ -309,9 +305,7 @@ where
                 .map_or_else(wall_now, |timer| timer.now());
 
             // Check idle timeout
-            if state.requests_served > 0
-                && state.exceeded_idle_timeout(self.config.idle_timeout, now)
-            {
+            if state.exceeded_idle_timeout(self.config.idle_timeout, now) {
                 state.phase = ConnectionPhase::Closing;
                 break;
             }

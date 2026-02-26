@@ -944,7 +944,9 @@ impl Encoder<Response> for Http1Codec {
                 return Ok(());
             }
 
-            if !has_content_length {
+            let suppress_content_length =
+                (100..=199).contains(&resp.status) || resp.status == 204 || resp.status == 304;
+            if !has_content_length && !suppress_content_length {
                 let _ = fmt::Write::write_fmt(
                     &mut w,
                     format_args!("Content-Length: {}\r\n", resp.body.len()),
@@ -1206,7 +1208,7 @@ mod tests {
         let resp = Response::new(204, "No Content", Vec::new());
         let bytes = encode_one(&mut codec, resp);
         let s = String::from_utf8(bytes).unwrap();
-        assert!(s.contains("Content-Length: 0\r\n"));
+        assert!(!s.contains("Content-Length"));
         assert!(s.ends_with("\r\n\r\n"));
     }
 
