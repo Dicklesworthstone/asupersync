@@ -50,7 +50,6 @@ where
         pos: 0,
         cap: 0,
         total: 0,
-        yield_counter: 0,
     }
 }
 
@@ -63,7 +62,6 @@ pub struct Copy<'a, R: ?Sized, W: ?Sized> {
     pos: usize,
     cap: usize,
     total: u64,
-    yield_counter: u8,
 }
 
 impl<R, W> Future for Copy<'_, R, W>
@@ -75,14 +73,14 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        let mut steps = 0;
 
         loop {
-            if this.yield_counter > 32 {
-                this.yield_counter = 0;
+            if steps > 32 {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
-            this.yield_counter += 1;
+            steps += 1;
 
             // If we have buffered data, write it
             if this.pos < this.cap {
@@ -184,7 +182,6 @@ where
         reader,
         writer,
         total: 0,
-        yield_counter: 0,
     }
 }
 
@@ -193,7 +190,6 @@ pub struct CopyBuf<'a, R: ?Sized, W: ?Sized> {
     reader: &'a mut R,
     writer: &'a mut W,
     total: u64,
-    yield_counter: u8,
 }
 
 impl<R, W> Future for CopyBuf<'_, R, W>
@@ -205,14 +201,14 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        let mut steps = 0;
 
         loop {
-            if this.yield_counter > 32 {
-                this.yield_counter = 0;
+            if steps > 32 {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
-            this.yield_counter += 1;
+            steps += 1;
 
             let buf = match Pin::new(&mut *this.reader).poll_fill_buf(cx) {
                 Poll::Pending => return Poll::Pending,
@@ -277,7 +273,6 @@ where
         pos: 0,
         cap: 0,
         total: 0,
-        yield_counter: 0,
     }
 }
 
@@ -291,7 +286,6 @@ pub struct CopyWithProgress<'a, R: ?Sized, W: ?Sized, F> {
     pos: usize,
     cap: usize,
     total: u64,
-    yield_counter: u8,
 }
 
 impl<R, W, F> Future for CopyWithProgress<'_, R, W, F>
@@ -304,14 +298,14 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        let mut steps = 0;
 
         loop {
-            if this.yield_counter > 32 {
-                this.yield_counter = 0;
+            if steps > 32 {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
-            this.yield_counter += 1;
+            steps += 1;
 
             // If we have buffered data, write it
             if this.pos < this.cap {
@@ -390,7 +384,6 @@ where
         b_to_a: TransferState::default(),
         a_to_b_total: 0,
         b_to_a_total: 0,
-        steps: 0,
     }
 }
 
@@ -413,7 +406,6 @@ pub struct CopyBidirectional<'a, A: ?Sized, B: ?Sized> {
     b_to_a: TransferState,
     a_to_b_total: u64,
     b_to_a_total: u64,
-    steps: usize,
 }
 
 const YIELD_BUDGET: usize = 64;
@@ -556,12 +548,12 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        let mut steps = 0;
 
         // Poll both directions, interleaved, until both block or are done
         loop {
             // Check yield budget to prevent starvation
-            if this.steps >= YIELD_BUDGET {
-                this.steps = 0;
+            if steps >= YIELD_BUDGET {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
@@ -583,7 +575,7 @@ where
             }
 
             if made_progress {
-                this.steps += 1;
+                steps += 1;
             } else {
                 // Check if both are done (read complete, buffer flushed, AND shutdown complete)
                 let a_to_b_done = this.a_to_b.read_done

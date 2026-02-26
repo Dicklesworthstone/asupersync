@@ -411,7 +411,7 @@ impl Drop for Notified<'_> {
                         // It was woken by broadcast. No stored token needed.
                         return;
                     }
-                    
+
                     // It was woken by notify_one, but cancelled!
                     // Pass the notification to the next waiter to prevent a lost wakeup.
                     for entry in &mut waiters.entries {

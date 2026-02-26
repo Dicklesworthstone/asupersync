@@ -34,7 +34,7 @@ fn notify_one_lost_if_dropped_after_waiters() {
     // fut1 is dropped (cancelled) before consuming!
     drop(fut1);
 
-    // Because fut1 was cancelled, the notify_one token should be baton-passed 
+    // Because fut1 was cancelled, the notify_one token should be baton-passed
     // or re-stored.
     let mut fut2 = notify.notified();
     let ready2 = matches!(Pin::new(&mut fut2).poll(&mut cx), Poll::Ready(()));

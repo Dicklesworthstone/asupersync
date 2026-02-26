@@ -1054,7 +1054,9 @@ impl<P: Policy> Scope<'_, P> {
                     if crate::runtime::scheduler::three_lane::current_worker_id().is_some() {
                         // In scheduler-backed runtime execution, fully drain the
                         // cancelled primary before returning.
-                        let _ = h1.join(cx).await;
+                        if let Err(JoinError::Panicked(p)) = h1.join(cx).await {
+                            return Err(JoinError::Panicked(p));
+                        }
                     } else {
                         // In no-scheduler contexts (e.g. direct unit-test block_on),
                         // full join can deadlock because nothing drives stored tasks.
@@ -1062,7 +1064,11 @@ impl<P: Policy> Scope<'_, P> {
                         let mut drain = Box::pin(h1.join(cx));
                         let waker = std::task::Waker::noop();
                         let mut poll_cx = Context::from_waker(waker);
-                        let _ = drain.as_mut().poll(&mut poll_cx);
+                        if let std::task::Poll::Ready(Err(JoinError::Panicked(p))) =
+                            drain.as_mut().poll(&mut poll_cx)
+                        {
+                            return Err(JoinError::Panicked(p));
+                        }
                     }
 
                     return Err(JoinError::Cancelled(CancelReason::resource_unavailable()));

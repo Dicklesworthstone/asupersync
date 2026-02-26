@@ -699,7 +699,8 @@ mod tests {
 
         // Loser was dropped (cleanup via Drop) but NOT drained (not polled to completion)
         assert!(dropped.load(Ordering::SeqCst), "loser must be dropped");
-        // Loser was polled exactly once (during Select::poll) but never reached Ready
+        // Loser was NOT polled: left-biased Select returns A's result immediately
+        // without polling B. B is dropped without ever being polled.
         assert_eq!(
             polled.load(Ordering::SeqCst),
             0,

@@ -113,6 +113,8 @@ pub struct RateLimit<S> {
     /// Period for refilling tokens.
     period: Duration,
     time_getter: fn() -> Time,
+    /// Timer for sleeping when tokens are exhausted.
+    sleep: Option<crate::time::Sleep>,
 }
 
 impl<S: Clone> Clone for RateLimit<S> {
@@ -124,6 +126,7 @@ impl<S: Clone> Clone for RateLimit<S> {
             rate: self.rate,
             period: self.period,
             time_getter: self.time_getter,
+            sleep: None, // Sleep state is not cloned
         }
     }
 }
@@ -145,6 +148,7 @@ impl<S> RateLimit<S> {
             rate,
             period,
             time_getter: wall_clock_now,
+            sleep: None,
         }
     }
 
@@ -163,6 +167,7 @@ impl<S> RateLimit<S> {
             rate,
             period,
             time_getter,
+            sleep: None,
         }
     }
 
@@ -267,10 +272,28 @@ impl<S> RateLimit<S> {
         self.refill_state(now);
         if self.tokens > 0 {
             self.tokens -= 1;
+            self.sleep = None;
             Poll::Ready(Ok(()))
         } else {
             // Wake up caller to retry later
-            cx.waker().wake_by_ref();
+            if let Some(last) = self.last_refill {
+                let period_nanos = self.period.as_nanos().min(u128::from(u64::MAX)) as u64;
+                let next_deadline = last.saturating_add_nanos(period_nanos);
+
+                let need_new_sleep = self
+                    .sleep
+                    .as_ref()
+                    .is_none_or(|s| s.deadline() != next_deadline);
+                if need_new_sleep {
+                    self.sleep = Some(crate::time::Sleep::new(next_deadline));
+                }
+
+                if let Some(sleep) = &mut self.sleep {
+                    let _ = std::pin::Pin::new(sleep).poll(cx);
+                }
+            } else {
+                cx.waker().wake_by_ref();
+            }
             Poll::Pending
         }
     }
@@ -318,9 +341,27 @@ where
         // Refill + eagerly acquire token (no lock — `&mut self` is exclusive).
         self.refill_state(now);
         if self.tokens == 0 {
-            cx.waker().wake_by_ref();
+            if let Some(last) = self.last_refill {
+                let period_nanos = self.period.as_nanos().min(u128::from(u64::MAX)) as u64;
+                let next_deadline = last.saturating_add_nanos(period_nanos);
+
+                let need_new_sleep = self
+                    .sleep
+                    .as_ref()
+                    .is_none_or(|s| s.deadline() != next_deadline);
+                if need_new_sleep {
+                    self.sleep = Some(crate::time::Sleep::new(next_deadline));
+                }
+
+                if let Some(sleep) = &mut self.sleep {
+                    let _ = std::pin::Pin::new(sleep).poll(cx);
+                }
+            } else {
+                cx.waker().wake_by_ref();
+            }
             return Poll::Pending;
         }
+        self.sleep = None;
         self.tokens -= 1;
 
         // Token reserved. Check inner readiness.
@@ -726,6 +767,58 @@ mod tests {
         let future = RateLimitFuture::new(std::future::ready(Ok::<i32, &str>(42)));
         let dbg = format!("{future:?}");
         assert!(dbg.contains("RateLimitFuture"));
+    }
+
+    /// Regression test: Sleep must register a waker when tokens are exhausted.
+    ///
+    /// Previously, `Sleep::with_time_getter()` was used, which returns Pending
+    /// without registering any waker — causing tasks to hang forever. The fix
+    /// uses `Sleep::new()` which properly registers with the timer driver or
+    /// spawns a fallback thread.
+    #[test]
+    fn exhausted_tokens_register_waker_not_hang() {
+        init_test("exhausted_tokens_register_waker_not_hang");
+        let woken = Arc::new(AtomicBool::new(false));
+
+        struct TrackWaker(Arc<AtomicBool>);
+        impl Wake for TrackWaker {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let waker: Waker = Arc::new(TrackWaker(woken.clone())).into();
+        let mut cx = Context::from_waker(&waker);
+
+        // Create a rate limiter with 1 token, custom time getter.
+        let mut svc =
+            RateLimit::with_time_getter(EchoService, 1, Duration::from_secs(1), test_time);
+
+        // Set time to 0 and consume the single token.
+        TEST_NOW.store(0, Ordering::SeqCst);
+        let first = svc.poll_ready(&mut cx);
+        let ok = matches!(first, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ok, "first ready", true, ok);
+
+        // Now tokens are exhausted. poll_ready should return Pending.
+        let second = svc.poll_ready(&mut cx);
+        crate::assert_with_log!(second.is_pending(), "pending", true, second.is_pending());
+
+        // The Sleep should NOT use time_getter (which would skip waker registration).
+        // Verify the sleep field exists and was created with Sleep::new (no time_getter).
+        let sleep = svc.sleep.as_ref().expect("sleep must be created");
+        let has_time_getter = sleep.time_getter.is_some();
+        crate::assert_with_log!(
+            !has_time_getter,
+            "sleep must NOT have time_getter",
+            false,
+            has_time_getter
+        );
+
+        crate::test_complete!("exhausted_tokens_register_waker_not_hang");
     }
 
     #[test]

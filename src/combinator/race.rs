@@ -278,7 +278,7 @@ pub enum RaceError<E> {
     Second(E),
     /// The winner was cancelled.
     Cancelled(CancelReason),
-    /// The winner panicked.
+    /// A branch panicked.
     Panicked(PanicPayload),
 }
 
@@ -288,7 +288,7 @@ impl<E: fmt::Display> fmt::Display for RaceError<E> {
             Self::First(e) => write!(f, "first branch won with error: {e}"),
             Self::Second(e) => write!(f, "second branch won with error: {e}"),
             Self::Cancelled(r) => write!(f, "winner was cancelled: {r}"),
-            Self::Panicked(p) => write!(f, "winner panicked: {p}"),
+            Self::Panicked(p) => write!(f, "branch panicked: {p}"),
         }
     }
 }

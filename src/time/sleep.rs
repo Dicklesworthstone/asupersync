@@ -14,7 +14,6 @@ use crate::time::{TimerDriverHandle, TimerHandle};
 use crate::trace::TraceEvent;
 use crate::types::Time;
 use parking_lot::Mutex;
-use std::cell::Cell;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -157,7 +156,7 @@ pub struct Sleep {
     pub(crate) time_getter: Option<fn() -> Time>,
     /// Whether this sleep has been polled at least once.
     /// Used for tracing/debugging.
-    polled: Cell<bool>,
+    polled: std::sync::atomic::AtomicBool,
     /// Shared state for background waiter thread.
     state: Arc<Mutex<SleepState>>,
 }
@@ -183,7 +182,7 @@ impl Sleep {
         Self {
             deadline,
             time_getter: None,
-            polled: Cell::new(false),
+            polled: std::sync::atomic::AtomicBool::new(false),
             state: Arc::new(Mutex::new(SleepState {
                 waker: None,
                 fallback: None,
@@ -231,7 +230,7 @@ impl Sleep {
         Self {
             deadline,
             time_getter: Some(time_getter),
-            polled: Cell::new(false),
+            polled: std::sync::atomic::AtomicBool::new(false),
             state: Arc::new(Mutex::new(SleepState {
                 waker: None,
                 fallback: None,
@@ -281,7 +280,8 @@ impl Sleep {
     /// Any registered timer is cancelled and will be re-registered on next poll.
     pub fn reset(&mut self, deadline: Time) {
         self.deadline = deadline;
-        self.polled.set(false);
+        self.polled
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         let (handle, driver, fallback_handles) = {
             let mut state = self.state.lock();
             let mut handles = std::mem::take(&mut state.zombie_fallbacks);
@@ -317,7 +317,8 @@ impl Sleep {
     /// Any registered timer is cancelled and will be re-registered on next poll.
     pub fn reset_after(&mut self, now: Time, duration: Duration) {
         self.deadline = now.saturating_add_nanos(duration_to_nanos(duration));
-        self.polled.set(false);
+        self.polled
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         let (handle, driver, fallback_handles) = {
             let mut state = self.state.lock();
             let mut handles = std::mem::take(&mut state.zombie_fallbacks);
@@ -351,7 +352,7 @@ impl Sleep {
     /// Returns true if this sleep has been polled at least once.
     #[must_use]
     pub fn was_polled(&self) -> bool {
-        self.polled.get()
+        self.polled.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Gets the current time using the configured time getter or default.
@@ -366,7 +367,8 @@ impl Sleep {
     ///
     /// Returns `Poll::Ready(())` if the deadline has passed.
     pub fn poll_with_time(&self, now: Time) -> Poll<()> {
-        self.polled.set(true);
+        self.polled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         if now >= self.deadline {
             Poll::Ready(())
         } else {
@@ -606,7 +608,7 @@ impl Clone for Sleep {
         Self {
             deadline: self.deadline,
             time_getter: self.time_getter,
-            polled: Cell::new(false), // Fresh clone hasn't been polled
+            polled: std::sync::atomic::AtomicBool::new(false), // Fresh clone hasn't been polled
             state: Arc::new(Mutex::new(SleepState {
                 waker: None,
                 fallback: None,
