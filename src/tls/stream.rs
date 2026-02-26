@@ -483,6 +483,28 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         #[cfg(feature = "tracing-integration")]
         trace!(bytes = n, "TLS write");
 
+        // When rustls returns Ok(0) with a non-empty buffer, the internal
+        // plaintext buffer is full. Flush pending TLS records to make room,
+        // then retry. Returning Ok(0) would cause write_all() to raise
+        // WriteZero, which is not a real error in this situation.
+        if n == 0 && !buf.is_empty() {
+            while self.conn.wants_write() {
+                match self.poll_write_tls(cx) {
+                    Poll::Ready(Ok(_)) => {}
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+            let retry = io::Write::write(&mut self.conn.writer(), buf)?;
+            #[cfg(feature = "tracing-integration")]
+            trace!(bytes = retry, "TLS write retry after flush");
+            if retry == 0 {
+                // Buffer still full after flushing; signal backpressure
+                return Poll::Pending;
+            }
+            return Poll::Ready(Ok(retry));
+        }
+
         // Flush encrypted data to underlying IO
         while self.conn.wants_write() {
             match self.poll_write_tls(cx) {

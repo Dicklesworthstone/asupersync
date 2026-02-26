@@ -196,9 +196,12 @@ impl Worker {
                     std::thread::yield_now();
                     backoff += 1;
                 } else {
-                    // Use a short timeout so shutdown is observed even if no explicit
-                    // unpark signal is delivered while this worker is parked.
-                    self.parker.park_timeout(Duration::from_millis(1));
+                    // Use a moderate timeout so shutdown is observed even if no
+                    // explicit unpark signal is delivered while this worker is
+                    // parked.  The previous 1ms timeout caused ~3% CPU per idle
+                    // worker (1000 wake-ups/sec).  25ms is a good trade-off:
+                    // still responsive to shutdown while reducing idle CPU by ~25x.
+                    self.parker.park_timeout(Duration::from_millis(25));
                     break;
                 }
             }
