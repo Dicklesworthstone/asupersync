@@ -53,8 +53,8 @@ impl std::error::Error for ReplyLinearityViolation {}
 /// resolution is a linearity violation.
 #[derive(Debug, Default)]
 pub struct ReplyLinearityOracle {
-    /// Pending replies: (server, task, call_time) -> resolved?
-    pending: HashMap<(ActorId, TaskId), (Time, bool)>,
+    /// Pending replies: (server, task) -> (call_time, resolved, over_resolved).
+    pending: HashMap<(ActorId, TaskId), (Time, bool, bool)>,
     /// Count of replies created.
     created_count: usize,
     /// Count of replies resolved (sent or aborted).
@@ -70,14 +70,18 @@ impl ReplyLinearityOracle {
 
     /// Record a reply being created (when handle_call is entered).
     pub fn on_reply_created(&mut self, server: ActorId, task: TaskId, time: Time) {
-        self.pending.insert((server, task), (time, false));
+        self.pending.insert((server, task), (time, false, false));
         self.created_count += 1;
     }
 
     /// Record a reply being sent (committed).
     pub fn on_reply_sent(&mut self, server: ActorId, task: TaskId) {
         if let Some(entry) = self.pending.get_mut(&(server, task)) {
-            entry.1 = true;
+            if entry.1 {
+                entry.2 = true;
+            } else {
+                entry.1 = true;
+            }
         }
         self.resolved_count += 1;
     }
@@ -85,7 +89,11 @@ impl ReplyLinearityOracle {
     /// Record a reply being aborted (explicit cancellation).
     pub fn on_reply_aborted(&mut self, server: ActorId, task: TaskId) {
         if let Some(entry) = self.pending.get_mut(&(server, task)) {
-            entry.1 = true;
+            if entry.1 {
+                entry.2 = true;
+            } else {
+                entry.1 = true;
+            }
         }
         self.resolved_count += 1;
     }
@@ -97,7 +105,15 @@ impl ReplyLinearityOracle {
         keys.sort_by_key(|(a, t)| (a.task_id(), *t));
 
         for (server, task) in keys {
-            if let Some(&(call_time, resolved)) = self.pending.get(&(server, task)) {
+            if let Some(&(call_time, resolved, over_resolved)) = self.pending.get(&(server, task)) {
+                if over_resolved {
+                    return Err(ReplyLinearityViolation {
+                        server,
+                        task,
+                        dropped: false,
+                        call_time,
+                    });
+                }
                 if !resolved {
                     return Err(ReplyLinearityViolation {
                         server,
@@ -392,8 +408,8 @@ impl std::error::Error for SupervisorQuiescenceViolation {}
 pub struct SupervisorQuiescenceOracle {
     /// Supervisor -> (region, set of child tasks).
     supervisors: HashMap<TaskId, (RegionId, HashSet<TaskId>)>,
-    /// Tasks that have completed.
-    completed_tasks: HashSet<TaskId>,
+    /// Tasks that have completed, with completion time.
+    completed_tasks: HashMap<TaskId, Time>,
     /// Regions that have closed, with their close times.
     closed_regions: HashMap<RegionId, Time>,
     /// Total child registration events.
@@ -423,8 +439,15 @@ impl SupervisorQuiescenceOracle {
     }
 
     /// Record a task completing.
-    pub fn on_task_completed(&mut self, task: TaskId) {
-        self.completed_tasks.insert(task);
+    pub fn on_task_completed(&mut self, task: TaskId, time: Time) {
+        self.completed_tasks
+            .entry(task)
+            .and_modify(|completed_at| {
+                if time < *completed_at {
+                    *completed_at = time;
+                }
+            })
+            .or_insert(time);
     }
 
     /// Record a region closing.
@@ -444,7 +467,11 @@ impl SupervisorQuiescenceOracle {
                     let mut active: Vec<TaskId> = children
                         .iter()
                         .copied()
-                        .filter(|c| !self.completed_tasks.contains(c))
+                        .filter(|c| {
+                            self.completed_tasks
+                                .get(c)
+                                .is_none_or(|completed_at| *completed_at > close_time)
+                        })
                         .collect();
                     active.sort();
 
@@ -531,6 +558,16 @@ mod tests {
         oracle.on_reply_created(actor(1), task(1), Time::ZERO);
         oracle.on_reply_aborted(actor(1), task(1));
         assert!(oracle.check().is_ok());
+    }
+
+    #[test]
+    fn reply_linearity_fail_on_double_resolution() {
+        let mut oracle = ReplyLinearityOracle::new();
+        oracle.on_reply_created(actor(1), task(1), Time::ZERO);
+        oracle.on_reply_sent(actor(1), task(1));
+        oracle.on_reply_aborted(actor(1), task(1));
+        let err = oracle.check().unwrap_err();
+        assert!(!err.dropped);
     }
 
     #[test]
@@ -623,8 +660,8 @@ mod tests {
         oracle.on_supervisor_created(task(1), region(0));
         oracle.on_child_added(task(1), task(2));
         oracle.on_child_added(task(1), task(3));
-        oracle.on_task_completed(task(2));
-        oracle.on_task_completed(task(3));
+        oracle.on_task_completed(task(2), Time::ZERO);
+        oracle.on_task_completed(task(3), Time::ZERO);
         oracle.on_region_closed(region(0), Time::ZERO);
         assert!(oracle.check().is_ok());
     }
@@ -647,6 +684,18 @@ mod tests {
         oracle.on_child_added(task(1), task(2));
         // Region NOT closed — should pass (only checks closed regions).
         assert!(oracle.check().is_ok());
+    }
+
+    #[test]
+    fn supervisor_quiescence_fail_when_child_completes_after_close() {
+        let mut oracle = SupervisorQuiescenceOracle::new();
+        oracle.on_supervisor_created(task(1), region(0));
+        oracle.on_child_added(task(1), task(2));
+        oracle.on_region_closed(region(0), Time::from_nanos(100));
+        oracle.on_task_completed(task(2), Time::from_nanos(101));
+        let err = oracle.check().unwrap_err();
+        assert_eq!(err.active_children, vec![task(2)]);
+        assert_eq!(err.close_time, Time::from_nanos(100));
     }
 
     #[test]
