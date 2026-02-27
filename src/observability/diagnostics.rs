@@ -838,6 +838,566 @@ pub struct ObligationLeak {
     pub age: std::time::Duration,
 }
 
+/// Advanced observability taxonomy contract version.
+pub const ADVANCED_OBSERVABILITY_CONTRACT_VERSION: &str = "doctor-observability-v1";
+/// Baseline contract version consumed by advanced taxonomy mapping.
+pub const ADVANCED_OBSERVABILITY_BASELINE_VERSION: &str = "doctor-logging-v1";
+
+/// Advanced event classes for operator-facing diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AdvancedEventClass {
+    /// Command lifecycle in execution flow.
+    CommandLifecycle,
+    /// Cross-system synchronization and error boundaries.
+    IntegrationReliability,
+    /// Guided remediation lifecycle and verification.
+    RemediationSafety,
+    /// Deterministic replay lifecycle.
+    ReplayDeterminism,
+    /// Verification and gate-level summary events.
+    VerificationGovernance,
+}
+
+impl AdvancedEventClass {
+    /// Stable canonical string for schema/docs/export use.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CommandLifecycle => "command_lifecycle",
+            Self::IntegrationReliability => "integration_reliability",
+            Self::RemediationSafety => "remediation_safety",
+            Self::ReplayDeterminism => "replay_determinism",
+            Self::VerificationGovernance => "verification_governance",
+        }
+    }
+}
+
+/// Severity semantics for advanced diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AdvancedSeverity {
+    /// Informational event without operator action requirement.
+    Info,
+    /// Event that should be reviewed.
+    Warning,
+    /// Event indicates an actionable failure.
+    Error,
+    /// Event indicates taxonomy/contract contradiction requiring immediate attention.
+    Critical,
+}
+
+impl AdvancedSeverity {
+    /// Stable canonical string for schema/docs/export use.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Warning => "warning",
+            Self::Error => "error",
+            Self::Critical => "critical",
+        }
+    }
+}
+
+/// Troubleshooting dimensions used for fast triage and filtering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TroubleshootingDimension {
+    /// Cancellation protocol and drain/finalize lifecycle.
+    CancellationPath,
+    /// Schema/contract conformance and validation behavior.
+    ContractCompliance,
+    /// Determinism/replay and schedule stability.
+    Determinism,
+    /// External integration/dependency boundary behavior.
+    ExternalDependency,
+    /// Immediate operator action and investigation intent.
+    OperatorAction,
+    /// Recovery planning and remediation follow-through.
+    RecoveryPlanning,
+    /// Runtime-state/invariant integrity.
+    RuntimeInvariant,
+}
+
+impl TroubleshootingDimension {
+    /// Stable canonical string for schema/docs/export use.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CancellationPath => "cancellation_path",
+            Self::ContractCompliance => "contract_compliance",
+            Self::Determinism => "determinism",
+            Self::ExternalDependency => "external_dependency",
+            Self::OperatorAction => "operator_action",
+            Self::RecoveryPlanning => "recovery_planning",
+            Self::RuntimeInvariant => "runtime_invariant",
+        }
+    }
+}
+
+/// Event-class specification for taxonomy contract export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdvancedEventClassSpec {
+    /// Canonical identifier.
+    pub class_id: String,
+    /// Description for operator-facing diagnostics.
+    pub description: String,
+}
+
+/// Severity specification for taxonomy contract export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdvancedSeveritySpec {
+    /// Canonical severity identifier.
+    pub severity: String,
+    /// Meaning/intent of this severity.
+    pub meaning: String,
+}
+
+/// Troubleshooting-dimension specification for taxonomy contract export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TroubleshootingDimensionSpec {
+    /// Canonical dimension identifier.
+    pub dimension: String,
+    /// Why this dimension is useful during triage.
+    pub purpose: String,
+}
+
+/// Advanced observability contract layered on top of baseline doctor logging.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdvancedObservabilityContract {
+    /// Advanced contract version.
+    pub contract_version: String,
+    /// Required baseline contract version for mapping.
+    pub baseline_contract_version: String,
+    /// Event classes in lexical order.
+    pub event_classes: Vec<AdvancedEventClassSpec>,
+    /// Severity semantics in lexical order.
+    pub severity_semantics: Vec<AdvancedSeveritySpec>,
+    /// Troubleshooting dimensions in lexical order.
+    pub troubleshooting_dimensions: Vec<TroubleshootingDimensionSpec>,
+    /// Compatibility notes for downstream readers.
+    pub compatibility_notes: Vec<String>,
+}
+
+/// Baseline flow/event/outcome tuple consumed by the advanced classifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BaselineLogEvent<'a> {
+    /// Baseline flow identifier.
+    pub flow_id: &'a str,
+    /// Baseline event kind.
+    pub event_kind: &'a str,
+    /// Baseline outcome class.
+    pub outcome_class: &'a str,
+}
+
+/// Conflict detected while mapping baseline fields to advanced semantics.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AdvancedClassificationConflict {
+    /// Event kind is not allowed for this flow in baseline contract.
+    FlowEventMismatch {
+        /// Baseline flow identifier.
+        flow_id: String,
+        /// Baseline event kind.
+        event_kind: String,
+    },
+    /// Outcome conflicts with event-kind semantics.
+    OutcomeEventMismatch {
+        /// Baseline event kind.
+        event_kind: String,
+        /// Baseline outcome class.
+        outcome_class: String,
+    },
+}
+
+/// Classified advanced semantic view of one baseline event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdvancedLogClassification {
+    /// Advanced event class.
+    pub event_class: AdvancedEventClass,
+    /// Resolved severity.
+    pub severity: AdvancedSeverity,
+    /// Troubleshooting dimensions in deterministic lexical order.
+    pub dimensions: Vec<TroubleshootingDimension>,
+    /// Operator-facing narrative sentence.
+    pub narrative: String,
+    /// Recommended next action.
+    pub recommended_action: String,
+    /// Conflicts discovered during mapping/resolution.
+    pub conflicts: Vec<AdvancedClassificationConflict>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BaselineFlowId {
+    Execution,
+    Integration,
+    Remediation,
+    Replay,
+}
+
+impl BaselineFlowId {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "execution" => Some(Self::Execution),
+            "integration" => Some(Self::Integration),
+            "remediation" => Some(Self::Remediation),
+            "replay" => Some(Self::Replay),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BaselineEventKind {
+    CommandComplete,
+    CommandStart,
+    IntegrationError,
+    IntegrationSync,
+    RemediationApply,
+    RemediationVerify,
+    ReplayComplete,
+    ReplayStart,
+    VerificationSummary,
+}
+
+impl BaselineEventKind {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "command_complete" => Some(Self::CommandComplete),
+            "command_start" => Some(Self::CommandStart),
+            "integration_error" => Some(Self::IntegrationError),
+            "integration_sync" => Some(Self::IntegrationSync),
+            "remediation_apply" => Some(Self::RemediationApply),
+            "remediation_verify" => Some(Self::RemediationVerify),
+            "replay_complete" => Some(Self::ReplayComplete),
+            "replay_start" => Some(Self::ReplayStart),
+            "verification_summary" => Some(Self::VerificationSummary),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BaselineOutcomeClass {
+    Cancelled,
+    Failed,
+    Success,
+}
+
+impl BaselineOutcomeClass {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "cancelled" => Some(Self::Cancelled),
+            "failed" => Some(Self::Failed),
+            "success" => Some(Self::Success),
+            _ => None,
+        }
+    }
+}
+
+/// Returns the advanced observability taxonomy contract.
+#[must_use]
+pub fn advanced_observability_contract() -> AdvancedObservabilityContract {
+    AdvancedObservabilityContract {
+        contract_version: ADVANCED_OBSERVABILITY_CONTRACT_VERSION.to_string(),
+        baseline_contract_version: ADVANCED_OBSERVABILITY_BASELINE_VERSION.to_string(),
+        event_classes: vec![
+            AdvancedEventClassSpec {
+                class_id: AdvancedEventClass::CommandLifecycle.as_str().to_string(),
+                description: "Execution command lifecycle and gate telemetry.".to_string(),
+            },
+            AdvancedEventClassSpec {
+                class_id: AdvancedEventClass::IntegrationReliability
+                    .as_str()
+                    .to_string(),
+                description: "Cross-system integration health and boundary reliability."
+                    .to_string(),
+            },
+            AdvancedEventClassSpec {
+                class_id: AdvancedEventClass::RemediationSafety.as_str().to_string(),
+                description: "Remediation safety, application, and post-fix verification."
+                    .to_string(),
+            },
+            AdvancedEventClassSpec {
+                class_id: AdvancedEventClass::ReplayDeterminism.as_str().to_string(),
+                description: "Replay lifecycle and deterministic reproducibility.".to_string(),
+            },
+            AdvancedEventClassSpec {
+                class_id: AdvancedEventClass::VerificationGovernance
+                    .as_str()
+                    .to_string(),
+                description: "Verification summary and governance gate posture.".to_string(),
+            },
+        ],
+        severity_semantics: vec![
+            AdvancedSeveritySpec {
+                severity: AdvancedSeverity::Critical.as_str().to_string(),
+                meaning: "Contract/taxonomy contradiction requiring immediate correction."
+                    .to_string(),
+            },
+            AdvancedSeveritySpec {
+                severity: AdvancedSeverity::Error.as_str().to_string(),
+                meaning: "Actionable failure impacting reliability or correctness.".to_string(),
+            },
+            AdvancedSeveritySpec {
+                severity: AdvancedSeverity::Info.as_str().to_string(),
+                meaning: "Expected state transition with no direct intervention required."
+                    .to_string(),
+            },
+            AdvancedSeveritySpec {
+                severity: AdvancedSeverity::Warning.as_str().to_string(),
+                meaning: "Non-terminal issue or cancellation requiring review.".to_string(),
+            },
+        ],
+        troubleshooting_dimensions: vec![
+            TroubleshootingDimensionSpec {
+                dimension: TroubleshootingDimension::CancellationPath
+                    .as_str()
+                    .to_string(),
+                purpose: "Track request/drain/finalize behavior for cancelled runs.".to_string(),
+            },
+            TroubleshootingDimensionSpec {
+                dimension: TroubleshootingDimension::ContractCompliance
+                    .as_str()
+                    .to_string(),
+                purpose: "Validate schema, gate, and policy conformance.".to_string(),
+            },
+            TroubleshootingDimensionSpec {
+                dimension: TroubleshootingDimension::Determinism.as_str().to_string(),
+                purpose: "Confirm replay stability and deterministic artifact lineage.".to_string(),
+            },
+            TroubleshootingDimensionSpec {
+                dimension: TroubleshootingDimension::ExternalDependency
+                    .as_str()
+                    .to_string(),
+                purpose: "Isolate third-party/system boundary failures.".to_string(),
+            },
+            TroubleshootingDimensionSpec {
+                dimension: TroubleshootingDimension::OperatorAction
+                    .as_str()
+                    .to_string(),
+                purpose: "Prioritize immediate operator decision paths.".to_string(),
+            },
+            TroubleshootingDimensionSpec {
+                dimension: TroubleshootingDimension::RecoveryPlanning
+                    .as_str()
+                    .to_string(),
+                purpose: "Drive remediation and verify-after-change sequencing.".to_string(),
+            },
+            TroubleshootingDimensionSpec {
+                dimension: TroubleshootingDimension::RuntimeInvariant
+                    .as_str()
+                    .to_string(),
+                purpose: "Connect events to runtime invariant health.".to_string(),
+            },
+        ],
+        compatibility_notes: vec![
+            "Additive dimensions/classes may be introduced without baseline schema changes."
+                .to_string(),
+            "Field removals or semantic redefinitions require a contract-version bump.".to_string(),
+            "Unknown baseline flow/event/outcome values are hard validation errors.".to_string(),
+        ],
+    }
+}
+
+/// Classifies one baseline doctor logging event into advanced semantics.
+///
+/// Conflict resolution is deterministic:
+/// 1. Start with outcome-based severity (`success` -> info, `cancelled` -> warning, `failed` -> error).
+/// 2. Escalate for semantic contradictions (for example, `integration_error` + `success`).
+/// 3. Escalate to `critical` when flow/event pairing violates baseline contract.
+pub fn classify_baseline_log_event(
+    event: BaselineLogEvent<'_>,
+) -> Result<AdvancedLogClassification, String> {
+    let flow = BaselineFlowId::parse(event.flow_id)
+        .ok_or_else(|| format!("unknown flow_id {}", event.flow_id))?;
+    let kind = BaselineEventKind::parse(event.event_kind)
+        .ok_or_else(|| format!("unknown event_kind {}", event.event_kind))?;
+    let outcome = BaselineOutcomeClass::parse(event.outcome_class)
+        .ok_or_else(|| format!("unknown outcome_class {}", event.outcome_class))?;
+
+    let (event_class, mut dimensions, kind_narrative, action_hint) = kind_semantics(kind);
+    let mut conflicts = Vec::new();
+    let mut severity = match outcome {
+        BaselineOutcomeClass::Success => AdvancedSeverity::Info,
+        BaselineOutcomeClass::Cancelled => AdvancedSeverity::Warning,
+        BaselineOutcomeClass::Failed => AdvancedSeverity::Error,
+    };
+
+    if !flow_allows_event(flow, kind) {
+        conflicts.push(AdvancedClassificationConflict::FlowEventMismatch {
+            flow_id: event.flow_id.to_string(),
+            event_kind: event.event_kind.to_string(),
+        });
+        severity = AdvancedSeverity::Critical;
+        dimensions.push(TroubleshootingDimension::ContractCompliance);
+    }
+
+    if kind == BaselineEventKind::IntegrationError && outcome == BaselineOutcomeClass::Success {
+        conflicts.push(AdvancedClassificationConflict::OutcomeEventMismatch {
+            event_kind: event.event_kind.to_string(),
+            outcome_class: event.outcome_class.to_string(),
+        });
+        severity = severity.max(AdvancedSeverity::Error);
+        dimensions.push(TroubleshootingDimension::ContractCompliance);
+    }
+
+    if outcome == BaselineOutcomeClass::Cancelled {
+        dimensions.push(TroubleshootingDimension::CancellationPath);
+    }
+    if outcome == BaselineOutcomeClass::Failed {
+        dimensions.push(TroubleshootingDimension::RecoveryPlanning);
+    }
+    dimensions.sort_unstable();
+    dimensions.dedup();
+    conflicts.sort();
+
+    let outcome_phrase = match outcome {
+        BaselineOutcomeClass::Success => "completed successfully",
+        BaselineOutcomeClass::Cancelled => "was cancelled",
+        BaselineOutcomeClass::Failed => "failed",
+    };
+
+    Ok(AdvancedLogClassification {
+        event_class,
+        severity,
+        dimensions,
+        narrative: format!(
+            "{}:{} {}. {}",
+            event.flow_id, event.event_kind, outcome_phrase, kind_narrative
+        ),
+        recommended_action: if conflicts.is_empty() {
+            action_hint.to_string()
+        } else {
+            format!(
+                "{action_hint} Resolve taxonomy conflicts before trusting downstream automation."
+            )
+        },
+        conflicts,
+    })
+}
+
+/// Classifies a baseline event stream in-order.
+pub fn classify_baseline_log_events(
+    events: &[BaselineLogEvent<'_>],
+) -> Result<Vec<AdvancedLogClassification>, String> {
+    events
+        .iter()
+        .map(|event| classify_baseline_log_event(*event))
+        .collect()
+}
+
+fn flow_allows_event(flow: BaselineFlowId, kind: BaselineEventKind) -> bool {
+    match flow {
+        BaselineFlowId::Execution => matches!(
+            kind,
+            BaselineEventKind::CommandComplete
+                | BaselineEventKind::CommandStart
+                | BaselineEventKind::VerificationSummary
+        ),
+        BaselineFlowId::Integration => matches!(
+            kind,
+            BaselineEventKind::IntegrationError
+                | BaselineEventKind::IntegrationSync
+                | BaselineEventKind::VerificationSummary
+        ),
+        BaselineFlowId::Remediation => matches!(
+            kind,
+            BaselineEventKind::RemediationApply
+                | BaselineEventKind::RemediationVerify
+                | BaselineEventKind::VerificationSummary
+        ),
+        BaselineFlowId::Replay => matches!(
+            kind,
+            BaselineEventKind::ReplayComplete
+                | BaselineEventKind::ReplayStart
+                | BaselineEventKind::VerificationSummary
+        ),
+    }
+}
+
+fn kind_semantics(
+    kind: BaselineEventKind,
+) -> (
+    AdvancedEventClass,
+    Vec<TroubleshootingDimension>,
+    &'static str,
+    &'static str,
+) {
+    match kind {
+        BaselineEventKind::CommandComplete => (
+            AdvancedEventClass::CommandLifecycle,
+            vec![
+                TroubleshootingDimension::ContractCompliance,
+                TroubleshootingDimension::OperatorAction,
+            ],
+            "Execution gate completed and emitted a deterministic artifact pointer",
+            "Review gate summary and continue pipeline progression.",
+        ),
+        BaselineEventKind::CommandStart => (
+            AdvancedEventClass::CommandLifecycle,
+            vec![TroubleshootingDimension::OperatorAction],
+            "Execution gate started with reproducible command provenance",
+            "Monitor for completion and verify emitted command provenance.",
+        ),
+        BaselineEventKind::IntegrationError => (
+            AdvancedEventClass::IntegrationReliability,
+            vec![
+                TroubleshootingDimension::ExternalDependency,
+                TroubleshootingDimension::OperatorAction,
+            ],
+            "Integration boundary reported an error at an external/system edge",
+            "Inspect integration target, retry posture, and boundary adapter diagnostics.",
+        ),
+        BaselineEventKind::IntegrationSync => (
+            AdvancedEventClass::IntegrationReliability,
+            vec![TroubleshootingDimension::ExternalDependency],
+            "Integration synchronization event captured adapter boundary state",
+            "Verify upstream/downstream contract alignment for this sync point.",
+        ),
+        BaselineEventKind::RemediationApply => (
+            AdvancedEventClass::RemediationSafety,
+            vec![
+                TroubleshootingDimension::ContractCompliance,
+                TroubleshootingDimension::RecoveryPlanning,
+            ],
+            "Remediation apply phase executed against diagnosed findings",
+            "Confirm changes are scoped and queue remediation verification.",
+        ),
+        BaselineEventKind::RemediationVerify => (
+            AdvancedEventClass::RemediationSafety,
+            vec![
+                TroubleshootingDimension::ContractCompliance,
+                TroubleshootingDimension::RecoveryPlanning,
+            ],
+            "Post-remediation verification assessed health deltas and invariants",
+            "Evaluate health delta and close or reopen remediation loops.",
+        ),
+        BaselineEventKind::ReplayComplete => (
+            AdvancedEventClass::ReplayDeterminism,
+            vec![
+                TroubleshootingDimension::Determinism,
+                TroubleshootingDimension::RuntimeInvariant,
+            ],
+            "Replay completion captured deterministic scenario convergence status",
+            "Compare replay artifacts against baseline and investigate divergence.",
+        ),
+        BaselineEventKind::ReplayStart => (
+            AdvancedEventClass::ReplayDeterminism,
+            vec![TroubleshootingDimension::Determinism],
+            "Replay start established deterministic execution context",
+            "Track replay progress and preserve trace/evidence join keys.",
+        ),
+        BaselineEventKind::VerificationSummary => (
+            AdvancedEventClass::VerificationGovernance,
+            vec![
+                TroubleshootingDimension::ContractCompliance,
+                TroubleshootingDimension::Determinism,
+                TroubleshootingDimension::RuntimeInvariant,
+            ],
+            "Verification summary synthesized gate outcomes for governance review",
+            "Use summary to decide promotion, rollback, or targeted investigation.",
+        ),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::arc_with_non_send_sync)]
 mod tests {
@@ -1447,6 +2007,124 @@ mod tests {
                 .any(|r| r.contains("Directional deadlock risk")),
             "expected directional deadlock recommendation"
         );
+    }
+
+    #[test]
+    fn advanced_observability_contract_has_sorted_dimensions_and_classes() {
+        let contract = advanced_observability_contract();
+
+        let classes: Vec<&str> = contract
+            .event_classes
+            .iter()
+            .map(|item| item.class_id.as_str())
+            .collect();
+        let mut sorted_classes = classes.clone();
+        sorted_classes.sort_unstable();
+        sorted_classes.dedup();
+        assert_eq!(classes, sorted_classes);
+
+        let dimensions: Vec<&str> = contract
+            .troubleshooting_dimensions
+            .iter()
+            .map(|item| item.dimension.as_str())
+            .collect();
+        let mut sorted_dimensions = dimensions.clone();
+        sorted_dimensions.sort_unstable();
+        sorted_dimensions.dedup();
+        assert_eq!(dimensions, sorted_dimensions);
+    }
+
+    #[test]
+    fn classify_baseline_log_event_maps_known_event() {
+        let classified = classify_baseline_log_event(BaselineLogEvent {
+            flow_id: "execution",
+            event_kind: "command_start",
+            outcome_class: "success",
+        })
+        .expect("classification should succeed");
+
+        assert_eq!(classified.event_class, AdvancedEventClass::CommandLifecycle);
+        assert_eq!(classified.severity, AdvancedSeverity::Info);
+        assert!(classified.conflicts.is_empty());
+        assert!(
+            classified
+                .dimensions
+                .contains(&TroubleshootingDimension::OperatorAction)
+        );
+    }
+
+    #[test]
+    fn classify_baseline_log_event_detects_flow_event_conflict() {
+        let classified = classify_baseline_log_event(BaselineLogEvent {
+            flow_id: "execution",
+            event_kind: "integration_sync",
+            outcome_class: "success",
+        })
+        .expect("classification should succeed with conflict");
+
+        assert_eq!(classified.severity, AdvancedSeverity::Critical);
+        assert!(classified.conflicts.iter().any(|conflict| matches!(
+            conflict,
+            AdvancedClassificationConflict::FlowEventMismatch { .. }
+        )));
+    }
+
+    #[test]
+    fn classify_baseline_log_event_detects_outcome_event_conflict() {
+        let classified = classify_baseline_log_event(BaselineLogEvent {
+            flow_id: "integration",
+            event_kind: "integration_error",
+            outcome_class: "success",
+        })
+        .expect("classification should succeed with conflict");
+
+        assert_eq!(
+            classified.event_class,
+            AdvancedEventClass::IntegrationReliability
+        );
+        assert_eq!(classified.severity, AdvancedSeverity::Error);
+        assert!(classified.conflicts.iter().any(|conflict| matches!(
+            conflict,
+            AdvancedClassificationConflict::OutcomeEventMismatch { .. }
+        )));
+    }
+
+    #[test]
+    fn classify_baseline_log_events_is_deterministic() {
+        let stream = vec![
+            BaselineLogEvent {
+                flow_id: "execution",
+                event_kind: "command_start",
+                outcome_class: "success",
+            },
+            BaselineLogEvent {
+                flow_id: "execution",
+                event_kind: "verification_summary",
+                outcome_class: "failed",
+            },
+            BaselineLogEvent {
+                flow_id: "replay",
+                event_kind: "replay_complete",
+                outcome_class: "cancelled",
+            },
+        ];
+
+        let a = classify_baseline_log_events(&stream).expect("stream classification should pass");
+        let b = classify_baseline_log_events(&stream).expect("stream classification should pass");
+        assert_eq!(a, b);
+        assert!(!a.is_empty());
+        assert!(a.iter().all(|entry| !entry.narrative.is_empty()));
+    }
+
+    #[test]
+    fn classify_baseline_log_event_rejects_unknown_tokens() {
+        let err = classify_baseline_log_event(BaselineLogEvent {
+            flow_id: "unknown",
+            event_kind: "command_start",
+            outcome_class: "success",
+        })
+        .expect_err("unknown flow must be rejected");
+        assert!(err.contains("unknown flow_id"));
     }
 
     #[test]
