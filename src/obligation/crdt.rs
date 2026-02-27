@@ -113,8 +113,14 @@ impl CrdtObligationEntry {
                 .or_insert(LatticeState::Unknown);
             *entry = entry.join(other_state);
         }
-        if self.kind.is_none() {
-            self.kind = other.kind;
+        match (self.kind, other.kind) {
+            (None, rhs) => {
+                self.kind = rhs;
+            }
+            (Some(lhs), Some(rhs)) if lhs != rhs => {
+                self.state = self.state.join(LatticeState::Conflict);
+            }
+            _ => {}
         }
         for (node, &count) in &other.acquire_counts {
             let entry = self.acquire_counts.entry(node.clone()).or_insert(0);
@@ -164,11 +170,23 @@ impl CrdtObligationLedger {
             .entries
             .entry(id)
             .or_insert_with(CrdtObligationEntry::new);
-        if entry.kind.is_none() {
-            entry.kind = Some(kind);
-        }
         if entry.is_terminal() {
             return entry.state;
+        }
+        match entry.kind {
+            None => {
+                entry.kind = Some(kind);
+            }
+            Some(existing_kind) if existing_kind != kind => {
+                entry.state = entry.state.join(LatticeState::Conflict);
+                let witness = entry
+                    .witnesses
+                    .entry(self.local_node.clone())
+                    .or_insert(LatticeState::Unknown);
+                *witness = witness.join(LatticeState::Conflict);
+                return entry.state;
+            }
+            Some(_) => {}
         }
         *entry
             .acquire_counts
@@ -206,7 +224,7 @@ impl CrdtObligationLedger {
             .entry(id)
             .or_insert_with(CrdtObligationEntry::new);
         // Guard: only repair entries that are actually broken.
-        if !entry.is_conflict() && entry.is_linear() && entry.is_terminal() {
+        if !entry.is_conflict() && entry.is_linear() {
             return;
         }
         entry.state = LatticeState::Aborted;
@@ -778,15 +796,18 @@ mod tests {
     }
 
     #[test]
-    fn acquire_keeps_first_observed_kind() {
+    fn acquire_mismatched_kind_marks_conflict() {
         let mut ledger = CrdtObligationLedger::new(node("A"));
         let id = oid(42);
 
         ledger.record_acquire(id, ObligationKind::SendPermit);
-        ledger.record_acquire(id, ObligationKind::Lease);
+        let state = ledger.record_acquire(id, ObligationKind::Lease);
 
         let entry = ledger.get_entry(&id).expect("entry should exist");
+        assert_eq!(state, LatticeState::Conflict);
+        assert_eq!(entry.state, LatticeState::Conflict);
         assert_eq!(entry.kind, Some(ObligationKind::SendPermit));
+        assert_eq!(entry.total_acquires(), 1);
     }
 
     #[test]
@@ -814,6 +835,36 @@ mod tests {
         assert_eq!(after, Some(LatticeState::Committed));
         assert_eq!(entry.total_acquires(), 1);
         assert_eq!(entry.total_resolves(), 1);
+    }
+
+    #[test]
+    fn merge_mismatched_kind_marks_conflict() {
+        let id = oid(44);
+
+        let mut a = CrdtObligationLedger::new(node("A"));
+        a.record_acquire(id, ObligationKind::SendPermit);
+
+        let mut b = CrdtObligationLedger::new(node("B"));
+        b.record_acquire(id, ObligationKind::Lease);
+
+        a.merge(&b);
+        let entry = a.get_entry(&id).expect("entry should exist");
+        assert_eq!(entry.state, LatticeState::Conflict);
+        assert!(entry.is_conflict());
+    }
+
+    #[test]
+    fn force_abort_repair_skips_healthy_pending_entry() {
+        let mut ledger = CrdtObligationLedger::new(node("A"));
+        let id = oid(45);
+        ledger.record_acquire(id, ObligationKind::Ack);
+
+        ledger.force_abort_repair(id);
+
+        let entry = ledger.get_entry(&id).expect("entry should exist");
+        assert_eq!(entry.state, LatticeState::Reserved);
+        assert_eq!(entry.total_acquires(), 1);
+        assert_eq!(entry.total_resolves(), 0);
     }
 
     // ── derive-trait coverage (wave 74) ──────────────────────────────────
