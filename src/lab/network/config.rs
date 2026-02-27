@@ -613,8 +613,8 @@ mod tests {
         let mut rng = DetRng::new(1234);
         for _ in 0..64 {
             let sample = model.sample(&mut rng);
-            assert!(sample >= min, "sample below min: {:?} < {:?}", sample, min);
-            assert!(sample <= max, "sample above max: {:?} > {:?}", sample, max);
+            assert!(sample >= min, "sample below min: {sample:?} < {min:?}");
+            assert!(sample <= max, "sample above max: {sample:?} > {max:?}");
         }
     }
 
@@ -629,7 +629,7 @@ mod tests {
         let mut rng = DetRng::new(2026);
         for _ in 0..256 {
             let sample = model.sample(&mut rng);
-            assert!(sample <= max, "sample above max: {:?} > {:?}", sample, max);
+            assert!(sample <= max, "sample above max: {sample:?} > {max:?}");
         }
     }
 

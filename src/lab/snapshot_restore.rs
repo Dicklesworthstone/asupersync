@@ -288,6 +288,12 @@ impl RestorableSnapshot {
         // Build lookup sets
         let region_ids: HashSet<u32> = self.snapshot.regions.iter().map(|r| r.id.index).collect();
         let task_ids: HashSet<u32> = self.snapshot.tasks.iter().map(|t| t.id.index).collect();
+        let obligation_ids: HashSet<u32> = self
+            .snapshot
+            .obligations
+            .iter()
+            .map(|o| o.id.index)
+            .collect();
 
         stats.region_count = self.snapshot.regions.len();
         stats.task_count = self.snapshot.tasks.len();
@@ -315,6 +321,19 @@ impl RestorableSnapshot {
                     errors.push(RestoreError::DuplicateId {
                         kind: "task",
                         id: task.id.index,
+                    });
+                }
+            }
+        }
+
+        // Check for duplicate obligation IDs
+        if obligation_ids.len() != self.snapshot.obligations.len() {
+            let mut seen = HashSet::new();
+            for obligation in &self.snapshot.obligations {
+                if !seen.insert(obligation.id.index) {
+                    errors.push(RestoreError::DuplicateId {
+                        kind: "obligation",
+                        id: obligation.id.index,
                     });
                 }
             }
@@ -499,7 +518,12 @@ fn compute_max_depth(parent_map: &HashMap<u32, Option<u32>>) -> usize {
     for &start in parent_map.keys() {
         let mut depth = 0;
         let mut current = Some(start);
+        let mut visited = HashSet::new();
         while let Some(node) = current {
+            if !visited.insert(node) {
+                // Break on cycle to keep depth computation total.
+                break;
+            }
             depth += 1;
             current = parent_map.get(&node).copied().flatten();
         }
@@ -887,6 +911,68 @@ mod tests {
             .any(|e| matches!(e, RestoreError::DuplicateId { kind: "region", .. }));
         crate::assert_with_log!(has_error, "has DuplicateId error", true, has_error);
         crate::test_complete!("duplicate_region_id_detected");
+    }
+
+    #[test]
+    fn duplicate_obligation_id_detected() {
+        init_test("duplicate_obligation_id_detected");
+        let snapshot = make_snapshot(
+            vec![make_region(0, None, RegionStateSnapshot::Open)],
+            vec![make_task(0, 0, TaskStateSnapshot::Running)],
+            vec![
+                make_obligation(7, 0, ObligationStateSnapshot::Reserved),
+                make_obligation(7, 0, ObligationStateSnapshot::Committed), // duplicate
+            ],
+        );
+        let result = snapshot.validate();
+
+        let not_valid = !result.is_valid;
+        crate::assert_with_log!(not_valid, "not valid", true, not_valid);
+        let has_error = result.errors.iter().any(|e| {
+            matches!(
+                e,
+                RestoreError::DuplicateId {
+                    kind: "obligation",
+                    ..
+                }
+            )
+        });
+        crate::assert_with_log!(
+            has_error,
+            "has obligation DuplicateId error",
+            true,
+            has_error
+        );
+        crate::test_complete!("duplicate_obligation_id_detected");
+    }
+
+    #[test]
+    fn cyclic_region_tree_detected_without_depth_hang() {
+        init_test("cyclic_region_tree_detected_without_depth_hang");
+        let snapshot = make_snapshot(
+            vec![
+                make_region(0, Some(1), RegionStateSnapshot::Open),
+                make_region(1, Some(0), RegionStateSnapshot::Open),
+            ],
+            Vec::new(),
+            Vec::new(),
+        );
+        let result = snapshot.validate();
+
+        let not_valid = !result.is_valid;
+        crate::assert_with_log!(not_valid, "not valid", true, not_valid);
+        let has_cycle = result
+            .errors
+            .iter()
+            .any(|e| matches!(e, RestoreError::CyclicRegionTree { .. }));
+        crate::assert_with_log!(has_cycle, "has CyclicRegionTree error", true, has_cycle);
+        crate::assert_with_log!(
+            result.stats.max_depth == 2,
+            "max_depth bounded with cycle",
+            2,
+            result.stats.max_depth
+        );
+        crate::test_complete!("cyclic_region_tree_detected_without_depth_hang");
     }
 
     #[test]
