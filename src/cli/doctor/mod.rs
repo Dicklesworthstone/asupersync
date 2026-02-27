@@ -888,6 +888,116 @@ pub struct ExecutionAdapterPlan {
     pub artifact_manifest_fields: Vec<String>,
 }
 
+/// Deterministic scenario-composer and run-queue manager contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScenarioComposerContract {
+    /// Contract version for compatibility checks.
+    pub contract_version: String,
+    /// Required execution-adapter dependency.
+    pub execution_adapter_version: String,
+    /// Required logging contract dependency.
+    pub logging_contract_version: String,
+    /// Required request fields in lexical order.
+    pub required_request_fields: Vec<String>,
+    /// Required queued-run fields in lexical order.
+    pub required_run_fields: Vec<String>,
+    /// Deterministic scenario template catalog in lexical template-id order.
+    pub scenario_templates: Vec<ScenarioTemplate>,
+    /// Deterministic run-queue policy.
+    pub queue_policy: ScenarioRunQueuePolicy,
+    /// Deterministic failure taxonomy for compose/queue operations.
+    pub failure_taxonomy: Vec<ScenarioQueueFailureClass>,
+}
+
+/// One scenario template used for compose + queue planning.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScenarioTemplate {
+    /// Stable template identifier.
+    pub template_id: String,
+    /// Human-readable template description.
+    pub description: String,
+    /// Command classes required by this template in lexical order.
+    pub required_command_classes: Vec<String>,
+    /// Artifact classes expected from execution in lexical order.
+    pub required_artifacts: Vec<String>,
+    /// Default queue priority (0..=255, larger means higher priority).
+    pub default_priority: u8,
+    /// Retry budget for this template.
+    pub max_retries: u8,
+    /// Whether this template requires an explicit deterministic seed.
+    pub requires_replay_seed: bool,
+}
+
+/// Deterministic run-queue policy configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScenarioRunQueuePolicy {
+    /// Maximum concurrent runs in `running` state.
+    pub max_concurrent_runs: u16,
+    /// Maximum queue depth accepted by the manager.
+    pub max_queue_depth: u16,
+    /// Dispatch policy identifier.
+    pub dispatch_order: String,
+    /// Priority-band labels in lexical order.
+    pub priority_bands: Vec<String>,
+    /// Queue-level cancellation policy.
+    pub cancellation_policy: String,
+}
+
+/// One request passed to the scenario composer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScenarioRunRequest {
+    /// Stable run identifier.
+    pub run_id: String,
+    /// Template identifier to compose.
+    pub template_id: String,
+    /// Correlation identifier for replay/audit joins.
+    pub correlation_id: String,
+    /// Deterministic seed for replay.
+    pub seed: String,
+    /// Optional explicit priority override.
+    pub priority_override: Option<u8>,
+    /// Requester identity.
+    pub requested_by: String,
+}
+
+/// One composed queue entry ready for execution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScenarioRunQueueEntry {
+    /// Stable queue entry identifier.
+    pub queue_id: String,
+    /// Stable run identifier.
+    pub run_id: String,
+    /// Template identifier.
+    pub template_id: String,
+    /// Correlation identifier.
+    pub correlation_id: String,
+    /// Deterministic seed.
+    pub seed: String,
+    /// Effective priority used by queue ordering.
+    pub priority: u8,
+    /// Queue state (`queued` | `running`).
+    pub state: String,
+    /// Required command classes for this run.
+    pub command_classes: Vec<String>,
+    /// Required artifact classes for this run.
+    pub required_artifacts: Vec<String>,
+    /// Remaining retries for this run.
+    pub retries_remaining: u8,
+}
+
+/// One deterministic failure-taxonomy entry for scenario compose/queue flows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScenarioQueueFailureClass {
+    /// Stable failure code.
+    pub code: String,
+    /// Severity (`critical`, `high`, `medium`, `low`).
+    pub severity: String,
+    /// Whether the failure is retryable.
+    pub retryable: bool,
+    /// Required operator action for this failure.
+    pub operator_action: String,
+}
+
 /// Core diagnostics report contract for doctor report consumers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CoreDiagnosticsReportContract {
@@ -1399,6 +1509,45 @@ impl Outputtable for ExecutionAdapterContract {
     }
 }
 
+impl Outputtable for ScenarioComposerContract {
+    fn human_format(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("Contract version: {}", self.contract_version));
+        lines.push(format!(
+            "Execution adapter dependency: {}",
+            self.execution_adapter_version
+        ));
+        lines.push(format!(
+            "Logging contract dependency: {}",
+            self.logging_contract_version
+        ));
+        lines.push(format!(
+            "Scenario templates: {}",
+            self.scenario_templates.len()
+        ));
+        lines.push(format!(
+            "Queue policy: max_concurrent={}, max_depth={}, dispatch={}",
+            self.queue_policy.max_concurrent_runs,
+            self.queue_policy.max_queue_depth,
+            self.queue_policy.dispatch_order
+        ));
+        lines.push(format!(
+            "Failure taxonomy: {}",
+            self.failure_taxonomy.len()
+        ));
+        for template in &self.scenario_templates {
+            lines.push(format!(
+                "- {} [priority={}, retries={}, seed_required={}]",
+                template.template_id,
+                template.default_priority,
+                template.max_retries,
+                template.requires_replay_seed
+            ));
+        }
+        lines.join("\n")
+    }
+}
+
 impl Outputtable for CoreDiagnosticsReportContract {
     fn human_format(&self) -> String {
         let mut lines = Vec::new();
@@ -1611,6 +1760,7 @@ const SCREEN_ENGINE_CONTRACT_VERSION: &str = "doctor-screen-engine-v1";
 const EVIDENCE_SCHEMA_VERSION: &str = "doctor-evidence-v1";
 const STRUCTURED_LOGGING_CONTRACT_VERSION: &str = "doctor-logging-v1";
 const EXECUTION_ADAPTER_CONTRACT_VERSION: &str = "doctor-exec-adapter-v1";
+const SCENARIO_COMPOSER_CONTRACT_VERSION: &str = "doctor-scenario-composer-v1";
 const CORE_DIAGNOSTICS_REPORT_VERSION: &str = "doctor-core-report-v1";
 const ADVANCED_DIAGNOSTICS_REPORT_VERSION: &str = "doctor-advanced-report-v1";
 const VISUAL_LANGUAGE_VERSION: &str = "doctor-visual-language-v1";
@@ -5638,6 +5788,7 @@ pub fn validate_structured_logging_event_stream(
 }
 
 /// Returns the canonical rch-backed execution-adapter contract.
+#[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn execution_adapter_contract() -> ExecutionAdapterContract {
     ExecutionAdapterContract {
@@ -6164,8 +6315,7 @@ pub fn plan_execution_command(
                 .route_policies
                 .iter()
                 .find(|policy| policy.policy_id == "local_fallback_on_rch_unavailable")
-                .map(|policy| policy.route.clone())
-                .unwrap_or_else(|| "local_direct".to_string())
+                .map_or_else(|| "local_direct".to_string(), |policy| policy.route.clone())
         }
     } else {
         "local_direct".to_string()
@@ -6223,12 +6373,421 @@ pub fn advance_execution_state(
             candidate.from_state == current_state.trim() && candidate.trigger == trigger.trim()
         })
         .ok_or_else(|| {
-            format!(
-                "invalid execution state transition from {} using {}",
-                current_state, trigger
-            )
+            format!("invalid execution state transition from {current_state} using {trigger}")
         })?;
     Ok(transition.to_state.clone())
+}
+
+/// Returns the canonical scenario-composer + run-queue manager contract.
+#[allow(clippy::too_many_lines)]
+#[must_use]
+pub fn scenario_composer_contract() -> ScenarioComposerContract {
+    ScenarioComposerContract {
+        contract_version: SCENARIO_COMPOSER_CONTRACT_VERSION.to_string(),
+        execution_adapter_version: EXECUTION_ADAPTER_CONTRACT_VERSION.to_string(),
+        logging_contract_version: STRUCTURED_LOGGING_CONTRACT_VERSION.to_string(),
+        required_request_fields: vec![
+            "correlation_id".to_string(),
+            "requested_by".to_string(),
+            "run_id".to_string(),
+            "seed".to_string(),
+            "template_id".to_string(),
+        ],
+        required_run_fields: vec![
+            "command_classes".to_string(),
+            "correlation_id".to_string(),
+            "priority".to_string(),
+            "queue_id".to_string(),
+            "required_artifacts".to_string(),
+            "retries_remaining".to_string(),
+            "run_id".to_string(),
+            "seed".to_string(),
+            "state".to_string(),
+            "template_id".to_string(),
+        ],
+        scenario_templates: vec![
+            ScenarioTemplate {
+                template_id: "scenario_cancel_recovery".to_string(),
+                description:
+                    "Cancellation-path replay with deterministic recovery verification."
+                        .to_string(),
+                required_command_classes: vec![
+                    "cargo_check".to_string(),
+                    "cargo_test".to_string(),
+                ],
+                required_artifacts: vec![
+                    "structured_log".to_string(),
+                    "trace_bundle".to_string(),
+                ],
+                default_priority: 220,
+                max_retries: 2,
+                requires_replay_seed: true,
+            },
+            ScenarioTemplate {
+                template_id: "scenario_happy_path_smoke".to_string(),
+                description:
+                    "Fast deterministic smoke path for baseline command/orchestration health."
+                        .to_string(),
+                required_command_classes: vec![
+                    "cargo_check".to_string(),
+                    "cargo_fmt_check".to_string(),
+                ],
+                required_artifacts: vec![
+                    "structured_log".to_string(),
+                    "summary_report".to_string(),
+                ],
+                default_priority: 120,
+                max_retries: 1,
+                requires_replay_seed: false,
+            },
+            ScenarioTemplate {
+                template_id: "scenario_regression_bundle".to_string(),
+                description:
+                    "Full regression execution with replay-ready transcript capture."
+                        .to_string(),
+                required_command_classes: vec![
+                    "cargo_check".to_string(),
+                    "cargo_clippy".to_string(),
+                    "cargo_test".to_string(),
+                ],
+                required_artifacts: vec![
+                    "structured_log".to_string(),
+                    "summary_report".to_string(),
+                    "transcript".to_string(),
+                ],
+                default_priority: 180,
+                max_retries: 2,
+                requires_replay_seed: true,
+            },
+        ],
+        queue_policy: ScenarioRunQueuePolicy {
+            max_concurrent_runs: 2,
+            max_queue_depth: 32,
+            dispatch_order: "priority_then_run_id".to_string(),
+            priority_bands: vec![
+                "p0_critical".to_string(),
+                "p1_high".to_string(),
+                "p2_normal".to_string(),
+                "p3_low".to_string(),
+            ],
+            cancellation_policy: "cancel_duplicate_run_id".to_string(),
+        },
+        failure_taxonomy: vec![
+            ScenarioQueueFailureClass {
+                code: "invalid_seed".to_string(),
+                severity: "high".to_string(),
+                retryable: false,
+                operator_action: "Provide deterministic replay seed and retry compose."
+                    .to_string(),
+            },
+            ScenarioQueueFailureClass {
+                code: "queue_full".to_string(),
+                severity: "medium".to_string(),
+                retryable: true,
+                operator_action: "Drain queue or increase queue budget in policy.".to_string(),
+            },
+            ScenarioQueueFailureClass {
+                code: "unknown_template".to_string(),
+                severity: "critical".to_string(),
+                retryable: false,
+                operator_action: "Use a known template_id from scenario_templates.".to_string(),
+            },
+        ],
+    }
+}
+
+/// Validates invariants for [`ScenarioComposerContract`].
+///
+/// # Errors
+///
+/// Returns `Err` when ordering, schema, or queue-policy invariants are violated.
+#[allow(clippy::too_many_lines)]
+pub fn validate_scenario_composer_contract(
+    contract: &ScenarioComposerContract,
+) -> Result<(), String> {
+    if contract.contract_version != SCENARIO_COMPOSER_CONTRACT_VERSION {
+        return Err(format!(
+            "unexpected contract_version {}",
+            contract.contract_version
+        ));
+    }
+    if contract.execution_adapter_version != EXECUTION_ADAPTER_CONTRACT_VERSION {
+        return Err(format!(
+            "unexpected execution_adapter_version {}",
+            contract.execution_adapter_version
+        ));
+    }
+    if contract.logging_contract_version != STRUCTURED_LOGGING_CONTRACT_VERSION {
+        return Err(format!(
+            "unexpected logging_contract_version {}",
+            contract.logging_contract_version
+        ));
+    }
+
+    validate_lexical_string_set(
+        &contract.required_request_fields,
+        "required_request_fields",
+    )?;
+    for required in ["correlation_id", "requested_by", "run_id", "seed", "template_id"] {
+        if !contract
+            .required_request_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_request_fields missing {required}"));
+        }
+    }
+
+    validate_lexical_string_set(&contract.required_run_fields, "required_run_fields")?;
+    for required in [
+        "command_classes",
+        "correlation_id",
+        "priority",
+        "queue_id",
+        "required_artifacts",
+        "retries_remaining",
+        "run_id",
+        "seed",
+        "state",
+        "template_id",
+    ] {
+        if !contract
+            .required_run_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_run_fields missing {required}"));
+        }
+    }
+
+    if contract.scenario_templates.is_empty() {
+        return Err("scenario_templates must be non-empty".to_string());
+    }
+    let template_ids = contract
+        .scenario_templates
+        .iter()
+        .map(|template| template.template_id.clone())
+        .collect::<Vec<_>>();
+    validate_lexical_string_set(&template_ids, "scenario_templates.template_id")?;
+    let execution_contract = execution_adapter_contract();
+    let execution_class_ids = execution_contract
+        .command_classes
+        .iter()
+        .map(|class| class.class_id.clone())
+        .collect::<BTreeSet<_>>();
+
+    for template in &contract.scenario_templates {
+        if template.description.trim().is_empty() {
+            return Err(format!("template {} has empty description", template.template_id));
+        }
+        validate_lexical_string_set(
+            &template.required_command_classes,
+            &format!(
+                "template {} required_command_classes",
+                template.template_id
+            ),
+        )?;
+        validate_lexical_string_set(
+            &template.required_artifacts,
+            &format!("template {} required_artifacts", template.template_id),
+        )?;
+        if template.max_retries > 8 {
+            return Err(format!(
+                "template {} max_retries must be <= 8",
+                template.template_id
+            ));
+        }
+        for class_id in &template.required_command_classes {
+            if !execution_class_ids.contains(class_id) {
+                return Err(format!(
+                    "template {} references unknown command class {}",
+                    template.template_id, class_id
+                ));
+            }
+        }
+        if template.requires_replay_seed && template.default_priority < 100 {
+            return Err(format!(
+                "template {} requires_replay_seed must have default_priority >= 100",
+                template.template_id
+            ));
+        }
+    }
+
+    if contract.queue_policy.max_concurrent_runs == 0 {
+        return Err("queue_policy.max_concurrent_runs must be > 0".to_string());
+    }
+    if contract.queue_policy.max_queue_depth == 0 {
+        return Err("queue_policy.max_queue_depth must be > 0".to_string());
+    }
+    if contract.queue_policy.max_concurrent_runs > contract.queue_policy.max_queue_depth {
+        return Err(
+            "queue_policy.max_concurrent_runs must be <= queue_policy.max_queue_depth".to_string(),
+        );
+    }
+    if contract.queue_policy.dispatch_order != "priority_then_run_id" {
+        return Err("queue_policy.dispatch_order must be priority_then_run_id".to_string());
+    }
+    validate_lexical_string_set(
+        &contract.queue_policy.priority_bands,
+        "queue_policy.priority_bands",
+    )?;
+    if contract.queue_policy.cancellation_policy != "cancel_duplicate_run_id" {
+        return Err(
+            "queue_policy.cancellation_policy must be cancel_duplicate_run_id".to_string(),
+        );
+    }
+
+    if contract.failure_taxonomy.is_empty() {
+        return Err("failure_taxonomy must be non-empty".to_string());
+    }
+    let failure_codes = contract
+        .failure_taxonomy
+        .iter()
+        .map(|failure| failure.code.clone())
+        .collect::<Vec<_>>();
+    validate_lexical_string_set(&failure_codes, "failure_taxonomy.code")?;
+    for required in ["invalid_seed", "queue_full", "unknown_template"] {
+        if !failure_codes.iter().any(|code| code == required) {
+            return Err(format!("failure_taxonomy missing required code {required}"));
+        }
+    }
+    for failure in &contract.failure_taxonomy {
+        if !matches!(
+            failure.severity.as_str(),
+            "critical" | "high" | "low" | "medium"
+        ) {
+            return Err(format!(
+                "failure {} has unsupported severity {}",
+                failure.code, failure.severity
+            ));
+        }
+        if failure.operator_action.trim().is_empty() {
+            return Err(format!(
+                "failure {} must define operator_action",
+                failure.code
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Composes one deterministic queue entry from a scenario request.
+///
+/// # Errors
+///
+/// Returns `Err` when request fields or template constraints are violated.
+pub fn compose_scenario_run(
+    contract: &ScenarioComposerContract,
+    request: &ScenarioRunRequest,
+) -> Result<ScenarioRunQueueEntry, String> {
+    validate_scenario_composer_contract(contract)?;
+
+    if request.run_id.trim().is_empty() {
+        return Err("run_id must be non-empty".to_string());
+    }
+    if !is_slug_like(&request.correlation_id) {
+        return Err("correlation_id must be slug-like".to_string());
+    }
+    if request.requested_by.trim().is_empty() {
+        return Err("requested_by must be non-empty".to_string());
+    }
+
+    let template = contract
+        .scenario_templates
+        .iter()
+        .find(|candidate| candidate.template_id == request.template_id)
+        .ok_or_else(|| format!("unknown template_id {}", request.template_id))?;
+    if template.requires_replay_seed && request.seed.trim().is_empty() {
+        return Err("seed must be non-empty for templates requiring replay seed".to_string());
+    }
+    if !request.seed.trim().is_empty() && !is_slug_like(request.seed.trim()) {
+        return Err("seed must be slug-like when provided".to_string());
+    }
+
+    Ok(ScenarioRunQueueEntry {
+        queue_id: format!("queue-{}", request.run_id.trim()),
+        run_id: request.run_id.trim().to_string(),
+        template_id: template.template_id.clone(),
+        correlation_id: request.correlation_id.clone(),
+        seed: request.seed.trim().to_string(),
+        priority: request.priority_override.unwrap_or(template.default_priority),
+        state: "queued".to_string(),
+        command_classes: template.required_command_classes.clone(),
+        required_artifacts: template.required_artifacts.clone(),
+        retries_remaining: template.max_retries,
+    })
+}
+
+/// Builds a deterministic run queue from scenario requests.
+///
+/// # Errors
+///
+/// Returns `Err` when composed entries violate queue-capacity policy.
+pub fn build_scenario_run_queue(
+    contract: &ScenarioComposerContract,
+    requests: &[ScenarioRunRequest],
+) -> Result<Vec<ScenarioRunQueueEntry>, String> {
+    validate_scenario_composer_contract(contract)?;
+    if requests.len() > usize::from(contract.queue_policy.max_queue_depth) {
+        return Err(format!(
+            "queue_full: {} requests exceed max_queue_depth {}",
+            requests.len(),
+            contract.queue_policy.max_queue_depth
+        ));
+    }
+
+    let mut entries = requests
+        .iter()
+        .map(|request| compose_scenario_run(contract, request))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    entries.sort_by(|left, right| {
+        right
+            .priority
+            .cmp(&left.priority)
+            .then(left.run_id.cmp(&right.run_id))
+            .then(left.template_id.cmp(&right.template_id))
+    });
+    Ok(entries)
+}
+
+/// Applies dispatch policy to a deterministic queue and marks running entries.
+///
+/// # Errors
+///
+/// Returns `Err` when queue entries fail policy validation.
+pub fn dispatch_scenario_run_queue(
+    contract: &ScenarioComposerContract,
+    entries: &[ScenarioRunQueueEntry],
+) -> Result<Vec<ScenarioRunQueueEntry>, String> {
+    validate_scenario_composer_contract(contract)?;
+    if entries.len() > usize::from(contract.queue_policy.max_queue_depth) {
+        return Err(format!(
+            "queue_full: {} entries exceed max_queue_depth {}",
+            entries.len(),
+            contract.queue_policy.max_queue_depth
+        ));
+    }
+
+    let mut normalized = entries.to_vec();
+    normalized.sort_by(|left, right| {
+        right
+            .priority
+            .cmp(&left.priority)
+            .then(left.run_id.cmp(&right.run_id))
+            .then(left.template_id.cmp(&right.template_id))
+    });
+
+    let running_limit = usize::from(contract.queue_policy.max_concurrent_runs);
+    for (index, entry) in normalized.iter_mut().enumerate() {
+        entry.state = if index < running_limit {
+            "running".to_string()
+        } else {
+            "queued".to_string()
+        };
+    }
+    Ok(normalized)
 }
 
 /// Returns the canonical core diagnostics-report contract.
@@ -10088,6 +10647,162 @@ edition = "2024"
         let contract = execution_adapter_contract();
         let err = advance_execution_state(&contract, "planned", "cancel").expect_err("must fail");
         assert!(err.contains("invalid execution state transition"), "{err}");
+    }
+
+    #[test]
+    fn scenario_composer_contract_validates() {
+        let contract = scenario_composer_contract();
+        validate_scenario_composer_contract(&contract).expect("valid scenario composer contract");
+    }
+
+    #[test]
+    fn scenario_composer_contract_is_deterministic() {
+        let first = scenario_composer_contract();
+        let second = scenario_composer_contract();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn scenario_composer_contract_round_trip_json() {
+        let contract = scenario_composer_contract();
+        let json = serde_json::to_string(&contract).expect("serialize");
+        let parsed: ScenarioComposerContract = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(contract, parsed);
+        validate_scenario_composer_contract(&parsed).expect("parsed contract valid");
+    }
+
+    #[test]
+    fn scenario_composer_contract_rejects_unknown_command_class_reference() {
+        let mut contract = scenario_composer_contract();
+        contract.scenario_templates[0]
+            .required_command_classes
+            .push("unknown_command_class".to_string());
+        contract.scenario_templates[0].required_command_classes.sort();
+        let err = validate_scenario_composer_contract(&contract).expect_err("must fail");
+        assert!(err.contains("references unknown command class"), "{err}");
+    }
+
+    #[test]
+    fn compose_scenario_run_uses_defaults() {
+        let contract = scenario_composer_contract();
+        let request = ScenarioRunRequest {
+            run_id: "run-happy".to_string(),
+            template_id: "scenario_happy_path_smoke".to_string(),
+            correlation_id: "corr-happy".to_string(),
+            seed: "".to_string(),
+            priority_override: None,
+            requested_by: "doctor_cli".to_string(),
+        };
+        let entry = compose_scenario_run(&contract, &request).expect("compose should succeed");
+        assert_eq!(entry.queue_id, "queue-run-happy");
+        assert_eq!(entry.priority, 120);
+        assert_eq!(entry.state, "queued");
+    }
+
+    #[test]
+    fn build_scenario_run_queue_orders_by_priority_then_run_id() {
+        let contract = scenario_composer_contract();
+        let requests = vec![
+            ScenarioRunRequest {
+                run_id: "run-b".to_string(),
+                template_id: "scenario_happy_path_smoke".to_string(),
+                correlation_id: "corr-b".to_string(),
+                seed: "".to_string(),
+                priority_override: Some(120),
+                requested_by: "doctor_cli".to_string(),
+            },
+            ScenarioRunRequest {
+                run_id: "run-a".to_string(),
+                template_id: "scenario_happy_path_smoke".to_string(),
+                correlation_id: "corr-a".to_string(),
+                seed: "".to_string(),
+                priority_override: Some(220),
+                requested_by: "doctor_cli".to_string(),
+            },
+            ScenarioRunRequest {
+                run_id: "run-c".to_string(),
+                template_id: "scenario_happy_path_smoke".to_string(),
+                correlation_id: "corr-c".to_string(),
+                seed: "".to_string(),
+                priority_override: Some(220),
+                requested_by: "doctor_cli".to_string(),
+            },
+        ];
+        let queue = build_scenario_run_queue(&contract, &requests).expect("queue should build");
+        let order = queue.iter().map(|entry| entry.run_id.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            order,
+            vec![
+                "run-a".to_string(),
+                "run-c".to_string(),
+                "run-b".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn build_scenario_run_queue_rejects_queue_overflow() {
+        let mut contract = scenario_composer_contract();
+        contract.queue_policy.max_queue_depth = 1;
+
+        let requests = vec![
+            ScenarioRunRequest {
+                run_id: "run-one".to_string(),
+                template_id: "scenario_happy_path_smoke".to_string(),
+                correlation_id: "corr-one".to_string(),
+                seed: "".to_string(),
+                priority_override: None,
+                requested_by: "doctor_cli".to_string(),
+            },
+            ScenarioRunRequest {
+                run_id: "run-two".to_string(),
+                template_id: "scenario_happy_path_smoke".to_string(),
+                correlation_id: "corr-two".to_string(),
+                seed: "".to_string(),
+                priority_override: None,
+                requested_by: "doctor_cli".to_string(),
+            },
+        ];
+        let err = build_scenario_run_queue(&contract, &requests).expect_err("must fail");
+        assert!(err.contains("queue_full"), "{err}");
+    }
+
+    #[test]
+    fn dispatch_scenario_run_queue_respects_max_concurrency() {
+        let contract = scenario_composer_contract();
+        let requests = vec![
+            ScenarioRunRequest {
+                run_id: "run-1".to_string(),
+                template_id: "scenario_regression_bundle".to_string(),
+                correlation_id: "corr-1".to_string(),
+                seed: "seed-1".to_string(),
+                priority_override: None,
+                requested_by: "doctor_cli".to_string(),
+            },
+            ScenarioRunRequest {
+                run_id: "run-2".to_string(),
+                template_id: "scenario_cancel_recovery".to_string(),
+                correlation_id: "corr-2".to_string(),
+                seed: "seed-2".to_string(),
+                priority_override: None,
+                requested_by: "doctor_cli".to_string(),
+            },
+            ScenarioRunRequest {
+                run_id: "run-3".to_string(),
+                template_id: "scenario_happy_path_smoke".to_string(),
+                correlation_id: "corr-3".to_string(),
+                seed: "".to_string(),
+                priority_override: None,
+                requested_by: "doctor_cli".to_string(),
+            },
+        ];
+        let queue = build_scenario_run_queue(&contract, &requests).expect("queue should build");
+        let dispatched = dispatch_scenario_run_queue(&contract, &queue).expect("dispatch works");
+        let running = dispatched
+            .iter()
+            .filter(|entry| entry.state == "running")
+            .count();
+        assert_eq!(running, 2);
     }
 
     #[test]
