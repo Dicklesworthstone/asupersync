@@ -358,21 +358,9 @@ impl Notified<'_> {
             if gen_changed {
                 let mut waiters = self.notify.waiters.lock();
 
-                let (was_notified, notified_generation) = if index < waiters.entries.len() {
-                    let entry = &waiters.entries[index];
-                    (entry.notified, entry.generation)
-                } else {
-                    (false, self.initial_generation)
-                };
-
                 waiters.remove(index);
                 self.waiter_index = None;
-
-                if was_notified && notified_generation == self.initial_generation {
-                    self.notify.pass_baton(waiters);
-                } else {
-                    drop(waiters);
-                }
+                drop(waiters);
                 return self.mark_done();
             }
 
@@ -381,21 +369,9 @@ impl Notified<'_> {
             // Re-check generation under lock to prevent baton-loss races.
             let current_gen = self.notify.generation.load(Ordering::Acquire);
             if current_gen != self.initial_generation {
-                let (was_notified, notified_generation) = if index < waiters.entries.len() {
-                    let entry = &waiters.entries[index];
-                    (entry.notified, entry.generation)
-                } else {
-                    (false, self.initial_generation)
-                };
-
                 waiters.remove(index);
                 self.waiter_index = None;
-
-                if was_notified && notified_generation == self.initial_generation {
-                    self.notify.pass_baton(waiters);
-                } else {
-                    drop(waiters);
-                }
+                drop(waiters);
                 return self.mark_done();
             }
 

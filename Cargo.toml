@@ -171,6 +171,7 @@ hmac = "0.12"
 rdkafka = { version = "0.39", default-features = false, optional = true }
 # Systematic concurrency testing for scheduler (loom-tests feature)
 loom = { version = "0.7", optional = true }
+tokio = "1.49.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.7.11", optional = true }

@@ -336,12 +336,32 @@ impl<'a, T> Future for Reserve<'a, T> {
         // Check cancellation
         if self.cx.checkpoint().is_err() {
             self.cx.trace("mpsc::reserve cancelled");
+            if let Some(id) = self.waiter_id.take() {
+                let next_waker = {
+                    let mut inner = self.sender.shared.inner.lock();
+                    let is_head = inner.send_wakers.front().is_some_and(|w| w.id == id);
+                    if is_head {
+                        inner.send_wakers.pop_front();
+                    } else {
+                        inner.send_wakers.retain(|w| w.id != id);
+                    }
+                    if is_head && inner.has_capacity(self.sender.shared.capacity) {
+                        inner.take_next_sender_waker()
+                    } else {
+                        None
+                    }
+                };
+                if let Some(w) = next_waker {
+                    w.wake();
+                }
+            }
             return Poll::Ready(Err(SendError::Cancelled(())));
         }
 
         let mut inner = self.sender.shared.inner.lock();
 
         if self.sender.shared.receiver_dropped.load(Ordering::Relaxed) {
+            self.waiter_id = None; // Waiter is already cleared by Receiver::drop
             return Poll::Ready(Err(SendError::Disconnected(())));
         }
 
@@ -647,6 +667,7 @@ impl<T> Receiver<T> {
     pub fn poll_recv(&mut self, cx: &Cx, task_cx: &mut Context<'_>) -> Poll<Result<T, RecvError>> {
         if cx.checkpoint().is_err() {
             cx.trace("mpsc::recv cancelled");
+            self.shared.inner.lock().recv_waker = None;
             return Poll::Ready(Err(RecvError::Cancelled));
         }
 

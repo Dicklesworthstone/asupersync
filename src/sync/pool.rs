@@ -832,6 +832,13 @@ where
                 if !w.waker.will_wake(cx.waker()) {
                     w.waker.clone_from(cx.waker());
                 }
+            } else {
+                // Was removed by try_get_idle but health check failed.
+                // Re-register at the FRONT to preserve FIFO fairness.
+                state.waiters.push_front(PoolWaiter {
+                    id,
+                    waker: cx.waker().clone(),
+                });
             }
         } else {
             let id = state.next_waiter_id;
@@ -1505,14 +1512,14 @@ where
 
                 // Try to get a healthy idle resource.
                 while let Some((resource, created_at)) = self.try_get_idle(cleanup.waiter_id) {
-                    let id = cleanup.waiter_id.take();
-                    if let Some(id) = id {
-                        self.return_wakers.lock().retain(|(wid, _)| *wid != id);
-                    }
-
                     if self.config.health_check_on_acquire && !self.is_healthy(&resource) {
                         self.reject_unhealthy_idle_resource();
                         continue;
+                    }
+
+                    let id = cleanup.waiter_id.take();
+                    if let Some(id) = id {
+                        self.return_wakers.lock().retain(|(wid, _)| *wid != id);
                     }
 
                     let acquire_duration =
