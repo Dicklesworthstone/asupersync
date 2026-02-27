@@ -2283,23 +2283,6 @@ impl ThreeLaneWorker {
         local.pop_ready_only_with_hint(rng_hint)
     }
 
-    /// Checks all local `PriorityScheduler` lanes in a single lock
-    /// acquisition (cancel > timed > ready), avoiding the 3 separate
-    /// lock round-trips when `try_cancel_work`, `try_timed_work`, and
-    /// `try_ready_work` each fall through to the local scheduler.
-    ///
-    /// Returns `(lane_tag, task_id)` — 0=cancel, 1=timed, 2=ready.
-    #[inline]
-    pub(crate) fn try_local_any_lane(&mut self) -> Option<(u8, TaskId)> {
-        let now = self
-            .timer_driver
-            .as_ref()
-            .map_or(Time::ZERO, TimerDriverHandle::now);
-        let mut local = self.local.lock();
-        let rng_hint = self.rng.next_u64();
-        local.pop_any_lane_with_hint(rng_hint, now)
-    }
-
     /// Single-lock local lane check with suggestion-aware ordering.
     ///
     /// Acquires the local `PriorityScheduler` lock once and checks

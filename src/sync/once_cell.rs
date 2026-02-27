@@ -164,6 +164,7 @@ impl<T> OnceCell<T> {
                     // The initializer was cancelled — state is back to UNINIT.
                     // Loop to retry setting.
                 }
+                Err(UNINIT) => {} // Spurious failure, try again
                 Err(_) => unreachable!("invalid state"),
             }
         }
@@ -213,6 +214,7 @@ impl<T> OnceCell<T> {
                 Err(INITIALIZED) => {
                     return self.value.get().expect("already initialized");
                 }
+                Err(UNINIT) => {} // Spurious failure, try again
                 Err(_) => {
                     // Another thread is initializing. Wait for it.
                     self.wait_for_init_blocking();
@@ -281,6 +283,7 @@ impl<T> OnceCell<T> {
                 Err(INITIALIZED) => {
                     return self.value.get().expect("already initialized");
                 }
+                Err(UNINIT) => {} // Spurious failure, try again
                 Err(_) => {
                     // Another task is initializing. Wait for it.
                     WaitInit {
@@ -377,6 +380,7 @@ impl<T> OnceCell<T> {
                     }
                     // The other task failed. Loop and retry the CAS.
                 }
+                Err(UNINIT) => {} // Spurious failure, try again
                 Err(_) => unreachable!("invalid state"),
             }
         }

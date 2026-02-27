@@ -47,6 +47,7 @@ where
         writer,
         buf: [0u8; DEFAULT_BUF_SIZE],
         read_done: false,
+        need_flush: false,
         pos: 0,
         cap: 0,
         total: 0,
@@ -59,6 +60,7 @@ pub struct Copy<'a, R: ?Sized, W: ?Sized> {
     writer: &'a mut W,
     buf: [u8; DEFAULT_BUF_SIZE],
     read_done: bool,
+    need_flush: bool,
     pos: usize,
     cap: usize,
     total: u64,
@@ -93,6 +95,7 @@ where
                     Poll::Ready(Ok(n)) => {
                         this.pos += n;
                         this.total += n as u64;
+                        this.need_flush = true;
                         continue;
                     }
                 }
@@ -110,7 +113,20 @@ where
             // Read more data
             let mut read_buf = ReadBuf::new(&mut this.buf);
             match Pin::new(&mut *this.reader).poll_read(cx, &mut read_buf) {
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    if this.need_flush {
+                        match Pin::new(&mut *this.writer).poll_flush(cx) {
+                            Poll::Pending => return Poll::Pending,
+                            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                            Poll::Ready(Ok(())) => {
+                                this.need_flush = false;
+                                return Poll::Pending;
+                            }
+                        }
+                    } else {
+                        return Poll::Pending;
+                    }
+                }
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                 Poll::Ready(Ok(())) => {
                     let n = read_buf.filled().len();
@@ -186,6 +202,7 @@ where
         reader,
         writer,
         total: 0,
+        need_flush: false,
     }
 }
 
@@ -194,6 +211,7 @@ pub struct CopyBuf<'a, R: ?Sized, W: ?Sized> {
     reader: &'a mut R,
     writer: &'a mut W,
     total: u64,
+    need_flush: bool,
 }
 
 impl<R, W> Future for CopyBuf<'_, R, W>
@@ -215,7 +233,20 @@ where
             steps += 1;
 
             let buf = match Pin::new(&mut *this.reader).poll_fill_buf(cx) {
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    if this.need_flush {
+                        match Pin::new(&mut *this.writer).poll_flush(cx) {
+                            Poll::Pending => return Poll::Pending,
+                            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                            Poll::Ready(Ok(())) => {
+                                this.need_flush = false;
+                                return Poll::Pending;
+                            }
+                        }
+                    } else {
+                        return Poll::Pending;
+                    }
+                }
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                 Poll::Ready(Ok(buf)) => buf,
             };
@@ -239,6 +270,7 @@ where
 
             Pin::new(&mut *this.reader).consume(n);
             this.total += n as u64;
+            this.need_flush = true;
         }
     }
 }
@@ -278,6 +310,7 @@ where
         on_progress,
         buf: [0u8; DEFAULT_BUF_SIZE],
         read_done: false,
+        need_flush: false,
         pos: 0,
         cap: 0,
         total: 0,
@@ -291,6 +324,7 @@ pub struct CopyWithProgress<'a, R: ?Sized, W: ?Sized, F> {
     on_progress: F,
     buf: [u8; DEFAULT_BUF_SIZE],
     read_done: bool,
+    need_flush: bool,
     pos: usize,
     cap: usize,
     total: u64,
@@ -327,6 +361,7 @@ where
                         this.pos += n;
                         this.total += n as u64;
                         (this.on_progress)(this.total);
+                        this.need_flush = true;
                         continue;
                     }
                 }
@@ -344,7 +379,20 @@ where
             // Read more data
             let mut read_buf = ReadBuf::new(&mut this.buf);
             match Pin::new(&mut *this.reader).poll_read(cx, &mut read_buf) {
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    if this.need_flush {
+                        match Pin::new(&mut *this.writer).poll_flush(cx) {
+                            Poll::Pending => return Poll::Pending,
+                            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                            Poll::Ready(Ok(())) => {
+                                this.need_flush = false;
+                                return Poll::Pending;
+                            }
+                        }
+                    } else {
+                        return Poll::Pending;
+                    }
+                }
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                 Poll::Ready(Ok(())) => {
                     let n = read_buf.filled().len();

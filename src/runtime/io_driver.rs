@@ -615,6 +615,8 @@ impl IoDriverHandle {
                 }
             };
 
+            drop(guard);
+
             for waker in wakers {
                 waker.wake();
             }

@@ -508,8 +508,11 @@ impl<R> PooledResource<R> {
     /// discover the newly available resource/slot.
     fn notify_return_wakers(&self) {
         if let Some(ref wakers) = self.return_wakers {
-            let drained = std::mem::take(&mut *wakers.lock());
-            for (_, waker) in drained {
+            let waker = {
+                let lock = wakers.lock();
+                lock.first().map(|(_, waker)| waker.clone())
+            };
+            if let Some(waker) = waker {
                 waker.wake();
             }
         }
@@ -878,8 +881,8 @@ where
     R: Send + 'static,
     F: AsyncResourceFactory<Resource = R>,
 {
-    fn try_reserve(pool: &'a GenericPool<R, F>) -> Option<Self> {
-        if pool.reserve_create_slot() {
+    fn try_reserve(pool: &'a GenericPool<R, F>, waiter_id: Option<u64>) -> Option<Self> {
+        if pool.reserve_create_slot(waiter_id) {
             Some(Self {
                 pool,
                 committed: false,
@@ -1080,7 +1083,7 @@ where
             // Reserve a creation slot so concurrent acquire() calls see
             // an accurate capacity picture.  Without this, concurrent
             // acquires could exceed max_size during warmup.
-            let Some(slot) = CreateSlotReservation::try_reserve(self) else {
+            let Some(slot) = CreateSlotReservation::try_reserve(self, None) else {
                 break; // max_size reached (possibly by concurrent activity)
             };
 
@@ -1158,7 +1161,6 @@ where
     fn process_returns(&self) {
         let rx = self.return_rx.lock();
         let mut waiters_to_wake: SmallVec<[Waker; 4]> = SmallVec::new();
-        let mut wake_count = 0;
         while let Ok(ret) = rx.try_recv() {
             match ret {
                 PoolReturn::Return {
@@ -1181,7 +1183,13 @@ where
                             idle_since: Instant::now(),
                             created_at,
                         });
-                        wake_count += 1;
+
+                        let total = state.active + state.idle.len() + state.creating;
+                        let available =
+                            state.idle.len() + self.config.max_size.saturating_sub(total);
+                        if available > 0 && available - 1 < state.waiters.len() {
+                            waiters_to_wake.push(state.waiters[available - 1].waker.clone());
+                        }
                     }
                     drop(state);
                 }
@@ -1195,22 +1203,17 @@ where
 
                     let mut state = self.state.lock();
                     state.active = state.active.saturating_sub(1);
+
+                    let total = state.active + state.idle.len() + state.creating;
+                    let available = state.idle.len() + self.config.max_size.saturating_sub(total);
+                    if available > 0 && available - 1 < state.waiters.len() {
+                        waiters_to_wake.push(state.waiters[available - 1].waker.clone());
+                    }
                     drop(state);
-                    wake_count += 1;
                 }
             }
         }
         drop(rx);
-
-        if wake_count > 0 {
-            let state = self.state.lock();
-            let total = state.active + state.idle.len() + state.creating;
-            let available = state.idle.len() + self.config.max_size.saturating_sub(total);
-            let start = available.saturating_sub(wake_count);
-            for w in state.waiters.iter().skip(start).take(wake_count) {
-                waiters_to_wake.push(w.waker.clone());
-            }
-        }
 
         for waker in waiters_to_wake {
             waker.wake();
@@ -1218,7 +1221,7 @@ where
     }
 
     /// Try to get an idle resource, returning its original creation time.
-    fn try_get_idle(&self) -> Option<(R, Instant)> {
+    fn try_get_idle(&self, waiter_id: Option<u64>) -> Option<(R, Instant)> {
         let mut state = self.state.lock();
 
         // Evict expired resources first and track eviction reasons for metrics
@@ -1263,6 +1266,9 @@ where
         let result = if let Some(idle) = state.idle.pop_front() {
             state.active += 1;
             state.total_acquisitions += 1;
+            if let Some(id) = waiter_id {
+                state.waiters.retain(|w| w.id != id);
+            }
             Some((idle.resource, idle.created_at))
         } else {
             None
@@ -1279,13 +1285,16 @@ where
     }
 
     /// Reserve a creation slot under max-size accounting.
-    fn reserve_create_slot(&self) -> bool {
+    fn reserve_create_slot(&self, waiter_id: Option<u64>) -> bool {
         let mut state = self.state.lock();
         let total = state.active + state.idle.len() + state.creating;
         if state.closed || total >= self.config.max_size {
             return false;
         }
         state.creating += 1;
+        if let Some(id) = waiter_id {
+            state.waiters.retain(|w| w.id != id);
+        }
         true
     }
 
@@ -1436,6 +1445,7 @@ where
                 F: AsyncResourceFactory<Resource = R>,
             {
                 fn drop(&mut self) {
+                    self.pool.process_returns();
                     if let Some(id) = self.waiter_id {
                         let mut state = self.pool.state.lock();
                         let pos = state.waiters.iter().position(|w| w.id == id);
@@ -1494,17 +1504,15 @@ where
                 }
 
                 // Try to get a healthy idle resource.
-                while let Some((resource, created_at)) = self.try_get_idle() {
+                while let Some((resource, created_at)) = self.try_get_idle(cleanup.waiter_id) {
+                    let id = cleanup.waiter_id.take();
+                    if let Some(id) = id {
+                        self.return_wakers.lock().retain(|(wid, _)| *wid != id);
+                    }
+
                     if self.config.health_check_on_acquire && !self.is_healthy(&resource) {
                         self.reject_unhealthy_idle_resource();
                         continue;
-                    }
-
-                    if let Some(id) = cleanup.waiter_id.take() {
-                        let mut state = self.state.lock();
-                        state.waiters.retain(|w| w.id != id);
-                        drop(state);
-                        self.return_wakers.lock().retain(|(wid, _)| *wid != id);
                     }
 
                     let acquire_duration =
@@ -1526,11 +1534,11 @@ where
                 }
 
                 // Try to create a new resource if under capacity
-                if let Some(create_slot) = CreateSlotReservation::try_reserve(self) {
-                    if let Some(id) = cleanup.waiter_id.take() {
-                        let mut state = self.state.lock();
-                        state.waiters.retain(|w| w.id != id);
-                        drop(state);
+                if let Some(create_slot) =
+                    CreateSlotReservation::try_reserve(self, cleanup.waiter_id)
+                {
+                    let id = cleanup.waiter_id.take();
+                    if let Some(id) = id {
                         self.return_wakers.lock().retain(|(wid, _)| *wid != id);
                     }
 
@@ -1606,7 +1614,7 @@ where
             return None;
         }
 
-        while let Some((resource, created_at)) = self.try_get_idle() {
+        while let Some((resource, created_at)) = self.try_get_idle(None) {
             if self.config.health_check_on_acquire && !self.is_healthy(&resource) {
                 self.reject_unhealthy_idle_resource();
                 continue;
@@ -2295,7 +2303,7 @@ mod tests {
         init_test("create_slot_reservation_enforces_max_size_and_releases_on_drop");
         let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(1));
 
-        let slot1 = CreateSlotReservation::try_reserve(&pool);
+        let slot1 = CreateSlotReservation::try_reserve(&pool, None);
         crate::assert_with_log!(
             slot1.is_some(),
             "first slot reserved",
@@ -2303,7 +2311,7 @@ mod tests {
             slot1.is_some()
         );
 
-        let slot2 = CreateSlotReservation::try_reserve(&pool);
+        let slot2 = CreateSlotReservation::try_reserve(&pool, None);
         crate::assert_with_log!(
             slot2.is_none(),
             "second slot blocked at max_size=1",
@@ -2313,7 +2321,7 @@ mod tests {
 
         drop(slot1);
 
-        let slot3 = CreateSlotReservation::try_reserve(&pool);
+        let slot3 = CreateSlotReservation::try_reserve(&pool, None);
         crate::assert_with_log!(
             slot3.is_some(),
             "slot released when reservation dropped",
@@ -2344,7 +2352,7 @@ mod tests {
         let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(3));
 
         // Reserve a create slot (simulates async resource creation in progress)
-        let slot = CreateSlotReservation::try_reserve(&pool);
+        let slot = CreateSlotReservation::try_reserve(&pool, None);
         assert!(slot.is_some(), "should reserve a create slot");
 
         let stats = pool.stats();
@@ -3213,11 +3221,11 @@ mod tests {
         let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(1));
 
         // Reserve a slot (simulates start of resource creation)
-        let slot = CreateSlotReservation::try_reserve(&pool);
+        let slot = CreateSlotReservation::try_reserve(&pool, None);
         assert!(slot.is_some(), "should reserve slot");
 
         // Verify pool is at capacity
-        let slot2 = CreateSlotReservation::try_reserve(&pool);
+        let slot2 = CreateSlotReservation::try_reserve(&pool, None);
         assert!(slot2.is_none(), "pool at capacity with one creating slot");
 
         // Drop without committing (simulates cancel during create)
@@ -3233,7 +3241,7 @@ mod tests {
         );
 
         // Should be able to reserve again
-        let slot3 = CreateSlotReservation::try_reserve(&pool);
+        let slot3 = CreateSlotReservation::try_reserve(&pool, None);
         assert!(slot3.is_some(), "slot available after cancel");
         if let Some(s) = slot3 {
             s.commit();

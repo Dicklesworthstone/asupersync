@@ -302,7 +302,7 @@ impl GlobalInjector {
     pub fn is_empty(&self) -> bool {
         self.cancel_queue.is_empty()
             && self.timed_count.load(Ordering::Relaxed) == 0
-            && self.ready_queue.is_empty()
+            && self.ready_count.load(Ordering::Relaxed) == 0
     }
 
     /// Returns true if there is work that can be executed immediately.
@@ -314,7 +314,7 @@ impl GlobalInjector {
     #[inline]
     #[must_use]
     pub fn has_runnable_work(&self, now: Time) -> bool {
-        if !self.cancel_queue.is_empty() || !self.ready_queue.is_empty() {
+        if !self.cancel_queue.is_empty() || self.ready_count.load(Ordering::Relaxed) > 0 {
             return true;
         }
         if self.timed_count.load(Ordering::Relaxed) == 0 {
@@ -354,7 +354,7 @@ impl GlobalInjector {
     #[inline]
     #[must_use]
     pub fn has_ready_work(&self) -> bool {
-        !self.ready_queue.is_empty()
+        self.ready_count.load(Ordering::Relaxed) > 0
     }
 
     /// Returns the approximate number of tasks in the ready lane.
@@ -542,6 +542,38 @@ mod tests {
         let popped_ready = injector.pop_ready().expect("ready task should pop");
         assert_eq!(popped_ready.task, task(11));
         assert_eq!(injector.ready_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn readiness_checks_use_ready_counter_to_avoid_false_empty_window() {
+        let injector = GlobalInjector::new();
+
+        // Simulate the inject_ready interleaving where the advisory counter is
+        // visible before the queue push is visible cross-thread.
+        injector.ready_count.fetch_add(1, Ordering::Relaxed);
+
+        assert!(
+            !injector.is_empty(),
+            "counter-visible ready work must not report empty"
+        );
+        assert!(
+            injector.has_ready_work(),
+            "counter-visible ready work must report ready lane activity"
+        );
+        assert!(
+            injector.has_runnable_work(Time::ZERO),
+            "counter-visible ready work must report runnable work"
+        );
+
+        injector.ready_queue.push(PriorityTask {
+            task: task(14),
+            priority: 9,
+        });
+
+        let popped_ready = injector.pop_ready().expect("ready task should pop");
+        assert_eq!(popped_ready.task, task(14));
+        assert_eq!(injector.ready_count.load(Ordering::Relaxed), 0);
+        assert!(injector.is_empty(), "injector returns empty after pop");
     }
 
     #[test]

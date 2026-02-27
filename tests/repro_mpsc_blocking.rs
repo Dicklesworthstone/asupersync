@@ -10,7 +10,6 @@ use asupersync::lab::LabRuntime;
 use asupersync::types::Budget;
 
 #[test]
-#[ignore = "Known deadlock: mpsc uses blocking condvar in single-threaded lab runtime"]
 fn repro_mpsc_deadlock_in_single_threaded_runtime() {
     common::init_test_logging();
 

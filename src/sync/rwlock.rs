@@ -453,7 +453,7 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
             .is_some_and(|id| !state.writer_queue.iter().any(|w| w.id == id));
         let can_acquire = !state.writer_active
             && state.readers == 0
-            && (dequeued || state.writer_queue.is_empty());
+            && (dequeued || (self.waiter_id.is_none() && state.writer_waiters == 1));
 
         if can_acquire {
             state.writer_active = true;
@@ -788,7 +788,7 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
             .is_some_and(|id| !state.writer_queue.iter().any(|w| w.id == id));
         let can_acquire = !state.writer_active
             && state.readers == 0
-            && (dequeued || state.writer_queue.is_empty());
+            && (dequeued || (self.waiter_id.is_none() && state.writer_waiters == 1));
 
         if can_acquire {
             state.writer_active = true;
@@ -1281,13 +1281,12 @@ mod tests {
         // Wait for the second writer to register.
         thread::sleep(std::time::Duration::from_millis(20));
 
-        // Release active writer. This wakes the reader (drain_reader_waiters),
-        // NOT the second writer (writer_waiters > 0 is checked, but
-        // release_writer wakes writers first when writer_waiters > 0).
+        // Release active writer. Since writer_waiters > 0, this wakes the second
+        // writer directly and DOES NOT dequeue the reader.
         drop(write_guard);
 
-        // Drop the read future without polling. If it was dequeued, its drop
-        // should forward the wake to the second writer.
+        // Drop the read future without polling. It simply removes itself from the queue.
+        // The second writer is already woken and will acquire the lock.
         drop(read_fut);
 
         let _ = handle.join();

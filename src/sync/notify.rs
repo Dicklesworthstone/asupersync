@@ -240,6 +240,23 @@ impl Notify {
         let waiters = self.waiters.lock();
         waiters.active_count()
     }
+
+    /// Passes a `notify_one` baton to the next active waiter, or stores it if none exist.
+    /// This must be called with the waiters lock held.
+    fn pass_baton(&self, mut waiters: parking_lot::MutexGuard<'_, WaiterSlab>) {
+        for entry in &mut waiters.entries {
+            if !entry.notified && entry.waker.is_some() {
+                entry.notified = true;
+                if let Some(waker) = entry.waker.take() {
+                    waiters.active -= 1;
+                    drop(waiters);
+                    waker.wake();
+                    return;
+                }
+            }
+        }
+        self.stored_notifications.fetch_add(1, Ordering::Release);
+    }
 }
 
 impl Default for Notify {
@@ -270,126 +287,133 @@ pub struct Notified<'a> {
     initial_generation: u64,
 }
 
+impl Notified<'_> {
+    #[inline]
+    fn mark_done(&mut self) -> Poll<()> {
+        self.state = NotifiedState::Done;
+        Poll::Ready(())
+    }
+
+    fn try_consume_stored_notification(&self) -> bool {
+        let mut stored = self.notify.stored_notifications.load(Ordering::Acquire);
+        while stored > 0 {
+            match self.notify.stored_notifications.compare_exchange_weak(
+                stored,
+                stored - 1,
+                Ordering::Acquire,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => stored = actual,
+            }
+        }
+        false
+    }
+
+    fn poll_init(&mut self, cx: &Context<'_>) -> Poll<()> {
+        // Lock-free fast path: consume a stored notify token.
+        if self.try_consume_stored_notification() {
+            return self.mark_done();
+        }
+
+        // Lock-free fast path: observe broadcast generation bump.
+        let current_gen = self.notify.generation.load(Ordering::Acquire);
+        if current_gen != self.initial_generation {
+            return self.mark_done();
+        }
+
+        // Register as a waiter.
+        let mut waiters = self.notify.waiters.lock();
+
+        // Re-check conditions under waiter lock to close races with concurrent notifiers.
+        if self.try_consume_stored_notification() {
+            drop(waiters);
+            return self.mark_done();
+        }
+
+        let current_gen = self.notify.generation.load(Ordering::Acquire);
+        if current_gen != self.initial_generation {
+            drop(waiters);
+            return self.mark_done();
+        }
+
+        let index = waiters.insert(WaiterEntry {
+            waker: Some(cx.waker().clone()),
+            notified: false,
+            generation: self.initial_generation,
+        });
+        self.waiter_index = Some(index);
+        self.state = NotifiedState::Waiting;
+        drop(waiters);
+
+        Poll::Pending
+    }
+
+    fn poll_waiting(&mut self, cx: &Context<'_>) -> Poll<()> {
+        // Lock-free fast path check.
+        let current_gen = self.notify.generation.load(Ordering::Acquire);
+        let gen_changed = current_gen != self.initial_generation;
+
+        if let Some(index) = self.waiter_index {
+            if gen_changed {
+                let mut waiters = self.notify.waiters.lock();
+                waiters.remove(index);
+                self.waiter_index = None;
+                drop(waiters);
+                return self.mark_done();
+            }
+
+            let mut waiters = self.notify.waiters.lock();
+
+            // Re-check generation under lock to prevent baton-loss races.
+            let current_gen = self.notify.generation.load(Ordering::Acquire);
+            if current_gen != self.initial_generation {
+                waiters.remove(index);
+                self.waiter_index = None;
+                drop(waiters);
+                return self.mark_done();
+            }
+
+            if index < waiters.entries.len() {
+                if waiters.entries[index].notified {
+                    waiters.remove(index);
+                    drop(waiters);
+                    self.waiter_index = None;
+                    return self.mark_done();
+                }
+
+                // Update waker while we have the lock, but only if it changed.
+                match &mut waiters.entries[index].waker {
+                    Some(existing) if existing.will_wake(cx.waker()) => {}
+                    Some(existing) => existing.clone_from(cx.waker()),
+                    slot @ None => {
+                        *slot = Some(cx.waker().clone());
+                        waiters.active += 1;
+                    }
+                }
+            } else {
+                // Entry was popped by tail shrinking. This only happens if our
+                // waker was taken by notify_one/notify_waiters, so we're notified.
+                drop(waiters);
+                self.waiter_index = None;
+                return self.mark_done();
+            }
+        } else if gen_changed {
+            return self.mark_done();
+        }
+
+        Poll::Pending
+    }
+}
+
 impl Future for Notified<'_> {
     type Output = ();
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         match self.state {
-            NotifiedState::Init => {
-                // Check for stored notification.
-                let mut stored = self.notify.stored_notifications.load(Ordering::Acquire);
-                while stored > 0 {
-                    match self.notify.stored_notifications.compare_exchange_weak(
-                        stored,
-                        stored - 1,
-                        Ordering::Acquire,
-                        Ordering::Acquire,
-                    ) {
-                        Ok(_) => {
-                            self.state = NotifiedState::Done;
-                            return Poll::Ready(());
-                        }
-                        Err(actual) => stored = actual,
-                    }
-                }
-
-                // Check if generation changed (notify_waiters called).
-                let current_gen = self.notify.generation.load(Ordering::Acquire);
-                if current_gen != self.initial_generation {
-                    self.state = NotifiedState::Done;
-                    return Poll::Ready(());
-                }
-
-                // Register as a waiter.
-                let mut waiters = self.notify.waiters.lock();
-
-                // Re-check stored notifications and generation while holding the waiter lock.
-                // This closes races where a notifier runs between the lock-free checks above and
-                // the waiter registration below.
-                {
-                    let mut stored = self.notify.stored_notifications.load(Ordering::Acquire);
-                    while stored > 0 {
-                        match self.notify.stored_notifications.compare_exchange_weak(
-                            stored,
-                            stored - 1,
-                            Ordering::Acquire,
-                            Ordering::Acquire,
-                        ) {
-                            Ok(_) => {
-                                drop(waiters);
-                                self.state = NotifiedState::Done;
-                                return Poll::Ready(());
-                            }
-                            Err(actual) => stored = actual,
-                        }
-                    }
-                }
-
-                let current_gen = self.notify.generation.load(Ordering::Acquire);
-                if current_gen != self.initial_generation {
-                    drop(waiters);
-                    self.state = NotifiedState::Done;
-                    return Poll::Ready(());
-                }
-
-                let index = waiters.insert(WaiterEntry {
-                    waker: Some(cx.waker().clone()),
-                    notified: false,
-                    generation: self.initial_generation,
-                });
-                self.waiter_index = Some(index);
-                self.state = NotifiedState::Waiting;
-                drop(waiters);
-
-                Poll::Pending
-            }
-            NotifiedState::Waiting => {
-                // Check if generation changed.
-                let current_gen = self.notify.generation.load(Ordering::Acquire);
-                if current_gen != self.initial_generation {
-                    if let Some(index) = self.waiter_index.take() {
-                        let mut waiters = self.notify.waiters.lock();
-                        waiters.remove(index);
-                    }
-                    self.state = NotifiedState::Done;
-                    return Poll::Ready(());
-                }
-
-                // Check if we were notified.
-                if let Some(index) = self.waiter_index {
-                    let mut waiters = self.notify.waiters.lock();
-
-                    if index < waiters.entries.len() {
-                        if waiters.entries[index].notified {
-                            waiters.remove(index);
-                            drop(waiters);
-                            self.waiter_index = None;
-                            self.state = NotifiedState::Done;
-                            return Poll::Ready(());
-                        }
-                        // Update waker while we have the lock, but only if it changed.
-                        match &mut waiters.entries[index].waker {
-                            Some(existing) if existing.will_wake(cx.waker()) => {}
-                            Some(existing) => existing.clone_from(cx.waker()),
-                            slot @ None => {
-                                *slot = Some(cx.waker().clone());
-                                waiters.active += 1;
-                            }
-                        }
-                    } else {
-                        // Entry was popped by tail shrinking. This only
-                        // happens if our waker was taken by notify_one/notify_waiters,
-                        // which means we were notified.
-                        drop(waiters); // Release lock.
-                        self.waiter_index = None; // Entry no longer exists.
-                        self.state = NotifiedState::Done;
-                        return Poll::Ready(());
-                    }
-                }
-
-                Poll::Pending
-            }
+            NotifiedState::Init => self.poll_init(cx),
+            NotifiedState::Waiting => self.poll_waiting(cx),
             NotifiedState::Done => Poll::Ready(()),
         }
     }

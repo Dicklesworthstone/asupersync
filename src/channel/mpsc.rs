@@ -427,7 +427,7 @@ impl<T> Drop for Reserve<'_, T> {
                 }
 
                 // Propagate wake if we were blocking capacity.
-                if inner.has_capacity(self.sender.shared.capacity) {
+                if is_head && inner.has_capacity(self.sender.shared.capacity) {
                     inner.take_next_sender_waker()
                 } else {
                     None
