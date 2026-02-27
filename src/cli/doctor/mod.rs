@@ -42,6 +42,95 @@ pub struct OperatorModelContract {
     pub decision_loops: Vec<DecisionLoop>,
     /// Global evidence requirements attached to all workflows.
     pub global_evidence_requirements: Vec<String>,
+    /// Deterministic information architecture and navigation topology.
+    pub navigation_topology: NavigationTopology,
+}
+
+/// Deterministic IA/navigation topology for operator workflows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NavigationTopology {
+    /// Topology version for compatibility checks.
+    pub version: String,
+    /// Entry-point screens in lexical order.
+    pub entry_points: Vec<String>,
+    /// Screen definitions in lexical `id` order.
+    pub screens: Vec<NavigationScreen>,
+    /// Deterministic route graph edges in lexical `id` order.
+    pub routes: Vec<NavigationRoute>,
+    /// Deterministic keyboard binding catalog.
+    pub keyboard_bindings: Vec<NavigationKeyboardBinding>,
+    /// Structured route-event schema for observability.
+    pub route_events: Vec<NavigationRouteEvent>,
+}
+
+/// One screen node in the navigation topology.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NavigationScreen {
+    /// Stable screen identifier.
+    pub id: String,
+    /// Human-readable screen label.
+    pub label: String,
+    /// Canonical route path for this screen.
+    pub route: String,
+    /// Personas that primarily own this surface.
+    pub personas: Vec<String>,
+    /// Canonical panel set for this surface.
+    pub primary_panels: Vec<String>,
+    /// Deterministic focus order for panel traversal.
+    pub focus_order: Vec<String>,
+    /// Recovery route identifiers reachable from this screen.
+    pub recovery_routes: Vec<String>,
+}
+
+/// One directed navigation route.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NavigationRoute {
+    /// Stable route identifier.
+    pub id: String,
+    /// Source screen identifier.
+    pub from_screen: String,
+    /// Destination screen identifier.
+    pub to_screen: String,
+    /// Trigger for this route.
+    pub trigger: String,
+    /// Guard expression for this route.
+    pub guard: String,
+    /// Outcome class (`success`, `cancelled`, `failed`).
+    pub outcome: String,
+}
+
+/// Scope of a keyboard binding.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum NavigationBindingScope {
+    /// Binding is global and available from any screen.
+    Global,
+    /// Binding applies within a screen context.
+    Screen,
+}
+
+/// One deterministic keyboard binding.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NavigationKeyboardBinding {
+    /// Key chord.
+    pub key: String,
+    /// Action executed by this binding.
+    pub action: String,
+    /// Binding scope.
+    pub scope: NavigationBindingScope,
+    /// Optional destination screen.
+    pub target_screen: Option<String>,
+    /// Optional destination panel.
+    pub target_panel: Option<String>,
+}
+
+/// One route-event schema entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NavigationRouteEvent {
+    /// Event key.
+    pub event: String,
+    /// Required fields for this event in lexical order.
+    pub required_fields: Vec<String>,
 }
 
 /// One operator persona in the doctor product model.
@@ -98,6 +187,109 @@ pub struct DecisionStep {
     pub action: String,
     /// Required evidence keys for this step.
     pub required_evidence: Vec<String>,
+}
+
+/// Final UX acceptance signoff matrix contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UxSignoffMatrixContract {
+    /// Contract version for compatibility checks.
+    pub contract_version: String,
+    /// Baseline matrix version this signoff matrix extends.
+    pub baseline_matrix_version: String,
+    /// Required structured logging fields for every signoff assertion.
+    pub logging_requirements: Vec<String>,
+    /// Journey-level acceptance signoff definitions.
+    pub journeys: Vec<UxJourneySignoff>,
+    /// Rollout pass/fail gate policy.
+    pub rollout_gate: UxRolloutGatePolicy,
+}
+
+/// One operator journey in the signoff matrix.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UxJourneySignoff {
+    /// Stable journey identifier.
+    pub journey_id: String,
+    /// Persona id this journey validates.
+    pub persona_id: String,
+    /// Decision loop id this journey validates.
+    pub decision_loop_id: String,
+    /// Canonical screen path for the journey.
+    pub canonical_path: Vec<String>,
+    /// Transition assertions for the happy path.
+    pub transitions: Vec<UxTransitionAssertion>,
+    /// Interruption/cancellation assertions for this journey.
+    pub interruption_assertions: Vec<UxInterruptionAssertion>,
+    /// Recovery assertions for this journey.
+    pub recovery_assertions: Vec<UxRecoveryAssertion>,
+    /// Evidence visibility assertions for this journey.
+    pub evidence_assertions: Vec<UxEvidenceAssertion>,
+}
+
+/// One happy-path transition assertion.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UxTransitionAssertion {
+    /// Stable assertion id.
+    pub id: String,
+    /// Source screen id.
+    pub from_screen: String,
+    /// Destination screen id.
+    pub to_screen: String,
+    /// Referenced topology route id.
+    pub route_ref: String,
+    /// Expected focused panel after transition.
+    pub expected_focus_panel: String,
+}
+
+/// One interruption-path assertion.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UxInterruptionAssertion {
+    /// Stable assertion id.
+    pub id: String,
+    /// Screen where interruption is injected.
+    pub screen_id: String,
+    /// Trigger producing interruption.
+    pub trigger: String,
+    /// Expected state class after interruption.
+    pub expected_state: String,
+}
+
+/// One recovery-path assertion.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UxRecoveryAssertion {
+    /// Stable assertion id.
+    pub id: String,
+    /// Source screen id.
+    pub from_screen: String,
+    /// Destination screen id.
+    pub to_screen: String,
+    /// Referenced recovery route id.
+    pub route_ref: String,
+    /// Whether rerun context must be preserved through recovery.
+    pub requires_rerun_context: bool,
+}
+
+/// One evidence visibility assertion.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UxEvidenceAssertion {
+    /// Stable assertion id.
+    pub id: String,
+    /// Screen id where evidence must be visible.
+    pub screen_id: String,
+    /// Required evidence keys that must be present.
+    pub required_evidence_keys: Vec<String>,
+}
+
+/// Rollout gate policy for signoff.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UxRolloutGatePolicy {
+    /// Minimum aggregate pass rate required for signoff.
+    pub min_pass_rate_percent: u8,
+    /// No critical-severity failures may remain for signoff.
+    pub require_zero_critical_failures: bool,
+    /// Journeys that must pass before rollout.
+    pub required_journeys: Vec<String>,
+    /// Remediation actions required when signoff criteria fail.
+    pub mandatory_remediations: Vec<String>,
 }
 
 /// Deterministic screen-to-engine data contract for doctor TUI surfaces.
@@ -566,6 +758,136 @@ pub struct StructuredLogEvent {
     pub fields: BTreeMap<String, String>,
 }
 
+/// Deterministic rch-backed execution-adapter contract for doctor orchestration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutionAdapterContract {
+    /// Contract version for compatibility checks.
+    pub contract_version: String,
+    /// Required upstream logging contract dependency.
+    pub logging_contract_version: String,
+    /// Required request envelope fields in lexical order.
+    pub required_request_fields: Vec<String>,
+    /// Required result envelope fields in lexical order.
+    pub required_result_fields: Vec<String>,
+    /// Command-class catalog in lexical class-id order.
+    pub command_classes: Vec<ExecutionCommandClass>,
+    /// Route/fallback policy catalog in lexical policy-id order.
+    pub route_policies: Vec<ExecutionRoutePolicy>,
+    /// Timeout profiles in lexical class-id order.
+    pub timeout_profiles: Vec<ExecutionTimeoutProfile>,
+    /// Allowed deterministic execution-state transitions.
+    pub state_transitions: Vec<ExecutionStateTransition>,
+    /// Failure taxonomy in lexical code order.
+    pub failure_taxonomy: Vec<ExecutionFailureClass>,
+    /// Required artifact-manifest fields in lexical order.
+    pub artifact_manifest_fields: Vec<String>,
+}
+
+/// One command class supported by the execution adapter.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutionCommandClass {
+    /// Stable class identifier.
+    pub class_id: String,
+    /// Human-readable class label.
+    pub label: String,
+    /// Allowed command prefixes for this class in lexical order.
+    pub allowed_prefixes: Vec<String>,
+    /// Whether this class must be routed through `rch`.
+    pub force_rch: bool,
+    /// Default timeout (seconds) for this class.
+    pub default_timeout_secs: u32,
+}
+
+/// One deterministic route policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutionRoutePolicy {
+    /// Stable policy identifier.
+    pub policy_id: String,
+    /// Condition expression describing when this policy applies.
+    pub condition: String,
+    /// Route selected by this policy (`remote_rch`, `local_direct`, `fail_closed`).
+    pub route: String,
+    /// Retry strategy identifier.
+    pub retry_strategy: String,
+    /// Maximum retries allowed by this policy.
+    pub max_retries: u8,
+}
+
+/// Timeout profile for one command class.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutionTimeoutProfile {
+    /// Command class id this timeout profile applies to.
+    pub class_id: String,
+    /// Soft timeout threshold in seconds.
+    pub soft_timeout_secs: u32,
+    /// Hard timeout threshold in seconds.
+    pub hard_timeout_secs: u32,
+    /// Cancellation grace period in seconds.
+    pub cancel_grace_secs: u32,
+}
+
+/// One legal execution-state transition.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutionStateTransition {
+    /// Source state.
+    pub from_state: String,
+    /// Trigger that causes the transition.
+    pub trigger: String,
+    /// Target state.
+    pub to_state: String,
+}
+
+/// One deterministic failure-taxonomy entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutionFailureClass {
+    /// Stable failure code.
+    pub code: String,
+    /// Severity (`critical`, `high`, `medium`, `low`).
+    pub severity: String,
+    /// Whether this failure is retryable.
+    pub retryable: bool,
+    /// Required operator action for this failure.
+    pub operator_action: String,
+}
+
+/// Request envelope for deterministic command planning.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutionAdapterRequest {
+    /// Stable command identifier.
+    pub command_id: String,
+    /// Command class id.
+    pub command_class: String,
+    /// Correlation id for replay/audit joins.
+    pub correlation_id: String,
+    /// Raw command text submitted by caller.
+    pub raw_command: String,
+    /// Whether remote execution is preferred when available.
+    pub prefer_remote: bool,
+}
+
+/// Deterministic execution plan emitted by the adapter.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutionAdapterPlan {
+    /// Stable command identifier.
+    pub command_id: String,
+    /// Command class id.
+    pub command_class: String,
+    /// Correlation id for replay/audit joins.
+    pub correlation_id: String,
+    /// Normalized command string.
+    pub normalized_command: String,
+    /// Routed command actually executed.
+    pub routed_command: String,
+    /// Selected route (`remote_rch`, `local_direct`, `fail_closed`).
+    pub route: String,
+    /// Effective timeout in seconds.
+    pub timeout_secs: u32,
+    /// Initial state for state-machine progression.
+    pub initial_state: String,
+    /// Required artifact-manifest field set.
+    pub artifact_manifest_fields: Vec<String>,
+}
+
 /// Core diagnostics report contract for doctor report consumers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CoreDiagnosticsReportContract {
@@ -913,6 +1235,13 @@ impl Outputtable for OperatorModelContract {
         lines.push(format!("Personas: {}", self.personas.len()));
         lines.push(format!("Decision loops: {}", self.decision_loops.len()));
         lines.push(format!(
+            "Navigation topology: {} (screens={}, routes={}, bindings={})",
+            self.navigation_topology.version,
+            self.navigation_topology.screens.len(),
+            self.navigation_topology.routes.len(),
+            self.navigation_topology.keyboard_bindings.len()
+        ));
+        lines.push(format!(
             "Global evidence requirements: {}",
             self.global_evidence_requirements.join(", ")
         ));
@@ -924,6 +1253,36 @@ impl Outputtable for OperatorModelContract {
                 persona.mission,
                 persona.default_decision_loop,
                 persona.high_stakes_decisions.len()
+            ));
+        }
+        lines.join("\n")
+    }
+}
+
+impl Outputtable for UxSignoffMatrixContract {
+    fn human_format(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("Contract version: {}", self.contract_version));
+        lines.push(format!("Baseline matrix: {}", self.baseline_matrix_version));
+        lines.push(format!("Journeys: {}", self.journeys.len()));
+        lines.push(format!(
+            "Rollout gate: pass_rate>={}%, zero_critical_failures={}",
+            self.rollout_gate.min_pass_rate_percent,
+            self.rollout_gate.require_zero_critical_failures
+        ));
+        lines.push(format!(
+            "Logging requirements: {}",
+            self.logging_requirements.join(", ")
+        ));
+        for journey in &self.journeys {
+            lines.push(format!(
+                "- {} [{}] transitions={}, interruptions={}, recoveries={}, evidence={}",
+                journey.journey_id,
+                journey.persona_id,
+                journey.transitions.len(),
+                journey.interruption_assertions.len(),
+                journey.recovery_assertions.len(),
+                journey.evidence_assertions.len()
             ));
         }
         lines.join("\n")
@@ -1008,6 +1367,32 @@ impl Outputtable for StructuredLoggingContract {
                 flow.required_fields.len(),
                 flow.optional_fields.len(),
                 flow.event_kinds.join(", ")
+            ));
+        }
+        lines.join("\n")
+    }
+}
+
+impl Outputtable for ExecutionAdapterContract {
+    fn human_format(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("Contract version: {}", self.contract_version));
+        lines.push(format!(
+            "Logging contract dependency: {}",
+            self.logging_contract_version
+        ));
+        lines.push(format!("Command classes: {}", self.command_classes.len()));
+        lines.push(format!("Route policies: {}", self.route_policies.len()));
+        lines.push(format!("Timeout profiles: {}", self.timeout_profiles.len()));
+        lines.push(format!(
+            "State transitions: {}",
+            self.state_transitions.len()
+        ));
+        lines.push(format!("Failure taxonomy: {}", self.failure_taxonomy.len()));
+        for class in &self.command_classes {
+            lines.push(format!(
+                "- {} [{}] force_rch={} timeout={}s",
+                class.class_id, class.label, class.force_rch, class.default_timeout_secs
             ));
         }
         lines.join("\n")
@@ -1219,9 +1604,13 @@ struct ParsedStringArray {
 const SCANNER_VERSION: &str = "doctor-workspace-scan-v1";
 const TAXONOMY_VERSION: &str = "capability-surfaces-v1";
 const OPERATOR_MODEL_VERSION: &str = "doctor-operator-model-v1";
+const NAVIGATION_TOPOLOGY_VERSION: &str = "doctor-navigation-topology-v1";
+const UX_SIGNOFF_MATRIX_VERSION: &str = "doctor-ux-signoff-matrix-v1";
+const UX_BASELINE_MATRIX_VERSION: &str = "doctor-ux-acceptance-matrix-v0";
 const SCREEN_ENGINE_CONTRACT_VERSION: &str = "doctor-screen-engine-v1";
 const EVIDENCE_SCHEMA_VERSION: &str = "doctor-evidence-v1";
 const STRUCTURED_LOGGING_CONTRACT_VERSION: &str = "doctor-logging-v1";
+const EXECUTION_ADAPTER_CONTRACT_VERSION: &str = "doctor-exec-adapter-v1";
 const CORE_DIAGNOSTICS_REPORT_VERSION: &str = "doctor-core-report-v1";
 const ADVANCED_DIAGNOSTICS_REPORT_VERSION: &str = "doctor-advanced-report-v1";
 const VISUAL_LANGUAGE_VERSION: &str = "doctor-visual-language-v1";
@@ -1558,11 +1947,674 @@ pub fn operator_model_contract() -> OperatorModelContract {
         },
     ];
 
+    let navigation_topology = NavigationTopology {
+        version: NAVIGATION_TOPOLOGY_VERSION.to_string(),
+        entry_points: vec![
+            "bead_command_center".to_string(),
+            "gate_status_board".to_string(),
+            "incident_console".to_string(),
+        ],
+        screens: vec![
+            NavigationScreen {
+                id: "artifact_audit".to_string(),
+                label: "Artifact Audit".to_string(),
+                route: "/doctor/artifacts".to_string(),
+                personas: vec!["release_guardian".to_string()],
+                primary_panels: vec![
+                    "context_panel".to_string(),
+                    "primary_panel".to_string(),
+                    "action_panel".to_string(),
+                ],
+                focus_order: vec![
+                    "context_panel".to_string(),
+                    "primary_panel".to_string(),
+                    "action_panel".to_string(),
+                ],
+                recovery_routes: vec![
+                    "route_artifact_audit_to_evidence_timeline_on_failure".to_string(),
+                    "route_artifact_audit_to_loading_on_retry".to_string(),
+                ],
+            },
+            NavigationScreen {
+                id: "bead_command_center".to_string(),
+                label: "Bead Command Center".to_string(),
+                route: "/doctor/beads".to_string(),
+                personas: vec!["conformance_engineer".to_string()],
+                primary_panels: vec![
+                    "context_panel".to_string(),
+                    "primary_panel".to_string(),
+                    "action_panel".to_string(),
+                ],
+                focus_order: vec![
+                    "context_panel".to_string(),
+                    "primary_panel".to_string(),
+                    "action_panel".to_string(),
+                ],
+                recovery_routes: vec![
+                    "route_bead_command_center_to_evidence_timeline_on_failure".to_string(),
+                    "route_bead_command_center_to_loading_on_retry".to_string(),
+                ],
+            },
+            NavigationScreen {
+                id: "decision_ledger".to_string(),
+                label: "Decision Ledger".to_string(),
+                route: "/doctor/ledger".to_string(),
+                personas: vec!["release_guardian".to_string()],
+                primary_panels: vec![
+                    "context_panel".to_string(),
+                    "primary_panel".to_string(),
+                    "action_panel".to_string(),
+                ],
+                focus_order: vec![
+                    "context_panel".to_string(),
+                    "primary_panel".to_string(),
+                    "action_panel".to_string(),
+                ],
+                recovery_routes: vec![
+                    "route_decision_ledger_to_evidence_timeline_on_failure".to_string(),
+                    "route_decision_ledger_to_loading_on_retry".to_string(),
+                ],
+            },
+            NavigationScreen {
+                id: "evidence_timeline".to_string(),
+                label: "Evidence Timeline".to_string(),
+                route: "/doctor/evidence".to_string(),
+                personas: vec![
+                    "conformance_engineer".to_string(),
+                    "runtime_operator".to_string(),
+                ],
+                primary_panels: vec![
+                    "context_panel".to_string(),
+                    "primary_panel".to_string(),
+                    "action_panel".to_string(),
+                ],
+                focus_order: vec![
+                    "context_panel".to_string(),
+                    "primary_panel".to_string(),
+                    "action_panel".to_string(),
+                ],
+                recovery_routes: vec!["route_evidence_timeline_to_loading_on_retry".to_string()],
+            },
+            NavigationScreen {
+                id: "gate_status_board".to_string(),
+                label: "Gate Status Board".to_string(),
+                route: "/doctor/gates".to_string(),
+                personas: vec!["release_guardian".to_string()],
+                primary_panels: vec![
+                    "context_panel".to_string(),
+                    "primary_panel".to_string(),
+                    "action_panel".to_string(),
+                ],
+                focus_order: vec![
+                    "context_panel".to_string(),
+                    "primary_panel".to_string(),
+                    "action_panel".to_string(),
+                ],
+                recovery_routes: vec![
+                    "route_gate_status_board_to_artifact_audit_on_failure".to_string(),
+                    "route_gate_status_board_to_loading_on_retry".to_string(),
+                ],
+            },
+            NavigationScreen {
+                id: "incident_console".to_string(),
+                label: "Incident Console".to_string(),
+                route: "/doctor/incidents".to_string(),
+                personas: vec!["runtime_operator".to_string()],
+                primary_panels: vec![
+                    "context_panel".to_string(),
+                    "primary_panel".to_string(),
+                    "action_panel".to_string(),
+                ],
+                focus_order: vec![
+                    "context_panel".to_string(),
+                    "primary_panel".to_string(),
+                    "action_panel".to_string(),
+                ],
+                recovery_routes: vec![
+                    "route_incident_console_to_runtime_health_on_failure".to_string(),
+                    "route_incident_console_to_loading_on_retry".to_string(),
+                ],
+            },
+            NavigationScreen {
+                id: "replay_inspector".to_string(),
+                label: "Replay Inspector".to_string(),
+                route: "/doctor/replay".to_string(),
+                personas: vec!["runtime_operator".to_string()],
+                primary_panels: vec![
+                    "context_panel".to_string(),
+                    "primary_panel".to_string(),
+                    "action_panel".to_string(),
+                ],
+                focus_order: vec![
+                    "context_panel".to_string(),
+                    "primary_panel".to_string(),
+                    "action_panel".to_string(),
+                ],
+                recovery_routes: vec![
+                    "route_replay_inspector_to_evidence_timeline_on_failure".to_string(),
+                    "route_replay_inspector_to_loading_on_retry".to_string(),
+                ],
+            },
+            NavigationScreen {
+                id: "runtime_health".to_string(),
+                label: "Runtime Health".to_string(),
+                route: "/doctor/runtime".to_string(),
+                personas: vec!["runtime_operator".to_string()],
+                primary_panels: vec![
+                    "context_panel".to_string(),
+                    "primary_panel".to_string(),
+                    "action_panel".to_string(),
+                ],
+                focus_order: vec![
+                    "context_panel".to_string(),
+                    "primary_panel".to_string(),
+                    "action_panel".to_string(),
+                ],
+                recovery_routes: vec![
+                    "route_runtime_health_to_evidence_timeline_on_failure".to_string(),
+                    "route_runtime_health_to_loading_on_retry".to_string(),
+                ],
+            },
+            NavigationScreen {
+                id: "scenario_workbench".to_string(),
+                label: "Scenario Workbench".to_string(),
+                route: "/doctor/scenarios".to_string(),
+                personas: vec!["conformance_engineer".to_string()],
+                primary_panels: vec![
+                    "context_panel".to_string(),
+                    "primary_panel".to_string(),
+                    "action_panel".to_string(),
+                ],
+                focus_order: vec![
+                    "context_panel".to_string(),
+                    "primary_panel".to_string(),
+                    "action_panel".to_string(),
+                ],
+                recovery_routes: vec![
+                    "route_scenario_workbench_to_evidence_timeline_on_failure".to_string(),
+                    "route_scenario_workbench_to_loading_on_retry".to_string(),
+                ],
+            },
+        ],
+        routes: vec![
+            NavigationRoute {
+                id: "route_artifact_audit_to_decision_ledger".to_string(),
+                from_screen: "artifact_audit".to_string(),
+                to_screen: "decision_ledger".to_string(),
+                trigger: "next_stage".to_string(),
+                guard: "artifacts_complete".to_string(),
+                outcome: "success".to_string(),
+            },
+            NavigationRoute {
+                id: "route_artifact_audit_to_evidence_timeline_on_failure".to_string(),
+                from_screen: "artifact_audit".to_string(),
+                to_screen: "evidence_timeline".to_string(),
+                trigger: "recover".to_string(),
+                guard: "artifact_missing_or_invalid".to_string(),
+                outcome: "failed".to_string(),
+            },
+            NavigationRoute {
+                id: "route_artifact_audit_to_loading_on_retry".to_string(),
+                from_screen: "artifact_audit".to_string(),
+                to_screen: "artifact_audit".to_string(),
+                trigger: "retry".to_string(),
+                guard: "always".to_string(),
+                outcome: "success".to_string(),
+            },
+            NavigationRoute {
+                id: "route_bead_command_center_to_evidence_timeline_on_failure".to_string(),
+                from_screen: "bead_command_center".to_string(),
+                to_screen: "evidence_timeline".to_string(),
+                trigger: "recover".to_string(),
+                guard: "triage_data_invalid".to_string(),
+                outcome: "failed".to_string(),
+            },
+            NavigationRoute {
+                id: "route_bead_command_center_to_loading_on_retry".to_string(),
+                from_screen: "bead_command_center".to_string(),
+                to_screen: "bead_command_center".to_string(),
+                trigger: "retry".to_string(),
+                guard: "always".to_string(),
+                outcome: "success".to_string(),
+            },
+            NavigationRoute {
+                id: "route_bead_command_center_to_scenario_workbench".to_string(),
+                from_screen: "bead_command_center".to_string(),
+                to_screen: "scenario_workbench".to_string(),
+                trigger: "open_scenario_workbench".to_string(),
+                guard: "selected_work_item_exists".to_string(),
+                outcome: "success".to_string(),
+            },
+            NavigationRoute {
+                id: "route_decision_ledger_to_evidence_timeline_on_failure".to_string(),
+                from_screen: "decision_ledger".to_string(),
+                to_screen: "evidence_timeline".to_string(),
+                trigger: "recover".to_string(),
+                guard: "decision_evidence_incomplete".to_string(),
+                outcome: "failed".to_string(),
+            },
+            NavigationRoute {
+                id: "route_decision_ledger_to_gate_status_board".to_string(),
+                from_screen: "decision_ledger".to_string(),
+                to_screen: "gate_status_board".to_string(),
+                trigger: "back_to_gates".to_string(),
+                guard: "always".to_string(),
+                outcome: "success".to_string(),
+            },
+            NavigationRoute {
+                id: "route_decision_ledger_to_loading_on_retry".to_string(),
+                from_screen: "decision_ledger".to_string(),
+                to_screen: "decision_ledger".to_string(),
+                trigger: "retry".to_string(),
+                guard: "always".to_string(),
+                outcome: "success".to_string(),
+            },
+            NavigationRoute {
+                id: "route_evidence_timeline_to_bead_command_center".to_string(),
+                from_screen: "evidence_timeline".to_string(),
+                to_screen: "bead_command_center".to_string(),
+                trigger: "return_to_triage".to_string(),
+                guard: "persona_conformance_engineer".to_string(),
+                outcome: "success".to_string(),
+            },
+            NavigationRoute {
+                id: "route_evidence_timeline_to_gate_status_board".to_string(),
+                from_screen: "evidence_timeline".to_string(),
+                to_screen: "gate_status_board".to_string(),
+                trigger: "handoff_to_release_guardian".to_string(),
+                guard: "gate_context_available".to_string(),
+                outcome: "success".to_string(),
+            },
+            NavigationRoute {
+                id: "route_evidence_timeline_to_incident_console".to_string(),
+                from_screen: "evidence_timeline".to_string(),
+                to_screen: "incident_console".to_string(),
+                trigger: "handoff_to_runtime_operator".to_string(),
+                guard: "incident_context_available".to_string(),
+                outcome: "success".to_string(),
+            },
+            NavigationRoute {
+                id: "route_evidence_timeline_to_loading_on_retry".to_string(),
+                from_screen: "evidence_timeline".to_string(),
+                to_screen: "evidence_timeline".to_string(),
+                trigger: "retry".to_string(),
+                guard: "always".to_string(),
+                outcome: "success".to_string(),
+            },
+            NavigationRoute {
+                id: "route_gate_status_board_to_artifact_audit".to_string(),
+                from_screen: "gate_status_board".to_string(),
+                to_screen: "artifact_audit".to_string(),
+                trigger: "audit_artifacts".to_string(),
+                guard: "always".to_string(),
+                outcome: "success".to_string(),
+            },
+            NavigationRoute {
+                id: "route_gate_status_board_to_artifact_audit_on_failure".to_string(),
+                from_screen: "gate_status_board".to_string(),
+                to_screen: "artifact_audit".to_string(),
+                trigger: "recover".to_string(),
+                guard: "gate_evidence_incomplete".to_string(),
+                outcome: "failed".to_string(),
+            },
+            NavigationRoute {
+                id: "route_gate_status_board_to_evidence_timeline".to_string(),
+                from_screen: "gate_status_board".to_string(),
+                to_screen: "evidence_timeline".to_string(),
+                trigger: "inspect_evidence".to_string(),
+                guard: "always".to_string(),
+                outcome: "success".to_string(),
+            },
+            NavigationRoute {
+                id: "route_gate_status_board_to_loading_on_retry".to_string(),
+                from_screen: "gate_status_board".to_string(),
+                to_screen: "gate_status_board".to_string(),
+                trigger: "retry".to_string(),
+                guard: "always".to_string(),
+                outcome: "success".to_string(),
+            },
+            NavigationRoute {
+                id: "route_incident_console_to_evidence_timeline".to_string(),
+                from_screen: "incident_console".to_string(),
+                to_screen: "evidence_timeline".to_string(),
+                trigger: "handoff_to_evidence".to_string(),
+                guard: "containment_snapshot_available".to_string(),
+                outcome: "success".to_string(),
+            },
+            NavigationRoute {
+                id: "route_incident_console_to_loading_on_retry".to_string(),
+                from_screen: "incident_console".to_string(),
+                to_screen: "incident_console".to_string(),
+                trigger: "retry".to_string(),
+                guard: "always".to_string(),
+                outcome: "success".to_string(),
+            },
+            NavigationRoute {
+                id: "route_incident_console_to_runtime_health".to_string(),
+                from_screen: "incident_console".to_string(),
+                to_screen: "runtime_health".to_string(),
+                trigger: "inspect_runtime_health".to_string(),
+                guard: "always".to_string(),
+                outcome: "success".to_string(),
+            },
+            NavigationRoute {
+                id: "route_incident_console_to_runtime_health_on_failure".to_string(),
+                from_screen: "incident_console".to_string(),
+                to_screen: "runtime_health".to_string(),
+                trigger: "recover".to_string(),
+                guard: "incident_flow_failed".to_string(),
+                outcome: "failed".to_string(),
+            },
+            NavigationRoute {
+                id: "route_replay_inspector_to_evidence_timeline_on_failure".to_string(),
+                from_screen: "replay_inspector".to_string(),
+                to_screen: "evidence_timeline".to_string(),
+                trigger: "recover".to_string(),
+                guard: "replay_artifact_missing".to_string(),
+                outcome: "failed".to_string(),
+            },
+            NavigationRoute {
+                id: "route_replay_inspector_to_incident_console".to_string(),
+                from_screen: "replay_inspector".to_string(),
+                to_screen: "incident_console".to_string(),
+                trigger: "return_to_incident_console".to_string(),
+                guard: "always".to_string(),
+                outcome: "success".to_string(),
+            },
+            NavigationRoute {
+                id: "route_replay_inspector_to_loading_on_retry".to_string(),
+                from_screen: "replay_inspector".to_string(),
+                to_screen: "replay_inspector".to_string(),
+                trigger: "retry".to_string(),
+                guard: "always".to_string(),
+                outcome: "success".to_string(),
+            },
+            NavigationRoute {
+                id: "route_runtime_health_to_evidence_timeline_on_failure".to_string(),
+                from_screen: "runtime_health".to_string(),
+                to_screen: "evidence_timeline".to_string(),
+                trigger: "recover".to_string(),
+                guard: "runtime_snapshot_unavailable".to_string(),
+                outcome: "failed".to_string(),
+            },
+            NavigationRoute {
+                id: "route_runtime_health_to_loading_on_retry".to_string(),
+                from_screen: "runtime_health".to_string(),
+                to_screen: "runtime_health".to_string(),
+                trigger: "retry".to_string(),
+                guard: "always".to_string(),
+                outcome: "success".to_string(),
+            },
+            NavigationRoute {
+                id: "route_runtime_health_to_replay_inspector".to_string(),
+                from_screen: "runtime_health".to_string(),
+                to_screen: "replay_inspector".to_string(),
+                trigger: "open_replay_inspector".to_string(),
+                guard: "replay_context_available".to_string(),
+                outcome: "success".to_string(),
+            },
+            NavigationRoute {
+                id: "route_scenario_workbench_to_evidence_timeline".to_string(),
+                from_screen: "scenario_workbench".to_string(),
+                to_screen: "evidence_timeline".to_string(),
+                trigger: "open_evidence_timeline".to_string(),
+                guard: "scenario_execution_complete".to_string(),
+                outcome: "success".to_string(),
+            },
+            NavigationRoute {
+                id: "route_scenario_workbench_to_evidence_timeline_on_failure".to_string(),
+                from_screen: "scenario_workbench".to_string(),
+                to_screen: "evidence_timeline".to_string(),
+                trigger: "recover".to_string(),
+                guard: "scenario_execution_failed".to_string(),
+                outcome: "failed".to_string(),
+            },
+            NavigationRoute {
+                id: "route_scenario_workbench_to_loading_on_retry".to_string(),
+                from_screen: "scenario_workbench".to_string(),
+                to_screen: "scenario_workbench".to_string(),
+                trigger: "retry".to_string(),
+                guard: "always".to_string(),
+                outcome: "success".to_string(),
+            },
+        ],
+        keyboard_bindings: vec![
+            NavigationKeyboardBinding {
+                key: "?".to_string(),
+                action: "open_help_overlay".to_string(),
+                scope: NavigationBindingScope::Global,
+                target_screen: None,
+                target_panel: None,
+            },
+            NavigationKeyboardBinding {
+                key: "g a".to_string(),
+                action: "go_artifact_audit".to_string(),
+                scope: NavigationBindingScope::Global,
+                target_screen: Some("artifact_audit".to_string()),
+                target_panel: Some("context_panel".to_string()),
+            },
+            NavigationKeyboardBinding {
+                key: "g b".to_string(),
+                action: "go_bead_command_center".to_string(),
+                scope: NavigationBindingScope::Global,
+                target_screen: Some("bead_command_center".to_string()),
+                target_panel: Some("context_panel".to_string()),
+            },
+            NavigationKeyboardBinding {
+                key: "g d".to_string(),
+                action: "go_decision_ledger".to_string(),
+                scope: NavigationBindingScope::Global,
+                target_screen: Some("decision_ledger".to_string()),
+                target_panel: Some("context_panel".to_string()),
+            },
+            NavigationKeyboardBinding {
+                key: "g e".to_string(),
+                action: "go_evidence_timeline".to_string(),
+                scope: NavigationBindingScope::Global,
+                target_screen: Some("evidence_timeline".to_string()),
+                target_panel: Some("context_panel".to_string()),
+            },
+            NavigationKeyboardBinding {
+                key: "g i".to_string(),
+                action: "go_incident_console".to_string(),
+                scope: NavigationBindingScope::Global,
+                target_screen: Some("incident_console".to_string()),
+                target_panel: Some("context_panel".to_string()),
+            },
+            NavigationKeyboardBinding {
+                key: "g p".to_string(),
+                action: "go_replay_inspector".to_string(),
+                scope: NavigationBindingScope::Global,
+                target_screen: Some("replay_inspector".to_string()),
+                target_panel: Some("context_panel".to_string()),
+            },
+            NavigationKeyboardBinding {
+                key: "g r".to_string(),
+                action: "go_runtime_health".to_string(),
+                scope: NavigationBindingScope::Global,
+                target_screen: Some("runtime_health".to_string()),
+                target_panel: Some("context_panel".to_string()),
+            },
+            NavigationKeyboardBinding {
+                key: "g s".to_string(),
+                action: "go_scenario_workbench".to_string(),
+                scope: NavigationBindingScope::Global,
+                target_screen: Some("scenario_workbench".to_string()),
+                target_panel: Some("context_panel".to_string()),
+            },
+            NavigationKeyboardBinding {
+                key: "g t".to_string(),
+                action: "go_gate_status_board".to_string(),
+                scope: NavigationBindingScope::Global,
+                target_screen: Some("gate_status_board".to_string()),
+                target_panel: Some("context_panel".to_string()),
+            },
+            NavigationKeyboardBinding {
+                key: "c".to_string(),
+                action: "request_cancellation".to_string(),
+                scope: NavigationBindingScope::Screen,
+                target_screen: None,
+                target_panel: Some("action_panel".to_string()),
+            },
+            NavigationKeyboardBinding {
+                key: "enter".to_string(),
+                action: "execute_focused_action".to_string(),
+                scope: NavigationBindingScope::Screen,
+                target_screen: None,
+                target_panel: Some("action_panel".to_string()),
+            },
+            NavigationKeyboardBinding {
+                key: "esc".to_string(),
+                action: "cancel_modal_return_context".to_string(),
+                scope: NavigationBindingScope::Screen,
+                target_screen: None,
+                target_panel: Some("context_panel".to_string()),
+            },
+            NavigationKeyboardBinding {
+                key: "r".to_string(),
+                action: "refresh_surface".to_string(),
+                scope: NavigationBindingScope::Screen,
+                target_screen: None,
+                target_panel: Some("context_panel".to_string()),
+            },
+            NavigationKeyboardBinding {
+                key: "shift+tab".to_string(),
+                action: "focus_prev_panel".to_string(),
+                scope: NavigationBindingScope::Screen,
+                target_screen: None,
+                target_panel: None,
+            },
+            NavigationKeyboardBinding {
+                key: "tab".to_string(),
+                action: "focus_next_panel".to_string(),
+                scope: NavigationBindingScope::Screen,
+                target_screen: None,
+                target_panel: None,
+            },
+            NavigationKeyboardBinding {
+                key: "x".to_string(),
+                action: "open_replay_or_export".to_string(),
+                scope: NavigationBindingScope::Screen,
+                target_screen: None,
+                target_panel: Some("action_panel".to_string()),
+            },
+        ],
+        route_events: vec![
+            NavigationRouteEvent {
+                event: "focus_changed".to_string(),
+                required_fields: vec![
+                    "contract_version".to_string(),
+                    "correlation_id".to_string(),
+                    "event".to_string(),
+                    "focus_target".to_string(),
+                    "latency_ms".to_string(),
+                    "navigation_topology_version".to_string(),
+                    "run_id".to_string(),
+                    "screen_id".to_string(),
+                    "trace_id".to_string(),
+                ],
+            },
+            NavigationRouteEvent {
+                event: "focus_invalid".to_string(),
+                required_fields: vec![
+                    "contract_version".to_string(),
+                    "correlation_id".to_string(),
+                    "diagnostic_reason".to_string(),
+                    "event".to_string(),
+                    "focus_target".to_string(),
+                    "latency_ms".to_string(),
+                    "navigation_topology_version".to_string(),
+                    "run_id".to_string(),
+                    "screen_id".to_string(),
+                    "trace_id".to_string(),
+                ],
+            },
+            NavigationRouteEvent {
+                event: "route_blocked".to_string(),
+                required_fields: vec![
+                    "contract_version".to_string(),
+                    "correlation_id".to_string(),
+                    "diagnostic_reason".to_string(),
+                    "event".to_string(),
+                    "focus_target".to_string(),
+                    "from_state".to_string(),
+                    "latency_ms".to_string(),
+                    "navigation_topology_version".to_string(),
+                    "outcome_class".to_string(),
+                    "run_id".to_string(),
+                    "screen_id".to_string(),
+                    "to_state".to_string(),
+                    "trace_id".to_string(),
+                    "trigger".to_string(),
+                ],
+            },
+            NavigationRouteEvent {
+                event: "route_entered".to_string(),
+                required_fields: vec![
+                    "contract_version".to_string(),
+                    "correlation_id".to_string(),
+                    "event".to_string(),
+                    "focus_target".to_string(),
+                    "from_state".to_string(),
+                    "latency_ms".to_string(),
+                    "navigation_topology_version".to_string(),
+                    "outcome_class".to_string(),
+                    "run_id".to_string(),
+                    "screen_id".to_string(),
+                    "to_state".to_string(),
+                    "trace_id".to_string(),
+                    "trigger".to_string(),
+                ],
+            },
+            NavigationRouteEvent {
+                event: "route_recovery_completed".to_string(),
+                required_fields: vec![
+                    "contract_version".to_string(),
+                    "correlation_id".to_string(),
+                    "event".to_string(),
+                    "focus_target".to_string(),
+                    "from_state".to_string(),
+                    "latency_ms".to_string(),
+                    "navigation_topology_version".to_string(),
+                    "outcome_class".to_string(),
+                    "recovery_route_id".to_string(),
+                    "rerun_context".to_string(),
+                    "run_id".to_string(),
+                    "screen_id".to_string(),
+                    "to_state".to_string(),
+                    "trace_id".to_string(),
+                    "trigger".to_string(),
+                ],
+            },
+            NavigationRouteEvent {
+                event: "route_recovery_started".to_string(),
+                required_fields: vec![
+                    "contract_version".to_string(),
+                    "correlation_id".to_string(),
+                    "event".to_string(),
+                    "focus_target".to_string(),
+                    "from_state".to_string(),
+                    "latency_ms".to_string(),
+                    "navigation_topology_version".to_string(),
+                    "outcome_class".to_string(),
+                    "recovery_route_id".to_string(),
+                    "rerun_context".to_string(),
+                    "run_id".to_string(),
+                    "screen_id".to_string(),
+                    "to_state".to_string(),
+                    "trace_id".to_string(),
+                    "trigger".to_string(),
+                ],
+            },
+        ],
+    };
+
     OperatorModelContract {
         contract_version: OPERATOR_MODEL_VERSION.to_string(),
         personas,
         decision_loops,
         global_evidence_requirements,
+        navigation_topology,
     }
 }
 
@@ -1585,6 +2637,9 @@ pub fn validate_operator_model_contract(contract: &OperatorModelContract) -> Res
     }
     if contract.global_evidence_requirements.is_empty() {
         return Err("global_evidence_requirements must be non-empty".to_string());
+    }
+    if contract.navigation_topology.version.trim().is_empty() {
+        return Err("navigation_topology.version must be non-empty".to_string());
     }
 
     let mut deduped_global = contract.global_evidence_requirements.clone();
@@ -1797,6 +2852,1060 @@ pub fn validate_operator_model_contract(contract: &OperatorModelContract) -> Res
                 }
             }
         }
+    }
+
+    let topology = &contract.navigation_topology;
+    if topology.entry_points.is_empty() {
+        return Err("navigation_topology.entry_points must be non-empty".to_string());
+    }
+    let mut deduped_entry_points = topology.entry_points.clone();
+    deduped_entry_points.sort();
+    deduped_entry_points.dedup();
+    if deduped_entry_points.len() != topology.entry_points.len() {
+        return Err("navigation_topology.entry_points must be unique".to_string());
+    }
+    if deduped_entry_points != topology.entry_points {
+        return Err("navigation_topology.entry_points must be lexically sorted".to_string());
+    }
+
+    if topology.screens.is_empty() {
+        return Err("navigation_topology.screens must be non-empty".to_string());
+    }
+    let screen_ids: Vec<_> = topology
+        .screens
+        .iter()
+        .map(|screen| screen.id.clone())
+        .collect();
+    if screen_ids.iter().any(|id| id.trim().is_empty()) {
+        return Err("navigation_topology.screens contains empty id".to_string());
+    }
+    let mut deduped_screen_ids = screen_ids.clone();
+    deduped_screen_ids.sort();
+    deduped_screen_ids.dedup();
+    if deduped_screen_ids.len() != screen_ids.len() {
+        return Err("navigation_topology.screens must be unique by id".to_string());
+    }
+    if deduped_screen_ids != screen_ids {
+        return Err("navigation_topology.screens must be lexically sorted by id".to_string());
+    }
+    let topology_screen_set: BTreeSet<_> = screen_ids.iter().cloned().collect();
+
+    let screen_contract = screen_engine_contract();
+    let screen_contract_ids: BTreeSet<_> = screen_contract
+        .screens
+        .into_iter()
+        .map(|screen| screen.id)
+        .collect();
+
+    for screen in &topology.screens {
+        if screen.label.trim().is_empty() {
+            return Err(format!(
+                "navigation_topology screen {} has empty label",
+                screen.id
+            ));
+        }
+        if !screen.route.starts_with("/doctor/") {
+            return Err(format!(
+                "navigation_topology screen {} has invalid route {}",
+                screen.id, screen.route
+            ));
+        }
+        if screen.personas.is_empty() {
+            return Err(format!(
+                "navigation_topology screen {} must declare personas",
+                screen.id
+            ));
+        }
+        let mut deduped_personas = screen.personas.clone();
+        deduped_personas.sort();
+        deduped_personas.dedup();
+        if deduped_personas.len() != screen.personas.len() {
+            return Err(format!(
+                "navigation_topology screen {} personas must be unique",
+                screen.id
+            ));
+        }
+        if deduped_personas != screen.personas {
+            return Err(format!(
+                "navigation_topology screen {} personas must be lexically sorted",
+                screen.id
+            ));
+        }
+        for persona_id in &screen.personas {
+            if !seen_personas.contains(persona_id) {
+                return Err(format!(
+                    "navigation_topology screen {} references unknown persona {}",
+                    screen.id, persona_id
+                ));
+            }
+        }
+        if screen.primary_panels.is_empty() || screen.focus_order.is_empty() {
+            return Err(format!(
+                "navigation_topology screen {} must define primary_panels and focus_order",
+                screen.id
+            ));
+        }
+        if screen
+            .primary_panels
+            .iter()
+            .any(|panel| panel.trim().is_empty())
+            || screen
+                .focus_order
+                .iter()
+                .any(|panel| panel.trim().is_empty())
+        {
+            return Err(format!(
+                "navigation_topology screen {} has empty panel id",
+                screen.id
+            ));
+        }
+        let mut deduped_primary_panels = screen.primary_panels.clone();
+        deduped_primary_panels.sort();
+        deduped_primary_panels.dedup();
+        if deduped_primary_panels.len() != screen.primary_panels.len() {
+            return Err(format!(
+                "navigation_topology screen {} primary_panels must be unique",
+                screen.id
+            ));
+        }
+        let mut deduped_focus_order = screen.focus_order.clone();
+        deduped_focus_order.sort();
+        deduped_focus_order.dedup();
+        if deduped_focus_order.len() != screen.focus_order.len() {
+            return Err(format!(
+                "navigation_topology screen {} focus_order must be unique",
+                screen.id
+            ));
+        }
+        let primary_panel_set: BTreeSet<_> = screen.primary_panels.iter().collect();
+        let focus_panel_set: BTreeSet<_> = screen.focus_order.iter().collect();
+        if primary_panel_set != focus_panel_set {
+            return Err(format!(
+                "navigation_topology screen {} focus_order must match primary_panels set",
+                screen.id
+            ));
+        }
+        if screen.recovery_routes.is_empty() {
+            return Err(format!(
+                "navigation_topology screen {} must define recovery_routes",
+                screen.id
+            ));
+        }
+        let mut deduped_recovery_routes = screen.recovery_routes.clone();
+        deduped_recovery_routes.sort();
+        deduped_recovery_routes.dedup();
+        if deduped_recovery_routes.len() != screen.recovery_routes.len() {
+            return Err(format!(
+                "navigation_topology screen {} recovery_routes must be unique",
+                screen.id
+            ));
+        }
+        if !screen_contract_ids.contains(&screen.id) {
+            return Err(format!(
+                "navigation_topology screen {} is missing from screen_engine_contract",
+                screen.id
+            ));
+        }
+    }
+
+    if topology_screen_set != screen_contract_ids {
+        return Err(
+            "navigation_topology screens must match screen_engine_contract screens".to_string(),
+        );
+    }
+    for entry in &topology.entry_points {
+        if !topology_screen_set.contains(entry) {
+            return Err(format!(
+                "navigation_topology entry_point {entry} references unknown screen"
+            ));
+        }
+    }
+
+    if topology.routes.is_empty() {
+        return Err("navigation_topology.routes must be non-empty".to_string());
+    }
+    let route_ids: Vec<_> = topology
+        .routes
+        .iter()
+        .map(|route| route.id.clone())
+        .collect();
+    if route_ids.iter().any(|id| id.trim().is_empty()) {
+        return Err("navigation_topology.routes contains empty id".to_string());
+    }
+    let mut deduped_route_ids = route_ids.clone();
+    deduped_route_ids.sort();
+    deduped_route_ids.dedup();
+    if deduped_route_ids.len() != route_ids.len() {
+        return Err("navigation_topology.routes must be unique by id".to_string());
+    }
+    if deduped_route_ids != route_ids {
+        return Err("navigation_topology.routes must be lexically sorted by id".to_string());
+    }
+    let route_id_set: BTreeSet<_> = route_ids.iter().cloned().collect();
+    for route in &topology.routes {
+        if route.trigger.trim().is_empty() || route.guard.trim().is_empty() {
+            return Err(format!(
+                "navigation route {} must define non-empty trigger/guard",
+                route.id
+            ));
+        }
+        if !topology_screen_set.contains(&route.from_screen)
+            || !topology_screen_set.contains(&route.to_screen)
+        {
+            return Err(format!(
+                "navigation route {} references unknown screen(s): {} -> {}",
+                route.id, route.from_screen, route.to_screen
+            ));
+        }
+        if route.outcome != "success" && route.outcome != "cancelled" && route.outcome != "failed" {
+            return Err(format!(
+                "navigation route {} has invalid outcome {}",
+                route.id, route.outcome
+            ));
+        }
+    }
+    for screen in &topology.screens {
+        for route_id in &screen.recovery_routes {
+            if !route_id_set.contains(route_id) {
+                return Err(format!(
+                    "navigation screen {} recovery route {} is undefined",
+                    screen.id, route_id
+                ));
+            }
+        }
+    }
+
+    if topology.keyboard_bindings.is_empty() {
+        return Err("navigation_topology.keyboard_bindings must be non-empty".to_string());
+    }
+    let mut binding_uniqueness = BTreeSet::new();
+    let mut binding_order = Vec::new();
+    let valid_panels = BTreeSet::from([
+        "action_panel".to_string(),
+        "context_panel".to_string(),
+        "primary_panel".to_string(),
+    ]);
+    for binding in &topology.keyboard_bindings {
+        if binding.key.trim().is_empty() || binding.action.trim().is_empty() {
+            return Err("navigation keyboard binding has empty key/action".to_string());
+        }
+        if !binding_uniqueness.insert((binding.scope, binding.key.clone())) {
+            return Err(format!(
+                "duplicate navigation keyboard binding for scope/key: {:?} {}",
+                binding.scope, binding.key
+            ));
+        }
+        if let Some(target_screen) = &binding.target_screen
+            && !topology_screen_set.contains(target_screen)
+        {
+            return Err(format!(
+                "navigation keyboard binding {} references unknown target_screen {}",
+                binding.key, target_screen
+            ));
+        }
+        if let Some(target_panel) = &binding.target_panel
+            && !valid_panels.contains(target_panel)
+        {
+            return Err(format!(
+                "navigation keyboard binding {} references unknown target_panel {}",
+                binding.key, target_panel
+            ));
+        }
+        if binding.scope == NavigationBindingScope::Screen && binding.target_screen.is_some() {
+            return Err(format!(
+                "screen-scoped binding {} must not set target_screen",
+                binding.key
+            ));
+        }
+        binding_order.push((
+            binding.scope,
+            binding.key.clone(),
+            binding.target_screen.clone(),
+            binding.target_panel.clone(),
+            binding.action.clone(),
+        ));
+    }
+    let mut sorted_binding_order = binding_order.clone();
+    sorted_binding_order.sort();
+    if sorted_binding_order != binding_order {
+        return Err("navigation_topology.keyboard_bindings must be lexically sorted".to_string());
+    }
+
+    if topology.route_events.is_empty() {
+        return Err("navigation_topology.route_events must be non-empty".to_string());
+    }
+    let route_event_names: Vec<_> = topology
+        .route_events
+        .iter()
+        .map(|event| event.event.clone())
+        .collect();
+    if route_event_names
+        .iter()
+        .any(|event| event.trim().is_empty())
+    {
+        return Err("navigation_topology.route_events contains empty event".to_string());
+    }
+    let mut deduped_route_event_names = route_event_names.clone();
+    deduped_route_event_names.sort();
+    deduped_route_event_names.dedup();
+    if deduped_route_event_names.len() != route_event_names.len() {
+        return Err("navigation_topology.route_events must be unique by event".to_string());
+    }
+    if deduped_route_event_names != route_event_names {
+        return Err(
+            "navigation_topology.route_events must be lexically sorted by event".to_string(),
+        );
+    }
+    for event in &topology.route_events {
+        if event.required_fields.is_empty() {
+            return Err(format!(
+                "navigation route_event {} must define required_fields",
+                event.event
+            ));
+        }
+        if event
+            .required_fields
+            .iter()
+            .any(|field| field.trim().is_empty())
+        {
+            return Err(format!(
+                "navigation route_event {} has empty required field",
+                event.event
+            ));
+        }
+        let mut deduped_required_fields = event.required_fields.clone();
+        deduped_required_fields.sort();
+        deduped_required_fields.dedup();
+        if deduped_required_fields.len() != event.required_fields.len() {
+            return Err(format!(
+                "navigation route_event {} required_fields must be unique",
+                event.event
+            ));
+        }
+        if deduped_required_fields != event.required_fields {
+            return Err(format!(
+                "navigation route_event {} required_fields must be lexically sorted",
+                event.event
+            ));
+        }
+        for required in ["correlation_id", "run_id", "screen_id", "trace_id"] {
+            if !event.required_fields.iter().any(|field| field == required) {
+                return Err(format!(
+                    "navigation route_event {} missing required field {}",
+                    event.event, required
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Returns the final UX signoff matrix contract layered on the v0 baseline.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn ux_signoff_matrix_contract() -> UxSignoffMatrixContract {
+    UxSignoffMatrixContract {
+        contract_version: UX_SIGNOFF_MATRIX_VERSION.to_string(),
+        baseline_matrix_version: UX_BASELINE_MATRIX_VERSION.to_string(),
+        logging_requirements: vec![
+            "assertion_id".to_string(),
+            "correlation_id".to_string(),
+            "journey_id".to_string(),
+            "outcome".to_string(),
+            "route_ref".to_string(),
+            "run_id".to_string(),
+            "screen_id".to_string(),
+            "trace_id".to_string(),
+        ],
+        journeys: vec![
+            UxJourneySignoff {
+                journey_id: "journey_conformance_engineer_triage".to_string(),
+                persona_id: "conformance_engineer".to_string(),
+                decision_loop_id: "triage_investigate_remediate".to_string(),
+                canonical_path: vec![
+                    "bead_command_center".to_string(),
+                    "scenario_workbench".to_string(),
+                    "evidence_timeline".to_string(),
+                    "bead_command_center".to_string(),
+                ],
+                transitions: vec![
+                    UxTransitionAssertion {
+                        id: "tx_journey_conformance_engineer_triage_01".to_string(),
+                        from_screen: "bead_command_center".to_string(),
+                        to_screen: "scenario_workbench".to_string(),
+                        route_ref: "route_bead_command_center_to_scenario_workbench".to_string(),
+                        expected_focus_panel: "context_panel".to_string(),
+                    },
+                    UxTransitionAssertion {
+                        id: "tx_journey_conformance_engineer_triage_02".to_string(),
+                        from_screen: "scenario_workbench".to_string(),
+                        to_screen: "evidence_timeline".to_string(),
+                        route_ref: "route_scenario_workbench_to_evidence_timeline".to_string(),
+                        expected_focus_panel: "primary_panel".to_string(),
+                    },
+                    UxTransitionAssertion {
+                        id: "tx_journey_conformance_engineer_triage_03".to_string(),
+                        from_screen: "evidence_timeline".to_string(),
+                        to_screen: "bead_command_center".to_string(),
+                        route_ref: "route_evidence_timeline_to_bead_command_center".to_string(),
+                        expected_focus_panel: "context_panel".to_string(),
+                    },
+                ],
+                interruption_assertions: vec![
+                    UxInterruptionAssertion {
+                        id: "int_journey_conformance_engineer_triage_01".to_string(),
+                        screen_id: "scenario_workbench".to_string(),
+                        trigger: "cancellation_request".to_string(),
+                        expected_state: "cancelled".to_string(),
+                    },
+                    UxInterruptionAssertion {
+                        id: "int_journey_conformance_engineer_triage_02".to_string(),
+                        screen_id: "evidence_timeline".to_string(),
+                        trigger: "route_blocked".to_string(),
+                        expected_state: "failed".to_string(),
+                    },
+                ],
+                recovery_assertions: vec![
+                    UxRecoveryAssertion {
+                        id: "rec_journey_conformance_engineer_triage_01".to_string(),
+                        from_screen: "scenario_workbench".to_string(),
+                        to_screen: "scenario_workbench".to_string(),
+                        route_ref: "route_scenario_workbench_to_loading_on_retry".to_string(),
+                        requires_rerun_context: true,
+                    },
+                    UxRecoveryAssertion {
+                        id: "rec_journey_conformance_engineer_triage_02".to_string(),
+                        from_screen: "scenario_workbench".to_string(),
+                        to_screen: "evidence_timeline".to_string(),
+                        route_ref: "route_scenario_workbench_to_evidence_timeline_on_failure"
+                            .to_string(),
+                        requires_rerun_context: true,
+                    },
+                ],
+                evidence_assertions: vec![
+                    UxEvidenceAssertion {
+                        id: "ev_journey_conformance_engineer_triage_01".to_string(),
+                        screen_id: "bead_command_center".to_string(),
+                        required_evidence_keys: vec![
+                            "finding_id".to_string(),
+                            "priority_score".to_string(),
+                            "scenario_id".to_string(),
+                        ],
+                    },
+                    UxEvidenceAssertion {
+                        id: "ev_journey_conformance_engineer_triage_02".to_string(),
+                        screen_id: "evidence_timeline".to_string(),
+                        required_evidence_keys: vec![
+                            "artifact_pointer".to_string(),
+                            "outcome_class".to_string(),
+                            "trace_id".to_string(),
+                        ],
+                    },
+                ],
+            },
+            UxJourneySignoff {
+                journey_id: "journey_release_guardian_gate".to_string(),
+                persona_id: "release_guardian".to_string(),
+                decision_loop_id: "release_gate_verification".to_string(),
+                canonical_path: vec![
+                    "gate_status_board".to_string(),
+                    "artifact_audit".to_string(),
+                    "decision_ledger".to_string(),
+                    "gate_status_board".to_string(),
+                ],
+                transitions: vec![
+                    UxTransitionAssertion {
+                        id: "tx_journey_release_guardian_gate_01".to_string(),
+                        from_screen: "gate_status_board".to_string(),
+                        to_screen: "artifact_audit".to_string(),
+                        route_ref: "route_gate_status_board_to_artifact_audit".to_string(),
+                        expected_focus_panel: "context_panel".to_string(),
+                    },
+                    UxTransitionAssertion {
+                        id: "tx_journey_release_guardian_gate_02".to_string(),
+                        from_screen: "artifact_audit".to_string(),
+                        to_screen: "decision_ledger".to_string(),
+                        route_ref: "route_artifact_audit_to_decision_ledger".to_string(),
+                        expected_focus_panel: "action_panel".to_string(),
+                    },
+                    UxTransitionAssertion {
+                        id: "tx_journey_release_guardian_gate_03".to_string(),
+                        from_screen: "decision_ledger".to_string(),
+                        to_screen: "gate_status_board".to_string(),
+                        route_ref: "route_decision_ledger_to_gate_status_board".to_string(),
+                        expected_focus_panel: "context_panel".to_string(),
+                    },
+                ],
+                interruption_assertions: vec![
+                    UxInterruptionAssertion {
+                        id: "int_journey_release_guardian_gate_01".to_string(),
+                        screen_id: "artifact_audit".to_string(),
+                        trigger: "cancellation_request".to_string(),
+                        expected_state: "cancelled".to_string(),
+                    },
+                    UxInterruptionAssertion {
+                        id: "int_journey_release_guardian_gate_02".to_string(),
+                        screen_id: "gate_status_board".to_string(),
+                        trigger: "route_blocked".to_string(),
+                        expected_state: "failed".to_string(),
+                    },
+                ],
+                recovery_assertions: vec![
+                    UxRecoveryAssertion {
+                        id: "rec_journey_release_guardian_gate_01".to_string(),
+                        from_screen: "gate_status_board".to_string(),
+                        to_screen: "artifact_audit".to_string(),
+                        route_ref: "route_gate_status_board_to_artifact_audit_on_failure"
+                            .to_string(),
+                        requires_rerun_context: true,
+                    },
+                    UxRecoveryAssertion {
+                        id: "rec_journey_release_guardian_gate_02".to_string(),
+                        from_screen: "artifact_audit".to_string(),
+                        to_screen: "artifact_audit".to_string(),
+                        route_ref: "route_artifact_audit_to_loading_on_retry".to_string(),
+                        requires_rerun_context: true,
+                    },
+                ],
+                evidence_assertions: vec![
+                    UxEvidenceAssertion {
+                        id: "ev_journey_release_guardian_gate_01".to_string(),
+                        screen_id: "artifact_audit".to_string(),
+                        required_evidence_keys: vec![
+                            "command_provenance".to_string(),
+                            "gate_name".to_string(),
+                            "outcome_class".to_string(),
+                        ],
+                    },
+                    UxEvidenceAssertion {
+                        id: "ev_journey_release_guardian_gate_02".to_string(),
+                        screen_id: "decision_ledger".to_string(),
+                        required_evidence_keys: vec![
+                            "decision_reason".to_string(),
+                            "outcome_class".to_string(),
+                            "run_id".to_string(),
+                        ],
+                    },
+                ],
+            },
+            UxJourneySignoff {
+                journey_id: "journey_runtime_operator_incident".to_string(),
+                persona_id: "runtime_operator".to_string(),
+                decision_loop_id: "incident_containment".to_string(),
+                canonical_path: vec![
+                    "incident_console".to_string(),
+                    "runtime_health".to_string(),
+                    "replay_inspector".to_string(),
+                    "incident_console".to_string(),
+                ],
+                transitions: vec![
+                    UxTransitionAssertion {
+                        id: "tx_journey_runtime_operator_incident_01".to_string(),
+                        from_screen: "incident_console".to_string(),
+                        to_screen: "runtime_health".to_string(),
+                        route_ref: "route_incident_console_to_runtime_health".to_string(),
+                        expected_focus_panel: "context_panel".to_string(),
+                    },
+                    UxTransitionAssertion {
+                        id: "tx_journey_runtime_operator_incident_02".to_string(),
+                        from_screen: "runtime_health".to_string(),
+                        to_screen: "replay_inspector".to_string(),
+                        route_ref: "route_runtime_health_to_replay_inspector".to_string(),
+                        expected_focus_panel: "primary_panel".to_string(),
+                    },
+                    UxTransitionAssertion {
+                        id: "tx_journey_runtime_operator_incident_03".to_string(),
+                        from_screen: "replay_inspector".to_string(),
+                        to_screen: "incident_console".to_string(),
+                        route_ref: "route_replay_inspector_to_incident_console".to_string(),
+                        expected_focus_panel: "context_panel".to_string(),
+                    },
+                ],
+                interruption_assertions: vec![
+                    UxInterruptionAssertion {
+                        id: "int_journey_runtime_operator_incident_01".to_string(),
+                        screen_id: "incident_console".to_string(),
+                        trigger: "cancellation_request".to_string(),
+                        expected_state: "cancelled".to_string(),
+                    },
+                    UxInterruptionAssertion {
+                        id: "int_journey_runtime_operator_incident_02".to_string(),
+                        screen_id: "runtime_health".to_string(),
+                        trigger: "route_blocked".to_string(),
+                        expected_state: "failed".to_string(),
+                    },
+                ],
+                recovery_assertions: vec![
+                    UxRecoveryAssertion {
+                        id: "rec_journey_runtime_operator_incident_01".to_string(),
+                        from_screen: "incident_console".to_string(),
+                        to_screen: "incident_console".to_string(),
+                        route_ref: "route_incident_console_to_loading_on_retry".to_string(),
+                        requires_rerun_context: true,
+                    },
+                    UxRecoveryAssertion {
+                        id: "rec_journey_runtime_operator_incident_02".to_string(),
+                        from_screen: "incident_console".to_string(),
+                        to_screen: "runtime_health".to_string(),
+                        route_ref: "route_incident_console_to_runtime_health_on_failure"
+                            .to_string(),
+                        requires_rerun_context: true,
+                    },
+                ],
+                evidence_assertions: vec![
+                    UxEvidenceAssertion {
+                        id: "ev_journey_runtime_operator_incident_01".to_string(),
+                        screen_id: "runtime_health".to_string(),
+                        required_evidence_keys: vec![
+                            "cancel_phase".to_string(),
+                            "obligation_snapshot".to_string(),
+                            "run_id".to_string(),
+                        ],
+                    },
+                    UxEvidenceAssertion {
+                        id: "ev_journey_runtime_operator_incident_02".to_string(),
+                        screen_id: "replay_inspector".to_string(),
+                        required_evidence_keys: vec![
+                            "artifact_pointer".to_string(),
+                            "repro_command".to_string(),
+                            "scenario_id".to_string(),
+                        ],
+                    },
+                ],
+            },
+        ],
+        rollout_gate: UxRolloutGatePolicy {
+            min_pass_rate_percent: 98,
+            require_zero_critical_failures: true,
+            required_journeys: vec![
+                "journey_conformance_engineer_triage".to_string(),
+                "journey_release_guardian_gate".to_string(),
+                "journey_runtime_operator_incident".to_string(),
+            ],
+            mandatory_remediations: vec![
+                "block_rollout_until_green_signoff".to_string(),
+                "capture_state_diff_and_rerun_hint".to_string(),
+                "file_followup_bead_with_trace_link".to_string(),
+            ],
+        },
+    }
+}
+
+/// Validates final UX signoff matrix integrity and rollout gates.
+#[allow(clippy::too_many_lines)]
+pub fn validate_ux_signoff_matrix_contract(
+    contract: &UxSignoffMatrixContract,
+) -> Result<(), String> {
+    if contract.contract_version != UX_SIGNOFF_MATRIX_VERSION {
+        return Err(format!(
+            "ux_signoff contract_version must equal {UX_SIGNOFF_MATRIX_VERSION}"
+        ));
+    }
+    if contract.baseline_matrix_version != UX_BASELINE_MATRIX_VERSION {
+        return Err(format!(
+            "ux_signoff baseline_matrix_version must equal {UX_BASELINE_MATRIX_VERSION}"
+        ));
+    }
+    if contract.logging_requirements.is_empty() {
+        return Err("ux_signoff logging_requirements must be non-empty".to_string());
+    }
+    let mut sorted_logging_requirements = contract.logging_requirements.clone();
+    sorted_logging_requirements.sort();
+    sorted_logging_requirements.dedup();
+    if sorted_logging_requirements.len() != contract.logging_requirements.len() {
+        return Err("ux_signoff logging_requirements must be unique".to_string());
+    }
+    if sorted_logging_requirements != contract.logging_requirements {
+        return Err("ux_signoff logging_requirements must be lexically sorted".to_string());
+    }
+    for required in [
+        "assertion_id",
+        "correlation_id",
+        "journey_id",
+        "outcome",
+        "route_ref",
+        "run_id",
+        "screen_id",
+        "trace_id",
+    ] {
+        if !contract
+            .logging_requirements
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!(
+                "ux_signoff logging_requirements missing required field {required}"
+            ));
+        }
+    }
+
+    let operator_contract = operator_model_contract();
+    validate_operator_model_contract(&operator_contract)?;
+    let screen_contract = screen_engine_contract();
+    validate_screen_engine_contract(&screen_contract)?;
+
+    let persona_ids: BTreeSet<_> = operator_contract
+        .personas
+        .iter()
+        .map(|persona| persona.id.clone())
+        .collect();
+    let decision_loop_ids: BTreeSet<_> = operator_contract
+        .decision_loops
+        .iter()
+        .map(|decision_loop| decision_loop.id.clone())
+        .collect();
+    let screen_ids: BTreeSet<_> = screen_contract
+        .screens
+        .iter()
+        .map(|screen| screen.id.clone())
+        .collect();
+    let route_map: BTreeMap<_, _> = operator_contract
+        .navigation_topology
+        .routes
+        .iter()
+        .map(|route| {
+            (
+                route.id.clone(),
+                (route.from_screen.clone(), route.to_screen.clone()),
+            )
+        })
+        .collect();
+    let route_pairs: BTreeSet<_> = route_map
+        .values()
+        .map(|(from_screen, to_screen)| (from_screen.clone(), to_screen.clone()))
+        .collect();
+    let mut known_evidence_keys: BTreeSet<String> = operator_contract
+        .global_evidence_requirements
+        .iter()
+        .cloned()
+        .collect();
+    for decision_loop in &operator_contract.decision_loops {
+        for step in &decision_loop.steps {
+            known_evidence_keys.extend(step.required_evidence.iter().cloned());
+        }
+    }
+
+    if contract.journeys.is_empty() {
+        return Err("ux_signoff journeys must be non-empty".to_string());
+    }
+    let journey_ids: Vec<_> = contract
+        .journeys
+        .iter()
+        .map(|journey| journey.journey_id.clone())
+        .collect();
+    let mut sorted_journey_ids = journey_ids.clone();
+    sorted_journey_ids.sort();
+    sorted_journey_ids.dedup();
+    if sorted_journey_ids.len() != journey_ids.len() {
+        return Err("ux_signoff journeys must be unique by journey_id".to_string());
+    }
+    if sorted_journey_ids != journey_ids {
+        return Err("ux_signoff journeys must be lexically sorted by journey_id".to_string());
+    }
+
+    for journey in &contract.journeys {
+        if !persona_ids.contains(&journey.persona_id) {
+            return Err(format!(
+                "ux_signoff journey {} references unknown persona {}",
+                journey.journey_id, journey.persona_id
+            ));
+        }
+        if !decision_loop_ids.contains(&journey.decision_loop_id) {
+            return Err(format!(
+                "ux_signoff journey {} references unknown decision_loop {}",
+                journey.journey_id, journey.decision_loop_id
+            ));
+        }
+        if journey.canonical_path.len() < 2 {
+            return Err(format!(
+                "ux_signoff journey {} canonical_path must have at least 2 screens",
+                journey.journey_id
+            ));
+        }
+        for screen_id in &journey.canonical_path {
+            if !screen_ids.contains(screen_id) {
+                return Err(format!(
+                    "ux_signoff journey {} references unknown screen {} in canonical_path",
+                    journey.journey_id, screen_id
+                ));
+            }
+        }
+        for path_pair in journey.canonical_path.windows(2) {
+            let pair = (path_pair[0].clone(), path_pair[1].clone());
+            if !route_pairs.contains(&pair) {
+                return Err(format!(
+                    "ux_signoff journey {} has canonical_path edge without route: {} -> {}",
+                    journey.journey_id, pair.0, pair.1
+                ));
+            }
+        }
+
+        if journey.transitions.is_empty() {
+            return Err(format!(
+                "ux_signoff journey {} transitions must be non-empty",
+                journey.journey_id
+            ));
+        }
+        let transition_ids: Vec<_> = journey
+            .transitions
+            .iter()
+            .map(|assertion| assertion.id.clone())
+            .collect();
+        let mut sorted_transition_ids = transition_ids.clone();
+        sorted_transition_ids.sort();
+        sorted_transition_ids.dedup();
+        if sorted_transition_ids.len() != transition_ids.len() {
+            return Err(format!(
+                "ux_signoff journey {} transitions must be unique by id",
+                journey.journey_id
+            ));
+        }
+        if sorted_transition_ids != transition_ids {
+            return Err(format!(
+                "ux_signoff journey {} transitions must be lexically sorted by id",
+                journey.journey_id
+            ));
+        }
+        for transition in &journey.transitions {
+            if !screen_ids.contains(&transition.from_screen)
+                || !screen_ids.contains(&transition.to_screen)
+            {
+                return Err(format!(
+                    "ux_signoff transition {} references unknown screen(s)",
+                    transition.id
+                ));
+            }
+            let Some((route_from, route_to)) = route_map.get(&transition.route_ref) else {
+                return Err(format!(
+                    "ux_signoff transition {} references unknown route {}",
+                    transition.id, transition.route_ref
+                ));
+            };
+            if route_from != &transition.from_screen || route_to != &transition.to_screen {
+                return Err(format!(
+                    "ux_signoff transition {} route {} mismatches {} -> {}",
+                    transition.id,
+                    transition.route_ref,
+                    transition.from_screen,
+                    transition.to_screen
+                ));
+            }
+            if transition.expected_focus_panel != "action_panel"
+                && transition.expected_focus_panel != "context_panel"
+                && transition.expected_focus_panel != "primary_panel"
+            {
+                return Err(format!(
+                    "ux_signoff transition {} has invalid expected_focus_panel {}",
+                    transition.id, transition.expected_focus_panel
+                ));
+            }
+        }
+
+        if journey.interruption_assertions.is_empty() {
+            return Err(format!(
+                "ux_signoff journey {} interruption_assertions must be non-empty",
+                journey.journey_id
+            ));
+        }
+        let interruption_ids: Vec<_> = journey
+            .interruption_assertions
+            .iter()
+            .map(|assertion| assertion.id.clone())
+            .collect();
+        let mut sorted_interruption_ids = interruption_ids.clone();
+        sorted_interruption_ids.sort();
+        sorted_interruption_ids.dedup();
+        if sorted_interruption_ids.len() != interruption_ids.len() {
+            return Err(format!(
+                "ux_signoff journey {} interruption_assertions must be unique by id",
+                journey.journey_id
+            ));
+        }
+        if sorted_interruption_ids != interruption_ids {
+            return Err(format!(
+                "ux_signoff journey {} interruption_assertions must be lexically sorted by id",
+                journey.journey_id
+            ));
+        }
+        for interruption in &journey.interruption_assertions {
+            if !screen_ids.contains(&interruption.screen_id) {
+                return Err(format!(
+                    "ux_signoff interruption {} references unknown screen {}",
+                    interruption.id, interruption.screen_id
+                ));
+            }
+            if interruption.trigger.trim().is_empty() {
+                return Err(format!(
+                    "ux_signoff interruption {} trigger must be non-empty",
+                    interruption.id
+                ));
+            }
+            if interruption.expected_state != "cancelled"
+                && interruption.expected_state != "failed"
+                && interruption.expected_state != "idle"
+                && interruption.expected_state != "loading"
+                && interruption.expected_state != "ready"
+            {
+                return Err(format!(
+                    "ux_signoff interruption {} has invalid expected_state {}",
+                    interruption.id, interruption.expected_state
+                ));
+            }
+        }
+
+        if journey.recovery_assertions.is_empty() {
+            return Err(format!(
+                "ux_signoff journey {} recovery_assertions must be non-empty",
+                journey.journey_id
+            ));
+        }
+        let recovery_ids: Vec<_> = journey
+            .recovery_assertions
+            .iter()
+            .map(|assertion| assertion.id.clone())
+            .collect();
+        let mut sorted_recovery_ids = recovery_ids.clone();
+        sorted_recovery_ids.sort();
+        sorted_recovery_ids.dedup();
+        if sorted_recovery_ids.len() != recovery_ids.len() {
+            return Err(format!(
+                "ux_signoff journey {} recovery_assertions must be unique by id",
+                journey.journey_id
+            ));
+        }
+        if sorted_recovery_ids != recovery_ids {
+            return Err(format!(
+                "ux_signoff journey {} recovery_assertions must be lexically sorted by id",
+                journey.journey_id
+            ));
+        }
+        for recovery in &journey.recovery_assertions {
+            if !screen_ids.contains(&recovery.from_screen)
+                || !screen_ids.contains(&recovery.to_screen)
+            {
+                return Err(format!(
+                    "ux_signoff recovery {} references unknown screen(s)",
+                    recovery.id
+                ));
+            }
+            let Some((route_from, route_to)) = route_map.get(&recovery.route_ref) else {
+                return Err(format!(
+                    "ux_signoff recovery {} references unknown route {}",
+                    recovery.id, recovery.route_ref
+                ));
+            };
+            if route_from != &recovery.from_screen || route_to != &recovery.to_screen {
+                return Err(format!(
+                    "ux_signoff recovery {} route {} mismatches {} -> {}",
+                    recovery.id, recovery.route_ref, recovery.from_screen, recovery.to_screen
+                ));
+            }
+        }
+
+        if journey.evidence_assertions.is_empty() {
+            return Err(format!(
+                "ux_signoff journey {} evidence_assertions must be non-empty",
+                journey.journey_id
+            ));
+        }
+        let evidence_ids: Vec<_> = journey
+            .evidence_assertions
+            .iter()
+            .map(|assertion| assertion.id.clone())
+            .collect();
+        let mut sorted_evidence_ids = evidence_ids.clone();
+        sorted_evidence_ids.sort();
+        sorted_evidence_ids.dedup();
+        if sorted_evidence_ids.len() != evidence_ids.len() {
+            return Err(format!(
+                "ux_signoff journey {} evidence_assertions must be unique by id",
+                journey.journey_id
+            ));
+        }
+        if sorted_evidence_ids != evidence_ids {
+            return Err(format!(
+                "ux_signoff journey {} evidence_assertions must be lexically sorted by id",
+                journey.journey_id
+            ));
+        }
+        for evidence in &journey.evidence_assertions {
+            if !screen_ids.contains(&evidence.screen_id) {
+                return Err(format!(
+                    "ux_signoff evidence assertion {} references unknown screen {}",
+                    evidence.id, evidence.screen_id
+                ));
+            }
+            if evidence.required_evidence_keys.is_empty() {
+                return Err(format!(
+                    "ux_signoff evidence assertion {} required_evidence_keys must be non-empty",
+                    evidence.id
+                ));
+            }
+            let mut sorted_required_keys = evidence.required_evidence_keys.clone();
+            sorted_required_keys.sort();
+            sorted_required_keys.dedup();
+            if sorted_required_keys.len() != evidence.required_evidence_keys.len() {
+                return Err(format!(
+                    "ux_signoff evidence assertion {} required_evidence_keys must be unique",
+                    evidence.id
+                ));
+            }
+            if sorted_required_keys != evidence.required_evidence_keys {
+                return Err(format!(
+                    "ux_signoff evidence assertion {} required_evidence_keys must be lexically sorted",
+                    evidence.id
+                ));
+            }
+            for evidence_key in &evidence.required_evidence_keys {
+                if !known_evidence_keys.contains(evidence_key) {
+                    return Err(format!(
+                        "ux_signoff evidence assertion {} references unknown evidence key {}",
+                        evidence.id, evidence_key
+                    ));
+                }
+            }
+        }
+    }
+
+    if contract.rollout_gate.min_pass_rate_percent < 95 {
+        return Err("ux_signoff rollout_gate min_pass_rate_percent must be >= 95".to_string());
+    }
+    if !contract.rollout_gate.require_zero_critical_failures {
+        return Err("ux_signoff rollout_gate must require zero critical failures".to_string());
+    }
+    if contract.rollout_gate.required_journeys.is_empty() {
+        return Err("ux_signoff rollout_gate required_journeys must be non-empty".to_string());
+    }
+    let mut sorted_required_journeys = contract.rollout_gate.required_journeys.clone();
+    sorted_required_journeys.sort();
+    sorted_required_journeys.dedup();
+    if sorted_required_journeys.len() != contract.rollout_gate.required_journeys.len() {
+        return Err("ux_signoff rollout_gate required_journeys must be unique".to_string());
+    }
+    if sorted_required_journeys != contract.rollout_gate.required_journeys {
+        return Err(
+            "ux_signoff rollout_gate required_journeys must be lexically sorted".to_string(),
+        );
+    }
+    if sorted_required_journeys != journey_ids {
+        return Err(
+            "ux_signoff rollout_gate required_journeys must match journey ids exactly".to_string(),
+        );
+    }
+    if contract.rollout_gate.mandatory_remediations.is_empty() {
+        return Err("ux_signoff rollout_gate mandatory_remediations must be non-empty".to_string());
+    }
+    let mut sorted_mandatory_remediations = contract.rollout_gate.mandatory_remediations.clone();
+    sorted_mandatory_remediations.sort();
+    sorted_mandatory_remediations.dedup();
+    if sorted_mandatory_remediations.len() != contract.rollout_gate.mandatory_remediations.len() {
+        return Err("ux_signoff rollout_gate mandatory_remediations must be unique".to_string());
+    }
+    if sorted_mandatory_remediations != contract.rollout_gate.mandatory_remediations {
+        return Err(
+            "ux_signoff rollout_gate mandatory_remediations must be lexically sorted".to_string(),
+        );
     }
 
     Ok(())
@@ -3526,6 +5635,600 @@ pub fn validate_structured_logging_event_stream(
     }
 
     Ok(())
+}
+
+/// Returns the canonical rch-backed execution-adapter contract.
+#[must_use]
+pub fn execution_adapter_contract() -> ExecutionAdapterContract {
+    ExecutionAdapterContract {
+        contract_version: EXECUTION_ADAPTER_CONTRACT_VERSION.to_string(),
+        logging_contract_version: STRUCTURED_LOGGING_CONTRACT_VERSION.to_string(),
+        required_request_fields: vec![
+            "command_class".to_string(),
+            "command_id".to_string(),
+            "correlation_id".to_string(),
+            "prefer_remote".to_string(),
+            "raw_command".to_string(),
+        ],
+        required_result_fields: vec![
+            "artifact_manifest".to_string(),
+            "command_id".to_string(),
+            "exit_code".to_string(),
+            "outcome_class".to_string(),
+            "route".to_string(),
+            "routed_command".to_string(),
+            "state".to_string(),
+        ],
+        command_classes: vec![
+            ExecutionCommandClass {
+                class_id: "cargo_check".to_string(),
+                label: "cargo check".to_string(),
+                allowed_prefixes: vec!["cargo check".to_string()],
+                force_rch: true,
+                default_timeout_secs: 300,
+            },
+            ExecutionCommandClass {
+                class_id: "cargo_clippy".to_string(),
+                label: "cargo clippy".to_string(),
+                allowed_prefixes: vec!["cargo clippy".to_string()],
+                force_rch: true,
+                default_timeout_secs: 300,
+            },
+            ExecutionCommandClass {
+                class_id: "cargo_fmt_check".to_string(),
+                label: "cargo fmt --check".to_string(),
+                allowed_prefixes: vec!["cargo fmt --check".to_string()],
+                force_rch: false,
+                default_timeout_secs: 120,
+            },
+            ExecutionCommandClass {
+                class_id: "cargo_test".to_string(),
+                label: "cargo test".to_string(),
+                allowed_prefixes: vec!["cargo test".to_string()],
+                force_rch: true,
+                default_timeout_secs: 1800,
+            },
+            ExecutionCommandClass {
+                class_id: "doctor_custom".to_string(),
+                label: "doctor custom command".to_string(),
+                allowed_prefixes: vec![
+                    "asupersync doctor".to_string(),
+                    "br ".to_string(),
+                    "bv --robot-".to_string(),
+                ],
+                force_rch: false,
+                default_timeout_secs: 180,
+            },
+        ],
+        route_policies: vec![
+            ExecutionRoutePolicy {
+                policy_id: "local_fallback_on_rch_unavailable".to_string(),
+                condition: "rch_unavailable".to_string(),
+                route: "local_direct".to_string(),
+                retry_strategy: "none".to_string(),
+                max_retries: 0,
+            },
+            ExecutionRoutePolicy {
+                policy_id: "remote_rch_default".to_string(),
+                condition: "prefer_remote_and_rch_available".to_string(),
+                route: "remote_rch".to_string(),
+                retry_strategy: "bounded_backoff".to_string(),
+                max_retries: 2,
+            },
+        ],
+        timeout_profiles: vec![
+            ExecutionTimeoutProfile {
+                class_id: "cargo_check".to_string(),
+                soft_timeout_secs: 180,
+                hard_timeout_secs: 300,
+                cancel_grace_secs: 10,
+            },
+            ExecutionTimeoutProfile {
+                class_id: "cargo_clippy".to_string(),
+                soft_timeout_secs: 240,
+                hard_timeout_secs: 300,
+                cancel_grace_secs: 10,
+            },
+            ExecutionTimeoutProfile {
+                class_id: "cargo_fmt_check".to_string(),
+                soft_timeout_secs: 90,
+                hard_timeout_secs: 120,
+                cancel_grace_secs: 5,
+            },
+            ExecutionTimeoutProfile {
+                class_id: "cargo_test".to_string(),
+                soft_timeout_secs: 1500,
+                hard_timeout_secs: 1800,
+                cancel_grace_secs: 30,
+            },
+            ExecutionTimeoutProfile {
+                class_id: "doctor_custom".to_string(),
+                soft_timeout_secs: 120,
+                hard_timeout_secs: 180,
+                cancel_grace_secs: 10,
+            },
+        ],
+        state_transitions: vec![
+            ExecutionStateTransition {
+                from_state: "cancel_requested".to_string(),
+                trigger: "cancel_completed".to_string(),
+                to_state: "cancelled".to_string(),
+            },
+            ExecutionStateTransition {
+                from_state: "cancel_requested".to_string(),
+                trigger: "cancel_timeout".to_string(),
+                to_state: "failed".to_string(),
+            },
+            ExecutionStateTransition {
+                from_state: "planned".to_string(),
+                trigger: "enqueue".to_string(),
+                to_state: "queued".to_string(),
+            },
+            ExecutionStateTransition {
+                from_state: "queued".to_string(),
+                trigger: "start".to_string(),
+                to_state: "running".to_string(),
+            },
+            ExecutionStateTransition {
+                from_state: "running".to_string(),
+                trigger: "cancel".to_string(),
+                to_state: "cancel_requested".to_string(),
+            },
+            ExecutionStateTransition {
+                from_state: "running".to_string(),
+                trigger: "process_exit_nonzero".to_string(),
+                to_state: "failed".to_string(),
+            },
+            ExecutionStateTransition {
+                from_state: "running".to_string(),
+                trigger: "process_exit_zero".to_string(),
+                to_state: "succeeded".to_string(),
+            },
+        ],
+        failure_taxonomy: vec![
+            ExecutionFailureClass {
+                code: "command_failed".to_string(),
+                severity: "high".to_string(),
+                retryable: false,
+                operator_action: "Inspect stderr and open remediation workflow.".to_string(),
+            },
+            ExecutionFailureClass {
+                code: "command_timeout".to_string(),
+                severity: "medium".to_string(),
+                retryable: true,
+                operator_action: "Retry with bounded backoff and attach transcript.".to_string(),
+            },
+            ExecutionFailureClass {
+                code: "invalid_transition".to_string(),
+                severity: "critical".to_string(),
+                retryable: false,
+                operator_action: "Abort run and emit deterministic state-machine diagnostics."
+                    .to_string(),
+            },
+            ExecutionFailureClass {
+                code: "rch_unavailable".to_string(),
+                severity: "medium".to_string(),
+                retryable: true,
+                operator_action: "Apply local fallback policy and log route downgrade.".to_string(),
+            },
+        ],
+        artifact_manifest_fields: vec![
+            "command_provenance".to_string(),
+            "outcome_class".to_string(),
+            "run_id".to_string(),
+            "scenario_id".to_string(),
+            "trace_id".to_string(),
+            "transcript_path".to_string(),
+            "worker_route".to_string(),
+        ],
+    }
+}
+
+/// Validates invariants for [`ExecutionAdapterContract`].
+///
+/// # Errors
+///
+/// Returns `Err` when ordering, schema, or policy invariants are violated.
+#[allow(clippy::too_many_lines)]
+pub fn validate_execution_adapter_contract(
+    contract: &ExecutionAdapterContract,
+) -> Result<(), String> {
+    if contract.contract_version != EXECUTION_ADAPTER_CONTRACT_VERSION {
+        return Err(format!(
+            "unexpected contract_version {}",
+            contract.contract_version
+        ));
+    }
+    if contract.logging_contract_version != STRUCTURED_LOGGING_CONTRACT_VERSION {
+        return Err(format!(
+            "unexpected logging_contract_version {}",
+            contract.logging_contract_version
+        ));
+    }
+
+    validate_lexical_string_set(&contract.required_request_fields, "required_request_fields")?;
+    for required in [
+        "command_class",
+        "command_id",
+        "correlation_id",
+        "prefer_remote",
+        "raw_command",
+    ] {
+        if !contract
+            .required_request_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_request_fields missing {required}"));
+        }
+    }
+
+    validate_lexical_string_set(&contract.required_result_fields, "required_result_fields")?;
+    for required in [
+        "artifact_manifest",
+        "command_id",
+        "exit_code",
+        "outcome_class",
+        "route",
+        "routed_command",
+        "state",
+    ] {
+        if !contract
+            .required_result_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_result_fields missing {required}"));
+        }
+    }
+
+    validate_lexical_string_set(
+        &contract.artifact_manifest_fields,
+        "artifact_manifest_fields",
+    )?;
+    for required in [
+        "command_provenance",
+        "outcome_class",
+        "run_id",
+        "scenario_id",
+        "trace_id",
+        "transcript_path",
+        "worker_route",
+    ] {
+        if !contract
+            .artifact_manifest_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("artifact_manifest_fields missing {required}"));
+        }
+    }
+
+    if contract.command_classes.is_empty() {
+        return Err("command_classes must be non-empty".to_string());
+    }
+    let class_ids = contract
+        .command_classes
+        .iter()
+        .map(|class| class.class_id.clone())
+        .collect::<Vec<_>>();
+    validate_lexical_string_set(&class_ids, "command_classes.class_id")?;
+    for class in &contract.command_classes {
+        if class.label.trim().is_empty() {
+            return Err(format!("command class {} has empty label", class.class_id));
+        }
+        validate_lexical_string_set(
+            &class.allowed_prefixes,
+            &format!("command class {} allowed_prefixes", class.class_id),
+        )?;
+        if class.default_timeout_secs == 0 {
+            return Err(format!(
+                "command class {} default_timeout_secs must be > 0",
+                class.class_id
+            ));
+        }
+        if class.force_rch
+            && !class
+                .allowed_prefixes
+                .iter()
+                .all(|prefix| prefix.starts_with("cargo "))
+        {
+            return Err(format!(
+                "force_rch command class {} must use cargo-prefixed allowed_prefixes",
+                class.class_id
+            ));
+        }
+    }
+
+    if contract.route_policies.is_empty() {
+        return Err("route_policies must be non-empty".to_string());
+    }
+    let policy_ids = contract
+        .route_policies
+        .iter()
+        .map(|policy| policy.policy_id.clone())
+        .collect::<Vec<_>>();
+    validate_lexical_string_set(&policy_ids, "route_policies.policy_id")?;
+    for required in ["local_fallback_on_rch_unavailable", "remote_rch_default"] {
+        if !policy_ids.iter().any(|policy_id| policy_id == required) {
+            return Err(format!("route_policies missing required policy {required}"));
+        }
+    }
+    for policy in &contract.route_policies {
+        if policy.condition.trim().is_empty() || policy.retry_strategy.trim().is_empty() {
+            return Err(format!(
+                "route policy {} must define condition/retry_strategy",
+                policy.policy_id
+            ));
+        }
+        if !matches!(
+            policy.route.as_str(),
+            "fail_closed" | "local_direct" | "remote_rch"
+        ) {
+            return Err(format!(
+                "route policy {} uses unsupported route {}",
+                policy.policy_id, policy.route
+            ));
+        }
+    }
+
+    if contract.timeout_profiles.is_empty() {
+        return Err("timeout_profiles must be non-empty".to_string());
+    }
+    let timeout_class_ids = contract
+        .timeout_profiles
+        .iter()
+        .map(|profile| profile.class_id.clone())
+        .collect::<Vec<_>>();
+    validate_lexical_string_set(&timeout_class_ids, "timeout_profiles.class_id")?;
+    if timeout_class_ids != class_ids {
+        return Err("timeout_profiles.class_id must exactly match command class ids".to_string());
+    }
+    for profile in &contract.timeout_profiles {
+        if profile.soft_timeout_secs == 0
+            || profile.hard_timeout_secs == 0
+            || profile.cancel_grace_secs == 0
+        {
+            return Err(format!(
+                "timeout profile {} must have non-zero values",
+                profile.class_id
+            ));
+        }
+        if profile.soft_timeout_secs > profile.hard_timeout_secs {
+            return Err(format!(
+                "timeout profile {} soft_timeout_secs must be <= hard_timeout_secs",
+                profile.class_id
+            ));
+        }
+    }
+
+    if contract.state_transitions.is_empty() {
+        return Err("state_transitions must be non-empty".to_string());
+    }
+    let mut transition_keys = contract
+        .state_transitions
+        .iter()
+        .map(|transition| {
+            format!(
+                "{}|{}|{}",
+                transition.from_state, transition.trigger, transition.to_state
+            )
+        })
+        .collect::<Vec<_>>();
+    validate_lexical_string_set(&transition_keys, "state_transitions")?;
+    let valid_states = [
+        "cancel_requested",
+        "cancelled",
+        "failed",
+        "planned",
+        "queued",
+        "running",
+        "succeeded",
+    ];
+    for transition in &contract.state_transitions {
+        if !valid_states
+            .iter()
+            .any(|state| state == &transition.from_state.as_str())
+        {
+            return Err(format!(
+                "state transition uses unknown from_state {}",
+                transition.from_state
+            ));
+        }
+        if !valid_states
+            .iter()
+            .any(|state| state == &transition.to_state.as_str())
+        {
+            return Err(format!(
+                "state transition uses unknown to_state {}",
+                transition.to_state
+            ));
+        }
+        if transition.trigger.trim().is_empty() {
+            return Err("state transition trigger must be non-empty".to_string());
+        }
+    }
+    for required in [
+        "cancel_requested|cancel_completed|cancelled",
+        "cancel_requested|cancel_timeout|failed",
+        "planned|enqueue|queued",
+        "queued|start|running",
+        "running|cancel|cancel_requested",
+        "running|process_exit_nonzero|failed",
+        "running|process_exit_zero|succeeded",
+    ] {
+        if !transition_keys.iter().any(|key| key == required) {
+            return Err(format!(
+                "state_transitions missing required edge {required}"
+            ));
+        }
+    }
+    transition_keys.clear();
+
+    if contract.failure_taxonomy.is_empty() {
+        return Err("failure_taxonomy must be non-empty".to_string());
+    }
+    let failure_codes = contract
+        .failure_taxonomy
+        .iter()
+        .map(|failure| failure.code.clone())
+        .collect::<Vec<_>>();
+    validate_lexical_string_set(&failure_codes, "failure_taxonomy.code")?;
+    for required in [
+        "command_failed",
+        "command_timeout",
+        "invalid_transition",
+        "rch_unavailable",
+    ] {
+        if !failure_codes.iter().any(|code| code == required) {
+            return Err(format!("failure_taxonomy missing required code {required}"));
+        }
+    }
+    for failure in &contract.failure_taxonomy {
+        if !matches!(
+            failure.severity.as_str(),
+            "critical" | "high" | "low" | "medium"
+        ) {
+            return Err(format!(
+                "failure {} has unsupported severity {}",
+                failure.code, failure.severity
+            ));
+        }
+        if failure.operator_action.trim().is_empty() {
+            return Err(format!(
+                "failure {} must define operator_action",
+                failure.code
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn normalize_command_line(raw_command: &str) -> Result<String, String> {
+    let normalized = raw_command
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string();
+    if normalized.is_empty() {
+        return Err("raw_command must be non-empty".to_string());
+    }
+    Ok(normalized)
+}
+
+/// Builds a deterministic execution plan for one adapter request.
+///
+/// # Errors
+///
+/// Returns `Err` when request fields, command-class matching, or routing rules fail.
+pub fn plan_execution_command(
+    contract: &ExecutionAdapterContract,
+    request: &ExecutionAdapterRequest,
+    rch_available: bool,
+) -> Result<ExecutionAdapterPlan, String> {
+    validate_execution_adapter_contract(contract)?;
+
+    if request.command_id.trim().is_empty() {
+        return Err("command_id must be non-empty".to_string());
+    }
+    if !is_slug_like(&request.correlation_id) {
+        return Err("correlation_id must be slug-like".to_string());
+    }
+
+    let class = contract
+        .command_classes
+        .iter()
+        .find(|candidate| candidate.class_id == request.command_class)
+        .ok_or_else(|| format!("unknown command_class {}", request.command_class))?;
+
+    let normalized_command = normalize_command_line(&request.raw_command)?;
+    if !class
+        .allowed_prefixes
+        .iter()
+        .any(|prefix| normalized_command.starts_with(prefix))
+    {
+        return Err(format!(
+            "raw_command for class {} must start with one of [{}]",
+            class.class_id,
+            class.allowed_prefixes.join(", ")
+        ));
+    }
+
+    let route = if request.prefer_remote && (class.force_rch || rch_available) {
+        if rch_available {
+            "remote_rch".to_string()
+        } else {
+            contract
+                .route_policies
+                .iter()
+                .find(|policy| policy.policy_id == "local_fallback_on_rch_unavailable")
+                .map(|policy| policy.route.clone())
+                .unwrap_or_else(|| "local_direct".to_string())
+        }
+    } else {
+        "local_direct".to_string()
+    };
+
+    let routed_command = if route == "remote_rch" {
+        if normalized_command.starts_with("rch exec -- ") {
+            normalized_command.clone()
+        } else {
+            format!("rch exec -- {normalized_command}")
+        }
+    } else {
+        normalized_command.clone()
+    };
+
+    let timeout_profile = contract
+        .timeout_profiles
+        .iter()
+        .find(|profile| profile.class_id == class.class_id)
+        .ok_or_else(|| {
+            format!(
+                "missing timeout profile for command class {}",
+                class.class_id
+            )
+        })?;
+
+    Ok(ExecutionAdapterPlan {
+        command_id: request.command_id.clone(),
+        command_class: class.class_id.clone(),
+        correlation_id: request.correlation_id.clone(),
+        normalized_command,
+        routed_command,
+        route,
+        timeout_secs: timeout_profile.hard_timeout_secs,
+        initial_state: "planned".to_string(),
+        artifact_manifest_fields: contract.artifact_manifest_fields.clone(),
+    })
+}
+
+/// Advances the deterministic execution state machine by one trigger.
+///
+/// # Errors
+///
+/// Returns `Err` when no transition exists for `(current_state, trigger)`.
+pub fn advance_execution_state(
+    contract: &ExecutionAdapterContract,
+    current_state: &str,
+    trigger: &str,
+) -> Result<String, String> {
+    validate_execution_adapter_contract(contract)?;
+    let transition = contract
+        .state_transitions
+        .iter()
+        .find(|candidate| {
+            candidate.from_state == current_state.trim() && candidate.trigger == trigger.trim()
+        })
+        .ok_or_else(|| {
+            format!(
+                "invalid execution state transition from {} using {}",
+                current_state, trigger
+            )
+        })?;
+    Ok(transition.to_state.clone())
 }
 
 /// Returns the canonical core diagnostics-report contract.
@@ -6537,6 +9240,132 @@ edition = "2024"
     }
 
     #[test]
+    fn operator_model_contract_navigation_topology_matches_screen_contract() {
+        let contract = operator_model_contract();
+        let topology_screens: BTreeSet<_> = contract
+            .navigation_topology
+            .screens
+            .iter()
+            .map(|screen| screen.id.clone())
+            .collect();
+        let screen_contract_screens: BTreeSet<_> = screen_engine_contract()
+            .screens
+            .iter()
+            .map(|screen| screen.id.clone())
+            .collect();
+        assert_eq!(topology_screens, screen_contract_screens);
+    }
+
+    #[test]
+    fn operator_model_contract_rejects_unsorted_navigation_screens() {
+        let mut contract = operator_model_contract();
+        contract.navigation_topology.screens.swap(0, 1);
+        let err = validate_operator_model_contract(&contract).expect_err("must fail");
+        assert!(
+            err.contains("navigation_topology.screens must be lexically sorted by id"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn operator_model_contract_rejects_route_with_unknown_screen() {
+        let mut contract = operator_model_contract();
+        contract.navigation_topology.routes[0].to_screen = "unknown_screen".to_string();
+        let err = validate_operator_model_contract(&contract).expect_err("must fail");
+        assert!(err.contains("references unknown screen"), "{err}");
+    }
+
+    #[test]
+    fn operator_model_contract_rejects_route_event_missing_core_field() {
+        let mut contract = operator_model_contract();
+        contract.navigation_topology.route_events[0]
+            .required_fields
+            .retain(|field| field != "trace_id");
+        let err = validate_operator_model_contract(&contract).expect_err("must fail");
+        assert!(err.contains("missing required field trace_id"), "{err}");
+    }
+
+    #[test]
+    fn operator_model_contract_rejects_duplicate_keyboard_binding_scope_key() {
+        let mut contract = operator_model_contract();
+        contract
+            .navigation_topology
+            .keyboard_bindings
+            .push(contract.navigation_topology.keyboard_bindings[0].clone());
+        let err = validate_operator_model_contract(&contract).expect_err("must fail");
+        assert!(
+            err.contains("duplicate navigation keyboard binding"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn ux_signoff_matrix_contract_validates() {
+        let contract = ux_signoff_matrix_contract();
+        validate_ux_signoff_matrix_contract(&contract).expect("valid ux signoff matrix");
+    }
+
+    #[test]
+    fn ux_signoff_matrix_contract_is_deterministic() {
+        let first = ux_signoff_matrix_contract();
+        let second = ux_signoff_matrix_contract();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn ux_signoff_matrix_contract_round_trip_json() {
+        let contract = ux_signoff_matrix_contract();
+        let json = serde_json::to_string(&contract).expect("serialize");
+        let parsed: UxSignoffMatrixContract = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(contract, parsed);
+        validate_ux_signoff_matrix_contract(&parsed).expect("parsed ux signoff matrix valid");
+    }
+
+    #[test]
+    fn ux_signoff_matrix_contract_rejects_unsorted_journeys() {
+        let mut contract = ux_signoff_matrix_contract();
+        contract.journeys.swap(0, 1);
+        let err = validate_ux_signoff_matrix_contract(&contract).expect_err("must fail");
+        assert!(
+            err.contains("ux_signoff journeys must be lexically sorted by journey_id"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn ux_signoff_matrix_contract_rejects_transition_route_mismatch() {
+        let mut contract = ux_signoff_matrix_contract();
+        contract.journeys[0].transitions[0].route_ref =
+            "route_incident_console_to_runtime_health".to_string();
+        let err = validate_ux_signoff_matrix_contract(&contract).expect_err("must fail");
+        assert!(err.contains("mismatches"), "{err}");
+    }
+
+    #[test]
+    fn ux_signoff_matrix_contract_rejects_missing_interruption_assertions() {
+        let mut contract = ux_signoff_matrix_contract();
+        contract.journeys[1].interruption_assertions.clear();
+        let err = validate_ux_signoff_matrix_contract(&contract).expect_err("must fail");
+        assert!(
+            err.contains("interruption_assertions must be non-empty"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn ux_signoff_matrix_contract_rejects_unknown_evidence_key() {
+        let mut contract = ux_signoff_matrix_contract();
+        contract.journeys[2].evidence_assertions[0]
+            .required_evidence_keys
+            .push("unknown_evidence_key".to_string());
+        contract.journeys[2].evidence_assertions[0]
+            .required_evidence_keys
+            .sort();
+        let err = validate_ux_signoff_matrix_contract(&contract).expect_err("must fail");
+        assert!(err.contains("references unknown evidence key"), "{err}");
+    }
+
+    #[test]
     fn screen_engine_contract_validates() {
         let contract = screen_engine_contract();
         validate_screen_engine_contract(&contract).expect("valid screen contract");
@@ -7175,6 +10004,90 @@ edition = "2024"
             err.contains("events must be lexically ordered by flow_id/event_kind/trace_id"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn execution_adapter_contract_validates() {
+        let contract = execution_adapter_contract();
+        validate_execution_adapter_contract(&contract).expect("valid execution adapter contract");
+    }
+
+    #[test]
+    fn execution_adapter_contract_is_deterministic() {
+        let first = execution_adapter_contract();
+        let second = execution_adapter_contract();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn execution_adapter_contract_round_trip_json() {
+        let contract = execution_adapter_contract();
+        let json = serde_json::to_string(&contract).expect("serialize");
+        let parsed: ExecutionAdapterContract = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(contract, parsed);
+        validate_execution_adapter_contract(&parsed).expect("parsed contract valid");
+    }
+
+    #[test]
+    fn execution_adapter_contract_rejects_unsorted_command_classes() {
+        let mut contract = execution_adapter_contract();
+        contract.command_classes.swap(0, 1);
+        let err = validate_execution_adapter_contract(&contract).expect_err("must fail");
+        assert!(
+            err.contains("command_classes.class_id must be lexically sorted"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn plan_execution_command_wraps_rch_invocation() {
+        let contract = execution_adapter_contract();
+        let request = ExecutionAdapterRequest {
+            command_id: "cmd-1".to_string(),
+            command_class: "cargo_test".to_string(),
+            correlation_id: "corr-1".to_string(),
+            raw_command: "  cargo   test   -p   asupersync ".to_string(),
+            prefer_remote: true,
+        };
+        let plan = plan_execution_command(&contract, &request, true).expect("plan should build");
+        assert_eq!(plan.route, "remote_rch");
+        assert_eq!(plan.normalized_command, "cargo test -p asupersync");
+        assert_eq!(plan.routed_command, "rch exec -- cargo test -p asupersync");
+        assert_eq!(plan.initial_state, "planned");
+    }
+
+    #[test]
+    fn plan_execution_command_falls_back_when_rch_unavailable() {
+        let contract = execution_adapter_contract();
+        let request = ExecutionAdapterRequest {
+            command_id: "cmd-2".to_string(),
+            command_class: "cargo_check".to_string(),
+            correlation_id: "corr-2".to_string(),
+            raw_command: "cargo check --all-targets".to_string(),
+            prefer_remote: true,
+        };
+        let plan = plan_execution_command(&contract, &request, false).expect("plan should build");
+        assert_eq!(plan.route, "local_direct");
+        assert_eq!(plan.routed_command, "cargo check --all-targets");
+    }
+
+    #[test]
+    fn advance_execution_state_supports_cancel_path() {
+        let contract = execution_adapter_contract();
+        let queued = advance_execution_state(&contract, "planned", "enqueue").expect("enqueue");
+        let running = advance_execution_state(&contract, &queued, "start").expect("start");
+        let cancel_requested =
+            advance_execution_state(&contract, &running, "cancel").expect("cancel");
+        let cancelled = advance_execution_state(&contract, &cancel_requested, "cancel_completed")
+            .expect("cancel complete");
+        assert_eq!(cancelled, "cancelled");
+    }
+
+    #[test]
+    fn advance_execution_state_rejects_invalid_transition() {
+        let contract = execution_adapter_contract();
+        let err = advance_execution_state(&contract, "planned", "cancel").expect_err("must fail");
+        assert!(err.contains("invalid execution state transition"), "{err}");
     }
 
     #[test]

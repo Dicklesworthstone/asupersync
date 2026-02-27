@@ -257,6 +257,161 @@ Logging constraints:
 | `runtime_operator` | `incident_containment` | `incident_console -> runtime_health -> replay_inspector` | `incident_console -> evidence_timeline` |
 | `release_guardian` | `release_gate_verification` | `gate_status_board -> artifact_audit -> decision_ledger` | `gate_status_board -> evidence_timeline` |
 
+## Baseline UX Acceptance Matrix (v0)
+
+This section is the Track 1.6 baseline acceptance artifact. It defines core
+journey assertions early so downstream implementation tracks can build against a
+stable, deterministic contract before final signoff hardening (`asupersync-2b4jj.1.5`).
+
+### Deterministic Identifier and Traceability Rules
+
+- Journey IDs: `journey_<persona>_<loop>`
+- Transition assertion IDs: `tx_<journey_id>_<two_digit_index>`
+- Evidence assertion IDs: `ev_<journey_id>_<screen_id>_<topic>`
+- IDs are lexical and stable across runs.
+
+Each assertion must include traceability pointers:
+
+- `screen_ref`: `doctor-screen-engine-v1` screen id
+- `route_ref`: `navigation_topology.routes[].id`
+- `decision_loop_ref`: `operator_model.decision_loops[].id`
+
+### Core Journey Baseline
+
+| Journey ID | Persona | Decision Loop Ref | Canonical Path | Mission Outcome |
+|---|---|---|---|---|
+| `journey_conformance_engineer_triage` | `conformance_engineer` | `triage_investigate_remediate` | `bead_command_center -> scenario_workbench -> evidence_timeline` | Deterministic issue triage with evidence handoff ready |
+| `journey_runtime_operator_incident` | `runtime_operator` | `incident_containment` | `incident_console -> runtime_health -> replay_inspector -> incident_console` | Incident containment with replay-verifiable context |
+| `journey_release_guardian_gate` | `release_guardian` | `release_gate_verification` | `gate_status_board -> artifact_audit -> decision_ledger -> gate_status_board` | Gate decision made with auditable evidence links |
+
+### Transition Assertions (Baseline)
+
+| Assertion ID | Journey ID | From -> To | Trigger | Expected Panel Focus | Traceability |
+|---|---|---|---|---|---|
+| `tx_journey_conformance_engineer_triage_01` | `journey_conformance_engineer_triage` | `bead_command_center -> scenario_workbench` | `open_scenario_workbench` | lands on `context_panel` then cycles `context -> primary -> action` | `screen_ref=scenario_workbench`, `route_ref=route_bead_command_center_to_scenario_workbench` |
+| `tx_journey_conformance_engineer_triage_02` | `journey_conformance_engineer_triage` | `scenario_workbench -> evidence_timeline` | `open_evidence_timeline` | focus preserves panel order and returns `context_panel` on `esc` | `screen_ref=evidence_timeline`, `route_ref=route_scenario_workbench_to_evidence_timeline` |
+| `tx_journey_conformance_engineer_triage_03` | `journey_conformance_engineer_triage` | `evidence_timeline -> bead_command_center` | `return_to_triage` | `action_panel` actions must be disabled until evidence context loaded | `screen_ref=bead_command_center`, `route_ref=route_evidence_timeline_to_bead_command_center` |
+| `tx_journey_runtime_operator_incident_01` | `journey_runtime_operator_incident` | `incident_console -> runtime_health` | `inspect_runtime_health` | focus stays deterministic through refresh/retry | `screen_ref=runtime_health`, `route_ref=route_incident_console_to_runtime_health` |
+| `tx_journey_runtime_operator_incident_02` | `journey_runtime_operator_incident` | `runtime_health -> replay_inspector` | `open_replay_inspector` | replay inspector opens with `context_panel` selected | `screen_ref=replay_inspector`, `route_ref=route_runtime_health_to_replay_inspector` |
+| `tx_journey_runtime_operator_incident_03` | `journey_runtime_operator_incident` | `replay_inspector -> incident_console` | `return_to_incident_console` | selected incident context is restored (no orphan context) | `screen_ref=incident_console`, `route_ref=route_replay_inspector_to_incident_console` |
+| `tx_journey_release_guardian_gate_01` | `journey_release_guardian_gate` | `gate_status_board -> artifact_audit` | `audit_artifacts` | `context_panel` must expose gate scope before action enablement | `screen_ref=artifact_audit`, `route_ref=route_gate_status_board_to_artifact_audit` |
+| `tx_journey_release_guardian_gate_02` | `journey_release_guardian_gate` | `artifact_audit -> decision_ledger` | `next_stage` | focus may enter `action_panel` only after artifact completeness guard passes | `screen_ref=decision_ledger`, `route_ref=route_artifact_audit_to_decision_ledger` |
+| `tx_journey_release_guardian_gate_03` | `journey_release_guardian_gate` | `decision_ledger -> gate_status_board` | `back_to_gates` | returns to previously selected gate row with stable ordering | `screen_ref=gate_status_board`, `route_ref=route_decision_ledger_to_gate_status_board` |
+
+### Evidence Visibility Assertions (Baseline)
+
+| Assertion ID | Journey ID | Screen Ref | Required Evidence Keys | Visibility Assertion |
+|---|---|---|---|---|
+| `ev_journey_conformance_engineer_triage_evidence_timeline_triage` | `journey_conformance_engineer_triage` | `evidence_timeline` | `obligation_snapshot`, `trace_excerpt`, `scheduler_state` | all required keys visible before `handoff_to_release_guardian` is enabled |
+| `ev_journey_conformance_engineer_triage_bead_command_center_backlog` | `journey_conformance_engineer_triage` | `bead_command_center` | `bead_dependencies`, `priority_signals` | triage list must show dependency + priority context in primary panel |
+| `ev_journey_runtime_operator_incident_runtime_health` | `journey_runtime_operator_incident` | `runtime_health` | `cancel_phase`, `reactor_backpressure`, `obligation_pressure` | runtime health summary must include current cancellation and obligation pressure state |
+| `ev_journey_runtime_operator_incident_replay_inspector` | `journey_runtime_operator_incident` | `replay_inspector` | `trace_pointer`, `seed`, `replay_window` | replay panel must expose exact replay command ingredients |
+| `ev_journey_release_guardian_gate_artifact_audit` | `journey_release_guardian_gate` | `artifact_audit` | `build_signature`, `test_provenance`, `lint_digest` | signoff path remains blocked if any required artifact key is missing |
+| `ev_journey_release_guardian_gate_decision_ledger` | `journey_release_guardian_gate` | `decision_ledger` | `signoff_rationale`, `risk_classification`, `evidence_pointer_set` | decision ledger entries must include direct evidence pointers for each decision row |
+
+### Unit-Test Scaffolding Requirements (Baseline)
+
+- `UT-UXM-001`: parser validates matrix schema + deterministic ID format (`journey_`, `tx_`, `ev_`).
+- `UT-UXM-002`: assertion matcher validates all `screen_ref` and `route_ref` links exist in the active contracts.
+- `UT-UXM-003`: deterministic ordering check enforces lexical ordering for journey, transition, and evidence assertion IDs.
+- `UT-UXM-004`: baseline oracle loader supports stable fixture replay keyed by `(journey_id, assertion_id)`.
+
+### E2E Baseline Script Requirements (Baseline)
+
+- `E2E-UXM-001`: replay `journey_conformance_engineer_triage` happy path and emit panel-transition transcript.
+- `E2E-UXM-002`: replay `journey_runtime_operator_incident` happy path and capture replay-context artifact pointers.
+- `E2E-UXM-003`: replay `journey_release_guardian_gate` happy path and assert evidence-gated decision enablement.
+- `E2E-UXM-004`: structured logs must include `correlation_id`, `run_id`, `trace_id`, `journey_id`, `assertion_id`, `screen_ref`, `route_ref`, `outcome`.
+
+### Handoff Boundary to Signoff Matrix (`asupersync-2b4jj.1.5`)
+
+This v0 baseline is intentionally limited to primary happy-path journeys and
+core evidence visibility gates. Signoff bead `1.5` must extend this matrix with:
+
+- interruption/recovery coverage for every primary journey
+- stricter rollout pass/fail thresholds and gating policy
+- expanded negative-path assertions (blocked routes, invalid focus, missing evidence)
+- final signoff reporting and waiver policy
+
+Signoff work must extend these IDs/additive sections, not replace or rename the
+baseline identifiers defined here.
+
+## Final UX Signoff Matrix (v1)
+
+This section is the final signoff layer for bead `asupersync-2b4jj.1.5`.
+It extends the v0 baseline with interruption/recovery assertions, stricter
+rollout policy, and explicit failure-diagnostics requirements.
+
+### Signoff Journey Coverage
+
+| Signoff Journey ID | Persona | Required Path Cycle | Interruption Coverage | Recovery Coverage |
+|---|---|---|---|---|
+| `journey_conformance_engineer_triage` | `conformance_engineer` | `bead_command_center -> scenario_workbench -> evidence_timeline -> bead_command_center` | cancellation at `scenario_workbench`, blocked route at `evidence_timeline` | retry-in-place + failure handoff from `scenario_workbench` |
+| `journey_runtime_operator_incident` | `runtime_operator` | `incident_console -> runtime_health -> replay_inspector -> incident_console` | cancellation at `incident_console`, blocked route at `runtime_health` | retry-in-place + failure route from `incident_console` to `runtime_health` |
+| `journey_release_guardian_gate` | `release_guardian` | `gate_status_board -> artifact_audit -> decision_ledger -> gate_status_board` | cancellation at `artifact_audit`, blocked route at `gate_status_board` | retry-in-place + failure route from `gate_status_board` to `artifact_audit` |
+
+### Interruption and Recovery Assertions (Signoff)
+
+| Assertion ID | Type | Journey | Injected At / Path | Expected Outcome |
+|---|---|---|---|---|
+| `int_journey_conformance_engineer_triage_01` | interruption | `journey_conformance_engineer_triage` | `scenario_workbench` + cancellation trigger | state becomes `cancelled` with preserved `correlation_id` |
+| `int_journey_conformance_engineer_triage_02` | interruption | `journey_conformance_engineer_triage` | `evidence_timeline` + blocked navigation trigger | state becomes `failed` with `diagnostic_reason` |
+| `rec_journey_conformance_engineer_triage_01` | recovery | `journey_conformance_engineer_triage` | `scenario_workbench -> scenario_workbench` via retry route | rerun context preserved; state returns to `loading` then `ready` |
+| `rec_journey_conformance_engineer_triage_02` | recovery | `journey_conformance_engineer_triage` | `scenario_workbench -> evidence_timeline` failure handoff | evidence surface remains reachable for escalation |
+| `int_journey_runtime_operator_incident_01` | interruption | `journey_runtime_operator_incident` | `incident_console` + cancellation trigger | containment flow enters `cancelled` deterministically |
+| `int_journey_runtime_operator_incident_02` | interruption | `journey_runtime_operator_incident` | `runtime_health` + blocked navigation trigger | failure state includes remediation hint |
+| `rec_journey_runtime_operator_incident_01` | recovery | `journey_runtime_operator_incident` | `incident_console -> incident_console` via retry route | rerun metadata retained end-to-end |
+| `rec_journey_runtime_operator_incident_02` | recovery | `journey_runtime_operator_incident` | `incident_console -> runtime_health` failure route | containment resumes with runtime context |
+| `int_journey_release_guardian_gate_01` | interruption | `journey_release_guardian_gate` | `artifact_audit` + cancellation trigger | signoff flow halts with deterministic blocked status |
+| `int_journey_release_guardian_gate_02` | interruption | `journey_release_guardian_gate` | `gate_status_board` + blocked navigation trigger | state becomes `failed` with clear gate diagnostics |
+| `rec_journey_release_guardian_gate_01` | recovery | `journey_release_guardian_gate` | `gate_status_board -> artifact_audit` failure route | missing evidence collection route always available |
+| `rec_journey_release_guardian_gate_02` | recovery | `journey_release_guardian_gate` | `artifact_audit -> artifact_audit` via retry route | signoff path only resumes after evidence guard passes |
+
+### Unit-Test Signoff Requirements
+
+- `UT-UXS-001`: signoff matrix parser enforces deterministic schema and ID format.
+- `UT-UXS-002`: journeys/assertions must be lexically sorted and duplicate-free.
+- `UT-UXS-003`: all `screen_ref` and `route_ref` links must resolve to active contracts.
+- `UT-UXS-004`: interruption/recovery assertions are mandatory for every signoff journey.
+- `UT-UXS-005`: rollout gate policy validation enforces threshold and required-journey consistency.
+
+### E2E Signoff Script Requirements
+
+- `E2E-UXS-001`: full happy-path execution for all three signoff journeys.
+- `E2E-UXS-002`: interruption-path replay for each journey with deterministic failure signatures.
+- `E2E-UXS-003`: recovery-path replay for each journey with rerun-context continuity checks.
+- `E2E-UXS-004`: on failure, emit state diff (`expected` vs `actual`), missing-evidence markers, and direct rerun command hints.
+
+### Logging Requirements for Signoff Assertions
+
+Every signoff assertion must include:
+
+- `assertion_id`
+- `journey_id`
+- `correlation_id`
+- `run_id`
+- `trace_id`
+- `screen_id`
+- `route_ref`
+- `outcome`
+
+Additional failure-path requirements:
+
+- interruption failures: `diagnostic_reason`
+- recovery assertions: `rerun_hint`
+- all failing assertions: `expected_state`, `actual_state`, `missing_evidence_keys`
+
+### Rollout Gate Policy (Signoff)
+
+Rollout is blocked unless all criteria pass:
+
+1. Minimum aggregate signoff pass rate: `98%`.
+2. Critical-severity signoff failures: `0`.
+3. Required journeys all green:
+`journey_conformance_engineer_triage`, `journey_runtime_operator_incident`, `journey_release_guardian_gate`.
+4. Mandatory remediation actions for any failed signoff assertion:
+`block_rollout_until_green_signoff`, `capture_state_diff_and_rerun_hint`, `file_followup_bead_with_trace_link`.
+
 ## Canonical Personas (v1)
 
 - `conformance_engineer`: drives deterministic reproduction and correctness closure.
