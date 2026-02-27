@@ -156,10 +156,13 @@ impl<T> OnceCell<T> {
                 }
                 Err(INITIALIZED) => return Err(value),
                 Err(INITIALIZING) => {
-                    // Another thread/task is initializing. The cell is essentially "claimed".
-                    // Do not block the thread (especially in async contexts).
-                    // Just return the value to the caller.
-                    return Err(value);
+                    // Another thread/task is initializing. Wait for it.
+                    self.wait_for_init_blocking();
+                    if self.is_initialized() {
+                        return Err(value);
+                    }
+                    // The initializer was cancelled — state is back to UNINIT.
+                    // Loop to retry setting.
                 }
                 Err(UNINIT) => {} // Spurious failure, try again
                 Err(_) => unreachable!("invalid state"),

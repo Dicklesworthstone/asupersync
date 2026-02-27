@@ -809,29 +809,14 @@ where
                 .max_size
                 .saturating_sub(total_including_creating);
 
-        let position = self.waiter_id.map_or_else(
-            || {
-                if state.waiters.is_empty() {
-                    Some(0)
-                } else {
-                    Some(state.waiters.len())
-                }
-            },
-            |id| state.waiters.iter().position(|w| w.id == id),
-        );
-
-        if let Some(pos) = position {
-            if pos < available {
-                return Poll::Ready(());
-            }
-        }
-
-        // Single-pass: check if already queued and update waker, or register.
-        if let Some(id) = *self.waiter_id {
-            if let Some(w) = state.waiters.iter_mut().find(|w| w.id == id) {
+        // Single-pass: check if already queued, update waker/register, and get position.
+        let pos = if let Some(id) = *self.waiter_id {
+            if let Some(idx) = state.waiters.iter().position(|w| w.id == id) {
+                let w = &mut state.waiters[idx];
                 if !w.waker.will_wake(cx.waker()) {
                     w.waker.clone_from(cx.waker());
                 }
+                idx
             } else {
                 // Was removed by try_get_idle but health check failed.
                 // Re-register at the FRONT to preserve FIFO fairness.
@@ -839,15 +824,22 @@ where
                     id,
                     waker: cx.waker().clone(),
                 });
+                0
             }
         } else {
             let id = state.next_waiter_id;
             state.next_waiter_id += 1;
+            let idx = state.waiters.len();
             state.waiters.push_back(PoolWaiter {
                 id,
                 waker: cx.waker().clone(),
             });
             *self.waiter_id = Some(id);
+            idx
+        };
+
+        if pos < available {
+            return Poll::Ready(());
         }
 
         // Also register in the return_wakers list
