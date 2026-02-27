@@ -67,9 +67,15 @@ pub mod signal;
 pub use args::{COMMON_ARGS_HELP, CommonArgs, parse_color_choice, parse_output_format};
 pub use completion::{Completable, CompletionItem, Shell, generate_completions};
 pub use doctor::{
-    CapabilityEdge, DecisionLoop, DecisionStep, OperatorModelContract, OperatorPersona, ScanEvent,
-    WorkspaceMember, WorkspaceScanReport, operator_model_contract, scan_workspace,
-    validate_operator_model_contract,
+    CapabilityEdge, ContractCompatibility, ContractErrorEnvelope, DecisionLoop, DecisionStep,
+    EvidenceIngestionReport, EvidenceProvenance, EvidenceRecord, ExchangeOutcome, IngestionEvent,
+    MigrationGuidance, OperatorModelContract, OperatorPersona, PayloadField, PayloadSchema,
+    RejectedArtifact, RejectedPayloadLog, RuntimeArtifact, ScanEvent, ScreenContract,
+    ScreenEngineContract, ScreenExchangeEnvelope, ScreenExchangeRequest, StateTransition,
+    WorkspaceMember, WorkspaceScanReport, ingest_runtime_artifacts,
+    is_screen_contract_version_supported, operator_model_contract, scan_workspace,
+    screen_engine_contract, simulate_screen_exchange, validate_evidence_ingestion_report,
+    validate_operator_model_contract, validate_screen_engine_contract,
 };
 pub use error::{CliError, errors};
 pub use exit::ExitCode;
@@ -85,9 +91,15 @@ pub use signal::{CancellationToken, Signal, SignalHandler};
 pub mod prelude {
     pub use super::args::{COMMON_ARGS_HELP, CommonArgs};
     pub use super::doctor::{
-        CapabilityEdge, DecisionLoop, DecisionStep, OperatorModelContract, OperatorPersona,
-        ScanEvent, WorkspaceMember, WorkspaceScanReport, operator_model_contract, scan_workspace,
-        validate_operator_model_contract,
+        CapabilityEdge, ContractCompatibility, ContractErrorEnvelope, DecisionLoop, DecisionStep,
+        EvidenceIngestionReport, EvidenceProvenance, EvidenceRecord, ExchangeOutcome,
+        IngestionEvent, MigrationGuidance, OperatorModelContract, OperatorPersona, PayloadField,
+        PayloadSchema, RejectedArtifact, RejectedPayloadLog, RuntimeArtifact, ScanEvent,
+        ScreenContract, ScreenEngineContract, ScreenExchangeEnvelope, ScreenExchangeRequest,
+        StateTransition, WorkspaceMember, WorkspaceScanReport, ingest_runtime_artifacts,
+        is_screen_contract_version_supported, operator_model_contract, scan_workspace,
+        screen_engine_contract, simulate_screen_exchange, validate_evidence_ingestion_report,
+        validate_operator_model_contract, validate_screen_engine_contract,
     };
     pub use super::error::{CliError, errors};
     pub use super::exit::ExitCode;

@@ -4,8 +4,8 @@
 use asupersync::Time;
 use asupersync::cli::{
     CliError, ColorChoice, CommonArgs, ExitCode, OperatorModelContract, Output, OutputFormat,
-    Outputtable, WorkspaceScanReport, operator_model_contract, parse_color_choice,
-    parse_output_format, scan_workspace,
+    Outputtable, ScreenEngineContract, WorkspaceScanReport, operator_model_contract,
+    parse_color_choice, parse_output_format, scan_workspace, screen_engine_contract,
 };
 use asupersync::trace::{
     CompressionMode, IssueSeverity, ReplayEvent, TRACE_FILE_VERSION, TRACE_MAGIC, TraceFileError,
@@ -230,6 +230,8 @@ enum DoctorCommand {
     ScanWorkspace(DoctorScanWorkspaceArgs),
     /// Emit operator personas, missions, and decision loops contract
     OperatorModel,
+    /// Emit canonical screen-to-engine contract for doctor TUI surfaces
+    ScreenContracts,
 }
 
 #[derive(Args, Debug)]
@@ -584,6 +586,7 @@ fn run_doctor(args: DoctorArgs, output: &mut Output) -> Result<(), CliError> {
     match args.command {
         DoctorCommand::ScanWorkspace(scan_args) => doctor_scan_workspace(&scan_args, output),
         DoctorCommand::OperatorModel => doctor_operator_model(output),
+        DoctorCommand::ScreenContracts => doctor_screen_contracts(output),
     }
 }
 
@@ -606,6 +609,14 @@ fn doctor_scan_workspace(
 
 fn doctor_operator_model(output: &mut Output) -> Result<(), CliError> {
     let contract: OperatorModelContract = operator_model_contract();
+    output.write(&contract).map_err(|err| {
+        CliError::new("output_error", "Failed to write output").detail(err.to_string())
+    })?;
+    Ok(())
+}
+
+fn doctor_screen_contracts(output: &mut Output) -> Result<(), CliError> {
+    let contract: ScreenEngineContract = screen_engine_contract();
     output.write(&contract).map_err(|err| {
         CliError::new("output_error", "Failed to write output").detail(err.to_string())
     })?;
