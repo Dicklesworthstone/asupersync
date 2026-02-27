@@ -300,10 +300,10 @@ impl RegionSnapshot {
 
         // Parent
         let has_parent = cursor.read_u8()?;
-        let parent = if has_parent == 1 {
-            Some(cursor.read_region_id()?)
-        } else {
-            None
+        let parent = match has_parent {
+            0 => None,
+            1 => Some(cursor.read_region_id()?),
+            flag => return Err(SnapshotError::InvalidPresenceFlag(flag)),
         };
 
         // Metadata
@@ -386,6 +386,8 @@ pub enum SnapshotError {
     UnexpectedEof,
     /// Invalid UTF-8 string.
     InvalidString,
+    /// Invalid optional/presence marker (must be 0 or 1).
+    InvalidPresenceFlag(u8),
 }
 
 impl std::fmt::Display for SnapshotError {
@@ -396,6 +398,9 @@ impl std::fmt::Display for SnapshotError {
             Self::InvalidState(s) => write!(f, "invalid state byte: {s}"),
             Self::UnexpectedEof => write!(f, "unexpected end of snapshot data"),
             Self::InvalidString => write!(f, "invalid UTF-8 in snapshot"),
+            Self::InvalidPresenceFlag(flag) => {
+                write!(f, "invalid presence flag: {flag} (expected 0 or 1)")
+            }
         }
     }
 }
@@ -525,29 +530,31 @@ impl<'a> Cursor<'a> {
     }
 
     fn read_optional_u64(&mut self) -> Result<Option<u64>, SnapshotError> {
-        if self.read_u8()? == 1 {
-            Ok(Some(self.read_u64()?))
-        } else {
-            Ok(None)
+        match self.read_u8()? {
+            0 => Ok(None),
+            1 => Ok(Some(self.read_u64()?)),
+            flag => Err(SnapshotError::InvalidPresenceFlag(flag)),
         }
     }
 
     fn read_optional_u32(&mut self) -> Result<Option<u32>, SnapshotError> {
-        if self.read_u8()? == 1 {
-            Ok(Some(self.read_u32()?))
-        } else {
-            Ok(None)
+        match self.read_u8()? {
+            0 => Ok(None),
+            1 => Ok(Some(self.read_u32()?)),
+            flag => Err(SnapshotError::InvalidPresenceFlag(flag)),
         }
     }
 
     fn read_optional_string(&mut self) -> Result<Option<String>, SnapshotError> {
-        if self.read_u8()? == 1 {
-            let len = self.read_u32()? as usize;
-            let bytes = self.read_exact(len)?;
-            let s = std::str::from_utf8(bytes).map_err(|_| SnapshotError::InvalidString)?;
-            Ok(Some(s.to_string()))
-        } else {
-            Ok(None)
+        match self.read_u8()? {
+            0 => Ok(None),
+            1 => {
+                let len = self.read_u32()? as usize;
+                let bytes = self.read_exact(len)?;
+                let s = std::str::from_utf8(bytes).map_err(|_| SnapshotError::InvalidString)?;
+                Ok(Some(s.to_string()))
+            }
+            flag => Err(SnapshotError::InvalidPresenceFlag(flag)),
         }
     }
 }
@@ -728,6 +735,27 @@ mod tests {
     fn snapshot_truncated_data() {
         let result = RegionSnapshot::from_bytes(b"SNAP\x01");
         assert_eq!(result.unwrap_err(), SnapshotError::UnexpectedEof);
+    }
+
+    #[test]
+    fn snapshot_invalid_budget_presence_flag() {
+        let mut bytes = RegionSnapshot::empty(RegionId::new_for_test(9, 0)).to_bytes();
+        // Layout for empty snapshot:
+        // header(5) + region_id(8) + state(1) + timestamp(8) + sequence(8)
+        // + task_count(4) + child_count(4) + finalizer_count(4) = 42
+        // Next byte is budget.deadline presence flag.
+        bytes[42] = 2;
+        let result = RegionSnapshot::from_bytes(&bytes);
+        assert_eq!(result.unwrap_err(), SnapshotError::InvalidPresenceFlag(2));
+    }
+
+    #[test]
+    fn snapshot_invalid_parent_presence_flag() {
+        let mut bytes = RegionSnapshot::empty(RegionId::new_for_test(9, 0)).to_bytes();
+        // In empty snapshot, parent presence flag is at offset 46.
+        bytes[46] = 2;
+        let result = RegionSnapshot::from_bytes(&bytes);
+        assert_eq!(result.unwrap_err(), SnapshotError::InvalidPresenceFlag(2));
     }
 
     #[test]
@@ -920,6 +948,9 @@ mod tests {
 
         let err = SnapshotError::InvalidString;
         assert!(err.to_string().contains("invalid UTF-8"));
+
+        let err = SnapshotError::InvalidPresenceFlag(7);
+        assert!(err.to_string().contains("invalid presence flag"));
     }
 
     #[test]
@@ -1011,6 +1042,7 @@ mod tests {
             SnapshotError::InvalidState(0xFF),
             SnapshotError::UnexpectedEof,
             SnapshotError::InvalidString,
+            SnapshotError::InvalidPresenceFlag(2),
         ];
         for err in &errors {
             let dbg = format!("{err:?}");

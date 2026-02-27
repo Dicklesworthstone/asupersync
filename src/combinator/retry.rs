@@ -599,17 +599,23 @@ where
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         loop {
-            // Check cancellation from the context first
-            if let Some(cx_ref) = Cx::current() {
-                if cx_ref.is_cancel_requested() {
-                    return Poll::Ready(RetryResult::Cancelled(
-                        cx_ref.cancel_reason().unwrap_or_default(),
-                    ));
+            // Check cancellation from the context
+            // WARNING: We must NOT force-drop the inner future if we are in Polling state,
+            // because asupersync requires futures to be drained to Outcome::Cancelled.
+            let cancel_reason = Cx::current().and_then(|c| {
+                if c.is_cancel_requested() {
+                    Some(c.cancel_reason().unwrap_or_default())
+                } else {
+                    None
                 }
-            }
+            });
 
             match &mut self.inner {
                 RetryInner::Idle => {
+                    if let Some(r) = cancel_reason {
+                        return Poll::Ready(RetryResult::Cancelled(r));
+                    }
+
                     // Start next attempt or sleep
                     // Use Cx entropy if available
                     let mut rng = Cx::current().map(|c| DetRng::new(c.random_u64()));
@@ -643,6 +649,9 @@ where
                     }
                 }
                 RetryInner::Sleeping(sleep) => {
+                    if let Some(r) = cancel_reason {
+                        return Poll::Ready(RetryResult::Cancelled(r));
+                    }
                     match Pin::new(sleep).poll(cx) {
                         Poll::Ready(()) => {
                             // Sleep done, start factory

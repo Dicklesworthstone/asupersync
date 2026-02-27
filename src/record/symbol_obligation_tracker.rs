@@ -84,6 +84,39 @@ pub enum SymbolObligationKind {
     },
 }
 
+/// Error returned when updating decoding progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodingProgressUpdateError {
+    /// Progress updates are only valid for decoding obligations.
+    NotDecodingObligation,
+    /// Reported progress exceeds the required symbol count.
+    SymbolsReceivedExceedsNeeded {
+        /// The number of symbols received so far.
+        received: u32,
+        /// The total number of symbols needed to complete decoding.
+        needed: u32,
+    },
+}
+
+impl std::fmt::Display for DecodingProgressUpdateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotDecodingObligation => {
+                write!(
+                    f,
+                    "decoding progress can only be updated for decoding obligations"
+                )
+            }
+            Self::SymbolsReceivedExceedsNeeded { received, needed } => write!(
+                f,
+                "symbols_received ({received}) exceeds symbols_needed ({needed})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DecodingProgressUpdateError {}
+
 // ============================================================================
 // SymbolObligation
 // ============================================================================
@@ -241,17 +274,28 @@ impl SymbolObligation {
 
     /// Updates decoding progress.
     ///
-    /// # Panics
-    /// Panics if this is not a decoding obligation.
-    pub fn update_decoding_progress(&mut self, symbols_received: u32) {
+    /// Returns an error when called for a non-decoding obligation or when the
+    /// provided count exceeds the decode target.
+    pub fn update_decoding_progress(
+        &mut self,
+        symbols_received: u32,
+    ) -> Result<(), DecodingProgressUpdateError> {
         if let SymbolObligationKind::DecodingInProgress {
             symbols_received: ref mut count,
+            symbols_needed,
             ..
         } = self.kind
         {
+            if symbols_received > symbols_needed {
+                return Err(DecodingProgressUpdateError::SymbolsReceivedExceedsNeeded {
+                    received: symbols_received,
+                    needed: symbols_needed,
+                });
+            }
             *count = symbols_received;
+            Ok(())
         } else {
-            panic!("not a decoding obligation");
+            Err(DecodingProgressUpdateError::NotDecodingObligation)
         }
     }
 
@@ -750,13 +794,56 @@ mod tests {
         }
 
         // Update progress
-        ob.update_decoding_progress(5);
+        assert!(ob.update_decoding_progress(5).is_ok());
 
         if let SymbolObligationKind::DecodingInProgress {
             symbols_received, ..
         } = ob.symbol_kind()
         {
             assert_eq!(*symbols_received, 5);
+        }
+    }
+
+    // Test 11b: Updating progress on a non-decoding obligation returns error.
+    #[test]
+    fn test_decoding_progress_update_rejects_non_decoding_obligation() {
+        let (oid, tid, rid) = test_ids();
+        let symbol_id = SymbolId::new_for_test(42, 0, 0);
+
+        let mut ob = SymbolObligation::ack(oid, tid, rid, symbol_id, rid, Time::ZERO);
+
+        let result = ob.update_decoding_progress(1);
+        assert_eq!(
+            result,
+            Err(DecodingProgressUpdateError::NotDecodingObligation)
+        );
+    }
+
+    // Test 11c: Updating progress beyond the decode target returns error.
+    #[test]
+    fn test_decoding_progress_update_rejects_received_above_needed() {
+        let (oid, tid, rid) = test_ids();
+        let object_id = ObjectId::new_for_test(7);
+        let window = EpochWindow {
+            start: EpochId(1),
+            end: EpochId(2),
+        };
+
+        let mut ob = SymbolObligation::decoding(oid, tid, rid, object_id, 3, window, Time::ZERO);
+        let result = ob.update_decoding_progress(4);
+        assert_eq!(
+            result,
+            Err(DecodingProgressUpdateError::SymbolsReceivedExceedsNeeded {
+                received: 4,
+                needed: 3,
+            })
+        );
+
+        if let SymbolObligationKind::DecodingInProgress {
+            symbols_received, ..
+        } = ob.symbol_kind()
+        {
+            assert_eq!(*symbols_received, 0);
         }
     }
 
