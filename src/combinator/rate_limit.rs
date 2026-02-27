@@ -187,7 +187,6 @@ pub struct RateLimitMetrics {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RejectionReason {
     Timeout,
-    Cancelled,
 }
 
 /// Result of a queue entry: None = waiting, Some(Ok(())) = granted, Some(Err(reason)) = rejected.
@@ -640,10 +639,6 @@ impl RateLimiter {
                     Err(RateLimitError::Timeout {
                         waited: Duration::from_millis(wait_ms),
                     })
-                }
-                Some(Err(RejectionReason::Cancelled)) => {
-                    queue.remove(idx);
-                    Err(RateLimitError::Cancelled)
                 }
                 None => Ok(false),
             }

@@ -1995,9 +1995,7 @@ impl<Caps> Cx<Caps> {
         futures: Vec<Pin<Box<dyn Future<Output = T> + Send>>>,
     ) -> Result<T, JoinError> {
         if futures.is_empty() {
-            return Err(JoinError::Cancelled(crate::types::CancelReason::user(
-                "race requires at least one future",
-            )));
+            return std::future::pending().await;
         }
         let (res, _) = SelectAll::new(futures).await;
         Ok(res)

@@ -280,8 +280,7 @@ impl LossRecovery {
                         .congestion_recovery_start_time
                         .is_some_and(|t| pkt.time_sent_micros <= t);
                     if !in_recovery {
-                        acked_bytes_for_growth =
-                            acked_bytes_for_growth.saturating_add(pkt.bytes);
+                        acked_bytes_for_growth = acked_bytes_for_growth.saturating_add(pkt.bytes);
                     }
                 }
                 let sample = now_micros.saturating_sub(pkt.time_sent_micros);

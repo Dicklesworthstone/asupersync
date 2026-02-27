@@ -694,6 +694,22 @@ mod tests {
         crate::test_complete!("zero_period_keeps_bucket_full");
     }
 
+    #[test]
+    fn zero_period_zero_rate_still_ready() {
+        init_test("zero_period_zero_rate_still_ready");
+        let mut svc = RateLimit::with_time_getter(EchoService, 0, Duration::ZERO, test_time);
+        TEST_NOW.store(1, Ordering::SeqCst);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = svc.poll_ready(&mut cx);
+        crate::assert_with_log!(first.is_ready(), "first ready", true, first.is_ready());
+
+        let second = svc.poll_ready(&mut cx);
+        crate::assert_with_log!(second.is_ready(), "second ready", true, second.is_ready());
+        crate::test_complete!("zero_period_zero_rate_still_ready");
+    }
+
     // =========================================================================
     // Wave 31: Data-type trait coverage
     // =========================================================================

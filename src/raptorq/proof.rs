@@ -309,7 +309,7 @@ fn compare_proofs(expected: &DecodeProof, actual: &DecodeProof) -> Result<(), Re
         "elimination.strategy_transitions",
         &exp_elim.strategy_transitions,
         &act_elim.strategy_transitions,
-        false,
+        exp_elim.truncated,
     )?;
 
     if expected.outcome != actual.outcome {
@@ -474,6 +474,8 @@ impl EliminationTrace {
         self.inactivated += 1;
         if self.inactive_cols.len() < MAX_PIVOT_EVENTS {
             self.inactive_cols.push(col);
+        } else {
+            self.truncated = true;
         }
     }
 

@@ -304,10 +304,8 @@ impl SymbolDistributor {
             self.metrics.quorum_achieved_count =
                 self.metrics.quorum_achieved_count.saturating_add(1);
         } else {
-            self.metrics.distributions_failed =
-                self.metrics.distributions_failed.saturating_add(1);
-            self.metrics.quorum_missed_count =
-                self.metrics.quorum_missed_count.saturating_add(1);
+            self.metrics.distributions_failed = self.metrics.distributions_failed.saturating_add(1);
+            self.metrics.quorum_missed_count = self.metrics.quorum_missed_count.saturating_add(1);
         }
 
         DistributionResult {

@@ -619,7 +619,9 @@ impl MonotoneSagaExecutor {
             // Post-hoc monotonicity validation.
             if self.validate_monotonicity {
                 if let Err(reason) = executor.validate_monotonicity(step, &before, state) {
-                    *fallback_reason = Some(reason);
+                    if fallback_reason.is_none() {
+                        *fallback_reason = Some(reason);
+                    }
                     // Continue executing remaining steps with join semantics.
                     // The violation is recorded but does not change execution
                     // within this batch; the flag prevents future batches from
@@ -630,7 +632,10 @@ impl MonotoneSagaExecutor {
 
         BatchResult {
             batch_index: batch_idx,
-            coordination_free: fallback_reason.is_none(),
+            // This function only runs when this batch is executing on the
+            // coordination-free path. A fallback reason set mid-batch should
+            // affect subsequent batches, not rewrite how this batch ran.
+            coordination_free: true,
             step_count: steps.len(),
             merged_state: *state,
             merge_count,
@@ -1043,6 +1048,11 @@ mod tests {
                 .unwrap()
                 .contains("simulated")
         );
+        assert_eq!(result.batch_results.len(), 1);
+        assert!(
+            result.batch_results[0].coordination_free,
+            "a batch that executed on the coordination-free path should be reported as coordination_free even if fallback is triggered for subsequent batches"
+        );
         // Regression: coordination-free batches that fall back due to
         // monotonicity violations should NOT inflate barrier_count, because
         // they still executed with join semantics (no actual barriers).
@@ -1050,6 +1060,44 @@ mod tests {
             result.barrier_count, 0,
             "fallback batches must not inflate barrier_count"
         );
+    }
+
+    #[test]
+    fn fallback_reason_preserves_first_violation() {
+        struct MultiViolationExecutor;
+
+        impl StepExecutor for MultiViolationExecutor {
+            fn execute(&mut self, _step: &SagaStep) -> LatticeState {
+                LatticeState::Reserved
+            }
+
+            fn validate_monotonicity(
+                &self,
+                step: &SagaStep,
+                _before: &LatticeState,
+                _after: &LatticeState,
+            ) -> Result<(), String> {
+                match step.label.as_str() {
+                    "v1" => Err("first violation".to_string()),
+                    "v2" => Err("second violation".to_string()),
+                    _ => Ok(()),
+                }
+            }
+        }
+
+        let plan = SagaPlan::new(
+            "multi_violation",
+            vec![
+                SagaStep::new(SagaOpKind::Reserve, "v1"),
+                SagaStep::new(SagaOpKind::Send, "v2"),
+            ],
+        );
+        let exec_plan = SagaExecutionPlan::from_plan(&plan);
+        let executor = MonotoneSagaExecutor::new();
+        let mut step_exec = MultiViolationExecutor;
+
+        let result = executor.execute(&exec_plan, &mut step_exec);
+        assert_eq!(result.fallback_reason.as_deref(), Some("first violation"));
     }
 
     #[test]

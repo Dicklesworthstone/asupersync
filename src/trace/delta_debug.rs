@@ -530,6 +530,10 @@ where
     let keep = if config.hierarchical {
         let (mut tree, roots) = build_region_tree(&trace.events);
         assign_task_events_to_regions(&trace.events, &mut tree);
+        // Re-compute subtree indices so ancestors include late-added task events.
+        for root in &roots {
+            collect_subtree(*root, &mut tree);
+        }
 
         if roots.is_empty() {
             // No region hierarchy — skip top-down.

@@ -159,18 +159,25 @@ fn generate_spawn(scope: Option<&Expr>, name: Option<&LitStr>, future: &Expr) ->
         },
     );
 
-    quote! {
-        {
-            // spawn! macro expansion
-            let __scope = &#scope_expr;
-            #name_trace
-            __scope.spawn_registered(__state, __cx, |__child_cx| {
+    let closure_expr = match future {
+        Expr::Closure(closure) => quote! { #closure },
+        _ => quote! {
+            |__child_cx| {
                 // Suppress unused warning if cx isn't used in the future
                 let _ = &__child_cx;
                 async move {
                     (#future).await
                 }
-            }).expect("spawn! failed: region closed or not found")
+            }
+        },
+    };
+
+    quote! {
+        {
+            // spawn! macro expansion
+            let __scope = &#scope_expr;
+            #name_trace
+            __scope.spawn_registered(__state, __cx, #closure_expr).expect("spawn! failed: region closed or not found")
         }
     }
 }
@@ -336,6 +343,25 @@ mod tests {
         assert!(
             generated_str.contains("__child_cx"),
             "Closure should receive child cx"
+        );
+    }
+
+    #[test]
+    fn test_generate_spawn_with_closure() {
+        let input: proc_macro2::TokenStream = quote! { |child_cx| async move { 42 } };
+        let parsed: SpawnInput = syn::parse2(input).unwrap();
+        let generated = generate_spawn(parsed.scope.as_ref(), parsed.name.as_ref(), &parsed.future);
+
+        let generated_str = generated.to_string();
+        // It should use the user-provided closure directly without wrapping it
+        assert!(
+            generated_str.contains("child_cx"),
+            "Closure should receive user-specified child cx"
+        );
+        // It shouldn't contain the synthetic __child_cx
+        assert!(
+            !generated_str.contains("__child_cx"),
+            "Should not generate wrapper closure"
         );
     }
 }
