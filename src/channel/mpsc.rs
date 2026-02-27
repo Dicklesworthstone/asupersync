@@ -342,8 +342,8 @@ impl<'a, T> Future for Reserve<'a, T> {
                     let is_head = inner.send_wakers.front().is_some_and(|w| w.id == id);
                     if is_head {
                         inner.send_wakers.pop_front();
-                    } else {
-                        inner.send_wakers.retain(|w| w.id != id);
+                    } else if let Some(pos) = inner.send_wakers.iter().position(|w| w.id == id) {
+                        inner.send_wakers.remove(pos);
                     }
                     if is_head && inner.has_capacity(self.sender.shared.capacity) {
                         inner.take_next_sender_waker()
@@ -378,8 +378,8 @@ impl<'a, T> Future for Reserve<'a, T> {
 
                 if is_head {
                     inner.send_wakers.pop_front();
-                } else {
-                    inner.send_wakers.retain(|w| w.id != id);
+                } else if let Some(pos) = inner.send_wakers.iter().position(|w| w.id == id) {
+                    inner.send_wakers.remove(pos);
                 }
 
                 // CASCADE: If there is still capacity, wake the *next* waiter.
@@ -442,8 +442,8 @@ impl<T> Drop for Reserve<'_, T> {
 
                 if is_head {
                     inner.send_wakers.pop_front();
-                } else {
-                    inner.send_wakers.retain(|w| w.id != id);
+                } else if let Some(pos) = inner.send_wakers.iter().position(|w| w.id == id) {
+                    inner.send_wakers.remove(pos);
                 }
 
                 // Propagate wake if we were blocking capacity.

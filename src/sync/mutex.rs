@@ -236,7 +236,9 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
             // Remove ourselves from the queue if we were still in it,
             // to prevent our stale record from eating future wakeups.
             if let Some(id) = self.waiter_id {
-                state.waiters.retain(|w| w.id != id);
+                if let Some(pos) = state.waiters.iter().position(|w| w.id == id) {
+                    state.waiters.remove(pos);
+                }
             }
 
             // Clear waiter_id so Drop doesn't uselessly lock and search the queue
@@ -290,7 +292,9 @@ impl<T> Drop for LockFuture<'_, '_, T> {
                 let mut state = self.mutex.state.lock();
 
                 // Try to remove from queue
-                state.waiters.retain(|w| w.id != waiter_id);
+                if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
+                    state.waiters.remove(pos);
+                }
 
                 // If the lock is free, pass the baton to the next waiter.
                 // This is safe even if we were not the designated heir, as spurious
@@ -381,7 +385,9 @@ impl<T> OwnedMutexGuard<T> {
                         let mut state = self.mutex.state.lock();
 
                         // Try to remove from queue
-                        state.waiters.retain(|w| w.id != waiter_id);
+                        if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
+                            state.waiters.remove(pos);
+                        }
 
                         if state.locked {
                             None
@@ -414,7 +420,9 @@ impl<T> OwnedMutexGuard<T> {
                     // Remove ourselves from the queue if we were still in it,
                     // to prevent our stale record from eating future wakeups.
                     if let Some(id) = self.waiter_id {
-                        state.waiters.retain(|w| w.id != id);
+                        if let Some(pos) = state.waiters.iter().position(|w| w.id == id) {
+                            state.waiters.remove(pos);
+                        }
                     }
 
                     drop(state);

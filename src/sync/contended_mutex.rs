@@ -57,7 +57,7 @@ mod inner {
     /// updated during lock(); unlock-path counters (hold_ns, max_hold_ns) are
     /// updated during drop(Guard). Separating them prevents cross-invalidation.
     #[derive(Debug)]
-    #[repr(C)]
+    #[repr(C, align(64))]
     struct Metrics {
         // ── Cache line 1: updated on lock() ──
         acquisitions: AtomicU64,

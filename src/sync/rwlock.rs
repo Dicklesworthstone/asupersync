@@ -415,7 +415,9 @@ impl<T> Drop for ReadFuture<'_, '_, T> {
     fn drop(&mut self) {
         if let Some(waiter_id) = self.waiter_id {
             let mut state = self.lock.state.lock();
-            state.reader_waiters.retain(|w| w.id != waiter_id);
+            if let Some(pos) = state.reader_waiters.iter().position(|w| w.id == waiter_id) {
+                state.reader_waiters.remove(pos);
+            }
         }
     }
 }
@@ -510,9 +512,10 @@ impl<T> Drop for WriteFuture<'_, '_, T> {
         let mut state = self.lock.state.lock();
 
         if let Some(waiter_id) = self.waiter_id {
-            let initial_len = state.writer_queue.len();
-            state.writer_queue.retain(|w| w.id != waiter_id);
-            let removed = initial_len != state.writer_queue.len();
+            let removed = state.writer_queue.iter().position(|w| w.id == waiter_id).is_some_and(|pos| {
+                state.writer_queue.remove(pos);
+                true
+            });
 
             state.writer_waiters = state.writer_waiters.saturating_sub(1);
 
@@ -749,7 +752,9 @@ impl<T> Drop for OwnedReadFuture<'_, T> {
     fn drop(&mut self) {
         if let Some(waiter_id) = self.waiter_id {
             let mut state = self.lock.state.lock();
-            state.reader_waiters.retain(|w| w.id != waiter_id);
+            if let Some(pos) = state.reader_waiters.iter().position(|w| w.id == waiter_id) {
+                state.reader_waiters.remove(pos);
+            }
         }
     }
 }
@@ -844,9 +849,10 @@ impl<T> Drop for OwnedWriteFuture<'_, T> {
         let mut state = self.lock.state.lock();
 
         if let Some(waiter_id) = self.waiter_id {
-            let initial_len = state.writer_queue.len();
-            state.writer_queue.retain(|w| w.id != waiter_id);
-            let removed = initial_len != state.writer_queue.len();
+            let removed = state.writer_queue.iter().position(|w| w.id == waiter_id).is_some_and(|pos| {
+                state.writer_queue.remove(pos);
+                true
+            });
 
             state.writer_waiters = state.writer_waiters.saturating_sub(1);
 
