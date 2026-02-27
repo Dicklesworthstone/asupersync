@@ -1281,6 +1281,7 @@ fn run_future_with_budget<F: Future>(future: F, poll_budget: u32) -> F::Output {
     let mut future = Box::pin(future);
     let mut polls = 0u32;
     let budget = poll_budget.max(1);
+    let mut consecutive_budget_exhaustions: u32 = 0;
 
     loop {
         match future.as_mut().poll(&mut cx) {
@@ -1288,11 +1289,24 @@ fn run_future_with_budget<F: Future>(future: F, poll_budget: u32) -> F::Output {
             Poll::Pending => {
                 polls = polls.saturating_add(1);
                 if polls >= budget {
-                    // Yield to other threads if we exhausted budget (cooperative)
-                    std::thread::yield_now();
+                    // Budget exhausted: the future keeps returning Pending despite
+                    // being woken.  Use exponential backoff sleep to prevent a
+                    // tight spin loop (yield_now is nearly a no-op on idle
+                    // systems and was the root cause of runaway CPU usage).
+                    consecutive_budget_exhaustions =
+                        consecutive_budget_exhaustions.saturating_add(1);
+                    let backoff_ms = match consecutive_budget_exhaustions {
+                        1 => 1,
+                        2 => 5,
+                        _ => 25,
+                    };
+                    std::thread::sleep(Duration::from_millis(backoff_ms));
                     polls = 0;
                 } else {
-                    // Park until woken
+                    // Park until woken.  Do NOT reset consecutive_budget_exhaustions
+                    // here: thread::park() can return instantly when an unpark token
+                    // is already pending (common during waker storms), so a reset
+                    // would defeat the exponential backoff.
                     std::thread::park();
                 }
             }
