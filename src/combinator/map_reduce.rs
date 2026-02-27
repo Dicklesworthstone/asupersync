@@ -296,7 +296,7 @@ impl<E: fmt::Debug + fmt::Display> std::error::Error for MapReduceError<E> {}
 ///
 /// This is deterministic and predictable, but requires the reduce function
 /// to be associative for equivalent parallel execution.
-pub fn map_reduce_outcomes<T, E: Clone, F>(
+pub fn map_reduce_outcomes<T, E, F>(
     outcomes: Vec<Outcome<T, E>>,
     reduce: F,
 ) -> (AggregateDecision<E>, Option<T>, Vec<(usize, T)>)
@@ -396,7 +396,7 @@ where
 /// assert_eq!(result.reduced, Some(6)); // 1 + 2 + 3
 /// ```
 #[must_use]
-pub fn make_map_reduce_result<T, E: Clone, F>(
+pub fn make_map_reduce_result<T, E, F>(
     outcomes: Vec<Outcome<T, E>>,
     reduce: F,
 ) -> MapReduceResult<T, E>
@@ -431,9 +431,7 @@ where
 /// let reduced = map_reduce_to_result(result);
 /// assert_eq!(reduced.unwrap(), 6);
 /// ```
-pub fn map_reduce_to_result<T, E: Clone>(
-    result: MapReduceResult<T, E>,
-) -> Result<T, MapReduceError<E>> {
+pub fn map_reduce_to_result<T, E>(result: MapReduceResult<T, E>) -> Result<T, MapReduceError<E>> {
     // Handle empty input
     if result.total_count == 0 {
         return Err(MapReduceError::Empty);

@@ -491,10 +491,7 @@ pub fn make_retry_result<T, E>(
     outcome: Outcome<T, E>,
     state: &RetryState,
     is_final: bool,
-) -> Option<RetryResult<T, E>>
-where
-    E: Clone,
-{
+) -> Option<RetryResult<T, E>> {
     match outcome {
         Outcome::Ok(v) => Some(RetryResult::Ok(v)),
         Outcome::Err(e) => {
@@ -596,7 +593,7 @@ where
     Fut: Future<Output = Outcome<T, E>> + Unpin,
     P: Clone + Into<RetryPolicy> + Unpin,
     Pred: RetryPredicate<E> + Unpin,
-    E: Clone + Unpin,
+    E: Unpin,
 {
     type Output = RetryResult<T, E>;
 

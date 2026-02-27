@@ -263,7 +263,7 @@ impl<T, E> FirstOkResult<T, E> {
 /// assert_eq!(result.success.unwrap().index, 1);
 /// ```
 #[must_use]
-pub fn first_ok_outcomes<T, E: Clone>(outcomes: Vec<Outcome<T, E>>) -> FirstOkResult<T, E> {
+pub fn first_ok_outcomes<T, E>(outcomes: Vec<Outcome<T, E>>) -> FirstOkResult<T, E> {
     let total = outcomes.len();
 
     // Handle empty case
@@ -317,7 +317,7 @@ pub fn first_ok_outcomes<T, E: Clone>(outcomes: Vec<Outcome<T, E>>) -> FirstOkRe
 /// let value = first_ok_to_result(result);
 /// assert_eq!(value.unwrap(), 42);
 /// ```
-pub fn first_ok_to_result<T, E: Clone>(result: FirstOkResult<T, E>) -> Result<T, FirstOkError<E>> {
+pub fn first_ok_to_result<T, E>(result: FirstOkResult<T, E>) -> Result<T, FirstOkError<E>> {
     // Check for success first
     if let Some(success) = result.success {
         return Ok(success.value);
@@ -336,28 +336,37 @@ pub fn first_ok_to_result<T, E: Clone>(result: FirstOkResult<T, E>) -> Result<T,
     }
 
     // Check for cancellations
-    for (_, failure) in &result.failures {
-        if let FirstOkFailure::Cancelled(r) = failure {
-            // Collect errors before the cancellation
-            let errors_before: Vec<E> = result
-                .failures
-                .iter()
-                .filter_map(|(_, f)| match f {
-                    FirstOkFailure::Error(e) => Some(e.clone()),
-                    _ => None,
-                })
-                .collect();
-            let attempted = result.failures.len();
+    if let Some(cancel_idx) = result
+        .failures
+        .iter()
+        .position(|(_, f)| matches!(f, FirstOkFailure::Cancelled(_)))
+    {
+        let attempted = result.failures.len();
+        let mut failures = result.failures;
+        let cancel_failure = failures.remove(cancel_idx);
+        let FirstOkFailure::Cancelled(reason) = cancel_failure.1 else {
+            unreachable!()
+        };
 
-            return Err(FirstOkError::Cancelled {
-                reason: r.clone(),
-                errors_before_cancel: errors_before,
-                attempted_before_cancel: attempted,
-            });
-        }
+        // Collect errors before the cancellation
+        let errors_before: Vec<E> = failures
+            .into_iter()
+            .take(cancel_idx)
+            .filter_map(|(_, f)| match f {
+                FirstOkFailure::Error(e) => Some(e),
+                _ => None,
+            })
+            .collect();
+
+        return Err(FirstOkError::Cancelled {
+            reason,
+            errors_before_cancel: errors_before,
+            attempted_before_cancel: attempted,
+        });
     }
 
     // All errors - collect them
+    let attempted = result.failures.len();
     let errors: Vec<E> = result
         .failures
         .into_iter()
@@ -366,7 +375,6 @@ pub fn first_ok_to_result<T, E: Clone>(result: FirstOkResult<T, E>) -> Result<T,
             _ => None,
         })
         .collect();
-    let attempted = errors.len();
 
     Err(FirstOkError::AllFailed { errors, attempted })
 }

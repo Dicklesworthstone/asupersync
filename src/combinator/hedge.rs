@@ -472,7 +472,7 @@ where
     Back: Future<Output = Outcome<T, E>> + Unpin,
     F: FnOnce() -> Back + Unpin,
     T: Unpin,
-    E: Clone + Unpin,
+    E: Unpin,
 {
     type Output = HedgeResult<T, E>;
 

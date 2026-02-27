@@ -289,10 +289,7 @@ pub type Join2Result<T1, T2, E> = (Outcome<(T1, T2), E>, Option<T1>, Option<T2>)
 /// assert!(v1.is_none());
 /// assert!(v2.is_none());
 /// ```
-pub fn join2_outcomes<T1, T2, E: Clone>(
-    o1: Outcome<T1, E>,
-    o2: Outcome<T2, E>,
-) -> Join2Result<T1, T2, E> {
+pub fn join2_outcomes<T1, T2, E>(o1: Outcome<T1, E>, o2: Outcome<T2, E>) -> Join2Result<T1, T2, E> {
     match (o1, o2) {
         (Outcome::Ok(v1), Outcome::Ok(v2)) => (Outcome::Ok((v1, v2)), None, None),
         // Panicked takes precedence
@@ -372,7 +369,7 @@ impl<E: fmt::Debug + fmt::Display> std::error::Error for JoinAllError<E> {}
 /// # Returns
 /// A tuple of (aggregate decision, vector of successful values with their indices).
 #[must_use]
-pub fn join_all_outcomes<T, E: Clone>(
+pub fn join_all_outcomes<T, E>(
     outcomes: Vec<Outcome<T, E>>,
 ) -> (AggregateDecision<E>, Vec<(usize, T)>) {
     let mut successes = Vec::with_capacity(outcomes.len());
@@ -448,7 +445,7 @@ pub fn join_all_outcomes<T, E: Clone>(
 /// assert_eq!(result.success_count(), 3);
 /// ```
 #[must_use]
-pub fn make_join_all_result<T, E: Clone>(outcomes: Vec<Outcome<T, E>>) -> JoinAllResult<T, E> {
+pub fn make_join_all_result<T, E>(outcomes: Vec<Outcome<T, E>>) -> JoinAllResult<T, E> {
     let total_count = outcomes.len();
     let (decision, successes) = join_all_outcomes(outcomes);
     JoinAllResult::new(decision, successes, total_count)
@@ -473,9 +470,7 @@ pub fn make_join_all_result<T, E: Clone>(outcomes: Vec<Outcome<T, E>>) -> JoinAl
 /// let values = join_all_to_result(result);
 /// assert_eq!(values.unwrap(), vec![1, 2, 3]);
 /// ```
-pub fn join_all_to_result<T, E: Clone>(
-    result: JoinAllResult<T, E>,
-) -> Result<Vec<T>, JoinAllError<E>> {
+pub fn join_all_to_result<T, E>(result: JoinAllResult<T, E>) -> Result<Vec<T>, JoinAllError<E>> {
     match result.decision {
         AggregateDecision::AllOk => {
             // Fast path: for AllOk, successes are emitted in source index order.
