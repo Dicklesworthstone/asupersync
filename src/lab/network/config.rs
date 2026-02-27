@@ -213,7 +213,7 @@ impl LatencyModel {
                 }
                 let range = max.as_nanos().saturating_sub(min.as_nanos());
                 let offset = u128::from(rng.next_u64()) % (range + 1);
-                Duration::from_nanos((min.as_nanos() + offset) as u64)
+                duration_from_total_nanos_saturating(min.as_nanos().saturating_add(offset))
             }
             Self::Normal { mean, std_dev } => {
                 let z = sample_standard_normal(rng);
@@ -271,7 +271,7 @@ impl JitterModel {
                 }
                 let nanos = max.as_nanos();
                 let offset = u128::from(rng.next_u64()) % (nanos + 1);
-                Duration::from_nanos(offset as u64)
+                duration_from_total_nanos_saturating(offset)
             }
             Self::Bursty {
                 normal_jitter,
@@ -289,7 +289,7 @@ impl JitterModel {
                 } else {
                     let nanos = range.as_nanos();
                     let offset = u128::from(rng.next_u64()) % (nanos + 1);
-                    Duration::from_nanos(offset as u64)
+                    duration_from_total_nanos_saturating(offset)
                 }
             }
         }
@@ -319,9 +319,22 @@ fn duration_from_secs_f64(secs: f64) -> Duration {
     if !secs.is_finite() || secs <= 0.0 {
         return Duration::ZERO;
     }
-    let max_secs = (u64::MAX as f64) / 1_000_000_000.0;
-    let clamped = secs.min(max_secs);
-    Duration::from_secs_f64(clamped)
+    Duration::try_from_secs_f64(secs).unwrap_or_else(|_| max_duration())
+}
+
+const MAX_DURATION_NANOS: u128 = (u64::MAX as u128) * 1_000_000_000 + 999_999_999;
+
+fn max_duration() -> Duration {
+    Duration::new(u64::MAX, 999_999_999)
+}
+
+fn duration_from_total_nanos_saturating(total_nanos: u128) -> Duration {
+    if total_nanos >= MAX_DURATION_NANOS {
+        return max_duration();
+    }
+    let secs = (total_nanos / 1_000_000_000) as u64;
+    let nanos = (total_nanos % 1_000_000_000) as u32;
+    Duration::new(secs, nanos)
 }
 
 #[cfg(test)]
@@ -583,6 +596,41 @@ mod tests {
     fn duration_from_secs_f64_valid() {
         let d = duration_from_secs_f64(0.001);
         assert_eq!(d, Duration::from_millis(1));
+    }
+
+    #[test]
+    fn duration_from_secs_f64_large_value_preserved() {
+        let secs = 1_000_000_000_000.0;
+        let d = duration_from_secs_f64(secs);
+        assert_eq!(d.as_secs(), 1_000_000_000_000);
+    }
+
+    #[test]
+    fn latency_model_uniform_large_range_does_not_truncate() {
+        let min = Duration::from_secs(20_000_000_000);
+        let max = min + Duration::from_secs(1);
+        let model = LatencyModel::Uniform { min, max };
+        let mut rng = DetRng::new(1234);
+        for _ in 0..64 {
+            let sample = model.sample(&mut rng);
+            assert!(sample >= min, "sample below min: {:?} < {:?}", sample, min);
+            assert!(sample <= max, "sample above max: {:?} > {:?}", sample, max);
+        }
+    }
+
+    #[test]
+    fn jitter_model_uniform_large_max_does_not_truncate() {
+        // When max exceeds u64::MAX nanos (~18.4e9 seconds), samples must still
+        // be valid Durations within [0, max]. The RNG is u64-bounded so offset
+        // itself cannot exceed u64::MAX, but the conversion path must not panic
+        // or wrap.
+        let max = Duration::from_secs(20_000_000_000);
+        let model = JitterModel::Uniform { max };
+        let mut rng = DetRng::new(2026);
+        for _ in 0..256 {
+            let sample = model.sample(&mut rng);
+            assert!(sample <= max, "sample above max: {:?} > {:?}", sample, max);
+        }
     }
 
     #[test]
