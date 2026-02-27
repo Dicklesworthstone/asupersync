@@ -267,11 +267,28 @@ mod imp {
                 let Some(key) = user_data_to_token(user_data) else {
                     continue;
                 };
-                let interest = if res >= 0 {
-                    poll_mask_to_interest(res as u32)
-                } else {
-                    Interest::ERROR
-                };
+
+                if let Some(errno) = completion_errno(res) {
+                    // PollRemove cancellation completions use the original token's
+                    // user_data and must not be surfaced as readiness events.
+                    if is_poll_cancellation_errno(errno) {
+                        continue;
+                    }
+
+                    // Closed/invalid fds can otherwise churn permanent ERROR
+                    // completions; prune stale bookkeeping and move on.
+                    if is_terminal_fd_errno(errno) {
+                        let mut regs = self.registrations.lock();
+                        regs.remove(&key);
+                        continue;
+                    }
+
+                    if self.registrations.lock().contains_key(&key) {
+                        events.push(Event::errored(key));
+                    }
+                    continue;
+                }
+                let interest = poll_mask_to_interest(res as u32);
 
                 // Ignore stale completions for tokens that have been deregistered.
                 if let Some(info) = self.registrations.lock().get(&key).copied() {
@@ -304,6 +321,21 @@ mod imp {
         fn registration_count(&self) -> usize {
             self.registrations.lock().len()
         }
+    }
+
+    #[inline]
+    fn completion_errno(res: i32) -> Option<i32> {
+        (res < 0).then_some(-res)
+    }
+
+    #[inline]
+    fn is_poll_cancellation_errno(errno: i32) -> bool {
+        matches!(errno, libc::ECANCELED | libc::ENOENT)
+    }
+
+    #[inline]
+    fn is_terminal_fd_errno(errno: i32) -> bool {
+        matches!(errno, libc::EBADF | libc::ENODEV)
     }
 
     fn submit_poll_entry(
@@ -621,6 +653,51 @@ mod imp {
                 events.is_empty(),
                 "internal poll-remove completion must not surface as a user event"
             );
+        }
+
+        #[test]
+        fn test_poll_ignores_cancelled_poll_cqe_for_registered_token() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+
+            let (left, _right) = UnixStream::pair().expect("unix stream pair");
+            let key = Token::new(2024);
+            reactor
+                .register(&left, key, Interest::READABLE)
+                .expect("register should succeed");
+
+            // Cancel the in-flight poll op for this token. io_uring reports
+            // the cancelled CQE with the original token user_data.
+            reactor
+                .submit_poll_remove(key)
+                .expect("poll remove submission should succeed");
+
+            let mut saw_error = false;
+            let mut events = Events::with_capacity(8);
+            for _ in 0..4 {
+                reactor
+                    .poll(&mut events, Some(Duration::from_millis(25)))
+                    .expect("poll should succeed");
+                if events
+                    .iter()
+                    .any(|event| event.token == key && event.ready.is_error())
+                {
+                    saw_error = true;
+                    break;
+                }
+            }
+
+            assert!(
+                !saw_error,
+                "canceled poll CQE must not surface as ERROR readiness for live token"
+            );
+
+            // Re-arm registration after explicit cancellation so cleanup remains valid.
+            reactor
+                .modify(key, Interest::READABLE)
+                .expect("re-arm after cancellation should succeed");
+            reactor.deregister(key).expect("deregister should succeed");
         }
 
         #[test]
