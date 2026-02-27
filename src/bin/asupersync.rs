@@ -3,8 +3,9 @@
 
 use asupersync::Time;
 use asupersync::cli::{
-    CliError, ColorChoice, CommonArgs, ExitCode, Output, OutputFormat, Outputtable,
-    WorkspaceScanReport, parse_color_choice, parse_output_format, scan_workspace,
+    CliError, ColorChoice, CommonArgs, ExitCode, OperatorModelContract, Output, OutputFormat,
+    Outputtable, WorkspaceScanReport, operator_model_contract, parse_color_choice,
+    parse_output_format, scan_workspace,
 };
 use asupersync::trace::{
     CompressionMode, IssueSeverity, ReplayEvent, TRACE_FILE_VERSION, TRACE_MAGIC, TraceFileError,
@@ -227,6 +228,8 @@ struct DoctorArgs {
 enum DoctorCommand {
     /// Scan workspace topology and capability-flow surfaces
     ScanWorkspace(DoctorScanWorkspaceArgs),
+    /// Emit operator personas, missions, and decision loops contract
+    OperatorModel,
 }
 
 #[derive(Args, Debug)]
@@ -532,8 +535,10 @@ fn run_trace(args: TraceArgs, output: &mut Output) -> Result<(), CliError> {
                 CliError::new("output_error", "Failed to write output").detail(e.to_string())
             })?;
             if !valid {
-                return Err(CliError::new("verification_failed", "Trace verification failed")
-                    .exit_code(ExitCode::TEST_FAILURE));
+                return Err(
+                    CliError::new("verification_failed", "Trace verification failed")
+                        .exit_code(ExitCode::TEST_FAILURE),
+                );
             }
             Ok(())
         }
@@ -578,6 +583,7 @@ fn run_lab(args: LabArgs, output: &mut Output) -> Result<(), CliError> {
 fn run_doctor(args: DoctorArgs, output: &mut Output) -> Result<(), CliError> {
     match args.command {
         DoctorCommand::ScanWorkspace(scan_args) => doctor_scan_workspace(&scan_args, output),
+        DoctorCommand::OperatorModel => doctor_operator_model(output),
     }
 }
 
@@ -593,6 +599,14 @@ fn doctor_scan_workspace(
     })?;
 
     output.write(&report).map_err(|err| {
+        CliError::new("output_error", "Failed to write output").detail(err.to_string())
+    })?;
+    Ok(())
+}
+
+fn doctor_operator_model(output: &mut Output) -> Result<(), CliError> {
+    let contract: OperatorModelContract = operator_model_contract();
+    output.write(&contract).map_err(|err| {
         CliError::new("output_error", "Failed to write output").detail(err.to_string())
     })?;
     Ok(())
@@ -1261,9 +1275,20 @@ fn compute_duration_nanos(reader: &mut TraceReader) -> Result<Option<u64>, Trace
     let mut min: Option<u64> = None;
     let mut max: Option<u64> = None;
     while let Some(event) = reader.read_event()? {
-        if let Some(time) = replay_event_time_nanos(&event) {
-            min = Some(min.map_or(time, |prev| prev.min(time)));
-            max = Some(max.map_or(time, |prev| prev.max(time)));
+        match event {
+            ReplayEvent::TimeAdvanced {
+                from_nanos,
+                to_nanos,
+                ..
+            } => {
+                min = Some(min.map_or(from_nanos, |prev| prev.min(from_nanos)));
+                max = Some(max.map_or(to_nanos, |prev| prev.max(to_nanos)));
+            }
+            ReplayEvent::Checkpoint { time_nanos, .. } => {
+                min = Some(min.map_or(time_nanos, |prev| prev.min(time_nanos)));
+                max = Some(max.map_or(time_nanos, |prev| prev.max(time_nanos)));
+            }
+            _ => {}
         }
     }
     Ok(match (min, max) {

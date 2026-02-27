@@ -26,6 +26,8 @@ The command emits a `WorkspaceScanReport`.
 {
   "root": "string",
   "workspace_manifest": "string",
+  "scanner_version": "doctor-workspace-scan-v1",
+  "taxonomy_version": "capability-surfaces-v1",
   "members": [
     {
       "name": "string",
@@ -43,7 +45,15 @@ The command emits a `WorkspaceScanReport`.
       "sample_files": ["string"]
     }
   ],
-  "warnings": ["string"]
+  "warnings": ["string"],
+  "events": [
+    {
+      "phase": "string",
+      "level": "info|warn",
+      "message": "string",
+      "path": "string|null"
+    }
+  ]
 }
 ```
 
@@ -80,9 +90,21 @@ Current warning classes:
 - missing member manifest (`member missing Cargo.toml`)
 - missing wildcard base (`wildcard base missing`)
 - unsupported workspace glob form (`unsupported workspace member glob pattern`)
+- malformed workspace arrays (`malformed workspace array`, `unterminated workspace array`)
+- malformed package metadata (`malformed package name field`, `missing package name`)
+
+## Structured Event Semantics
+
+`events` is deterministic and intended for machine-parsed diagnostics.
+
+- `phase` identifies scan step boundaries (`scan_start`, `workspace_manifest`, `member_discovery`, `member_scan`, `scan_complete`).
+- `level` distinguishes informational (`info`) from anomaly (`warn`) records.
+- `path` carries the relevant manifest/member path when available.
+- Event ordering is stable across runs for identical workspace contents.
 
 ## Compatibility Notes
 
 - New fields must be additive and backward-compatible.
 - Existing fields are stable for consumers in doctor track 2.
 - Taxonomy expansion should append new surfaces without renaming existing labels.
+- Event-phase expansion should add new phase labels without changing existing semantics.

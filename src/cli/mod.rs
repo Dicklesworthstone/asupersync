@@ -66,7 +66,11 @@ pub mod signal;
 // Re-export commonly used types
 pub use args::{COMMON_ARGS_HELP, CommonArgs, parse_color_choice, parse_output_format};
 pub use completion::{Completable, CompletionItem, Shell, generate_completions};
-pub use doctor::{CapabilityEdge, WorkspaceMember, WorkspaceScanReport, scan_workspace};
+pub use doctor::{
+    CapabilityEdge, DecisionLoop, DecisionStep, OperatorModelContract, OperatorPersona, ScanEvent,
+    WorkspaceMember, WorkspaceScanReport, operator_model_contract, scan_workspace,
+    validate_operator_model_contract,
+};
 pub use error::{CliError, errors};
 pub use exit::ExitCode;
 pub use output::{ColorChoice, Output, OutputFormat, Outputtable};
@@ -80,7 +84,11 @@ pub use signal::{CancellationToken, Signal, SignalHandler};
 /// ```
 pub mod prelude {
     pub use super::args::{COMMON_ARGS_HELP, CommonArgs};
-    pub use super::doctor::{CapabilityEdge, WorkspaceMember, WorkspaceScanReport, scan_workspace};
+    pub use super::doctor::{
+        CapabilityEdge, DecisionLoop, DecisionStep, OperatorModelContract, OperatorPersona,
+        ScanEvent, WorkspaceMember, WorkspaceScanReport, operator_model_contract, scan_workspace,
+        validate_operator_model_contract,
+    };
     pub use super::error::{CliError, errors};
     pub use super::exit::ExitCode;
     pub use super::output::{ColorChoice, Output, OutputFormat, Outputtable};
