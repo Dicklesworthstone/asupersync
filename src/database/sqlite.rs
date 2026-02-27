@@ -154,6 +154,7 @@ impl SqliteValue {
     pub fn as_real(&self) -> Option<f64> {
         match self {
             Self::Real(v) => Some(*v),
+            #[allow(clippy::cast_precision_loss)]
             Self::Integer(v) => Some(*v as f64),
             _ => None,
         }

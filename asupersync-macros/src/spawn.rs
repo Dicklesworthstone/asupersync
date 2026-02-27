@@ -159,9 +159,10 @@ fn generate_spawn(scope: Option<&Expr>, name: Option<&LitStr>, future: &Expr) ->
         },
     );
 
-    let closure_expr = match future {
-        Expr::Closure(closure) => quote! { #closure },
-        _ => quote! {
+    let closure_expr = if let Expr::Closure(closure) = future {
+        quote! { #closure }
+    } else {
+        quote! {
             |__child_cx| {
                 // Suppress unused warning if cx isn't used in the future
                 let _ = &__child_cx;
@@ -169,7 +170,7 @@ fn generate_spawn(scope: Option<&Expr>, name: Option<&LitStr>, future: &Expr) ->
                     (#future).await
                 }
             }
-        },
+        }
     };
 
     quote! {
