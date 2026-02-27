@@ -357,9 +357,22 @@ impl Notified<'_> {
         if let Some(index) = self.waiter_index {
             if gen_changed {
                 let mut waiters = self.notify.waiters.lock();
+
+                let (was_notified, notified_generation) = if index < waiters.entries.len() {
+                    let entry = &waiters.entries[index];
+                    (entry.notified, entry.generation)
+                } else {
+                    (false, self.initial_generation)
+                };
+
                 waiters.remove(index);
                 self.waiter_index = None;
-                drop(waiters);
+
+                if was_notified && notified_generation == self.initial_generation {
+                    self.notify.pass_baton(waiters);
+                } else {
+                    drop(waiters);
+                }
                 return self.mark_done();
             }
 
@@ -368,9 +381,21 @@ impl Notified<'_> {
             // Re-check generation under lock to prevent baton-loss races.
             let current_gen = self.notify.generation.load(Ordering::Acquire);
             if current_gen != self.initial_generation {
+                let (was_notified, notified_generation) = if index < waiters.entries.len() {
+                    let entry = &waiters.entries[index];
+                    (entry.notified, entry.generation)
+                } else {
+                    (false, self.initial_generation)
+                };
+
                 waiters.remove(index);
                 self.waiter_index = None;
-                drop(waiters);
+
+                if was_notified && notified_generation == self.initial_generation {
+                    self.notify.pass_baton(waiters);
+                } else {
+                    drop(waiters);
+                }
                 return self.mark_done();
             }
 
@@ -443,21 +468,7 @@ impl Drop for Notified<'_> {
 
                     // It was woken by notify_one, but cancelled!
                     // Pass the notification to the next waiter to prevent a lost wakeup.
-                    for entry in &mut waiters.entries {
-                        if !entry.notified && entry.waker.is_some() {
-                            entry.notified = true;
-                            if let Some(waker) = entry.waker.take() {
-                                waiters.active -= 1;
-                                drop(waiters);
-                                waker.wake();
-                                return;
-                            }
-                        }
-                    }
-                    // No active waiter found — re-store the notification.
-                    self.notify
-                        .stored_notifications
-                        .fetch_add(1, Ordering::Release);
+                    self.notify.pass_baton(waiters);
                 }
             }
         }
