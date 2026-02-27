@@ -3,8 +3,9 @@
 
 use asupersync::Time;
 use asupersync::cli::{
-    CliError, ColorChoice, CommonArgs, ExitCode, OperatorModelContract, Output, OutputFormat,
-    Outputtable, ScreenEngineContract, StructuredLoggingContract, WorkspaceScanReport,
+    CliError, ColorChoice, CommonArgs, CoreDiagnosticsReportBundle, ExitCode,
+    OperatorModelContract, Output, OutputFormat, Outputtable, ScreenEngineContract,
+    StructuredLoggingContract, WorkspaceScanReport, core_diagnostics_report_bundle,
     operator_model_contract, parse_color_choice, parse_output_format, scan_workspace,
     screen_engine_contract, structured_logging_contract,
 };
@@ -235,6 +236,8 @@ enum DoctorCommand {
     ScreenContracts,
     /// Emit baseline structured logging contract for doctor flows
     LoggingContract,
+    /// Emit core diagnostics report contract and deterministic fixture bundle
+    ReportContract,
 }
 
 #[derive(Args, Debug)]
@@ -591,6 +594,7 @@ fn run_doctor(args: DoctorArgs, output: &mut Output) -> Result<(), CliError> {
         DoctorCommand::OperatorModel => doctor_operator_model(output),
         DoctorCommand::ScreenContracts => doctor_screen_contracts(output),
         DoctorCommand::LoggingContract => doctor_logging_contract(output),
+        DoctorCommand::ReportContract => doctor_report_contract(output),
     }
 }
 
@@ -630,6 +634,14 @@ fn doctor_screen_contracts(output: &mut Output) -> Result<(), CliError> {
 fn doctor_logging_contract(output: &mut Output) -> Result<(), CliError> {
     let contract: StructuredLoggingContract = structured_logging_contract();
     output.write(&contract).map_err(|err| {
+        CliError::new("output_error", "Failed to write output").detail(err.to_string())
+    })?;
+    Ok(())
+}
+
+fn doctor_report_contract(output: &mut Output) -> Result<(), CliError> {
+    let bundle: CoreDiagnosticsReportBundle = core_diagnostics_report_bundle();
+    output.write(&bundle).map_err(|err| {
         CliError::new("output_error", "Failed to write output").detail(err.to_string())
     })?;
     Ok(())

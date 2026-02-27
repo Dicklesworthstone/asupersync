@@ -67,19 +67,24 @@ pub mod signal;
 pub use args::{COMMON_ARGS_HELP, CommonArgs, parse_color_choice, parse_output_format};
 pub use completion::{Completable, CompletionItem, Shell, generate_completions};
 pub use doctor::{
-    CapabilityEdge, ContractCompatibility, ContractErrorEnvelope, CorrelationPrimitiveSpec,
-    DecisionLoop, DecisionStep, EvidenceIngestionReport, EvidenceProvenance, EvidenceRecord,
-    ExchangeOutcome, IngestionEvent, LoggingFieldSpec, LoggingFlowSpec, MigrationGuidance,
-    OperatorModelContract, OperatorPersona, PayloadField, PayloadSchema, RejectedArtifact,
-    RejectedPayloadLog, RuntimeArtifact, ScanEvent, ScreenContract, ScreenEngineContract,
-    ScreenExchangeEnvelope, ScreenExchangeRequest, StateTransition, StructuredLogEvent,
-    StructuredLoggingContract, WorkspaceMember, WorkspaceScanReport, emit_structured_log_event,
+    CapabilityEdge, ContractCompatibility, ContractErrorEnvelope, CoreDiagnosticsCommand,
+    CoreDiagnosticsEvidence, CoreDiagnosticsFinding, CoreDiagnosticsFixture,
+    CoreDiagnosticsProvenance, CoreDiagnosticsReport, CoreDiagnosticsReportBundle,
+    CoreDiagnosticsReportContract, CoreDiagnosticsSummary, CorrelationPrimitiveSpec, DecisionLoop,
+    DecisionStep, EvidenceIngestionReport, EvidenceProvenance, EvidenceRecord, ExchangeOutcome,
+    IngestionEvent, LoggingFieldSpec, LoggingFlowSpec, MigrationGuidance, OperatorModelContract,
+    OperatorPersona, PayloadField, PayloadSchema, RejectedArtifact, RejectedPayloadLog,
+    RuntimeArtifact, ScanEvent, ScreenContract, ScreenEngineContract, ScreenExchangeEnvelope,
+    ScreenExchangeRequest, StateTransition, StructuredLogEvent, StructuredLoggingContract,
+    WorkspaceMember, WorkspaceScanReport, core_diagnostics_report_bundle,
+    core_diagnostics_report_contract, core_diagnostics_report_fixtures, emit_structured_log_event,
     ingest_runtime_artifacts, is_screen_contract_version_supported, operator_model_contract,
-    run_structured_logging_smoke, scan_workspace, screen_engine_contract, simulate_screen_exchange,
-    structured_logging_contract, validate_evidence_ingestion_report,
-    validate_operator_model_contract, validate_screen_engine_contract,
-    validate_structured_log_event, validate_structured_logging_contract,
-    validate_structured_logging_event_stream,
+    run_core_diagnostics_report_smoke, run_structured_logging_smoke, scan_workspace,
+    screen_engine_contract, simulate_screen_exchange, structured_logging_contract,
+    validate_core_diagnostics_report, validate_core_diagnostics_report_contract,
+    validate_evidence_ingestion_report, validate_operator_model_contract,
+    validate_screen_engine_contract, validate_structured_log_event,
+    validate_structured_logging_contract, validate_structured_logging_event_stream,
 };
 pub use error::{CliError, errors};
 pub use exit::ExitCode;
@@ -95,19 +100,25 @@ pub use signal::{CancellationToken, Signal, SignalHandler};
 pub mod prelude {
     pub use super::args::{COMMON_ARGS_HELP, CommonArgs};
     pub use super::doctor::{
-        CapabilityEdge, ContractCompatibility, ContractErrorEnvelope, CorrelationPrimitiveSpec,
+        CapabilityEdge, ContractCompatibility, ContractErrorEnvelope, CoreDiagnosticsCommand,
+        CoreDiagnosticsEvidence, CoreDiagnosticsFinding, CoreDiagnosticsFixture,
+        CoreDiagnosticsProvenance, CoreDiagnosticsReport, CoreDiagnosticsReportBundle,
+        CoreDiagnosticsReportContract, CoreDiagnosticsSummary, CorrelationPrimitiveSpec,
         DecisionLoop, DecisionStep, EvidenceIngestionReport, EvidenceProvenance, EvidenceRecord,
         ExchangeOutcome, IngestionEvent, LoggingFieldSpec, LoggingFlowSpec, MigrationGuidance,
         OperatorModelContract, OperatorPersona, PayloadField, PayloadSchema, RejectedArtifact,
         RejectedPayloadLog, RuntimeArtifact, ScanEvent, ScreenContract, ScreenEngineContract,
         ScreenExchangeEnvelope, ScreenExchangeRequest, StateTransition, StructuredLogEvent,
-        StructuredLoggingContract, WorkspaceMember, WorkspaceScanReport, emit_structured_log_event,
-        ingest_runtime_artifacts, is_screen_contract_version_supported, operator_model_contract,
-        run_structured_logging_smoke, scan_workspace, screen_engine_contract,
-        simulate_screen_exchange, structured_logging_contract, validate_evidence_ingestion_report,
-        validate_operator_model_contract, validate_screen_engine_contract,
-        validate_structured_log_event, validate_structured_logging_contract,
-        validate_structured_logging_event_stream,
+        StructuredLoggingContract, WorkspaceMember, WorkspaceScanReport,
+        core_diagnostics_report_bundle, core_diagnostics_report_contract,
+        core_diagnostics_report_fixtures, emit_structured_log_event, ingest_runtime_artifacts,
+        is_screen_contract_version_supported, operator_model_contract,
+        run_core_diagnostics_report_smoke, run_structured_logging_smoke, scan_workspace,
+        screen_engine_contract, simulate_screen_exchange, structured_logging_contract,
+        validate_core_diagnostics_report, validate_core_diagnostics_report_contract,
+        validate_evidence_ingestion_report, validate_operator_model_contract,
+        validate_screen_engine_contract, validate_structured_log_event,
+        validate_structured_logging_contract, validate_structured_logging_event_stream,
     };
     pub use super::error::{CliError, errors};
     pub use super::exit::ExitCode;

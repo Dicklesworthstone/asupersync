@@ -566,6 +566,318 @@ pub struct StructuredLogEvent {
     pub fields: BTreeMap<String, String>,
 }
 
+/// Core diagnostics report contract for doctor report consumers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoreDiagnosticsReportContract {
+    /// Contract/schema version for report payloads.
+    pub contract_version: String,
+    /// Required top-level report sections in lexical order.
+    pub required_sections: Vec<String>,
+    /// Required summary fields in lexical order.
+    pub summary_required_fields: Vec<String>,
+    /// Required finding fields in lexical order.
+    pub finding_required_fields: Vec<String>,
+    /// Required evidence fields in lexical order.
+    pub evidence_required_fields: Vec<String>,
+    /// Required command fields in lexical order.
+    pub command_required_fields: Vec<String>,
+    /// Required provenance fields in lexical order.
+    pub provenance_required_fields: Vec<String>,
+    /// Allowed normalized outcome classes in lexical order.
+    pub outcome_classes: Vec<String>,
+    /// Upstream logging contract dependency.
+    pub logging_contract_version: String,
+    /// Upstream evidence-ingestion schema dependency.
+    pub evidence_schema_version: String,
+    /// Compatibility/versioning guidance for readers and writers.
+    pub compatibility: ContractCompatibility,
+    /// Follow-up bead for advanced report-extension semantics.
+    pub advanced_extension_bead: String,
+    /// Cross-system interoperability checks required before full closure.
+    pub integration_gate_beads: Vec<String>,
+}
+
+/// Core diagnostics report payload consumed by baseline TUI/report backends.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoreDiagnosticsReport {
+    /// Report schema version.
+    pub schema_version: String,
+    /// Stable report identifier.
+    pub report_id: String,
+    /// High-level deterministic summary.
+    pub summary: CoreDiagnosticsSummary,
+    /// Findings ordered lexically by `finding_id`.
+    pub findings: Vec<CoreDiagnosticsFinding>,
+    /// Evidence records ordered lexically by `evidence_id`.
+    pub evidence: Vec<CoreDiagnosticsEvidence>,
+    /// Command provenance records ordered lexically by `command_id`.
+    pub commands: Vec<CoreDiagnosticsCommand>,
+    /// Provenance envelope for replay and audit.
+    pub provenance: CoreDiagnosticsProvenance,
+}
+
+/// Deterministic report summary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoreDiagnosticsSummary {
+    /// Summary status (`healthy`, `degraded`, `failed`).
+    pub status: String,
+    /// Normalized top-level outcome class.
+    pub overall_outcome: String,
+    /// Total findings represented in the report.
+    pub total_findings: u32,
+    /// Count of findings with `critical` severity.
+    pub critical_findings: u32,
+}
+
+/// One deterministic finding entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoreDiagnosticsFinding {
+    /// Stable finding identifier.
+    pub finding_id: String,
+    /// Human-readable finding title.
+    pub title: String,
+    /// Severity (`critical`, `high`, `medium`, `low`).
+    pub severity: String,
+    /// Finding status (`open`, `in_progress`, `resolved`).
+    pub status: String,
+    /// Evidence identifiers supporting this finding.
+    pub evidence_refs: Vec<String>,
+    /// Command identifiers used to reproduce/verify this finding.
+    pub command_refs: Vec<String>,
+}
+
+/// One deterministic evidence entry for report rendering.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoreDiagnosticsEvidence {
+    /// Stable evidence identifier.
+    pub evidence_id: String,
+    /// Evidence source label.
+    pub source: String,
+    /// Artifact pointer for deterministic retrieval.
+    pub artifact_pointer: String,
+    /// Replay command/pointer for this evidence item.
+    pub replay_pointer: String,
+    /// Normalized outcome class for this evidence item.
+    pub outcome_class: String,
+    /// FrankenSuite-aligned trace reference.
+    pub franken_trace_id: String,
+}
+
+/// One deterministic command/provenance record.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoreDiagnosticsCommand {
+    /// Stable command identifier.
+    pub command_id: String,
+    /// Shell command issued.
+    pub command: String,
+    /// Tool family (`rch`, `br`, `bv`, `asupersync`, etc).
+    pub tool: String,
+    /// Exit code produced by command execution.
+    pub exit_code: i32,
+    /// Normalized outcome class derived from execution result.
+    pub outcome_class: String,
+}
+
+/// Provenance envelope attached to every diagnostics report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoreDiagnosticsProvenance {
+    /// Deterministic run identifier.
+    pub run_id: String,
+    /// Deterministic scenario identifier.
+    pub scenario_id: String,
+    /// Trace identifier.
+    pub trace_id: String,
+    /// Seed used for deterministic replay.
+    pub seed: String,
+    /// Generator identity for this report.
+    pub generated_by: String,
+    /// Stable timestamp string (typically RFC3339) emitted by generator.
+    pub generated_at: String,
+}
+
+/// Deterministic fixture entry for core diagnostics report validation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoreDiagnosticsFixture {
+    /// Stable fixture identifier.
+    pub fixture_id: String,
+    /// Human-readable fixture description.
+    pub description: String,
+    /// Canonical report payload for this fixture.
+    pub report: CoreDiagnosticsReport,
+}
+
+/// Serializable bundle containing the contract plus deterministic fixtures.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoreDiagnosticsReportBundle {
+    /// Core report contract.
+    pub contract: CoreDiagnosticsReportContract,
+    /// Deterministic fixture set.
+    pub fixtures: Vec<CoreDiagnosticsFixture>,
+}
+
+/// Taxonomy mapping allow-list used by advanced report extensions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvancedDiagnosticsTaxonomyMapping {
+    /// Allowed taxonomy class identifiers.
+    pub class_allowlist: Vec<String>,
+    /// Allowed taxonomy dimension identifiers.
+    pub dimension_allowlist: Vec<String>,
+    /// Allowed taxonomy severity identifiers.
+    pub severity_allowlist: Vec<String>,
+}
+
+/// Advanced diagnostics report extension contract layered on top of core report schema.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvancedDiagnosticsReportExtensionContract {
+    /// Extension contract/schema version.
+    pub contract_version: String,
+    /// Required base core-report contract version.
+    pub base_contract_version: String,
+    /// Required advanced observability taxonomy contract version.
+    pub taxonomy_contract_version: String,
+    /// Required extension sections in lexical order.
+    pub required_extension_sections: Vec<String>,
+    /// Required remediation-delta fields in lexical order.
+    pub remediation_delta_required_fields: Vec<String>,
+    /// Required trust-transition fields in lexical order.
+    pub trust_transition_required_fields: Vec<String>,
+    /// Required collaboration-trail fields in lexical order.
+    pub collaboration_required_fields: Vec<String>,
+    /// Required troubleshooting-playbook fields in lexical order.
+    pub playbook_required_fields: Vec<String>,
+    /// Allowed normalized outcome classes in lexical order.
+    pub outcome_classes: Vec<String>,
+    /// Mapping constraints to advanced taxonomy outputs.
+    pub taxonomy_mapping: AdvancedDiagnosticsTaxonomyMapping,
+    /// Compatibility/versioning guidance.
+    pub compatibility: ContractCompatibility,
+    /// Integration handoff bead for full cross-system validation.
+    pub integration_handoff_bead: String,
+}
+
+/// Advanced extension payload linked to one base core diagnostics report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvancedDiagnosticsReportExtension {
+    /// Extension schema version.
+    pub schema_version: String,
+    /// Base report identifier this extension augments.
+    pub base_report_id: String,
+    /// Base report schema version.
+    pub base_report_schema_version: String,
+    /// Remediation deltas ordered lexically by `delta_id`.
+    pub remediation_deltas: Vec<AdvancedRemediationDelta>,
+    /// Trust transitions ordered lexically by `transition_id`.
+    pub trust_transitions: Vec<AdvancedTrustTransition>,
+    /// Collaboration/audit trail ordered lexically by `entry_id`.
+    pub collaboration_trail: Vec<AdvancedCollaborationEntry>,
+    /// Troubleshooting playbooks ordered lexically by `playbook_id`.
+    pub troubleshooting_playbooks: Vec<AdvancedTroubleshootingPlaybook>,
+}
+
+/// One remediation delta tied to a core finding and taxonomy semantics.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvancedRemediationDelta {
+    /// Stable remediation-delta identifier.
+    pub delta_id: String,
+    /// Target finding in base report.
+    pub finding_id: String,
+    /// Previous finding status.
+    pub previous_status: String,
+    /// New finding status.
+    pub next_status: String,
+    /// Normalized outcome class for this delta.
+    pub delta_outcome: String,
+    /// Linked advanced taxonomy class id.
+    pub mapped_taxonomy_class: String,
+    /// Linked advanced taxonomy dimension id.
+    pub mapped_taxonomy_dimension: String,
+    /// Supporting evidence references from base report.
+    pub verification_evidence_refs: Vec<String>,
+}
+
+/// One trust-score transition entry for report trust evolution semantics.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvancedTrustTransition {
+    /// Stable transition identifier.
+    pub transition_id: String,
+    /// Transition stage label.
+    pub stage: String,
+    /// Previous trust score (`0..=100`).
+    pub previous_score: u8,
+    /// Next trust score (`0..=100`).
+    pub next_score: u8,
+    /// Normalized outcome class.
+    pub outcome_class: String,
+    /// Linked advanced taxonomy severity.
+    pub mapped_taxonomy_severity: String,
+    /// Human-readable transition rationale.
+    pub rationale: String,
+}
+
+/// One collaboration/audit-trail entry for cross-agent provenance context.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvancedCollaborationEntry {
+    /// Stable collaboration entry identifier.
+    pub entry_id: String,
+    /// Channel (`agent_mail`, `beads`, `doctor_cli`, ...).
+    pub channel: String,
+    /// Actor identifier.
+    pub actor: String,
+    /// Action summary.
+    pub action: String,
+    /// Linked thread identifier.
+    pub thread_id: String,
+    /// Linked message reference id.
+    pub message_ref: String,
+    /// Linked bead identifier.
+    pub bead_ref: String,
+    /// Linked taxonomy narrative snippet.
+    pub mapped_taxonomy_narrative: String,
+}
+
+/// Troubleshooting playbook guidance entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvancedTroubleshootingPlaybook {
+    /// Stable playbook identifier.
+    pub playbook_id: String,
+    /// Human-readable playbook title.
+    pub title: String,
+    /// Triggering taxonomy class id.
+    pub trigger_taxonomy_class: String,
+    /// Triggering taxonomy severity id.
+    pub trigger_taxonomy_severity: String,
+    /// Ordered deterministic playbook steps.
+    pub ordered_steps: Vec<String>,
+    /// Referenced base-report command ids.
+    pub command_refs: Vec<String>,
+    /// Referenced base-report evidence ids.
+    pub evidence_refs: Vec<String>,
+}
+
+/// Deterministic fixture entry pairing base core report with advanced extension payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvancedDiagnosticsFixture {
+    /// Stable fixture identifier.
+    pub fixture_id: String,
+    /// Human-readable fixture description.
+    pub description: String,
+    /// Base core-report payload.
+    pub core_report: CoreDiagnosticsReport,
+    /// Advanced extension payload.
+    pub extension: AdvancedDiagnosticsReportExtension,
+}
+
+/// Serializable advanced-report bundle for validation/smoke/e2e flows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvancedDiagnosticsReportBundle {
+    /// Core report contract dependency.
+    pub core_contract: CoreDiagnosticsReportContract,
+    /// Advanced extension contract.
+    pub extension_contract: AdvancedDiagnosticsReportExtensionContract,
+    /// Deterministic fixture set.
+    pub fixtures: Vec<AdvancedDiagnosticsFixture>,
+}
+
 impl Outputtable for WorkspaceScanReport {
     fn human_format(&self) -> String {
         let mut lines = Vec::new();
@@ -702,6 +1014,106 @@ impl Outputtable for StructuredLoggingContract {
     }
 }
 
+impl Outputtable for CoreDiagnosticsReportContract {
+    fn human_format(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("Contract version: {}", self.contract_version));
+        lines.push(format!(
+            "Required sections: {}",
+            self.required_sections.join(", ")
+        ));
+        lines.push(format!(
+            "Logging contract: {}",
+            self.logging_contract_version
+        ));
+        lines.push(format!("Evidence schema: {}", self.evidence_schema_version));
+        lines.push(format!(
+            "Advanced extension bead: {}",
+            self.advanced_extension_bead
+        ));
+        lines.push(format!(
+            "Integration gates: {}",
+            self.integration_gate_beads.join(", ")
+        ));
+        lines.join("\n")
+    }
+}
+
+impl Outputtable for CoreDiagnosticsReportBundle {
+    fn human_format(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(self.contract.human_format());
+        lines.push(format!("Fixtures: {}", self.fixtures.len()));
+        for fixture in &self.fixtures {
+            lines.push(format!(
+                "- {} [{}] findings={} evidence={} commands={}",
+                fixture.fixture_id,
+                fixture.report.summary.overall_outcome,
+                fixture.report.findings.len(),
+                fixture.report.evidence.len(),
+                fixture.report.commands.len()
+            ));
+        }
+        lines.join("\n")
+    }
+}
+
+impl Outputtable for AdvancedDiagnosticsReportExtensionContract {
+    fn human_format(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("Contract version: {}", self.contract_version));
+        lines.push(format!(
+            "Base contract version: {}",
+            self.base_contract_version
+        ));
+        lines.push(format!(
+            "Taxonomy contract version: {}",
+            self.taxonomy_contract_version
+        ));
+        lines.push(format!(
+            "Required extension sections: {}",
+            self.required_extension_sections.join(", ")
+        ));
+        lines.push(format!(
+            "Taxonomy classes: {}",
+            self.taxonomy_mapping.class_allowlist.join(", ")
+        ));
+        lines.push(format!(
+            "Taxonomy dimensions: {}",
+            self.taxonomy_mapping.dimension_allowlist.join(", ")
+        ));
+        lines.push(format!(
+            "Taxonomy severities: {}",
+            self.taxonomy_mapping.severity_allowlist.join(", ")
+        ));
+        lines.push(format!(
+            "Integration handoff bead: {}",
+            self.integration_handoff_bead
+        ));
+        lines.join("\n")
+    }
+}
+
+impl Outputtable for AdvancedDiagnosticsReportBundle {
+    fn human_format(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(self.extension_contract.human_format());
+        lines.push(format!("Fixtures: {}", self.fixtures.len()));
+        for fixture in &self.fixtures {
+            lines.push(format!(
+                "- {} [{}] deltas={} trust={} collab={} playbooks={}",
+                fixture.fixture_id,
+                fixture.core_report.summary.overall_outcome,
+                fixture.extension.remediation_deltas.len(),
+                fixture.extension.trust_transitions.len(),
+                fixture.extension.collaboration_trail.len(),
+                fixture.extension.troubleshooting_playbooks.len()
+            ));
+        }
+        lines.join("\n")
+    }
+}
+
 impl Outputtable for VisualLanguageContract {
     fn human_format(&self) -> String {
         let mut lines = Vec::new();
@@ -810,6 +1222,8 @@ const OPERATOR_MODEL_VERSION: &str = "doctor-operator-model-v1";
 const SCREEN_ENGINE_CONTRACT_VERSION: &str = "doctor-screen-engine-v1";
 const EVIDENCE_SCHEMA_VERSION: &str = "doctor-evidence-v1";
 const STRUCTURED_LOGGING_CONTRACT_VERSION: &str = "doctor-logging-v1";
+const CORE_DIAGNOSTICS_REPORT_VERSION: &str = "doctor-core-report-v1";
+const ADVANCED_DIAGNOSTICS_REPORT_VERSION: &str = "doctor-advanced-report-v1";
 const VISUAL_LANGUAGE_VERSION: &str = "doctor-visual-language-v1";
 const DEFAULT_VISUAL_VIEWPORT_WIDTH: u16 = 132;
 const DEFAULT_VISUAL_VIEWPORT_HEIGHT: u16 = 44;
@@ -3093,10 +3507,8 @@ pub fn validate_structured_logging_event_stream(
     }
 
     let mut last_key: Option<(String, String, String)> = None;
-    let mut seen_flows = BTreeSet::new();
     for event in events {
         validate_structured_log_event(contract, event)?;
-        seen_flows.insert(event.flow_id.clone());
 
         let ordering_key = (
             event.flow_id.clone(),
@@ -3113,13 +3525,1466 @@ pub fn validate_structured_logging_event_stream(
         last_key = Some(ordering_key);
     }
 
-    for required in ["execution", "integration", "remediation", "replay"] {
-        if !seen_flows.contains(required) {
-            return Err(format!("event stream missing flow {required}"));
+    Ok(())
+}
+
+/// Returns the canonical core diagnostics-report contract.
+#[must_use]
+pub fn core_diagnostics_report_contract() -> CoreDiagnosticsReportContract {
+    CoreDiagnosticsReportContract {
+        contract_version: CORE_DIAGNOSTICS_REPORT_VERSION.to_string(),
+        required_sections: vec![
+            "commands".to_string(),
+            "evidence".to_string(),
+            "findings".to_string(),
+            "provenance".to_string(),
+            "summary".to_string(),
+        ],
+        summary_required_fields: vec![
+            "critical_findings".to_string(),
+            "overall_outcome".to_string(),
+            "status".to_string(),
+            "total_findings".to_string(),
+        ],
+        finding_required_fields: vec![
+            "command_refs".to_string(),
+            "evidence_refs".to_string(),
+            "finding_id".to_string(),
+            "severity".to_string(),
+            "status".to_string(),
+            "title".to_string(),
+        ],
+        evidence_required_fields: vec![
+            "artifact_pointer".to_string(),
+            "evidence_id".to_string(),
+            "franken_trace_id".to_string(),
+            "outcome_class".to_string(),
+            "replay_pointer".to_string(),
+            "source".to_string(),
+        ],
+        command_required_fields: vec![
+            "command".to_string(),
+            "command_id".to_string(),
+            "exit_code".to_string(),
+            "outcome_class".to_string(),
+            "tool".to_string(),
+        ],
+        provenance_required_fields: vec![
+            "generated_at".to_string(),
+            "generated_by".to_string(),
+            "run_id".to_string(),
+            "scenario_id".to_string(),
+            "seed".to_string(),
+            "trace_id".to_string(),
+        ],
+        outcome_classes: vec![
+            "cancelled".to_string(),
+            "failed".to_string(),
+            "success".to_string(),
+        ],
+        logging_contract_version: STRUCTURED_LOGGING_CONTRACT_VERSION.to_string(),
+        evidence_schema_version: EVIDENCE_SCHEMA_VERSION.to_string(),
+        compatibility: ContractCompatibility {
+            minimum_reader_version: CORE_DIAGNOSTICS_REPORT_VERSION.to_string(),
+            supported_reader_versions: vec![CORE_DIAGNOSTICS_REPORT_VERSION.to_string()],
+            migration_guidance: vec![MigrationGuidance {
+                from_version: "doctor-core-report-v0".to_string(),
+                to_version: CORE_DIAGNOSTICS_REPORT_VERSION.to_string(),
+                breaking: false,
+                required_actions: vec![
+                    "Fail validation when report lists are not lexically ordered.".to_string(),
+                    "Preserve command/evidence pointers exactly for deterministic replay."
+                        .to_string(),
+                    "Treat summary/findings/evidence/commands/provenance as required sections."
+                        .to_string(),
+                ],
+            }],
+        },
+        advanced_extension_bead: "asupersync-2b4jj.5.8".to_string(),
+        integration_gate_beads: vec![
+            "asupersync-2b4jj.5.3".to_string(),
+            "asupersync-2b4jj.5.5".to_string(),
+        ],
+    }
+}
+
+/// Validates invariants for [`CoreDiagnosticsReportContract`].
+///
+/// # Errors
+///
+/// Returns `Err` when ordering, schema, or compatibility invariants are violated.
+pub fn validate_core_diagnostics_report_contract(
+    contract: &CoreDiagnosticsReportContract,
+) -> Result<(), String> {
+    if contract.contract_version != CORE_DIAGNOSTICS_REPORT_VERSION {
+        return Err(format!(
+            "unexpected contract_version {}",
+            contract.contract_version
+        ));
+    }
+    validate_lexical_string_set(&contract.required_sections, "required_sections")?;
+    for section in ["commands", "evidence", "findings", "provenance", "summary"] {
+        if !contract
+            .required_sections
+            .iter()
+            .any(|candidate| candidate == section)
+        {
+            return Err(format!("required_sections missing {section}"));
+        }
+    }
+    validate_lexical_string_set(&contract.summary_required_fields, "summary_required_fields")?;
+    validate_lexical_string_set(&contract.finding_required_fields, "finding_required_fields")?;
+    validate_lexical_string_set(
+        &contract.evidence_required_fields,
+        "evidence_required_fields",
+    )?;
+    validate_lexical_string_set(&contract.command_required_fields, "command_required_fields")?;
+    validate_lexical_string_set(
+        &contract.provenance_required_fields,
+        "provenance_required_fields",
+    )?;
+    validate_lexical_string_set(&contract.outcome_classes, "outcome_classes")?;
+    for required in ["cancelled", "failed", "success"] {
+        if !contract
+            .outcome_classes
+            .iter()
+            .any(|candidate| candidate == required)
+        {
+            return Err(format!("outcome_classes missing required value {required}"));
+        }
+    }
+    if contract.logging_contract_version != STRUCTURED_LOGGING_CONTRACT_VERSION {
+        return Err(format!(
+            "unexpected logging_contract_version {}",
+            contract.logging_contract_version
+        ));
+    }
+    if contract.evidence_schema_version != EVIDENCE_SCHEMA_VERSION {
+        return Err(format!(
+            "unexpected evidence_schema_version {}",
+            contract.evidence_schema_version
+        ));
+    }
+    if contract.advanced_extension_bead != "asupersync-2b4jj.5.8" {
+        return Err("advanced_extension_bead must reference asupersync-2b4jj.5.8".to_string());
+    }
+    validate_lexical_string_set(&contract.integration_gate_beads, "integration_gate_beads")?;
+    for required in ["asupersync-2b4jj.5.3", "asupersync-2b4jj.5.5"] {
+        if !contract
+            .integration_gate_beads
+            .iter()
+            .any(|candidate| candidate == required)
+        {
+            return Err(format!(
+                "integration_gate_beads missing required value {required}"
+            ));
         }
     }
 
+    if contract
+        .compatibility
+        .minimum_reader_version
+        .trim()
+        .is_empty()
+    {
+        return Err("compatibility.minimum_reader_version must be non-empty".to_string());
+    }
+    validate_lexical_string_set(
+        &contract.compatibility.supported_reader_versions,
+        "compatibility.supported_reader_versions",
+    )?;
+    if !contract
+        .compatibility
+        .supported_reader_versions
+        .iter()
+        .any(|version| version == &contract.compatibility.minimum_reader_version)
+    {
+        return Err("minimum_reader_version missing from supported_reader_versions".to_string());
+    }
+    for (index, guidance) in contract.compatibility.migration_guidance.iter().enumerate() {
+        if guidance.from_version.trim().is_empty() || guidance.to_version.trim().is_empty() {
+            return Err(format!(
+                "migration_guidance[{index}] has empty from/to version"
+            ));
+        }
+        validate_lexical_string_set(
+            &guidance.required_actions,
+            &format!("migration_guidance[{index}].required_actions"),
+        )?;
+    }
     Ok(())
+}
+
+/// Validates one [`CoreDiagnosticsReport`] against the contract.
+///
+/// # Errors
+///
+/// Returns `Err` when required fields, ordering, or reference integrity fail.
+#[allow(clippy::too_many_lines)]
+pub fn validate_core_diagnostics_report(
+    report: &CoreDiagnosticsReport,
+    contract: &CoreDiagnosticsReportContract,
+) -> Result<(), String> {
+    validate_core_diagnostics_report_contract(contract)?;
+
+    if report.schema_version != contract.contract_version {
+        return Err(format!(
+            "report schema_version {} does not match contract {}",
+            report.schema_version, contract.contract_version
+        ));
+    }
+    if !report.report_id.starts_with("doctor-report-") || !is_slug_like(&report.report_id) {
+        return Err("report_id must match doctor-report-* slug format".to_string());
+    }
+    if report.summary.status.trim().is_empty() {
+        return Err("summary.status must be non-empty".to_string());
+    }
+    if !["degraded", "failed", "healthy"]
+        .iter()
+        .any(|candidate| candidate == &report.summary.status.as_str())
+    {
+        return Err("summary.status must be one of degraded|failed|healthy".to_string());
+    }
+    if !contract
+        .outcome_classes
+        .iter()
+        .any(|candidate| candidate == &report.summary.overall_outcome)
+    {
+        return Err(format!(
+            "summary.overall_outcome {} is not supported",
+            report.summary.overall_outcome
+        ));
+    }
+    if report.summary.total_findings != report.findings.len() as u32 {
+        return Err("summary.total_findings must match findings length".to_string());
+    }
+    let computed_critical = report
+        .findings
+        .iter()
+        .filter(|finding| finding.severity == "critical")
+        .count() as u32;
+    if report.summary.critical_findings != computed_critical {
+        return Err("summary.critical_findings must match critical findings count".to_string());
+    }
+
+    let finding_ids = report
+        .findings
+        .iter()
+        .map(|finding| finding.finding_id.clone())
+        .collect::<Vec<_>>();
+    if !finding_ids.is_empty() {
+        validate_lexical_string_set(&finding_ids, "findings.finding_id")?;
+    }
+
+    let evidence_ids = report
+        .evidence
+        .iter()
+        .map(|evidence| evidence.evidence_id.clone())
+        .collect::<Vec<_>>();
+    if !evidence_ids.is_empty() {
+        validate_lexical_string_set(&evidence_ids, "evidence.evidence_id")?;
+    }
+
+    let command_ids = report
+        .commands
+        .iter()
+        .map(|command| command.command_id.clone())
+        .collect::<Vec<_>>();
+    if !command_ids.is_empty() {
+        validate_lexical_string_set(&command_ids, "commands.command_id")?;
+    }
+
+    let evidence_set = evidence_ids.iter().collect::<BTreeSet<_>>();
+    let command_set = command_ids.iter().collect::<BTreeSet<_>>();
+
+    for finding in &report.findings {
+        if finding.title.trim().is_empty() {
+            return Err(format!(
+                "finding {} title must be non-empty",
+                finding.finding_id
+            ));
+        }
+        if !["critical", "high", "low", "medium"]
+            .iter()
+            .any(|candidate| candidate == &finding.severity.as_str())
+        {
+            return Err(format!(
+                "finding {} has unsupported severity {}",
+                finding.finding_id, finding.severity
+            ));
+        }
+        if !["in_progress", "open", "resolved"]
+            .iter()
+            .any(|candidate| candidate == &finding.status.as_str())
+        {
+            return Err(format!(
+                "finding {} has unsupported status {}",
+                finding.finding_id, finding.status
+            ));
+        }
+        validate_lexical_string_set(
+            &finding.evidence_refs,
+            &format!("finding {} evidence_refs", finding.finding_id),
+        )?;
+        validate_lexical_string_set(
+            &finding.command_refs,
+            &format!("finding {} command_refs", finding.finding_id),
+        )?;
+        for evidence_ref in &finding.evidence_refs {
+            if !evidence_set.contains(evidence_ref) {
+                return Err(format!(
+                    "finding {} references unknown evidence {}",
+                    finding.finding_id, evidence_ref
+                ));
+            }
+        }
+        for command_ref in &finding.command_refs {
+            if !command_set.contains(command_ref) {
+                return Err(format!(
+                    "finding {} references unknown command {}",
+                    finding.finding_id, command_ref
+                ));
+            }
+        }
+    }
+
+    for evidence in &report.evidence {
+        if evidence.source.trim().is_empty()
+            || evidence.artifact_pointer.trim().is_empty()
+            || evidence.replay_pointer.trim().is_empty()
+        {
+            return Err(format!(
+                "evidence {} must define source/artifact_pointer/replay_pointer",
+                evidence.evidence_id
+            ));
+        }
+        if !contract
+            .outcome_classes
+            .iter()
+            .any(|candidate| candidate == &evidence.outcome_class)
+        {
+            return Err(format!(
+                "evidence {} has unsupported outcome_class {}",
+                evidence.evidence_id, evidence.outcome_class
+            ));
+        }
+        if !evidence.franken_trace_id.starts_with("trace-")
+            || !is_slug_like(&evidence.franken_trace_id)
+        {
+            return Err(format!(
+                "evidence {} franken_trace_id must match trace-* slug format",
+                evidence.evidence_id
+            ));
+        }
+    }
+
+    for command in &report.commands {
+        if command.command.trim().is_empty() || command.tool.trim().is_empty() {
+            return Err(format!(
+                "command {} must define command/tool",
+                command.command_id
+            ));
+        }
+        if command.command.contains('\n') || command.command.contains('\r') {
+            return Err(format!(
+                "command {} must be single-line",
+                command.command_id
+            ));
+        }
+        if !is_slug_like(&command.tool) {
+            return Err(format!(
+                "command {} tool must be slug-like",
+                command.command_id
+            ));
+        }
+        if !contract
+            .outcome_classes
+            .iter()
+            .any(|candidate| candidate == &command.outcome_class)
+        {
+            return Err(format!(
+                "command {} has unsupported outcome_class {}",
+                command.command_id, command.outcome_class
+            ));
+        }
+    }
+
+    if !report.provenance.run_id.starts_with("run-") || !is_slug_like(&report.provenance.run_id) {
+        return Err("provenance.run_id must match run-* slug format".to_string());
+    }
+    if !is_slug_like(&report.provenance.scenario_id) {
+        return Err("provenance.scenario_id must be slug-like".to_string());
+    }
+    if !report.provenance.trace_id.starts_with("trace-")
+        || !is_slug_like(&report.provenance.trace_id)
+    {
+        return Err("provenance.trace_id must match trace-* slug format".to_string());
+    }
+    if report.provenance.seed.trim().is_empty()
+        || report.provenance.generated_by.trim().is_empty()
+        || report.provenance.generated_at.trim().is_empty()
+    {
+        return Err("provenance seed/generated_by/generated_at must be non-empty".to_string());
+    }
+    if !report.provenance.generated_at.contains('T') {
+        return Err("provenance.generated_at must be RFC3339-like".to_string());
+    }
+
+    Ok(())
+}
+
+/// Returns deterministic core-report fixtures for happy/partial/failure paths.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn core_diagnostics_report_fixtures() -> Vec<CoreDiagnosticsFixture> {
+    vec![
+        CoreDiagnosticsFixture {
+            fixture_id: "baseline_failure_path".to_string(),
+            description:
+                "Baseline failure fixture with critical finding and failed gate evidence."
+                    .to_string(),
+            report: CoreDiagnosticsReport {
+                schema_version: CORE_DIAGNOSTICS_REPORT_VERSION.to_string(),
+                report_id: "doctor-report-failure-v1".to_string(),
+                summary: CoreDiagnosticsSummary {
+                    status: "failed".to_string(),
+                    overall_outcome: "failed".to_string(),
+                    total_findings: 2,
+                    critical_findings: 1,
+                },
+                findings: vec![
+                    CoreDiagnosticsFinding {
+                        finding_id: "finding-001".to_string(),
+                        title: "Obligation leak during shutdown path".to_string(),
+                        severity: "critical".to_string(),
+                        status: "open".to_string(),
+                        evidence_refs: vec!["evidence-001".to_string()],
+                        command_refs: vec!["command-001".to_string()],
+                    },
+                    CoreDiagnosticsFinding {
+                        finding_id: "finding-002".to_string(),
+                        title: "Replay mismatch for cancellation timeline".to_string(),
+                        severity: "high".to_string(),
+                        status: "in_progress".to_string(),
+                        evidence_refs: vec!["evidence-002".to_string()],
+                        command_refs: vec!["command-002".to_string()],
+                    },
+                ],
+                evidence: vec![
+                    CoreDiagnosticsEvidence {
+                        evidence_id: "evidence-001".to_string(),
+                        source: "structured_log".to_string(),
+                        artifact_pointer: "artifacts/run-doctor-failure/doctor/core-report/finding-001.json".to_string(),
+                        replay_pointer:
+                            "rch exec -- cargo test -p asupersync -- obligation_leak".to_string(),
+                        outcome_class: "failed".to_string(),
+                        franken_trace_id: "trace-franken-failure-001".to_string(),
+                    },
+                    CoreDiagnosticsEvidence {
+                        evidence_id: "evidence-002".to_string(),
+                        source: "trace".to_string(),
+                        artifact_pointer:
+                            "artifacts/run-doctor-failure/doctor/core-report/trace-002.json"
+                                .to_string(),
+                        replay_pointer:
+                            "asupersync trace verify artifacts/run-doctor-failure/trace-002.bin"
+                                .to_string(),
+                        outcome_class: "failed".to_string(),
+                        franken_trace_id: "trace-franken-failure-002".to_string(),
+                    },
+                ],
+                commands: vec![
+                    CoreDiagnosticsCommand {
+                        command_id: "command-001".to_string(),
+                        command:
+                            "rch exec -- cargo test -p asupersync obligation_leak -- --nocapture"
+                                .to_string(),
+                        tool: "rch".to_string(),
+                        exit_code: 101,
+                        outcome_class: "failed".to_string(),
+                    },
+                    CoreDiagnosticsCommand {
+                        command_id: "command-002".to_string(),
+                        command:
+                            "asupersync trace verify artifacts/run-doctor-failure/trace-002.bin"
+                                .to_string(),
+                        tool: "asupersync".to_string(),
+                        exit_code: 2,
+                        outcome_class: "failed".to_string(),
+                    },
+                ],
+                provenance: CoreDiagnosticsProvenance {
+                    run_id: "run-doctor-failure".to_string(),
+                    scenario_id: "doctor-core-report-failure".to_string(),
+                    trace_id: "trace-doctor-failure".to_string(),
+                    seed: "1337".to_string(),
+                    generated_by: "doctor_asupersync".to_string(),
+                    generated_at: "2026-02-26T06:00:00Z".to_string(),
+                },
+            },
+        },
+        CoreDiagnosticsFixture {
+            fixture_id: "happy_path".to_string(),
+            description: "Healthy baseline fixture with deterministic replay-ready artifacts."
+                .to_string(),
+            report: CoreDiagnosticsReport {
+                schema_version: CORE_DIAGNOSTICS_REPORT_VERSION.to_string(),
+                report_id: "doctor-report-happy-v1".to_string(),
+                summary: CoreDiagnosticsSummary {
+                    status: "healthy".to_string(),
+                    overall_outcome: "success".to_string(),
+                    total_findings: 1,
+                    critical_findings: 0,
+                },
+                findings: vec![CoreDiagnosticsFinding {
+                    finding_id: "finding-010".to_string(),
+                    title: "Baseline diagnostics fixture coverage verified".to_string(),
+                    severity: "low".to_string(),
+                    status: "resolved".to_string(),
+                    evidence_refs: vec!["evidence-010".to_string()],
+                    command_refs: vec!["command-010".to_string()],
+                }],
+                evidence: vec![CoreDiagnosticsEvidence {
+                    evidence_id: "evidence-010".to_string(),
+                    source: "benchmark".to_string(),
+                    artifact_pointer:
+                        "artifacts/run-doctor-happy/doctor/core-report/benchmark-010.json"
+                            .to_string(),
+                    replay_pointer:
+                        "rch exec -- cargo test -p asupersync doctor_core_report_smoke"
+                            .to_string(),
+                    outcome_class: "success".to_string(),
+                    franken_trace_id: "trace-franken-happy-010".to_string(),
+                }],
+                commands: vec![CoreDiagnosticsCommand {
+                    command_id: "command-010".to_string(),
+                    command:
+                        "rch exec -- cargo test -p asupersync doctor_core_report_smoke -- --nocapture"
+                            .to_string(),
+                    tool: "rch".to_string(),
+                    exit_code: 0,
+                    outcome_class: "success".to_string(),
+                }],
+                provenance: CoreDiagnosticsProvenance {
+                    run_id: "run-doctor-happy".to_string(),
+                    scenario_id: "doctor-core-report-happy".to_string(),
+                    trace_id: "trace-doctor-happy".to_string(),
+                    seed: "2026".to_string(),
+                    generated_by: "doctor_asupersync".to_string(),
+                    generated_at: "2026-02-26T06:01:00Z".to_string(),
+                },
+            },
+        },
+        CoreDiagnosticsFixture {
+            fixture_id: "partial_data_path".to_string(),
+            description:
+                "Partial-data fixture with cancelled outcome and minimal still-valid envelope."
+                    .to_string(),
+            report: CoreDiagnosticsReport {
+                schema_version: CORE_DIAGNOSTICS_REPORT_VERSION.to_string(),
+                report_id: "doctor-report-partial-v1".to_string(),
+                summary: CoreDiagnosticsSummary {
+                    status: "degraded".to_string(),
+                    overall_outcome: "cancelled".to_string(),
+                    total_findings: 0,
+                    critical_findings: 0,
+                },
+                findings: Vec::new(),
+                evidence: vec![CoreDiagnosticsEvidence {
+                    evidence_id: "evidence-020".to_string(),
+                    source: "structured_log".to_string(),
+                    artifact_pointer:
+                        "artifacts/run-doctor-partial/doctor/core-report/structured-log-020.json"
+                            .to_string(),
+                    replay_pointer:
+                        "rch exec -- cargo test -p asupersync doctor_partial_report -- --nocapture"
+                            .to_string(),
+                    outcome_class: "cancelled".to_string(),
+                    franken_trace_id: "trace-franken-partial-020".to_string(),
+                }],
+                commands: vec![CoreDiagnosticsCommand {
+                    command_id: "command-020".to_string(),
+                    command:
+                        "rch exec -- cargo test -p asupersync doctor_partial_report -- --nocapture"
+                            .to_string(),
+                    tool: "rch".to_string(),
+                    exit_code: 130,
+                    outcome_class: "cancelled".to_string(),
+                }],
+                provenance: CoreDiagnosticsProvenance {
+                    run_id: "run-doctor-partial".to_string(),
+                    scenario_id: "doctor-core-report-partial".to_string(),
+                    trace_id: "trace-doctor-partial".to_string(),
+                    seed: "777".to_string(),
+                    generated_by: "doctor_asupersync".to_string(),
+                    generated_at: "2026-02-26T06:02:00Z".to_string(),
+                },
+            },
+        },
+    ]
+}
+
+/// Returns a serializable bundle containing contract + deterministic fixtures.
+#[must_use]
+pub fn core_diagnostics_report_bundle() -> CoreDiagnosticsReportBundle {
+    CoreDiagnosticsReportBundle {
+        contract: core_diagnostics_report_contract(),
+        fixtures: core_diagnostics_report_fixtures(),
+    }
+}
+
+/// Runs deterministic core-report fixture smoke and emits structured-log events.
+///
+/// # Errors
+///
+/// Returns `Err` when contract/report validation or log emission fails.
+pub fn run_core_diagnostics_report_smoke(
+    bundle: &CoreDiagnosticsReportBundle,
+    logging_contract: &StructuredLoggingContract,
+) -> Result<Vec<StructuredLogEvent>, String> {
+    validate_core_diagnostics_report_contract(&bundle.contract)?;
+    validate_lexical_string_set(
+        &bundle
+            .fixtures
+            .iter()
+            .map(|fixture| fixture.fixture_id.clone())
+            .collect::<Vec<_>>(),
+        "core diagnostics fixture_id",
+    )?;
+    let mut events = Vec::new();
+    for fixture in &bundle.fixtures {
+        if fixture.description.trim().is_empty() {
+            return Err(format!(
+                "fixture {} must define non-empty description",
+                fixture.fixture_id
+            ));
+        }
+        validate_core_diagnostics_report(&fixture.report, &bundle.contract)?;
+        for flow_id in ["execution", "integration", "remediation", "replay"] {
+            let mut fields = BTreeMap::new();
+            fields.insert(
+                "artifact_pointer".to_string(),
+                format!(
+                    "artifacts/{}/doctor/core-report/{}.json",
+                    fixture.report.provenance.run_id, fixture.fixture_id
+                ),
+            );
+            fields.insert(
+                "command_provenance".to_string(),
+                format!(
+                    "asupersync doctor report-contract --fixture {}",
+                    fixture.fixture_id
+                ),
+            );
+            fields.insert("flow_id".to_string(), flow_id.to_string());
+            fields.insert(
+                "outcome_class".to_string(),
+                fixture.report.summary.overall_outcome.clone(),
+            );
+            fields.insert(
+                "run_id".to_string(),
+                fixture.report.provenance.run_id.clone(),
+            );
+            fields.insert(
+                "scenario_id".to_string(),
+                fixture.report.provenance.scenario_id.clone(),
+            );
+            fields.insert(
+                "trace_id".to_string(),
+                fixture.report.provenance.trace_id.clone(),
+            );
+            let event = emit_structured_log_event(
+                logging_contract,
+                flow_id,
+                "verification_summary",
+                &fields,
+            )?;
+            events.push(event);
+        }
+    }
+    events.sort_by(|left, right| {
+        (
+            left.flow_id.as_str(),
+            left.event_kind.as_str(),
+            left.fields
+                .get("trace_id")
+                .map(String::as_str)
+                .unwrap_or_default(),
+        )
+            .cmp(&(
+                right.flow_id.as_str(),
+                right.event_kind.as_str(),
+                right
+                    .fields
+                    .get("trace_id")
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+            ))
+    });
+    Ok(events)
+}
+
+fn advanced_taxonomy_allowlists() -> (Vec<String>, Vec<String>, Vec<String>) {
+    let taxonomy = crate::observability::diagnostics::advanced_observability_contract();
+    let mut classes = taxonomy
+        .event_classes
+        .iter()
+        .map(|entry| entry.class_id.clone())
+        .collect::<Vec<_>>();
+    classes.sort();
+    classes.dedup();
+    let mut dimensions = taxonomy
+        .troubleshooting_dimensions
+        .iter()
+        .map(|entry| entry.dimension.clone())
+        .collect::<Vec<_>>();
+    dimensions.sort();
+    dimensions.dedup();
+    let mut severities = taxonomy
+        .severity_semantics
+        .iter()
+        .map(|entry| entry.severity.clone())
+        .collect::<Vec<_>>();
+    severities.sort();
+    severities.dedup();
+    (classes, dimensions, severities)
+}
+
+/// Returns the canonical advanced diagnostics-report extension contract.
+#[must_use]
+pub fn advanced_diagnostics_report_extension_contract() -> AdvancedDiagnosticsReportExtensionContract
+{
+    let (class_allowlist, dimension_allowlist, severity_allowlist) = advanced_taxonomy_allowlists();
+    AdvancedDiagnosticsReportExtensionContract {
+        contract_version: ADVANCED_DIAGNOSTICS_REPORT_VERSION.to_string(),
+        base_contract_version: CORE_DIAGNOSTICS_REPORT_VERSION.to_string(),
+        taxonomy_contract_version:
+            crate::observability::diagnostics::ADVANCED_OBSERVABILITY_CONTRACT_VERSION.to_string(),
+        required_extension_sections: vec![
+            "collaboration_trail".to_string(),
+            "remediation_deltas".to_string(),
+            "troubleshooting_playbooks".to_string(),
+            "trust_transitions".to_string(),
+        ],
+        remediation_delta_required_fields: vec![
+            "delta_id".to_string(),
+            "delta_outcome".to_string(),
+            "finding_id".to_string(),
+            "mapped_taxonomy_class".to_string(),
+            "mapped_taxonomy_dimension".to_string(),
+            "next_status".to_string(),
+            "previous_status".to_string(),
+            "verification_evidence_refs".to_string(),
+        ],
+        trust_transition_required_fields: vec![
+            "mapped_taxonomy_severity".to_string(),
+            "next_score".to_string(),
+            "outcome_class".to_string(),
+            "previous_score".to_string(),
+            "rationale".to_string(),
+            "stage".to_string(),
+            "transition_id".to_string(),
+        ],
+        collaboration_required_fields: vec![
+            "action".to_string(),
+            "actor".to_string(),
+            "bead_ref".to_string(),
+            "channel".to_string(),
+            "entry_id".to_string(),
+            "mapped_taxonomy_narrative".to_string(),
+            "message_ref".to_string(),
+            "thread_id".to_string(),
+        ],
+        playbook_required_fields: vec![
+            "command_refs".to_string(),
+            "evidence_refs".to_string(),
+            "ordered_steps".to_string(),
+            "playbook_id".to_string(),
+            "title".to_string(),
+            "trigger_taxonomy_class".to_string(),
+            "trigger_taxonomy_severity".to_string(),
+        ],
+        outcome_classes: vec![
+            "cancelled".to_string(),
+            "failed".to_string(),
+            "success".to_string(),
+        ],
+        taxonomy_mapping: AdvancedDiagnosticsTaxonomyMapping {
+            class_allowlist,
+            dimension_allowlist,
+            severity_allowlist,
+        },
+        compatibility: ContractCompatibility {
+            minimum_reader_version: ADVANCED_DIAGNOSTICS_REPORT_VERSION.to_string(),
+            supported_reader_versions: vec![ADVANCED_DIAGNOSTICS_REPORT_VERSION.to_string()],
+            migration_guidance: vec![MigrationGuidance {
+                from_version: "doctor-advanced-report-v0".to_string(),
+                to_version: ADVANCED_DIAGNOSTICS_REPORT_VERSION.to_string(),
+                breaking: false,
+                required_actions: vec![
+                    "Map extension taxonomy fields to doctor-observability-v1 allowlists."
+                        .to_string(),
+                    "Preserve deterministic lexical ordering for all extension vectors."
+                        .to_string(),
+                    "Validate extension references against base core report ids.".to_string(),
+                ],
+            }],
+        },
+        integration_handoff_bead: "asupersync-2b4jj.5.5".to_string(),
+    }
+}
+
+/// Validates invariants for [`AdvancedDiagnosticsReportExtensionContract`].
+///
+/// # Errors
+///
+/// Returns `Err` when schema, ordering, compatibility, or taxonomy mapping invariants are violated.
+#[allow(clippy::too_many_lines)]
+pub fn validate_advanced_diagnostics_report_extension_contract(
+    contract: &AdvancedDiagnosticsReportExtensionContract,
+) -> Result<(), String> {
+    if contract.contract_version != ADVANCED_DIAGNOSTICS_REPORT_VERSION {
+        return Err(format!(
+            "unexpected advanced contract_version {}",
+            contract.contract_version
+        ));
+    }
+    if contract.base_contract_version != CORE_DIAGNOSTICS_REPORT_VERSION {
+        return Err(format!(
+            "unexpected base_contract_version {}",
+            contract.base_contract_version
+        ));
+    }
+    if contract.taxonomy_contract_version
+        != crate::observability::diagnostics::ADVANCED_OBSERVABILITY_CONTRACT_VERSION
+    {
+        return Err(format!(
+            "unexpected taxonomy_contract_version {}",
+            contract.taxonomy_contract_version
+        ));
+    }
+    validate_lexical_string_set(
+        &contract.required_extension_sections,
+        "required_extension_sections",
+    )?;
+    for required in [
+        "collaboration_trail",
+        "remediation_deltas",
+        "troubleshooting_playbooks",
+        "trust_transitions",
+    ] {
+        if !contract
+            .required_extension_sections
+            .iter()
+            .any(|candidate| candidate == required)
+        {
+            return Err(format!("required_extension_sections missing {required}"));
+        }
+    }
+    validate_lexical_string_set(
+        &contract.remediation_delta_required_fields,
+        "remediation_delta_required_fields",
+    )?;
+    validate_lexical_string_set(
+        &contract.trust_transition_required_fields,
+        "trust_transition_required_fields",
+    )?;
+    validate_lexical_string_set(
+        &contract.collaboration_required_fields,
+        "collaboration_required_fields",
+    )?;
+    validate_lexical_string_set(
+        &contract.playbook_required_fields,
+        "playbook_required_fields",
+    )?;
+    validate_lexical_string_set(&contract.outcome_classes, "outcome_classes")?;
+    for required in ["cancelled", "failed", "success"] {
+        if !contract
+            .outcome_classes
+            .iter()
+            .any(|candidate| candidate == required)
+        {
+            return Err(format!("outcome_classes missing required value {required}"));
+        }
+    }
+
+    validate_lexical_string_set(
+        &contract.taxonomy_mapping.class_allowlist,
+        "taxonomy_mapping.class_allowlist",
+    )?;
+    validate_lexical_string_set(
+        &contract.taxonomy_mapping.dimension_allowlist,
+        "taxonomy_mapping.dimension_allowlist",
+    )?;
+    validate_lexical_string_set(
+        &contract.taxonomy_mapping.severity_allowlist,
+        "taxonomy_mapping.severity_allowlist",
+    )?;
+
+    let (taxonomy_classes, taxonomy_dimensions, taxonomy_severities) =
+        advanced_taxonomy_allowlists();
+    for class in &contract.taxonomy_mapping.class_allowlist {
+        if !taxonomy_classes.iter().any(|candidate| candidate == class) {
+            return Err(format!(
+                "taxonomy class {class} is not defined in advanced taxonomy"
+            ));
+        }
+    }
+    for dimension in &contract.taxonomy_mapping.dimension_allowlist {
+        if !taxonomy_dimensions
+            .iter()
+            .any(|candidate| candidate == dimension)
+        {
+            return Err(format!(
+                "taxonomy dimension {dimension} is not defined in advanced taxonomy"
+            ));
+        }
+    }
+    for severity in &contract.taxonomy_mapping.severity_allowlist {
+        if !taxonomy_severities
+            .iter()
+            .any(|candidate| candidate == severity)
+        {
+            return Err(format!(
+                "taxonomy severity {severity} is not defined in advanced taxonomy"
+            ));
+        }
+    }
+
+    if contract
+        .compatibility
+        .minimum_reader_version
+        .trim()
+        .is_empty()
+    {
+        return Err("compatibility.minimum_reader_version must be non-empty".to_string());
+    }
+    validate_lexical_string_set(
+        &contract.compatibility.supported_reader_versions,
+        "compatibility.supported_reader_versions",
+    )?;
+    if !contract
+        .compatibility
+        .supported_reader_versions
+        .iter()
+        .any(|version| version == &contract.compatibility.minimum_reader_version)
+    {
+        return Err("minimum_reader_version missing from supported_reader_versions".to_string());
+    }
+    for (index, guidance) in contract.compatibility.migration_guidance.iter().enumerate() {
+        if guidance.from_version.trim().is_empty() || guidance.to_version.trim().is_empty() {
+            return Err(format!(
+                "migration_guidance[{index}] has empty from/to version"
+            ));
+        }
+        validate_lexical_string_set(
+            &guidance.required_actions,
+            &format!("migration_guidance[{index}].required_actions"),
+        )?;
+    }
+    if contract.integration_handoff_bead != "asupersync-2b4jj.5.5" {
+        return Err("integration_handoff_bead must reference asupersync-2b4jj.5.5".to_string());
+    }
+    Ok(())
+}
+
+/// Validates one advanced diagnostics extension against base report + contracts.
+///
+/// # Errors
+///
+/// Returns `Err` when schema linkage, ordering, taxonomy mapping, or reference integrity fails.
+#[allow(clippy::too_many_lines)]
+pub fn validate_advanced_diagnostics_report_extension(
+    extension: &AdvancedDiagnosticsReportExtension,
+    core_report: &CoreDiagnosticsReport,
+    extension_contract: &AdvancedDiagnosticsReportExtensionContract,
+    core_contract: &CoreDiagnosticsReportContract,
+) -> Result<(), String> {
+    validate_core_diagnostics_report(core_report, core_contract)?;
+    validate_advanced_diagnostics_report_extension_contract(extension_contract)?;
+
+    if extension.schema_version != extension_contract.contract_version {
+        return Err(format!(
+            "extension schema_version {} does not match contract {}",
+            extension.schema_version, extension_contract.contract_version
+        ));
+    }
+    if extension.base_report_schema_version != core_contract.contract_version {
+        return Err(format!(
+            "extension base_report_schema_version {} does not match core contract {}",
+            extension.base_report_schema_version, core_contract.contract_version
+        ));
+    }
+    if extension.base_report_id != core_report.report_id {
+        return Err("extension base_report_id must match core report_id".to_string());
+    }
+
+    let remediation_ids = extension
+        .remediation_deltas
+        .iter()
+        .map(|delta| delta.delta_id.clone())
+        .collect::<Vec<_>>();
+    if !remediation_ids.is_empty() {
+        validate_lexical_string_set(&remediation_ids, "remediation_deltas.delta_id")?;
+    }
+    let trust_ids = extension
+        .trust_transitions
+        .iter()
+        .map(|transition| transition.transition_id.clone())
+        .collect::<Vec<_>>();
+    if !trust_ids.is_empty() {
+        validate_lexical_string_set(&trust_ids, "trust_transitions.transition_id")?;
+    }
+    let collaboration_ids = extension
+        .collaboration_trail
+        .iter()
+        .map(|entry| entry.entry_id.clone())
+        .collect::<Vec<_>>();
+    if !collaboration_ids.is_empty() {
+        validate_lexical_string_set(&collaboration_ids, "collaboration_trail.entry_id")?;
+    }
+    let playbook_ids = extension
+        .troubleshooting_playbooks
+        .iter()
+        .map(|entry| entry.playbook_id.clone())
+        .collect::<Vec<_>>();
+    if !playbook_ids.is_empty() {
+        validate_lexical_string_set(&playbook_ids, "troubleshooting_playbooks.playbook_id")?;
+    }
+
+    let finding_ids = core_report
+        .findings
+        .iter()
+        .map(|finding| finding.finding_id.clone())
+        .collect::<BTreeSet<_>>();
+    let evidence_ids = core_report
+        .evidence
+        .iter()
+        .map(|evidence| evidence.evidence_id.clone())
+        .collect::<BTreeSet<_>>();
+    let command_ids = core_report
+        .commands
+        .iter()
+        .map(|command| command.command_id.clone())
+        .collect::<BTreeSet<_>>();
+
+    for delta in &extension.remediation_deltas {
+        if !finding_ids.contains(&delta.finding_id) {
+            return Err(format!(
+                "remediation delta {} references unknown finding {}",
+                delta.delta_id, delta.finding_id
+            ));
+        }
+        if !["in_progress", "open", "resolved"]
+            .iter()
+            .any(|candidate| candidate == &delta.previous_status.as_str())
+            || !["in_progress", "open", "resolved"]
+                .iter()
+                .any(|candidate| candidate == &delta.next_status.as_str())
+        {
+            return Err(format!(
+                "remediation delta {} has unsupported status transition {} -> {}",
+                delta.delta_id, delta.previous_status, delta.next_status
+            ));
+        }
+        if !extension_contract
+            .outcome_classes
+            .iter()
+            .any(|candidate| candidate == &delta.delta_outcome)
+        {
+            return Err(format!(
+                "remediation delta {} has unsupported outcome {}",
+                delta.delta_id, delta.delta_outcome
+            ));
+        }
+        if !extension_contract
+            .taxonomy_mapping
+            .class_allowlist
+            .iter()
+            .any(|candidate| candidate == &delta.mapped_taxonomy_class)
+        {
+            return Err(format!(
+                "remediation delta {} has unsupported taxonomy class {}",
+                delta.delta_id, delta.mapped_taxonomy_class
+            ));
+        }
+        if !extension_contract
+            .taxonomy_mapping
+            .dimension_allowlist
+            .iter()
+            .any(|candidate| candidate == &delta.mapped_taxonomy_dimension)
+        {
+            return Err(format!(
+                "remediation delta {} has unsupported taxonomy dimension {}",
+                delta.delta_id, delta.mapped_taxonomy_dimension
+            ));
+        }
+        validate_lexical_string_set(
+            &delta.verification_evidence_refs,
+            &format!(
+                "remediation delta {} verification_evidence_refs",
+                delta.delta_id
+            ),
+        )?;
+        for reference in &delta.verification_evidence_refs {
+            if !evidence_ids.contains(reference) {
+                return Err(format!(
+                    "remediation delta {} references unknown evidence {}",
+                    delta.delta_id, reference
+                ));
+            }
+        }
+    }
+
+    for transition in &extension.trust_transitions {
+        if !extension_contract
+            .outcome_classes
+            .iter()
+            .any(|candidate| candidate == &transition.outcome_class)
+        {
+            return Err(format!(
+                "trust transition {} has unsupported outcome {}",
+                transition.transition_id, transition.outcome_class
+            ));
+        }
+        if !extension_contract
+            .taxonomy_mapping
+            .severity_allowlist
+            .iter()
+            .any(|candidate| candidate == &transition.mapped_taxonomy_severity)
+        {
+            return Err(format!(
+                "trust transition {} has unsupported taxonomy severity {}",
+                transition.transition_id, transition.mapped_taxonomy_severity
+            ));
+        }
+        if transition.rationale.trim().is_empty() || transition.stage.trim().is_empty() {
+            return Err(format!(
+                "trust transition {} must define stage and rationale",
+                transition.transition_id
+            ));
+        }
+    }
+
+    for entry in &extension.collaboration_trail {
+        if entry.channel.trim().is_empty()
+            || entry.actor.trim().is_empty()
+            || entry.action.trim().is_empty()
+            || entry.thread_id.trim().is_empty()
+            || entry.message_ref.trim().is_empty()
+            || entry.bead_ref.trim().is_empty()
+            || entry.mapped_taxonomy_narrative.trim().is_empty()
+        {
+            return Err(format!(
+                "collaboration entry {} has empty required fields",
+                entry.entry_id
+            ));
+        }
+    }
+
+    for playbook in &extension.troubleshooting_playbooks {
+        if !extension_contract
+            .taxonomy_mapping
+            .class_allowlist
+            .iter()
+            .any(|candidate| candidate == &playbook.trigger_taxonomy_class)
+        {
+            return Err(format!(
+                "playbook {} has unsupported taxonomy class {}",
+                playbook.playbook_id, playbook.trigger_taxonomy_class
+            ));
+        }
+        if !extension_contract
+            .taxonomy_mapping
+            .severity_allowlist
+            .iter()
+            .any(|candidate| candidate == &playbook.trigger_taxonomy_severity)
+        {
+            return Err(format!(
+                "playbook {} has unsupported taxonomy severity {}",
+                playbook.playbook_id, playbook.trigger_taxonomy_severity
+            ));
+        }
+        if playbook.title.trim().is_empty() {
+            return Err(format!(
+                "playbook {} must define title",
+                playbook.playbook_id
+            ));
+        }
+        validate_lexical_string_set(
+            &playbook.ordered_steps,
+            &format!("playbook {} ordered_steps", playbook.playbook_id),
+        )?;
+        validate_lexical_string_set(
+            &playbook.command_refs,
+            &format!("playbook {} command_refs", playbook.playbook_id),
+        )?;
+        validate_lexical_string_set(
+            &playbook.evidence_refs,
+            &format!("playbook {} evidence_refs", playbook.playbook_id),
+        )?;
+        for command_ref in &playbook.command_refs {
+            if !command_ids.contains(command_ref) {
+                return Err(format!(
+                    "playbook {} references unknown command {}",
+                    playbook.playbook_id, command_ref
+                ));
+            }
+        }
+        for evidence_ref in &playbook.evidence_refs {
+            if !evidence_ids.contains(evidence_ref) {
+                return Err(format!(
+                    "playbook {} references unknown evidence {}",
+                    playbook.playbook_id, evidence_ref
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Returns deterministic advanced diagnostics fixtures built on core-report fixtures.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn advanced_diagnostics_report_fixtures() -> Vec<AdvancedDiagnosticsFixture> {
+    let core_fixtures = core_diagnostics_report_fixtures();
+    let failure = core_fixtures
+        .iter()
+        .find(|fixture| fixture.fixture_id == "baseline_failure_path")
+        .expect("baseline failure fixture exists")
+        .report
+        .clone();
+    let happy = core_fixtures
+        .iter()
+        .find(|fixture| fixture.fixture_id == "happy_path")
+        .expect("happy fixture exists")
+        .report
+        .clone();
+
+    vec![
+        AdvancedDiagnosticsFixture {
+            fixture_id: "advanced_failure_path".to_string(),
+            description:
+                "Failure-path extension fixture with remediation delta and collaboration trail."
+                    .to_string(),
+            core_report: failure,
+            extension: AdvancedDiagnosticsReportExtension {
+                schema_version: ADVANCED_DIAGNOSTICS_REPORT_VERSION.to_string(),
+                base_report_id: "doctor-report-failure-v1".to_string(),
+                base_report_schema_version: CORE_DIAGNOSTICS_REPORT_VERSION.to_string(),
+                remediation_deltas: vec![AdvancedRemediationDelta {
+                    delta_id: "delta-001".to_string(),
+                    finding_id: "finding-001".to_string(),
+                    previous_status: "open".to_string(),
+                    next_status: "in_progress".to_string(),
+                    delta_outcome: "failed".to_string(),
+                    mapped_taxonomy_class: "remediation_safety".to_string(),
+                    mapped_taxonomy_dimension: "recovery_planning".to_string(),
+                    verification_evidence_refs: vec!["evidence-001".to_string()],
+                }],
+                trust_transitions: vec![AdvancedTrustTransition {
+                    transition_id: "trust-001".to_string(),
+                    stage: "post-remediation-attempt".to_string(),
+                    previous_score: 82,
+                    next_score: 44,
+                    outcome_class: "failed".to_string(),
+                    mapped_taxonomy_severity: "error".to_string(),
+                    rationale: "Critical finding persisted after first remediation pass."
+                        .to_string(),
+                }],
+                collaboration_trail: vec![AdvancedCollaborationEntry {
+                    entry_id: "collab-001".to_string(),
+                    channel: "agent_mail".to_string(),
+                    actor: "ChartreuseBrook".to_string(),
+                    action: "requested remediation follow-up".to_string(),
+                    thread_id: "br-2b4jj.5.8".to_string(),
+                    message_ref: "mail-advanced-001".to_string(),
+                    bead_ref: "asupersync-2b4jj.5.8".to_string(),
+                    mapped_taxonomy_narrative:
+                        "Remediation safety remained degraded after failed verification."
+                            .to_string(),
+                }],
+                troubleshooting_playbooks: vec![AdvancedTroubleshootingPlaybook {
+                    playbook_id: "playbook-001".to_string(),
+                    title: "Critical remediation retry loop".to_string(),
+                    trigger_taxonomy_class: "remediation_safety".to_string(),
+                    trigger_taxonomy_severity: "error".to_string(),
+                    ordered_steps: vec![
+                        "capture_fresh_evidence".to_string(),
+                        "reproduce_failure_with_rch".to_string(),
+                        "stage_patch_and_verify".to_string(),
+                    ],
+                    command_refs: vec!["command-001".to_string()],
+                    evidence_refs: vec!["evidence-001".to_string()],
+                }],
+            },
+        },
+        AdvancedDiagnosticsFixture {
+            fixture_id: "advanced_happy_path".to_string(),
+            description:
+                "Healthy-path extension fixture with trust improvement and closure guidance."
+                    .to_string(),
+            core_report: happy,
+            extension: AdvancedDiagnosticsReportExtension {
+                schema_version: ADVANCED_DIAGNOSTICS_REPORT_VERSION.to_string(),
+                base_report_id: "doctor-report-happy-v1".to_string(),
+                base_report_schema_version: CORE_DIAGNOSTICS_REPORT_VERSION.to_string(),
+                remediation_deltas: vec![AdvancedRemediationDelta {
+                    delta_id: "delta-010".to_string(),
+                    finding_id: "finding-010".to_string(),
+                    previous_status: "in_progress".to_string(),
+                    next_status: "resolved".to_string(),
+                    delta_outcome: "success".to_string(),
+                    mapped_taxonomy_class: "verification_governance".to_string(),
+                    mapped_taxonomy_dimension: "contract_compliance".to_string(),
+                    verification_evidence_refs: vec!["evidence-010".to_string()],
+                }],
+                trust_transitions: vec![AdvancedTrustTransition {
+                    transition_id: "trust-010".to_string(),
+                    stage: "post-verification".to_string(),
+                    previous_score: 76,
+                    next_score: 95,
+                    outcome_class: "success".to_string(),
+                    mapped_taxonomy_severity: "info".to_string(),
+                    rationale:
+                        "Verification summary and replay checks indicate stable healthy state."
+                            .to_string(),
+                }],
+                collaboration_trail: vec![AdvancedCollaborationEntry {
+                    entry_id: "collab-010".to_string(),
+                    channel: "beads".to_string(),
+                    actor: "ChartreuseBrook".to_string(),
+                    action: "closed remediation bead".to_string(),
+                    thread_id: "br-2b4jj.5.8".to_string(),
+                    message_ref: "mail-advanced-010".to_string(),
+                    bead_ref: "asupersync-2b4jj.5.8".to_string(),
+                    mapped_taxonomy_narrative:
+                        "Verification governance is healthy and ready for promotion.".to_string(),
+                }],
+                troubleshooting_playbooks: vec![AdvancedTroubleshootingPlaybook {
+                    playbook_id: "playbook-010".to_string(),
+                    title: "Healthy promotion checklist".to_string(),
+                    trigger_taxonomy_class: "verification_governance".to_string(),
+                    trigger_taxonomy_severity: "info".to_string(),
+                    ordered_steps: vec![
+                        "archive_artifacts".to_string(),
+                        "promote_release".to_string(),
+                        "publish_summary".to_string(),
+                    ],
+                    command_refs: vec!["command-010".to_string()],
+                    evidence_refs: vec!["evidence-010".to_string()],
+                }],
+            },
+        },
+    ]
+}
+
+/// Returns a serializable bundle containing core + advanced report contracts and fixtures.
+#[must_use]
+pub fn advanced_diagnostics_report_bundle() -> AdvancedDiagnosticsReportBundle {
+    AdvancedDiagnosticsReportBundle {
+        core_contract: core_diagnostics_report_contract(),
+        extension_contract: advanced_diagnostics_report_extension_contract(),
+        fixtures: advanced_diagnostics_report_fixtures(),
+    }
+}
+
+/// Runs deterministic advanced-extension fixture smoke and emits structured events.
+///
+/// # Errors
+///
+/// Returns `Err` when contract/report validation or structured-log emission fails.
+pub fn run_advanced_diagnostics_report_smoke(
+    bundle: &AdvancedDiagnosticsReportBundle,
+    logging_contract: &StructuredLoggingContract,
+) -> Result<Vec<StructuredLogEvent>, String> {
+    validate_core_diagnostics_report_contract(&bundle.core_contract)?;
+    validate_advanced_diagnostics_report_extension_contract(&bundle.extension_contract)?;
+    validate_lexical_string_set(
+        &bundle
+            .fixtures
+            .iter()
+            .map(|fixture| fixture.fixture_id.clone())
+            .collect::<Vec<_>>(),
+        "advanced diagnostics fixture_id",
+    )?;
+
+    let mut events = Vec::new();
+    for fixture in &bundle.fixtures {
+        if fixture.description.trim().is_empty() {
+            return Err(format!(
+                "fixture {} must define non-empty description",
+                fixture.fixture_id
+            ));
+        }
+        validate_advanced_diagnostics_report_extension(
+            &fixture.extension,
+            &fixture.core_report,
+            &bundle.extension_contract,
+            &bundle.core_contract,
+        )?;
+
+        for (flow_id, kind) in [
+            ("integration", "integration_sync"),
+            ("remediation", "remediation_verify"),
+            ("replay", "replay_complete"),
+        ] {
+            let mut fields = BTreeMap::new();
+            fields.insert(
+                "artifact_pointer".to_string(),
+                format!(
+                    "artifacts/{}/doctor/advanced-report/{}.json",
+                    fixture.core_report.provenance.run_id, fixture.fixture_id
+                ),
+            );
+            fields.insert(
+                "command_provenance".to_string(),
+                format!(
+                    "asupersync doctor report-advanced-contract --fixture {}",
+                    fixture.fixture_id
+                ),
+            );
+            fields.insert("flow_id".to_string(), flow_id.to_string());
+            fields.insert(
+                "outcome_class".to_string(),
+                fixture.core_report.summary.overall_outcome.clone(),
+            );
+            fields.insert(
+                "run_id".to_string(),
+                fixture.core_report.provenance.run_id.clone(),
+            );
+            fields.insert(
+                "scenario_id".to_string(),
+                fixture.core_report.provenance.scenario_id.clone(),
+            );
+            fields.insert(
+                "trace_id".to_string(),
+                format!("{}-{}", fixture.core_report.provenance.trace_id, flow_id),
+            );
+            let event = emit_structured_log_event(logging_contract, flow_id, kind, &fields)?;
+            events.push(event);
+        }
+    }
+    events.sort_by(|left, right| {
+        (
+            left.flow_id.as_str(),
+            left.event_kind.as_str(),
+            left.fields
+                .get("trace_id")
+                .map(String::as_str)
+                .unwrap_or_default(),
+        )
+            .cmp(&(
+                right.flow_id.as_str(),
+                right.event_kind.as_str(),
+                right
+                    .fields
+                    .get("trace_id")
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+            ))
+    });
+    Ok(events)
 }
 
 fn capability_rank(capability: TerminalCapabilityClass) -> u8 {
@@ -5309,6 +7174,168 @@ edition = "2024"
         assert!(
             err.contains("events must be lexically ordered by flow_id/event_kind/trace_id"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn core_diagnostics_report_contract_validates() {
+        let contract = core_diagnostics_report_contract();
+        validate_core_diagnostics_report_contract(&contract).expect("valid core report contract");
+    }
+
+    #[test]
+    fn core_diagnostics_report_contract_round_trip_json() {
+        let contract = core_diagnostics_report_contract();
+        let json = serde_json::to_string(&contract).expect("serialize");
+        let parsed: CoreDiagnosticsReportContract =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(contract, parsed);
+        validate_core_diagnostics_report_contract(&parsed).expect("parsed contract valid");
+    }
+
+    #[test]
+    fn core_diagnostics_report_bundle_is_deterministic_and_valid() {
+        let first = core_diagnostics_report_bundle();
+        let second = core_diagnostics_report_bundle();
+        assert_eq!(first, second);
+
+        validate_core_diagnostics_report_contract(&first.contract).expect("contract valid");
+        for fixture in &first.fixtures {
+            validate_core_diagnostics_report(&fixture.report, &first.contract)
+                .expect("fixture report valid");
+        }
+    }
+
+    #[test]
+    fn core_diagnostics_report_rejects_unsorted_findings() {
+        let contract = core_diagnostics_report_contract();
+        let mut fixture = core_diagnostics_report_fixtures()
+            .into_iter()
+            .find(|candidate| candidate.fixture_id == "baseline_failure_path")
+            .expect("fixture exists");
+        fixture.report.findings.swap(0, 1);
+        let err = validate_core_diagnostics_report(&fixture.report, &contract)
+            .expect_err("unsorted findings must fail");
+        assert!(err.contains("findings.finding_id"), "{err}");
+    }
+
+    #[test]
+    fn core_diagnostics_report_smoke_emits_valid_structured_events() {
+        let bundle = core_diagnostics_report_bundle();
+        let logging_contract = structured_logging_contract();
+        let first =
+            run_core_diagnostics_report_smoke(&bundle, &logging_contract).expect("smoke events");
+        let second =
+            run_core_diagnostics_report_smoke(&bundle, &logging_contract).expect("smoke events");
+        assert_eq!(first, second);
+        validate_structured_logging_event_stream(&logging_contract, &first)
+            .expect("structured event stream valid");
+
+        let mut scenario_ids = first
+            .iter()
+            .filter_map(|event| event.fields.get("scenario_id").cloned())
+            .collect::<Vec<_>>();
+        scenario_ids.sort();
+        scenario_ids.dedup();
+        assert_eq!(
+            scenario_ids,
+            vec![
+                "doctor-core-report-failure".to_string(),
+                "doctor-core-report-happy".to_string(),
+                "doctor-core-report-partial".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn advanced_diagnostics_report_extension_contract_validates() {
+        let contract = advanced_diagnostics_report_extension_contract();
+        validate_advanced_diagnostics_report_extension_contract(&contract)
+            .expect("valid extension contract");
+    }
+
+    #[test]
+    fn advanced_diagnostics_report_extension_contract_round_trip_json() {
+        let contract = advanced_diagnostics_report_extension_contract();
+        let json = serde_json::to_string(&contract).expect("serialize");
+        let parsed: AdvancedDiagnosticsReportExtensionContract =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(contract, parsed);
+        validate_advanced_diagnostics_report_extension_contract(&parsed)
+            .expect("parsed extension contract valid");
+    }
+
+    #[test]
+    fn advanced_diagnostics_bundle_is_deterministic_and_valid() {
+        let first = advanced_diagnostics_report_bundle();
+        let second = advanced_diagnostics_report_bundle();
+        assert_eq!(first, second);
+
+        for fixture in &first.fixtures {
+            validate_advanced_diagnostics_report_extension(
+                &fixture.extension,
+                &fixture.core_report,
+                &first.extension_contract,
+                &first.core_contract,
+            )
+            .expect("fixture extension should validate");
+        }
+    }
+
+    #[test]
+    fn advanced_extension_contract_rejects_unknown_taxonomy_class() {
+        let mut contract = advanced_diagnostics_report_extension_contract();
+        contract
+            .taxonomy_mapping
+            .class_allowlist
+            .push("unknown_taxonomy_class".to_string());
+        contract.taxonomy_mapping.class_allowlist.sort();
+        let err = validate_advanced_diagnostics_report_extension_contract(&contract)
+            .expect_err("unknown taxonomy class must fail");
+        assert!(err.contains("unknown_taxonomy_class"), "{err}");
+    }
+
+    #[test]
+    fn advanced_extension_rejects_base_report_id_mismatch() {
+        let bundle = advanced_diagnostics_report_bundle();
+        let fixture = bundle.fixtures.first().expect("fixture exists");
+        let mut extension = fixture.extension.clone();
+        extension.base_report_id = "doctor-report-mismatch".to_string();
+
+        let err = validate_advanced_diagnostics_report_extension(
+            &extension,
+            &fixture.core_report,
+            &bundle.extension_contract,
+            &bundle.core_contract,
+        )
+        .expect_err("mismatched base report id should fail");
+        assert!(err.contains("base_report_id"), "{err}");
+    }
+
+    #[test]
+    fn advanced_diagnostics_report_smoke_emits_valid_structured_events() {
+        let bundle = advanced_diagnostics_report_bundle();
+        let logging_contract = structured_logging_contract();
+        let first =
+            run_advanced_diagnostics_report_smoke(&bundle, &logging_contract).expect("smoke");
+        let second =
+            run_advanced_diagnostics_report_smoke(&bundle, &logging_contract).expect("smoke");
+        assert_eq!(first, second);
+        validate_structured_logging_event_stream(&logging_contract, &first)
+            .expect("structured events valid");
+
+        let mut scenario_ids = first
+            .iter()
+            .filter_map(|event| event.fields.get("scenario_id").cloned())
+            .collect::<Vec<_>>();
+        scenario_ids.sort();
+        scenario_ids.dedup();
+        assert_eq!(
+            scenario_ids,
+            vec![
+                "doctor-core-report-failure".to_string(),
+                "doctor-core-report-happy".to_string(),
+            ]
         );
     }
 }
