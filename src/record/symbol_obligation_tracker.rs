@@ -295,6 +295,50 @@ pub struct SymbolObligationTracker {
 }
 
 impl SymbolObligationTracker {
+    fn index_obligation_id(&mut self, id: ObligationId, kind: &SymbolObligationKind) {
+        match kind {
+            SymbolObligationKind::SymbolTransmit { symbol_id, .. }
+            | SymbolObligationKind::SymbolAck { symbol_id, .. } => {
+                self.by_symbol
+                    .entry(*symbol_id)
+                    .or_insert_with(|| Vec::with_capacity(2))
+                    .push(id);
+            }
+            SymbolObligationKind::DecodingInProgress { object_id, .. }
+            | SymbolObligationKind::EncodingSession { object_id, .. }
+            | SymbolObligationKind::SymbolLease { object_id, .. } => {
+                self.by_object
+                    .entry(*object_id)
+                    .or_insert_with(|| Vec::with_capacity(2))
+                    .push(id);
+            }
+        }
+    }
+
+    fn remove_indexed_obligation_id(&mut self, id: ObligationId, kind: &SymbolObligationKind) {
+        match kind {
+            SymbolObligationKind::SymbolTransmit { symbol_id, .. }
+            | SymbolObligationKind::SymbolAck { symbol_id, .. } => {
+                if let Some(ids) = self.by_symbol.get_mut(symbol_id) {
+                    ids.retain(|i| *i != id);
+                    if ids.is_empty() {
+                        self.by_symbol.remove(symbol_id);
+                    }
+                }
+            }
+            SymbolObligationKind::DecodingInProgress { object_id, .. }
+            | SymbolObligationKind::EncodingSession { object_id, .. }
+            | SymbolObligationKind::SymbolLease { object_id, .. } => {
+                if let Some(ids) = self.by_object.get_mut(object_id) {
+                    ids.retain(|i| *i != id);
+                    if ids.is_empty() {
+                        self.by_object.remove(object_id);
+                    }
+                }
+            }
+        }
+    }
+
     /// Creates a new tracker for the given region.
     #[must_use]
     pub fn new(region_id: RegionId) -> Self {
@@ -315,26 +359,11 @@ impl SymbolObligationTracker {
     /// Registers a new symbolic obligation.
     pub fn register(&mut self, obligation: SymbolObligation) -> ObligationId {
         let id = obligation.id();
-
-        // Index by symbol or object
-        match &obligation.kind {
-            SymbolObligationKind::SymbolTransmit { symbol_id, .. }
-            | SymbolObligationKind::SymbolAck { symbol_id, .. } => {
-                self.by_symbol
-                    .entry(*symbol_id)
-                    .or_insert_with(|| Vec::with_capacity(2))
-                    .push(id);
-            }
-            SymbolObligationKind::DecodingInProgress { object_id, .. }
-            | SymbolObligationKind::EncodingSession { object_id, .. }
-            | SymbolObligationKind::SymbolLease { object_id, .. } => {
-                self.by_object
-                    .entry(*object_id)
-                    .or_insert_with(|| Vec::with_capacity(2))
-                    .push(id);
-            }
+        if let Some(previous) = self.obligations.remove(&id) {
+            self.remove_indexed_obligation_id(id, &previous.kind);
         }
 
+        self.index_obligation_id(id, &obligation.kind);
         self.obligations.insert(id, obligation);
         id
     }
@@ -349,28 +378,7 @@ impl SymbolObligationTracker {
         now: Time,
     ) -> Option<SymbolObligation> {
         self.obligations.remove(&id).map(|mut ob| {
-            // Clean up index maps to prevent stale ID accumulation
-            match &ob.kind {
-                SymbolObligationKind::SymbolTransmit { symbol_id, .. }
-                | SymbolObligationKind::SymbolAck { symbol_id, .. } => {
-                    if let Some(ids) = self.by_symbol.get_mut(symbol_id) {
-                        ids.retain(|i| *i != id);
-                        if ids.is_empty() {
-                            self.by_symbol.remove(symbol_id);
-                        }
-                    }
-                }
-                SymbolObligationKind::DecodingInProgress { object_id, .. }
-                | SymbolObligationKind::EncodingSession { object_id, .. }
-                | SymbolObligationKind::SymbolLease { object_id, .. } => {
-                    if let Some(ids) = self.by_object.get_mut(object_id) {
-                        ids.retain(|i| *i != id);
-                        if ids.is_empty() {
-                            self.by_object.remove(object_id);
-                        }
-                    }
-                }
-            }
+            self.remove_indexed_obligation_id(id, &ob.kind);
 
             if ob.is_pending() {
                 if commit {
@@ -592,6 +600,41 @@ mod tests {
         let found = tracker.by_symbol(symbol_id);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id(), id);
+    }
+
+    // Regression: re-registering the same ID must re-index by symbol/object and
+    // not leave stale index entries pointing to a different obligation payload.
+    #[test]
+    fn test_register_same_id_reindexes_lookup() {
+        let rid = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let mut tracker = SymbolObligationTracker::new(rid);
+
+        let (oid, tid, _) = test_ids();
+        let dest = RegionId::from_arena(ArenaIndex::new(1, 0));
+        let first_symbol = SymbolId::new_for_test(11, 0, 0);
+        let second_symbol = SymbolId::new_for_test(12, 0, 0);
+
+        let first =
+            SymbolObligation::transmit(oid, tid, rid, first_symbol, dest, None, None, Time::ZERO);
+        tracker.register(first);
+        assert_eq!(tracker.by_symbol(first_symbol).len(), 1);
+
+        let second = SymbolObligation::transmit(
+            oid,
+            tid,
+            rid,
+            second_symbol,
+            dest,
+            None,
+            None,
+            Time::from_nanos(1),
+        );
+        tracker.register(second);
+
+        assert!(tracker.by_symbol(first_symbol).is_empty());
+        let reindexed = tracker.by_symbol(second_symbol);
+        assert_eq!(reindexed.len(), 1);
+        assert_eq!(reindexed[0].id(), oid);
     }
 
     // Test 6: Tracker resolution (commit)
