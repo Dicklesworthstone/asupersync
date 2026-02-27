@@ -1671,7 +1671,7 @@ impl LabRuntime {
             );
         }) {
             crate::tracing_compat::warn!(
-                error = ?_error,
+                error = ?error,
                 "lab runtime io_driver poll failed"
             );
         }
