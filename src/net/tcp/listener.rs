@@ -209,7 +209,6 @@ impl TcpListener {
             Some(RearmDecision::Error(err)) => return Err(err),
             None => {}
         }
-        drop(registration);
 
         let Some(current) = Cx::current() else {
             return Ok(InterestRegistrationMode::FallbackPoll);
@@ -220,10 +219,7 @@ impl TcpListener {
 
         match driver.register(&self.inner, Interest::READABLE, cx.waker().clone()) {
             Ok(new_reg) => {
-                let mut registration = self.registration.lock();
-                if registration.is_none() {
-                    *registration = Some(new_reg);
-                }
+                *registration = Some(new_reg);
                 drop(registration);
                 Ok(InterestRegistrationMode::ReactorArmed)
             }

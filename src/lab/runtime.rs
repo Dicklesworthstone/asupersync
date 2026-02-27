@@ -1043,13 +1043,13 @@ impl LabRuntime {
     /// because large jumps may affect lease/timeout correctness.
     #[allow(clippy::no_effect_underscore_binding)]
     pub fn inject_clock_skew(&mut self, skew_nanos: u64) {
-        let _old_time = self.virtual_time;
+        let old_time = self.virtual_time;
         self.advance_time(skew_nanos);
 
         crate::tracing_compat::warn!(
             "virtual clock jump detected: old_time_ms={}, new_time_ms={}, jump_ms={} \
              -- may affect lease/timeout correctness",
-            _old_time.as_nanos() / 1_000_000,
+            old_time.as_nanos() / 1_000_000,
             self.virtual_time.as_nanos() / 1_000_000,
             skew_nanos / 1_000_000
         );
@@ -1643,7 +1643,7 @@ impl LabRuntime {
             &mut self.replay_recorder,
             &mut self.seen_io_tokens,
         );
-        if let Err(_error) = handle.turn_with(Some(Duration::ZERO), |event, interest| {
+        if let Err(error) = handle.turn_with(Some(Duration::ZERO), |event, interest| {
             let token = event.token.0;
             let interest = interest.unwrap_or(event.ready);
             if seen.insert(token) {

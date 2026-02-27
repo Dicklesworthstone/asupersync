@@ -80,7 +80,7 @@ impl WakerState {
     fn wake(&self, task: TaskId, source: WakeSource) {
         let mut woken = self.woken.lock();
         if woken.insert(task) {
-            let _source_label = match source {
+            let source_label = match source {
                 WakeSource::Timer => "timer",
                 WakeSource::Io { .. } => "io",
                 WakeSource::Explicit => "explicit",
@@ -88,7 +88,7 @@ impl WakerState {
             };
             trace!(
                 task_id = ?task,
-                wake_source = _source_label,
+                wake_source = source_label,
                 "task woken"
             );
         }

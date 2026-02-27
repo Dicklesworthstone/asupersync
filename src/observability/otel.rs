@@ -1418,13 +1418,6 @@ mod exporter_tests {
 
     #[test]
     fn multi_exporter_fans_out() {
-        let exp1 = InMemoryExporter::new();
-        let exp2 = InMemoryExporter::new();
-
-        // Need to use Arc to share between multi-exporter and tests
-        let exp1_arc = Arc::new(exp1);
-        let exp2_arc = Arc::new(exp2);
-
         // Create a wrapper to use with MultiExporter
         struct ArcExporter(Arc<InMemoryExporter>);
         impl MetricsExporter for ArcExporter {
@@ -1435,6 +1428,13 @@ mod exporter_tests {
                 self.0.flush()
             }
         }
+
+        let exp1 = InMemoryExporter::new();
+        let exp2 = InMemoryExporter::new();
+
+        // Need to use Arc to share between multi-exporter and tests
+        let exp1_arc = Arc::new(exp1);
+        let exp2_arc = Arc::new(exp2);
 
         let mut multi = MultiExporter::new(vec![]);
         multi.add(Box::new(ArcExporter(Arc::clone(&exp1_arc))));

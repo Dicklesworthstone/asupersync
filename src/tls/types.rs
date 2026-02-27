@@ -769,10 +769,9 @@ mod tests {
 
     #[test]
     fn pin_set_from_iterator() {
-        let pins: Vec<CertificatePin> = (0..3)
+        let set: CertificatePinSet = (0..3)
             .map(|i| CertificatePin::spki_sha256(vec![i; 32]).unwrap())
             .collect();
-        let set: CertificatePinSet = pins.into_iter().collect();
         assert_eq!(set.len(), 3);
     }
 

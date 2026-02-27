@@ -479,6 +479,7 @@ impl RuntimeBuilder {
     ///     .build()?;
     /// ```
     #[cfg(feature = "config-file")]
+    #[allow(clippy::result_large_err)]
     pub fn from_toml(path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
         let toml_config =
             crate::runtime::env_config::parse_toml_file(path.as_ref()).map_err(|e| {
@@ -510,6 +511,7 @@ impl RuntimeBuilder {
     ///     .build()?;
     /// ```
     #[cfg(feature = "config-file")]
+    #[allow(clippy::result_large_err)]
     pub fn from_toml_str(toml: &str) -> Result<Self, Error> {
         let toml_config = crate::runtime::env_config::parse_toml_str(toml).map_err(|e| {
             Error::new(crate::error::ErrorKind::ConfigError).with_message(e.to_string())

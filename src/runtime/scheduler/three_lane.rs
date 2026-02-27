@@ -1629,10 +1629,10 @@ impl ThreeLaneWorker {
             self.preemption_metrics.adaptive_e_value = policy.e_value();
         }
 
-        if let Some(_reward) = reward {
+        if let Some(reward) = reward {
             trace!(
                 worker_id = self.id,
-                reward = _reward,
+                reward = reward,
                 adaptive_limit = self.preemption_metrics.adaptive_current_limit,
                 adaptive_epochs = self.preemption_metrics.adaptive_epochs,
                 adaptive_e_value = self.preemption_metrics.adaptive_e_value,

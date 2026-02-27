@@ -110,6 +110,7 @@ pub enum Scheme {
 
 /// HTTP client transport stream (plain TCP or TLS).
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum ClientIo {
     /// Plain TCP stream.
     Plain(TcpStream),

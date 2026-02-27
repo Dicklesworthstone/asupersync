@@ -261,14 +261,14 @@ impl Worker {
                                         Some(worker_id) if worker_id == self.worker.id => {
                                             local_waiters.push(waiter);
                                         }
-                                        Some(_worker_id) => {
+                                        Some(worker_id) => {
                                             record.wake_state.clear();
                                             if let Some((waker, _)) = &record.cached_waker {
                                                 foreign_wakers.push(waker.clone());
                                             } else {
                                                 error!(
                                                     ?waiter,
-                                                    worker_id = _worker_id,
+                                                    worker_id = worker_id,
                                                     current_worker = self.worker.id,
                                                     "panic path: pinned local waiter has invalid worker id, wake skipped"
                                                 );
@@ -453,14 +453,14 @@ impl Worker {
                                     Some(worker_id) if worker_id == self.id => {
                                         local_waiters.push(waiter);
                                     }
-                                    Some(_worker_id) => {
+                                    Some(worker_id) => {
                                         record.wake_state.clear();
                                         if let Some((waker, _)) = &record.cached_waker {
                                             foreign_wakers.push(waker.clone());
                                         } else {
                                             error!(
                                                 ?waiter,
-                                                worker_id = _worker_id,
+                                                worker_id = worker_id,
                                                 current_worker = self.id,
                                                 "ready path: pinned local waiter has foreign worker id, wake skipped"
                                             );

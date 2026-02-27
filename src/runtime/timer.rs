@@ -59,7 +59,7 @@ impl TimerHeap {
     /// Adds a timer for a task with the given deadline.
     pub fn insert(&mut self, task: TaskId, deadline: Time) {
         let generation = self.next_generation;
-        self.next_generation += 1;
+        self.next_generation = self.next_generation.wrapping_add(1);
         self.heap.push(TimerEntry {
             deadline,
             task,
@@ -266,5 +266,31 @@ mod tests {
 
         let heap2 = TimerHeap::new();
         assert_eq!(format!("{heap2:?}"), dbg);
+    }
+
+    #[test]
+    fn generation_counter_wraps_without_panicking() {
+        init_test("generation_counter_wraps_without_panicking");
+        let mut heap = TimerHeap::new();
+        heap.next_generation = u64::MAX;
+
+        let deadline = Time::from_millis(10);
+        heap.insert(task(1), deadline);
+        heap.insert(task(2), deadline);
+
+        let expired = heap.pop_expired(deadline);
+        crate::assert_with_log!(
+            expired.len() == 2,
+            "both wrapped-generation entries are retained and popped",
+            2usize,
+            expired.len()
+        );
+        crate::assert_with_log!(
+            expired.contains(&task(1)) && expired.contains(&task(2)),
+            "wrapped-generation entries are recoverable",
+            true,
+            expired.contains(&task(1)) && expired.contains(&task(2))
+        );
+        crate::test_complete!("generation_counter_wraps_without_panicking");
     }
 }

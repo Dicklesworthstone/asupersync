@@ -943,11 +943,11 @@ impl Consumer {
             }
         }
 
-        if let Err(_err) = client.unsubscribe(cx, sid).await {
+        if let Err(err) = client.unsubscribe(cx, sid).await {
             warn!(
                 subject = %sub.subject(),
                 sid,
-                error = ?_err,
+                error = ?err,
                 "JetStream pull unsubscribe failed"
             );
         }
