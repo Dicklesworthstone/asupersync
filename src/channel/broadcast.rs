@@ -1145,7 +1145,12 @@ mod tests {
 
         // Wait for receiver count to drop to 0 before releasing the lock.
         // This ensures the sender thread (waiting on the lock) will see count == 0.
-        while tx.channel.receiver_count.load(std::sync::atomic::Ordering::Acquire) > 0 {
+        while tx
+            .channel
+            .receiver_count
+            .load(std::sync::atomic::Ordering::Acquire)
+            > 0
+        {
             std::thread::yield_now();
         }
 

@@ -43,6 +43,15 @@ fn upsert_channel_waiter(
     }
 }
 
+fn pop_next_queued_waiter(wakers: &mut SmallVec<[ChannelWaiter; 2]>) -> Option<ChannelWaiter> {
+    while let Some(waiter) = wakers.pop() {
+        if waiter.queued.load(Ordering::Acquire) {
+            return Some(waiter);
+        }
+    }
+    None
+}
+
 /// A stream of incoming symbols.
 pub trait SymbolStream: Send {
     /// Receive the next symbol.
@@ -393,7 +402,7 @@ impl SymbolStream for ChannelStream {
             // Wake sender if we freed space.
             let waiter = {
                 let mut wakers = this.shared.send_wakers.lock();
-                wakers.pop()
+                pop_next_queued_waiter(&mut wakers)
             };
             if let Some(w) = waiter {
                 w.queued.store(false, Ordering::Release);
@@ -989,6 +998,66 @@ mod tests {
         crate::assert_with_log!(!first_woke, "stale waker not used", false, first_woke);
         crate::assert_with_log!(second_woke, "latest waker used", true, second_woke);
         crate::test_complete!("test_channel_stream_refreshes_queued_waker_on_repoll");
+    }
+
+    #[test]
+    fn test_channel_stream_skips_stale_send_waiter_entries() {
+        init_test("test_channel_stream_skips_stale_send_waiter_entries");
+        let shared = Arc::new(SharedChannel::new(1));
+        {
+            let mut queue = shared.queue.lock();
+            queue.push_back(create_symbol(11));
+        }
+        let mut stream = ChannelStream::new(Arc::clone(&shared));
+
+        let stale_flag = Arc::new(AtomicBool::new(false));
+        let active_flag = Arc::new(AtomicBool::new(false));
+        let stale_queued = Arc::new(AtomicBool::new(false));
+        let active_queued = Arc::new(AtomicBool::new(true));
+
+        {
+            let mut send_wakers = shared.send_wakers.lock();
+            send_wakers.push(ChannelWaiter {
+                waker: flagged_waker(Arc::clone(&active_flag)),
+                queued: Arc::clone(&active_queued),
+            });
+            // Stale waiter is intentionally the most-recent entry (LIFO pop path).
+            send_wakers.push(ChannelWaiter {
+                waker: flagged_waker(Arc::clone(&stale_flag)),
+                queued: Arc::clone(&stale_queued),
+            });
+        }
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let recv = Pin::new(&mut stream).poll_next(&mut context);
+        crate::assert_with_log!(
+            matches!(recv, Poll::Ready(Some(Ok(_)))),
+            "receive succeeds",
+            true,
+            matches!(recv, Poll::Ready(Some(Ok(_))))
+        );
+
+        let stale_woke = stale_flag.load(Ordering::Acquire);
+        let active_woke = active_flag.load(Ordering::Acquire);
+        crate::assert_with_log!(!stale_woke, "stale waiter not woken", false, stale_woke);
+        crate::assert_with_log!(active_woke, "active waiter woken", true, active_woke);
+        let active_cleared = !active_queued.load(Ordering::Acquire);
+        crate::assert_with_log!(
+            active_cleared,
+            "active waiter flag cleared",
+            true,
+            active_cleared
+        );
+        let send_waiters_empty = shared.send_wakers.lock().is_empty();
+        crate::assert_with_log!(
+            send_waiters_empty,
+            "stale entries pruned",
+            true,
+            send_waiters_empty
+        );
+
+        crate::test_complete!("test_channel_stream_skips_stale_send_waiter_entries");
     }
 
     #[test]

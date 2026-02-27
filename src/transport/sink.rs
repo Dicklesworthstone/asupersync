@@ -30,6 +30,15 @@ fn upsert_channel_waiter(
     }
 }
 
+fn pop_next_queued_waiter(wakers: &mut SmallVec<[ChannelWaiter; 2]>) -> Option<ChannelWaiter> {
+    while let Some(waiter) = wakers.pop() {
+        if waiter.queued.load(Ordering::Acquire) {
+            return Some(waiter);
+        }
+    }
+    None
+}
+
 /// A sink for outgoing symbols.
 pub trait SymbolSink: Send + Unpin {
     /// Send a symbol.
@@ -438,7 +447,7 @@ impl SymbolSink for ChannelSink {
         // Wake receiver.
         let waiter = {
             let mut wakers = this.shared.recv_wakers.lock();
-            wakers.pop()
+            pop_next_queued_waiter(&mut wakers)
         };
         if let Some(w) = waiter {
             w.queued.store(false, Ordering::Release);
@@ -984,6 +993,62 @@ mod tests {
         crate::assert_with_log!(!first_woke, "stale waker not used", false, first_woke);
         crate::assert_with_log!(second_woke, "latest waker used", true, second_woke);
         crate::test_complete!("test_channel_sink_refreshes_queued_waker_on_repoll");
+    }
+
+    #[test]
+    fn test_channel_sink_skips_stale_recv_waiter_entries() {
+        init_test("test_channel_sink_skips_stale_recv_waiter_entries");
+        let shared = Arc::new(SharedChannel::new(1));
+        let mut sink = ChannelSink::new(Arc::clone(&shared));
+
+        let stale_flag = Arc::new(AtomicBool::new(false));
+        let active_flag = Arc::new(AtomicBool::new(false));
+        let stale_queued = Arc::new(AtomicBool::new(false));
+        let active_queued = Arc::new(AtomicBool::new(true));
+
+        {
+            let mut recv_wakers = shared.recv_wakers.lock();
+            recv_wakers.push(ChannelWaiter {
+                waker: flagged_waker(Arc::clone(&active_flag)),
+                queued: Arc::clone(&active_queued),
+            });
+            // Stale waiter is intentionally the most-recent entry (LIFO pop path).
+            recv_wakers.push(ChannelWaiter {
+                waker: flagged_waker(Arc::clone(&stale_flag)),
+                queued: Arc::clone(&stale_queued),
+            });
+        }
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let send = Pin::new(&mut sink).poll_send(&mut context, create_symbol(5));
+        crate::assert_with_log!(
+            matches!(send, Poll::Ready(Ok(()))),
+            "send succeeds",
+            true,
+            matches!(send, Poll::Ready(Ok(())))
+        );
+
+        let stale_woke = stale_flag.load(Ordering::Acquire);
+        let active_woke = active_flag.load(Ordering::Acquire);
+        crate::assert_with_log!(!stale_woke, "stale waiter not woken", false, stale_woke);
+        crate::assert_with_log!(active_woke, "active waiter woken", true, active_woke);
+        let active_cleared = !active_queued.load(Ordering::Acquire);
+        crate::assert_with_log!(
+            active_cleared,
+            "active waiter flag cleared",
+            true,
+            active_cleared
+        );
+        let recv_waiters_empty = shared.recv_wakers.lock().is_empty();
+        crate::assert_with_log!(
+            recv_waiters_empty,
+            "stale entries pruned",
+            true,
+            recv_waiters_empty
+        );
+
+        crate::test_complete!("test_channel_sink_skips_stale_recv_waiter_entries");
     }
 
     #[test]
