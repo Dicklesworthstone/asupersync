@@ -495,6 +495,77 @@ pub struct EvidenceIngestionReport {
     pub events: Vec<IngestionEvent>,
 }
 
+/// Typed definition for one required field in the logging envelope.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LoggingFieldSpec {
+    /// Stable field key.
+    pub key: String,
+    /// Data type descriptor (e.g. `string`, `enum`).
+    pub field_type: String,
+    /// Deterministic formatting rule.
+    pub format_rule: String,
+    /// Field-level contract note.
+    pub description: String,
+}
+
+/// Correlation primitive used for cross-flow joins.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CorrelationPrimitiveSpec {
+    /// Stable primitive key.
+    pub key: String,
+    /// Deterministic formatting rule.
+    pub format_rule: String,
+    /// Human-readable purpose for operators.
+    pub purpose: String,
+}
+
+/// Core-flow logging requirements.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LoggingFlowSpec {
+    /// Stable flow identifier (`execution`, `replay`, `remediation`, `integration`).
+    pub flow_id: String,
+    /// Human-readable flow description.
+    pub description: String,
+    /// Required fields for this flow in lexical order.
+    pub required_fields: Vec<String>,
+    /// Optional fields for this flow in lexical order.
+    pub optional_fields: Vec<String>,
+    /// Allowed event kinds for this flow in lexical order.
+    pub event_kinds: Vec<String>,
+}
+
+/// Baseline structured-logging contract for doctor flows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StructuredLoggingContract {
+    /// Contract version for compatibility checks.
+    pub contract_version: String,
+    /// Required envelope fields and formatting rules.
+    pub envelope_required_fields: Vec<LoggingFieldSpec>,
+    /// Correlation primitives required across all core flows.
+    pub correlation_primitives: Vec<CorrelationPrimitiveSpec>,
+    /// Allowed normalized outcome classes in lexical order.
+    pub outcome_classes: Vec<String>,
+    /// Core flow requirements in lexical order by `flow_id`.
+    pub core_flows: Vec<LoggingFlowSpec>,
+    /// Event taxonomy in lexical order.
+    pub event_taxonomy: Vec<String>,
+    /// Compatibility/versioning guidance for consumers.
+    pub compatibility: ContractCompatibility,
+}
+
+/// One normalized structured-log event emitted under the baseline contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StructuredLogEvent {
+    /// Contract version used for this event.
+    pub contract_version: String,
+    /// Flow identifier (`execution`, `replay`, `remediation`, `integration`).
+    pub flow_id: String,
+    /// Event kind from taxonomy.
+    pub event_kind: String,
+    /// Field payload (deterministically keyed).
+    pub fields: BTreeMap<String, String>,
+}
+
 impl Outputtable for WorkspaceScanReport {
     fn human_format(&self) -> String {
         let mut lines = Vec::new();
@@ -595,6 +666,36 @@ impl Outputtable for EvidenceIngestionReport {
             lines.push(format!(
                 "rejected: {} [{}] {}",
                 rejected.artifact_id, rejected.artifact_type, rejected.reason
+            ));
+        }
+        lines.join("\n")
+    }
+}
+
+impl Outputtable for StructuredLoggingContract {
+    fn human_format(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("Contract version: {}", self.contract_version));
+        lines.push(format!(
+            "Envelope required fields: {}",
+            self.envelope_required_fields.len()
+        ));
+        lines.push(format!(
+            "Correlation primitives: {}",
+            self.correlation_primitives.len()
+        ));
+        lines.push(format!("Core flows: {}", self.core_flows.len()));
+        lines.push(format!(
+            "Event taxonomy: {}",
+            self.event_taxonomy.join(", ")
+        ));
+        for flow in &self.core_flows {
+            lines.push(format!(
+                "- {} [required={}, optional={}, events={}]",
+                flow.flow_id,
+                flow.required_fields.len(),
+                flow.optional_fields.len(),
+                flow.event_kinds.join(", ")
             ));
         }
         lines.join("\n")
@@ -708,6 +809,7 @@ const TAXONOMY_VERSION: &str = "capability-surfaces-v1";
 const OPERATOR_MODEL_VERSION: &str = "doctor-operator-model-v1";
 const SCREEN_ENGINE_CONTRACT_VERSION: &str = "doctor-screen-engine-v1";
 const EVIDENCE_SCHEMA_VERSION: &str = "doctor-evidence-v1";
+const STRUCTURED_LOGGING_CONTRACT_VERSION: &str = "doctor-logging-v1";
 const VISUAL_LANGUAGE_VERSION: &str = "doctor-visual-language-v1";
 const DEFAULT_VISUAL_VIEWPORT_WIDTH: u16 = 132;
 const DEFAULT_VISUAL_VIEWPORT_HEIGHT: u16 = 44;
@@ -2375,6 +2477,647 @@ pub fn validate_evidence_ingestion_report(report: &EvidenceIngestionReport) -> R
 
     sorted_evidence_ids.clear();
     rejected_keys.clear();
+
+    Ok(())
+}
+
+fn validate_lexical_string_set(values: &[String], context: &str) -> Result<(), String> {
+    if values.is_empty() {
+        return Err(format!("{context} must be non-empty"));
+    }
+    if values.iter().any(|value| value.trim().is_empty()) {
+        return Err(format!("{context} must not contain empty values"));
+    }
+    let mut deduped = values.to_vec();
+    deduped.sort();
+    deduped.dedup();
+    if deduped.len() != values.len() {
+        return Err(format!("{context} must be unique"));
+    }
+    if deduped != values {
+        return Err(format!("{context} must be lexically sorted"));
+    }
+    Ok(())
+}
+
+fn is_slug_like(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().all(|ch| {
+            ch.is_ascii_lowercase()
+                || ch.is_ascii_digit()
+                || matches!(ch, '-' | '_' | '.' | ':' | '/')
+        })
+}
+
+fn validate_field_format(
+    field: &LoggingFieldSpec,
+    value: &str,
+    allowed_outcomes: &[String],
+) -> Result<(), String> {
+    match field.key.as_str() {
+        "run_id" => {
+            if !value.starts_with("run-") || !is_slug_like(value) {
+                return Err("run_id must match run-* slug format".to_string());
+            }
+        }
+        "scenario_id" => {
+            if !is_slug_like(value) {
+                return Err("scenario_id must be a slug-like identifier".to_string());
+            }
+        }
+        "trace_id" => {
+            if !value.starts_with("trace-") || !is_slug_like(value) {
+                return Err("trace_id must match trace-* slug format".to_string());
+            }
+        }
+        "command_provenance" => {
+            if value.contains('\n') || value.contains('\r') {
+                return Err("command_provenance must be a single-line command".to_string());
+            }
+        }
+        "outcome_class" => {
+            if !allowed_outcomes.iter().any(|candidate| candidate == value) {
+                return Err(format!("outcome_class {value} is not supported"));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Returns the canonical baseline structured-logging contract for doctor flows.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn structured_logging_contract() -> StructuredLoggingContract {
+    let envelope_required_fields = vec![
+        LoggingFieldSpec {
+            key: "artifact_pointer".to_string(),
+            field_type: "string".to_string(),
+            format_rule: "non-empty pointer to deterministic artifact".to_string(),
+            description: "Artifact path or pointer used for replay/audit.".to_string(),
+        },
+        LoggingFieldSpec {
+            key: "command_provenance".to_string(),
+            field_type: "string".to_string(),
+            format_rule: "single-line shell command".to_string(),
+            description: "Exact command provenance used to produce this event.".to_string(),
+        },
+        LoggingFieldSpec {
+            key: "flow_id".to_string(),
+            field_type: "enum".to_string(),
+            format_rule: "execution|integration|remediation|replay".to_string(),
+            description: "Core workflow lane emitting this event.".to_string(),
+        },
+        LoggingFieldSpec {
+            key: "outcome_class".to_string(),
+            field_type: "enum".to_string(),
+            format_rule: "cancelled|failed|success".to_string(),
+            description: "Normalized event outcome class.".to_string(),
+        },
+        LoggingFieldSpec {
+            key: "run_id".to_string(),
+            field_type: "string".to_string(),
+            format_rule: "run-[a-z0-9._:/-]+".to_string(),
+            description: "Deterministic run identifier.".to_string(),
+        },
+        LoggingFieldSpec {
+            key: "scenario_id".to_string(),
+            field_type: "string".to_string(),
+            format_rule: "[a-z0-9._:/-]+".to_string(),
+            description: "Scenario identifier for replay grouping.".to_string(),
+        },
+        LoggingFieldSpec {
+            key: "trace_id".to_string(),
+            field_type: "string".to_string(),
+            format_rule: "trace-[a-z0-9._:/-]+".to_string(),
+            description: "Trace identifier for deterministic replay joins.".to_string(),
+        },
+    ];
+
+    let correlation_primitives = vec![
+        CorrelationPrimitiveSpec {
+            key: "command_provenance".to_string(),
+            format_rule: "single-line shell command".to_string(),
+            purpose: "Reconstruct exact command lineage for reproduction.".to_string(),
+        },
+        CorrelationPrimitiveSpec {
+            key: "outcome_class".to_string(),
+            format_rule: "cancelled|failed|success".to_string(),
+            purpose: "Normalize cross-flow success/failure semantics.".to_string(),
+        },
+        CorrelationPrimitiveSpec {
+            key: "run_id".to_string(),
+            format_rule: "run-[a-z0-9._:/-]+".to_string(),
+            purpose: "Join all events emitted by one deterministic run.".to_string(),
+        },
+        CorrelationPrimitiveSpec {
+            key: "scenario_id".to_string(),
+            format_rule: "[a-z0-9._:/-]+".to_string(),
+            purpose: "Join events by scenario family and replay fixture.".to_string(),
+        },
+        CorrelationPrimitiveSpec {
+            key: "trace_id".to_string(),
+            format_rule: "trace-[a-z0-9._:/-]+".to_string(),
+            purpose: "Join events with trace/replay artifacts.".to_string(),
+        },
+    ];
+
+    let common_required = vec![
+        "artifact_pointer".to_string(),
+        "command_provenance".to_string(),
+        "flow_id".to_string(),
+        "outcome_class".to_string(),
+        "run_id".to_string(),
+        "scenario_id".to_string(),
+        "trace_id".to_string(),
+    ];
+
+    let core_flows = vec![
+        LoggingFlowSpec {
+            flow_id: "execution".to_string(),
+            description: "Build/test/lint execution telemetry.".to_string(),
+            required_fields: common_required.clone(),
+            optional_fields: vec!["gate_name".to_string(), "worker_route".to_string()],
+            event_kinds: vec![
+                "command_complete".to_string(),
+                "command_start".to_string(),
+                "verification_summary".to_string(),
+            ],
+        },
+        LoggingFlowSpec {
+            flow_id: "integration".to_string(),
+            description: "Cross-system integration adapter telemetry.".to_string(),
+            required_fields: common_required.clone(),
+            optional_fields: vec!["integration_target".to_string(), "retry_count".to_string()],
+            event_kinds: vec![
+                "integration_error".to_string(),
+                "integration_sync".to_string(),
+                "verification_summary".to_string(),
+            ],
+        },
+        LoggingFlowSpec {
+            flow_id: "remediation".to_string(),
+            description: "Guided remediation and verify-after-change telemetry.".to_string(),
+            required_fields: common_required.clone(),
+            optional_fields: vec!["finding_id".to_string(), "risk_score".to_string()],
+            event_kinds: vec![
+                "remediation_apply".to_string(),
+                "remediation_verify".to_string(),
+                "verification_summary".to_string(),
+            ],
+        },
+        LoggingFlowSpec {
+            flow_id: "replay".to_string(),
+            description: "Replay and determinism verification telemetry.".to_string(),
+            required_fields: common_required,
+            optional_fields: vec!["replay_pointer".to_string(), "seed".to_string()],
+            event_kinds: vec![
+                "replay_complete".to_string(),
+                "replay_start".to_string(),
+                "verification_summary".to_string(),
+            ],
+        },
+    ];
+
+    StructuredLoggingContract {
+        contract_version: STRUCTURED_LOGGING_CONTRACT_VERSION.to_string(),
+        envelope_required_fields,
+        correlation_primitives,
+        outcome_classes: vec![
+            "cancelled".to_string(),
+            "failed".to_string(),
+            "success".to_string(),
+        ],
+        core_flows,
+        event_taxonomy: vec![
+            "command_complete".to_string(),
+            "command_start".to_string(),
+            "integration_error".to_string(),
+            "integration_sync".to_string(),
+            "remediation_apply".to_string(),
+            "remediation_verify".to_string(),
+            "replay_complete".to_string(),
+            "replay_start".to_string(),
+            "verification_summary".to_string(),
+        ],
+        compatibility: ContractCompatibility {
+            minimum_reader_version: STRUCTURED_LOGGING_CONTRACT_VERSION.to_string(),
+            supported_reader_versions: vec![STRUCTURED_LOGGING_CONTRACT_VERSION.to_string()],
+            migration_guidance: vec![MigrationGuidance {
+                from_version: "doctor-logging-v0".to_string(),
+                to_version: STRUCTURED_LOGGING_CONTRACT_VERSION.to_string(),
+                breaking: false,
+                required_actions: vec![
+                    "Attach command_provenance to every event envelope.".to_string(),
+                    "Emit normalized outcome_class for every core-flow event.".to_string(),
+                    "Fail validation when required correlation primitives are missing.".to_string(),
+                ],
+            }],
+        },
+    }
+}
+
+/// Validates invariants for [`StructuredLoggingContract`].
+///
+/// # Errors
+///
+/// Returns `Err` when ordering, schema, or compatibility invariants are violated.
+#[allow(clippy::too_many_lines)]
+pub fn validate_structured_logging_contract(
+    contract: &StructuredLoggingContract,
+) -> Result<(), String> {
+    if contract.contract_version != STRUCTURED_LOGGING_CONTRACT_VERSION {
+        return Err(format!(
+            "unexpected contract_version {}",
+            contract.contract_version
+        ));
+    }
+    if contract.envelope_required_fields.is_empty() {
+        return Err("envelope_required_fields must be non-empty".to_string());
+    }
+
+    let envelope_keys = contract
+        .envelope_required_fields
+        .iter()
+        .map(|field| field.key.clone())
+        .collect::<Vec<_>>();
+    validate_lexical_string_set(&envelope_keys, "envelope_required_fields keys")?;
+    for field in &contract.envelope_required_fields {
+        if field.field_type.trim().is_empty()
+            || field.format_rule.trim().is_empty()
+            || field.description.trim().is_empty()
+        {
+            return Err(format!(
+                "envelope field {} must define type/format_rule/description",
+                field.key
+            ));
+        }
+    }
+
+    let primitive_keys = contract
+        .correlation_primitives
+        .iter()
+        .map(|primitive| primitive.key.clone())
+        .collect::<Vec<_>>();
+    validate_lexical_string_set(&primitive_keys, "correlation_primitives keys")?;
+    for primitive in &contract.correlation_primitives {
+        if primitive.format_rule.trim().is_empty() || primitive.purpose.trim().is_empty() {
+            return Err(format!(
+                "correlation primitive {} must define format_rule/purpose",
+                primitive.key
+            ));
+        }
+        if !envelope_keys.contains(&primitive.key) {
+            return Err(format!(
+                "correlation primitive {} missing from envelope_required_fields",
+                primitive.key
+            ));
+        }
+    }
+
+    validate_lexical_string_set(&contract.outcome_classes, "outcome_classes")?;
+    for required in ["cancelled", "failed", "success"] {
+        if !contract
+            .outcome_classes
+            .iter()
+            .any(|candidate| candidate == required)
+        {
+            return Err(format!("outcome_classes missing required value {required}"));
+        }
+    }
+    validate_lexical_string_set(&contract.event_taxonomy, "event_taxonomy")?;
+
+    if contract.core_flows.is_empty() {
+        return Err("core_flows must be non-empty".to_string());
+    }
+    let flow_ids = contract
+        .core_flows
+        .iter()
+        .map(|flow| flow.flow_id.clone())
+        .collect::<Vec<_>>();
+    validate_lexical_string_set(&flow_ids, "core_flows flow_id")?;
+    for required in ["execution", "integration", "remediation", "replay"] {
+        if !flow_ids.iter().any(|flow_id| flow_id == required) {
+            return Err(format!("core_flows missing required flow {required}"));
+        }
+    }
+
+    for flow in &contract.core_flows {
+        if flow.description.trim().is_empty() {
+            return Err(format!("flow {} has empty description", flow.flow_id));
+        }
+        validate_lexical_string_set(
+            &flow.required_fields,
+            &format!("flow {} required_fields", flow.flow_id),
+        )?;
+        validate_lexical_string_set(
+            &flow.optional_fields,
+            &format!("flow {} optional_fields", flow.flow_id),
+        )?;
+        validate_lexical_string_set(
+            &flow.event_kinds,
+            &format!("flow {} event_kinds", flow.flow_id),
+        )?;
+
+        for key in &flow.required_fields {
+            if !envelope_keys.contains(key) {
+                return Err(format!(
+                    "flow {} requires unknown envelope key {}",
+                    flow.flow_id, key
+                ));
+            }
+        }
+        for key in &flow.optional_fields {
+            if flow.required_fields.iter().any(|required| required == key) {
+                return Err(format!(
+                    "flow {} optional field {} must not overlap required fields",
+                    flow.flow_id, key
+                ));
+            }
+        }
+        for kind in &flow.event_kinds {
+            if !contract.event_taxonomy.iter().any(|event| event == kind) {
+                return Err(format!(
+                    "flow {} uses event kind {} outside event_taxonomy",
+                    flow.flow_id, kind
+                ));
+            }
+        }
+        for primitive in &contract.correlation_primitives {
+            if !flow
+                .required_fields
+                .iter()
+                .any(|required| required == &primitive.key)
+            {
+                return Err(format!(
+                    "flow {} must require primitive {}",
+                    flow.flow_id, primitive.key
+                ));
+            }
+        }
+    }
+
+    if contract
+        .compatibility
+        .minimum_reader_version
+        .trim()
+        .is_empty()
+    {
+        return Err("compatibility.minimum_reader_version must be non-empty".to_string());
+    }
+    validate_lexical_string_set(
+        &contract.compatibility.supported_reader_versions,
+        "compatibility.supported_reader_versions",
+    )?;
+    if !contract
+        .compatibility
+        .supported_reader_versions
+        .iter()
+        .any(|version| version == &contract.compatibility.minimum_reader_version)
+    {
+        return Err("minimum_reader_version missing from supported_reader_versions".to_string());
+    }
+    for (index, guidance) in contract.compatibility.migration_guidance.iter().enumerate() {
+        if guidance.from_version.trim().is_empty() || guidance.to_version.trim().is_empty() {
+            return Err(format!(
+                "migration_guidance[{index}] has empty from/to version"
+            ));
+        }
+        validate_lexical_string_set(
+            &guidance.required_actions,
+            &format!("migration_guidance[{index}].required_actions"),
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Emits one normalized event and enforces required field presence/format rules.
+///
+/// # Errors
+///
+/// Returns `Err` when field presence, formatting, or taxonomy checks fail.
+pub fn emit_structured_log_event(
+    contract: &StructuredLoggingContract,
+    flow_id: &str,
+    event_kind: &str,
+    fields: &BTreeMap<String, String>,
+) -> Result<StructuredLogEvent, String> {
+    validate_structured_logging_contract(contract)?;
+
+    let flow = contract
+        .core_flows
+        .iter()
+        .find(|candidate| candidate.flow_id == flow_id)
+        .ok_or_else(|| format!("unknown flow_id {flow_id}"))?;
+    if !flow.event_kinds.iter().any(|kind| kind == event_kind) {
+        return Err(format!(
+            "event_kind {event_kind} is not allowed for flow {flow_id}"
+        ));
+    }
+
+    if !contract
+        .event_taxonomy
+        .iter()
+        .any(|kind| kind == event_kind)
+    {
+        return Err(format!(
+            "event_kind {event_kind} missing from event_taxonomy"
+        ));
+    }
+
+    let mut normalized_fields = BTreeMap::new();
+    for (key, value) in fields {
+        normalized_fields.insert(key.clone(), value.trim().to_string());
+    }
+
+    for required in &flow.required_fields {
+        let value = normalized_fields
+            .get(required)
+            .ok_or_else(|| format!("missing required field {required}"))?;
+        if value.is_empty() {
+            return Err(format!("required field {required} must be non-empty"));
+        }
+    }
+
+    for spec in &contract.envelope_required_fields {
+        let value = normalized_fields
+            .get(&spec.key)
+            .ok_or_else(|| format!("missing required envelope field {}", spec.key))?;
+        if value.is_empty() {
+            return Err(format!(
+                "required envelope field {} must be non-empty",
+                spec.key
+            ));
+        }
+        validate_field_format(spec, value, &contract.outcome_classes).map_err(|reason| {
+            format!(
+                "invalid field format for {}: {} (rule: {})",
+                spec.key, reason, spec.format_rule
+            )
+        })?;
+    }
+
+    if normalized_fields
+        .get("flow_id")
+        .is_some_and(|value| value != flow_id)
+    {
+        return Err(format!(
+            "flow_id field value must match flow argument ({flow_id})"
+        ));
+    }
+
+    Ok(StructuredLogEvent {
+        contract_version: contract.contract_version.clone(),
+        flow_id: flow_id.to_string(),
+        event_kind: event_kind.to_string(),
+        fields: normalized_fields,
+    })
+}
+
+/// Validates one previously emitted [`StructuredLogEvent`].
+///
+/// # Errors
+///
+/// Returns `Err` when the event does not satisfy contract invariants.
+pub fn validate_structured_log_event(
+    contract: &StructuredLoggingContract,
+    event: &StructuredLogEvent,
+) -> Result<(), String> {
+    if event.contract_version != contract.contract_version {
+        return Err(format!(
+            "event contract_version {} does not match {}",
+            event.contract_version, contract.contract_version
+        ));
+    }
+    let normalized =
+        emit_structured_log_event(contract, &event.flow_id, &event.event_kind, &event.fields)?;
+    if normalized.fields != event.fields {
+        return Err("event fields are not deterministically normalized".to_string());
+    }
+    Ok(())
+}
+
+/// Emits deterministic smoke events for execution/replay/remediation/integration flows.
+///
+/// # Errors
+///
+/// Returns `Err` when any event fails contract validation.
+pub fn run_structured_logging_smoke(
+    contract: &StructuredLoggingContract,
+    run_id: &str,
+) -> Result<Vec<StructuredLogEvent>, String> {
+    let normalized_run_id = if run_id.trim().is_empty() {
+        "run-smoke".to_string()
+    } else {
+        run_id.trim().to_string()
+    };
+    let trace_suffix = normalized_run_id
+        .strip_prefix("run-")
+        .unwrap_or(&normalized_run_id);
+
+    let mut events = Vec::new();
+    for flow in &contract.core_flows {
+        for kind in &flow.event_kinds {
+            let outcome = if kind.ends_with("_error") {
+                "failed".to_string()
+            } else if kind.contains("cancel") {
+                "cancelled".to_string()
+            } else {
+                "success".to_string()
+            };
+
+            let mut fields = BTreeMap::new();
+            fields.insert(
+                "artifact_pointer".to_string(),
+                format!("artifacts/{normalized_run_id}/{}/{kind}.json", flow.flow_id),
+            );
+            fields.insert(
+                "command_provenance".to_string(),
+                format!(
+                    "rch exec -- cargo test -p asupersync -- doctor-{}-smoke",
+                    flow.flow_id
+                ),
+            );
+            fields.insert("flow_id".to_string(), flow.flow_id.clone());
+            fields.insert("outcome_class".to_string(), outcome);
+            fields.insert("run_id".to_string(), normalized_run_id.clone());
+            fields.insert(
+                "scenario_id".to_string(),
+                format!("doctor-{}-smoke", flow.flow_id),
+            );
+            fields.insert(
+                "trace_id".to_string(),
+                format!("trace-{trace_suffix}-{}", flow.flow_id),
+            );
+
+            let event = emit_structured_log_event(contract, &flow.flow_id, kind, &fields)?;
+            events.push(event);
+        }
+    }
+
+    events.sort_by(|left, right| {
+        (
+            left.flow_id.as_str(),
+            left.event_kind.as_str(),
+            left.fields
+                .get("trace_id")
+                .map(String::as_str)
+                .unwrap_or_default(),
+        )
+            .cmp(&(
+                right.flow_id.as_str(),
+                right.event_kind.as_str(),
+                right
+                    .fields
+                    .get("trace_id")
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+            ))
+    });
+
+    Ok(events)
+}
+
+/// Validates a stream of structured log events and ordering guarantees.
+///
+/// # Errors
+///
+/// Returns `Err` when stream ordering or field invariants are violated.
+pub fn validate_structured_logging_event_stream(
+    contract: &StructuredLoggingContract,
+    events: &[StructuredLogEvent],
+) -> Result<(), String> {
+    if events.is_empty() {
+        return Err("events must be non-empty".to_string());
+    }
+
+    let mut last_key: Option<(String, String, String)> = None;
+    let mut seen_flows = BTreeSet::new();
+    for event in events {
+        validate_structured_log_event(contract, event)?;
+        seen_flows.insert(event.flow_id.clone());
+
+        let ordering_key = (
+            event.flow_id.clone(),
+            event.event_kind.clone(),
+            event.fields.get("trace_id").cloned().unwrap_or_default(),
+        );
+        if let Some(previous) = &last_key
+            && ordering_key < *previous
+        {
+            return Err(
+                "events must be lexically ordered by flow_id/event_kind/trace_id".to_string(),
+            );
+        }
+        last_key = Some(ordering_key);
+    }
+
+    for required in ["execution", "integration", "remediation", "replay"] {
+        if !seen_flows.contains(required) {
+            return Err(format!("event stream missing flow {required}"));
+        }
+    }
 
     Ok(())
 }
@@ -4450,5 +5193,122 @@ edition = "2024"
         assert_eq!(first, second);
         validate_evidence_ingestion_report(&first).expect("first report valid");
         validate_evidence_ingestion_report(&second).expect("second report valid");
+    }
+
+    #[test]
+    fn structured_logging_contract_validates() {
+        let contract = structured_logging_contract();
+        validate_structured_logging_contract(&contract).expect("valid logging contract");
+    }
+
+    #[test]
+    fn structured_logging_contract_round_trip_json() {
+        let contract = structured_logging_contract();
+        let json = serde_json::to_string(&contract).expect("serialize");
+        let parsed: StructuredLoggingContract = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(contract, parsed);
+        validate_structured_logging_contract(&parsed).expect("parsed contract valid");
+    }
+
+    #[test]
+    fn structured_logging_contract_rejects_unsorted_event_taxonomy() {
+        let mut contract = structured_logging_contract();
+        contract.event_taxonomy = vec![
+            "verification_summary".to_string(),
+            "command_start".to_string(),
+        ];
+        let err = validate_structured_logging_contract(&contract).expect_err("must fail");
+        assert!(
+            err.contains("event_taxonomy must be lexically sorted"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn emit_structured_log_event_enforces_required_fields() {
+        let contract = structured_logging_contract();
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "artifact_pointer".to_string(),
+            "artifacts/run-1/execution/start.json".to_string(),
+        );
+        fields.insert(
+            "command_provenance".to_string(),
+            "rch exec -- cargo test".to_string(),
+        );
+        fields.insert("flow_id".to_string(), "execution".to_string());
+        fields.insert("outcome_class".to_string(), "success".to_string());
+        fields.insert("run_id".to_string(), "run-1".to_string());
+        fields.insert(
+            "scenario_id".to_string(),
+            "doctor-execution-smoke".to_string(),
+        );
+
+        let err = emit_structured_log_event(&contract, "execution", "command_start", &fields)
+            .expect_err("missing trace_id must fail");
+        assert!(err.contains("missing required field trace_id"), "{err}");
+    }
+
+    #[test]
+    fn emit_structured_log_event_enforces_format_rules() {
+        let contract = structured_logging_contract();
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "artifact_pointer".to_string(),
+            "artifacts/run-1/execution/start.json".to_string(),
+        );
+        fields.insert(
+            "command_provenance".to_string(),
+            "rch exec -- cargo test".to_string(),
+        );
+        fields.insert("flow_id".to_string(), "execution".to_string());
+        fields.insert("outcome_class".to_string(), "success".to_string());
+        fields.insert("run_id".to_string(), "run-1".to_string());
+        fields.insert("scenario_id".to_string(), "Doctor Scenario".to_string());
+        fields.insert("trace_id".to_string(), "trace-1".to_string());
+
+        let err = emit_structured_log_event(&contract, "execution", "command_start", &fields)
+            .expect_err("invalid scenario_id must fail");
+        assert!(
+            err.contains("invalid field format for scenario_id"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn structured_logging_smoke_run_is_deterministic_and_validates() {
+        let contract = structured_logging_contract();
+        let first = run_structured_logging_smoke(&contract, "run-logging-smoke").expect("smoke");
+        let second = run_structured_logging_smoke(&contract, "run-logging-smoke").expect("smoke");
+        assert_eq!(first, second);
+        validate_structured_logging_event_stream(&contract, &first).expect("stream valid");
+
+        let mut observed_flows = BTreeSet::new();
+        for event in &first {
+            observed_flows.insert(event.flow_id.clone());
+        }
+        assert_eq!(
+            observed_flows.into_iter().collect::<Vec<_>>(),
+            vec![
+                "execution".to_string(),
+                "integration".to_string(),
+                "remediation".to_string(),
+                "replay".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn structured_logging_event_stream_rejects_out_of_order_events() {
+        let contract = structured_logging_contract();
+        let mut events = run_structured_logging_smoke(&contract, "run-ordering").expect("smoke");
+        events.reverse();
+
+        let err = validate_structured_logging_event_stream(&contract, &events)
+            .expect_err("reversed events must fail ordering");
+        assert!(
+            err.contains("events must be lexically ordered by flow_id/event_kind/trace_id"),
+            "{err}"
+        );
     }
 }

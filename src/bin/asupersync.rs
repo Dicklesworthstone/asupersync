@@ -4,8 +4,9 @@
 use asupersync::Time;
 use asupersync::cli::{
     CliError, ColorChoice, CommonArgs, ExitCode, OperatorModelContract, Output, OutputFormat,
-    Outputtable, ScreenEngineContract, WorkspaceScanReport, operator_model_contract,
-    parse_color_choice, parse_output_format, scan_workspace, screen_engine_contract,
+    Outputtable, ScreenEngineContract, StructuredLoggingContract, WorkspaceScanReport,
+    operator_model_contract, parse_color_choice, parse_output_format, scan_workspace,
+    screen_engine_contract, structured_logging_contract,
 };
 use asupersync::trace::{
     CompressionMode, IssueSeverity, ReplayEvent, TRACE_FILE_VERSION, TRACE_MAGIC, TraceFileError,
@@ -232,6 +233,8 @@ enum DoctorCommand {
     OperatorModel,
     /// Emit canonical screen-to-engine contract for doctor TUI surfaces
     ScreenContracts,
+    /// Emit baseline structured logging contract for doctor flows
+    LoggingContract,
 }
 
 #[derive(Args, Debug)]
@@ -587,6 +590,7 @@ fn run_doctor(args: DoctorArgs, output: &mut Output) -> Result<(), CliError> {
         DoctorCommand::ScanWorkspace(scan_args) => doctor_scan_workspace(&scan_args, output),
         DoctorCommand::OperatorModel => doctor_operator_model(output),
         DoctorCommand::ScreenContracts => doctor_screen_contracts(output),
+        DoctorCommand::LoggingContract => doctor_logging_contract(output),
     }
 }
 
@@ -617,6 +621,14 @@ fn doctor_operator_model(output: &mut Output) -> Result<(), CliError> {
 
 fn doctor_screen_contracts(output: &mut Output) -> Result<(), CliError> {
     let contract: ScreenEngineContract = screen_engine_contract();
+    output.write(&contract).map_err(|err| {
+        CliError::new("output_error", "Failed to write output").detail(err.to_string())
+    })?;
+    Ok(())
+}
+
+fn doctor_logging_contract(output: &mut Output) -> Result<(), CliError> {
+    let contract: StructuredLoggingContract = structured_logging_contract();
     output.write(&contract).map_err(|err| {
         CliError::new("output_error", "Failed to write output").detail(err.to_string())
     })?;
