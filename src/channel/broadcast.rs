@@ -1138,8 +1138,19 @@ mod tests {
         ready_rx.recv().expect("ready recv");
         go_tx.send(()).expect("go send");
         send_entered_rx.recv().expect("send_entered recv");
-        drop(rx);
+
+        let drop_handle = std::thread::spawn(move || {
+            drop(rx);
+        });
+
+        // Wait for receiver count to drop to 0 before releasing the lock.
+        // This ensures the sender thread (waiting on the lock) will see count == 0.
+        while tx.channel.receiver_count.load(std::sync::atomic::Ordering::Acquire) > 0 {
+            std::thread::yield_now();
+        }
+
         drop(lock_guard);
+        drop_handle.join().expect("drop thread panicked");
 
         let delivered = handle.join().expect("sender thread panicked");
         crate::assert_with_log!(

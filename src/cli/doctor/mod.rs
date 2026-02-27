@@ -281,6 +281,7 @@ const SURFACE_MARKERS: [(&str, &[&str]); 12] = [
 
 /// Returns the canonical operator/persona contract for doctor surfaces.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn operator_model_contract() -> OperatorModelContract {
     let global_evidence_requirements = vec![
         "artifact_pointer".to_string(),

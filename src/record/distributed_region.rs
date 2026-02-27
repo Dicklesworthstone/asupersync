@@ -382,11 +382,15 @@ impl DistributedRegionRecord {
     /// Marks a replica as lost and potentially degrades the region.
     pub fn replica_lost(&mut self, replica_id: &str, now: Time) -> Result<StateTransition, Error> {
         // Mark the replica as unavailable.
-        let found = self.replicas.iter_mut().find(|r| r.id == replica_id);
-
-        if let Some(replica) = found {
-            replica.status = ReplicaStatus::Unavailable;
-        }
+        let replica = self
+            .replicas
+            .iter_mut()
+            .find(|r| r.id == replica_id)
+            .ok_or_else(|| {
+                Error::new(ErrorKind::Internal)
+                    .with_message(format!("replica {replica_id} not found"))
+            })?;
+        replica.status = ReplicaStatus::Unavailable;
 
         let healthy = self.healthy_replicas();
 
@@ -845,6 +849,20 @@ mod tests {
         let mut region = create_active_region();
         let result = region.remove_replica("nonexistent");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn replica_lost_unknown_replica_error_does_not_mutate_state() {
+        let mut region = create_active_region();
+        let prev_state = region.state;
+        let prev_healthy = region.healthy_replicas();
+        let prev_transitions = region.transitions.len();
+
+        let result = region.replica_lost("nonexistent", Time::from_secs(9));
+        assert!(result.is_err());
+        assert_eq!(region.state, prev_state);
+        assert_eq!(region.healthy_replicas(), prev_healthy);
+        assert_eq!(region.transitions.len(), prev_transitions);
     }
 
     // =========================================================================

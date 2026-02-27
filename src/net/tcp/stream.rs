@@ -308,6 +308,10 @@ impl TcpStream {
                 fallback_rewake(cx);
                 Ok(())
             }
+            Err(err) if err.kind() == io::ErrorKind::NotConnected => {
+                fallback_rewake(cx);
+                Ok(())
+            }
             Err(err) => Err(err),
         }
     }
@@ -371,6 +375,10 @@ async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>>
                     match driver.register(socket, Interest::WRITABLE, cx.waker().clone()) {
                         Ok(new_reg) => registration = Some(new_reg),
                         Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+                            fallback = true;
+                            return Poll::Ready(Ok(()));
+                        }
+                        Err(err) if err.kind() == io::ErrorKind::NotConnected => {
                             fallback = true;
                             return Poll::Ready(Ok(()));
                         }
@@ -697,6 +705,52 @@ mod tests {
         }
     }
 
+    struct RegisterNotConnectedReactor {
+        inner: LabReactor,
+    }
+
+    impl RegisterNotConnectedReactor {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                inner: LabReactor::new(),
+            })
+        }
+    }
+
+    impl Reactor for RegisterNotConnectedReactor {
+        fn register(
+            &self,
+            _source: &dyn crate::runtime::reactor::Source,
+            _token: Token,
+            _interest: Interest,
+        ) -> io::Result<()> {
+            Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "injected not connected register failure",
+            ))
+        }
+
+        fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
+            self.inner.modify(token, interest)
+        }
+
+        fn deregister(&self, token: Token) -> io::Result<()> {
+            self.inner.deregister(token)
+        }
+
+        fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
+            self.inner.poll(events, timeout)
+        }
+
+        fn wake(&self) -> io::Result<()> {
+            self.inner.wake()
+        }
+
+        fn registration_count(&self) -> usize {
+            self.inner.registration_count()
+        }
+    }
+
     #[test]
     fn tcp_stream_builder_defaults() {
         let builder = TcpStreamBuilder::new("127.0.0.1:0");
@@ -803,6 +857,44 @@ mod tests {
         let poll = Pin::new(&mut stream).poll_read(&mut cx, &mut read_buf);
         assert!(matches!(poll, Poll::Pending));
         assert!(stream.registration.is_some());
+    }
+
+    #[test]
+    fn tcp_stream_register_notconnected_falls_back_to_pending() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let client = net::TcpStream::connect(addr).expect("connect");
+        let (server, _) = listener.accept().expect("accept");
+        client.set_nonblocking(true).expect("nonblocking");
+        server.set_nonblocking(true).expect("nonblocking");
+
+        let reactor = RegisterNotConnectedReactor::new();
+        let driver = IoDriverHandle::new(reactor);
+        let cx = Cx::new_with_observability(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let mut stream = TcpStream::from_std(client).expect("wrap stream");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut buf = [0u8; 8];
+        let mut read_buf = ReadBuf::new(&mut buf);
+
+        let poll = Pin::new(&mut stream).poll_read(&mut cx, &mut read_buf);
+        assert!(
+            matches!(poll, Poll::Pending),
+            "register NotConnected should use fallback wake path instead of returning an error"
+        );
+        assert!(
+            stream.registration.is_none(),
+            "fallback path should not keep a stale registration"
+        );
     }
 
     #[cfg(unix)]

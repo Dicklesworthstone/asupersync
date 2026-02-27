@@ -120,12 +120,10 @@ where
                             Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                             Poll::Ready(Ok(())) => {
                                 this.need_flush = false;
-                                return Poll::Pending;
                             }
                         }
-                    } else {
-                        return Poll::Pending;
                     }
+                    return Poll::Pending;
                 }
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                 Poll::Ready(Ok(())) => {
@@ -240,12 +238,10 @@ where
                             Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                             Poll::Ready(Ok(())) => {
                                 this.need_flush = false;
-                                return Poll::Pending;
                             }
                         }
-                    } else {
-                        return Poll::Pending;
                     }
+                    return Poll::Pending;
                 }
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                 Poll::Ready(Ok(buf)) => buf,
@@ -386,12 +382,10 @@ where
                             Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                             Poll::Ready(Ok(())) => {
                                 this.need_flush = false;
-                                return Poll::Pending;
                             }
                         }
-                    } else {
-                        return Poll::Pending;
                     }
+                    return Poll::Pending;
                 }
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                 Poll::Ready(Ok(())) => {
