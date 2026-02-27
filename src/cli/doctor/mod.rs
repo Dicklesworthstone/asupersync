@@ -53,10 +53,29 @@ pub struct OperatorPersona {
     pub label: String,
     /// Primary mission statement.
     pub mission: String,
+    /// Deterministic mission-success signals used for acceptance checks.
+    pub mission_success_signals: Vec<String>,
     /// Primary UI surfaces used by this persona.
     pub primary_views: Vec<String>,
     /// Default decision loop identifier.
     pub default_decision_loop: String,
+    /// High-stakes decisions this persona is expected to make.
+    pub high_stakes_decisions: Vec<PersonaDecision>,
+}
+
+/// One high-stakes operator decision mapped to the canonical decision loops.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersonaDecision {
+    /// Stable decision identifier within the persona.
+    pub id: String,
+    /// Human-readable decision prompt.
+    pub prompt: String,
+    /// Decision loop this decision belongs to.
+    pub decision_loop: String,
+    /// Step identifier inside `decision_loop` this decision binds to.
+    pub decision_step: String,
+    /// Evidence keys required for making the decision.
+    pub required_evidence: Vec<String>,
 }
 
 /// Deterministic decision loop definition.
@@ -121,8 +140,12 @@ impl Outputtable for OperatorModelContract {
         ));
         for persona in &self.personas {
             lines.push(format!(
-                "- {} ({}) => {} [loop={}]",
-                persona.label, persona.id, persona.mission, persona.default_decision_loop
+                "- {} ({}) => {} [loop={}, decisions={}]",
+                persona.label,
+                persona.id,
+                persona.mission,
+                persona.default_decision_loop,
+                persona.high_stakes_decisions.len()
             ));
         }
         lines.join("\n")
@@ -404,34 +427,121 @@ pub fn operator_model_contract() -> OperatorModelContract {
             id: "conformance_engineer".to_string(),
             label: "Conformance Engineer".to_string(),
             mission: "Drive deterministic reproduction and close correctness gaps.".to_string(),
+            mission_success_signals: vec![
+                "deterministic_repro_pass_rate".to_string(),
+                "regression_suite_green".to_string(),
+            ],
             primary_views: vec![
                 "bead_command_center".to_string(),
                 "scenario_workbench".to_string(),
                 "evidence_timeline".to_string(),
             ],
             default_decision_loop: "triage_investigate_remediate".to_string(),
+            high_stakes_decisions: vec![
+                PersonaDecision {
+                    id: "promote_finding_to_active_work".to_string(),
+                    prompt: "Promote finding to active remediation work item.".to_string(),
+                    decision_loop: "triage_investigate_remediate".to_string(),
+                    decision_step: "prioritize_finding".to_string(),
+                    required_evidence: vec![
+                        "finding_id".to_string(),
+                        "priority_score".to_string(),
+                        "scenario_id".to_string(),
+                    ],
+                },
+                PersonaDecision {
+                    id: "declare_remediation_verified".to_string(),
+                    prompt: "Declare remediation verified for the candidate patch.".to_string(),
+                    decision_loop: "triage_investigate_remediate".to_string(),
+                    decision_step: "apply_fix_and_verify".to_string(),
+                    required_evidence: vec![
+                        "artifact_pointer".to_string(),
+                        "command_provenance".to_string(),
+                        "outcome_class".to_string(),
+                    ],
+                },
+            ],
         },
         OperatorPersona {
             id: "release_guardian".to_string(),
             label: "Release Guardian".to_string(),
             mission: "Enforce release gates and block unsafe promotions.".to_string(),
+            mission_success_signals: vec![
+                "gate_closure_latency".to_string(),
+                "release_block_precision".to_string(),
+            ],
             primary_views: vec![
                 "gate_status_board".to_string(),
                 "artifact_audit".to_string(),
                 "decision_ledger".to_string(),
             ],
             default_decision_loop: "release_gate_verification".to_string(),
+            high_stakes_decisions: vec![
+                PersonaDecision {
+                    id: "approve_release_candidate".to_string(),
+                    prompt: "Approve release candidate once all deterministic gates pass."
+                        .to_string(),
+                    decision_loop: "release_gate_verification".to_string(),
+                    decision_step: "signoff_or_block".to_string(),
+                    required_evidence: vec![
+                        "decision_reason".to_string(),
+                        "outcome_class".to_string(),
+                        "run_id".to_string(),
+                    ],
+                },
+                PersonaDecision {
+                    id: "block_release_candidate".to_string(),
+                    prompt: "Block release candidate when gate evidence is incomplete.".to_string(),
+                    decision_loop: "release_gate_verification".to_string(),
+                    decision_step: "collect_gate_status".to_string(),
+                    required_evidence: vec![
+                        "command_provenance".to_string(),
+                        "gate_name".to_string(),
+                        "outcome_class".to_string(),
+                    ],
+                },
+            ],
         },
         OperatorPersona {
             id: "runtime_operator".to_string(),
             label: "Runtime Operator".to_string(),
             mission: "Contain live incidents while preserving deterministic evidence.".to_string(),
+            mission_success_signals: vec![
+                "incident_mttc".to_string(),
+                "postmortem_evidence_completeness".to_string(),
+            ],
             primary_views: vec![
                 "incident_console".to_string(),
                 "runtime_health".to_string(),
                 "replay_inspector".to_string(),
             ],
             default_decision_loop: "incident_containment".to_string(),
+            high_stakes_decisions: vec![
+                PersonaDecision {
+                    id: "declare_containment_state".to_string(),
+                    prompt: "Declare whether containment actions are sufficient for stabilization."
+                        .to_string(),
+                    decision_loop: "incident_containment".to_string(),
+                    decision_step: "stabilize_runtime".to_string(),
+                    required_evidence: vec![
+                        "cancel_phase".to_string(),
+                        "obligation_snapshot".to_string(),
+                        "run_id".to_string(),
+                    ],
+                },
+                PersonaDecision {
+                    id: "escalate_to_postmortem".to_string(),
+                    prompt: "Escalate incident to postmortem workflow with replay pointers."
+                        .to_string(),
+                    decision_loop: "incident_containment".to_string(),
+                    decision_step: "record_postmortem_input".to_string(),
+                    required_evidence: vec![
+                        "artifact_pointer".to_string(),
+                        "repro_command".to_string(),
+                        "scenario_id".to_string(),
+                    ],
+                },
+            ],
         },
     ];
 
@@ -448,6 +558,7 @@ pub fn operator_model_contract() -> OperatorModelContract {
 /// # Errors
 ///
 /// Returns `Err` when required fields are missing, duplicated, or inconsistent.
+#[allow(clippy::too_many_lines)]
 pub fn validate_operator_model_contract(contract: &OperatorModelContract) -> Result<(), String> {
     if contract.contract_version.trim().is_empty() {
         return Err("contract_version must be non-empty".to_string());
@@ -462,6 +573,17 @@ pub fn validate_operator_model_contract(contract: &OperatorModelContract) -> Res
     if contract.global_evidence_requirements.is_empty() {
         return Err("global_evidence_requirements must be non-empty".to_string());
     }
+
+    let mut deduped_global = contract.global_evidence_requirements.clone();
+    deduped_global.sort();
+    deduped_global.dedup();
+    if deduped_global.len() != contract.global_evidence_requirements.len() {
+        return Err("global_evidence_requirements must be unique".to_string());
+    }
+    if deduped_global != contract.global_evidence_requirements {
+        return Err("global_evidence_requirements must be lexically sorted".to_string());
+    }
+    let global_evidence_set: BTreeSet<_> = contract.global_evidence_requirements.iter().collect();
 
     let mut seen_personas = BTreeSet::new();
     for persona in &contract.personas {
@@ -480,8 +602,37 @@ pub fn validate_operator_model_contract(contract: &OperatorModelContract) -> Res
         if persona.primary_views.is_empty() {
             return Err(format!("persona {} must define primary_views", persona.id));
         }
+        if persona.mission_success_signals.is_empty() {
+            return Err(format!(
+                "persona {} must define mission_success_signals",
+                persona.id
+            ));
+        }
+        let mut deduped_signals = persona.mission_success_signals.clone();
+        deduped_signals.sort();
+        deduped_signals.dedup();
+        if deduped_signals.len() != persona.mission_success_signals.len() {
+            return Err(format!(
+                "persona {} mission_success_signals must be unique",
+                persona.id
+            ));
+        }
+        if deduped_signals != persona.mission_success_signals {
+            return Err(format!(
+                "persona {} mission_success_signals must be lexically sorted",
+                persona.id
+            ));
+        }
+        if persona.high_stakes_decisions.is_empty() {
+            return Err(format!(
+                "persona {} must define high_stakes_decisions",
+                persona.id
+            ));
+        }
     }
 
+    let mut loop_steps: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut step_evidence_keys: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
     let mut seen_loops = BTreeSet::new();
     for loop_def in &contract.decision_loops {
         if loop_def.id.trim().is_empty() {
@@ -495,6 +646,7 @@ pub fn validate_operator_model_contract(contract: &OperatorModelContract) -> Res
         }
 
         let mut seen_steps = BTreeSet::new();
+        let mut loop_step_ids = BTreeSet::new();
         for step in &loop_def.steps {
             if step.id.trim().is_empty() || step.action.trim().is_empty() {
                 return Err(format!(
@@ -514,6 +666,21 @@ pub fn validate_operator_model_contract(contract: &OperatorModelContract) -> Res
                     loop_def.id, step.id
                 ));
             }
+            let mut deduped_step_evidence = step.required_evidence.clone();
+            deduped_step_evidence.sort();
+            deduped_step_evidence.dedup();
+            if deduped_step_evidence.len() != step.required_evidence.len() {
+                return Err(format!(
+                    "decision loop {} step {} required_evidence must be unique",
+                    loop_def.id, step.id
+                ));
+            }
+            if deduped_step_evidence != step.required_evidence {
+                return Err(format!(
+                    "decision loop {} step {} required_evidence must be lexically sorted",
+                    loop_def.id, step.id
+                ));
+            }
             if step
                 .required_evidence
                 .iter()
@@ -524,7 +691,13 @@ pub fn validate_operator_model_contract(contract: &OperatorModelContract) -> Res
                     loop_def.id, step.id
                 ));
             }
+            loop_step_ids.insert(step.id.clone());
+            step_evidence_keys.insert(
+                (loop_def.id.clone(), step.id.clone()),
+                step.required_evidence.iter().cloned().collect(),
+            );
         }
+        loop_steps.insert(loop_def.id.clone(), loop_step_ids);
     }
 
     for persona in &contract.personas {
@@ -534,16 +707,83 @@ pub fn validate_operator_model_contract(contract: &OperatorModelContract) -> Res
                 persona.id, persona.default_decision_loop
             ));
         }
-    }
-
-    let mut deduped = contract.global_evidence_requirements.clone();
-    deduped.sort();
-    deduped.dedup();
-    if deduped.len() != contract.global_evidence_requirements.len() {
-        return Err("global_evidence_requirements must be unique".to_string());
-    }
-    if deduped != contract.global_evidence_requirements {
-        return Err("global_evidence_requirements must be lexically sorted".to_string());
+        let mut seen_decisions = BTreeSet::new();
+        for decision in &persona.high_stakes_decisions {
+            if decision.id.trim().is_empty() || decision.prompt.trim().is_empty() {
+                return Err(format!(
+                    "persona {} has high_stakes_decision with empty id/prompt",
+                    persona.id
+                ));
+            }
+            if !seen_decisions.insert(decision.id.clone()) {
+                return Err(format!(
+                    "persona {} has duplicate high_stakes_decision id {}",
+                    persona.id, decision.id
+                ));
+            }
+            if decision.decision_loop != persona.default_decision_loop {
+                return Err(format!(
+                    "persona {} decision {} must use default decision loop {}",
+                    persona.id, decision.id, persona.default_decision_loop
+                ));
+            }
+            let Some(step_ids) = loop_steps.get(&decision.decision_loop) else {
+                return Err(format!(
+                    "persona {} decision {} references unknown decision loop {}",
+                    persona.id, decision.id, decision.decision_loop
+                ));
+            };
+            if !step_ids.contains(&decision.decision_step) {
+                return Err(format!(
+                    "persona {} decision {} references unknown step {} in loop {}",
+                    persona.id, decision.id, decision.decision_step, decision.decision_loop
+                ));
+            }
+            if decision.required_evidence.is_empty() {
+                return Err(format!(
+                    "persona {} decision {} must declare required_evidence",
+                    persona.id, decision.id
+                ));
+            }
+            let mut deduped_decision_evidence = decision.required_evidence.clone();
+            deduped_decision_evidence.sort();
+            deduped_decision_evidence.dedup();
+            if deduped_decision_evidence.len() != decision.required_evidence.len() {
+                return Err(format!(
+                    "persona {} decision {} required_evidence must be unique",
+                    persona.id, decision.id
+                ));
+            }
+            if deduped_decision_evidence != decision.required_evidence {
+                return Err(format!(
+                    "persona {} decision {} required_evidence must be lexically sorted",
+                    persona.id, decision.id
+                ));
+            }
+            let Some(step_keys) = step_evidence_keys.get(&(
+                decision.decision_loop.clone(),
+                decision.decision_step.clone(),
+            )) else {
+                return Err(format!(
+                    "persona {} decision {} has missing step evidence binding",
+                    persona.id, decision.id
+                ));
+            };
+            for key in &decision.required_evidence {
+                if key.trim().is_empty() {
+                    return Err(format!(
+                        "persona {} decision {} has empty evidence key",
+                        persona.id, decision.id
+                    ));
+                }
+                if !step_keys.contains(key) && !global_evidence_set.contains(key) {
+                    return Err(format!(
+                        "persona {} decision {} references unknown evidence key {}",
+                        persona.id, decision.id, key
+                    ));
+                }
+            }
+        }
     }
 
     Ok(())
@@ -1267,5 +1507,35 @@ edition = "2024"
         contract.personas.push(contract.personas[0].clone());
         let err = validate_operator_model_contract(&contract).expect_err("must fail");
         assert!(err.contains("duplicate persona id"), "{err}");
+    }
+
+    #[test]
+    fn operator_model_contract_rejects_unsorted_mission_success_signals() {
+        let mut contract = operator_model_contract();
+        contract.personas[0].mission_success_signals =
+            vec!["z_signal".to_string(), "a_signal".to_string()];
+        let err = validate_operator_model_contract(&contract).expect_err("must fail");
+        assert!(err.contains("mission_success_signals must be lexically sorted"));
+    }
+
+    #[test]
+    fn operator_model_contract_rejects_unknown_decision_step_binding() {
+        let mut contract = operator_model_contract();
+        contract.personas[0].high_stakes_decisions[0].decision_step = "unknown_step".to_string();
+        let err = validate_operator_model_contract(&contract).expect_err("must fail");
+        assert!(err.contains("references unknown step"), "{err}");
+    }
+
+    #[test]
+    fn operator_model_contract_rejects_decision_evidence_outside_contract() {
+        let mut contract = operator_model_contract();
+        contract.personas[0].high_stakes_decisions[0]
+            .required_evidence
+            .push("not_in_contract".to_string());
+        contract.personas[0].high_stakes_decisions[0]
+            .required_evidence
+            .sort();
+        let err = validate_operator_model_contract(&contract).expect_err("must fail");
+        assert!(err.contains("references unknown evidence key"), "{err}");
     }
 }
