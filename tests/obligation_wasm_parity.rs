@@ -66,12 +66,7 @@ fn wasm_obligation_lifecycle_with_abstract_time() {
     let reserve_time = t(1_000_000); // 1ms in browser perf time
     let commit_time = t(5_500_000); // 5.5ms later
 
-    let token = ledger.acquire(
-        ObligationKind::SendPermit,
-        task(0),
-        region(0),
-        reserve_time,
-    );
+    let token = ledger.acquire(ObligationKind::SendPermit, task(0), region(0), reserve_time);
 
     let duration = ledger.commit(token, commit_time);
     assert_eq!(

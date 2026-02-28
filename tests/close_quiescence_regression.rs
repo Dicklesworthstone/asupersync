@@ -343,3 +343,104 @@ fn close_region_with_live_task_violates_leak() {
 
     test_complete!("close_region_with_live_task_violates_leak");
 }
+
+/// Browser-style nested cancellation cascade:
+/// child in-flight work drains, child finalizer completes, child closes,
+/// then root finalizer completes before root close.
+///
+/// Validates region-close quiescence under nested scopes with explicit
+/// finalizer completion ordering.
+#[test]
+fn browser_nested_cancel_cascade_reaches_quiescence() {
+    init_test("browser_nested_cancel_cascade_reaches_quiescence");
+
+    let mut quiescence = QuiescenceOracle::new();
+    let mut task_leak = TaskLeakOracle::new();
+
+    let root = region(0);
+    let child = region(1);
+    let inflight_child = task(10);
+    let child_finalizer = task(11);
+    let root_finalizer = task(12);
+
+    quiescence.on_region_create(root, None);
+    quiescence.on_region_create(child, Some(root));
+
+    quiescence.on_spawn(inflight_child, child);
+    task_leak.on_spawn(inflight_child, child, t(10));
+    quiescence.on_spawn(child_finalizer, child);
+    task_leak.on_spawn(child_finalizer, child, t(11));
+    quiescence.on_spawn(root_finalizer, root);
+    task_leak.on_spawn(root_finalizer, root, t(12));
+
+    // Cancellation cascade drain order: child work + finalizer before child close.
+    quiescence.on_task_complete(inflight_child);
+    task_leak.on_complete(inflight_child, t(100));
+    quiescence.on_task_complete(child_finalizer);
+    task_leak.on_complete(child_finalizer, t(110));
+    quiescence.on_region_close(child, t(120));
+    task_leak.on_region_close(child, t(120));
+
+    // Root finalizer must complete before root can close quiescently.
+    quiescence.on_task_complete(root_finalizer);
+    task_leak.on_complete(root_finalizer, t(200));
+    quiescence.on_region_close(root, t(210));
+    task_leak.on_region_close(root, t(210));
+
+    let q = quiescence.check();
+    let tl = task_leak.check(t(210));
+    let ok = q.is_ok() && tl.is_ok();
+    assert_with_log!(ok, "browser nested cancel cascade is quiescent", true, ok);
+
+    test_complete!("browser_nested_cancel_cascade_reaches_quiescence");
+}
+
+/// Browser negative-path: parent closes before its finalizer completes.
+///
+/// Validates that quiescence/leak oracles reject close-before-finalizer.
+#[test]
+fn browser_close_before_finalizer_completion_violates_quiescence() {
+    init_test("browser_close_before_finalizer_completion_violates_quiescence");
+
+    let mut quiescence = QuiescenceOracle::new();
+    let mut task_leak = TaskLeakOracle::new();
+
+    let root = region(0);
+    let child = region(1);
+    let child_task = task(20);
+    let root_finalizer = task(21);
+
+    quiescence.on_region_create(root, None);
+    quiescence.on_region_create(child, Some(root));
+    quiescence.on_spawn(child_task, child);
+    task_leak.on_spawn(child_task, child, t(10));
+    quiescence.on_spawn(root_finalizer, root);
+    task_leak.on_spawn(root_finalizer, root, t(11));
+
+    // Child drains and closes cleanly.
+    quiescence.on_task_complete(child_task);
+    task_leak.on_complete(child_task, t(50));
+    quiescence.on_region_close(child, t(60));
+    task_leak.on_region_close(child, t(60));
+
+    // Root closes prematurely while root_finalizer is still live.
+    quiescence.on_region_close(root, t(70));
+    task_leak.on_region_close(root, t(70));
+
+    let q = quiescence.check();
+    let tl = task_leak.check(t(70));
+    assert_with_log!(
+        q.is_err(),
+        "quiescence oracle rejects close-before-finalizer",
+        true,
+        q.is_err()
+    );
+    assert_with_log!(
+        tl.is_err(),
+        "task leak oracle rejects live finalizer at close",
+        true,
+        tl.is_err()
+    );
+
+    test_complete!("browser_close_before_finalizer_completion_violates_quiescence");
+}

@@ -7,7 +7,12 @@
 
 use asupersync::bytes::BytesMut;
 use asupersync::http::h2::{Header, HpackDecoder, HpackEncoder, Settings, SettingsBuilder};
-use asupersync::io::{FetchAuthority, FetchMethod, FetchPolicyError, FetchRequest};
+use asupersync::io::{
+    BrowserStorageAdapter, BrowserStorageIoCap, FetchAuthority, FetchMethod, FetchPolicyError,
+    FetchRequest, StorageAuthority, StorageBackend, StorageConsistencyPolicy, StorageIoCap,
+    StorageOperation, StoragePolicyError, StorageQuotaPolicy, StorageRedactionPolicy,
+    StorageRequest,
+};
 use asupersync::net::websocket::{CloseReason, Frame, Opcode, WsError};
 
 // =============================================================================
@@ -214,6 +219,18 @@ mod browser_fetch_security {
     }
 
     #[test]
+    fn invariant_fetch_policy_default_authority_is_deny_all() {
+        let authority = FetchAuthority::default();
+        let request = FetchRequest::new(FetchMethod::Get, "https://api.example.com/v1/data");
+        assert_eq!(
+            authority.authorize(&request),
+            Err(FetchPolicyError::OriginDenied(
+                "https://api.example.com".to_owned()
+            ))
+        );
+    }
+
+    #[test]
     fn invariant_fetch_policy_denies_method_escalation() {
         let authority = strict_fetch_authority();
         let request = FetchRequest::new(FetchMethod::Post, "https://api.example.com/v1/data");
@@ -232,6 +249,18 @@ mod browser_fetch_security {
             authority.authorize(&request),
             Err(FetchPolicyError::CredentialsDenied)
         );
+    }
+
+    #[test]
+    fn invariant_fetch_policy_allows_credentials_with_explicit_grant() {
+        let authority = FetchAuthority::deny_all()
+            .grant_origin("https://api.example.com")
+            .grant_method(FetchMethod::Get)
+            .with_max_header_count(4)
+            .with_credentials_allowed();
+        let request = FetchRequest::new(FetchMethod::Get, "https://api.example.com/v1/data")
+            .with_credentials();
+        assert_eq!(authority.authorize(&request), Ok(()));
     }
 
     #[test]
@@ -279,6 +308,101 @@ mod browser_fetch_security {
             authority.authorize(&request),
             Err(FetchPolicyError::CredentialsDenied)
         );
+    }
+}
+
+// =============================================================================
+// BROWSER STORAGE AUTHORITY INVARIANTS
+// =============================================================================
+
+mod browser_storage_security {
+    use super::*;
+
+    fn strict_storage_cap() -> BrowserStorageIoCap {
+        BrowserStorageIoCap::new(
+            StorageAuthority::deny_all()
+                .grant_backend(StorageBackend::IndexedDb)
+                .grant_namespace("cache:*")
+                .grant_operation(StorageOperation::Get)
+                .grant_operation(StorageOperation::Set)
+                .grant_operation(StorageOperation::Delete)
+                .grant_operation(StorageOperation::ListKeys),
+            StorageQuotaPolicy {
+                max_total_bytes: 1024,
+                max_key_bytes: 64,
+                max_value_bytes: 256,
+                max_namespace_bytes: 64,
+                max_entries: 32,
+            },
+            StorageConsistencyPolicy::ImmediateReadAfterWrite,
+            StorageRedactionPolicy {
+                redact_keys: true,
+                redact_namespaces: true,
+                redact_value_lengths: true,
+            },
+        )
+    }
+
+    #[test]
+    fn invariant_storage_policy_default_authority_is_deny_all() {
+        let cap = BrowserStorageIoCap::new(
+            StorageAuthority::default(),
+            StorageQuotaPolicy::default(),
+            StorageConsistencyPolicy::ImmediateReadAfterWrite,
+            StorageRedactionPolicy::default(),
+        );
+        let request = StorageRequest::set(StorageBackend::IndexedDb, "cache:v1", "token", 4);
+        assert_eq!(
+            cap.authorize(&request),
+            Err(StoragePolicyError::BackendDenied(StorageBackend::IndexedDb))
+        );
+    }
+
+    #[test]
+    fn invariant_storage_policy_denies_namespace_escalation() {
+        let mut adapter = BrowserStorageAdapter::new(strict_storage_cap());
+        let result = adapter.set(
+            StorageBackend::IndexedDb,
+            "session:v1",
+            "token",
+            b"abc".to_vec(),
+        );
+        assert_eq!(
+            result,
+            Err(asupersync::io::BrowserStorageError::Policy(
+                StoragePolicyError::NamespaceDenied("session:v1".to_owned())
+            ))
+        );
+    }
+
+    #[test]
+    fn invariant_storage_policy_denies_clear_without_explicit_operation_grant() {
+        let mut adapter = BrowserStorageAdapter::new(strict_storage_cap());
+        let result = adapter.clear_namespace(StorageBackend::IndexedDb, "cache:user:1");
+        assert_eq!(
+            result,
+            Err(asupersync::io::BrowserStorageError::Policy(
+                StoragePolicyError::OperationDenied(StorageOperation::ClearNamespace)
+            ))
+        );
+    }
+
+    #[test]
+    fn invariant_storage_telemetry_redacts_sensitive_labels() {
+        let mut adapter = BrowserStorageAdapter::new(strict_storage_cap());
+        adapter
+            .set(
+                StorageBackend::IndexedDb,
+                "cache:user:42",
+                "access_token",
+                b"secret".to_vec(),
+            )
+            .expect("set should succeed");
+
+        let event = adapter.events().last().expect("event should be recorded");
+        assert_eq!(event.namespace_label, "namespace[len:13]");
+        assert_eq!(event.key_label.as_deref(), Some("key[len:12]"));
+        assert_eq!(event.value_len, None);
     }
 }
 

@@ -2,7 +2,7 @@
 
 Status: draft
 Last updated: 2026-02-28
-Owner: asupersync-umelq.14.1
+Owner: asupersync-umelq.14.2
 
 ## Scope
 
@@ -55,6 +55,7 @@ This addendum defines browser-specific security assumptions and controls for the
 
 - Browser host and JavaScript environment are untrusted from the runtime point of view.
 - Network authority must be explicit (`Cx` + `IoCap`) and never ambient.
+- Fetch capability authority is default-deny; every origin/method/credential grant is explicit.
 - Replay artifacts are potentially exfiltratable unless treated as sensitive outputs.
 - Dependency compromise remains possible; policy gates must prevent forbidden runtime surfaces.
 
@@ -62,16 +63,17 @@ This addendum defines browser-specific security assumptions and controls for the
 
 | Category | Browser Abuse Case | Required Control |
 | --- | --- | --- |
-| Spoofing | Untrusted origin impersonates approved backend | Explicit origin allowlist in `FetchAuthority` |
+| Spoofing | Untrusted origin impersonates approved backend | Default-deny origin policy + explicit origin allowlist in `FetchAuthority` |
 | Tampering | Script mutates request shape to bypass policy | Method allowlist + header-count cap + invalid URL rejection |
 | Repudiation | Missing provenance for security decisions | Structured security diagnostics + deterministic test replay commands |
 | Information Disclosure | Replay/log artifacts expose secrets/tokens | Redaction requirements + no secret-bearing stdout/stderr |
 | Denial of Service | Oversized headers/bodies or hostile request patterns | Hard policy bounds (`max_header_count`, protocol size limits) |
-| Elevation of Privilege | Ambient fetch/credentials escalation without capability | Capability-gated `IoCap::fetch_cap()` + credential-default deny |
+| Elevation of Privilege | Ambient fetch/credentials escalation without capability | Capability-gated `IoCap::fetch_cap()` + default-deny grants (origin/method/credentials) |
 
 ### Explicit Policy Checks and Adversarial Tests
 
 - `tests/security_invariants.rs` (`browser_fetch_security` module) enforces:
+  - default authority deny-all behavior,
   - untrusted origin denial,
   - method escalation denial,
   - credential-default-deny behavior,
@@ -104,7 +106,7 @@ cargo test --test security_invariants browser_fetch_security -- --nocapture
 | --- | --- | --- | --- |
 | Third-party package compromise in JS toolchains | Rust-level controls cannot fully govern npm/bundler supply chain | Dependency policy gate + lockfile review + reproducible CI artifacts | Signed provenance + policy-enforced package allowlist for browser SDK distribution |
 | Replay artifact over-collection | Traces can capture sensitive operational context if emitted too broadly | Redaction guidance + scoped diagnostics + no secret stdout/stderr | Automated artifact redaction validation gate in CI |
-| Host bridge misuse by integrators | Browser embedding layer can accidentally widen authority in app code | Explicit `FetchAuthority` contract and deny-by-default credentials | Contract tests for all host adapters plus policy check in release gate |
+| Host bridge misuse by integrators | Browser embedding layer can accidentally widen authority in app code | Explicit `FetchAuthority` contract with default-deny grants (origin/method/credentials) | Contract tests for all host adapters plus policy check in release gate |
 
 ## Threats and Mitigations by Component
 

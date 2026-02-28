@@ -159,6 +159,7 @@ declare -A SUITES=(
     [combinators]="test_combinators.sh"
     [cancel-attribution]="test_cancel_attribution.sh"
     [scheduler]="test_scheduler_wakeup_e2e.sh"
+    [doctor-workspace-scan]="test_doctor_workspace_scan_e2e.sh"
     [phase6]="run_phase6_e2e.sh"
 )
 
@@ -176,6 +177,7 @@ declare -A SUITE_ARTIFACT_ROOTS=(
     [combinators]="test_logs"
     [cancel-attribution]="target/test-results/cancel-attribution"
     [scheduler]="target/e2e-results/scheduler"
+    [doctor-workspace-scan]="target/e2e-results/doctor_workspace_scan"
     [phase6]="target/phase6-e2e"
 )
 
@@ -193,6 +195,7 @@ declare -A SUITE_SUMMARY_GLOBS=(
     [combinators]="summary.json"
     [cancel-attribution]="summary_*.json"
     [scheduler]="summary.json"
+    [doctor-workspace-scan]="summary.json"
     [phase6]="summary_*.json"
 )
 
@@ -210,6 +213,7 @@ declare -A SUITE_ARTIFACT_DIR_GLOBS=(
     [combinators]="combinators_*"
     [cancel-attribution]=""
     [scheduler]="20*"
+    [doctor-workspace-scan]="artifacts_*"
     [phase6]=""
 )
 
@@ -227,6 +231,7 @@ declare -A SUITE_CANONICAL_SCENARIO_ID=(
     [combinators]="E2E-SUITE-COMBINATORS"
     [cancel-attribution]="E2E-SUITE-CANCEL-ATTRIBUTION"
     [scheduler]="E2E-SUITE-SCHEDULER-WAKEUP"
+    [doctor-workspace-scan]="E2E-SUITE-DOCTOR-WORKSPACE-SCAN"
     [phase6]="E2E-SUITE-PHASE6"
 )
 
@@ -246,7 +251,7 @@ RAPTORQ_REQUIRED_SCENARIOS=(
 SUITE_ORDER=(
     websocket http messaging transport database distributed
     h2-security net-hardening redis
-    combinators cancel-attribution scheduler
+    combinators cancel-attribution scheduler doctor-workspace-scan
     phase6
 )
 
