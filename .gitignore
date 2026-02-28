@@ -139,3 +139,8 @@ output.txt
 
 # Standalone bug reproduction / debugging harnesses
 src/channel/deadlock_test.rs
+
+# FrankenSuite sub-project stray test artifact dirs
+franken_decision/false/
+franken_evidence/false/
+franken_kernel/false/
