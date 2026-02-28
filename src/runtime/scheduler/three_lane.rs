@@ -630,35 +630,6 @@ pub(crate) fn schedule_cancel_on_current_local(task: TaskId, priority: u8) -> bo
     })
 }
 
-thread_local! {
-    static CURRENT_LOCAL: RefCell<Option<Arc<Mutex<PriorityScheduler>>>> = const { RefCell::new(None) };
-}
-
-/// Scoped setter for the thread-local scheduler pointer.
-///
-/// When active, [`ThreeLaneScheduler::spawn`] will schedule onto this local
-/// scheduler instead of injecting into the global ready queue.
-#[derive(Debug)]
-struct ScopedLocalScheduler {
-    prev: Option<Arc<Mutex<PriorityScheduler>>>,
-}
-
-impl ScopedLocalScheduler {
-    fn new(local: Arc<Mutex<PriorityScheduler>>) -> Self {
-        let prev = CURRENT_LOCAL.with(|cell| cell.borrow_mut().replace(local));
-        Self { prev }
-    }
-}
-
-impl Drop for ScopedLocalScheduler {
-    fn drop(&mut self) {
-        let prev = self.prev.take();
-        CURRENT_LOCAL.with(|cell| {
-            *cell.borrow_mut() = prev;
-        });
-    }
-}
-
 /// A multi-worker scheduler with 3-lane priority support.
 ///
 /// Each worker maintains a local `PriorityScheduler` for tasks spawned within
@@ -5108,21 +5079,18 @@ mod tests {
         let mut handoff_yields = 0u32;
 
         for _ in 0..64 {
-            match worker.next_task() {
-                Some(_) => {
-                    dispatched = dispatched.saturating_add(1);
-                    current_burst = current_burst.saturating_add(1);
-                    max_burst = max_burst.max(current_burst);
+            if worker.next_task().is_some() {
+                dispatched = dispatched.saturating_add(1);
+                current_burst = current_burst.saturating_add(1);
+                max_burst = max_burst.max(current_burst);
+            } else {
+                if dispatched == 10 {
+                    break;
                 }
-                None => {
-                    if dispatched == 10 {
-                        break;
-                    }
-                    if current_burst == 3 {
-                        handoff_yields = handoff_yields.saturating_add(1);
-                    }
-                    current_burst = 0;
+                if current_burst == 3 {
+                    handoff_yields = handoff_yields.saturating_add(1);
                 }
+                current_burst = 0;
             }
         }
 

@@ -16,6 +16,7 @@
 //! | `enable_parking` | true |
 //! | `poll_budget` | 128 |
 //! | `browser_ready_handoff_limit` | 0 (disabled) |
+//! | `browser_worker_offload` | disabled, min cost 1024, max in-flight 16 |
 //! | `root_region_limits` | `None` |
 //! | `observability` | `None` |
 //! | `enable_governor` | `false` |
@@ -45,6 +46,70 @@ impl BlockingPoolConfig {
     pub fn normalize(&mut self) {
         if self.max_threads < self.min_threads {
             self.max_threads = self.min_threads;
+        }
+    }
+}
+
+/// Payload transfer strategy for browser worker offload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerTransferMode {
+    /// Clone structured payloads (structured clone semantics).
+    CloneStructured,
+    /// Only allow transferable payload classes; reject others.
+    TransferableOnly,
+}
+
+/// Cancellation propagation policy across browser worker boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerCancellationMode {
+    /// Request cancellation and continue without waiting for worker ack.
+    BestEffortAbort,
+    /// Require explicit worker-side acknowledgement before completion.
+    RequireAck,
+}
+
+/// Browser worker offload contract for CPU-heavy runtime paths.
+///
+/// This is an opt-in scaffold contract for wasm/browser profiles.
+/// It defines how payload ownership and cancellation are represented
+/// before transport-level worker wiring is fully implemented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrowserWorkerOffloadConfig {
+    /// Enable worker offload for eligible runtime operations.
+    pub enabled: bool,
+    /// Minimum estimated task cost required before offload is considered.
+    pub min_task_cost: u32,
+    /// Maximum number of in-flight worker requests.
+    pub max_in_flight: usize,
+    /// Payload transfer strategy across the worker boundary.
+    pub transfer_mode: WorkerTransferMode,
+    /// Cancellation propagation policy for offloaded operations.
+    pub cancellation_mode: WorkerCancellationMode,
+    /// Require caller-owned payload buffers before dispatch.
+    pub require_owned_payloads: bool,
+}
+
+impl BrowserWorkerOffloadConfig {
+    /// Normalize configuration values to safe defaults.
+    pub fn normalize(&mut self) {
+        if self.min_task_cost == 0 {
+            self.min_task_cost = 1;
+        }
+        if self.max_in_flight == 0 {
+            self.max_in_flight = 1;
+        }
+    }
+}
+
+impl Default for BrowserWorkerOffloadConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_task_cost: 1024,
+            max_in_flight: 16,
+            transfer_mode: WorkerTransferMode::TransferableOnly,
+            cancellation_mode: WorkerCancellationMode::RequireAck,
+            require_owned_payloads: true,
         }
     }
 }
@@ -119,6 +184,8 @@ pub struct RuntimeConfig {
     /// unbounded host-turn monopolization under adversarial ready floods.
     /// `0` disables forced handoff behavior.
     pub browser_ready_handoff_limit: usize,
+    /// Browser worker offload contract for CPU-heavy runtime paths.
+    pub browser_worker_offload: BrowserWorkerOffloadConfig,
     /// Maximum consecutive cancel-lane dispatches before yielding to other lanes.
     pub cancel_lane_max_streak: usize,
     /// Logical clock mode used for trace causal ordering.
@@ -200,6 +267,7 @@ impl RuntimeConfig {
         if self.adaptive_cancel_streak_epoch_steps == 0 {
             self.adaptive_cancel_streak_epoch_steps = 1;
         }
+        self.browser_worker_offload.normalize();
         if let Some(escalation) = self.leak_escalation.as_mut() {
             if escalation.threshold == 0 {
                 escalation.threshold = 1;
@@ -230,6 +298,7 @@ impl Default for RuntimeConfig {
             enable_parking: true,
             poll_budget: 128,
             browser_ready_handoff_limit: 0,
+            browser_worker_offload: BrowserWorkerOffloadConfig::default(),
             cancel_lane_max_streak: 16,
             logical_clock_mode: None,
             root_region_limits: None,
@@ -294,6 +363,24 @@ mod tests {
             config.browser_ready_handoff_limit
         );
         crate::assert_with_log!(
+            !config.browser_worker_offload.enabled,
+            "browser_worker_offload.enabled",
+            false,
+            config.browser_worker_offload.enabled
+        );
+        crate::assert_with_log!(
+            config.browser_worker_offload.min_task_cost == 1024,
+            "browser_worker_offload.min_task_cost",
+            1024,
+            config.browser_worker_offload.min_task_cost
+        );
+        crate::assert_with_log!(
+            config.browser_worker_offload.max_in_flight == 16,
+            "browser_worker_offload.max_in_flight",
+            16,
+            config.browser_worker_offload.max_in_flight
+        );
+        crate::assert_with_log!(
             config.cancel_lane_max_streak == 16,
             "cancel_lane_max_streak",
             16,
@@ -348,6 +435,14 @@ mod tests {
             enable_parking: true,
             poll_budget: 0,
             browser_ready_handoff_limit: 0,
+            browser_worker_offload: BrowserWorkerOffloadConfig {
+                enabled: true,
+                min_task_cost: 0,
+                max_in_flight: 0,
+                transfer_mode: WorkerTransferMode::CloneStructured,
+                cancellation_mode: WorkerCancellationMode::BestEffortAbort,
+                require_owned_payloads: false,
+            },
             cancel_lane_max_streak: 0,
             root_region_limits: None,
             on_thread_start: None,
@@ -396,6 +491,18 @@ mod tests {
             "browser_ready_handoff_limit",
             0,
             config.browser_ready_handoff_limit
+        );
+        crate::assert_with_log!(
+            config.browser_worker_offload.min_task_cost == 1,
+            "browser_worker_offload.min_task_cost",
+            1,
+            config.browser_worker_offload.min_task_cost
+        );
+        crate::assert_with_log!(
+            config.browser_worker_offload.max_in_flight == 1,
+            "browser_worker_offload.max_in_flight",
+            1,
+            config.browser_worker_offload.max_in_flight
         );
         crate::assert_with_log!(
             config.cancel_lane_max_streak == 1,
@@ -512,6 +619,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn test_normalize_preserves_custom_values() {
         init_test("test_normalize_preserves_custom_values");
         let mut config = RuntimeConfig {
@@ -527,6 +635,14 @@ mod tests {
             enable_parking: false,
             poll_budget: 32,
             browser_ready_handoff_limit: 64,
+            browser_worker_offload: BrowserWorkerOffloadConfig {
+                enabled: true,
+                min_task_cost: 4096,
+                max_in_flight: 8,
+                transfer_mode: WorkerTransferMode::TransferableOnly,
+                cancellation_mode: WorkerCancellationMode::RequireAck,
+                require_owned_payloads: true,
+            },
             cancel_lane_max_streak: 16,
             root_region_limits: None,
             on_thread_start: None,
@@ -583,6 +699,24 @@ mod tests {
             config.browser_ready_handoff_limit
         );
         crate::assert_with_log!(
+            config.browser_worker_offload.enabled,
+            "browser_worker_offload.enabled",
+            true,
+            config.browser_worker_offload.enabled
+        );
+        crate::assert_with_log!(
+            config.browser_worker_offload.min_task_cost == 4096,
+            "browser_worker_offload.min_task_cost",
+            4096,
+            config.browser_worker_offload.min_task_cost
+        );
+        crate::assert_with_log!(
+            config.browser_worker_offload.max_in_flight == 8,
+            "browser_worker_offload.max_in_flight",
+            8,
+            config.browser_worker_offload.max_in_flight
+        );
+        crate::assert_with_log!(
             config.cancel_lane_max_streak == 16,
             "cancel_lane_max_streak",
             16,
@@ -619,6 +753,76 @@ mod tests {
             config.obligation_leak_response
         );
         crate::test_complete!("test_normalize_preserves_custom_values");
+    }
+
+    #[test]
+    fn test_browser_worker_offload_defaults() {
+        init_test("test_browser_worker_offload_defaults");
+        let cfg = BrowserWorkerOffloadConfig::default();
+        crate::assert_with_log!(
+            !cfg.enabled,
+            "offload disabled by default",
+            false,
+            cfg.enabled
+        );
+        crate::assert_with_log!(
+            cfg.min_task_cost == 1024,
+            "default min task cost",
+            1024,
+            cfg.min_task_cost
+        );
+        crate::assert_with_log!(
+            cfg.max_in_flight == 16,
+            "default max in flight",
+            16,
+            cfg.max_in_flight
+        );
+        crate::assert_with_log!(
+            cfg.transfer_mode == WorkerTransferMode::TransferableOnly,
+            "default transfer mode",
+            WorkerTransferMode::TransferableOnly,
+            cfg.transfer_mode
+        );
+        crate::assert_with_log!(
+            cfg.cancellation_mode == WorkerCancellationMode::RequireAck,
+            "default cancellation mode",
+            WorkerCancellationMode::RequireAck,
+            cfg.cancellation_mode
+        );
+        crate::assert_with_log!(
+            cfg.require_owned_payloads,
+            "default require_owned_payloads",
+            true,
+            cfg.require_owned_payloads
+        );
+        crate::test_complete!("test_browser_worker_offload_defaults");
+    }
+
+    #[test]
+    fn test_browser_worker_offload_normalize_clamps_zero_values() {
+        init_test("test_browser_worker_offload_normalize_clamps_zero_values");
+        let mut cfg = BrowserWorkerOffloadConfig {
+            enabled: true,
+            min_task_cost: 0,
+            max_in_flight: 0,
+            transfer_mode: WorkerTransferMode::CloneStructured,
+            cancellation_mode: WorkerCancellationMode::BestEffortAbort,
+            require_owned_payloads: false,
+        };
+        cfg.normalize();
+        crate::assert_with_log!(
+            cfg.min_task_cost == 1,
+            "min_task_cost",
+            1,
+            cfg.min_task_cost
+        );
+        crate::assert_with_log!(
+            cfg.max_in_flight == 1,
+            "max_in_flight",
+            1,
+            cfg.max_in_flight
+        );
+        crate::test_complete!("test_browser_worker_offload_normalize_clamps_zero_values");
     }
 
     // ========================================================================

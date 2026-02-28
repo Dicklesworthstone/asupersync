@@ -107,6 +107,7 @@
 //! | [`enable_parking`](RuntimeBuilder::enable_parking) | true | Park idle workers |
 //! | [`poll_budget`](RuntimeBuilder::poll_budget) | 128 | Polls before cooperative yield |
 //! | [`browser_ready_handoff_limit`](RuntimeBuilder::browser_ready_handoff_limit) | 0 (disabled) | Max ready dispatch burst before host-turn handoff |
+//! | [`browser_worker_offload`](RuntimeBuilder::browser_worker_offload) | disabled | Browser worker offload policy contract |
 //! | [`cancel_lane_max_streak`](RuntimeBuilder::cancel_lane_max_streak) | 16 | Max consecutive cancel dispatches |
 //! | [`enable_adaptive_cancel_streak`](RuntimeBuilder::enable_adaptive_cancel_streak) | true | Enable regret-bounded adaptive cancel streak |
 //! | [`adaptive_cancel_streak_epoch_steps`](RuntimeBuilder::adaptive_cancel_streak_epoch_steps) | 128 | Dispatches per adaptive epoch |
@@ -143,11 +144,13 @@ use crate::runtime::config::RuntimeConfig;
 use crate::runtime::deadline_monitor::{
     AdaptiveDeadlineConfig, DeadlineWarning, MonitorConfig, default_warning_handler,
 };
+use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::reactor::Reactor;
 use crate::runtime::scheduler::ThreeLaneScheduler;
 use crate::time::TimerDriverHandle;
 use crate::trace::distributed::LogicalClockMode;
 use crate::types::{Budget, CancelAttributionConfig};
+use crate::util::EntropySource;
 use parking_lot::{Mutex, MutexGuard};
 use std::future::Future;
 use std::io;
@@ -182,6 +185,9 @@ use std::time::Duration;
 pub struct RuntimeBuilder {
     config: RuntimeConfig,
     reactor: Option<Arc<dyn Reactor>>,
+    io_driver: Option<IoDriverHandle>,
+    timer_driver: Option<TimerDriverHandle>,
+    entropy_source: Option<Arc<dyn EntropySource>>,
 }
 
 impl RuntimeBuilder {
@@ -191,6 +197,9 @@ impl RuntimeBuilder {
         Self {
             config: RuntimeConfig::default(),
             reactor: None,
+            io_driver: None,
+            timer_driver: None,
+            entropy_source: None,
         }
     }
 
@@ -284,6 +293,58 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn browser_ready_handoff_limit(mut self, limit: usize) -> Self {
         self.config.browser_ready_handoff_limit = limit;
+        self
+    }
+
+    /// Set the browser worker offload policy contract.
+    ///
+    /// This config defines ownership, cancellation, and transfer semantics
+    /// for CPU-heavy work that may be dispatched to browser workers.
+    #[must_use]
+    pub fn browser_worker_offload(
+        mut self,
+        config: crate::runtime::config::BrowserWorkerOffloadConfig,
+    ) -> Self {
+        self.config.browser_worker_offload = config;
+        self
+    }
+
+    /// Enable or disable browser worker offload.
+    #[must_use]
+    pub fn browser_worker_offload_enabled(mut self, enabled: bool) -> Self {
+        self.config.browser_worker_offload.enabled = enabled;
+        self
+    }
+
+    /// Set worker offload cost/in-flight thresholds.
+    #[must_use]
+    pub fn browser_worker_offload_limits(
+        mut self,
+        min_task_cost: u32,
+        max_in_flight: usize,
+    ) -> Self {
+        self.config.browser_worker_offload.min_task_cost = min_task_cost;
+        self.config.browser_worker_offload.max_in_flight = max_in_flight;
+        self
+    }
+
+    /// Set payload transfer strategy for browser worker offload.
+    #[must_use]
+    pub fn browser_worker_transfer_mode(
+        mut self,
+        mode: crate::runtime::config::WorkerTransferMode,
+    ) -> Self {
+        self.config.browser_worker_offload.transfer_mode = mode;
+        self
+    }
+
+    /// Set cancellation propagation strategy for browser worker offload.
+    #[must_use]
+    pub fn browser_worker_cancellation_mode(
+        mut self,
+        mode: crate::runtime::config::WorkerCancellationMode,
+    ) -> Self {
+        self.config.browser_worker_offload.cancellation_mode = mode;
         self
     }
 
@@ -503,6 +564,9 @@ impl RuntimeBuilder {
         Ok(Self {
             config,
             reactor: None,
+            io_driver: None,
+            timer_driver: None,
+            entropy_source: None,
         })
     }
 
@@ -534,13 +598,22 @@ impl RuntimeBuilder {
         Ok(Self {
             config,
             reactor: None,
+            io_driver: None,
+            timer_driver: None,
+            entropy_source: None,
         })
     }
 
     /// Build a runtime from this configuration.
     #[allow(clippy::result_large_err)]
     pub fn build(self) -> Result<Runtime, Error> {
-        Runtime::with_config_and_reactor(self.config, self.reactor)
+        Runtime::with_config_and_platform(
+            self.config,
+            self.reactor,
+            self.io_driver,
+            self.timer_driver,
+            self.entropy_source,
+        )
     }
 
     /// Provide a reactor for runtime I/O integration.
@@ -549,6 +622,36 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn with_reactor(mut self, reactor: Arc<dyn Reactor>) -> Self {
         self.reactor = Some(reactor);
+        self
+    }
+
+    /// Provide an explicit I/O driver handle for runtime capability contexts.
+    ///
+    /// This overrides the default reactor-backed driver creation path and is
+    /// useful for platform seam injection (for example, browser adapters).
+    #[must_use]
+    pub fn with_io_driver(mut self, driver: IoDriverHandle) -> Self {
+        self.io_driver = Some(driver);
+        self
+    }
+
+    /// Provide an explicit timer driver handle for runtime capability contexts.
+    ///
+    /// When set, this driver is installed into runtime state before root-region
+    /// initialization, so spawned tasks inherit it through `Cx`.
+    #[must_use]
+    pub fn with_timer_driver(mut self, driver: TimerDriverHandle) -> Self {
+        self.timer_driver = Some(driver);
+        self
+    }
+
+    /// Provide an explicit entropy source for capability-based randomness.
+    ///
+    /// The runtime forks this source per task and wires it into task contexts,
+    /// avoiding implicit ambient entropy.
+    #[must_use]
+    pub fn with_entropy_source(mut self, source: Arc<dyn EntropySource>) -> Self {
+        self.entropy_source = Some(source);
         self
     }
 
@@ -777,21 +880,36 @@ impl Runtime {
     /// Construct a runtime from the given configuration.
     #[allow(clippy::result_large_err)]
     pub fn with_config(config: RuntimeConfig) -> Result<Self, Error> {
-        Self::with_config_and_reactor(config, None)
+        Self::with_config_and_platform(config, None, None, None, None)
     }
 
     /// Construct a runtime from the given configuration and reactor.
     #[allow(clippy::result_large_err)]
     pub fn with_config_and_reactor(
+        config: RuntimeConfig,
+        reactor: Option<Arc<dyn Reactor>>,
+    ) -> Result<Self, Error> {
+        Self::with_config_and_platform(config, reactor, None, None, None)
+    }
+
+    /// Construct a runtime from configuration and explicit platform seams.
+    #[allow(clippy::result_large_err)]
+    fn with_config_and_platform(
         mut config: RuntimeConfig,
         reactor: Option<Arc<dyn Reactor>>,
+        io_driver: Option<IoDriverHandle>,
+        timer_driver: Option<TimerDriverHandle>,
+        entropy_source: Option<Arc<dyn EntropySource>>,
     ) -> Result<Self, Error> {
         config.normalize();
         Ok(Self {
-            inner: Arc::new(RuntimeInner::new(config, reactor).map_err(|e| {
-                Error::new(crate::error::ErrorKind::Internal)
-                    .with_message(format!("runtime init: {e}"))
-            })?),
+            inner: Arc::new(
+                RuntimeInner::new(config, reactor, io_driver, timer_driver, entropy_source)
+                    .map_err(|e| {
+                        Error::new(crate::error::ErrorKind::Internal)
+                            .with_message(format!("runtime init: {e}"))
+                    })?,
+            ),
         })
     }
 
@@ -995,41 +1113,126 @@ struct RuntimeInner {
 }
 
 impl RuntimeInner {
-    fn new(config: RuntimeConfig, reactor: Option<Arc<dyn Reactor>>) -> io::Result<Self> {
+    fn initialize_runtime_state(
+        config: &RuntimeConfig,
+        reactor: Option<Arc<dyn Reactor>>,
+        io_driver: Option<IoDriverHandle>,
+        timer_driver: Option<TimerDriverHandle>,
+        entropy_source: Option<Arc<dyn EntropySource>>,
+    ) -> RuntimeState {
+        let mut runtime_state = reactor.map_or_else(
+            || RuntimeState::new_with_metrics(config.metrics_provider.clone()),
+            |reactor| {
+                RuntimeState::with_reactor_and_metrics(reactor, config.metrics_provider.clone())
+            },
+        );
+        if let Some(driver) = io_driver {
+            runtime_state.set_io_driver(driver);
+        }
+        if let Some(driver) = timer_driver {
+            runtime_state.set_timer_driver(driver);
+        }
+        if let Some(source) = entropy_source {
+            runtime_state.set_entropy_source(source);
+        }
+        runtime_state
+    }
+
+    fn initialize_root_region(
+        config: &RuntimeConfig,
+        state: &Arc<crate::sync::ContendedMutex<RuntimeState>>,
+    ) -> crate::types::RegionId {
+        let mut guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(observability) = config.observability.clone() {
+            guard.set_observability_config(observability);
+        }
+        if let Some(mode) = config.logical_clock_mode.clone() {
+            guard.set_logical_clock_mode(mode);
+        }
+        guard.set_cancel_attribution_config(config.cancel_attribution);
+        guard.set_obligation_leak_response(config.obligation_leak_response);
+        guard.set_leak_escalation(config.leak_escalation);
+        if guard.timer_driver().is_none() {
+            guard.set_timer_driver(TimerDriverHandle::with_wall_clock());
+        }
+        let root = guard.create_root_region(Budget::INFINITE);
+        if let Some(limits) = config.root_region_limits.clone() {
+            let _ = guard.set_region_limits(root, limits);
+        }
+        root
+    }
+
+    fn spawn_worker_threads(
+        config: &RuntimeConfig,
+        scheduler: &mut ThreeLaneScheduler,
+    ) -> io::Result<Vec<std::thread::JoinHandle<()>>> {
+        let mut worker_threads = Vec::new();
+        if config.worker_threads == 0 {
+            return Ok(worker_threads);
+        }
+
+        let workers = scheduler.take_workers();
+        for worker in workers {
+            let name = {
+                let id = worker.id;
+                format!("{}-{id}", config.thread_name_prefix)
+            };
+            let on_start = config.on_thread_start.clone();
+            let on_stop = config.on_thread_stop.clone();
+            let mut builder = std::thread::Builder::new().name(name);
+            if config.thread_stack_size > 0 {
+                builder = builder.stack_size(config.thread_stack_size);
+            }
+            let handle = builder
+                .spawn(move || {
+                    if let Some(callback) = on_start.as_ref() {
+                        callback();
+                    }
+                    let mut worker = worker;
+                    worker.run_loop();
+                    if let Some(callback) = on_stop.as_ref() {
+                        callback();
+                    }
+                })
+                .map_err(|e| {
+                    // Signal already-running workers to exit their run loops,
+                    // then join them so they don't leak.
+                    scheduler.shutdown();
+                    while let Some(handle) = worker_threads.pop() {
+                        let _ = handle.join();
+                    }
+                    io::Error::other(format!("failed to spawn worker thread: {e}"))
+                })?;
+            worker_threads.push(handle);
+        }
+
+        Ok(worker_threads)
+    }
+
+    fn new(
+        config: RuntimeConfig,
+        reactor: Option<Arc<dyn Reactor>>,
+        io_driver: Option<IoDriverHandle>,
+        timer_driver: Option<TimerDriverHandle>,
+        entropy_source: Option<Arc<dyn EntropySource>>,
+    ) -> io::Result<Self> {
         // Runtime currently instantiates the unified RuntimeState path.
         // ShardedState exists behind migration work, but there is not yet a
         // RuntimeConfig layout switch wired here (see bd-2f7uj runbook).
+        let runtime_state = Self::initialize_runtime_state(
+            &config,
+            reactor,
+            io_driver,
+            timer_driver,
+            entropy_source,
+        );
         let state = Arc::new(crate::sync::ContendedMutex::new(
             "runtime_state",
-            match reactor {
-                Some(reactor) => {
-                    RuntimeState::with_reactor_and_metrics(reactor, config.metrics_provider.clone())
-                }
-                None => RuntimeState::new_with_metrics(config.metrics_provider.clone()),
-            },
+            runtime_state,
         ));
-        let root_region = {
-            let mut guard = state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(observability) = config.observability.clone() {
-                guard.set_observability_config(observability);
-            }
-            if let Some(mode) = config.logical_clock_mode.clone() {
-                guard.set_logical_clock_mode(mode);
-            }
-            guard.set_cancel_attribution_config(config.cancel_attribution);
-            guard.set_obligation_leak_response(config.obligation_leak_response);
-            guard.set_leak_escalation(config.leak_escalation);
-            if guard.timer_driver().is_none() {
-                guard.set_timer_driver(TimerDriverHandle::with_wall_clock());
-            }
-            let root = guard.create_root_region(Budget::INFINITE);
-            if let Some(limits) = config.root_region_limits.clone() {
-                let _ = guard.set_region_limits(root, limits);
-            }
-            root
-        };
+        let root_region = Self::initialize_root_region(&config, &state);
 
         let mut scheduler = ThreeLaneScheduler::new_with_options(
             config.worker_threads,
@@ -1047,43 +1250,7 @@ impl RuntimeInner {
             config.adaptive_cancel_streak_epoch_steps,
         );
 
-        let mut worker_threads: Vec<std::thread::JoinHandle<()>> = Vec::new();
-        if config.worker_threads > 0 {
-            let workers = scheduler.take_workers();
-            for worker in workers {
-                let name = {
-                    let id = worker.id;
-                    format!("{}-{id}", config.thread_name_prefix)
-                };
-                let on_start = config.on_thread_start.clone();
-                let on_stop = config.on_thread_stop.clone();
-                let mut builder = std::thread::Builder::new().name(name);
-                if config.thread_stack_size > 0 {
-                    builder = builder.stack_size(config.thread_stack_size);
-                }
-                let handle = builder
-                    .spawn(move || {
-                        if let Some(callback) = on_start.as_ref() {
-                            callback();
-                        }
-                        let mut worker = worker;
-                        worker.run_loop();
-                        if let Some(callback) = on_stop.as_ref() {
-                            callback();
-                        }
-                    })
-                    .map_err(|e| {
-                        // Signal already-running workers to exit their run loops,
-                        // then join them so they don't leak.
-                        scheduler.shutdown();
-                        while let Some(handle) = worker_threads.pop() {
-                            let _ = handle.join();
-                        }
-                        io::Error::other(format!("failed to spawn worker thread: {e}"))
-                    })?;
-                worker_threads.push(handle);
-            }
-        }
+        let worker_threads = Self::spawn_worker_threads(&config, &mut scheduler)?;
 
         let (deadline_monitor_shutdown, deadline_monitor_thread) =
             Self::start_deadline_monitor(&config, &state);
@@ -1428,6 +1595,142 @@ mod tests {
         assert!(
             runtime.blocking_handle().is_none(),
             "blocking_handle should return None"
+        );
+    }
+
+    #[test]
+    fn runtime_builder_platform_seams_propagate_into_task_contexts() {
+        init_test_logging();
+
+        let io_driver = IoDriverHandle::new(Arc::new(LabReactor::new()));
+        {
+            let mut driver = io_driver.lock();
+            let _ = driver.register_waker(noop_waker());
+        }
+
+        let virtual_clock = Arc::new(crate::time::VirtualClock::starting_at(Time::from_secs(42)));
+        let timer_driver = TimerDriverHandle::with_virtual_clock(virtual_clock);
+
+        let runtime = RuntimeBuilder::current_thread()
+            .with_io_driver(io_driver.clone())
+            .with_timer_driver(timer_driver.clone())
+            .with_entropy_source(Arc::new(crate::util::DetEntropy::new(1234)))
+            .build()
+            .expect("runtime build");
+
+        let (io_present, timer_now, entropy_source) =
+            runtime.block_on(runtime.handle().spawn(async {
+                let cx = Cx::current().expect("task context");
+                (
+                    cx.io_driver_handle().is_some(),
+                    cx.timer_driver().map(|driver| driver.now()),
+                    cx.entropy().source_id(),
+                )
+            }));
+        assert!(io_present, "injected io driver should be visible in Cx");
+        assert_eq!(
+            timer_now,
+            Some(Time::from_secs(42)),
+            "injected virtual timer should be visible in Cx"
+        );
+        assert_eq!(
+            entropy_source, "deterministic",
+            "injected entropy source should flow through Cx"
+        );
+
+        let guard = runtime
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state_io = guard.io_driver_handle().expect("runtime io driver");
+        assert_eq!(
+            state_io.waker_count(),
+            1,
+            "runtime should retain the injected io driver instance"
+        );
+        let state_timer = guard.timer_driver_handle().expect("runtime timer driver");
+        assert_eq!(
+            state_timer.now(),
+            Time::from_secs(42),
+            "runtime should retain the injected timer driver instance"
+        );
+    }
+
+    #[test]
+    fn runtime_builder_platform_seams_override_reactor_defaults() {
+        init_test_logging();
+
+        let custom_driver = IoDriverHandle::new(Arc::new(LabReactor::new()));
+        {
+            let mut driver = custom_driver.lock();
+            let _ = driver.register_waker(noop_waker());
+        }
+        let custom_timer = TimerDriverHandle::with_virtual_clock(Arc::new(
+            crate::time::VirtualClock::starting_at(Time::from_secs(7)),
+        ));
+
+        let runtime = RuntimeBuilder::current_thread()
+            .with_reactor(Arc::new(LabReactor::new()))
+            .with_io_driver(custom_driver)
+            .with_timer_driver(custom_timer)
+            .build()
+            .expect("runtime build");
+
+        let guard = runtime
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let io = guard.io_driver_handle().expect("io driver");
+        assert_eq!(
+            io.waker_count(),
+            1,
+            "explicit io driver should override default reactor wiring"
+        );
+        let timer = guard.timer_driver_handle().expect("timer driver");
+        assert_eq!(
+            timer.now(),
+            Time::from_secs(7),
+            "explicit timer driver should override wall-clock default"
+        );
+    }
+
+    #[test]
+    fn runtime_builder_browser_worker_offload_policy_round_trips() {
+        init_test_logging();
+
+        let runtime = RuntimeBuilder::current_thread()
+            .browser_worker_offload_enabled(true)
+            .browser_worker_offload_limits(2048, 4)
+            .browser_worker_transfer_mode(
+                crate::runtime::config::WorkerTransferMode::CloneStructured,
+            )
+            .browser_worker_cancellation_mode(
+                crate::runtime::config::WorkerCancellationMode::BestEffortAbort,
+            )
+            .build()
+            .expect("runtime build");
+
+        let offload = runtime.config().browser_worker_offload;
+        assert!(offload.enabled, "offload policy should be enabled");
+        assert_eq!(
+            offload.min_task_cost, 2048,
+            "min task cost should round-trip"
+        );
+        assert_eq!(
+            offload.max_in_flight, 4,
+            "in-flight limit should round-trip"
+        );
+        assert_eq!(
+            offload.transfer_mode,
+            crate::runtime::config::WorkerTransferMode::CloneStructured,
+            "transfer mode should round-trip"
+        );
+        assert_eq!(
+            offload.cancellation_mode,
+            crate::runtime::config::WorkerCancellationMode::BestEffortAbort,
+            "cancellation mode should round-trip"
         );
     }
 
