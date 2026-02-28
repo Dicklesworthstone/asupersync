@@ -264,6 +264,22 @@ mod browser_fetch_security {
             .with_header("x-trace-id", "t-1");
         assert_eq!(authority.authorize(&request), Ok(()));
     }
+
+    #[test]
+    fn invariant_fetch_policy_wildcard_origin_still_denies_credentials() {
+        let authority = FetchAuthority {
+            allowed_origins: vec!["*".to_owned()],
+            allowed_methods: vec![FetchMethod::Get],
+            allow_credentials: false,
+            max_header_count: 4,
+        };
+        let request = FetchRequest::new(FetchMethod::Get, "https://any-origin.example/v1/data")
+            .with_credentials();
+        assert_eq!(
+            authority.authorize(&request),
+            Err(FetchPolicyError::CredentialsDenied)
+        );
+    }
 }
 
 // =============================================================================

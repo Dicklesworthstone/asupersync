@@ -98,6 +98,14 @@ python3 scripts/check_wasm_dependency_policy.py --policy .github/wasm_dependency
 cargo test --test security_invariants browser_fetch_security -- --nocapture
 ```
 
+### Residual Risk Register (Browser Scope)
+
+| Risk | Why Residual | Current Mitigation | Closure Trigger |
+| --- | --- | --- | --- |
+| Third-party package compromise in JS toolchains | Rust-level controls cannot fully govern npm/bundler supply chain | Dependency policy gate + lockfile review + reproducible CI artifacts | Signed provenance + policy-enforced package allowlist for browser SDK distribution |
+| Replay artifact over-collection | Traces can capture sensitive operational context if emitted too broadly | Redaction guidance + scoped diagnostics + no secret stdout/stderr | Automated artifact redaction validation gate in CI |
+| Host bridge misuse by integrators | Browser embedding layer can accidentally widen authority in app code | Explicit `FetchAuthority` contract and deny-by-default credentials | Contract tests for all host adapters plus policy check in release gate |
+
 ## Threats and Mitigations by Component
 
 ### Runtime Core

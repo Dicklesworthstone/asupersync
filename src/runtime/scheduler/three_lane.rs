@@ -5062,6 +5062,95 @@ mod tests {
     }
 
     #[test]
+    fn test_browser_ready_handoff_limit_bounds_ready_bursts() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        scheduler.set_browser_ready_handoff_limit(3);
+
+        for i in 0..10u32 {
+            scheduler.inject_ready(TaskId::new_for_test(1, i), 50);
+        }
+
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+        let mut dispatched = 0u32;
+        let mut current_burst = 0usize;
+        let mut max_burst = 0usize;
+        let mut handoff_yields = 0u32;
+
+        for _ in 0..64 {
+            match worker.next_task() {
+                Some(_) => {
+                    dispatched = dispatched.saturating_add(1);
+                    current_burst = current_burst.saturating_add(1);
+                    max_burst = max_burst.max(current_burst);
+                }
+                None => {
+                    if dispatched == 10 {
+                        break;
+                    }
+                    if current_burst == 3 {
+                        handoff_yields = handoff_yields.saturating_add(1);
+                    }
+                    current_burst = 0;
+                }
+            }
+        }
+
+        assert_eq!(dispatched, 10, "all ready tasks should dispatch");
+        assert!(
+            max_burst <= 3,
+            "ready burst should be capped by handoff limit: observed {max_burst}"
+        );
+        assert!(
+            handoff_yields >= 3,
+            "10 tasks with limit=3 should induce at least 3 handoff yields"
+        );
+        assert_eq!(
+            worker.preemption_metrics().browser_ready_handoff_yields,
+            u64::from(handoff_yields),
+            "metrics should track host-turn handoff yields"
+        );
+    }
+
+    #[test]
+    fn test_browser_ready_handoff_does_not_mask_cancel_priority() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        scheduler.set_browser_ready_handoff_limit(1);
+
+        let ready_a = TaskId::new_for_test(1, 1);
+        let ready_b = TaskId::new_for_test(1, 2);
+        let cancel = TaskId::new_for_test(1, 3);
+        scheduler.inject_ready(ready_a, 50);
+        scheduler.inject_ready(ready_b, 50);
+
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+        assert!(
+            worker.next_task().is_some(),
+            "first dispatch should consume a ready task"
+        );
+
+        worker.global.inject_cancel(cancel, 100);
+        let second = worker.next_task();
+        assert_eq!(
+            second,
+            Some(cancel),
+            "cancel work must preempt before ready-handoff yielding"
+        );
+        assert!(
+            worker.next_task().is_some(),
+            "remaining ready task should still dispatch"
+        );
+        assert_eq!(
+            worker.preemption_metrics().browser_ready_handoff_yields,
+            0,
+            "cancel preemption should prevent handoff yield in this sequence"
+        );
+    }
+
+    #[test]
     fn test_preemption_fairness_yield_under_cancel_flood() {
         let limit: usize = 4;
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
