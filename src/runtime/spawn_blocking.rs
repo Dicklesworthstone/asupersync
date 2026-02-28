@@ -89,10 +89,13 @@ impl<T> BlockingOneshot<T> {
     }
 
     fn send(self, val: std::thread::Result<T>) {
-        let mut guard = self.state.lock();
-        guard.result = Some(val);
-        guard.done = true;
-        if let Some(waker) = guard.waker.take() {
+        let waker = {
+            let mut guard = self.state.lock();
+            guard.result = Some(val);
+            guard.done = true;
+            guard.waker.take()
+        };
+        if let Some(waker) = waker {
             waker.wake();
         }
     }

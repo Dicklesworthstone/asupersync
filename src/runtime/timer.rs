@@ -17,10 +17,11 @@ struct TimerEntry {
 impl Ord for TimerEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse ordering for min-heap (earliest deadline first).
-        other
-            .deadline
-            .cmp(&self.deadline)
-            .then_with(|| other.generation.cmp(&self.generation))
+        other.deadline.cmp(&self.deadline).then_with(|| {
+            // Handle generation wrapping: if self is earlier (diff < 0), it should be Greater
+            let diff = self.generation.wrapping_sub(other.generation).cast_signed();
+            0.cmp(&diff)
+        })
     }
 }
 
@@ -280,16 +281,10 @@ mod tests {
 
         let expired = heap.pop_expired(deadline);
         crate::assert_with_log!(
-            expired.len() == 2,
-            "both wrapped-generation entries are retained and popped",
-            2usize,
-            expired.len()
-        );
-        crate::assert_with_log!(
-            expired.contains(&task(1)) && expired.contains(&task(2)),
-            "wrapped-generation entries are recoverable",
-            true,
-            expired.contains(&task(1)) && expired.contains(&task(2))
+            expired == vec![task(1), task(2)],
+            "wrapped-generation entries pop in correct insertion order",
+            vec![task(1), task(2)],
+            expired
         );
         crate::test_complete!("generation_counter_wraps_without_panicking");
     }

@@ -261,17 +261,17 @@ impl Worker {
                                         Some(worker_id) if worker_id == self.worker.id => {
                                             local_waiters.push(waiter);
                                         }
-                                                                            Some(_worker_id) => {
-                                                                                record.wake_state.clear();
-                                                                                if let Some((waker, _)) = &record.cached_waker {
-                                                                                    foreign_wakers.push(waker.clone());
-                                                                                } else {
-                                                                                    error!(
-                                                                                        ?waiter,
-                                                                                        worker_id = _worker_id,
-                                                                                        current_worker = self.worker.id,
-                                                                                        "panic path: pinned local waiter has invalid worker id, wake skipped"
-                                                                                    );                                                // We consumed `notify()` above; clear the wake bit so a
+                                        Some(_worker_id) => {
+                                            record.wake_state.clear();
+                                            if let Some((waker, _)) = &record.cached_waker {
+                                                foreign_wakers.push(waker.clone());
+                                            } else {
+                                                error!(
+                                                    ?waiter,
+                                                    worker_id = _worker_id,
+                                                    current_worker = self.worker.id,
+                                                    "panic path: pinned local waiter has invalid worker id, wake skipped"
+                                                ); // We consumed `notify()` above; clear the wake bit so a
                                                 // future valid wake is not permanently dedup-suppressed.
                                             }
                                         }
