@@ -260,6 +260,10 @@ harness = false
 name = "load_balancer_benchmark"
 harness = false
 
+[[bench]]
+name = "scheduler_browser_bench"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = "fat"
