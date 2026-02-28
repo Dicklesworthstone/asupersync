@@ -805,7 +805,9 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
                 this.counted = false;
             }
             drop(state);
-            return Poll::Ready(Ok(OwnedRwLockWriteGuard { lock: Arc::clone(&this.lock) }));
+            return Poll::Ready(Ok(OwnedRwLockWriteGuard {
+                lock: Arc::clone(&this.lock),
+            }));
         }
 
         if let Some(waiter_id) = this.waiter_id {
