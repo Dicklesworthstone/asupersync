@@ -42,6 +42,7 @@
 //! | Linux | epoll | `epoll.rs` |
 //! | macOS/BSD | kqueue | `kqueue.rs` |
 //! | Windows | IOCP | `windows.rs` |
+//! | Browser/wasm32 | BrowserReactor (scaffold) | `browser.rs` |
 //! | Testing | virtual | `lab.rs` |
 //!
 //! # Usage Pattern
@@ -94,6 +95,7 @@
 //! - Spurious wakeups to cancelled tasks
 //! - Resource leaks in the reactor's token slab
 
+pub mod browser;
 pub mod interest;
 pub mod lab;
 mod registration;
@@ -119,6 +121,7 @@ pub mod kqueue;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+pub use browser::{BrowserReactor, BrowserReactorConfig};
 pub use interest::Interest;
 pub use lab::{FaultConfig, LabReactor};
 #[allow(unused_imports)]
@@ -597,6 +600,11 @@ pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
     Ok(Arc::new(IocpReactor::new()?))
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
+    Ok(Arc::new(BrowserReactor::default()))
+}
+
 #[cfg(not(any(
     target_os = "linux",
     target_os = "macos",
@@ -604,7 +612,8 @@ pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
     target_os = "openbsd",
     target_os = "netbsd",
     target_os = "dragonfly",
-    target_os = "windows"
+    target_os = "windows",
+    target_arch = "wasm32"
 )))]
 pub fn create_reactor() -> io::Result<Arc<dyn Reactor>> {
     Err(io::Error::new(
@@ -1037,6 +1046,13 @@ mod tests {
         crate::test_complete!("reactor_trait_bounds_lab");
     }
 
+    #[test]
+    fn reactor_trait_bounds_browser() {
+        init_test("reactor_trait_bounds_browser");
+        assert_reactor_trait_bounds::<super::BrowserReactor>();
+        crate::test_complete!("reactor_trait_bounds_browser");
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn reactor_trait_bounds_io_uring() {
@@ -1152,6 +1168,21 @@ mod tests {
         compliance_check_modify_unknown(&reactor, name);
 
         crate::test_complete!("cross_reactor_compliance_lab");
+    }
+
+    #[test]
+    fn cross_reactor_compliance_browser() {
+        init_test("cross_reactor_compliance_browser");
+        let reactor = super::BrowserReactor::default();
+        let name = "BrowserReactor";
+
+        compliance_check_empty_state(&reactor, name);
+        compliance_check_wake(&reactor, name);
+        compliance_check_poll_nonblocking(&reactor, name);
+        compliance_check_deregister_unknown(&reactor, name);
+        compliance_check_modify_unknown(&reactor, name);
+
+        crate::test_complete!("cross_reactor_compliance_browser");
     }
 
     #[cfg(target_os = "linux")]

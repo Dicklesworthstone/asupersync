@@ -130,6 +130,38 @@ impl EntropySource for DetEntropy {
     }
 }
 
+/// Browser-compatible entropy source for wasm32 targets.
+///
+/// Stub implementation (asupersync-umelq.4.4). Delegates to `getrandom` which
+/// maps to `crypto.getRandomValues()` on wasm32-unknown-unknown via the `js`
+/// feature. The implementation is intentionally identical to [`OsEntropy`] for
+/// now; it exists as a distinct type so that browser-specific entropy policies
+/// (e.g., entropy pool warming, CSPRNG seeding from Web Crypto) can be added
+/// without changing the native path.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BrowserEntropy;
+
+impl EntropySource for BrowserEntropy {
+    fn fill_bytes(&self, dest: &mut [u8]) {
+        check_ambient_entropy("browser");
+        getrandom::fill(dest).expect("browser entropy failed");
+    }
+
+    fn next_u64(&self) -> u64 {
+        let mut buf = [0u8; 8];
+        self.fill_bytes(&mut buf);
+        u64::from_le_bytes(buf)
+    }
+
+    fn fork(&self, _task_id: TaskId) -> Arc<dyn EntropySource> {
+        Arc::new(Self)
+    }
+
+    fn source_id(&self) -> &'static str {
+        "browser"
+    }
+}
+
 /// Thread-local deterministic entropy sources derived from a global seed.
 #[derive(Debug, Clone)]
 pub struct ThreadLocalEntropy {

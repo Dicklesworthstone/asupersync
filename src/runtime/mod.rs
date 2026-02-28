@@ -163,7 +163,10 @@ pub use io_op::IoOp;
 pub use obligation_table::{
     ObligationAbortInfo, ObligationCommitInfo, ObligationLeakInfo, ObligationTable,
 };
-pub use reactor::{Event, Events, Interest, LabReactor, Reactor, Registration, Source, Token};
+pub use reactor::{
+    BrowserReactor, BrowserReactorConfig, Event, Events, Interest, LabReactor, Reactor,
+    Registration, Source, Token,
+};
 pub use region_heap::{HeapIndex, HeapRef, HeapStats, RegionHeap, global_alloc_count};
 pub use region_table::{RegionCreateError, RegionTable};
 pub use scheduler::Scheduler;

@@ -15,7 +15,7 @@ pub use cache::{CACHE_LINE_SIZE, CachePadded};
 pub use det_hash::{DetBuildHasher, DetHashMap, DetHashSet, DetHasher};
 pub use det_rng::DetRng;
 pub use entropy::{
-    DetEntropy, EntropySource, OsEntropy, StrictEntropyGuard, ThreadLocalEntropy,
+    BrowserEntropy, DetEntropy, EntropySource, OsEntropy, StrictEntropyGuard, ThreadLocalEntropy,
     check_ambient_entropy, disable_strict_entropy, enable_strict_entropy, strict_entropy_enabled,
 };
 pub use resource::{
