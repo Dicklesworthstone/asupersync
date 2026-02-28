@@ -1,0 +1,115 @@
+{
+  "schema_version": "wasm-worker-offload-policy-v1",
+  "description": "Deterministic worker-offload policy for CPU-heavy browser runtime paths.",
+  "invariants": {
+    "structured_ownership": true,
+    "region_close_implies_quiescence": true,
+    "cancellation_protocol": "request-drain-finalize",
+    "no_obligation_leaks": true,
+    "no_ambient_authority": true
+  },
+  "offload_triggers": {
+    "min_estimated_cpu_ns": 2000000,
+    "max_main_thread_slice_ns": 1000000,
+    "queue_backpressure_threshold": 64,
+    "max_inline_retry_count": 2
+  },
+  "worker_pool": {
+    "mode": "bounded-dedicated-pool",
+    "max_workers": 4,
+    "max_inflight_jobs": 512,
+    "max_payload_bytes": 262144,
+    "idle_shutdown_ms": 30000
+  },
+  "message_protocol": {
+    "envelope_version": "worker-envelope-v1",
+    "required_fields": [
+      "message_id",
+      "job_id",
+      "region_id",
+      "task_id",
+      "obligation_id",
+      "op",
+      "seq_no",
+      "seed",
+      "issued_at_turn",
+      "payload"
+    ],
+    "operations": [
+      "spawn_job",
+      "poll_status",
+      "cancel_job",
+      "drain_job",
+      "finalize_job",
+      "shutdown_worker"
+    ],
+    "states": [
+      "created",
+      "queued",
+      "running",
+      "cancel_requested",
+      "draining",
+      "finalizing",
+      "completed",
+      "failed"
+    ],
+    "terminal_states": [
+      "completed",
+      "failed"
+    ]
+  },
+  "cancellation_contract": {
+    "request_timeout_ms": 25,
+    "drain_timeout_ms": 250,
+    "finalize_timeout_ms": 250,
+    "required_events": [
+      "worker_cancel_requested",
+      "worker_cancel_acknowledged",
+      "worker_drain_started",
+      "worker_drain_completed",
+      "worker_finalize_completed"
+    ]
+  },
+  "ownership_model": {
+    "region_affinity_required": true,
+    "obligation_commit_required": true,
+    "cross_region_handoff_forbidden": true,
+    "stale_generation_behavior": "typed-error-drop-no-panic"
+  },
+  "determinism_contract": {
+    "seed_propagation_required": true,
+    "decision_seq_required": true,
+    "host_turn_id_required": true,
+    "replay_hash_required": true
+  },
+  "test_matrix": [
+    {
+      "id": "WKR-OFFLOAD-CPU-BURST",
+      "focus": "offload trigger threshold selection under burst compute",
+      "required": true
+    },
+    {
+      "id": "WKR-CANCEL-PROPAGATION",
+      "focus": "request-drain-finalize propagation through worker boundary",
+      "required": true
+    },
+    {
+      "id": "WKR-OWNERSHIP-NO-CROSS-REGION",
+      "focus": "reject cross-region ownership transfers",
+      "required": true
+    },
+    {
+      "id": "WKR-DETERMINISTIC-REPLAY",
+      "focus": "stable event/replay hash under same seed",
+      "required": true
+    },
+    {
+      "id": "WKR-PAYLOAD-BOUNDARY",
+      "focus": "payload size and queue pressure handling",
+      "required": true
+    }
+  ],
+  "output": {
+    "summary_path": "artifacts/wasm_worker_offload_summary.json"
+  }
+}

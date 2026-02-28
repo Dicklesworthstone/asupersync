@@ -1,0 +1,318 @@
+{
+  "schema_version": "wasm-benchmark-corpus-v1",
+  "description": "Deterministic benchmark corpus contract for browser-targeted Asupersync workloads.",
+  "budget_contract": {
+    "source_document": "WASM_SIZE_PERF_BUDGETS.md",
+    "metric_ids": [
+      "M-PERF-01A",
+      "M-PERF-01B",
+      "M-PERF-02A",
+      "M-PERF-02B",
+      "M-PERF-03A",
+      "M-PERF-03B",
+      "M-PERF-04A",
+      "M-PERF-04B",
+      "M-PERF-04C",
+      "M-PERF-04D"
+    ]
+  },
+  "quality_gates": {
+    "required_frameworks": [
+      "vanilla-js",
+      "typescript-sdk",
+      "react",
+      "nextjs"
+    ],
+    "required_workloads": [
+      "cold-start",
+      "steady-throughput",
+      "cancellation-storm",
+      "streaming-io",
+      "memory-pressure"
+    ],
+    "required_seed_set": [
+      11,
+      29,
+      42,
+      73,
+      101
+    ],
+    "required_browsers": [
+      "desktop-chromium",
+      "desktop-firefox",
+      "mobile-android"
+    ]
+  },
+  "scenario_defaults": {
+    "runner_command_prefix": "rch exec -- ./scripts/run_perf_e2e.sh",
+    "artifact_schema_version": "wasm-benchmark-corpus-summary-v1",
+    "required_log_fields": [
+      "scenario_id",
+      "framework",
+      "workload",
+      "profile",
+      "browser",
+      "bundler",
+      "seed",
+      "metric_id",
+      "value",
+      "unit",
+      "status",
+      "artifact_paths",
+      "repro_command"
+    ]
+  },
+  "scenarios": [
+    {
+      "id": "WB-COLD-01",
+      "journey": "vanilla-first-load",
+      "framework": "vanilla-js",
+      "workload": "cold-start",
+      "profile": "core-min",
+      "browsers": [
+        "desktop-chromium",
+        "mobile-android"
+      ],
+      "bundlers": [
+        "vite",
+        "esbuild"
+      ],
+      "seed_set": [
+        11,
+        29,
+        42,
+        73,
+        101
+      ],
+      "metric_ids": [
+        "M-PERF-02A",
+        "M-PERF-02B",
+        "M-PERF-01A",
+        "M-PERF-01B"
+      ],
+      "bench_suite": [
+        "phase0_baseline"
+      ],
+      "repro_command": "rch exec -- ./scripts/run_perf_e2e.sh --bench phase0_baseline --seed 42 --metric median_ns"
+    },
+    {
+      "id": "WB-THROUGHPUT-01",
+      "journey": "vanilla-interaction-burst",
+      "framework": "vanilla-js",
+      "workload": "steady-throughput",
+      "profile": "core-trace",
+      "browsers": [
+        "desktop-chromium",
+        "desktop-firefox"
+      ],
+      "bundlers": [
+        "vite"
+      ],
+      "seed_set": [
+        11,
+        29,
+        42,
+        73,
+        101
+      ],
+      "metric_ids": [
+        "M-PERF-04C",
+        "M-PERF-04D"
+      ],
+      "bench_suite": [
+        "scheduler_benchmark",
+        "timer_wheel"
+      ],
+      "repro_command": "rch exec -- ./scripts/run_perf_e2e.sh --bench scheduler_benchmark --bench timer_wheel --seed 42 --metric p95_ns"
+    },
+    {
+      "id": "WB-CANCEL-01",
+      "journey": "typescript-sdk-cancel-heavy",
+      "framework": "typescript-sdk",
+      "workload": "cancellation-storm",
+      "profile": "core-trace",
+      "browsers": [
+        "desktop-chromium",
+        "desktop-firefox"
+      ],
+      "bundlers": [
+        "esbuild",
+        "webpack"
+      ],
+      "seed_set": [
+        11,
+        29,
+        42,
+        73,
+        101
+      ],
+      "metric_ids": [
+        "M-PERF-03B",
+        "M-PERF-04A",
+        "M-PERF-04C"
+      ],
+      "bench_suite": [
+        "cancel_drain_bench",
+        "cancel_trace_bench"
+      ],
+      "repro_command": "rch exec -- ./scripts/run_perf_e2e.sh --bench cancel_drain_bench --bench cancel_trace_bench --seed 42 --metric p95_ns"
+    },
+    {
+      "id": "WB-STREAM-01",
+      "journey": "typescript-sdk-streaming-fetch",
+      "framework": "typescript-sdk",
+      "workload": "streaming-io",
+      "profile": "core-trace",
+      "browsers": [
+        "desktop-chromium"
+      ],
+      "bundlers": [
+        "vite",
+        "webpack"
+      ],
+      "seed_set": [
+        11,
+        29,
+        42,
+        73,
+        101
+      ],
+      "metric_ids": [
+        "M-PERF-04A",
+        "M-PERF-04D"
+      ],
+      "bench_suite": [
+        "protocol_benchmark",
+        "reactor_benchmark"
+      ],
+      "repro_command": "rch exec -- ./scripts/run_perf_e2e.sh --bench protocol_benchmark --bench reactor_benchmark --seed 42 --metric p95_ns"
+    },
+    {
+      "id": "WB-MEM-01",
+      "journey": "react-dashboard-live-updates",
+      "framework": "react",
+      "workload": "memory-pressure",
+      "profile": "full-dev",
+      "browsers": [
+        "desktop-chromium",
+        "desktop-firefox",
+        "mobile-android"
+      ],
+      "bundlers": [
+        "vite"
+      ],
+      "seed_set": [
+        11,
+        29,
+        42,
+        73,
+        101
+      ],
+      "metric_ids": [
+        "M-PERF-03A",
+        "M-PERF-04D"
+      ],
+      "bench_suite": [
+        "phase0_baseline",
+        "scheduler_benchmark"
+      ],
+      "repro_command": "rch exec -- ./scripts/run_perf_e2e.sh --bench phase0_baseline --bench scheduler_benchmark --seed 42 --metric p95_ns"
+    },
+    {
+      "id": "WB-THROUGHPUT-02",
+      "journey": "react-operator-burst-actions",
+      "framework": "react",
+      "workload": "steady-throughput",
+      "profile": "core-trace",
+      "browsers": [
+        "desktop-chromium"
+      ],
+      "bundlers": [
+        "vite"
+      ],
+      "seed_set": [
+        11,
+        29,
+        42,
+        73,
+        101
+      ],
+      "metric_ids": [
+        "M-PERF-04C",
+        "M-PERF-04D"
+      ],
+      "bench_suite": [
+        "scheduler_benchmark",
+        "tracing_overhead"
+      ],
+      "repro_command": "rch exec -- ./scripts/run_perf_e2e.sh --bench scheduler_benchmark --bench tracing_overhead --seed 42 --metric p95_ns"
+    },
+    {
+      "id": "WB-COLD-02",
+      "journey": "nextjs-ssr-hydration",
+      "framework": "nextjs",
+      "workload": "cold-start",
+      "profile": "core-min",
+      "browsers": [
+        "desktop-chromium",
+        "mobile-android"
+      ],
+      "bundlers": [
+        "webpack",
+        "turbopack"
+      ],
+      "seed_set": [
+        11,
+        29,
+        42,
+        73,
+        101
+      ],
+      "metric_ids": [
+        "M-PERF-02A",
+        "M-PERF-02B",
+        "M-PERF-01A"
+      ],
+      "bench_suite": [
+        "phase0_baseline",
+        "golden_output"
+      ],
+      "repro_command": "rch exec -- ./scripts/run_perf_e2e.sh --bench phase0_baseline --bench golden_output --seed 42 --metric median_ns"
+    },
+    {
+      "id": "WB-CANCEL-02",
+      "journey": "nextjs-route-transition-cancellation",
+      "framework": "nextjs",
+      "workload": "cancellation-storm",
+      "profile": "core-trace",
+      "browsers": [
+        "desktop-chromium",
+        "desktop-firefox"
+      ],
+      "bundlers": [
+        "webpack",
+        "turbopack"
+      ],
+      "seed_set": [
+        11,
+        29,
+        42,
+        73,
+        101
+      ],
+      "metric_ids": [
+        "M-PERF-03B",
+        "M-PERF-04A",
+        "M-PERF-04D"
+      ],
+      "bench_suite": [
+        "cancel_drain_bench",
+        "protocol_benchmark"
+      ],
+      "repro_command": "rch exec -- ./scripts/run_perf_e2e.sh --bench cancel_drain_bench --bench protocol_benchmark --seed 42 --metric p95_ns"
+    }
+  ],
+  "output": {
+    "summary_path": "artifacts/wasm_benchmark_corpus_summary.json"
+  }
+}

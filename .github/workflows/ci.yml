@@ -66,6 +66,38 @@ jobs:
             artifacts/wasm_dependency_audit_log.ndjson
           retention-days: 30
 
+      - name: WASM optimization policy self-test
+        run: python3 scripts/check_wasm_optimization_policy.py --self-test
+
+      - name: WASM optimization pipeline contract
+        run: |
+          mkdir -p artifacts
+          python3 scripts/check_wasm_optimization_policy.py \
+            --policy .github/wasm_optimization_policy.json
+
+      - name: Upload WASM optimization pipeline summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-optimization-pipeline-summary
+          path: artifacts/wasm_optimization_pipeline_summary.json
+          retention-days: 30
+
+      - name: WASM benchmark corpus self-test
+        run: python3 scripts/check_wasm_benchmark_corpus.py --self-test
+
+      - name: WASM benchmark corpus contract
+        run: |
+          mkdir -p artifacts
+          python3 scripts/check_wasm_benchmark_corpus.py \
+            --policy .github/wasm_benchmark_corpus.json
+
+      - name: Upload WASM benchmark corpus summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-benchmark-corpus-summary
+          path: artifacts/wasm_benchmark_corpus_summary.json
+          retention-days: 30
+
       - name: Perf regression gate self-test
         run: python3 scripts/check_perf_regression.py --self-test
 
