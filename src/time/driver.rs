@@ -208,12 +208,10 @@ impl BrowserMonotonicClock {
         let mut current = self.now.load(Ordering::Acquire);
         loop {
             let next = current.saturating_add(delta);
-            match self.now.compare_exchange_weak(
-                current,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
+            match self
+                .now
+                .compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire)
+            {
                 Ok(_) => return Time::from_nanos(next),
                 Err(actual) => current = actual,
             }
@@ -939,12 +937,7 @@ mod tests {
 
         let _ = clock.observe_host_time(Duration::from_millis(100));
         let t1 = clock.observe_host_time(Duration::from_millis(103));
-        crate::assert_with_log!(
-            t1 == Time::ZERO,
-            "sub-floor delta deferred",
-            Time::ZERO,
-            t1
-        );
+        crate::assert_with_log!(t1 == Time::ZERO, "sub-floor delta deferred", Time::ZERO, t1);
         crate::assert_with_log!(
             clock.pending_catch_up() == Duration::from_millis(3),
             "pending catch-up tracks deferred jitter",

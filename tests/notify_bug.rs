@@ -51,6 +51,12 @@ fn test_notify_cancel_safety_bug() {
     let left_token_dropped = poll_once(&mut fut2_2).is_ready();
 
     // Polling consumes the token, dropping passes the baton
-    assert!(!left_token_polled, "Polling to completion should consume the token");
-    assert!(left_token_dropped, "Dropping a notified future must pass the baton to prevent lost wakeups");
+    assert!(
+        !left_token_polled,
+        "Polling to completion should consume the token"
+    );
+    assert!(
+        left_token_dropped,
+        "Dropping a notified future must pass the baton to prevent lost wakeups"
+    );
 }
