@@ -9,5 +9,6 @@
 //! - `async_loser_drain`: LabRuntime-based async tests with oracle verification
 
 pub mod async_loser_drain;
+pub mod browser_loser_drain;
 pub mod loser_drain;
 pub mod obligation_cleanup;
