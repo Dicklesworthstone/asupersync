@@ -482,6 +482,11 @@ impl RuntimeState {
         self.io_driver.clone()
     }
 
+    /// Sets the I/O driver for this runtime.
+    pub fn set_io_driver(&mut self, driver: IoDriverHandle) {
+        self.io_driver = Some(driver);
+    }
+
     /// Returns a reference to the timer driver handle, if present.
     ///
     /// Returns `None` if the runtime was created without a timer driver.
@@ -1466,11 +1471,13 @@ impl RuntimeState {
     }
 
     /// Counts pending obligations.
+    ///
+    /// O(1) — delegates to `ObligationTable::pending_count()` which maintains
+    /// an incremental counter.
+    #[inline]
     #[must_use]
     pub fn pending_obligation_count(&self) -> usize {
-        self.obligations_iter()
-            .filter(|(_, o)| o.is_pending())
-            .count()
+        self.obligations.pending_count()
     }
 
     /// Returns true if the runtime is quiescent (no live work).
@@ -1481,11 +1488,12 @@ impl RuntimeState {
     /// - No I/O sources are registered (if I/O driver is present)
     #[must_use]
     pub fn is_quiescent(&self) -> bool {
-        let no_tasks = self.live_task_count() == 0;
-        let no_obligations = self.pending_obligation_count() == 0;
-        let no_io = self.io_driver.as_ref().is_none_or(IoDriverHandle::is_empty);
-        let no_finalizers = self.regions.iter().all(|(_, r)| r.finalizers_empty());
-        no_tasks && no_obligations && no_io && no_finalizers
+        // Short-circuit: each check is progressively more expensive, so bail
+        // early if any preceding condition is already false.
+        self.live_task_count() == 0
+            && self.pending_obligation_count() == 0
+            && self.io_driver.as_ref().is_none_or(IoDriverHandle::is_empty)
+            && self.regions.iter().all(|(_, r)| r.finalizers_empty())
     }
 
     /// Applies the region policy when a child reaches a terminal outcome.
@@ -1584,7 +1592,10 @@ impl RuntimeState {
         reason: &CancelReason,
         _source_task: Option<TaskId>,
     ) -> Vec<(TaskId, u8)> {
-        let mut tasks_to_cancel = Vec::with_capacity(self.live_task_count());
+        // Use a modest initial capacity instead of scanning the entire task
+        // arena for live_task_count(). The Vec will grow if needed, but avoids
+        // the O(arena_capacity) scan just for a size hint.
+        let mut tasks_to_cancel = Vec::with_capacity(32);
         let _cleanup_budget = reason.cleanup_budget();
         let root_span = debug_span!(
             "cancel_request",
@@ -4983,6 +4994,44 @@ mod tests {
             driver.waker_count()
         );
         crate::test_complete!("with_reactor_creates_state_with_io_driver");
+    }
+
+    #[test]
+    fn set_io_driver_injects_driver_into_state() {
+        init_test("set_io_driver_injects_driver_into_state");
+
+        let mut state = RuntimeState::new();
+        crate::assert_with_log!(
+            !state.has_io_driver(),
+            "starts without io driver",
+            false,
+            state.has_io_driver()
+        );
+
+        let handle = IoDriverHandle::new(Arc::new(LabReactor::new()));
+        let waker_state = Arc::new(TestWaker(AtomicBool::new(false)));
+        let waker = Waker::from(waker_state);
+        {
+            let mut driver = handle.lock();
+            let _ = driver.register_waker(waker);
+        }
+
+        state.set_io_driver(handle.clone());
+        crate::assert_with_log!(
+            state.has_io_driver(),
+            "io driver attached",
+            true,
+            state.has_io_driver()
+        );
+        let injected = state.io_driver_handle().expect("state io driver");
+        crate::assert_with_log!(
+            injected.waker_count() == 1,
+            "injected handle retained state",
+            1usize,
+            injected.waker_count()
+        );
+
+        crate::test_complete!("set_io_driver_injects_driver_into_state");
     }
 
     #[test]

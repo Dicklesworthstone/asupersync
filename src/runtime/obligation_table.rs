@@ -101,6 +101,11 @@ pub struct ObligationTable {
     obligations: Arena<ObligationRecord>,
     /// Secondary index: task → obligation IDs, indexed by arena slot.
     by_holder: Vec<Option<SmallVec<[ObligationId; 4]>>>,
+    /// Cached count of pending (Reserved) obligations.
+    ///
+    /// Maintained incrementally: +1 on create, -1 on commit/abort/leak.
+    /// This turns `pending_count()` from an O(arena_capacity) scan to O(1).
+    cached_pending: usize,
 }
 
 impl ObligationTable {
@@ -110,6 +115,7 @@ impl ObligationTable {
         Self {
             obligations: Arena::new(),
             by_holder: Vec::with_capacity(32),
+            cached_pending: 0,
         }
     }
 
@@ -130,9 +136,13 @@ impl ObligationTable {
 
     /// Inserts a new obligation record into the arena.
     pub fn insert(&mut self, record: ObligationRecord) -> ArenaIndex {
+        let is_pending = record.is_pending();
         let holder = record.holder;
         let idx = self.obligations.insert(record);
         self.push_holder_id(holder, ObligationId::from_arena(idx));
+        if is_pending {
+            self.cached_pending += 1;
+        }
         idx
     }
 
@@ -156,7 +166,12 @@ impl ObligationTable {
     {
         let idx = self.obligations.insert_with(f);
         if let Some(record) = self.obligations.get(idx) {
-            self.push_holder_id(record.holder, ObligationId::from_arena(idx));
+            let holder = record.holder;
+            let is_pending = record.is_pending();
+            self.push_holder_id(holder, ObligationId::from_arena(idx));
+            if is_pending {
+                self.cached_pending += 1;
+            }
         }
         idx
     }
@@ -164,6 +179,9 @@ impl ObligationTable {
     /// Removes an obligation record from the arena.
     pub fn remove(&mut self, index: ArenaIndex) -> Option<ObligationRecord> {
         let record = self.obligations.remove(index)?;
+        if record.is_pending() {
+            self.cached_pending = self.cached_pending.saturating_sub(1);
+        }
         let ob_id = ObligationId::from_arena(index);
         let slot = record.holder.arena_index().index() as usize;
         if let Some(Some(ids)) = self.by_holder.get_mut(slot) {
@@ -241,6 +259,7 @@ impl ObligationTable {
         };
         let ob_id = ObligationId::from_arena(idx);
         self.push_holder_id(holder, ob_id);
+        self.cached_pending += 1;
         ob_id
     }
 
@@ -268,6 +287,7 @@ impl ObligationTable {
         }
 
         let duration = record.commit(now);
+        self.cached_pending = self.cached_pending.saturating_sub(1);
         Ok(ObligationCommitInfo {
             id: record.id,
             holder: record.holder,
@@ -302,6 +322,7 @@ impl ObligationTable {
         }
 
         let duration = record.abort(now, reason);
+        self.cached_pending = self.cached_pending.saturating_sub(1);
         Ok(ObligationAbortInfo {
             id: record.id,
             holder: record.holder,
@@ -334,6 +355,7 @@ impl ObligationTable {
         }
 
         let duration = record.mark_leaked(now);
+        self.cached_pending = self.cached_pending.saturating_sub(1);
         Ok(ObligationLeakInfo {
             id: record.id,
             holder: record.holder,
@@ -419,12 +441,12 @@ impl ObligationTable {
     }
 
     /// Returns the count of pending obligations across all regions.
+    ///
+    /// O(1) — maintained incrementally via `cached_pending`.
+    #[inline]
     #[must_use]
     pub fn pending_count(&self) -> usize {
-        self.obligations
-            .iter()
-            .filter(|(_, r)| r.is_pending())
-            .count()
+        self.cached_pending
     }
 
     /// Collects IDs of pending obligations held by a specific task.
