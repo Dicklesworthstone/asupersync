@@ -106,6 +106,7 @@
 //! | [`blocking_threads`](RuntimeBuilder::blocking_threads) | 0, 0 | Blocking pool min/max |
 //! | [`enable_parking`](RuntimeBuilder::enable_parking) | true | Park idle workers |
 //! | [`poll_budget`](RuntimeBuilder::poll_budget) | 128 | Polls before cooperative yield |
+//! | [`browser_ready_handoff_limit`](RuntimeBuilder::browser_ready_handoff_limit) | 0 (disabled) | Max ready dispatch burst before host-turn handoff |
 //! | [`cancel_lane_max_streak`](RuntimeBuilder::cancel_lane_max_streak) | 16 | Max consecutive cancel dispatches |
 //! | [`enable_adaptive_cancel_streak`](RuntimeBuilder::enable_adaptive_cancel_streak) | true | Enable regret-bounded adaptive cancel streak |
 //! | [`adaptive_cancel_streak_epoch_steps`](RuntimeBuilder::adaptive_cancel_streak_epoch_steps) | 128 | Dispatches per adaptive epoch |
@@ -271,6 +272,18 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn poll_budget(mut self, budget: u32) -> Self {
         self.config.poll_budget = budget;
+        self
+    }
+
+    /// Set browser-style ready-lane burst handoff limit.
+    ///
+    /// When non-zero, scheduler workers can force a one-shot handoff after
+    /// `limit` consecutive ready dispatches, allowing host task queues to run.
+    /// This is primarily intended for browser event-loop adapters.
+    /// `0` disables forced handoff (default).
+    #[must_use]
+    pub fn browser_ready_handoff_limit(mut self, limit: usize) -> Self {
+        self.config.browser_ready_handoff_limit = limit;
         self
     }
 
@@ -1028,6 +1041,7 @@ impl RuntimeInner {
         scheduler.set_steal_batch_size(config.steal_batch_size);
         scheduler.set_enable_parking(config.enable_parking);
         scheduler.set_global_queue_limit(config.global_queue_limit);
+        scheduler.set_browser_ready_handoff_limit(config.browser_ready_handoff_limit);
         scheduler.set_adaptive_cancel_streak(
             config.enable_adaptive_cancel_streak,
             config.adaptive_cancel_streak_epoch_steps,

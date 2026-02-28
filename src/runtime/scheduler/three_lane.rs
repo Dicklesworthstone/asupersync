@@ -77,6 +77,7 @@ use std::time::Duration;
 pub type WorkerId = usize;
 
 const DEFAULT_CANCEL_STREAK_LIMIT: usize = 16;
+const DEFAULT_BROWSER_READY_HANDOFF_LIMIT: usize = 0;
 const DEFAULT_STEAL_BATCH_SIZE: usize = 4;
 const DEFAULT_ENABLE_PARKING: bool = true;
 const LOCAL_SCHEDULER_BURST_BUDGET: usize = 2048;
@@ -655,6 +656,10 @@ pub struct ThreeLaneScheduler {
     coordinator: Arc<WorkerCoordinator>,
     /// Maximum consecutive cancel-lane dispatches before yielding.
     cancel_streak_limit: usize,
+    /// Browser-style ready dispatch burst limit before a host-turn handoff.
+    ///
+    /// `0` disables forced handoff behavior.
+    browser_ready_handoff_limit: usize,
     /// Maximum number of ready tasks to steal in one batch.
     steal_batch_size: usize,
     /// Whether workers are allowed to park when idle.
@@ -733,6 +738,7 @@ impl ThreeLaneScheduler {
         governor_interval: u32,
     ) -> Self {
         let cancel_streak_limit = cancel_streak_limit.max(1);
+        let browser_ready_handoff_limit = DEFAULT_BROWSER_READY_HANDOFF_LIMIT;
         let governor_interval = governor_interval.max(1);
         let steal_batch_size = DEFAULT_STEAL_BATCH_SIZE;
         let enable_parking = DEFAULT_ENABLE_PARKING;
@@ -823,6 +829,8 @@ impl ThreeLaneScheduler {
                 steal_batch_size,
                 enable_parking,
                 cancel_streak: 0,
+                ready_dispatch_streak: 0,
+                browser_ready_handoff_limit,
                 cancel_streak_limit,
                 governor: if enable_governor {
                     Some(LyapunovGovernor::with_defaults())
@@ -872,6 +880,7 @@ impl ThreeLaneScheduler {
             state: Arc::clone(state),
             task_table,
             cancel_streak_limit,
+            browser_ready_handoff_limit,
             steal_batch_size,
             enable_parking,
             global_queue_limit: 0,
@@ -899,6 +908,21 @@ impl ThreeLaneScheduler {
         self.enable_parking = enable;
         for worker in &mut self.workers {
             worker.enable_parking = enable;
+        }
+    }
+
+    /// Sets the browser-style ready dispatch burst handoff limit.
+    ///
+    /// When non-zero, workers force a one-shot handoff after `limit`
+    /// consecutive ready-lane dispatches. This is intended for browser
+    /// event-loop adapters that need bounded host-turn monopolization.
+    pub fn set_browser_ready_handoff_limit(&mut self, limit: usize) {
+        self.browser_ready_handoff_limit = limit;
+        for worker in &mut self.workers {
+            worker.browser_ready_handoff_limit = limit;
+            if limit == 0 {
+                worker.ready_dispatch_streak = 0;
+            }
         }
     }
 
@@ -1324,6 +1348,12 @@ pub struct ThreeLaneWorker {
     enable_parking: bool,
     /// Number of consecutive cancel-lane dispatches.
     cancel_streak: usize,
+    /// Number of consecutive ready-lane dispatches.
+    ready_dispatch_streak: usize,
+    /// Browser-style ready dispatch burst limit before yielding host turn.
+    ///
+    /// `0` disables host-turn handoff gating.
+    browser_ready_handoff_limit: usize,
     /// Maximum consecutive cancel-lane dispatches before yielding.
     ///
     /// Fairness guarantee: if timed or ready work is pending, it will be
@@ -1365,6 +1395,8 @@ pub struct PreemptionMetrics {
     pub timed_dispatches: u64,
     /// Total ready-lane dispatches.
     pub ready_dispatches: u64,
+    /// Browser host-turn handoffs forced by ready-burst fairness controls.
+    pub browser_ready_handoff_yields: u64,
     /// Times the cancel streak hit the fairness limit.
     pub fairness_yields: u64,
     /// Maximum cancel streak observed.
@@ -1819,6 +1851,7 @@ impl ThreeLaneWorker {
             // After backoff/park, reset the consecutive cancel counter.
             // We've given other work a chance during the backoff period.
             self.cancel_streak = 0;
+            self.ready_dispatch_streak = 0;
         }
     }
 
@@ -1887,12 +1920,14 @@ impl ThreeLaneWorker {
             // Deadline pressure: global timed first.
             if let Some(tt) = self.global.pop_timed_if_due(now) {
                 self.cancel_streak = 0;
+                self.ready_dispatch_streak = 0;
                 self.preemption_metrics.timed_dispatches += 1;
                 return Some(self.finish_dispatch(tt.task));
             }
             if check_cancel {
                 if let Some(pt) = self.global.pop_cancel() {
                     self.cancel_streak += 1;
+                    self.ready_dispatch_streak = 0;
                     self.record_cancel_dispatch(base_limit, effective_limit);
                     return Some(self.finish_dispatch(pt.task));
                 }
@@ -1902,12 +1937,14 @@ impl ThreeLaneWorker {
             if check_cancel {
                 if let Some(pt) = self.global.pop_cancel() {
                     self.cancel_streak += 1;
+                    self.ready_dispatch_streak = 0;
                     self.record_cancel_dispatch(base_limit, effective_limit);
                     return Some(self.finish_dispatch(pt.task));
                 }
             }
             if let Some(tt) = self.global.pop_timed_if_due(now) {
                 self.cancel_streak = 0;
+                self.ready_dispatch_streak = 0;
                 self.preemption_metrics.timed_dispatches += 1;
                 return Some(self.finish_dispatch(tt.task));
             }
@@ -1920,10 +1957,12 @@ impl ThreeLaneWorker {
             match lane {
                 0 => {
                     self.cancel_streak = self.cancel_streak.saturating_add(1);
+                    self.ready_dispatch_streak = 0;
                     self.record_cancel_dispatch(base_limit, effective_limit);
                 }
                 1 => {
                     self.cancel_streak = 0;
+                    self.ready_dispatch_streak = 0;
                     self.preemption_metrics.timed_dispatches += 1;
                 }
                 _ => unreachable!(),
@@ -1931,11 +1970,19 @@ impl ThreeLaneWorker {
             return Some(self.finish_dispatch(task));
         }
 
+        if self.should_force_ready_handoff() {
+            self.preemption_metrics.browser_ready_handoff_yields += 1;
+            self.cancel_streak = 0;
+            self.ready_dispatch_streak = 0;
+            return None;
+        }
+
         // ── PHASE 3: Fast ready paths (no PriorityScheduler lock) ────
         // Check lock-free fast_queue first (O(1) atomic pop), then
         // local_ready which requires a try_lock.
         if let Some(task) = self.fast_queue.pop() {
             self.cancel_streak = 0;
+            self.ready_dispatch_streak = self.ready_dispatch_streak.saturating_add(1);
             self.preemption_metrics.ready_dispatches += 1;
             return Some(self.finish_dispatch(task));
         }
@@ -1945,11 +1992,13 @@ impl ThreeLaneWorker {
             .and_then(|mut queue| queue.pop());
         if let Some(task) = local_ready_task {
             self.cancel_streak = 0;
+            self.ready_dispatch_streak = self.ready_dispatch_streak.saturating_add(1);
             self.preemption_metrics.ready_dispatches += 1;
             return Some(self.finish_dispatch(task));
         }
         if let Some(pt) = self.global.pop_ready() {
             self.cancel_streak = 0;
+            self.ready_dispatch_streak = self.ready_dispatch_streak.saturating_add(1);
             self.preemption_metrics.ready_dispatches += 1;
             return Some(self.finish_dispatch(pt.task));
         }
@@ -1963,6 +2012,7 @@ impl ThreeLaneWorker {
         };
         if let Some(task) = local_task {
             self.cancel_streak = 0;
+            self.ready_dispatch_streak = self.ready_dispatch_streak.saturating_add(1);
             self.preemption_metrics.ready_dispatches += 1;
             return Some(self.finish_dispatch(task));
         }
@@ -1970,6 +2020,7 @@ impl ThreeLaneWorker {
         // ── PHASE 4: Steal from other workers ────────────────────────
         if let Some(task) = self.try_steal() {
             self.cancel_streak = 0;
+            self.ready_dispatch_streak = self.ready_dispatch_streak.saturating_add(1);
             self.preemption_metrics.ready_dispatches += 1;
             return Some(self.finish_dispatch(task));
         }
@@ -1983,13 +2034,35 @@ impl ThreeLaneWorker {
             if let Some(task) = self.try_cancel_work() {
                 self.preemption_metrics.fallback_cancel_dispatches += 1;
                 self.cancel_streak = 1;
+                self.ready_dispatch_streak = 0;
                 self.record_cancel_dispatch(base_limit, effective_limit);
                 return Some(self.finish_dispatch(task));
             }
             self.cancel_streak = 0;
         }
 
+        self.ready_dispatch_streak = 0;
         None
+    }
+
+    #[inline]
+    fn should_force_ready_handoff(&self) -> bool {
+        let limit = self.browser_ready_handoff_limit;
+        if limit == 0 || self.ready_dispatch_streak < limit {
+            return false;
+        }
+
+        if !self.fast_queue.is_empty() || self.global.has_ready_work() {
+            return true;
+        }
+        if self
+            .local_ready
+            .try_lock()
+            .is_some_and(|queue| !queue.is_empty())
+        {
+            return true;
+        }
+        self.local.lock().has_ready_work()
     }
 
     /// Record a cancel dispatch and update max streak metric.
