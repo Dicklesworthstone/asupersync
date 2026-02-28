@@ -370,9 +370,6 @@ where
             }
         }
 
-        // Gracefully shutdown the transport before returning
-        let _ = poll_fn(|cx| framed.poll_close(cx)).await;
-
         Ok(state)
     }
 }

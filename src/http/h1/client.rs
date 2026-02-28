@@ -551,10 +551,6 @@ impl Http1Client {
             }
         }
 
-        // Extract the transport and gracefully shut it down
-        let mut io = streaming.body.into_inner();
-        let _ = poll_fn(|cx| Pin::new(&mut io).poll_shutdown(cx)).await;
-
         Ok(response)
     }
 
@@ -926,11 +922,6 @@ impl<T> ClientIncomingBody<T> {
                 ChunkedReadState::Done => return Ok(None),
             }
         }
-    }
-
-    /// Consumes the body and returns the underlying transport.
-    pub fn into_inner(self) -> T {
-        self.io
     }
 }
 

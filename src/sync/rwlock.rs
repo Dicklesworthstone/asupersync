@@ -512,14 +512,10 @@ impl<T> Drop for WriteFuture<'_, '_, T> {
         let mut state = self.lock.state.lock();
 
         if let Some(waiter_id) = self.waiter_id {
-            let removed = state
-                .writer_queue
-                .iter()
-                .position(|w| w.id == waiter_id)
-                .is_some_and(|pos| {
-                    state.writer_queue.remove(pos);
-                    true
-                });
+            let removed = state.writer_queue.iter().position(|w| w.id == waiter_id).is_some_and(|pos| {
+                state.writer_queue.remove(pos);
+                true
+            });
 
             state.writer_waiters = state.writer_waiters.saturating_sub(1);
 
@@ -776,41 +772,40 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.as_mut().get_mut();
-        if this.lock.is_poisoned() {
+        if self.lock.is_poisoned() {
             return Poll::Ready(Err(RwLockError::Poisoned));
         }
 
-        if this.cx.checkpoint().is_err() {
+        if self.cx.checkpoint().is_err() {
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
 
-        let mut state = this.lock.state.lock();
-        if !this.counted {
+        // Clone the Arc to avoid borrow conflict with self.counted
+        let lock = Arc::clone(&self.lock);
+        let mut state = lock.state.lock();
+        if !self.counted {
             state.writer_waiters += 1;
-            this.counted = true;
+            self.counted = true;
         }
 
-        let dequeued = this
+        let dequeued = self
             .waiter_id
             .is_some_and(|id| !state.writer_queue.iter().any(|w| w.id == id));
         let can_acquire = !state.writer_active
             && state.readers == 0
-            && (dequeued || (this.waiter_id.is_none() && state.writer_waiters == 1));
+            && (dequeued || (self.waiter_id.is_none() && state.writer_waiters == 1));
 
         if can_acquire {
             state.writer_active = true;
-            if this.counted {
+            if self.counted {
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
-                this.counted = false;
+                self.counted = false;
             }
             drop(state);
-            return Poll::Ready(Ok(OwnedRwLockWriteGuard {
-                lock: Arc::clone(&this.lock),
-            }));
+            return Poll::Ready(Ok(OwnedRwLockWriteGuard { lock }));
         }
 
-        if let Some(waiter_id) = this.waiter_id {
+        if let Some(waiter_id) = self.waiter_id {
             if let Some(existing) = state.writer_queue.iter_mut().find(|w| w.id == waiter_id) {
                 if !existing.waker.will_wake(context.waker()) {
                     existing.waker.clone_from(context.waker());
@@ -823,7 +818,7 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
                     id: new_id,
                 });
                 drop(state);
-                this.waiter_id = Some(new_id);
+                self.waiter_id = Some(new_id);
                 return Poll::Pending;
             }
         } else {
@@ -834,7 +829,7 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
                 id,
             });
             drop(state);
-            this.waiter_id = Some(id);
+            self.waiter_id = Some(id);
             return Poll::Pending;
         }
         drop(state);
@@ -854,14 +849,10 @@ impl<T> Drop for OwnedWriteFuture<'_, T> {
         let mut state = self.lock.state.lock();
 
         if let Some(waiter_id) = self.waiter_id {
-            let removed = state
-                .writer_queue
-                .iter()
-                .position(|w| w.id == waiter_id)
-                .is_some_and(|pos| {
-                    state.writer_queue.remove(pos);
-                    true
-                });
+            let removed = state.writer_queue.iter().position(|w| w.id == waiter_id).is_some_and(|pos| {
+                state.writer_queue.remove(pos);
+                true
+            });
 
             state.writer_waiters = state.writer_waiters.saturating_sub(1);
 
