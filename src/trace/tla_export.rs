@@ -297,7 +297,7 @@ impl TlaExporter {
             src.push_str("Next ==\n");
             for i in 1..self.snapshots.len() {
                 let s = &self.snapshots[i];
-                let prefix = if i == 1 { "    " } else { "    \\/ " };
+                let prefix = "    \\/ ";
                 let _ = writeln!(&mut src, "{prefix}/\\ step = {} /\\ step' = {}", i - 1, i);
                 let _ = writeln!(
                     &mut src,
