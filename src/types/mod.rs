@@ -24,6 +24,7 @@ pub mod symbol;
 pub mod symbol_set;
 pub mod task_context;
 pub mod typed_symbol;
+pub mod wasm_abi;
 
 pub use budget::{Budget, CurveBudget, CurveError, MinPlusCurve, backlog_bound, delay_bound};
 pub use builder::{BuildError, BuildResult};
@@ -45,4 +46,14 @@ pub use typed_symbol::{
     DeserializationError, Deserializer, SerdeCodec, SerializationError, SerializationFormat,
     Serializer, TYPED_SYMBOL_HEADER_LEN, TYPED_SYMBOL_MAGIC, TypeDescriptor, TypeMismatchError,
     TypeRegistry, TypedDecoder, TypedEncoder, TypedSymbol,
+};
+pub use wasm_abi::{
+    WASM_ABI_MAJOR_VERSION, WASM_ABI_MINOR_VERSION, WASM_ABI_SIGNATURE_FINGERPRINT_V1,
+    WASM_ABI_SIGNATURES_V1, WasmAbiBoundaryEvent, WasmAbiCancellation, WasmAbiChangeClass,
+    WasmAbiCompatibilityDecision, WasmAbiErrorCode, WasmAbiFailure, WasmAbiOutcomeEnvelope,
+    WasmAbiPayloadShape, WasmAbiRecoverability, WasmAbiSignature, WasmAbiSymbol, WasmAbiValue,
+    WasmAbiVersion, WasmAbiVersionBump, WasmBoundaryState, WasmBoundaryTransitionError,
+    WasmHandleKind, WasmHandleRef, classify_wasm_abi_compatibility,
+    is_valid_wasm_boundary_transition, required_wasm_abi_bump, validate_wasm_boundary_transition,
+    wasm_abi_signature_fingerprint,
 };
