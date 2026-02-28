@@ -35,6 +35,17 @@ default = ["test-internals"]
 # Explicit opt-in for experimental browser-targeted builds.
 # This does not imply full wasm parity; it only enables guarded compilation paths.
 wasm-browser-preview = []
+# Browser runtime capability slices for wasm profile composition.
+wasm-runtime = ["wasm-browser-preview"]
+browser-io = []
+browser-trace = []
+deterministic-mode = []
+native-runtime = []
+# Canonical wasm browser profiles (FP-BR-* in the wasm build plan).
+wasm-browser-dev = ["wasm-runtime", "browser-io"]
+wasm-browser-prod = ["wasm-runtime", "browser-io"]
+wasm-browser-deterministic = ["wasm-runtime", "deterministic-mode", "browser-trace"]
+wasm-browser-minimal = ["wasm-runtime"]
 # Enable internal test helpers for integration tests.
 # This exposes private APIs like Cx::new() and is NOT for production use.
 test-internals = ["dep:tracing", "dep:tracing-subscriber", "dep:visibility"]

@@ -64,11 +64,52 @@
 #![cfg_attr(test, allow(clippy::large_stack_frames))]
 #![cfg_attr(feature = "simd-intrinsics", feature(portable_simd))]
 
-#[cfg(all(target_arch = "wasm32", not(feature = "wasm-browser-preview")))]
+#[cfg(all(
+    target_arch = "wasm32",
+    not(any(
+        feature = "wasm-browser-dev",
+        feature = "wasm-browser-prod",
+        feature = "wasm-browser-deterministic",
+        feature = "wasm-browser-minimal",
+    ))
+))]
 compile_error!(
-    "wasm32 builds are gated. Enable feature `wasm-browser-preview` for explicit browser preview \
-     builds, and follow docs/wasm_dependency_audit_policy.md for supported profiles."
+    "wasm32 builds require exactly one canonical profile feature: `wasm-browser-dev`, \
+     `wasm-browser-prod`, `wasm-browser-deterministic`, or `wasm-browser-minimal`."
 );
+
+#[cfg(all(
+    target_arch = "wasm32",
+    any(
+        all(feature = "wasm-browser-dev", feature = "wasm-browser-prod"),
+        all(feature = "wasm-browser-dev", feature = "wasm-browser-deterministic"),
+        all(feature = "wasm-browser-dev", feature = "wasm-browser-minimal"),
+        all(feature = "wasm-browser-prod", feature = "wasm-browser-deterministic"),
+        all(feature = "wasm-browser-prod", feature = "wasm-browser-minimal"),
+        all(
+            feature = "wasm-browser-deterministic",
+            feature = "wasm-browser-minimal"
+        ),
+    )
+))]
+compile_error!("wasm32 builds must select exactly one canonical browser profile feature.");
+
+#[cfg(all(target_arch = "wasm32", feature = "native-runtime"))]
+compile_error!("feature `native-runtime` is forbidden on wasm32 browser builds.");
+
+#[cfg(all(
+    target_arch = "wasm32",
+    feature = "wasm-browser-minimal",
+    feature = "browser-io"
+))]
+compile_error!("feature `browser-io` is forbidden with `wasm-browser-minimal`.");
+
+#[cfg(all(
+    target_arch = "wasm32",
+    feature = "wasm-browser-minimal",
+    feature = "browser-trace"
+))]
+compile_error!("feature `browser-trace` is forbidden with `wasm-browser-minimal`.");
 
 #[cfg(all(target_arch = "wasm32", feature = "cli"))]
 compile_error!(
@@ -217,7 +258,15 @@ pub use remote::{
 };
 pub use types::{
     Budget, CancelKind, CancelReason, ObligationId, Outcome, OutcomeError, PanicPayload, Policy,
-    RegionId, Severity, SystemPressure, TaskId, Time, join_outcomes,
+    RegionId, Severity, SystemPressure, TaskId, Time, WASM_ABI_MAJOR_VERSION,
+    WASM_ABI_MINOR_VERSION, WASM_ABI_SIGNATURE_FINGERPRINT_V1, WASM_ABI_SIGNATURES_V1,
+    WasmAbiBoundaryEvent, WasmAbiCancellation, WasmAbiChangeClass, WasmAbiCompatibilityDecision,
+    WasmAbiErrorCode, WasmAbiFailure, WasmAbiOutcomeEnvelope, WasmAbiPayloadShape,
+    WasmAbiRecoverability, WasmAbiSignature, WasmAbiSymbol, WasmAbiValue, WasmAbiVersion,
+    WasmAbiVersionBump, WasmBoundaryState, WasmBoundaryTransitionError, WasmHandleKind,
+    WasmHandleRef, classify_wasm_abi_compatibility, is_valid_wasm_boundary_transition,
+    join_outcomes, required_wasm_abi_bump, validate_wasm_boundary_transition,
+    wasm_abi_signature_fingerprint,
 };
 
 // Re-export proc macros when the proc-macros feature is enabled

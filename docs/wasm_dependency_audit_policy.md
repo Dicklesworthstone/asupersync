@@ -19,11 +19,13 @@ Audit browser-target dependency closure and block merges when forbidden runtime 
 
 ## Deterministic Profiles
 
-The policy currently audits three `wasm32-unknown-unknown` profiles:
+The policy audits the canonical `FP-BR-*` browser profiles on
+`wasm32-unknown-unknown`:
 
-- `wasm-core-no-default`
-- `wasm-core-default`
-- `wasm-audit-all-features`
+- `FP-BR-MIN` (`--no-default-features --features wasm-browser-minimal`)
+- `FP-BR-DEV` (`--no-default-features --features wasm-browser-dev`)
+- `FP-BR-PROD` (`--no-default-features --features wasm-browser-prod`)
+- `FP-BR-DET` (`--no-default-features --features wasm-browser-deterministic`)
 
 Each profile executes `cargo tree` with deterministic flags (`--prefix depth --charset ascii`) so output ordering is stable and machine-parseable.
 
@@ -66,5 +68,5 @@ Single-profile debugging:
 ```bash
 python3 scripts/check_wasm_dependency_policy.py \
   --policy .github/wasm_dependency_policy.json \
-  --only-profile wasm-audit-all-features
+  --only-profile FP-BR-DET
 ```

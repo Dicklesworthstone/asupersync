@@ -6,25 +6,32 @@
   },
   "profiles": [
     {
-      "id": "wasm-core-no-default",
+      "id": "FP-BR-MIN",
       "target": "wasm32-unknown-unknown",
       "no_default_features": true,
       "all_features": false,
-      "features": []
+      "features": ["wasm-browser-minimal"]
     },
     {
-      "id": "wasm-core-default",
+      "id": "FP-BR-DEV",
       "target": "wasm32-unknown-unknown",
-      "no_default_features": false,
+      "no_default_features": true,
       "all_features": false,
-      "features": []
+      "features": ["wasm-browser-dev"]
     },
     {
-      "id": "wasm-audit-all-features",
+      "id": "FP-BR-PROD",
       "target": "wasm32-unknown-unknown",
-      "no_default_features": false,
-      "all_features": true,
-      "features": []
+      "no_default_features": true,
+      "all_features": false,
+      "features": ["wasm-browser-prod"]
+    },
+    {
+      "id": "FP-BR-DET",
+      "target": "wasm32-unknown-unknown",
+      "no_default_features": true,
+      "all_features": false,
+      "features": ["wasm-browser-deterministic"]
     }
   ],
   "forbidden_crates": [
@@ -80,7 +87,7 @@
       "owner": "runtime-core",
       "replacement_issue": "asupersync-umelq.3.2",
       "expires_at_utc": "2026-06-30T00:00:00Z",
-      "notes": "Tracked conditional usage while canonical browser feature profiles are finalized."
+      "notes": "Tracked conditional usage while browser adapter optionalization and policy closure continue."
     }
   ],
   "output": {
