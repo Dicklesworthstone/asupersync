@@ -489,7 +489,7 @@ SELF_SYNTAX_OK=1
 declare -A RESULTS
 declare -A EXIT_CODES
 declare -A DURATION_MS
-declare -a FAILURE_VIOLATION_LINES
+declare -a FAILURE_VIOLATION_LINES=()
 
 set +e
 bash -n "$SCRIPT_DIR/run_all_e2e.sh" >/dev/null 2>&1
