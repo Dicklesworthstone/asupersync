@@ -63,6 +63,8 @@ Compatibility stance:
 | `WASM-ADR-006` | Deferred Native Surface Register Policy | accepted | architecture | Defines gate/defer criteria for native-only modules |
 | `WASM-ADR-007` | Versioned WASM ABI and Break Policy | proposed | bindings/api | Defines ABI stability, versioning, and break handling rules |
 | `WASM-ADR-008` | CI Gating and Evidence Promotion Rules | proposed | qa/ci | Defines evidence required for merge/release gates |
+| `WASM-ADR-009` | Browser Threat Model and Abuse-Case Contract | proposed | security/runtime | Defines browser adversary classes, mandatory controls, and residual-risk policy |
+| `WASM-ADR-010` | Browser Size/Perf Budget Contract | proposed | perf/release | Defines normative artifact/runtime budgets and escalation/waiver policy |
 
 ### 1.3 Explicitly Rejected Alternatives
 
@@ -808,50 +810,175 @@ Trace artifact fields:
 
 ## 15. Security and Capability Hardening
 
-## 15.1 Threat model focus
+## 15.1 Threat model scope and assumptions (WASM-13 baseline)
 
-1. stale/forged handle usage
-2. runtime isolation boundary violations
-3. trace tampering
-4. cancellation abuse patterns
+Protected assets:
 
-## 15.2 Controls
+1. capability boundaries (`Cx`-mediated authority and scoped handles),
+2. cancellation and obligation state integrity (no forged completion, no silent leak),
+3. deterministic trace/replay artifacts (confidentiality + integrity + provenance),
+4. browser package integrity (wasm/js bundle authenticity),
+5. host-app boundary correctness (worker messaging, storage, and bridge surfaces).
 
-1. handle registry with generation checks
-2. runtime capability gating at API boundary
-3. signed or checksummed trace artifacts for integrity checks (optional mode)
-4. strict close semantics and handle invalidation
+Adversary classes:
 
-## 15.3 Security test cases
+1. malicious same-origin application code attempting capability escalation,
+2. compromised dependency/supply-chain artifact in the browser bundle path,
+3. hostile input stream (malformed payloads, replay artifacts, protocol abuse),
+4. operator error (misconfigured capability policy, overbroad telemetry, unsafe defaults).
 
-1. stale handle invocation
-2. invalid handle id fuzzing
-3. cancellation storm behavior
-4. malformed trace import handling
+Assumptions:
+
+1. Browser sandbox primitives hold at platform baseline (no speculative sandbox escape modeled here).
+2. TLS termination and CDN delivery are external controls; this model focuses on runtime-layer fail-closed behavior when those controls degrade.
+3. Native-only surfaces remain gated out of browser profiles as defined by feature-profile policy.
+
+## 15.2 Browser abuse-case matrix
+
+| Threat vector | Representative abuse case | Impact class | Required mitigation | Detection and evidence |
+|---|---|---|---|---|
+| Capability escalation | Caller forges or reuses stale wasm handle to access unauthorized operation | R0-critical | Generation-tagged handle registry; fail-closed lookup; scope-bound capability checks on every boundary call | Structured `capability_denied` events with handle generation mismatch metadata |
+| API abuse / cancellation storms | Untrusted caller floods cancel requests to degrade progress or force inconsistent cleanup | R0-critical | Idempotent cancel protocol, bounded drain budget policy, loser-drain enforcement, starvation/fairness guards | Cancel-pressure counters + fairness certificates + replayable seed traces |
+| Supply-chain compromise | Tampered wasm/js artifact inserted in build/distribution path | R0-critical | Provenance attestation, checksum/signature verification, release-manifest pinning, deterministic build metadata | Artifact integrity report with hash/provenance tuple per release candidate |
+| Replay artifact leakage | Trace bundle exposes sensitive payload/context beyond intended diagnostic scope | R1-high | Redaction/minimization policy, explicit field allowlist, encrypted storage path where required | Redaction audit report + policy check outputs linked to trace artifact IDs |
+| Host bridge confusion | `postMessage`/worker channel mixes trusted and untrusted command envelopes | R1-high | Origin/session binding, typed envelope schema validation, default-deny command routing | Bridge contract violation logs with rejected envelope snapshots |
+| Resource exhaustion | Crafted workload causes pathological allocation or event-loop monopolization | R1-high | Runtime budget enforcement (poll/cost/deadline), bounded queue policies, backpressure with explicit failure | Size/perf gate artifacts + queue pressure telemetry + deterministic repro scripts |
+| Trace tampering | Adversary edits replay artifact to hide root cause or forge outcomes | R1-high | Artifact hash chain + schema/version validation + optional signed envelope | Trace verification output (`verify` report + mismatch pointers) |
+
+## 15.3 Security controls contract
+
+Mandatory controls for browser-v1 promotion:
+
+1. Default-deny capability surface:
+   - no ambient access to `fetch`, timers, storage, crypto, or worker channels without explicit capsule wiring,
+   - every externally reachable operation must declare required capability class.
+2. Handle safety:
+   - generation-protected handle IDs,
+   - strict invalidation on region close/finalization,
+   - stale handle use is a hard error, never a best-effort no-op.
+3. Supply-chain integrity:
+   - reproducible artifact metadata,
+   - hash/provenance tuple persisted with release evidence,
+   - promotion blocked on missing integrity envelope.
+4. Telemetry hygiene:
+   - trace schema field allowlist,
+   - redaction markers for sensitive fields,
+   - explicit retention and export policy tied to profile.
+5. Host boundary hardening:
+   - typed message envelopes,
+   - origin/session binding for bridge channels,
+   - reject-then-log policy for unknown commands.
+
+## 15.4 Adversarial test obligations
+
+Required deterministic security tests:
+
+1. Stale/forged handle misuse matrix (L0 + L1).
+2. Capability boundary bypass attempts across adapter APIs (L0 + L1).
+3. Cancellation abuse stress scenarios with fairness and obligation-leak assertions (L1 + L2).
+4. Malformed and tampered trace import scenarios (L0 + L3).
+5. Bridge-envelope spoofing/replay tests for worker and host integration surfaces (L1 + L2).
+
+Required gate evidence:
+
+1. deterministic scenario IDs and seeds,
+2. structured logs with threat ID, mitigation verdict, and replay pointers,
+3. reproducible command bundle (cargo-heavy steps via `rch exec -- ...`),
+4. residual-risk delta summary versus previous green baseline.
+
+## 15.5 Residual risk register policy
+
+1. Every unresolved `R0-critical` item blocks promotion immediately.
+2. `R1-high` items require explicit owner, mitigation plan, and expiry date before release candidate promotion.
+3. Temporary waiver requires ADR entry with:
+   - concrete risk statement,
+   - compensating controls,
+   - deterministic detection signal,
+   - rollback trigger.
+4. Security register review cadence:
+   - weekly during active implementation,
+   - mandatory at each phase gate (`PG-*`) and before GA cut.
 
 ---
 
 ## 16. Performance and Size Engineering
 
-## 16.1 Budget categories
+## 16.1 Budget contract (WASM-12 baseline)
 
-1. initialization latency
-2. per-tick scheduler overhead
-3. cancellation response latency
-4. memory overhead baseline
-5. compressed wasm artifact sizes by package tier
+All budgets are normative for browser-v1 promotion (`PG-8` and `PG-9` gates) unless an explicit waiver ADR is approved.
 
-## 16.2 Tiered packaging
+Assumed measurement baseline (for comparability, not for exclusivity):
 
-1. `core-min`
-2. `core-trace`
-3. `full-dev`
+1. Browser: Chromium stable channel on Linux x86_64.
+2. Device class: 4 vCPU / 16 GB RAM baseline runner.
+3. Network model: local assets, warm HTTP cache unless scenario states "cold start".
+4. Runtime profile under test: `FP-BR-PROD` unless otherwise stated.
+5. Runs per scenario: minimum 30 samples with p50/p95/p99 captured.
 
-## 16.3 CI gates
+| Budget metric | `core-min` | `core-trace` | `full-dev` | Gate class |
+|---|---:|---:|---:|---|
+| Compressed wasm size (gzip) | <= 220 KiB | <= 340 KiB | <= 520 KiB | hard fail |
+| Raw wasm size | <= 700 KiB | <= 1.05 MiB | <= 1.60 MiB | hard fail |
+| Init latency p95 (module load + instantiate + runtime bootstrap) | <= 45 ms | <= 60 ms | <= 90 ms | hard fail |
+| Scheduler turn overhead p95 | <= 250 us | <= 275 us | <= 325 us | hard fail |
+| Cancellation response latency p95 (`request -> observed at checkpoint`) | <= 8 ms | <= 10 ms | <= 14 ms | hard fail |
+| Steady-state memory overhead (runtime core, no app payload) | <= 24 MiB | <= 30 MiB | <= 40 MiB | hard fail |
+| Trace-enabled overhead vs `core-min` p95 (equal scenario) | n/a | <= +12% | <= +18% | hard fail |
 
-1. size regression checks
-2. browser perf smoke tests
-3. failure on budget breach beyond threshold
+Notes:
+
+1. p99 values must not exceed `1.8x` p95 for the same metric; otherwise classify as instability regression.
+2. Any single-metric breach in two consecutive CI runs blocks promotion.
+3. Budget values are intentionally strict to prevent late-stage footprint creep in browser integrations.
+
+## 16.2 Tiered packaging contract
+
+1. `core-min`: invariant-safe runtime kernel for constrained browser environments; no default tracing payload.
+2. `core-trace`: adds deterministic trace/replay hooks required for incident forensics and parity workflows.
+3. `full-dev`: developer-focused package with richer diagnostics, bounded to keep local iteration practical.
+
+Each tier must publish:
+
+1. feature profile manifest (`required`, `optional`, `forbidden`),
+2. measured size tuple (`raw`, `gzip`, `brotli` when available),
+3. runtime budget report (`init`, `scheduler`, `cancel`, `memory`),
+4. reproducible command bundle and artifact pointers.
+
+## 16.3 CI gates and regression policy
+
+All compute-heavy Rust checks must run through `rch`.
+
+Required CI checks for WASM-12:
+
+1. Size gate:
+   - Build each tier artifact and compute `raw + gzip` sizes.
+   - Fail immediately when any hard budget is exceeded.
+2. Perf smoke gate:
+   - Run deterministic browser perf scenarios (scheduler turn, cancel response, init).
+   - Store p50/p95/p99 and scenario metadata.
+3. Regression gate:
+   - Compare against last green baseline for same tier/profile.
+   - Fail on >5% regression for latency/memory metrics unless an approved waiver exists.
+4. Artifact gate:
+   - Upload structured report with scenario ID, seed/config pointers, runner metadata, and repro commands.
+   - Missing artifact fields are a gate failure (not a warning).
+
+Escalation policy:
+
+1. First breach: open blocker bead under `WASM-12`, attach failing artifacts, and pin owner.
+2. Second consecutive breach: freeze dependent promotions (`PG-8+`) until resolved.
+3. Waiver path: ADR with explicit expiry date, risk owner, and rollback condition.
+
+## 16.4 Evidence schema requirements
+
+Every WASM-12 gate report must include:
+
+1. `profile_id` and package tier,
+2. commit SHA + data hash,
+3. deterministic scenario IDs and seeds,
+4. metric set with p50/p95/p99 and threshold verdict,
+5. baseline delta percentages,
+6. direct rerun commands (including `rch exec -- ...` wrappers for cargo workloads).
 
 ---
 

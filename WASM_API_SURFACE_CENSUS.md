@@ -368,9 +368,9 @@ The scoreboard is tracked across four dimensions:
 | `M-COR-01` | Correctness | Retained-surface parity pass rate = passed parity checks / total required parity checks. | `>= 99.5%` on gated runs. | CI parity suite (`U-*`, `I-*`, `R-*`) | Per gated run + weekly rollup |
 | `M-COR-02` | Correctness | Critical invariant regression count (`PO-OWN`, `PO-CAN`, `PO-REG`, `PO-OBL`). | `0` per release candidate. | Oracle + replay verification logs | Per gated run |
 | `M-COR-03` | Correctness | Deterministic replay equivalence rate on required seed corpus. | `100%` class-equivalent outcomes on mandatory corpus. | Replay manifests + fingerprint reports | Daily + release gates |
-| `M-PERF-01` | Performance | wasm artifact size (`core-min`, `core-trace`, `full-dev`). | Must stay within approved profile budgets; no unapproved growth. | Build artifacts + size gate reports | Per build |
-| `M-PERF-02` | Performance | Runtime init latency p50/p95 on reference browser matrix. | p95 within budget envelope per phase. | Browser benchmark harness | Nightly + release gates |
-| `M-PERF-03` | Performance | Cancellation response latency and drain completion percentile. | No regression beyond configured tolerance window. | Deterministic stress suite + traces | Nightly |
+| `M-PERF-01` | Performance | wasm artifact size (`core-min`, `core-trace`, `full-dev`) for raw and gzip artifacts. | Hard caps from `WASM_SIZE_PERF_BUDGETS.md`: raw <= `650/900/1300 KiB`, gzip <= `220/320/480 KiB` (profile ordered as `core-min/core-trace/full-dev`). | Build artifacts + size gate reports | Per build |
+| `M-PERF-02` | Performance | Runtime cold-init latency p95 on reference desktop and mobile browser matrix. | Hard caps from `WASM_SIZE_PERF_BUDGETS.md`: desktop p95 <= `60/85/130 ms`, mobile p95 <= `160/220/320 ms` (`core-min/core-trace/full-dev`). | Browser benchmark harness | Nightly + release gates |
+| `M-PERF-03` | Performance | Cancellation responsiveness and steady-state memory envelope under deterministic scenario seeds. | Hard caps from `WASM_SIZE_PERF_BUDGETS.md`: cancellation p95 <= `2.5/3.5/5.0 ms`; steady heap p95 <= `24/32/48 MiB` (`core-min/core-trace/full-dev`). | Deterministic stress suite + traces | Nightly |
 | `M-DX-01` | DX | Time-to-first-success for new integrator (clean environment to running sample). | At or below phase target; red if above threshold in 2 consecutive windows. | Scripted onboarding runs + pilot telemetry | Weekly |
 | `M-DX-02` | DX | Documentation success rate (quickstart completion without manual intervention). | `>= 95%` completion in pilot cohort. | Pilot runbooks + support logs | Bi-weekly |
 | `M-DX-03` | DX | API ergonomics friction index (blocking integration defects per 10 pilot attempts). | Downward trend, hard cap per phase. | Issue tracker + pilot incident tags | Bi-weekly |
@@ -408,3 +408,14 @@ Escalation rules:
 1. Publish a weekly scoreboard packet containing raw metric extracts, trend deltas, and gate recommendation.
 2. Attach replay pointers for any metric connected to deterministic correctness claims.
 3. Keep at least the last 8 reporting windows accessible for audit and trend analysis.
+
+### 11.6 Budget Baseline Package (asupersync-umelq.13.1)
+
+`WASM_SIZE_PERF_BUDGETS.md` is the canonical threshold contract for `M-PERF-*`
+metrics and includes:
+
+1. profile-specific hard caps (`core-min`, `core-trace`, `full-dev`),
+2. warn-to-fail escalation semantics for operational p95 metrics,
+3. deterministic seed protocol and artifact schema for CI gates,
+4. downstream integration points for `asupersync-umelq.13.2`,
+   `asupersync-umelq.13.3`, and `asupersync-umelq.18.4`.
