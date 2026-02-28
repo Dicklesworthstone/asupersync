@@ -618,8 +618,8 @@ mod tests {
         assert_eq!(encoded.phase, "cancelling");
         assert_eq!(encoded.timestamp_nanos, 42);
         assert_eq!(encoded.message.as_deref(), Some("deadline exceeded"));
-        assert_eq!(encoded.origin_region, "RegionId(3:7)");
-        assert_eq!(encoded.origin_task.as_deref(), Some("TaskId(4:1)"));
+        assert_eq!(encoded.origin_region, "R3");
+        assert_eq!(encoded.origin_task.as_deref(), Some("T4"));
     }
 
     #[test]
