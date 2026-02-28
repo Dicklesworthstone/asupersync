@@ -64,21 +64,54 @@
 #![cfg_attr(test, allow(clippy::large_stack_frames))]
 #![cfg_attr(feature = "simd-intrinsics", feature(portable_simd))]
 
+#[cfg(all(target_arch = "wasm32", not(feature = "wasm-browser-preview")))]
+compile_error!(
+    "wasm32 builds are gated. Enable feature `wasm-browser-preview` for explicit browser preview \
+     builds, and follow docs/wasm_dependency_audit_policy.md for supported profiles."
+);
+
+#[cfg(all(target_arch = "wasm32", feature = "cli"))]
+compile_error!(
+    "feature `cli` is unsupported on wasm32 (requires native filesystem/process surfaces)."
+);
+
+#[cfg(all(target_arch = "wasm32", feature = "io-uring"))]
+compile_error!("feature `io-uring` is unsupported on wasm32.");
+
+#[cfg(all(target_arch = "wasm32", feature = "tls"))]
+compile_error!("feature `tls` is unsupported on wasm32 browser preview builds.");
+
+#[cfg(all(target_arch = "wasm32", feature = "tls-native-roots"))]
+compile_error!("feature `tls-native-roots` is unsupported on wasm32.");
+
+#[cfg(all(target_arch = "wasm32", feature = "tls-webpki-roots"))]
+compile_error!("feature `tls-webpki-roots` is unsupported on wasm32.");
+
+#[cfg(all(target_arch = "wasm32", feature = "sqlite"))]
+compile_error!("feature `sqlite` is unsupported on wasm32 browser preview builds.");
+
+#[cfg(all(target_arch = "wasm32", feature = "postgres"))]
+compile_error!("feature `postgres` is unsupported on wasm32 browser preview builds.");
+
+#[cfg(all(target_arch = "wasm32", feature = "mysql"))]
+compile_error!("feature `mysql` is unsupported on wasm32 browser preview builds.");
+
+#[cfg(all(target_arch = "wasm32", feature = "kafka"))]
+compile_error!("feature `kafka` is unsupported on wasm32 browser preview builds.");
+
+// ── Portable modules (no platform assumptions) ──────────────────────────
 pub mod actor;
 pub mod app;
 pub mod audit;
 pub mod bytes;
 pub mod cancel;
 pub mod channel;
-pub mod cli;
 pub mod codec;
 pub mod combinator;
 pub mod config;
 pub mod conformance;
 pub mod console;
 pub mod cx;
-#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
-pub mod database;
 pub mod decoding;
 pub mod distributed;
 pub mod encoding;
@@ -86,50 +119,69 @@ pub mod epoch;
 pub mod error;
 pub mod evidence;
 pub mod evidence_sink;
-pub mod fs;
 pub mod gen_server;
-pub mod grpc;
 pub mod http;
 pub mod io;
 pub mod lab;
 pub mod link;
-pub mod messaging;
-pub mod migration;
 pub mod monitor;
+pub mod migration;
 pub mod net;
 pub mod obligation;
 pub mod observability;
 pub mod plan;
-#[cfg(unix)]
-pub mod process;
 pub mod raptorq;
 pub mod record;
 pub mod remote;
 pub mod runtime;
 pub mod security;
-pub mod server;
 pub mod service;
 pub mod session;
-pub mod signal;
 pub mod spork;
 pub mod stream;
 pub mod supervision;
 pub mod sync;
-#[cfg(any(test, feature = "test-internals"))]
-pub mod test_logging;
-#[cfg(any(test, feature = "test-internals"))]
-pub mod test_ndjson;
-#[cfg(any(test, feature = "test-internals"))]
-pub mod test_utils;
 pub mod time;
-#[cfg(feature = "tls")]
-pub mod tls;
 pub mod trace;
 pub mod tracing_compat;
 pub mod transport;
 pub mod types;
 pub mod util;
 pub mod web;
+
+// ── Feature-gated modules ───────────────────────────────────────────────
+#[cfg(feature = "cli")]
+pub mod cli;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+pub mod database;
+#[cfg(feature = "tls")]
+pub mod tls;
+
+// ── Platform-specific modules (excluded from wasm32 browser builds) ─────
+// These modules depend on native OS surfaces (libc, nix, epoll, signal-hook,
+// socket2) that are unavailable on wasm32-unknown-unknown. Browser adapters
+// for the portable modules above are provided via platform trait seams
+// (see docs/wasm_platform_trait_seams.md).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod fs;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod grpc;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod messaging;
+#[cfg(unix)]
+pub mod process;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod server;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod signal;
+
+// ── Test-only modules ───────────────────────────────────────────────────
+#[cfg(any(test, feature = "test-internals"))]
+pub mod test_logging;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod test_ndjson;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod test_utils;
 
 // Re-exports for convenient access to core types
 pub use config::{

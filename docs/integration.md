@@ -152,6 +152,26 @@ Override via `RuntimeBuilder::obligation_leak_response(...)` or
 See `TESTING.md` for test categories, logging conventions, conformance suite usage,
 and fuzzing instructions.
 
+### wasm32 Guardrails
+
+Browser-targeted compilation is explicitly gated to prevent accidental partial
+builds with semantic holes:
+
+- `target_arch = "wasm32"` requires `--features wasm-browser-preview`.
+- The following features are compile-time rejected on wasm32:
+  - `cli`
+  - `io-uring`
+  - `tls`
+  - `tls-native-roots`
+  - `tls-webpki-roots`
+  - `sqlite`
+  - `postgres`
+  - `mysql`
+  - `kafka`
+
+Policy and deterministic dependency-audit profiles are documented in
+`docs/wasm_dependency_audit_policy.md`.
+
 ### Examples
 
 Examples live in `examples/` and cover:
