@@ -1,8 +1,8 @@
 # Security Review and Threat Model
 
 Status: draft
-Last updated: 2026-02-01
-Owner: bd-2827
+Last updated: 2026-02-28
+Owner: asupersync-umelq.14.1
 
 ## Scope
 
@@ -45,6 +45,58 @@ Primary assets and goals:
 - Remote authenticated attacker: protocol misuse, request smuggling, stream abuse
 - Local attacker (same host): abuse of file paths, permissions, or local sockets
 - Malicious library user: misuse of APIs, intentional invariant violations
+
+## Browser/WASM Threat Addendum (asupersync-umelq.14.1)
+
+This addendum defines browser-specific security assumptions and controls for the
+`wasm-browser-preview` surface.
+
+### Threat Assumptions
+
+- Browser host and JavaScript environment are untrusted from the runtime point of view.
+- Network authority must be explicit (`Cx` + `IoCap`) and never ambient.
+- Replay artifacts are potentially exfiltratable unless treated as sensitive outputs.
+- Dependency compromise remains possible; policy gates must prevent forbidden runtime surfaces.
+
+### STRIDE-style Threat Matrix (Browser Scope)
+
+| Category | Browser Abuse Case | Required Control |
+| --- | --- | --- |
+| Spoofing | Untrusted origin impersonates approved backend | Explicit origin allowlist in `FetchAuthority` |
+| Tampering | Script mutates request shape to bypass policy | Method allowlist + header-count cap + invalid URL rejection |
+| Repudiation | Missing provenance for security decisions | Structured security diagnostics + deterministic test replay commands |
+| Information Disclosure | Replay/log artifacts expose secrets/tokens | Redaction requirements + no secret-bearing stdout/stderr |
+| Denial of Service | Oversized headers/bodies or hostile request patterns | Hard policy bounds (`max_header_count`, protocol size limits) |
+| Elevation of Privilege | Ambient fetch/credentials escalation without capability | Capability-gated `IoCap::fetch_cap()` + credential-default deny |
+
+### Explicit Policy Checks and Adversarial Tests
+
+- `tests/security_invariants.rs` (`browser_fetch_security` module) enforces:
+  - untrusted origin denial,
+  - method escalation denial,
+  - credential-default-deny behavior,
+  - header-count bound enforcement,
+  - malformed URL rejection.
+- `src/io/cap.rs` unit tests enforce authority and policy wiring through `BrowserFetchIoCap`.
+- `.github/workflows/ci.yml` runs full test gates; failures include deterministic
+  test names and replayable commands.
+
+### Deterministic Repro Commands
+
+For local reproduction with remote offload:
+
+```bash
+rch exec -- cargo test --test security_invariants browser_fetch_security -- --nocapture
+rch exec -- cargo test --lib io::cap -- --nocapture
+rch exec -- cargo test --test security -- --nocapture
+```
+
+For CI parity checks:
+
+```bash
+python3 scripts/check_wasm_dependency_policy.py --policy .github/wasm_dependency_policy.json
+cargo test --test security_invariants browser_fetch_security -- --nocapture
+```
 
 ## Threats and Mitigations by Component
 
@@ -181,6 +233,7 @@ Gaps are listed in the "Open Items" section.
 | Network primitives hardening | `tests/net_tcp.rs`, `tests/net_udp.rs`, `tests/net_unix.rs`, `tests/net_verification.rs` | Nonblocking and error paths |
 | File system safety | `tests/fs_verification.rs`, `tests/io_cancellation.rs` | File ops + cancel behavior |
 | Security primitives | `tests/security/*.rs` | Auth/context/key/tag/property tests |
+| Browser fetch authority boundaries | `tests/security_invariants.rs` (`browser_fetch_security`), `src/io/cap.rs` (unit tests) | Origin/method/credentials/header policy enforcement |
 | Trace/replay integrity | `tests/replay_debugging.rs` | Trace format + replay sanity |
 
 ## Per-Protocol Size Limits (Current Defaults)

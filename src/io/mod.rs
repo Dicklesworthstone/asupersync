@@ -63,6 +63,10 @@ pub use write_permit::WritePermit;
 
 pub use buf_reader::BufReader;
 pub use buf_writer::BufWriter;
-pub use cap::{IoCap, IoNotAvailable, LabIoCap};
+pub use cap::{
+    BrowserFetchIoCap, FetchAuthority, FetchCancellationPolicy, FetchIoCap, FetchMethod,
+    FetchPolicyError, FetchRequest, FetchStreamPolicy, FetchTimeoutPolicy, IoCap, IoNotAvailable,
+    LabIoCap,
+};
 pub use lines::Lines;
 pub use std::io::SeekFrom;

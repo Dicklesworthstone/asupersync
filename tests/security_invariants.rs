@@ -7,6 +7,7 @@
 
 use asupersync::bytes::BytesMut;
 use asupersync::http::h2::{Header, HpackDecoder, HpackEncoder, Settings, SettingsBuilder};
+use asupersync::io::{FetchAuthority, FetchMethod, FetchPolicyError, FetchRequest};
 use asupersync::net::websocket::{CloseReason, Frame, Opcode, WsError};
 
 // =============================================================================
@@ -181,6 +182,87 @@ mod websocket_security {
         assert!(!matches!(invalid_opcode, WsError::InvalidUtf8));
         assert!(!matches!(invalid_utf8, WsError::InvalidOpcode(_)));
         assert!(!matches!(reserved_bits, WsError::InvalidOpcode(_)));
+    }
+}
+
+// =============================================================================
+// BROWSER FETCH AUTHORITY INVARIANTS
+// =============================================================================
+
+mod browser_fetch_security {
+    use super::*;
+
+    fn strict_fetch_authority() -> FetchAuthority {
+        FetchAuthority {
+            allowed_origins: vec!["https://api.example.com".to_owned()],
+            allowed_methods: vec![FetchMethod::Get],
+            allow_credentials: false,
+            max_header_count: 2,
+        }
+    }
+
+    #[test]
+    fn invariant_fetch_policy_denies_untrusted_origin() {
+        let authority = strict_fetch_authority();
+        let request = FetchRequest::new(FetchMethod::Get, "https://evil.example.com/v1/data");
+        assert_eq!(
+            authority.authorize(&request),
+            Err(FetchPolicyError::OriginDenied(
+                "https://evil.example.com".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn invariant_fetch_policy_denies_method_escalation() {
+        let authority = strict_fetch_authority();
+        let request = FetchRequest::new(FetchMethod::Post, "https://api.example.com/v1/data");
+        assert_eq!(
+            authority.authorize(&request),
+            Err(FetchPolicyError::MethodDenied(FetchMethod::Post))
+        );
+    }
+
+    #[test]
+    fn invariant_fetch_policy_denies_credentials_by_default() {
+        let authority = strict_fetch_authority();
+        let request = FetchRequest::new(FetchMethod::Get, "https://api.example.com/v1/data")
+            .with_credentials();
+        assert_eq!(
+            authority.authorize(&request),
+            Err(FetchPolicyError::CredentialsDenied)
+        );
+    }
+
+    #[test]
+    fn invariant_fetch_policy_enforces_header_limits() {
+        let authority = strict_fetch_authority();
+        let request = FetchRequest::new(FetchMethod::Get, "https://api.example.com/v1/data")
+            .with_header("x-one", "1")
+            .with_header("x-two", "2")
+            .with_header("x-three", "3");
+        assert_eq!(
+            authority.authorize(&request),
+            Err(FetchPolicyError::TooManyHeaders { count: 3, limit: 2 })
+        );
+    }
+
+    #[test]
+    fn invariant_fetch_policy_rejects_invalid_url_shape() {
+        let authority = strict_fetch_authority();
+        let request = FetchRequest::new(FetchMethod::Get, "not-a-url");
+        assert_eq!(
+            authority.authorize(&request),
+            Err(FetchPolicyError::InvalidUrl("not-a-url".to_owned()))
+        );
+    }
+
+    #[test]
+    fn invariant_fetch_policy_allows_explicitly_permitted_request() {
+        let authority = strict_fetch_authority();
+        let request = FetchRequest::new(FetchMethod::Get, "https://api.example.com/v1/data")
+            .with_header("x-trace-id", "t-1");
+        assert_eq!(authority.authorize(&request), Ok(()));
     }
 }
 

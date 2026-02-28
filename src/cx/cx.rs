@@ -873,6 +873,28 @@ impl<Caps> Cx<Caps> {
         self.handles.io_cap.is_some()
     }
 
+    /// Returns the fetch adapter capability, if one is configured.
+    ///
+    /// This is the browser-facing network authority surface. When present,
+    /// requests must pass explicit origin/method/credential policy checks
+    /// before any host fetch operation is attempted.
+    #[must_use]
+    pub fn fetch_cap(&self) -> Option<&dyn crate::io::FetchIoCap>
+    where
+        Caps: cap::HasIo,
+    {
+        self.handles.io_cap.as_ref().and_then(|cap| cap.fetch_cap())
+    }
+
+    /// Returns true if a fetch adapter capability is available.
+    #[must_use]
+    pub fn has_fetch_cap(&self) -> bool
+    where
+        Caps: cap::HasIo,
+    {
+        self.fetch_cap().is_some()
+    }
+
     /// Returns the remote capability, if one is configured.
     ///
     /// The remote capability authorizes spawning tasks on remote nodes.
