@@ -998,6 +998,339 @@ pub struct ScenarioQueueFailureClass {
     pub operator_action: String,
 }
 
+/// Deterministic e2e harness core contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct E2eHarnessCoreContract {
+    /// Contract version for compatibility checks.
+    pub contract_version: String,
+    /// Required execution-adapter dependency.
+    pub execution_adapter_version: String,
+    /// Required logging-contract dependency.
+    pub logging_contract_version: String,
+    /// Required config fields in lexical order.
+    pub required_config_fields: Vec<String>,
+    /// Required transcript fields in lexical order.
+    pub required_transcript_fields: Vec<String>,
+    /// Required artifact-index fields in lexical order.
+    pub required_artifact_index_fields: Vec<String>,
+    /// Deterministic lifecycle states in lexical order.
+    pub lifecycle_states: Vec<String>,
+    /// Deterministic failure taxonomy.
+    pub failure_taxonomy: Vec<E2eHarnessFailureClass>,
+}
+
+/// One deterministic failure-taxonomy entry for harness execution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct E2eHarnessFailureClass {
+    /// Stable failure code.
+    pub code: String,
+    /// Severity (`critical`, `high`, `medium`, `low`).
+    pub severity: String,
+    /// Whether this failure is retryable.
+    pub retryable: bool,
+    /// Required operator action for this failure.
+    pub operator_action: String,
+}
+
+/// Parsed deterministic e2e harness configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct E2eHarnessConfig {
+    /// Deterministic run identifier.
+    pub run_id: String,
+    /// Deterministic scenario identifier.
+    pub scenario_id: String,
+    /// Correlation identifier for joins across evidence surfaces.
+    pub correlation_id: String,
+    /// Deterministic replay seed.
+    pub seed: String,
+    /// Harness script identifier.
+    pub script_id: String,
+    /// Requester identity.
+    pub requested_by: String,
+    /// Scenario timeout in seconds.
+    pub timeout_secs: u32,
+    /// Expected top-level outcome (`success`, `failed`, `cancelled`).
+    pub expected_outcome: String,
+}
+
+/// One deterministic transcript event.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct E2eHarnessTranscriptEvent {
+    /// Event sequence number (1-based).
+    pub sequence: u32,
+    /// Logical stage identifier.
+    pub stage: String,
+    /// Lifecycle state after this event.
+    pub state: String,
+    /// Event outcome class.
+    pub outcome_class: String,
+    /// Human-readable event summary.
+    pub message: String,
+    /// Stage-local propagated seed.
+    pub propagated_seed: String,
+}
+
+/// Deterministic transcript bundle for one harness run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct E2eHarnessTranscript {
+    /// Deterministic run identifier.
+    pub run_id: String,
+    /// Deterministic scenario identifier.
+    pub scenario_id: String,
+    /// Correlation identifier.
+    pub correlation_id: String,
+    /// Root deterministic replay seed.
+    pub seed: String,
+    /// Ordered transcript events.
+    pub events: Vec<E2eHarnessTranscriptEvent>,
+}
+
+/// One deterministic artifact-index record for harness outputs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct E2eHarnessArtifactIndexEntry {
+    /// Stable artifact identifier.
+    pub artifact_id: String,
+    /// Artifact class (`transcript`, `structured_log`, `summary`).
+    pub artifact_class: String,
+    /// Canonical artifact path.
+    pub artifact_path: String,
+    /// Deterministic checksum hint for replay joins.
+    pub checksum_hint: String,
+}
+
+/// Deterministic beads/bv command-center contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BeadsCommandCenterContract {
+    /// Contract version for compatibility checks.
+    pub contract_version: String,
+    /// Canonical `br` command used to fetch ready work.
+    pub br_ready_command: String,
+    /// Canonical `br` command used to fetch blocked work.
+    pub br_blocked_command: String,
+    /// Canonical `bv` command used to fetch triage insights.
+    pub bv_triage_command: String,
+    /// Required fields for `br ready --json` entries in lexical order.
+    pub required_ready_fields: Vec<String>,
+    /// Required fields for `br blocked --json` entries in lexical order.
+    pub required_blocker_fields: Vec<String>,
+    /// Required fields for triage top-pick entries in lexical order.
+    pub required_triage_fields: Vec<String>,
+    /// Supported filter modes in lexical order.
+    pub filter_modes: Vec<String>,
+    /// Structured event taxonomy in lexical order.
+    pub event_taxonomy: Vec<String>,
+    /// Maximum age (seconds) before data is considered stale.
+    pub stale_after_secs: u64,
+}
+
+/// One normalized ready-work record from beads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BeadsReadyWorkItem {
+    /// Bead identifier.
+    pub id: String,
+    /// Human-readable bead title.
+    pub title: String,
+    /// Bead status (`open`, `in_progress`, `closed`).
+    pub status: String,
+    /// Numeric priority (`0` highest).
+    pub priority: u8,
+    /// Optional assignee.
+    pub assignee: Option<String>,
+}
+
+/// One normalized blocked-work record from beads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BeadsBlockedItem {
+    /// Bead identifier.
+    pub id: String,
+    /// Human-readable bead title.
+    pub title: String,
+    /// Bead status (`open`, `in_progress`, `closed`).
+    pub status: String,
+    /// Numeric priority (`0` highest).
+    pub priority: u8,
+    /// Upstream blocker identifiers in lexical order.
+    pub blocked_by: Vec<String>,
+}
+
+/// One normalized triage recommendation row from `bv --robot-triage`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BvTriageRecommendation {
+    /// Bead identifier.
+    pub id: String,
+    /// Human-readable bead title.
+    pub title: String,
+    /// Triage score from `bv`.
+    pub score: f64,
+    /// Count of downstream items this recommendation unblocks.
+    pub unblocks: u32,
+    /// Human-readable recommendation reasons in lexical order.
+    pub reasons: Vec<String>,
+}
+
+/// One structured command-center event for diagnostics and replay.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BeadsCommandCenterEvent {
+    /// Event kind (`command_invoked`, `parse_failure`, `snapshot_built`, etc).
+    pub event_kind: String,
+    /// Source stream (`ready`, `blocked`, `triage`, `snapshot`).
+    pub source: String,
+    /// Deterministic event message.
+    pub message: String,
+}
+
+/// Deterministic command-center snapshot for the beads/bv pane.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BeadsCommandCenterSnapshot {
+    /// Schema version.
+    pub schema_version: String,
+    /// Active filter mode.
+    pub filter_mode: String,
+    /// Whether source data is stale.
+    pub stale: bool,
+    /// Deterministic fingerprint for refresh/change detection.
+    pub refresh_fingerprint: String,
+    /// Normalized ready-work entries.
+    pub ready_work: Vec<BeadsReadyWorkItem>,
+    /// Normalized blocked-work entries.
+    pub blocked_work: Vec<BeadsBlockedItem>,
+    /// Normalized triage recommendations.
+    pub triage: Vec<BvTriageRecommendation>,
+    /// Parse errors captured while building the snapshot.
+    pub parse_errors: Vec<String>,
+    /// Structured command-center events.
+    pub events: Vec<BeadsCommandCenterEvent>,
+}
+
+/// Deterministic Agent Mail pane contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMailPaneContract {
+    /// Contract version for compatibility checks.
+    pub contract_version: String,
+    /// Canonical inbox command surface.
+    pub fetch_inbox_command: String,
+    /// Canonical outbox query command surface.
+    pub fetch_outbox_command: String,
+    /// Canonical contact-list command surface.
+    pub list_contacts_command: String,
+    /// Canonical message acknowledgement command surface.
+    pub acknowledge_command: String,
+    /// Canonical in-thread reply command surface.
+    pub reply_command: String,
+    /// Required message fields in lexical order.
+    pub required_message_fields: Vec<String>,
+    /// Required contact fields in lexical order.
+    pub required_contact_fields: Vec<String>,
+    /// Supported thread filter modes in lexical order.
+    pub thread_filter_modes: Vec<String>,
+    /// Structured event taxonomy in lexical order.
+    pub event_taxonomy: Vec<String>,
+}
+
+/// One normalized Agent Mail message row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMailMessageItem {
+    /// Message identifier.
+    pub id: u64,
+    /// Message subject.
+    pub subject: String,
+    /// Message sender.
+    pub from: String,
+    /// Message creation timestamp.
+    pub created_ts: String,
+    /// Importance class.
+    pub importance: String,
+    /// Whether acknowledgement is required.
+    pub ack_required: bool,
+    /// Whether message is currently acknowledged.
+    pub acknowledged: bool,
+    /// Optional thread identifier.
+    pub thread_id: Option<String>,
+    /// Delivery status (`received`, `sent`, `failed`).
+    pub delivery_status: String,
+    /// Direction (`inbox` or `outbox`).
+    pub direction: String,
+}
+
+/// One normalized Agent Mail contact status row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMailContactItem {
+    /// Contact peer agent name.
+    pub peer: String,
+    /// Contact status (`approved`, `pending`, `denied`).
+    pub status: String,
+    /// Contact rationale.
+    pub reason: String,
+    /// Last status update timestamp.
+    pub updated_ts: String,
+    /// Optional expiry timestamp.
+    pub expires_ts: Option<String>,
+}
+
+/// One structured Agent Mail pane event.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMailPaneEvent {
+    /// Event kind (`command_invoked`, `ack_transition`, etc).
+    pub event_kind: String,
+    /// Source stream (`inbox`, `outbox`, `contacts`, `thread`, `snapshot`).
+    pub source: String,
+    /// Optional message identifier.
+    pub message_id: Option<u64>,
+    /// Optional thread identifier.
+    pub thread_id: Option<String>,
+    /// Deterministic event message.
+    pub message: String,
+}
+
+/// Deterministic Agent Mail pane snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMailPaneSnapshot {
+    /// Schema version.
+    pub schema_version: String,
+    /// Active thread filter mode.
+    pub thread_filter_mode: String,
+    /// Active thread identifier.
+    pub active_thread: Option<String>,
+    /// Deterministic fingerprint for snapshot refresh/change detection.
+    pub refresh_fingerprint: String,
+    /// Normalized inbox rows.
+    pub inbox: Vec<AgentMailMessageItem>,
+    /// Normalized outbox rows.
+    pub outbox: Vec<AgentMailMessageItem>,
+    /// Active-thread merged rows.
+    pub thread_messages: Vec<AgentMailMessageItem>,
+    /// Contact-awareness rows.
+    pub contacts: Vec<AgentMailContactItem>,
+    /// Count of ack-required inbox rows still pending acknowledgement.
+    pub pending_ack_count: u32,
+    /// Replay-ready command trace snippets.
+    pub replay_commands: Vec<String>,
+    /// Parse errors captured during snapshot assembly.
+    pub parse_errors: Vec<String>,
+    /// Structured pane events.
+    pub events: Vec<AgentMailPaneEvent>,
+}
+
+/// One deterministic smoke-workflow step for Agent Mail.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMailPaneWorkflowStep {
+    /// Step identifier.
+    pub step_id: String,
+    /// Human-readable action summary.
+    pub action: String,
+    /// Snapshot captured at this workflow step.
+    pub snapshot: AgentMailPaneSnapshot,
+}
+
+/// Deterministic Agent Mail smoke-workflow transcript.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMailPaneWorkflowTranscript {
+    /// Scenario identifier.
+    pub scenario_id: String,
+    /// Ordered workflow steps.
+    pub steps: Vec<AgentMailPaneWorkflowStep>,
+}
+
 /// Core diagnostics report contract for doctor report consumers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CoreDiagnosticsReportContract {
@@ -1545,6 +1878,103 @@ impl Outputtable for ScenarioComposerContract {
     }
 }
 
+impl Outputtable for E2eHarnessCoreContract {
+    fn human_format(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("Contract version: {}", self.contract_version));
+        lines.push(format!(
+            "Execution adapter dependency: {}",
+            self.execution_adapter_version
+        ));
+        lines.push(format!(
+            "Logging contract dependency: {}",
+            self.logging_contract_version
+        ));
+        lines.push(format!(
+            "Required config fields: {}",
+            self.required_config_fields.len()
+        ));
+        lines.push(format!(
+            "Required transcript fields: {}",
+            self.required_transcript_fields.len()
+        ));
+        lines.push(format!(
+            "Required artifact index fields: {}",
+            self.required_artifact_index_fields.len()
+        ));
+        lines.push(format!(
+            "Lifecycle states: {}",
+            self.lifecycle_states.join(", ")
+        ));
+        lines.push(format!("Failure taxonomy: {}", self.failure_taxonomy.len()));
+        lines.join("\n")
+    }
+}
+
+impl Outputtable for BeadsCommandCenterContract {
+    fn human_format(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("Contract version: {}", self.contract_version));
+        lines.push(format!("br ready command: {}", self.br_ready_command));
+        lines.push(format!("br blocked command: {}", self.br_blocked_command));
+        lines.push(format!("bv triage command: {}", self.bv_triage_command));
+        lines.push(format!(
+            "Required ready fields: {}",
+            self.required_ready_fields.join(", ")
+        ));
+        lines.push(format!(
+            "Required blocker fields: {}",
+            self.required_blocker_fields.join(", ")
+        ));
+        lines.push(format!(
+            "Required triage fields: {}",
+            self.required_triage_fields.join(", ")
+        ));
+        lines.push(format!("Filter modes: {}", self.filter_modes.join(", ")));
+        lines.push(format!(
+            "Event taxonomy: {}",
+            self.event_taxonomy.join(", ")
+        ));
+        lines.push(format!("Stale after: {}s", self.stale_after_secs));
+        lines.join("\n")
+    }
+}
+
+impl Outputtable for AgentMailPaneContract {
+    fn human_format(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!("Contract version: {}", self.contract_version));
+        lines.push(format!("Fetch inbox command: {}", self.fetch_inbox_command));
+        lines.push(format!(
+            "Fetch outbox command: {}",
+            self.fetch_outbox_command
+        ));
+        lines.push(format!(
+            "List contacts command: {}",
+            self.list_contacts_command
+        ));
+        lines.push(format!("Acknowledge command: {}", self.acknowledge_command));
+        lines.push(format!("Reply command: {}", self.reply_command));
+        lines.push(format!(
+            "Required message fields: {}",
+            self.required_message_fields.join(", ")
+        ));
+        lines.push(format!(
+            "Required contact fields: {}",
+            self.required_contact_fields.join(", ")
+        ));
+        lines.push(format!(
+            "Thread filter modes: {}",
+            self.thread_filter_modes.join(", ")
+        ));
+        lines.push(format!(
+            "Event taxonomy: {}",
+            self.event_taxonomy.join(", ")
+        ));
+        lines.join("\n")
+    }
+}
+
 impl Outputtable for CoreDiagnosticsReportContract {
     fn human_format(&self) -> String {
         let mut lines = Vec::new();
@@ -1758,6 +2188,9 @@ const EVIDENCE_SCHEMA_VERSION: &str = "doctor-evidence-v1";
 const STRUCTURED_LOGGING_CONTRACT_VERSION: &str = "doctor-logging-v1";
 const EXECUTION_ADAPTER_CONTRACT_VERSION: &str = "doctor-exec-adapter-v1";
 const SCENARIO_COMPOSER_CONTRACT_VERSION: &str = "doctor-scenario-composer-v1";
+const E2E_HARNESS_CONTRACT_VERSION: &str = "doctor-e2e-harness-v1";
+const BEADS_COMMAND_CENTER_CONTRACT_VERSION: &str = "doctor-beads-command-center-v1";
+const AGENT_MAIL_PANE_CONTRACT_VERSION: &str = "doctor-agent-mail-pane-v1";
 const CORE_DIAGNOSTICS_REPORT_VERSION: &str = "doctor-core-report-v1";
 const ADVANCED_DIAGNOSTICS_REPORT_VERSION: &str = "doctor-advanced-report-v1";
 const VISUAL_LANGUAGE_VERSION: &str = "doctor-visual-language-v1";
@@ -6781,6 +7214,1700 @@ pub fn dispatch_scenario_run_queue(
     Ok(normalized)
 }
 
+/// Returns the canonical deterministic e2e harness core contract.
+#[must_use]
+pub fn e2e_harness_core_contract() -> E2eHarnessCoreContract {
+    E2eHarnessCoreContract {
+        contract_version: E2E_HARNESS_CONTRACT_VERSION.to_string(),
+        execution_adapter_version: EXECUTION_ADAPTER_CONTRACT_VERSION.to_string(),
+        logging_contract_version: STRUCTURED_LOGGING_CONTRACT_VERSION.to_string(),
+        required_config_fields: vec![
+            "correlation_id".to_string(),
+            "expected_outcome".to_string(),
+            "requested_by".to_string(),
+            "run_id".to_string(),
+            "scenario_id".to_string(),
+            "script_id".to_string(),
+            "seed".to_string(),
+            "timeout_secs".to_string(),
+        ],
+        required_transcript_fields: vec![
+            "correlation_id".to_string(),
+            "events".to_string(),
+            "run_id".to_string(),
+            "scenario_id".to_string(),
+            "seed".to_string(),
+        ],
+        required_artifact_index_fields: vec![
+            "artifact_class".to_string(),
+            "artifact_id".to_string(),
+            "artifact_path".to_string(),
+            "checksum_hint".to_string(),
+        ],
+        lifecycle_states: vec![
+            "cancelled".to_string(),
+            "completed".to_string(),
+            "failed".to_string(),
+            "running".to_string(),
+            "started".to_string(),
+        ],
+        failure_taxonomy: vec![
+            E2eHarnessFailureClass {
+                code: "config_missing".to_string(),
+                severity: "high".to_string(),
+                retryable: false,
+                operator_action: "Provide all required config fields and retry.".to_string(),
+            },
+            E2eHarnessFailureClass {
+                code: "invalid_seed".to_string(),
+                severity: "high".to_string(),
+                retryable: false,
+                operator_action: "Use a deterministic slug-like seed.".to_string(),
+            },
+            E2eHarnessFailureClass {
+                code: "script_timeout".to_string(),
+                severity: "medium".to_string(),
+                retryable: true,
+                operator_action: "Increase timeout budget or reduce scenario scope.".to_string(),
+            },
+        ],
+    }
+}
+
+/// Validates invariants for [`E2eHarnessCoreContract`].
+///
+/// # Errors
+///
+/// Returns `Err` when ordering, schema, or dependency invariants are violated.
+#[allow(clippy::too_many_lines)]
+pub fn validate_e2e_harness_core_contract(contract: &E2eHarnessCoreContract) -> Result<(), String> {
+    if contract.contract_version != E2E_HARNESS_CONTRACT_VERSION {
+        return Err(format!(
+            "unexpected contract_version {}",
+            contract.contract_version
+        ));
+    }
+    if contract.execution_adapter_version != EXECUTION_ADAPTER_CONTRACT_VERSION {
+        return Err(format!(
+            "unexpected execution_adapter_version {}",
+            contract.execution_adapter_version
+        ));
+    }
+    if contract.logging_contract_version != STRUCTURED_LOGGING_CONTRACT_VERSION {
+        return Err(format!(
+            "unexpected logging_contract_version {}",
+            contract.logging_contract_version
+        ));
+    }
+
+    validate_lexical_string_set(&contract.required_config_fields, "required_config_fields")?;
+    for required in [
+        "correlation_id",
+        "expected_outcome",
+        "requested_by",
+        "run_id",
+        "scenario_id",
+        "script_id",
+        "seed",
+        "timeout_secs",
+    ] {
+        if !contract
+            .required_config_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_config_fields missing {required}"));
+        }
+    }
+
+    validate_lexical_string_set(
+        &contract.required_transcript_fields,
+        "required_transcript_fields",
+    )?;
+    for required in ["correlation_id", "events", "run_id", "scenario_id", "seed"] {
+        if !contract
+            .required_transcript_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_transcript_fields missing {required}"));
+        }
+    }
+
+    validate_lexical_string_set(
+        &contract.required_artifact_index_fields,
+        "required_artifact_index_fields",
+    )?;
+    for required in [
+        "artifact_class",
+        "artifact_id",
+        "artifact_path",
+        "checksum_hint",
+    ] {
+        if !contract
+            .required_artifact_index_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_artifact_index_fields missing {required}"));
+        }
+    }
+
+    validate_lexical_string_set(&contract.lifecycle_states, "lifecycle_states")?;
+    for required in ["cancelled", "completed", "failed", "running", "started"] {
+        if !contract
+            .lifecycle_states
+            .iter()
+            .any(|state| state == required)
+        {
+            return Err(format!("lifecycle_states missing {required}"));
+        }
+    }
+
+    if contract.failure_taxonomy.is_empty() {
+        return Err("failure_taxonomy must be non-empty".to_string());
+    }
+    let failure_codes = contract
+        .failure_taxonomy
+        .iter()
+        .map(|failure| failure.code.clone())
+        .collect::<Vec<_>>();
+    validate_lexical_string_set(&failure_codes, "failure_taxonomy.code")?;
+    for required in ["config_missing", "invalid_seed", "script_timeout"] {
+        if !failure_codes.iter().any(|code| code == required) {
+            return Err(format!("failure_taxonomy missing required code {required}"));
+        }
+    }
+    for failure in &contract.failure_taxonomy {
+        if !matches!(
+            failure.severity.as_str(),
+            "critical" | "high" | "medium" | "low"
+        ) {
+            return Err(format!(
+                "failure {} has unsupported severity {}",
+                failure.code, failure.severity
+            ));
+        }
+        if failure.operator_action.trim().is_empty() {
+            return Err(format!(
+                "failure {} must define operator_action",
+                failure.code
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Parses deterministic harness configuration from raw key-value inputs.
+///
+/// # Errors
+///
+/// Returns `Err` when required fields are missing or invalid.
+pub fn parse_e2e_harness_config(
+    contract: &E2eHarnessCoreContract,
+    raw: &BTreeMap<String, String>,
+) -> Result<E2eHarnessConfig, String> {
+    validate_e2e_harness_core_contract(contract)?;
+
+    for field in &contract.required_config_fields {
+        if raw.get(field).is_none_or(|value| value.trim().is_empty()) {
+            return Err(format!("missing required config field {field}"));
+        }
+    }
+
+    let run_id = raw
+        .get("run_id")
+        .ok_or_else(|| "missing required config field run_id".to_string())?;
+    let scenario_id = raw
+        .get("scenario_id")
+        .ok_or_else(|| "missing required config field scenario_id".to_string())?;
+    let correlation_id = raw
+        .get("correlation_id")
+        .ok_or_else(|| "missing required config field correlation_id".to_string())?;
+    let seed = raw
+        .get("seed")
+        .ok_or_else(|| "missing required config field seed".to_string())?;
+    let script_id = raw
+        .get("script_id")
+        .ok_or_else(|| "missing required config field script_id".to_string())?;
+    let requested_by = raw
+        .get("requested_by")
+        .ok_or_else(|| "missing required config field requested_by".to_string())?;
+    let timeout_secs_raw = raw
+        .get("timeout_secs")
+        .ok_or_else(|| "missing required config field timeout_secs".to_string())?;
+    let expected_outcome = raw
+        .get("expected_outcome")
+        .ok_or_else(|| "missing required config field expected_outcome".to_string())?;
+
+    for (label, value) in [
+        ("run_id", run_id),
+        ("scenario_id", scenario_id),
+        ("correlation_id", correlation_id),
+        ("seed", seed),
+        ("script_id", script_id),
+    ] {
+        if !is_slug_like(value) {
+            return Err(format!("{label} must be slug-like"));
+        }
+    }
+    if requested_by.trim().is_empty() {
+        return Err("requested_by must be non-empty".to_string());
+    }
+    let timeout_secs = timeout_secs_raw
+        .parse::<u32>()
+        .map_err(|_| "timeout_secs must parse as u32".to_string())?;
+    if timeout_secs == 0 {
+        return Err("timeout_secs must be greater than 0".to_string());
+    }
+    if !matches!(
+        expected_outcome.as_str(),
+        "success" | "failed" | "cancelled"
+    ) {
+        return Err("expected_outcome must be one of success|failed|cancelled".to_string());
+    }
+
+    Ok(E2eHarnessConfig {
+        run_id: run_id.clone(),
+        scenario_id: scenario_id.clone(),
+        correlation_id: correlation_id.clone(),
+        seed: seed.clone(),
+        script_id: script_id.clone(),
+        requested_by: requested_by.clone(),
+        timeout_secs,
+        expected_outcome: expected_outcome.clone(),
+    })
+}
+
+/// Derives a deterministic stage seed from a root scenario seed.
+///
+/// # Errors
+///
+/// Returns `Err` when inputs are empty or not slug-like.
+pub fn propagate_harness_seed(seed: &str, stage: &str) -> Result<String, String> {
+    let root = seed.trim();
+    let stage_id = stage.trim();
+    if !is_slug_like(root) {
+        return Err("seed must be slug-like".to_string());
+    }
+    if !is_slug_like(stage_id) {
+        return Err("stage must be slug-like".to_string());
+    }
+    Ok(format!("{root}-{stage_id}"))
+}
+
+/// Builds a deterministic transcript for one harness scenario execution.
+///
+/// # Errors
+///
+/// Returns `Err` when config or stage data violates contract constraints.
+pub fn build_e2e_harness_transcript(
+    contract: &E2eHarnessCoreContract,
+    config: &E2eHarnessConfig,
+    stages: &[String],
+) -> Result<E2eHarnessTranscript, String> {
+    validate_e2e_harness_core_contract(contract)?;
+    if stages.is_empty() {
+        return Err("stages must be non-empty".to_string());
+    }
+
+    let mut events = Vec::with_capacity(stages.len());
+    let last_index = stages.len() - 1;
+    for (index, stage) in stages.iter().enumerate() {
+        let stage_id = stage.trim();
+        if !is_slug_like(stage_id) {
+            return Err(format!("stage {stage_id} must be slug-like"));
+        }
+        let state = if index == 0 {
+            "started"
+        } else if index == last_index {
+            match config.expected_outcome.as_str() {
+                "success" => "completed",
+                "failed" => "failed",
+                "cancelled" => "cancelled",
+                _ => return Err("unsupported expected_outcome".to_string()),
+            }
+        } else {
+            "running"
+        };
+        let outcome_class = if index == last_index {
+            config.expected_outcome.as_str()
+        } else {
+            "success"
+        };
+        events.push(E2eHarnessTranscriptEvent {
+            sequence: u32::try_from(index + 1).map_err(|_| "sequence overflow".to_string())?,
+            stage: stage_id.to_string(),
+            state: state.to_string(),
+            outcome_class: outcome_class.to_string(),
+            message: format!("{stage_id} transitioned to {state}"),
+            propagated_seed: propagate_harness_seed(&config.seed, stage_id)?,
+        });
+    }
+
+    Ok(E2eHarnessTranscript {
+        run_id: config.run_id.clone(),
+        scenario_id: config.scenario_id.clone(),
+        correlation_id: config.correlation_id.clone(),
+        seed: config.seed.clone(),
+        events,
+    })
+}
+
+/// Builds deterministic artifact-index entries for one harness transcript.
+///
+/// # Errors
+///
+/// Returns `Err` when transcript data is invalid.
+pub fn build_e2e_harness_artifact_index(
+    contract: &E2eHarnessCoreContract,
+    transcript: &E2eHarnessTranscript,
+) -> Result<Vec<E2eHarnessArtifactIndexEntry>, String> {
+    validate_e2e_harness_core_contract(contract)?;
+    if transcript.events.is_empty() {
+        return Err("transcript.events must be non-empty".to_string());
+    }
+
+    let base = format!("artifacts/{}/doctor/e2e", transcript.run_id);
+    let mut entries = vec![
+        E2eHarnessArtifactIndexEntry {
+            artifact_id: format!("{}-structured-log", transcript.scenario_id),
+            artifact_class: "structured_log".to_string(),
+            artifact_path: format!("{base}/{}-events.jsonl", transcript.scenario_id),
+            checksum_hint: format!(
+                "{}-structured-log-{}",
+                transcript.run_id,
+                transcript.events.len()
+            ),
+        },
+        E2eHarnessArtifactIndexEntry {
+            artifact_id: format!("{}-summary", transcript.scenario_id),
+            artifact_class: "summary".to_string(),
+            artifact_path: format!("{base}/{}-summary.json", transcript.scenario_id),
+            checksum_hint: format!("{}-summary-{}", transcript.run_id, transcript.events.len()),
+        },
+        E2eHarnessArtifactIndexEntry {
+            artifact_id: format!("{}-transcript", transcript.scenario_id),
+            artifact_class: "transcript".to_string(),
+            artifact_path: format!("{base}/{}-transcript.json", transcript.scenario_id),
+            checksum_hint: format!(
+                "{}-transcript-{}",
+                transcript.run_id,
+                transcript.events.len()
+            ),
+        },
+    ];
+    entries.sort_by(|left, right| left.artifact_id.cmp(&right.artifact_id));
+
+    let classes = entries
+        .iter()
+        .map(|entry| entry.artifact_class.clone())
+        .collect::<Vec<_>>();
+    validate_lexical_string_set(&classes, "artifact_index.artifact_class")?;
+    for entry in &entries {
+        if !entry.artifact_path.starts_with("artifacts/") {
+            return Err(format!(
+                "artifact_path must be under artifacts/: {}",
+                entry.artifact_id
+            ));
+        }
+        if entry.checksum_hint.trim().is_empty() {
+            return Err(format!(
+                "checksum_hint must be non-empty: {}",
+                entry.artifact_id
+            ));
+        }
+    }
+    Ok(entries)
+}
+
+/// Returns the canonical beads/bv command-center contract.
+#[must_use]
+pub fn beads_command_center_contract() -> BeadsCommandCenterContract {
+    BeadsCommandCenterContract {
+        contract_version: BEADS_COMMAND_CENTER_CONTRACT_VERSION.to_string(),
+        br_ready_command: "br ready --json".to_string(),
+        br_blocked_command: "br blocked --json".to_string(),
+        bv_triage_command: "bv --robot-triage".to_string(),
+        required_ready_fields: vec![
+            "id".to_string(),
+            "priority".to_string(),
+            "status".to_string(),
+            "title".to_string(),
+        ],
+        required_blocker_fields: vec![
+            "blocked_by".to_string(),
+            "id".to_string(),
+            "priority".to_string(),
+            "status".to_string(),
+            "title".to_string(),
+        ],
+        required_triage_fields: vec![
+            "id".to_string(),
+            "reasons".to_string(),
+            "score".to_string(),
+            "title".to_string(),
+            "unblocks".to_string(),
+        ],
+        filter_modes: vec![
+            "all".to_string(),
+            "in_progress".to_string(),
+            "open".to_string(),
+            "priority_le_2".to_string(),
+            "unblocked_only".to_string(),
+        ],
+        event_taxonomy: vec![
+            "command_invoked".to_string(),
+            "parse_failure".to_string(),
+            "snapshot_built".to_string(),
+            "stale_data_detected".to_string(),
+        ],
+        stale_after_secs: 300,
+    }
+}
+
+/// Validates invariants for [`BeadsCommandCenterContract`].
+///
+/// # Errors
+///
+/// Returns `Err` when command strings, field requirements, or deterministic
+/// ordering invariants are violated.
+pub fn validate_beads_command_center_contract(
+    contract: &BeadsCommandCenterContract,
+) -> Result<(), String> {
+    if contract.contract_version != BEADS_COMMAND_CENTER_CONTRACT_VERSION {
+        return Err(format!(
+            "unexpected contract_version {}",
+            contract.contract_version
+        ));
+    }
+    if contract.br_ready_command.trim() != "br ready --json" {
+        return Err("br_ready_command must be exactly `br ready --json`".to_string());
+    }
+    if contract.br_blocked_command.trim() != "br blocked --json" {
+        return Err("br_blocked_command must be exactly `br blocked --json`".to_string());
+    }
+    if contract.bv_triage_command.trim() != "bv --robot-triage" {
+        return Err("bv_triage_command must be exactly `bv --robot-triage`".to_string());
+    }
+
+    validate_lexical_string_set(&contract.required_ready_fields, "required_ready_fields")?;
+    for required in ["id", "priority", "status", "title"] {
+        if !contract
+            .required_ready_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_ready_fields missing {required}"));
+        }
+    }
+
+    validate_lexical_string_set(&contract.required_blocker_fields, "required_blocker_fields")?;
+    for required in ["blocked_by", "id", "priority", "status", "title"] {
+        if !contract
+            .required_blocker_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_blocker_fields missing {required}"));
+        }
+    }
+
+    validate_lexical_string_set(&contract.required_triage_fields, "required_triage_fields")?;
+    for required in ["id", "reasons", "score", "title", "unblocks"] {
+        if !contract
+            .required_triage_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_triage_fields missing {required}"));
+        }
+    }
+
+    validate_lexical_string_set(&contract.filter_modes, "filter_modes")?;
+    for required in [
+        "all",
+        "in_progress",
+        "open",
+        "priority_le_2",
+        "unblocked_only",
+    ] {
+        if !contract.filter_modes.iter().any(|mode| mode == required) {
+            return Err(format!("filter_modes missing {required}"));
+        }
+    }
+
+    validate_lexical_string_set(&contract.event_taxonomy, "event_taxonomy")?;
+    for required in [
+        "command_invoked",
+        "parse_failure",
+        "snapshot_built",
+        "stale_data_detected",
+    ] {
+        if !contract.event_taxonomy.iter().any(|kind| kind == required) {
+            return Err(format!("event_taxonomy missing {required}"));
+        }
+    }
+
+    if contract.stale_after_secs == 0 {
+        return Err("stale_after_secs must be > 0".to_string());
+    }
+    Ok(())
+}
+
+fn parse_required_string_field(
+    entry: &serde_json::Value,
+    field: &str,
+    source: &str,
+    index: usize,
+) -> Result<String, String> {
+    let value = entry
+        .get(field)
+        .ok_or_else(|| format!("parse_failure: {source}[{index}] missing field {field}"))?;
+    let text = value.as_str().ok_or_else(|| {
+        format!("parse_failure: {source}[{index}] field {field} must be a string")
+    })?;
+    if text.trim().is_empty() {
+        return Err(format!(
+            "parse_failure: {source}[{index}] field {field} must be non-empty"
+        ));
+    }
+    Ok(text.to_string())
+}
+
+fn parse_optional_string_field(
+    entry: &serde_json::Value,
+    field: &str,
+    source: &str,
+    index: usize,
+) -> Result<Option<String>, String> {
+    let Some(value) = entry.get(field) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let text = value.as_str().ok_or_else(|| {
+        format!("parse_failure: {source}[{index}] field {field} must be a string")
+    })?;
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(text.to_string()))
+}
+
+fn parse_priority_field(
+    entry: &serde_json::Value,
+    source: &str,
+    index: usize,
+) -> Result<u8, String> {
+    let value = entry
+        .get("priority")
+        .ok_or_else(|| format!("parse_failure: {source}[{index}] missing field priority"))?;
+    let raw = value.as_u64().ok_or_else(|| {
+        format!("parse_failure: {source}[{index}] field priority must be an unsigned integer")
+    })?;
+    u8::try_from(raw)
+        .map_err(|_| format!("parse_failure: {source}[{index}] field priority out of range"))
+}
+
+fn parse_required_u64_field(
+    entry: &serde_json::Value,
+    field: &str,
+    source: &str,
+    index: usize,
+) -> Result<u64, String> {
+    let value = entry
+        .get(field)
+        .ok_or_else(|| format!("parse_failure: {source}[{index}] missing field {field}"))?;
+    value.as_u64().ok_or_else(|| {
+        format!("parse_failure: {source}[{index}] field {field} must be an unsigned integer")
+    })
+}
+
+fn parse_bool_or_binary_u64_field(
+    entry: &serde_json::Value,
+    field: &str,
+    source: &str,
+    index: usize,
+) -> Result<bool, String> {
+    let value = entry
+        .get(field)
+        .ok_or_else(|| format!("parse_failure: {source}[{index}] missing field {field}"))?;
+    if let Some(boolean) = value.as_bool() {
+        return Ok(boolean);
+    }
+    if let Some(raw) = value.as_u64() {
+        return match raw {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(format!(
+                "parse_failure: {source}[{index}] field {field} must be 0 or 1 when numeric"
+            )),
+        };
+    }
+    Err(format!(
+        "parse_failure: {source}[{index}] field {field} must be a bool or unsigned integer"
+    ))
+}
+
+fn parse_result_array(
+    payload: &serde_json::Value,
+    source: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    if let Some(entries) = payload.as_array() {
+        return Ok(entries.clone());
+    }
+    if let Some(entries) = payload.get("result").and_then(serde_json::Value::as_array) {
+        return Ok(entries.clone());
+    }
+    Err(format!(
+        "parse_failure: {source} JSON must be an array or object containing result array"
+    ))
+}
+
+/// Parses `br ready --json` output into deterministic ready-work rows.
+///
+/// # Errors
+///
+/// Returns `Err` when required fields are missing or malformed.
+pub fn parse_br_ready_items(
+    contract: &BeadsCommandCenterContract,
+    raw_json: &str,
+) -> Result<Vec<BeadsReadyWorkItem>, String> {
+    validate_beads_command_center_contract(contract)?;
+    let payload: serde_json::Value = serde_json::from_str(raw_json)
+        .map_err(|err| format!("parse_failure: ready JSON: {err}"))?;
+    let entries = payload
+        .as_array()
+        .ok_or_else(|| "parse_failure: ready JSON must be an array".to_string())?;
+
+    let mut rows = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let id = parse_required_string_field(entry, "id", "ready", index)?;
+        let title = parse_required_string_field(entry, "title", "ready", index)?;
+        let status = parse_required_string_field(entry, "status", "ready", index)?;
+        let priority = parse_priority_field(entry, "ready", index)?;
+        let assignee = parse_optional_string_field(entry, "assignee", "ready", index)?;
+        rows.push(BeadsReadyWorkItem {
+            id,
+            title,
+            status,
+            priority,
+            assignee,
+        });
+    }
+    rows.sort_by(|left, right| {
+        left.priority
+            .cmp(&right.priority)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(rows)
+}
+
+/// Parses `br blocked --json` output into deterministic blocked-work rows.
+///
+/// # Errors
+///
+/// Returns `Err` when required fields are missing or malformed.
+pub fn parse_br_blocked_items(
+    contract: &BeadsCommandCenterContract,
+    raw_json: &str,
+) -> Result<Vec<BeadsBlockedItem>, String> {
+    validate_beads_command_center_contract(contract)?;
+    let payload: serde_json::Value = serde_json::from_str(raw_json)
+        .map_err(|err| format!("parse_failure: blocked JSON: {err}"))?;
+    let entries = payload
+        .as_array()
+        .ok_or_else(|| "parse_failure: blocked JSON must be an array".to_string())?;
+
+    let mut rows = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let id = parse_required_string_field(entry, "id", "blocked", index)?;
+        let title = parse_required_string_field(entry, "title", "blocked", index)?;
+        let status = parse_required_string_field(entry, "status", "blocked", index)?;
+        let priority = parse_priority_field(entry, "blocked", index)?;
+
+        let blocked_by_value = entry
+            .get("blocked_by")
+            .ok_or_else(|| format!("parse_failure: blocked[{index}] missing field blocked_by"))?;
+        let blocked_by_entries = blocked_by_value.as_array().ok_or_else(|| {
+            format!("parse_failure: blocked[{index}] field blocked_by must be an array")
+        })?;
+        let mut blocked_by = Vec::new();
+        for (blocker_index, blocker) in blocked_by_entries.iter().enumerate() {
+            if let Some(blocker_id) = blocker.as_str() {
+                if blocker_id.trim().is_empty() {
+                    return Err(format!(
+                        "parse_failure: blocked[{index}].blocked_by[{blocker_index}] must be non-empty"
+                    ));
+                }
+                blocked_by.push(blocker_id.to_string());
+                continue;
+            }
+            if let Some(blocker_id) = blocker.get("id").and_then(serde_json::Value::as_str) {
+                if blocker_id.trim().is_empty() {
+                    return Err(format!(
+                        "parse_failure: blocked[{index}].blocked_by[{blocker_index}].id must be non-empty"
+                    ));
+                }
+                blocked_by.push(blocker_id.to_string());
+                continue;
+            }
+            return Err(format!(
+                "parse_failure: blocked[{index}].blocked_by[{blocker_index}] must be a string or object with id"
+            ));
+        }
+        blocked_by.sort();
+        blocked_by.dedup();
+        rows.push(BeadsBlockedItem {
+            id,
+            title,
+            status,
+            priority,
+            blocked_by,
+        });
+    }
+    rows.sort_by(|left, right| {
+        right
+            .blocked_by
+            .len()
+            .cmp(&left.blocked_by.len())
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(rows)
+}
+
+/// Parses `bv --robot-triage` output into deterministic recommendation rows.
+///
+/// # Errors
+///
+/// Returns `Err` when triage fields are missing or malformed.
+pub fn parse_bv_triage_recommendations(
+    contract: &BeadsCommandCenterContract,
+    raw_json: &str,
+) -> Result<Vec<BvTriageRecommendation>, String> {
+    validate_beads_command_center_contract(contract)?;
+    let payload: serde_json::Value = serde_json::from_str(raw_json)
+        .map_err(|err| format!("parse_failure: triage JSON: {err}"))?;
+    let picks = payload
+        .get("triage")
+        .and_then(|triage| triage.get("quick_ref"))
+        .and_then(|quick_ref| quick_ref.get("top_picks"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            "parse_failure: triage.quick_ref.top_picks must be a JSON array".to_string()
+        })?;
+
+    let mut rows = Vec::new();
+    for (index, entry) in picks.iter().enumerate() {
+        let id = parse_required_string_field(entry, "id", "triage", index)?;
+        let title = parse_required_string_field(entry, "title", "triage", index)?;
+        let score = entry
+            .get("score")
+            .and_then(serde_json::Value::as_f64)
+            .ok_or_else(|| {
+                format!("parse_failure: triage[{index}] field score must be a number")
+            })?;
+        let unblocks_raw = entry
+            .get("unblocks")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                format!("parse_failure: triage[{index}] field unblocks must be an unsigned integer")
+            })?;
+        let unblocks = u32::try_from(unblocks_raw)
+            .map_err(|_| format!("parse_failure: triage[{index}] field unblocks out of range"))?;
+        let reasons_value = entry
+            .get("reasons")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                format!("parse_failure: triage[{index}] field reasons must be an array")
+            })?;
+        let mut reasons = Vec::new();
+        for (reason_index, reason) in reasons_value.iter().enumerate() {
+            let text = reason.as_str().ok_or_else(|| {
+                format!("parse_failure: triage[{index}].reasons[{reason_index}] must be a string")
+            })?;
+            if text.trim().is_empty() {
+                return Err(format!(
+                    "parse_failure: triage[{index}].reasons[{reason_index}] must be non-empty"
+                ));
+            }
+            reasons.push(text.to_string());
+        }
+        reasons.sort();
+        reasons.dedup();
+        rows.push(BvTriageRecommendation {
+            id,
+            title,
+            score,
+            unblocks,
+            reasons,
+        });
+    }
+    rows.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(rows)
+}
+
+/// Builds one deterministic beads/bv command-center snapshot.
+///
+/// # Errors
+///
+/// Returns `Err` when the contract or filter mode is invalid.
+#[allow(clippy::too_many_lines)]
+pub fn build_beads_command_center_snapshot(
+    contract: &BeadsCommandCenterContract,
+    ready_json: &str,
+    blocked_json: &str,
+    triage_json: &str,
+    filter_mode: &str,
+    snapshot_age_secs: u64,
+) -> Result<BeadsCommandCenterSnapshot, String> {
+    validate_beads_command_center_contract(contract)?;
+    if !contract.filter_modes.iter().any(|mode| mode == filter_mode) {
+        return Err(format!("unsupported filter_mode {filter_mode}"));
+    }
+
+    let mut events = vec![
+        BeadsCommandCenterEvent {
+            event_kind: "command_invoked".to_string(),
+            source: "ready".to_string(),
+            message: contract.br_ready_command.clone(),
+        },
+        BeadsCommandCenterEvent {
+            event_kind: "command_invoked".to_string(),
+            source: "blocked".to_string(),
+            message: contract.br_blocked_command.clone(),
+        },
+        BeadsCommandCenterEvent {
+            event_kind: "command_invoked".to_string(),
+            source: "triage".to_string(),
+            message: contract.bv_triage_command.clone(),
+        },
+    ];
+    let mut parse_errors = Vec::new();
+
+    let mut ready_work = match parse_br_ready_items(contract, ready_json) {
+        Ok(rows) => rows,
+        Err(err) => {
+            events.push(BeadsCommandCenterEvent {
+                event_kind: "parse_failure".to_string(),
+                source: "ready".to_string(),
+                message: err.clone(),
+            });
+            parse_errors.push(err);
+            Vec::new()
+        }
+    };
+    let mut blocked_work = match parse_br_blocked_items(contract, blocked_json) {
+        Ok(rows) => rows,
+        Err(err) => {
+            events.push(BeadsCommandCenterEvent {
+                event_kind: "parse_failure".to_string(),
+                source: "blocked".to_string(),
+                message: err.clone(),
+            });
+            parse_errors.push(err);
+            Vec::new()
+        }
+    };
+    let mut triage = match parse_bv_triage_recommendations(contract, triage_json) {
+        Ok(rows) => rows,
+        Err(err) => {
+            events.push(BeadsCommandCenterEvent {
+                event_kind: "parse_failure".to_string(),
+                source: "triage".to_string(),
+                message: err.clone(),
+            });
+            parse_errors.push(err);
+            Vec::new()
+        }
+    };
+
+    match filter_mode {
+        "all" => {}
+        "in_progress" => {
+            ready_work.retain(|item| item.status == "in_progress");
+            blocked_work.retain(|item| item.status == "in_progress");
+        }
+        "open" => {
+            ready_work.retain(|item| item.status == "open");
+            blocked_work.retain(|item| item.status == "open");
+        }
+        "priority_le_2" => {
+            ready_work.retain(|item| item.priority <= 2);
+            blocked_work.retain(|item| item.priority <= 2);
+        }
+        "unblocked_only" => {
+            let blocked_ids = blocked_work
+                .iter()
+                .map(|item| item.id.clone())
+                .collect::<BTreeSet<_>>();
+            ready_work.retain(|item| !blocked_ids.contains(&item.id));
+            blocked_work.clear();
+        }
+        _ => {
+            return Err(format!("unsupported filter_mode {filter_mode}"));
+        }
+    }
+
+    triage.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    let stale = snapshot_age_secs > contract.stale_after_secs;
+    if stale {
+        events.push(BeadsCommandCenterEvent {
+            event_kind: "stale_data_detected".to_string(),
+            source: "snapshot".to_string(),
+            message: format!(
+                "snapshot age {}s exceeds stale_after_secs {}s",
+                snapshot_age_secs, contract.stale_after_secs
+            ),
+        });
+    }
+    events.push(BeadsCommandCenterEvent {
+        event_kind: "snapshot_built".to_string(),
+        source: "snapshot".to_string(),
+        message: format!(
+            "ready={} blocked={} triage={} errors={}",
+            ready_work.len(),
+            blocked_work.len(),
+            triage.len(),
+            parse_errors.len()
+        ),
+    });
+
+    let ready_ids = ready_work
+        .iter()
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>()
+        .join(",");
+    let blocked_ids = blocked_work
+        .iter()
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>()
+        .join(",");
+    let triage_ids = triage
+        .iter()
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>()
+        .join(",");
+    let refresh_fingerprint =
+        format!("filter={filter_mode};ready={ready_ids};blocked={blocked_ids};triage={triage_ids}");
+
+    Ok(BeadsCommandCenterSnapshot {
+        schema_version: contract.contract_version.clone(),
+        filter_mode: filter_mode.to_string(),
+        stale,
+        refresh_fingerprint,
+        ready_work,
+        blocked_work,
+        triage,
+        parse_errors,
+        events,
+    })
+}
+
+/// Runs a deterministic command-center smoke workflow using canonical fixtures.
+///
+/// # Errors
+///
+/// Returns `Err` when contract validation or snapshot assembly fails.
+pub fn run_beads_command_center_smoke(
+    contract: &BeadsCommandCenterContract,
+) -> Result<BeadsCommandCenterSnapshot, String> {
+    let ready_json = r#"[
+  {"id":"asupersync-2b4jj.5.1","title":"Build beads and bv command-center pane","status":"open","priority":2},
+  {"id":"asupersync-2b4jj.2.1","title":"Build workspace scanner for Cargo graph and capability flow","status":"in_progress","priority":1,"assignee":"PearlBadger"},
+  {"id":"asupersync-2b4jj.5.2","title":"Build Agent Mail inbox-outbox and ack workflow pane","status":"open","priority":2}
+]"#;
+    let blocked_json = r#"[
+  {
+    "id":"asupersync-2b4jj.5.2",
+    "title":"Build Agent Mail inbox-outbox and ack workflow pane",
+    "status":"open",
+    "priority":2,
+    "blocked_by":[{"id":"asupersync-2b4jj.2.1"}]
+  }
+]"#;
+    let triage_json = r#"{
+  "triage": {
+    "quick_ref": {
+      "top_picks": [
+        {
+          "id":"asupersync-2b4jj.5.1",
+          "title":"Build beads and bv command-center pane",
+          "score":0.31,
+          "unblocks":3,
+          "reasons":["available","high impact"]
+        },
+        {
+          "id":"asupersync-2b4jj.5.2",
+          "title":"Build Agent Mail inbox-outbox and ack workflow pane",
+          "score":0.2,
+          "unblocks":2,
+          "reasons":["available"]
+        }
+      ]
+    }
+  }
+}"#;
+    build_beads_command_center_snapshot(contract, ready_json, blocked_json, triage_json, "all", 12)
+}
+
+/// Returns the canonical Agent Mail pane contract.
+#[must_use]
+pub fn agent_mail_pane_contract() -> AgentMailPaneContract {
+    AgentMailPaneContract {
+        contract_version: AGENT_MAIL_PANE_CONTRACT_VERSION.to_string(),
+        fetch_inbox_command:
+            "mcp_agent_mail.fetch_inbox(project_key, agent_name, include_bodies=true, limit=50)"
+                .to_string(),
+        fetch_outbox_command:
+            "mcp_agent_mail.search_messages(project_key, query=\"from:<agent_name>\", limit=50)"
+                .to_string(),
+        list_contacts_command: "mcp_agent_mail.list_contacts(project_key, agent_name)".to_string(),
+        acknowledge_command:
+            "mcp_agent_mail.acknowledge_message(project_key, agent_name, message_id)".to_string(),
+        reply_command:
+            "mcp_agent_mail.reply_message(project_key, message_id, sender_name, body_md)"
+                .to_string(),
+        required_message_fields: vec![
+            "ack_required".to_string(),
+            "created_ts".to_string(),
+            "from".to_string(),
+            "id".to_string(),
+            "importance".to_string(),
+            "subject".to_string(),
+        ],
+        required_contact_fields: vec![
+            "reason".to_string(),
+            "status".to_string(),
+            "to".to_string(),
+            "updated_ts".to_string(),
+        ],
+        thread_filter_modes: vec![
+            "ack_required".to_string(),
+            "all".to_string(),
+            "thread_only".to_string(),
+            "unacked_only".to_string(),
+        ],
+        event_taxonomy: vec![
+            "ack_transition".to_string(),
+            "command_invoked".to_string(),
+            "contact_attention_required".to_string(),
+            "delivery_failure".to_string(),
+            "parse_failure".to_string(),
+            "snapshot_built".to_string(),
+            "thread_continuity_gap".to_string(),
+            "thread_view_updated".to_string(),
+        ],
+    }
+}
+
+/// Validates invariants for [`AgentMailPaneContract`].
+///
+/// # Errors
+///
+/// Returns `Err` when command surfaces, required fields, or deterministic
+/// ordering invariants are violated.
+pub fn validate_agent_mail_pane_contract(contract: &AgentMailPaneContract) -> Result<(), String> {
+    if contract.contract_version != AGENT_MAIL_PANE_CONTRACT_VERSION {
+        return Err(format!(
+            "unexpected contract_version {}",
+            contract.contract_version
+        ));
+    }
+
+    for (key, value) in [
+        ("fetch_inbox_command", &contract.fetch_inbox_command),
+        ("fetch_outbox_command", &contract.fetch_outbox_command),
+        ("list_contacts_command", &contract.list_contacts_command),
+        ("acknowledge_command", &contract.acknowledge_command),
+        ("reply_command", &contract.reply_command),
+    ] {
+        if value.trim().is_empty() {
+            return Err(format!("{key} must be non-empty"));
+        }
+    }
+
+    validate_lexical_string_set(&contract.required_message_fields, "required_message_fields")?;
+    for required in [
+        "ack_required",
+        "created_ts",
+        "from",
+        "id",
+        "importance",
+        "subject",
+    ] {
+        if !contract
+            .required_message_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_message_fields missing {required}"));
+        }
+    }
+
+    validate_lexical_string_set(&contract.required_contact_fields, "required_contact_fields")?;
+    for required in ["reason", "status", "to", "updated_ts"] {
+        if !contract
+            .required_contact_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_contact_fields missing {required}"));
+        }
+    }
+
+    validate_lexical_string_set(&contract.thread_filter_modes, "thread_filter_modes")?;
+    for required in ["ack_required", "all", "thread_only", "unacked_only"] {
+        if !contract
+            .thread_filter_modes
+            .iter()
+            .any(|mode| mode == required)
+        {
+            return Err(format!("thread_filter_modes missing {required}"));
+        }
+    }
+
+    validate_lexical_string_set(&contract.event_taxonomy, "event_taxonomy")?;
+    for required in [
+        "ack_transition",
+        "command_invoked",
+        "contact_attention_required",
+        "delivery_failure",
+        "parse_failure",
+        "snapshot_built",
+        "thread_continuity_gap",
+        "thread_view_updated",
+    ] {
+        if !contract.event_taxonomy.iter().any(|kind| kind == required) {
+            return Err(format!("event_taxonomy missing {required}"));
+        }
+    }
+
+    Ok(())
+}
+
+/// Parses Agent Mail message rows for one source stream.
+///
+/// # Errors
+///
+/// Returns `Err` when required fields are missing or malformed.
+pub fn parse_agent_mail_messages(
+    contract: &AgentMailPaneContract,
+    raw_json: &str,
+    source: &str,
+    direction: &str,
+) -> Result<Vec<AgentMailMessageItem>, String> {
+    validate_agent_mail_pane_contract(contract)?;
+    if !matches!(direction, "inbox" | "outbox") {
+        return Err("direction must be inbox or outbox".to_string());
+    }
+
+    let payload: serde_json::Value = serde_json::from_str(raw_json)
+        .map_err(|err| format!("parse_failure: {source} JSON: {err}"))?;
+    let entries = parse_result_array(&payload, source)?;
+
+    let mut rows = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let id = parse_required_u64_field(entry, "id", source, index)?;
+        let subject = parse_required_string_field(entry, "subject", source, index)?;
+        let from = parse_required_string_field(entry, "from", source, index)?;
+        let created_ts = parse_required_string_field(entry, "created_ts", source, index)?;
+        let importance = parse_required_string_field(entry, "importance", source, index)?;
+        let ack_required = parse_bool_or_binary_u64_field(entry, "ack_required", source, index)?;
+        let thread_id = parse_optional_string_field(entry, "thread_id", source, index)?;
+        let delivery_status = if direction == "outbox" {
+            parse_optional_string_field(entry, "delivery_status", source, index)?
+                .unwrap_or_else(|| "sent".to_string())
+        } else {
+            "received".to_string()
+        };
+
+        rows.push(AgentMailMessageItem {
+            id,
+            subject,
+            from,
+            created_ts,
+            importance,
+            ack_required,
+            acknowledged: false,
+            thread_id,
+            delivery_status,
+            direction: direction.to_string(),
+        });
+    }
+
+    rows.sort_by(|left, right| {
+        left.created_ts
+            .cmp(&right.created_ts)
+            .then_with(|| left.id.cmp(&right.id))
+            .then_with(|| left.direction.cmp(&right.direction))
+    });
+    Ok(rows)
+}
+
+/// Parses Agent Mail contact rows.
+///
+/// # Errors
+///
+/// Returns `Err` when required fields are missing or malformed.
+pub fn parse_agent_mail_contacts(
+    contract: &AgentMailPaneContract,
+    raw_json: &str,
+) -> Result<Vec<AgentMailContactItem>, String> {
+    validate_agent_mail_pane_contract(contract)?;
+    let payload: serde_json::Value = serde_json::from_str(raw_json)
+        .map_err(|err| format!("parse_failure: contacts JSON: {err}"))?;
+    let entries = parse_result_array(&payload, "contacts")?;
+
+    let mut contacts = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let peer = parse_required_string_field(entry, "to", "contacts", index)?;
+        let status = parse_required_string_field(entry, "status", "contacts", index)?;
+        let reason = parse_required_string_field(entry, "reason", "contacts", index)?;
+        let updated_ts = parse_required_string_field(entry, "updated_ts", "contacts", index)?;
+        let expires_ts = parse_optional_string_field(entry, "expires_ts", "contacts", index)?;
+
+        contacts.push(AgentMailContactItem {
+            peer,
+            status,
+            reason,
+            updated_ts,
+            expires_ts,
+        });
+    }
+    contacts.sort_by(|left, right| left.peer.cmp(&right.peer));
+    Ok(contacts)
+}
+
+/// Builds one deterministic Agent Mail pane snapshot.
+///
+/// # Errors
+///
+/// Returns `Err` when the contract is invalid or when thread filtering is
+/// requested without an active thread.
+#[allow(clippy::too_many_lines)]
+pub fn build_agent_mail_pane_snapshot(
+    contract: &AgentMailPaneContract,
+    inbox_json: &str,
+    outbox_json: &str,
+    contacts_json: &str,
+    active_thread: Option<&str>,
+    thread_filter_mode: &str,
+    acknowledged_message_ids: &[u64],
+) -> Result<AgentMailPaneSnapshot, String> {
+    validate_agent_mail_pane_contract(contract)?;
+    if !contract
+        .thread_filter_modes
+        .iter()
+        .any(|mode| mode == thread_filter_mode)
+    {
+        return Err(format!(
+            "unsupported thread_filter_mode {thread_filter_mode}"
+        ));
+    }
+    if thread_filter_mode == "thread_only" && active_thread.is_none() {
+        return Err("thread_only filter requires active_thread".to_string());
+    }
+
+    let mut events = vec![
+        AgentMailPaneEvent {
+            event_kind: "command_invoked".to_string(),
+            source: "inbox".to_string(),
+            message_id: None,
+            thread_id: None,
+            message: contract.fetch_inbox_command.clone(),
+        },
+        AgentMailPaneEvent {
+            event_kind: "command_invoked".to_string(),
+            source: "outbox".to_string(),
+            message_id: None,
+            thread_id: None,
+            message: contract.fetch_outbox_command.clone(),
+        },
+        AgentMailPaneEvent {
+            event_kind: "command_invoked".to_string(),
+            source: "contacts".to_string(),
+            message_id: None,
+            thread_id: None,
+            message: contract.list_contacts_command.clone(),
+        },
+    ];
+    let mut parse_errors = Vec::new();
+
+    let mut inbox = match parse_agent_mail_messages(contract, inbox_json, "inbox", "inbox") {
+        Ok(rows) => rows,
+        Err(err) => {
+            events.push(AgentMailPaneEvent {
+                event_kind: "parse_failure".to_string(),
+                source: "inbox".to_string(),
+                message_id: None,
+                thread_id: None,
+                message: err.clone(),
+            });
+            parse_errors.push(err);
+            Vec::new()
+        }
+    };
+    let mut outbox = match parse_agent_mail_messages(contract, outbox_json, "outbox", "outbox") {
+        Ok(rows) => rows,
+        Err(err) => {
+            events.push(AgentMailPaneEvent {
+                event_kind: "parse_failure".to_string(),
+                source: "outbox".to_string(),
+                message_id: None,
+                thread_id: None,
+                message: err.clone(),
+            });
+            parse_errors.push(err);
+            Vec::new()
+        }
+    };
+    let contacts = match parse_agent_mail_contacts(contract, contacts_json) {
+        Ok(rows) => rows,
+        Err(err) => {
+            events.push(AgentMailPaneEvent {
+                event_kind: "parse_failure".to_string(),
+                source: "contacts".to_string(),
+                message_id: None,
+                thread_id: None,
+                message: err.clone(),
+            });
+            parse_errors.push(err);
+            Vec::new()
+        }
+    };
+
+    let acknowledged_ids = acknowledged_message_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    for message in &mut inbox {
+        if message.ack_required && acknowledged_ids.contains(&message.id) {
+            message.acknowledged = true;
+            events.push(AgentMailPaneEvent {
+                event_kind: "ack_transition".to_string(),
+                source: "inbox".to_string(),
+                message_id: Some(message.id),
+                thread_id: message.thread_id.clone(),
+                message: format!("message {} acknowledged", message.id),
+            });
+        }
+        if !message.ack_required {
+            message.acknowledged = true;
+        }
+    }
+    for message in &mut outbox {
+        if !message.ack_required {
+            message.acknowledged = true;
+        }
+        if message.delivery_status == "failed" {
+            events.push(AgentMailPaneEvent {
+                event_kind: "delivery_failure".to_string(),
+                source: "outbox".to_string(),
+                message_id: Some(message.id),
+                thread_id: message.thread_id.clone(),
+                message: format!("message {} delivery failed", message.id),
+            });
+        }
+    }
+
+    match thread_filter_mode {
+        "all" => {}
+        "ack_required" => {
+            inbox.retain(|message| message.ack_required);
+            outbox.retain(|message| message.ack_required);
+        }
+        "unacked_only" => {
+            inbox.retain(|message| message.ack_required && !message.acknowledged);
+            outbox.retain(|message| message.ack_required && !message.acknowledged);
+        }
+        "thread_only" => {
+            let Some(thread) = active_thread else {
+                return Err("thread_only filter requires active_thread".to_string());
+            };
+            inbox.retain(|message| message.thread_id.as_deref() == Some(thread));
+            outbox.retain(|message| message.thread_id.as_deref() == Some(thread));
+        }
+        _ => {
+            return Err(format!(
+                "unsupported thread_filter_mode {thread_filter_mode}"
+            ));
+        }
+    }
+
+    let selected_thread = active_thread.map(str::to_string).or_else(|| {
+        inbox
+            .iter()
+            .chain(outbox.iter())
+            .filter_map(|message| message.thread_id.clone())
+            .min()
+    });
+
+    let mut thread_messages = selected_thread.as_ref().map_or_else(Vec::new, |thread_id| {
+        inbox
+            .iter()
+            .chain(outbox.iter())
+            .filter(|message| message.thread_id.as_ref() == Some(thread_id))
+            .cloned()
+            .collect::<Vec<_>>()
+    });
+    thread_messages.sort_by(|left, right| {
+        left.created_ts
+            .cmp(&right.created_ts)
+            .then_with(|| left.id.cmp(&right.id))
+            .then_with(|| left.direction.cmp(&right.direction))
+    });
+
+    if active_thread.is_some() && thread_messages.is_empty() {
+        events.push(AgentMailPaneEvent {
+            event_kind: "thread_continuity_gap".to_string(),
+            source: "thread".to_string(),
+            message_id: None,
+            thread_id: selected_thread.clone(),
+            message: "active thread has no visible messages in current snapshot".to_string(),
+        });
+    } else if !thread_messages.is_empty() {
+        events.push(AgentMailPaneEvent {
+            event_kind: "thread_view_updated".to_string(),
+            source: "thread".to_string(),
+            message_id: None,
+            thread_id: selected_thread.clone(),
+            message: format!("thread view contains {} messages", thread_messages.len()),
+        });
+    }
+
+    for contact in &contacts {
+        if contact.status != "approved" {
+            events.push(AgentMailPaneEvent {
+                event_kind: "contact_attention_required".to_string(),
+                source: "contacts".to_string(),
+                message_id: None,
+                thread_id: None,
+                message: format!("contact {} is in {} state", contact.peer, contact.status),
+            });
+        }
+    }
+
+    let pending_ack_count = u32::try_from(
+        inbox
+            .iter()
+            .filter(|message| message.ack_required && !message.acknowledged)
+            .count(),
+    )
+    .map_err(|_| "pending ack count overflow".to_string())?;
+
+    let mut replay_commands = vec![
+        contract.fetch_inbox_command.clone(),
+        contract.fetch_outbox_command.clone(),
+        contract.list_contacts_command.clone(),
+    ];
+    if pending_ack_count > 0 {
+        replay_commands.push(contract.acknowledge_command.clone());
+    }
+    if selected_thread.is_some() {
+        replay_commands.push(contract.reply_command.clone());
+    }
+
+    events.push(AgentMailPaneEvent {
+        event_kind: "snapshot_built".to_string(),
+        source: "snapshot".to_string(),
+        message_id: None,
+        thread_id: selected_thread.clone(),
+        message: format!(
+            "inbox={} outbox={} thread={} contacts={} pending_ack={} errors={}",
+            inbox.len(),
+            outbox.len(),
+            thread_messages.len(),
+            contacts.len(),
+            pending_ack_count,
+            parse_errors.len()
+        ),
+    });
+
+    let inbox_fingerprint = inbox
+        .iter()
+        .map(|message| format!("{}:{}", message.id, message.acknowledged))
+        .collect::<Vec<_>>()
+        .join(",");
+    let outbox_fingerprint = outbox
+        .iter()
+        .map(|message| format!("{}:{}", message.id, message.delivery_status))
+        .collect::<Vec<_>>()
+        .join(",");
+    let contact_fingerprint = contacts
+        .iter()
+        .map(|contact| format!("{}:{}", contact.peer, contact.status))
+        .collect::<Vec<_>>()
+        .join(",");
+    let refresh_fingerprint = format!(
+        "filter={thread_filter_mode};thread={};inbox={inbox_fingerprint};outbox={outbox_fingerprint};contacts={contact_fingerprint}",
+        selected_thread.as_deref().unwrap_or("-")
+    );
+
+    Ok(AgentMailPaneSnapshot {
+        schema_version: contract.contract_version.clone(),
+        thread_filter_mode: thread_filter_mode.to_string(),
+        active_thread: selected_thread,
+        refresh_fingerprint,
+        inbox,
+        outbox,
+        thread_messages,
+        contacts,
+        pending_ack_count,
+        replay_commands,
+        parse_errors,
+        events,
+    })
+}
+
+/// Runs a deterministic Agent Mail workflow smoke transcript.
+///
+/// # Errors
+///
+/// Returns `Err` when any workflow snapshot assembly step fails.
+#[allow(clippy::too_many_lines)]
+pub fn run_agent_mail_pane_smoke(
+    contract: &AgentMailPaneContract,
+) -> Result<AgentMailPaneWorkflowTranscript, String> {
+    let inbox_json = r#"{
+  "result": [
+    {
+      "id": 2449,
+      "subject": "Re: [coord] BlackElk online: archaeology + next bead execution",
+      "importance": "normal",
+      "ack_required": true,
+      "created_ts": "2026-02-27T19:14:05.885632+00:00",
+      "thread_id": "coord-2026-02-27-blackelk",
+      "from": "BlackElk"
+    },
+    {
+      "id": 2466,
+      "subject": "[asupersync-28c51.489] Completed: Batch 42 random audit",
+      "importance": "normal",
+      "ack_required": false,
+      "created_ts": "2026-02-27T19:59:33.302248+00:00",
+      "thread_id": "asupersync-28c51.489",
+      "from": "SapphireHill"
+    }
+  ]
+}"#;
+    let outbox_before_reply = r#"[
+  {
+    "id": 2506,
+    "subject": "[asupersync-2b4jj.5.2] Start: Agent Mail inbox/outbox/ack workflow pane",
+    "importance": "normal",
+    "ack_required": 0,
+    "created_ts": "2026-02-27T23:52:19.925466+00:00",
+    "thread_id": "asupersync-2b4jj.5.2",
+    "from": "VioletStone",
+    "delivery_status": "sent"
+  }
+]"#;
+    let outbox_after_reply = r#"[
+  {
+    "id": 2506,
+    "subject": "[asupersync-2b4jj.5.2] Start: Agent Mail inbox/outbox/ack workflow pane",
+    "importance": "normal",
+    "ack_required": 0,
+    "created_ts": "2026-02-27T23:52:19.925466+00:00",
+    "thread_id": "asupersync-2b4jj.5.2",
+    "from": "VioletStone",
+    "delivery_status": "sent"
+  },
+  {
+    "id": 2507,
+    "subject": "Re: [coord] BlackElk online: archaeology + next bead execution",
+    "importance": "normal",
+    "ack_required": 0,
+    "created_ts": "2026-02-27T23:52:39.925466+00:00",
+    "thread_id": "coord-2026-02-27-blackelk",
+    "from": "VioletStone",
+    "delivery_status": "sent"
+  }
+]"#;
+    let contacts_json = r#"{
+  "result": [
+    {
+      "to": "BlackElk",
+      "status": "approved",
+      "reason": "Coordinate active bead claims and avoid overlap",
+      "updated_ts": "2026-02-27T18:36:16.334889+00:00",
+      "expires_ts": "2026-03-06T18:36:16.334889+00:00"
+    },
+    {
+      "to": "RainyCat",
+      "status": "pending",
+      "reason": "Requested coordination for thread handoff",
+      "updated_ts": "2026-02-27T18:40:28.202564+00:00",
+      "expires_ts": "2026-03-06T18:40:28.202564+00:00"
+    }
+  ]
+}"#;
+
+    let fetch_step = build_agent_mail_pane_snapshot(
+        contract,
+        inbox_json,
+        outbox_before_reply,
+        contacts_json,
+        Some("coord-2026-02-27-blackelk"),
+        "all",
+        &[],
+    )?;
+    let ack_step = build_agent_mail_pane_snapshot(
+        contract,
+        inbox_json,
+        outbox_before_reply,
+        contacts_json,
+        Some("coord-2026-02-27-blackelk"),
+        "all",
+        &[2449],
+    )?;
+    let reply_step = build_agent_mail_pane_snapshot(
+        contract,
+        inbox_json,
+        outbox_after_reply,
+        contacts_json,
+        Some("coord-2026-02-27-blackelk"),
+        "thread_only",
+        &[2449],
+    )?;
+
+    Ok(AgentMailPaneWorkflowTranscript {
+        scenario_id: "doctor-agent-mail-smoke".to_string(),
+        steps: vec![
+            AgentMailPaneWorkflowStep {
+                step_id: "fetch".to_string(),
+                action: "fetch inbox/outbox/contact state".to_string(),
+                snapshot: fetch_step,
+            },
+            AgentMailPaneWorkflowStep {
+                step_id: "ack".to_string(),
+                action: "acknowledge pending inbox item".to_string(),
+                snapshot: ack_step,
+            },
+            AgentMailPaneWorkflowStep {
+                step_id: "reply".to_string(),
+                action: "reply in-thread and verify continuity".to_string(),
+                snapshot: reply_step,
+            },
+        ],
+    })
+}
+
 /// Returns the canonical core diagnostics-report contract.
 #[must_use]
 pub fn core_diagnostics_report_contract() -> CoreDiagnosticsReportContract {
@@ -10800,6 +12927,495 @@ edition = "2024"
             .filter(|entry| entry.state == "running")
             .count();
         assert_eq!(running, 2);
+    }
+
+    #[test]
+    fn e2e_harness_core_contract_validates() {
+        let contract = e2e_harness_core_contract();
+        validate_e2e_harness_core_contract(&contract).expect("valid harness contract");
+    }
+
+    #[test]
+    fn e2e_harness_core_contract_round_trip_json() {
+        let contract = e2e_harness_core_contract();
+        let json = serde_json::to_string(&contract).expect("serialize");
+        let parsed: E2eHarnessCoreContract = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(contract, parsed);
+        validate_e2e_harness_core_contract(&parsed).expect("parsed harness contract valid");
+    }
+
+    #[test]
+    fn parse_e2e_harness_config_rejects_missing_field() {
+        let contract = e2e_harness_core_contract();
+        let mut raw = BTreeMap::from([
+            ("correlation_id".to_string(), "corr-e2e".to_string()),
+            ("expected_outcome".to_string(), "success".to_string()),
+            ("requested_by".to_string(), "doctor_cli".to_string()),
+            ("run_id".to_string(), "run-e2e".to_string()),
+            ("scenario_id".to_string(), "scenario-e2e".to_string()),
+            ("script_id".to_string(), "script-smoke".to_string()),
+            ("seed".to_string(), "seed-42".to_string()),
+            ("timeout_secs".to_string(), "120".to_string()),
+        ]);
+        raw.remove("seed");
+        let err = parse_e2e_harness_config(&contract, &raw).expect_err("must fail");
+        assert!(err.contains("missing required config field seed"), "{err}");
+    }
+
+    #[test]
+    fn parse_e2e_harness_config_parses_valid_input() {
+        let contract = e2e_harness_core_contract();
+        let raw = BTreeMap::from([
+            ("correlation_id".to_string(), "corr-e2e".to_string()),
+            ("expected_outcome".to_string(), "success".to_string()),
+            ("requested_by".to_string(), "doctor_cli".to_string()),
+            ("run_id".to_string(), "run-e2e".to_string()),
+            ("scenario_id".to_string(), "scenario-e2e".to_string()),
+            ("script_id".to_string(), "script-smoke".to_string()),
+            ("seed".to_string(), "seed-42".to_string()),
+            ("timeout_secs".to_string(), "120".to_string()),
+        ]);
+        let parsed = parse_e2e_harness_config(&contract, &raw).expect("parse should succeed");
+        assert_eq!(parsed.timeout_secs, 120);
+        assert_eq!(parsed.expected_outcome, "success");
+    }
+
+    #[test]
+    fn propagate_harness_seed_is_deterministic() {
+        let first = propagate_harness_seed("seed-42", "stage-bootstrap").expect("first seed");
+        let second = propagate_harness_seed("seed-42", "stage-bootstrap").expect("second seed");
+        assert_eq!(first, second);
+        assert_eq!(first, "seed-42-stage-bootstrap");
+    }
+
+    #[test]
+    fn build_e2e_harness_transcript_is_deterministic() {
+        let contract = e2e_harness_core_contract();
+        let raw = BTreeMap::from([
+            ("correlation_id".to_string(), "corr-e2e".to_string()),
+            ("expected_outcome".to_string(), "success".to_string()),
+            ("requested_by".to_string(), "doctor_cli".to_string()),
+            ("run_id".to_string(), "run-e2e".to_string()),
+            ("scenario_id".to_string(), "scenario-e2e".to_string()),
+            ("script_id".to_string(), "script-smoke".to_string()),
+            ("seed".to_string(), "seed-42".to_string()),
+            ("timeout_secs".to_string(), "120".to_string()),
+        ]);
+        let config = parse_e2e_harness_config(&contract, &raw).expect("parse");
+        let stages = vec![
+            "stage-bootstrap".to_string(),
+            "stage-run".to_string(),
+            "stage-verify".to_string(),
+        ];
+        let first =
+            build_e2e_harness_transcript(&contract, &config, &stages).expect("first transcript");
+        let second =
+            build_e2e_harness_transcript(&contract, &config, &stages).expect("second transcript");
+        assert_eq!(first, second);
+        assert_eq!(first.events[0].state, "started");
+        assert_eq!(first.events[2].state, "completed");
+    }
+
+    #[test]
+    fn build_e2e_harness_transcript_rejects_invalid_stage() {
+        let contract = e2e_harness_core_contract();
+        let raw = BTreeMap::from([
+            ("correlation_id".to_string(), "corr-e2e".to_string()),
+            ("expected_outcome".to_string(), "success".to_string()),
+            ("requested_by".to_string(), "doctor_cli".to_string()),
+            ("run_id".to_string(), "run-e2e".to_string()),
+            ("scenario_id".to_string(), "scenario-e2e".to_string()),
+            ("script_id".to_string(), "script-smoke".to_string()),
+            ("seed".to_string(), "seed-42".to_string()),
+            ("timeout_secs".to_string(), "120".to_string()),
+        ]);
+        let config = parse_e2e_harness_config(&contract, &raw).expect("parse");
+        let stages = vec!["stage bootstrap".to_string()];
+        let err = build_e2e_harness_transcript(&contract, &config, &stages).expect_err("must fail");
+        assert!(err.contains("must be slug-like"), "{err}");
+    }
+
+    #[test]
+    fn build_e2e_harness_artifact_index_is_lexical_and_stable() {
+        let contract = e2e_harness_core_contract();
+        let raw = BTreeMap::from([
+            ("correlation_id".to_string(), "corr-e2e".to_string()),
+            ("expected_outcome".to_string(), "success".to_string()),
+            ("requested_by".to_string(), "doctor_cli".to_string()),
+            ("run_id".to_string(), "run-e2e".to_string()),
+            ("scenario_id".to_string(), "scenario-e2e".to_string()),
+            ("script_id".to_string(), "script-smoke".to_string()),
+            ("seed".to_string(), "seed-42".to_string()),
+            ("timeout_secs".to_string(), "120".to_string()),
+        ]);
+        let config = parse_e2e_harness_config(&contract, &raw).expect("parse");
+        let stages = vec!["stage-bootstrap".to_string(), "stage-verify".to_string()];
+        let transcript =
+            build_e2e_harness_transcript(&contract, &config, &stages).expect("transcript");
+        let index = build_e2e_harness_artifact_index(&contract, &transcript).expect("index");
+        let ids = index
+            .iter()
+            .map(|entry| entry.artifact_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "scenario-e2e-structured-log".to_string(),
+                "scenario-e2e-summary".to_string(),
+                "scenario-e2e-transcript".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn beads_command_center_contract_validates() {
+        let contract = beads_command_center_contract();
+        validate_beads_command_center_contract(&contract).expect("valid contract");
+    }
+
+    #[test]
+    fn beads_command_center_contract_round_trip_json() {
+        let contract = beads_command_center_contract();
+        let json = serde_json::to_string(&contract).expect("serialize");
+        let parsed: BeadsCommandCenterContract = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(contract, parsed);
+        validate_beads_command_center_contract(&parsed).expect("parsed contract valid");
+    }
+
+    #[test]
+    fn parse_br_ready_items_sorts_by_priority_then_id() {
+        let contract = beads_command_center_contract();
+        let raw = r#"[
+  {"id":"asupersync-2b4jj.5.2","title":"Mail pane","status":"open","priority":2},
+  {"id":"asupersync-2b4jj.5.1","title":"Command center","status":"in_progress","priority":2,"assignee":"VioletStone"},
+  {"id":"asupersync-2b4jj.2.1","title":"Scanner","status":"open","priority":1}
+]"#;
+        let parsed = parse_br_ready_items(&contract, raw).expect("parse");
+        let ids = parsed
+            .iter()
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "asupersync-2b4jj.2.1".to_string(),
+                "asupersync-2b4jj.5.1".to_string(),
+                "asupersync-2b4jj.5.2".to_string(),
+            ]
+        );
+        assert_eq!(parsed[1].assignee.as_deref(), Some("VioletStone"));
+    }
+
+    #[test]
+    fn build_beads_command_center_snapshot_filters_and_marks_stale() {
+        let contract = beads_command_center_contract();
+        let ready_json = r#"[
+  {"id":"asupersync-2b4jj.5.1","title":"Command center","status":"open","priority":2},
+  {"id":"asupersync-2b4jj.2.1","title":"Scanner","status":"in_progress","priority":1},
+  {"id":"asupersync-2b4jj.5.2","title":"Mail pane","status":"open","priority":2}
+]"#;
+        let blocked_json = r#"[
+  {
+    "id":"asupersync-2b4jj.5.2",
+    "title":"Mail pane",
+    "status":"open",
+    "priority":2,
+    "blocked_by":[{"id":"asupersync-2b4jj.2.1"}]
+  }
+]"#;
+        let triage_json = r#"{
+  "triage": {
+    "quick_ref": {
+      "top_picks": [
+        {"id":"asupersync-2b4jj.5.1","title":"Command center","score":0.3,"unblocks":3,"reasons":["available","high impact"]},
+        {"id":"asupersync-2b4jj.5.2","title":"Mail pane","score":0.2,"unblocks":2,"reasons":["available"]}
+      ]
+    }
+  }
+}"#;
+
+        let snapshot = build_beads_command_center_snapshot(
+            &contract,
+            ready_json,
+            blocked_json,
+            triage_json,
+            "unblocked_only",
+            301,
+        )
+        .expect("snapshot");
+        let ready_ids = snapshot
+            .ready_work
+            .iter()
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ready_ids,
+            vec![
+                "asupersync-2b4jj.2.1".to_string(),
+                "asupersync-2b4jj.5.1".to_string(),
+            ]
+        );
+        assert!(snapshot.blocked_work.is_empty());
+        assert!(snapshot.stale);
+        assert!(
+            snapshot
+                .events
+                .iter()
+                .any(|event| event.event_kind == "stale_data_detected")
+        );
+    }
+
+    #[test]
+    fn build_beads_command_center_snapshot_tracks_parse_failures() {
+        let contract = beads_command_center_contract();
+        let ready_json = "{not-json}";
+        let blocked_json = "[]";
+        let triage_json = r#"{"triage":{"quick_ref":{"top_picks":[]}}}"#;
+        let snapshot = build_beads_command_center_snapshot(
+            &contract,
+            ready_json,
+            blocked_json,
+            triage_json,
+            "all",
+            5,
+        )
+        .expect("snapshot");
+        assert_eq!(snapshot.ready_work.len(), 0);
+        assert_eq!(snapshot.parse_errors.len(), 1);
+        assert!(
+            snapshot.parse_errors[0].contains("parse_failure: ready JSON"),
+            "{}",
+            snapshot.parse_errors[0]
+        );
+        assert!(
+            snapshot
+                .events
+                .iter()
+                .any(|event| event.event_kind == "parse_failure" && event.source == "ready")
+        );
+    }
+
+    #[test]
+    fn build_beads_command_center_snapshot_handles_empty_state() {
+        let contract = beads_command_center_contract();
+        let ready_json = "[]";
+        let blocked_json = "[]";
+        let triage_json = r#"{"triage":{"quick_ref":{"top_picks":[]}}}"#;
+        let snapshot = build_beads_command_center_snapshot(
+            &contract,
+            ready_json,
+            blocked_json,
+            triage_json,
+            "all",
+            0,
+        )
+        .expect("snapshot");
+        assert_eq!(snapshot.ready_work.len(), 0);
+        assert_eq!(snapshot.blocked_work.len(), 0);
+        assert_eq!(snapshot.triage.len(), 0);
+        assert_eq!(snapshot.parse_errors.len(), 0);
+        assert!(!snapshot.stale);
+        assert!(
+            snapshot
+                .events
+                .iter()
+                .any(|event| event.event_kind == "snapshot_built")
+        );
+    }
+
+    #[test]
+    fn beads_command_center_smoke_is_deterministic() {
+        let contract = beads_command_center_contract();
+        let first = run_beads_command_center_smoke(&contract).expect("first smoke");
+        let second = run_beads_command_center_smoke(&contract).expect("second smoke");
+        assert_eq!(first, second);
+        assert_eq!(first.ready_work.len(), 3);
+        assert_eq!(first.blocked_work.len(), 1);
+        assert_eq!(first.triage.len(), 2);
+        assert!(!first.stale);
+    }
+
+    #[test]
+    fn agent_mail_pane_contract_validates() {
+        let contract = agent_mail_pane_contract();
+        validate_agent_mail_pane_contract(&contract).expect("valid contract");
+    }
+
+    #[test]
+    fn agent_mail_pane_contract_round_trip_json() {
+        let contract = agent_mail_pane_contract();
+        let json = serde_json::to_string(&contract).expect("serialize");
+        let parsed: AgentMailPaneContract = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(contract, parsed);
+        validate_agent_mail_pane_contract(&parsed).expect("parsed contract valid");
+    }
+
+    #[test]
+    fn parse_agent_mail_messages_maps_ack_required_variants() {
+        let contract = agent_mail_pane_contract();
+        let raw = r#"{
+  "result": [
+    {
+      "id": 2449,
+      "subject": "Re: coordination",
+      "importance": "normal",
+      "ack_required": true,
+      "created_ts": "2026-02-27T19:14:05.885632+00:00",
+      "thread_id": "coord-2026-02-27-blackelk",
+      "from": "BlackElk"
+    },
+    {
+      "id": 2506,
+      "subject": "Start mail pane",
+      "importance": "normal",
+      "ack_required": 0,
+      "created_ts": "2026-02-27T23:52:19.925466+00:00",
+      "thread_id": "asupersync-2b4jj.5.2",
+      "from": "VioletStone",
+      "delivery_status": "sent"
+    }
+  ]
+}"#;
+        let parsed_inbox =
+            parse_agent_mail_messages(&contract, raw, "inbox", "inbox").expect("parse");
+        assert!(parsed_inbox[0].ack_required);
+        assert_eq!(parsed_inbox[0].direction, "inbox");
+        assert_eq!(parsed_inbox[0].delivery_status, "received");
+
+        let parsed_outbox =
+            parse_agent_mail_messages(&contract, raw, "outbox", "outbox").expect("parse");
+        assert!(!parsed_outbox[1].ack_required);
+        assert_eq!(parsed_outbox[1].direction, "outbox");
+        assert_eq!(parsed_outbox[1].delivery_status, "sent");
+    }
+
+    #[test]
+    fn build_agent_mail_pane_snapshot_applies_ack_and_thread_filter() {
+        let contract = agent_mail_pane_contract();
+        let inbox_json = r#"{
+  "result": [
+    {
+      "id": 2449,
+      "subject": "Re: coordination",
+      "importance": "normal",
+      "ack_required": true,
+      "created_ts": "2026-02-27T19:14:05.885632+00:00",
+      "thread_id": "coord-2026-02-27-blackelk",
+      "from": "BlackElk"
+    }
+  ]
+}"#;
+        let outbox_json = r#"[
+  {
+    "id": 2507,
+    "subject": "Re: coordination",
+    "importance": "normal",
+    "ack_required": 0,
+    "created_ts": "2026-02-27T23:52:39.925466+00:00",
+    "thread_id": "coord-2026-02-27-blackelk",
+    "from": "VioletStone",
+    "delivery_status": "sent"
+  }
+]"#;
+        let contacts_json = r#"{"result":[{"to":"BlackElk","status":"approved","reason":"coord","updated_ts":"2026-02-27T18:36:16.334889+00:00"}]}"#;
+
+        let snapshot = build_agent_mail_pane_snapshot(
+            &contract,
+            inbox_json,
+            outbox_json,
+            contacts_json,
+            Some("coord-2026-02-27-blackelk"),
+            "thread_only",
+            &[2449],
+        )
+        .expect("snapshot");
+        assert_eq!(snapshot.pending_ack_count, 0);
+        assert_eq!(snapshot.thread_messages.len(), 2);
+        assert!(
+            snapshot
+                .events
+                .iter()
+                .any(|event| event.event_kind == "ack_transition" && event.message_id == Some(2449))
+        );
+    }
+
+    #[test]
+    fn build_agent_mail_pane_snapshot_tracks_parse_failures_and_delivery_failure() {
+        let contract = agent_mail_pane_contract();
+        let inbox_json = r#"{
+  "result": [
+    {
+      "id": 3001,
+      "subject": "Needs ack",
+      "importance": "high",
+      "ack_required": true,
+      "created_ts": "2026-02-27T20:00:00+00:00",
+      "thread_id": "thread-1",
+      "from": "BlackElk"
+    }
+  ]
+}"#;
+        let outbox_json = r#"[
+  {
+    "id": 4001,
+    "subject": "Reply attempt",
+    "importance": "normal",
+    "ack_required": 0,
+    "created_ts": "2026-02-27T20:01:00+00:00",
+    "thread_id": "thread-1",
+    "from": "VioletStone",
+    "delivery_status": "failed"
+  }
+]"#;
+        let invalid_contacts_json = "{not-json}";
+
+        let snapshot = build_agent_mail_pane_snapshot(
+            &contract,
+            inbox_json,
+            outbox_json,
+            invalid_contacts_json,
+            Some("thread-1"),
+            "all",
+            &[],
+        )
+        .expect("snapshot");
+        assert_eq!(snapshot.parse_errors.len(), 1);
+        assert_eq!(snapshot.pending_ack_count, 1);
+        assert!(
+            snapshot
+                .events
+                .iter()
+                .any(|event| event.event_kind == "parse_failure" && event.source == "contacts")
+        );
+        assert!(
+            snapshot
+                .events
+                .iter()
+                .any(|event| event.event_kind == "delivery_failure"
+                    && event.message_id == Some(4001))
+        );
+    }
+
+    #[test]
+    fn agent_mail_pane_smoke_workflow_is_deterministic() {
+        let contract = agent_mail_pane_contract();
+        let first = run_agent_mail_pane_smoke(&contract).expect("first smoke");
+        let second = run_agent_mail_pane_smoke(&contract).expect("second smoke");
+        assert_eq!(first, second);
+        assert_eq!(first.steps.len(), 3);
+        assert_eq!(first.steps[0].step_id, "fetch");
+        assert_eq!(first.steps[0].snapshot.pending_ack_count, 1);
+        assert_eq!(first.steps[1].step_id, "ack");
+        assert_eq!(first.steps[1].snapshot.pending_ack_count, 0);
+        assert_eq!(first.steps[2].step_id, "reply");
+        assert_eq!(first.steps[2].snapshot.thread_messages.len(), 2);
+        assert!(
+            first.steps[2]
+                .snapshot
+                .events
+                .iter()
+                .any(|event| event.event_kind == "thread_view_updated")
+        );
     }
 
     #[test]
