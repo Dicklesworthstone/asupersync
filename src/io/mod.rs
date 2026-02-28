@@ -33,6 +33,8 @@
 //! - `copy_with_progress` is cancel-safe (progress callback is accurate).
 //! - `copy_bidirectional` is cancel-safe (both directions can be partially complete).
 
+pub mod browser_storage;
+pub mod browser_stream;
 mod buf_reader;
 mod buf_writer;
 pub mod cap;
@@ -61,12 +63,21 @@ pub use split::{ReadHalf, SplitStream, WriteHalf, split};
 pub use write::{AsyncWrite, AsyncWriteVectored};
 pub use write_permit::WritePermit;
 
+pub use browser_storage::{
+    BrowserStorageAdapter, BrowserStorageError, StorageEvent, StorageEventOutcome,
+};
+pub use browser_stream::{
+    BackpressureStrategy, BrowserReadableStream, BrowserStreamConfig, BrowserStreamError,
+    BrowserStreamIoCap, BrowserStreamState, BrowserWritableStream, StreamStats,
+};
 pub use buf_reader::BufReader;
 pub use buf_writer::BufWriter;
 pub use cap::{
-    BrowserFetchIoCap, FetchAuthority, FetchCancellationPolicy, FetchIoCap, FetchMethod,
-    FetchPolicyError, FetchRequest, FetchStreamPolicy, FetchTimeoutPolicy, IoCap, IoNotAvailable,
-    LabIoCap,
+    BrowserFetchIoCap, BrowserStorageIoCap, FetchAuthority, FetchCancellationPolicy, FetchIoCap,
+    FetchMethod, FetchPolicyError, FetchRequest, FetchStreamPolicy, FetchTimeoutPolicy, IoCap,
+    IoNotAvailable, LabIoCap, StorageAuthority, StorageBackend, StorageConsistencyPolicy,
+    StorageIoCap, StorageOperation, StoragePolicyError, StorageQuotaPolicy, StorageRedactionPolicy,
+    StorageRequest,
 };
 pub use lines::Lines;
 pub use std::io::SeekFrom;
