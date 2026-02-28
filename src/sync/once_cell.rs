@@ -571,9 +571,7 @@ impl<T> Drop for WaitInit<'_, T> {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            if let Some(idx) = guard.waiters.iter().position(|entry| entry.id == waiter_id) {
-                guard.waiters.swap_remove(idx);
-            }
+            guard.waiters.retain(|entry| entry.id != waiter_id);
         }
     }
 }

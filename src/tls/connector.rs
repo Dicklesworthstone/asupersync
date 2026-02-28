@@ -103,9 +103,7 @@ impl TlsConnector {
         if self.alpn_required {
             let expected = self.config.alpn_protocols.clone();
             let negotiated = stream.alpn_protocol().map(<[u8]>::to_vec);
-            let ok = negotiated
-                .as_deref()
-                .map_or(false, |p| expected.iter().any(|e| e.as_slice() == p));
+            let ok = negotiated.as_deref().map_or(false, |p| expected.iter().any(|e| e.as_slice() == p));
             if !ok {
                 return Err(TlsError::AlpnNegotiationFailed {
                     expected,

@@ -420,15 +420,11 @@ impl<T> Clone for Receiver<T> {
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         if self.channel.receiver_count.fetch_sub(1, Ordering::AcqRel) == 1 {
-            let _items = {
-                let mut inner = self.channel.inner.lock();
-                // Re-check under lock in case a sender concurrently called `subscribe`
-                if self.channel.receiver_count.load(Ordering::Acquire) == 0 {
-                    std::mem::take(&mut inner.buffer)
-                } else {
-                    std::collections::VecDeque::new()
-                }
-            };
+            let mut inner = self.channel.inner.lock();
+            // Re-check under lock in case a sender concurrently called `subscribe`
+            if self.channel.receiver_count.load(Ordering::Acquire) == 0 {
+                inner.buffer.clear();
+            }
         }
     }
 }

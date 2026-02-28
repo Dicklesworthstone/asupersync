@@ -1849,9 +1849,9 @@ mod tests {
     use crate::types::CancelKind;
     use crate::types::policy::FailFast;
     use crate::util::ArenaIndex;
-    use parking_lot::Mutex;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use parking_lot::Mutex;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();

@@ -1266,9 +1266,7 @@ where
             state.active += 1;
             state.total_acquisitions += 1;
             if let Some(id) = waiter_id {
-                if let Some(idx) = state.waiters.iter().position(|w| w.id == id) {
-                    state.waiters.remove(idx);
-                }
+                state.waiters.retain(|w| w.id != id);
             }
             Some((idle.resource, idle.created_at))
         } else {
@@ -1294,9 +1292,7 @@ where
         }
         state.creating += 1;
         if let Some(id) = waiter_id {
-            if let Some(idx) = state.waiters.iter().position(|w| w.id == id) {
-                state.waiters.remove(idx);
-            }
+            state.waiters.retain(|w| w.id != id);
         }
         true
     }
@@ -1374,9 +1370,7 @@ where
     /// Remove a waiter by ID.
     fn remove_waiter(&self, id: u64) {
         let mut state = self.state.lock();
-        if let Some(idx) = state.waiters.iter().position(|w| w.id == id) {
-            state.waiters.remove(idx);
-        }
+        state.waiters.retain(|w| w.id != id);
     }
 
     /// Record elapsed wait time for blocked acquires.
@@ -1454,9 +1448,7 @@ where
                     if let Some(id) = self.waiter_id {
                         let mut state = self.pool.state.lock();
                         let pos = state.waiters.iter().position(|w| w.id == id);
-                        if let Some(idx) = pos {
-                            state.waiters.remove(idx);
-                        }
+                        state.waiters.retain(|w| w.id != id);
 
                         let waker = if state.closed {
                             None
@@ -1486,10 +1478,7 @@ where
                         if let Some(w) = waker {
                             w.wake();
                         }
-                        let mut wakers = self.pool.return_wakers.lock();
-                        if let Some(idx) = wakers.iter().position(|(wid, _)| *wid == id) {
-                            wakers.swap_remove(idx);
-                        }
+                        self.pool.return_wakers.lock().retain(|(wid, _)| *wid != id);
                     }
                 }
             }
@@ -1522,10 +1511,7 @@ where
 
                     let id = cleanup.waiter_id.take();
                     if let Some(id) = id {
-                        let mut wakers = self.return_wakers.lock();
-                        if let Some(idx) = wakers.iter().position(|(wid, _)| *wid == id) {
-                            wakers.swap_remove(idx);
-                        }
+                        self.return_wakers.lock().retain(|(wid, _)| *wid != id);
                     }
 
                     let acquire_duration =
@@ -1552,10 +1538,7 @@ where
                 {
                     let id = cleanup.waiter_id.take();
                     if let Some(id) = id {
-                        let mut wakers = self.return_wakers.lock();
-                        if let Some(idx) = wakers.iter().position(|(wid, _)| *wid == id) {
-                            wakers.swap_remove(idx);
-                        }
+                        self.return_wakers.lock().retain(|(wid, _)| *wid != id);
                     }
 
                     let resource = self.create_resource().await?;

@@ -830,12 +830,10 @@ where
                 if let Some(timeout_duration) = self.config.fallback_timeout {
                     if let Some(timer) = cx.timer_driver() {
                         let now = timer.now();
-                        crate::time::timeout(now, timeout_duration, Box::pin(future))
-                            .await
-                            .map_or_else(
-                                |_| Err(TowerAdapterError::Timeout),
-                                |output| output.map_err(TowerAdapterError::Service),
-                            )
+                        crate::time::timeout(now, timeout_duration, Box::pin(future)).await.map_or_else(
+                            |_| Err(TowerAdapterError::Timeout),
+                            |output| output.map_err(TowerAdapterError::Service),
+                        )
                     } else {
                         // No timer driver available; fall back to best-effort.
                         future.await.map_err(TowerAdapterError::Service)
