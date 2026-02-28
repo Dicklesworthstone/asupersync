@@ -630,6 +630,35 @@ pub(crate) fn schedule_cancel_on_current_local(task: TaskId, priority: u8) -> bo
     })
 }
 
+thread_local! {
+    static CURRENT_LOCAL: RefCell<Option<Arc<Mutex<PriorityScheduler>>>> = const { RefCell::new(None) };
+}
+
+/// Scoped setter for the thread-local scheduler pointer.
+///
+/// When active, [`ThreeLaneScheduler::spawn`] will schedule onto this local
+/// scheduler instead of injecting into the global ready queue.
+#[derive(Debug)]
+struct ScopedLocalScheduler {
+    prev: Option<Arc<Mutex<PriorityScheduler>>>,
+}
+
+impl ScopedLocalScheduler {
+    fn new(local: Arc<Mutex<PriorityScheduler>>) -> Self {
+        let prev = CURRENT_LOCAL.with(|cell| cell.borrow_mut().replace(local));
+        Self { prev }
+    }
+}
+
+impl Drop for ScopedLocalScheduler {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        CURRENT_LOCAL.with(|cell| {
+            *cell.borrow_mut() = prev;
+        });
+    }
+}
+
 /// A multi-worker scheduler with 3-lane priority support.
 ///
 /// Each worker maintains a local `PriorityScheduler` for tasks spawned within
