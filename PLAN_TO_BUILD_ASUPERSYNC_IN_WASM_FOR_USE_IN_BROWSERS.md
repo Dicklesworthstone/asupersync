@@ -636,6 +636,91 @@ Trace artifact fields:
 4. loser-drain correctness
 5. deterministic trace fingerprint stability
 
+## 17.4 Verification taxonomy (WASM-17 test fabric baseline)
+
+Test layers:
+
+1. `L0-unit`: deterministic unit tests for one semantic unit (single module/state machine)
+2. `L1-integration`: cross-module runtime flow tests (scheduler + cancel + obligation + adapters)
+3. `L2-e2e`: browser user-path tests (vanilla, React, Next) with artifact capture
+4. `L3-replay`: deterministic replay assertions from captured traces and seeded scenario fixtures
+
+Risk tiers:
+
+1. `R0-critical`: cancellation, quiescence, obligation closure, authority boundaries
+2. `R1-high`: scheduler fairness, timer semantics, io capsule lifecycle, trace integrity
+3. `R2-medium`: framework binding correctness, packaging boundaries, docs-linked UX flows
+
+Rule: every retained browser feature/invariant must map to at least one `L0-unit` test and one higher-level test (`L1/L2/L3`).
+
+## 17.5 Feature and invariant traceability matrix
+
+| Trace ID | Retained feature/invariant | Risk | Required L0 unit coverage | Required higher-level coverage | Deterministic replay required | Owner |
+|---|---|---|---|---|---|---|
+| `WVT-001` | Structured task ownership (no orphan tasks) | R0-critical | region tree ownership + close checks | L1 region close integration; L2 unmount-driven scope teardown | yes (`RP-REGION-001`) | Runtime backend owner |
+| `WVT-002` | Region close implies quiescence | R0-critical | region final-state machine tests | L1 quiescence oracle parity native vs wasm | yes (`RP-QUIESCE-001`) | Runtime backend owner |
+| `WVT-003` | Cancel protocol `request -> drain -> finalize` | R0-critical | cancel phase transition tables | L1 cancel-drain integration under deadlines; L2 route-transition cancel flow | yes (`RP-CANCEL-001`, `RP-CANCEL-002`) | Cancellation + runtime owner |
+| `WVT-004` | Loser drain after race | R0-critical | race combinator loser-drain unit suite | L1 concurrent race integration with obligation accounting | yes (`RP-RACE-001`) | Combinator owner |
+| `WVT-005` | No obligation leaks (permit/ack/lease) | R0-critical | obligation table lifecycle tests | L1 leak oracle across fetch/websocket capsules | yes (`RP-OBL-001`) | Obligation owner |
+| `WVT-006` | Deterministic mode parity | R0-critical | virtual clock + tie-break ordering tests | L1 seed parity native/wasm; L3 fingerprint equivalence | yes (`RP-DET-001`) | Determinism owner |
+| `WVT-007` | Browser scheduler fairness and cancel streak bounds | R1-high | lane budget and streak limit tests | L1 scheduler stress integration; L2 UI latency smoke | yes (`RP-SCHED-001`) | Runtime backend owner |
+| `WVT-008` | Browser timer semantics and deadlines | R1-high | timer wheel/tick conversion tests | L1 timeout propagation integration in wasm profile | yes (`RP-TIME-001`) | Time subsystem owner |
+| `WVT-009` | Fetch capsule authority + cancellation bridge | R0-critical | capability check + lifecycle transition tests | L1 fetch abort integration; L2 framework data-load cancel path | yes (`RP-FETCH-001`) | Browser IO owner |
+| `WVT-010` | WebSocket capsule close/finalize mapping | R1-high | websocket state transition tests | L1 socket close/drain integration | yes (`RP-WS-001`) | Browser IO owner |
+| `WVT-011` | wasm handle generation safety (stale handle rejection) | R0-critical | handle registry and generation mismatch tests | L2 browser API misuse scenarios | yes (`RP-HANDLE-001`) | Bindings owner |
+| `WVT-012` | Trace schema integrity and replay import/export | R1-high | schema encode/decode unit tests | L1 artifact contract validation; L3 replay consistency | yes (`RP-TRACE-001`) | Replay + observability owner |
+| `WVT-013` | React integration lifecycle correctness | R2-medium | hook state-machine tests | L2 React integration e2e | optional (`RP-REACT-001`) | Framework owner |
+| `WVT-014` | Next.js App Router boundary correctness | R2-medium | boundary helper unit tests | L2 Next integration e2e/hydration safety | optional (`RP-NEXT-001`) | Framework owner |
+
+## 17.6 Coverage targets and pass/fail thresholds
+
+Coverage targets (minimum; per PR touching mapped surface):
+
+1. `R0-critical` rows: line >= 92%, branch >= 88%, mutation kill >= 80%
+2. `R1-high` rows: line >= 88%, branch >= 82%, mutation kill >= 70%
+3. `R2-medium` rows: line >= 80%, branch >= 72%
+4. Every traceability row must have at least one `L0-unit` and one higher-layer test reference in CI artifacts.
+
+Pass/fail gates:
+
+1. Any missing `L0-unit` or missing higher-layer mapping for a touched `WVT-*` row fails CI.
+2. Any `R0-critical` scenario without replay pointer (`RP-*`) fails CI.
+3. Deterministic parity suites must match outcome class and fingerprint class for required rows.
+4. Structured log validation must confirm required fields: `trace_id`, `scenario_id`, `seed`, `runtime_profile`, `artifact_uri`, `outcome_class`.
+
+## 17.7 Critical scenario catalog (must stay replayable)
+
+1. `RP-CANCEL-001`: cancel during reserve before commit (no data loss, no leak)
+2. `RP-CANCEL-002`: parent cancel fanout with mixed child phases (all children drained/finalized)
+3. `RP-RACE-001`: race winner commit with loser drain completion guarantee
+4. `RP-OBL-001`: permit/ack/lease closure under timeout and explicit user cancel
+5. `RP-QUIESCE-001`: region close under concurrent finalizers reaches quiescence
+6. `RP-DET-001`: same seed and profile produce equivalent fingerprint class
+7. `RP-FETCH-001`: fetch abort bridge preserves cancel reason mapping and cleanup
+8. `RP-HANDLE-001`: stale handle and forged id paths rejected with deterministic errors
+9. `RP-TRACE-001`: trace export/import roundtrip preserves replay determinism
+
+## 17.8 Ownership and maintenance cadence
+
+Ownership roles:
+
+1. Runtime backend owner: `WVT-001/002/007`
+2. Cancellation/runtime owner: `WVT-003`
+3. Combinator owner: `WVT-004`
+4. Obligation owner: `WVT-005`
+5. Determinism owner: `WVT-006`
+6. Browser IO owner: `WVT-009/010`
+7. Bindings owner: `WVT-011`
+8. Replay/observability owner: `WVT-012`
+9. Framework owner: `WVT-013/014`
+
+Cadence:
+
+1. On every PR: update touched `WVT-*` mappings and attach artifact links.
+2. Weekly: review coverage deltas and stale replay fixtures.
+3. Per milestone gate: full matrix audit across native/wasm and framework lanes.
+4. Before GA: zero unmapped retained features/invariants, zero stale `RP-*` pointers.
+
 ---
 
 ## 18. Program Execution Model
@@ -882,4 +967,3 @@ This plan intentionally pairs deep semantic rigor with aggressive productization
 - Adoption without rigor yields a popular but fragile abstraction.
 
 The objective is both: **correctness you can trust** and **developer experience teams will actually adopt**.
-
