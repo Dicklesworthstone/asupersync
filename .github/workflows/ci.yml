@@ -66,6 +66,26 @@ jobs:
             artifacts/wasm_dependency_audit_log.ndjson
           retention-days: 30
 
+      - name: Perf regression gate self-test
+        run: python3 scripts/check_perf_regression.py --self-test
+
+      - name: Perf regression gate
+        run: |
+          mkdir -p artifacts
+          python3 scripts/check_perf_regression.py \
+            --budgets .github/wasm_perf_budgets.json \
+            --profile core-min
+
+      - name: Upload perf regression report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-perf-regression-report
+          path: |
+            artifacts/wasm_perf_regression_report.json
+            artifacts/wasm_perf_gate_events.ndjson
+          retention-days: 30
+
       - name: Clippy lints
         run: cargo clippy --all-targets --all-features -- -D warnings
 

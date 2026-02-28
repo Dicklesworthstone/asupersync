@@ -1,0 +1,131 @@
+{
+  "schema_version": "wasm-perf-budgets-v1",
+  "source_document": "WASM_SIZE_PERF_BUDGETS.md",
+  "seed_set": [11, 29, 42, 73, 101],
+  "measurement_protocol": {
+    "latency_iterations_per_seed": 2000,
+    "memory_warmup_ops": 200,
+    "memory_sample_ops": 500,
+    "percentile_method": "median-of-seed-p95"
+  },
+  "hard_budgets": [
+    {
+      "metric_id": "M-PERF-01A",
+      "metric": "wasm size (raw bytes)",
+      "unit": "bytes",
+      "profiles": {
+        "core-min": 665600,
+        "core-trace": 921600,
+        "full-dev": 1331200
+      },
+      "gate_type": "hard_fail"
+    },
+    {
+      "metric_id": "M-PERF-01B",
+      "metric": "wasm size (gzip bytes)",
+      "unit": "bytes",
+      "profiles": {
+        "core-min": 225280,
+        "core-trace": 327680,
+        "full-dev": 491520
+      },
+      "gate_type": "hard_fail"
+    },
+    {
+      "metric_id": "M-PERF-02A",
+      "metric": "cold init p95 (desktop)",
+      "unit": "ms",
+      "profiles": {
+        "core-min": 60,
+        "core-trace": 85,
+        "full-dev": 130
+      },
+      "gate_type": "hard_fail"
+    },
+    {
+      "metric_id": "M-PERF-02B",
+      "metric": "cold init p95 (mobile)",
+      "unit": "ms",
+      "profiles": {
+        "core-min": 160,
+        "core-trace": 220,
+        "full-dev": 320
+      },
+      "gate_type": "hard_fail"
+    },
+    {
+      "metric_id": "M-PERF-03A",
+      "metric": "steady-state heap p95",
+      "unit": "MiB",
+      "profiles": {
+        "core-min": 24,
+        "core-trace": 32,
+        "full-dev": 48
+      },
+      "gate_type": "hard_fail"
+    },
+    {
+      "metric_id": "M-PERF-03B",
+      "metric": "cancel response p95",
+      "unit": "ms",
+      "profiles": {
+        "core-min": 2.5,
+        "core-trace": 3.5,
+        "full-dev": 5.0
+      },
+      "gate_type": "hard_fail"
+    }
+  ],
+  "operational_budgets": [
+    {
+      "metric_id": "M-PERF-04A",
+      "metric": "tx.reserve()+send() p95",
+      "unit": "us",
+      "target": 8,
+      "warn_threshold": 8,
+      "hard_threshold": 12,
+      "gate_type": "warn_then_block",
+      "consecutive_warn_escalation": 2
+    },
+    {
+      "metric_id": "M-PERF-04B",
+      "metric": "timeout arm+cancel p95",
+      "unit": "us",
+      "target": 15,
+      "warn_threshold": 15,
+      "hard_threshold": 24,
+      "gate_type": "warn_then_block",
+      "consecutive_warn_escalation": 2
+    },
+    {
+      "metric_id": "M-PERF-04C",
+      "metric": "scope.spawn()+join() p95",
+      "unit": "us",
+      "target": 40,
+      "warn_threshold": 40,
+      "hard_threshold": 65,
+      "gate_type": "warn_then_block",
+      "consecutive_warn_escalation": 2
+    },
+    {
+      "metric_id": "M-PERF-04D",
+      "metric": "deterministic replay overhead",
+      "unit": "%",
+      "target": 12,
+      "warn_threshold": 12,
+      "hard_threshold": 20,
+      "gate_type": "warn_then_block",
+      "consecutive_warn_escalation": 2
+    }
+  ],
+  "baseline_regression": {
+    "max_regression_pct": 10,
+    "comparison_metric": "median_ns",
+    "baseline_dir": "baselines",
+    "baseline_latest": "baselines/baseline_latest.json"
+  },
+  "output": {
+    "report_path": "artifacts/wasm_perf_regression_report.json",
+    "event_log_path": "artifacts/wasm_perf_gate_events.ndjson"
+  }
+}

@@ -129,6 +129,49 @@ Recommended benchmark envelope (to be implemented by `umelq.13.2`):
 rch exec -- cargo test -p asupersync --test wasm_perf_budget -- --nocapture
 ```
 
+
+## 8.3 Continuous Perf Regression Gate (`asupersync-umelq.13.5`)
+
+Automated regression detection is now enforced via:
+
+- budget policy: `.github/wasm_perf_budgets.json`
+- gate script: `scripts/check_perf_regression.py`
+- report artifact: `artifacts/wasm_perf_regression_report.json`
+- event log: `artifacts/wasm_perf_gate_events.ndjson`
+
+Gate logic:
+
+1. **Hard budget checks** (Section 3): Any measurement exceeding the profile
+   threshold triggers immediate CI failure.
+2. **Operational budget checks** (Section 4): First breach in warn band emits
+   warning. Two consecutive breaches escalate to hard failure.
+3. **Baseline regression detection**: Compares current benchmark run against
+   `baselines/baseline_latest.json`. Any benchmark regressing beyond
+   `max_regression_pct` (default 10%) triggers CI failure.
+
+The gate runs in the `check` CI job after benchmark corpus validation. When no
+measurements are available (e.g., before WASM compilation is green), all budget
+checks report `skip` and the gate passes. This ensures the gate infrastructure
+is validated even while the measurement pipeline is being built.
+
+Deterministic validator commands:
+
+```bash
+python3 scripts/check_perf_regression.py --self-test
+python3 scripts/check_perf_regression.py \
+  --budgets .github/wasm_perf_budgets.json \
+  --profile core-min
+```
+
+With baseline comparison:
+
+```bash
+python3 scripts/check_perf_regression.py \
+  --budgets .github/wasm_perf_budgets.json \
+  --baseline baselines/baseline_latest.json \
+  --current baselines/baseline_current.json
+```
+
 ## 9. Rationale for Threshold Values
 
 1. `core-min` budget targets CDN-friendly first payloads while leaving room for
@@ -148,7 +191,9 @@ This budget contract is an input artifact for:
    scenario to one or more metric IDs above.
 2. `asupersync-umelq.13.3` (optimization pipeline): may tune compilers and
    artifact variants but cannot alter thresholds without governance update.
-3. `asupersync-umelq.18.4` (CI verification pipelines): must enforce pass/fail
+3. `asupersync-umelq.13.5` (continuous perf regression gate): enforces hard/
+   operational budgets and baseline regression detection in CI.
+4. `asupersync-umelq.18.4` (CI verification pipelines): must enforce pass/fail
    semantics and artifact schema contract.
 
 ## 11. Change-Control Rules
