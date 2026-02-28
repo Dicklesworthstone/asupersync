@@ -18,10 +18,12 @@ use conformance::{
     ScanWarning, SpecRequirement, TraceabilityMatrix, TraceabilityScanError,
     requirements_from_entries, scan_conformance_attributes,
 };
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 
 #[derive(Parser, Debug)]
 #[command(name = "asupersync", version, about = "Asupersync CLI tools")]
@@ -230,6 +232,8 @@ struct DoctorArgs {
 enum DoctorCommand {
     /// Scan workspace topology and capability-flow surfaces
     ScanWorkspace(DoctorScanWorkspaceArgs),
+    /// Audit wasm-target dependency graph for forbidden runtime crates
+    WasmDependencyAudit(DoctorWasmDependencyAuditArgs),
     /// Emit operator personas, missions, and decision loops contract
     OperatorModel,
     /// Emit canonical screen-to-engine contract for doctor TUI surfaces
@@ -245,6 +249,25 @@ struct DoctorScanWorkspaceArgs {
     /// Workspace root to scan
     #[arg(long = "root", default_value = ".")]
     root: PathBuf,
+}
+
+#[derive(Args, Debug)]
+struct DoctorWasmDependencyAuditArgs {
+    /// Workspace root where Cargo.toml lives
+    #[arg(long = "root", default_value = ".")]
+    root: PathBuf,
+
+    /// Compilation target for dependency closure audit
+    #[arg(long = "target", default_value = "wasm32-unknown-unknown")]
+    target: String,
+
+    /// Additional forbidden crates (comma-separated)
+    #[arg(long = "forbidden", value_delimiter = ',')]
+    forbidden: Vec<String>,
+
+    /// Optional report path to write JSON output
+    #[arg(long = "report")]
+    report: Option<PathBuf>,
 }
 
 // =========================================================================
@@ -591,6 +614,9 @@ fn run_lab(args: LabArgs, output: &mut Output) -> Result<(), CliError> {
 fn run_doctor(args: DoctorArgs, output: &mut Output) -> Result<(), CliError> {
     match args.command {
         DoctorCommand::ScanWorkspace(scan_args) => doctor_scan_workspace(&scan_args, output),
+        DoctorCommand::WasmDependencyAudit(audit_args) => {
+            doctor_wasm_dependency_audit(&audit_args, output)
+        }
         DoctorCommand::OperatorModel => doctor_operator_model(output),
         DoctorCommand::ScreenContracts => doctor_screen_contracts(output),
         DoctorCommand::LoggingContract => doctor_logging_contract(output),
@@ -645,6 +671,291 @@ fn doctor_report_contract(output: &mut Output) -> Result<(), CliError> {
         CliError::new("output_error", "Failed to write output").detail(err.to_string())
     })?;
     Ok(())
+}
+
+fn doctor_wasm_dependency_audit(
+    args: &DoctorWasmDependencyAuditArgs,
+    output: &mut Output,
+) -> Result<(), CliError> {
+    let forbidden = normalized_forbidden_crates(&args.forbidden);
+    let tree = cargo_tree(&args.root, &args.target)?;
+    let discovered = parse_unique_crates(&tree);
+
+    let mut hits = Vec::new();
+    for crate_name in discovered
+        .iter()
+        .filter(|name| is_forbidden_runtime_crate(name, &forbidden))
+    {
+        let chain =
+            cargo_inverse_tree(&args.root, &args.target, crate_name).unwrap_or_else(|_| Vec::new());
+        hits.push(WasmDependencyForbiddenHit {
+            crate_name: crate_name.clone(),
+            policy_decision: "forbidden".to_string(),
+            decision_reason: "Forbidden async runtime ecosystem crate for Asupersync wasm profile"
+                .to_string(),
+            determinism_risk_score: determinism_risk_score(crate_name),
+            remediation_recommendation: remediation_recommendation(crate_name),
+            transitive_chain: chain,
+        });
+    }
+    hits.sort_by(|a, b| a.crate_name.cmp(&b.crate_name));
+
+    let report = WasmDependencyAuditReport {
+        workspace_root: args.root.display().to_string(),
+        target: args.target.clone(),
+        forbidden_crates: forbidden,
+        total_unique_crates: discovered.len(),
+        forbidden_hits: hits,
+        reproduction_commands: vec![
+            format!(
+                "cargo tree --target {} -e normal,build --prefix none",
+                args.target
+            ),
+            format!(
+                "cargo tree --target {} -e normal,build -i <crate> --prefix none",
+                args.target
+            ),
+        ],
+    };
+
+    if let Some(path) = &args.report {
+        let serialized = serde_json::to_string_pretty(&report).map_err(|err| {
+            CliError::new(
+                "serialization_error",
+                "Failed to serialize wasm dependency report",
+            )
+            .detail(err.to_string())
+        })?;
+        fs::write(path, serialized).map_err(|err| io_error(path, &err))?;
+    }
+
+    output.write(&report).map_err(|err| {
+        CliError::new("output_error", "Failed to write output").detail(err.to_string())
+    })?;
+
+    if !report.forbidden_hits.is_empty() {
+        return Err(CliError::new(
+            "forbidden_runtime_dependencies",
+            "Found forbidden runtime dependencies in wasm target graph",
+        )
+        .detail(
+            report
+                .forbidden_hits
+                .iter()
+                .map(|hit| hit.crate_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+        .exit_code(ExitCode::TEST_FAILURE));
+    }
+
+    Ok(())
+}
+
+fn normalized_forbidden_crates(extra_forbidden: &[String]) -> Vec<String> {
+    const DEFAULT_FORBIDDEN: [&str; 7] = [
+        "tokio",
+        "hyper",
+        "reqwest",
+        "axum",
+        "tower",
+        "async-std",
+        "smol",
+    ];
+    let mut set = BTreeSet::new();
+    for name in DEFAULT_FORBIDDEN {
+        let _ = set.insert(name.to_string());
+    }
+    for name in extra_forbidden.iter().map(String::as_str) {
+        let normalized = name.trim().to_ascii_lowercase();
+        if !normalized.is_empty() {
+            let _ = set.insert(normalized);
+        }
+    }
+    set.into_iter().collect()
+}
+
+fn cargo_tree(root: &Path, target: &str) -> Result<String, CliError> {
+    run_process_capture(
+        root,
+        "cargo",
+        &[
+            "tree",
+            "--target",
+            target,
+            "-e",
+            "normal,build",
+            "--prefix",
+            "none",
+        ],
+        "Failed to collect cargo dependency tree",
+    )
+}
+
+fn cargo_inverse_tree(
+    root: &Path,
+    target: &str,
+    crate_name: &str,
+) -> Result<Vec<String>, CliError> {
+    let output = run_process_capture(
+        root,
+        "cargo",
+        &[
+            "tree",
+            "--target",
+            target,
+            "-e",
+            "normal,build",
+            "-i",
+            crate_name,
+            "--prefix",
+            "none",
+        ],
+        "Failed to collect inverse dependency chain",
+    )?;
+    Ok(output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(24)
+        .map(ToString::to_string)
+        .collect())
+}
+
+fn run_process_capture(
+    root: &Path,
+    program: &str,
+    args: &[&str],
+    error_message: &'static str,
+) -> Result<String, CliError> {
+    let output = ProcessCommand::new(program)
+        .args(args)
+        .current_dir(root)
+        .output()
+        .map_err(|err| {
+            CliError::new("process_spawn_error", error_message)
+                .detail(err.to_string())
+                .context("program", program.to_string())
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(CliError::new("process_failure", error_message)
+            .detail(stderr)
+            .context("program", program.to_string())
+            .context("args", args.join(" ")));
+    }
+
+    String::from_utf8(output.stdout).map_err(|err| {
+        CliError::new("utf8_error", "Failed to decode process output as UTF-8")
+            .detail(err.to_string())
+            .context("program", program.to_string())
+    })
+}
+
+fn parse_unique_crates(tree_output: &str) -> BTreeSet<String> {
+    tree_output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter_map(parse_crate_name)
+        .collect()
+}
+
+fn parse_crate_name(line: &str) -> Option<String> {
+    let token = line.split_whitespace().next()?;
+    if token.starts_with(char::is_numeric) {
+        return None;
+    }
+    let name = token.trim_end_matches(':');
+    if name
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        Some(name.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+fn is_forbidden_runtime_crate(crate_name: &str, forbidden: &[String]) -> bool {
+    forbidden.iter().any(|blocked| {
+        crate_name == blocked || (blocked == "tokio" && crate_name.starts_with("tokio-"))
+    })
+}
+
+fn determinism_risk_score(crate_name: &str) -> u8 {
+    match crate_name {
+        "tokio" | "hyper" | "reqwest" | "axum" | "async-std" | "smol" => 100,
+        "tower" => 70,
+        _ => 50,
+    }
+}
+
+fn remediation_recommendation(crate_name: &str) -> String {
+    match crate_name {
+        "tokio" => "Remove Tokio runtime dependency; route through Asupersync runtime APIs".into(),
+        "hyper" => "Use Asupersync native HTTP stack (`src/http/*`) instead of Hyper".into(),
+        "reqwest" => "Replace reqwest usage with Asupersync net/http client surfaces".into(),
+        "axum" => "Avoid Axum/Tokio stack; use Asupersync service/server surfaces".into(),
+        "tower" => {
+            "Allow only trait-level compatibility. Disable Tokio-adapter runtime integration".into()
+        }
+        "async-std" | "smol" => {
+            "Remove alternate runtime dependency and unify execution under Asupersync".into()
+        }
+        _ => "Audit usage and replace with Asupersync-native deterministic equivalent".into(),
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct WasmDependencyAuditReport {
+    workspace_root: String,
+    target: String,
+    forbidden_crates: Vec<String>,
+    total_unique_crates: usize,
+    forbidden_hits: Vec<WasmDependencyForbiddenHit>,
+    reproduction_commands: Vec<String>,
+}
+
+impl Outputtable for WasmDependencyAuditReport {
+    fn human_format(&self) -> String {
+        let mut lines = vec![
+            format!("Workspace root: {}", self.workspace_root),
+            format!("Target: {}", self.target),
+            format!("Unique crates: {}", self.total_unique_crates),
+            format!("Forbidden list: {}", self.forbidden_crates.join(", ")),
+        ];
+        if self.forbidden_hits.is_empty() {
+            lines.push("Status: PASS (no forbidden runtime crates found)".to_string());
+        } else {
+            lines.push(format!(
+                "Status: FAIL ({} forbidden runtime crate(s) found)",
+                self.forbidden_hits.len()
+            ));
+            for hit in &self.forbidden_hits {
+                lines.push(format!(
+                    "- {} (risk {}): {}",
+                    hit.crate_name, hit.determinism_risk_score, hit.remediation_recommendation
+                ));
+            }
+        }
+        lines.push("Repro:".to_string());
+        for cmd in &self.reproduction_commands {
+            lines.push(format!("  {cmd}"));
+        }
+        lines.join("\n")
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct WasmDependencyForbiddenHit {
+    crate_name: String,
+    policy_decision: String,
+    decision_reason: String,
+    determinism_risk_score: u8,
+    remediation_recommendation: String,
+    transitive_chain: Vec<String>,
 }
 
 fn load_scenario(path: &Path) -> Result<asupersync::lab::scenario::Scenario, CliError> {
@@ -1463,6 +1774,10 @@ fn trace_file_error(path: &Path, err: TraceFileError) -> CliError {
             CliError::new("invalid_state", "Trace writer already finished")
         }
         TraceFileError::Truncated => CliError::new("truncated_trace", "Trace file truncated"),
+        TraceFileError::OversizedField { field, actual, max } => {
+            CliError::new("oversized_field", "Trace field exceeds allowed limit")
+                .detail(format!("{field}: {actual} bytes (max {max})"))
+        }
     }
     .context("path", path.display().to_string())
 }

@@ -1,0 +1,90 @@
+{
+  "schema_version": "wasm-dependency-policy-v1",
+  "description": "Deterministic dependency policy gate for wasm browser profiles (no ambient runtime contamination).",
+  "risk_thresholds": {
+    "high": 85
+  },
+  "profiles": [
+    {
+      "id": "wasm-core-no-default",
+      "target": "wasm32-unknown-unknown",
+      "no_default_features": true,
+      "all_features": false,
+      "features": []
+    },
+    {
+      "id": "wasm-core-default",
+      "target": "wasm32-unknown-unknown",
+      "no_default_features": false,
+      "all_features": false,
+      "features": []
+    },
+    {
+      "id": "wasm-audit-all-features",
+      "target": "wasm32-unknown-unknown",
+      "no_default_features": false,
+      "all_features": true,
+      "features": []
+    }
+  ],
+  "forbidden_crates": [
+    {
+      "name": "tokio",
+      "reason": "Asupersync is the runtime; Tokio runtime dependency is forbidden for browser invariants.",
+      "remediation": "Remove or isolate behind non-browser cfg and replace with native asupersync runtime abstractions.",
+      "risk_score": 100
+    },
+    {
+      "name": "hyper",
+      "reason": "Hyper depends on Tokio-oriented runtime assumptions that violate wasm browser runtime policy.",
+      "remediation": "Use native asupersync HTTP stack or explicit browser adapters.",
+      "risk_score": 97
+    },
+    {
+      "name": "reqwest",
+      "reason": "Reqwest introduces Tokio-centric network/runtime behavior and ambient authority risk.",
+      "remediation": "Use capability-scoped adapters over asupersync net/io surfaces.",
+      "risk_score": 97
+    },
+    {
+      "name": "axum",
+      "reason": "Axum is coupled to the Tokio ecosystem and does not satisfy browser runtime constraints.",
+      "remediation": "Use asupersync web/service layers for browser-compatible routing surfaces.",
+      "risk_score": 96
+    },
+    {
+      "name": "async-std",
+      "reason": "Introducing another executor/runtime violates no-ambient-runtime policy.",
+      "remediation": "Replace with asupersync primitives and structured concurrency APIs.",
+      "risk_score": 95
+    },
+    {
+      "name": "smol",
+      "reason": "Alternative runtime dependency violates runtime-closure and determinism constraints.",
+      "remediation": "Replace with asupersync task/scheduler primitives.",
+      "risk_score": 95
+    }
+  ],
+  "conditional_crates": [
+    {
+      "name": "tower",
+      "reason": "Tower may be used for trait compatibility only and must not pull Tokio runtime semantics into browser profiles.",
+      "remediation": "Keep behind explicit feature fences and maintain native asupersync adapters for browser builds.",
+      "risk_score": 70
+    }
+  ],
+  "transitions": [
+    {
+      "crate": "tower",
+      "status": "active",
+      "owner": "runtime-core",
+      "replacement_issue": "asupersync-umelq.3.2",
+      "expires_at_utc": "2026-06-30T00:00:00Z",
+      "notes": "Tracked conditional usage while canonical browser feature profiles are finalized."
+    }
+  ],
+  "output": {
+    "summary_path": "artifacts/wasm_dependency_audit_summary.json",
+    "log_path": "artifacts/wasm_dependency_audit_log.ndjson"
+  }
+}

@@ -48,6 +48,24 @@ jobs:
           path: ci-summaries/no_mock_policy_report.json
           retention-days: 30
 
+      - name: WASM dependency policy self-test
+        run: python3 scripts/check_wasm_dependency_policy.py --self-test
+
+      - name: WASM dependency policy gate
+        run: |
+          mkdir -p artifacts
+          python3 scripts/check_wasm_dependency_policy.py \
+            --policy .github/wasm_dependency_policy.json
+
+      - name: Upload WASM dependency audit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-dependency-audit-report
+          path: |
+            artifacts/wasm_dependency_audit_summary.json
+            artifacts/wasm_dependency_audit_log.ndjson
+          retention-days: 30
+
       - name: Clippy lints
         run: cargo clippy --all-targets --all-features -- -D warnings
 
