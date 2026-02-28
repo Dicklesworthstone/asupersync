@@ -89,6 +89,29 @@ pub const DEFAULT_COMPRESSION_CHUNK_SIZE: usize = 64 * 1024;
 /// Threshold for auto-compression (1MB).
 pub const AUTO_COMPRESSION_THRESHOLD: usize = 1024 * 1024;
 
+/// Maximum allowed metadata size when reading trace files (1 MiB).
+///
+/// Prevents OOM from a malicious or corrupt `meta_len` header field.
+pub const MAX_META_LEN: usize = 1024 * 1024;
+
+/// Maximum allowed event count for pre-allocation (10 million).
+///
+/// Prevents OOM from a malicious or corrupt `event_count` header field.
+/// The reader can still iterate beyond this; only the initial
+/// `Vec::with_capacity` call in `load_all` is bounded.
+pub const MAX_EVENT_PREALLOC: usize = 10_000_000;
+
+/// Maximum allowed single-event byte size (16 MiB).
+///
+/// No single serialized event should be larger than this. Prevents OOM
+/// from a corrupt or malicious length prefix in the event stream.
+pub const MAX_EVENT_LEN: usize = 16 * 1024 * 1024;
+
+/// Maximum allowed compressed chunk size (64 MiB).
+///
+/// Compressed chunks should not exceed this before decompression.
+pub const MAX_COMPRESSED_CHUNK_LEN: usize = 64 * 1024 * 1024;
+
 // =============================================================================
 // Compression Types
 // =============================================================================
@@ -294,6 +317,17 @@ pub enum TraceFileError {
     /// File is truncated or corrupt.
     #[error("file truncated or corrupt")]
     Truncated,
+
+    /// A length prefix exceeds the allowed maximum.
+    #[error("length prefix too large: {field} is {actual} bytes, max is {max}")]
+    OversizedField {
+        /// Which field was too large.
+        field: &'static str,
+        /// Actual value read.
+        actual: u64,
+        /// Maximum allowed.
+        max: u64,
+    },
 }
 
 impl From<rmp_serde::encode::Error> for TraceFileError {
@@ -780,6 +814,15 @@ impl TraceReader {
         reader.read_exact(&mut meta_len_bytes)?;
         let meta_len = u32::from_le_bytes(meta_len_bytes) as usize;
 
+        // Guard against oversized metadata (DoS mitigation — issues #8, #10)
+        if meta_len > MAX_META_LEN {
+            return Err(TraceFileError::OversizedField {
+                field: "meta_len",
+                actual: meta_len as u64,
+                max: MAX_META_LEN as u64,
+            });
+        }
+
         // Read metadata
         let mut meta_bytes = vec![0u8; meta_len];
         reader.read_exact(&mut meta_bytes)?;
@@ -898,6 +941,15 @@ impl TraceReader {
         }
         let len = u32::from_le_bytes(len_bytes) as usize;
 
+        // Guard against oversized event length (DoS mitigation — issues #8, #10)
+        if len > MAX_EVENT_LEN {
+            return Err(TraceFileError::OversizedField {
+                field: "event_len",
+                actual: len as u64,
+                max: MAX_EVENT_LEN as u64,
+            });
+        }
+
         // Read event data
         let mut event_bytes = vec![0u8; len];
         self.reader.read_exact(&mut event_bytes)?;
@@ -956,6 +1008,15 @@ impl TraceReader {
             return Ok(false);
         }
 
+        // Guard against oversized compressed chunks (DoS mitigation — issues #8, #10)
+        if chunk_len > MAX_COMPRESSED_CHUNK_LEN {
+            return Err(TraceFileError::OversizedField {
+                field: "compressed_chunk_len",
+                actual: chunk_len as u64,
+                max: MAX_COMPRESSED_CHUNK_LEN as u64,
+            });
+        }
+
         // Read compressed chunk
         let mut compressed = vec![0u8; chunk_len];
         self.reader.read_exact(&mut compressed)?;
@@ -995,7 +1056,11 @@ impl TraceReader {
     ///
     /// Returns an error if reading fails.
     pub fn load_all(mut self) -> TraceFileResult<Vec<ReplayEvent>> {
-        let mut events = Vec::with_capacity(self.event_count as usize);
+        // Cap pre-allocation to prevent OOM from a malicious event_count header
+        // (DoS mitigation — issues #8, #10). The vec will grow naturally if the
+        // file legitimately contains more events.
+        let prealloc = (self.event_count as usize).min(MAX_EVENT_PREALLOC);
+        let mut events = Vec::with_capacity(prealloc);
         while let Some(event) = self.read_event()? {
             events.push(event);
         }
@@ -1054,6 +1119,15 @@ impl TraceEventIterator {
             return Some(Err(TraceFileError::Io(e)));
         }
         let len = u32::from_le_bytes(len_bytes) as usize;
+
+        // Guard against oversized event length (DoS mitigation — issues #8, #10)
+        if len > MAX_EVENT_LEN {
+            return Some(Err(TraceFileError::OversizedField {
+                field: "event_len",
+                actual: len as u64,
+                max: MAX_EVENT_LEN as u64,
+            }));
+        }
 
         // Read event data
         let mut event_bytes = vec![0u8; len];
@@ -1124,6 +1198,15 @@ impl TraceEventIterator {
 
         if chunk_len == 0 {
             return Ok(false);
+        }
+
+        // Guard against oversized compressed chunks (DoS mitigation — issues #8, #10)
+        if chunk_len > MAX_COMPRESSED_CHUNK_LEN {
+            return Err(TraceFileError::OversizedField {
+                field: "compressed_chunk_len",
+                actual: chunk_len as u64,
+                max: MAX_COMPRESSED_CHUNK_LEN as u64,
+            });
         }
 
         // Read compressed chunk

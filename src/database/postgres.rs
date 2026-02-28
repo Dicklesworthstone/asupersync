@@ -1646,8 +1646,12 @@ impl PgConnection {
         self.read_exact(&mut len_buf).await?;
         let len_i32 = i32::from_be_bytes(len_buf);
 
-        // PostgreSQL messages should not exceed 1 GiB in practice.
-        const MAX_MESSAGE_LEN: i32 = 1_073_741_824;
+        // Practical PostgreSQL message limit. The protocol allows up to 2 GiB
+        // but legitimate messages rarely exceed a few tens of MiB even for large
+        // COPY batches. Capping at 64 MiB prevents a malicious peer (or MitM on
+        // an unencrypted connection) from forcing a multi-GiB allocation with a
+        // single 5-byte header (DoS mitigation — issue #8).
+        const MAX_MESSAGE_LEN: i32 = 64 * 1024 * 1024;
         if !(4..=MAX_MESSAGE_LEN).contains(&len_i32) {
             return Err(PgError::Protocol(format!(
                 "invalid message length: {len_i32}"
