@@ -60,6 +60,183 @@ impl TimeSource for WallClock {
     }
 }
 
+/// Browser-oriented monotonic clock configuration.
+///
+/// The browser clock adapter ingests host time samples (for example
+/// `performance.now()`) and maps them onto Asupersync `Time` while:
+///
+/// - preserving monotonicity even if host samples regress,
+/// - smoothing tiny jitter via a minimum-step floor, and
+/// - bounding large catch-up jumps (for background-tab throttling).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrowserClockConfig {
+    /// Maximum monotonic advancement applied per host sample.
+    ///
+    /// Set to `Duration::ZERO` to disable capping and apply full deltas.
+    pub max_forward_step: Duration,
+    /// Minimum delta applied immediately; smaller deltas are accumulated.
+    pub jitter_floor: Duration,
+}
+
+impl Default for BrowserClockConfig {
+    fn default() -> Self {
+        Self {
+            max_forward_step: Duration::from_millis(250),
+            jitter_floor: Duration::from_millis(1),
+        }
+    }
+}
+
+/// Browser monotonic clock built from host time samples.
+///
+/// This clock is intended for browser scheduler/timer adapters. Call
+/// [`observe_host_time`](Self::observe_host_time) from host callbacks to feed
+/// new host samples into the clock.
+///
+/// Suspension mitigation:
+/// - call [`suspend`](Self::suspend) when the tab/page is hidden,
+/// - call [`resume`](Self::resume) when visible again (first sample rebases).
+#[derive(Debug)]
+pub struct BrowserMonotonicClock {
+    now: AtomicU64,
+    paused: AtomicBool,
+    paused_at: AtomicU64,
+    has_host_sample: AtomicBool,
+    last_host_sample: AtomicU64,
+    pending_catch_up_ns: AtomicU64,
+    max_forward_step_ns: u64,
+    jitter_floor_ns: u64,
+}
+
+impl BrowserMonotonicClock {
+    /// Creates a browser monotonic clock with explicit policy.
+    #[must_use]
+    pub fn new(config: BrowserClockConfig) -> Self {
+        Self {
+            now: AtomicU64::new(0),
+            paused: AtomicBool::new(false),
+            paused_at: AtomicU64::new(0),
+            has_host_sample: AtomicBool::new(false),
+            last_host_sample: AtomicU64::new(0),
+            pending_catch_up_ns: AtomicU64::new(0),
+            max_forward_step_ns: duration_to_nanos_saturating(config.max_forward_step),
+            jitter_floor_ns: duration_to_nanos_saturating(config.jitter_floor),
+        }
+    }
+
+    /// Ingests a host-time sample and updates monotonic time.
+    ///
+    /// The first sample only establishes a host baseline and does not advance
+    /// runtime time.
+    pub fn observe_host_time(&self, host: Duration) -> Time {
+        let host_ns = duration_to_nanos_saturating(host);
+        self.observe_host_nanos(host_ns)
+    }
+
+    /// Ingests a host-time sample in nanoseconds.
+    pub fn observe_host_nanos(&self, host_ns: u64) -> Time {
+        if self.paused.load(Ordering::Acquire) {
+            return Time::from_nanos(self.paused_at.load(Ordering::Acquire));
+        }
+
+        // Rebase on first sample (or first sample after resume) without jump.
+        if self
+            .has_host_sample
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.last_host_sample.store(host_ns, Ordering::Release);
+            return self.now();
+        }
+
+        // Clamp regressions by tracking the max host sample seen.
+        let previous_host = self.last_host_sample.fetch_max(host_ns, Ordering::AcqRel);
+        let host_delta = host_ns.saturating_sub(previous_host);
+        let combined_delta =
+            host_delta.saturating_add(self.pending_catch_up_ns.load(Ordering::Acquire));
+
+        if combined_delta < self.jitter_floor_ns {
+            self.pending_catch_up_ns
+                .store(combined_delta, Ordering::Release);
+            return self.now();
+        }
+
+        let applied = if self.max_forward_step_ns == 0 {
+            combined_delta
+        } else {
+            combined_delta.min(self.max_forward_step_ns)
+        };
+        self.pending_catch_up_ns
+            .store(combined_delta.saturating_sub(applied), Ordering::Release);
+        self.advance_now(applied)
+    }
+
+    /// Freezes clock advancement while hidden/throttled.
+    pub fn suspend(&self) {
+        let now = self.now.load(Ordering::Acquire);
+        self.paused_at.store(now, Ordering::Release);
+        self.paused.store(true, Ordering::Release);
+    }
+
+    /// Resumes clock advancement.
+    ///
+    /// Resuming clears host baseline and pending catch-up so the next host
+    /// sample rebases instead of producing a giant jump.
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::Release);
+        self.has_host_sample.store(false, Ordering::Release);
+        self.pending_catch_up_ns.store(0, Ordering::Release);
+    }
+
+    /// Returns true when the browser clock is suspended.
+    #[must_use]
+    pub fn is_suspended(&self) -> bool {
+        self.paused.load(Ordering::Acquire)
+    }
+
+    /// Returns pending deferred advancement.
+    #[must_use]
+    pub fn pending_catch_up(&self) -> Duration {
+        Duration::from_nanos(self.pending_catch_up_ns.load(Ordering::Acquire))
+    }
+
+    fn advance_now(&self, delta: u64) -> Time {
+        if delta == 0 {
+            return self.now();
+        }
+
+        let mut current = self.now.load(Ordering::Acquire);
+        loop {
+            let next = current.saturating_add(delta);
+            match self.now.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Time::from_nanos(next),
+                Err(actual) => current = actual,
+            }
+        }
+    }
+}
+
+impl Default for BrowserMonotonicClock {
+    fn default() -> Self {
+        Self::new(BrowserClockConfig::default())
+    }
+}
+
+impl TimeSource for BrowserMonotonicClock {
+    fn now(&self) -> Time {
+        if self.paused.load(Ordering::Acquire) {
+            Time::from_nanos(self.paused_at.load(Ordering::Acquire))
+        } else {
+            Time::from_nanos(self.now.load(Ordering::Acquire))
+        }
+    }
+}
+
 /// Virtual time source for lab testing.
 ///
 /// Time only advances when explicitly told to do so, enabling
@@ -452,6 +629,13 @@ impl TimerDriverHandle {
         Self::new(driver)
     }
 
+    /// Creates a handle with a browser-monotonic timer driver.
+    #[must_use]
+    pub fn with_browser_clock(clock: Arc<BrowserMonotonicClock>) -> Self {
+        let driver = Arc::new(TimerDriver::with_clock(clock));
+        Self::new(driver)
+    }
+
     /// Returns the current time from the timer driver.
     #[inline]
     #[must_use]
@@ -683,6 +867,201 @@ mod tests {
             now
         );
         crate::test_complete!("virtual_clock_resume_unfreezes");
+    }
+
+    // =========================================================================
+    // BrowserMonotonicClock Tests
+    // =========================================================================
+
+    #[test]
+    fn browser_clock_first_sample_rebases_without_jump() {
+        init_test("browser_clock_first_sample_rebases_without_jump");
+        let clock = BrowserMonotonicClock::default();
+        crate::assert_with_log!(
+            clock.now() == Time::ZERO,
+            "starts at zero",
+            Time::ZERO,
+            clock.now()
+        );
+
+        let t = clock.observe_host_time(Duration::from_millis(250));
+        crate::assert_with_log!(
+            t == Time::ZERO,
+            "first sample is baseline only",
+            Time::ZERO,
+            t
+        );
+        crate::test_complete!("browser_clock_first_sample_rebases_without_jump");
+    }
+
+    #[test]
+    fn browser_clock_clamps_regression_monotonically() {
+        init_test("browser_clock_clamps_regression_monotonically");
+        let clock = BrowserMonotonicClock::new(BrowserClockConfig {
+            max_forward_step: Duration::ZERO,
+            jitter_floor: Duration::ZERO,
+        });
+
+        let _ = clock.observe_host_time(Duration::from_millis(100));
+        let t1 = clock.observe_host_time(Duration::from_millis(130));
+        crate::assert_with_log!(
+            t1 == Time::from_millis(30),
+            "advances with forward host sample",
+            Time::from_millis(30),
+            t1
+        );
+
+        let t2 = clock.observe_host_time(Duration::from_millis(120));
+        crate::assert_with_log!(
+            t2 == Time::from_millis(30),
+            "regressed host sample does not move clock backward",
+            Time::from_millis(30),
+            t2
+        );
+
+        let t3 = clock.observe_host_time(Duration::from_millis(150));
+        crate::assert_with_log!(
+            t3 == Time::from_millis(50),
+            "clock resumes monotonic progression after regression",
+            Time::from_millis(50),
+            t3
+        );
+        crate::test_complete!("browser_clock_clamps_regression_monotonically");
+    }
+
+    #[test]
+    fn browser_clock_jitter_floor_accumulates_small_deltas() {
+        init_test("browser_clock_jitter_floor_accumulates_small_deltas");
+        let clock = BrowserMonotonicClock::new(BrowserClockConfig {
+            max_forward_step: Duration::ZERO,
+            jitter_floor: Duration::from_millis(10),
+        });
+
+        let _ = clock.observe_host_time(Duration::from_millis(100));
+        let t1 = clock.observe_host_time(Duration::from_millis(103));
+        crate::assert_with_log!(
+            t1 == Time::ZERO,
+            "sub-floor delta deferred",
+            Time::ZERO,
+            t1
+        );
+        crate::assert_with_log!(
+            clock.pending_catch_up() == Duration::from_millis(3),
+            "pending catch-up tracks deferred jitter",
+            Duration::from_millis(3),
+            clock.pending_catch_up()
+        );
+
+        let t2 = clock.observe_host_time(Duration::from_millis(110));
+        crate::assert_with_log!(
+            t2 == Time::from_millis(10),
+            "accumulated jitter released at floor",
+            Time::from_millis(10),
+            t2
+        );
+        crate::assert_with_log!(
+            clock.pending_catch_up() == Duration::ZERO,
+            "pending catch-up drained",
+            Duration::ZERO,
+            clock.pending_catch_up()
+        );
+        crate::test_complete!("browser_clock_jitter_floor_accumulates_small_deltas");
+    }
+
+    #[test]
+    fn browser_clock_limits_catch_up_per_observation() {
+        init_test("browser_clock_limits_catch_up_per_observation");
+        let clock = BrowserMonotonicClock::new(BrowserClockConfig {
+            max_forward_step: Duration::from_millis(50),
+            jitter_floor: Duration::ZERO,
+        });
+
+        let _ = clock.observe_host_time(Duration::ZERO);
+        let t1 = clock.observe_host_time(Duration::from_millis(200));
+        crate::assert_with_log!(
+            t1 == Time::from_millis(50),
+            "first catch-up slice capped",
+            Time::from_millis(50),
+            t1
+        );
+        crate::assert_with_log!(
+            clock.pending_catch_up() == Duration::from_millis(150),
+            "remaining catch-up retained",
+            Duration::from_millis(150),
+            clock.pending_catch_up()
+        );
+
+        let t2 = clock.observe_host_time(Duration::from_millis(200));
+        crate::assert_with_log!(
+            t2 == Time::from_millis(100),
+            "second slice advances deterministically",
+            Time::from_millis(100),
+            t2
+        );
+        crate::assert_with_log!(
+            clock.pending_catch_up() == Duration::from_millis(100),
+            "catch-up debt decreases by cap",
+            Duration::from_millis(100),
+            clock.pending_catch_up()
+        );
+        crate::test_complete!("browser_clock_limits_catch_up_per_observation");
+    }
+
+    #[test]
+    fn browser_clock_suspend_resume_rebases_without_jump() {
+        init_test("browser_clock_suspend_resume_rebases_without_jump");
+        let clock = BrowserMonotonicClock::new(BrowserClockConfig {
+            max_forward_step: Duration::ZERO,
+            jitter_floor: Duration::ZERO,
+        });
+
+        let _ = clock.observe_host_time(Duration::from_millis(100));
+        let t1 = clock.observe_host_time(Duration::from_millis(120));
+        crate::assert_with_log!(
+            t1 == Time::from_millis(20),
+            "advances before suspend",
+            Time::from_millis(20),
+            t1
+        );
+
+        clock.suspend();
+        crate::assert_with_log!(
+            clock.is_suspended(),
+            "clock suspended",
+            true,
+            clock.is_suspended()
+        );
+        let t2 = clock.observe_host_time(Duration::from_millis(500));
+        crate::assert_with_log!(
+            t2 == Time::from_millis(20),
+            "suspended clock does not advance",
+            Time::from_millis(20),
+            t2
+        );
+
+        clock.resume();
+        crate::assert_with_log!(
+            !clock.is_suspended(),
+            "clock resumed",
+            false,
+            clock.is_suspended()
+        );
+
+        let t3 = clock.observe_host_time(Duration::from_millis(700));
+        crate::assert_with_log!(
+            t3 == Time::from_millis(20),
+            "first post-resume sample rebases",
+            Time::from_millis(20),
+            t3
+        );
+        let t4 = clock.observe_host_time(Duration::from_millis(730));
+        crate::assert_with_log!(
+            t4 == Time::from_millis(50),
+            "post-resume progression uses new baseline",
+            Time::from_millis(50),
+            t4
+        );
+        crate::test_complete!("browser_clock_suspend_resume_rebases_without_jump");
     }
 
     // =========================================================================
@@ -976,6 +1355,45 @@ mod tests {
         crate::test_complete!("timer_driver_now");
     }
 
+    #[test]
+    fn timer_driver_with_browser_clock_respects_catch_up_cap() {
+        init_test("timer_driver_with_browser_clock_respects_catch_up_cap");
+        let clock = Arc::new(BrowserMonotonicClock::new(BrowserClockConfig {
+            max_forward_step: Duration::from_millis(50),
+            jitter_floor: Duration::ZERO,
+        }));
+        let driver = TimerDriver::with_clock(clock.clone());
+        let woken = Arc::new(AtomicBool::new(false));
+
+        let _ = clock.observe_host_time(Duration::ZERO);
+        driver.register(Time::from_millis(80), waker_that_sets(woken.clone()));
+
+        let _ = clock.observe_host_time(Duration::from_millis(100));
+        let fired_1 = driver.process_timers();
+        crate::assert_with_log!(
+            fired_1 == 0,
+            "first capped catch-up does not fire 80ms timer",
+            0usize,
+            fired_1
+        );
+
+        let _ = clock.observe_host_time(Duration::from_millis(100));
+        let fired_2 = driver.process_timers();
+        crate::assert_with_log!(
+            fired_2 == 1,
+            "second catch-up slice fires timer",
+            1usize,
+            fired_2
+        );
+        crate::assert_with_log!(
+            woken.load(Ordering::SeqCst),
+            "timer waker called after bounded catch-up",
+            true,
+            woken.load(Ordering::SeqCst)
+        );
+        crate::test_complete!("timer_driver_with_browser_clock_respects_catch_up_cap");
+    }
+
     // =========================================================================
     // TimerHandle Tests
     // =========================================================================
@@ -1116,6 +1534,27 @@ mod tests {
         let eq = handle1.ptr_eq(&handle2);
         crate::assert_with_log!(!eq, "different drivers not equal", false, eq);
         crate::test_complete!("timer_driver_handle_ptr_eq");
+    }
+
+    #[test]
+    fn timer_driver_handle_with_browser_clock() {
+        init_test("timer_driver_handle_with_browser_clock");
+        let clock = Arc::new(BrowserMonotonicClock::new(BrowserClockConfig {
+            max_forward_step: Duration::ZERO,
+            jitter_floor: Duration::ZERO,
+        }));
+        let handle = TimerDriverHandle::with_browser_clock(clock.clone());
+
+        let _ = clock.observe_host_time(Duration::from_millis(20));
+        let _ = clock.observe_host_time(Duration::from_millis(35));
+        let now = handle.now();
+        crate::assert_with_log!(
+            now == Time::from_millis(15),
+            "driver handle reflects browser clock advancement",
+            Time::from_millis(15),
+            now
+        );
+        crate::test_complete!("timer_driver_handle_with_browser_clock");
     }
 
     // =========================================================================

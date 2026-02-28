@@ -134,6 +134,15 @@ Purpose: preserve runtime progress while preventing UI starvation and perpetual 
 - Condition: tab suspension or long host delay causes large timer catch-up.
 - Behavior: process catch-up in bounded batches, yielding between batches; do not violate fairness bound.
 
+Timer backend adaptation contract (`asupersync-umelq.5.2`) binds this to explicit policy:
+
+- Use a monotonic browser clock adapter fed by host samples (for example `performance.now()`).
+- First host sample after bootstrap or resume establishes baseline and does not jump runtime time.
+- Regressed host samples are clamped (runtime time never moves backward).
+- Small sub-floor jitter deltas are accumulated, then released deterministically.
+- Large forward deltas are capped per observation via `max_forward_step`, with remaining debt drained across subsequent observations.
+- Visibility suspend/resume must call clock suspend/resume so hidden-tab gaps do not explode timer deadlines in a single turn.
+
 ### F4 Capability Denial
 
 - Condition: missing/invalid authority for host callback path.
@@ -219,6 +228,12 @@ Required artifacts:
 - parity diff summary,
 - deterministic repro command block.
 
+For `asupersync-umelq.5.2`, artifacts must additionally include:
+
+- browser clock policy config (`max_forward_step`, `jitter_floor`),
+- deferred catch-up progression snapshot,
+- suspend/resume transition evidence.
+
 ## Reproduction Commands
 
 Use remote offload for cargo-heavy commands:
@@ -226,6 +241,8 @@ Use remote offload for cargo-heavy commands:
 ```bash
 rch exec -- cargo test --all-targets sched_browser -- --nocapture
 rch exec -- cargo test -p asupersync --features test-internals parity_browser_scheduler -- --nocapture
+rch exec -- cargo test -p asupersync browser_clock -- --nocapture
+rch exec -- cargo test -p asupersync timer_driver_with_browser_clock -- --nocapture
 rch exec -- cargo run --features cli --bin asupersync -- trace verify --strict artifacts/browser_scheduler.trace
 ```
 

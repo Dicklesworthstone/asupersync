@@ -15,6 +15,7 @@
 //! | `steal_batch_size` | 16 |
 //! | `enable_parking` | true |
 //! | `poll_budget` | 128 |
+//! | `browser_ready_handoff_limit` | 0 (disabled) |
 //! | `root_region_limits` | `None` |
 //! | `observability` | `None` |
 //! | `enable_governor` | `false` |
@@ -111,6 +112,13 @@ pub struct RuntimeConfig {
     pub enable_parking: bool,
     /// Time slice for cooperative yielding (polls).
     pub poll_budget: u32,
+    /// Browser pump fairness bound for consecutive ready dispatches.
+    ///
+    /// When non-zero, browser-style single-thread pumps can yield to the host
+    /// queue after this many ready-lane dispatches in a burst, preventing
+    /// unbounded host-turn monopolization under adversarial ready floods.
+    /// `0` disables forced handoff behavior.
+    pub browser_ready_handoff_limit: usize,
     /// Maximum consecutive cancel-lane dispatches before yielding to other lanes.
     pub cancel_lane_max_streak: usize,
     /// Logical clock mode used for trace causal ordering.
@@ -221,6 +229,7 @@ impl Default for RuntimeConfig {
             blocking: BlockingPoolConfig::default(),
             enable_parking: true,
             poll_budget: 128,
+            browser_ready_handoff_limit: 0,
             cancel_lane_max_streak: 16,
             logical_clock_mode: None,
             root_region_limits: None,
@@ -279,6 +288,12 @@ mod tests {
             config.poll_budget
         );
         crate::assert_with_log!(
+            config.browser_ready_handoff_limit == 0,
+            "browser_ready_handoff_limit",
+            0,
+            config.browser_ready_handoff_limit
+        );
+        crate::assert_with_log!(
             config.cancel_lane_max_streak == 16,
             "cancel_lane_max_streak",
             16,
@@ -332,6 +347,7 @@ mod tests {
             },
             enable_parking: true,
             poll_budget: 0,
+            browser_ready_handoff_limit: 0,
             cancel_lane_max_streak: 0,
             root_region_limits: None,
             on_thread_start: None,
@@ -374,6 +390,12 @@ mod tests {
             "poll_budget",
             1,
             config.poll_budget
+        );
+        crate::assert_with_log!(
+            config.browser_ready_handoff_limit == 0,
+            "browser_ready_handoff_limit",
+            0,
+            config.browser_ready_handoff_limit
         );
         crate::assert_with_log!(
             config.cancel_lane_max_streak == 1,
@@ -504,6 +526,7 @@ mod tests {
             },
             enable_parking: false,
             poll_budget: 32,
+            browser_ready_handoff_limit: 64,
             cancel_lane_max_streak: 16,
             root_region_limits: None,
             on_thread_start: None,
@@ -552,6 +575,12 @@ mod tests {
             "poll_budget",
             32,
             config.poll_budget
+        );
+        crate::assert_with_log!(
+            config.browser_ready_handoff_limit == 64,
+            "browser_ready_handoff_limit",
+            64,
+            config.browser_ready_handoff_limit
         );
         crate::assert_with_log!(
             config.cancel_lane_max_streak == 16,
