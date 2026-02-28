@@ -1,5 +1,10 @@
 //! PostgreSQL async client with wire protocol implementation.
-#![allow(clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::needless_pass_by_ref_mut, clippy::match_same_arms)]
+#![allow(
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::needless_pass_by_ref_mut,
+    clippy::match_same_arms
+)]
 //!
 //! This module provides a pure-Rust PostgreSQL client implementing the wire protocol
 //! with full Cx integration, SCRAM-SHA-256 authentication, and cancel-correct semantics.
