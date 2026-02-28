@@ -518,6 +518,43 @@ Critical implicit OS assumptions requiring explicit seam replacement before brow
 2. Threading and parking assumptions (`Parker`, worker unparks, TLS task pinning).
 3. Filesystem/process/signal assumptions in runtime-adjacent tooling and native integrations.
 
+### 6.6 Deferred Surface Register (WASM-01.5)
+
+Purpose:
+
+1. Keep deferred browser-v1 surfaces explicit, owned, and testable.
+2. Prevent deferrals from becoming untracked debt.
+3. Define objective reintegration criteria tied to phase gates and evidence contracts.
+
+Register rules:
+
+1. Every deferred surface must have an owner role, rationale, and reintegration trigger.
+2. Re-entry requires explicit gate evidence and deterministic repro artifacts.
+3. Scope changes must update this register and linked bead dependencies in the same change set.
+
+| Register ID | Deferred surface | Current disposition | Deferred rationale | Reintegration prerequisites | Reintegration acceptance evidence | Risk if deferred too long | Owner role |
+|---|---|---|---|---|---|---|---|
+| `DSR-001` | `runtime/reactor/*` + `runtime/io_driver.rs` (native FD readiness path) | Deferred from browser-v1 runtime path | Browser profile does not expose portable FD reactor semantics equivalent to epoll/kqueue/io_uring invariants | Browser event backend + capability adapters (`WASM-04` + `WASM-06`) stable; parity harness for readiness/cancel edges | Deterministic L1/L2 parity suite with cancel/drain equivalence and replayable traces (`PG-5` gate) | Ad-hoc IO semantics may drift from cancellation/obligation protocol guarantees | Runtime backend owner |
+| `DSR-002` | `runtime/blocking_pool.rs` | Deferred from browser-v1 execution profile | Browser baseline lacks native thread model assumptions used by blocking pool | Worker/offload model contract defined for browser profile; explicit authority + backpressure policy | Load/stress evidence showing no obligation leaks or quiescence regressions under offload pressure (`PG-5`/`PG-6`) | Hidden starvation and budget violations if reintroduced without model parity | Runtime + perf owner |
+| `DSR-003` | Native network stack (`net`, `http`, `grpc`, `tls`) | Deferred for browser-v1 | Existing stack assumes socket/TLS semantics outside browser capability envelope | Browser IO capsules and authority envelopes complete; ABI surface stable (`WASM-06` + `WASM-07`) | L1/L2 integration suites for browser transport semantics; threat-model controls verified (`PG-5` + `PG-8`) | Fragmented API promises and security boundary confusion for users | IO/security owner |
+| `DSR-004` | Native integration modules (`fs`, `process`, `signal`, `server`) | Deferred for browser-v1 | Platform mismatch with browser sandbox and host constraints | Clear browser-safe substitutes or explicit non-goal retention with migration guidance | Docs + conformance evidence showing no ambient-authority fallback introduced (`PG-8`) | Documentation drift and accidental unsupported-surface adoption | Product/docs owner |
+| `DSR-005` | Data/client integrations (`database`, `messaging`) | Deferred for browser-v1 runtime | Current implementations are native-first and not browser capability-safe by default | Capability-safe bridge design + threat model + profile closure checks completed | Adversarial/security tests plus profile manifest closure reports (`PG-8`) | Silent capability expansion or insecure transport assumptions | Security + integration owner |
+| `DSR-006` | CLI/tooling surface (`cli`, portions of `conformance`, file-oriented replay flows) | Deferred from browser artifact, retained in tooling lane | Browser package should not inherit host tooling assumptions | Browser diagnostics API contract complete (`WASM-11`) and artifact schema stable (`WASM-10`) | Replay/diagnostics parity evidence with schema validation and reproducible command bundles (`PG-7`) | Divergent diagnostics between browser and tooling ecosystems | Observability/tooling owner |
+| `DSR-007` | Optional `frankenlab` packaging for browser distribution | Deferred for runtime package, retained for test/forensics workflows | Runtime artifact should stay lean while preserving deterministic verification path | Packaging split stable (`runtime` vs `forensics` artifacts) and CI matrix enforces both lanes | CI evidence that browser runtime and forensic toolchain remain version-compatible (`PG-8`) | Loss of deterministic incident triage path if coupling breaks | QA/forensics owner |
+
+Reintegration workflow (mandatory):
+
+1. Open or link a reintegration bead referencing `DSR-*`.
+2. Record prerequisites as explicit checklist items with owners.
+3. Land implementation with L0+L1 (or higher) deterministic evidence.
+4. Attach replay commands and artifact pointers required by gate policy.
+5. Update register row state and remove deferral only after gate promotion succeeds.
+
+Cross-bead linkage:
+
+1. `asupersync-umelq.16.2` (quickstart/migration docs) depends on this register to accurately present deferred vs supported browser surfaces.
+2. `asupersync-umelq.3.*` profile-closure work must enforce register constraints in CI policy checks.
+
 ---
 
 ## 7. Invariant Preservation Program
@@ -661,6 +698,10 @@ Profile normalization rules:
    - expected size/perf impact,
    - deterministic-mode impact (`FP-BR-DET`).
 4. Any profile deviation requires ADR reference and expiration criteria.
+
+Implementation status (bead `asupersync-umelq.3.4`): canonical profile feature
+aliases are declared in `Cargo.toml`, and the dependency policy scanner now
+uses `FP-BR-DEV/PROD/DET/MIN` profile IDs directly.
 
 ## 10.3 Feature compatibility enforcement
 
@@ -969,16 +1010,76 @@ Escalation policy:
 2. Second consecutive breach: freeze dependent promotions (`PG-8+`) until resolved.
 3. Waiver path: ADR with explicit expiry date, risk owner, and rollback condition.
 
-## 16.4 Evidence schema requirements
+## 16.4 Optimization pipeline contract (compiler flags + wasm-opt + variants)
+
+Artifact variants (must be published for each promoted commit):
+
+| Variant ID | Cargo profile + feature profile | Optimization intent | `wasm-opt` policy | Required outputs |
+|---|---|---|---|---|
+| `AV-DEV` | `--profile dev` + `FP-BR-DEV` | Fast local iteration with good diagnostics | `-O1 --debuginfo` | debug symbols, size/perf snapshot, deterministic smoke trace |
+| `AV-CANARY` | `--profile release` + `FP-BR-PROD` + bounded trace | Production-like confidence before stable | `-O2` | canary wasm/js bundle, baseline delta report, replay compatibility verdict |
+| `AV-REL-SIZE` | `--profile release` + `FP-BR-PROD` | Minimize transfer + cold-start overhead | `-Oz` | release-size bundle, budget verdict table, migration notes |
+| `AV-REL-SPEED` | `--profile release` + `FP-BR-PROD` | Maximize steady-state runtime performance | `-O3` | release-speed bundle, scheduler/cancel perf report, deterministic parity verdict |
+
+Compiler/profile guardrails:
+
+1. Release-class variants (`AV-CANARY`, `AV-REL-*`) must pin codegen settings and include them in artifact metadata:
+   - `lto` mode,
+   - `codegen-units`,
+   - panic strategy,
+   - target triple and rustc version.
+2. Any change to release-class compiler settings requires:
+   - explicit baseline before/after comparison,
+   - rollback trigger entry (`RB-*`),
+   - and ADR reference when tradeoffs alter operational posture.
+3. Optimization changes are invalid unless deterministic parity evidence remains green for retained invariants.
+
+`wasm-opt` pass policy:
+
+1. Allowed baseline levels:
+   - `AV-DEV`: `-O1 --debuginfo`
+   - `AV-CANARY`: `-O2`
+   - `AV-REL-SIZE`: `-Oz`
+   - `AV-REL-SPEED`: `-O3`
+2. Any custom pass pipeline beyond baseline level must be declared in a committed manifest and diffed in CI.
+3. Passes that alter observable boundary semantics (ABI shape, exported symbol set, deterministic trace contract) require explicit compatibility review and gate approval.
+
+Build/repro command contract:
+
+1. Cargo-heavy steps must run through `rch`:
+   - `rch exec -- cargo build -p asupersync --target wasm32-unknown-unknown --profile <profile> --no-default-features --features <feature-set>`
+2. Post-build optimization command must be artifactized:
+   - `wasm-opt <in.wasm> -o <out.wasm> <level-or-pass-set>`
+3. Every variant publish must include exact commands, tool versions, and artifact hash tuple (`raw`, `gzip`, optional `brotli`).
+
+## 16.5 Variant promotion and rollback policy
+
+1. Promotion sequence:
+   - `AV-DEV` -> `AV-CANARY` -> (`AV-REL-SIZE` and/or `AV-REL-SPEED`) -> channel promotion.
+2. Promotion blockers:
+   - any hard budget failure,
+   - deterministic parity failure,
+   - ABI/export drift without approved compatibility transition.
+3. Variant selection rule for stable channel:
+   - choose the lowest-cost variant that satisfies all hard gates and required SLO targets.
+4. Rollback trigger conditions:
+   - >5% regression in key latency/memory metrics on two consecutive runs,
+   - size budget breach,
+   - replay instability or cancellation invariant regression.
+5. Rollback action:
+   - revert to last known-green variant manifest and reissue artifact set with updated incident note.
+
+## 16.6 Evidence schema requirements
 
 Every WASM-12 gate report must include:
 
-1. `profile_id` and package tier,
+1. `profile_id`, `variant_id`, and package tier,
 2. commit SHA + data hash,
 3. deterministic scenario IDs and seeds,
 4. metric set with p50/p95/p99 and threshold verdict,
 5. baseline delta percentages,
-6. direct rerun commands (including `rch exec -- ...` wrappers for cargo workloads).
+6. direct rerun commands (including `rch exec -- ...` wrappers for cargo workloads),
+7. compiler + `wasm-opt` configuration fingerprints.
 
 ---
 

@@ -172,6 +172,77 @@ builds with semantic holes:
 Policy and deterministic dependency-audit profiles are documented in
 `docs/wasm_dependency_audit_policy.md`.
 
+Optimization-variant policy (`dev`/`canary`/`release`) is defined in
+`.github/wasm_optimization_policy.json` and validated by
+`scripts/check_wasm_optimization_policy.py`, which emits
+`artifacts/wasm_optimization_pipeline_summary.json` for downstream perf/reliability
+gates.
+
+### Browser Edition Documentation IA (WASM-15 / `asupersync-umelq.16.1`)
+
+This section is the canonical information architecture and navigation contract
+for Browser Edition docs. Downstream docs beads (`16.2`, `16.3`, `16.4`, `16.5`)
+should extend this structure instead of inventing parallel navigation trees.
+
+Primary user journeys:
+
+1. First-use onboarding: install -> run a minimal browser workflow -> verify deterministic behavior.
+2. Framework adoption: integrate into React/Next flows without breaking ownership/cancellation semantics.
+3. Incident response: capture trace -> replay deterministically -> map findings to mitigation.
+4. Security/perf hardening: verify authority boundaries, redaction posture, and budget thresholds.
+
+Navigation top-level (required):
+
+| Lane | Reader intent | Required doc surfaces | Exit criteria |
+|---|---|---|---|
+| `Concepts` | Understand guarantees and constraints before coding | Browser semantic contract, invariants, capability model, deferred-surface register | Reader can explain what is in-scope vs deferred and why |
+| `Quickstart` | Get working minimal app fast | Install/profile selection, minimal code path, deterministic smoke validation | Reader can run one successful browser flow and verify expected output |
+| `API + Profiles` | Choose correct runtime/profile/capability envelope | Feature profile matrix, capability wrappers, ABI/ownership boundaries | Reader can select a profile and avoid forbidden surfaces |
+| `Framework Guides` | Implement in React/Next/vanilla | Framework-specific bootstrap + lifecycle + cancellation guidance | Reader can integrate without semantic violations |
+| `Replay + Diagnostics` | Debug failures with deterministic evidence | Trace schema, replay workflow, artifact commands, failure taxonomy | Reader can reproduce a failure from provided artifacts |
+| `Security + Performance` | Validate production-readiness gates | Threat model, policy checks, budgets, CI gates, waiver/escalation rules | Reader can execute gate checks and interpret failures |
+| `Troubleshooting` | Recover from known failure patterns | Symptom -> cause -> command -> expected evidence mapping | Reader can resolve common failures without ad-hoc guesswork |
+
+Browser Edition doc map (current canonical locations):
+
+1. Concepts and architecture:
+   - `PLAN_TO_BUILD_ASUPERSYNC_IN_WASM_FOR_USE_IN_BROWSERS.md`
+   - `docs/wasm_api_surface_census.md`
+2. Dependency/profile policy:
+   - `docs/wasm_dependency_audit.md`
+   - `docs/wasm_dependency_audit_policy.md`
+3. Scheduler/time/cancellation semantics:
+   - `docs/wasm_browser_scheduler_semantics.md`
+   - `docs/wasm_cancellation_state_machine.md`
+4. Security and hardening:
+   - `docs/security_threat_model.md`
+5. This integration guide:
+   - `docs/integration.md` (entrypoint index + integration orientation)
+
+Doc-drift verification hooks (required for Browser Edition doc changes):
+
+1. Link integrity check:
+   - ensure every Browser Edition section references at least one concrete artifact/test command.
+2. Invariant coverage check:
+   - docs must explicitly mention ownership/cancellation/obligation/quiescence impacts where relevant.
+3. Profile closure check:
+   - docs must not advertise forbidden wasm32 surfaces as supported.
+4. Repro command check:
+   - each troubleshooting or diagnostics flow must include a deterministic command path.
+
+Recommended command bundle for doc validation workflows:
+
+```bash
+# Validate rust docs/test snippets and compile surfaces
+rch exec -- cargo check --all-targets
+
+# Enforce lint quality on touched code/doc-adjacent surfaces
+rch exec -- cargo clippy --all-targets -- -D warnings
+
+# Validate formatting contract
+rch exec -- cargo fmt --check
+```
+
 ### Examples
 
 Examples live in `examples/` and cover:

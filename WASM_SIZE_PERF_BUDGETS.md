@@ -106,11 +106,30 @@ without format drift.
 
 ## 8. Canonical Command Envelope
 
-All cargo-heavy checks must be offloaded:
+All cargo-heavy checks must be offloaded.
+
+Current gating note (as of 2026-02-28):
+
+1. `wasm32-unknown-unknown` compilation for `asupersync` remains preview-gated and
+   still has unresolved native-surface imports on this branch.
+2. CI should still run the preview command (below) and record the exact failure
+   signature until the wasm profile-closure beads land.
+3. Native correctness/lint gates (`cargo check --all-targets`,
+   `cargo clippy --all-targets -- -D warnings`) remain mandatory hard gates.
+
+Preview wasm compilation command (expected to become green as profile-closure
+work lands):
 
 ```bash
-rch exec -- cargo check -p asupersync --target wasm32-unknown-unknown --no-default-features
-rch exec -- cargo build -p asupersync --target wasm32-unknown-unknown --release --no-default-features
+rch exec -- cargo check -p asupersync \
+  --target wasm32-unknown-unknown \
+  --no-default-features \
+  --features wasm-browser-preview,getrandom/wasm_js
+rch exec -- cargo build -p asupersync \
+  --target wasm32-unknown-unknown \
+  --release \
+  --no-default-features \
+  --features wasm-browser-preview,getrandom/wasm_js
 ```
 
 Recommended size capture:
@@ -129,6 +148,72 @@ Recommended benchmark envelope (to be implemented by `umelq.13.2`):
 rch exec -- cargo test -p asupersync --test wasm_perf_budget -- --nocapture
 ```
 
+## 8.1 Optimization Pipeline Contract (`asupersync-umelq.13.3`)
+
+Optimization variants are now canonicalized in:
+
+- policy: `.github/wasm_optimization_policy.json`
+- validator: `scripts/check_wasm_optimization_policy.py`
+- summary artifact: `artifacts/wasm_optimization_pipeline_summary.json`
+
+Profile mapping (must remain aligned with Section 2 budget profiles):
+
+| Variant ID | Policy profile | Budget profile | Intent | Optimization posture |
+|---|---|---|---|---|
+| `dev` | `wasm-browser-dev` | `full-dev` | fast local debugging | low optimization, richer debug info, no `wasm-opt` |
+| `canary` | `wasm-browser-canary` | `core-trace` | staging/canary signal quality | balanced `-C opt-level=s` + moderate `wasm-opt` passes |
+| `release` | `wasm-browser-release` | `core-min` | production shipment | maximal size reduction (`-C opt-level=z`, LTO, aggressive `wasm-opt`) |
+
+Contract rules:
+
+1. The optimization policy may tune compiler flags and `wasm-opt` passes only.
+2. Threshold values in Section 3/4 remain governance-controlled and cannot be
+   changed by optimization-pipeline edits.
+3. Every profile must keep `wasm-browser-preview,getrandom/wasm_js` enabled and
+   keep wasm-forbidden features disabled.
+4. CI must validate policy shape and emit the summary artifact for downstream
+   gates (`13.5`, `18.5`) even while wasm compilation remains preview-gated.
+
+Deterministic validator commands:
+
+```bash
+python3 scripts/check_wasm_optimization_policy.py --self-test
+python3 scripts/check_wasm_optimization_policy.py \
+  --policy .github/wasm_optimization_policy.json
+```
+
+## 8.2 Benchmark Corpus Contract (`asupersync-umelq.13.2`)
+
+Representative browser workload coverage is now canonicalized in:
+
+- policy: `.github/wasm_benchmark_corpus.json`
+- validator: `scripts/check_wasm_benchmark_corpus.py`
+- summary artifact: `artifacts/wasm_benchmark_corpus_summary.json`
+
+The corpus contract maps scenarios to explicit user journeys and budget metrics:
+
+1. Framework coverage: `vanilla-js`, `typescript-sdk`, `react`, `nextjs`.
+2. Workload coverage: `cold-start`, `steady-throughput`, `cancellation-storm`,
+   `streaming-io`, `memory-pressure`.
+3. Deterministic seed set (per scenario): `11, 29, 42, 73, 101`.
+4. Metric mapping must use the budget metric IDs defined in this document
+   (`M-PERF-01*` through `M-PERF-04*`).
+5. Scenario commands must use the canonical perf runner envelope:
+   `rch exec -- ./scripts/run_perf_e2e.sh ...`
+
+CI policy:
+
+1. Validate corpus schema + coverage and emit summary artifact.
+2. Treat missing framework/workload/browser coverage as a gate failure.
+3. Keep summary schema stable for downstream gates (`13.4`, `13.5`, `15.1`).
+
+Deterministic validator commands:
+
+```bash
+python3 scripts/check_wasm_benchmark_corpus.py --self-test
+python3 scripts/check_wasm_benchmark_corpus.py \
+  --policy .github/wasm_benchmark_corpus.json
+```
 
 ## 8.3 Continuous Perf Regression Gate (`asupersync-umelq.13.5`)
 

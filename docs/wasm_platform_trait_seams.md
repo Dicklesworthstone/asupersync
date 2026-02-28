@@ -224,3 +224,111 @@ CI artifacts must include:
 - failing fixture id,
 - event-log excerpt,
 - backend profile metadata.
+
+## Runtime Internal Extraction Map (Bead `asupersync-umelq.4.2`)
+
+Objective:
+
+Refactor runtime internals so all platform effects are capability-injected through seam traits, while preserving scheduler/cancel/obligation invariants and lock-order guarantees.
+
+## Internal Surface Mapping
+
+| Surface | Current core files | Injection target | Constraints |
+|---|---|---|---|
+| Scheduler core | `src/runtime/scheduler/three_lane.rs`, `src/runtime/scheduler/worker.rs`, `src/runtime/mod.rs` | `SchedulerSeam` trait object in runtime state | preserve lane semantics and fairness bounds; no orphan runnable entries |
+| Time and timers | `src/runtime/timer.rs`, `src/time/*`, `src/runtime/state.rs` | `TimeSeam` capabilities passed via `RuntimeBuilder` | monotonic ordering and timer-cancel idempotence must remain stable |
+| Reactor and readiness | `src/runtime/reactor/mod.rs`, `src/runtime/reactor/epoll.rs`, `src/runtime/reactor/kqueue.rs`, `src/runtime/reactor/io_uring.rs`, `src/runtime/reactor/macos.rs` | `IoSeam` backend adapter selected by profile | no stale token wake delivery; unknown-token path must stay non-panicking |
+| Wake dedup and cross-thread wake path | scheduler wake queues + waker glue in runtime/task path | `WakeupSeam` boundary for dedup + provenance | no lost wakeups under dedup pressure |
+| Capability validation | `src/cx/*`, runtime operation call sites | `AuthoritySeam` gate before host effect execution | no ambient fallback path; deny-by-default on missing capability |
+
+## Staged Refactor Slices
+
+### Slice `S1`: seam holder injection in runtime state
+
+1. Add explicit seam-holder fields to runtime state/container wiring.
+2. Inject seam-holder via builder path; no global singleton lookup allowed.
+3. Keep native defaults behind explicit constructors.
+
+Verification:
+
+1. runtime construction tests prove seam-holder presence for each profile.
+2. compile-fail guard for missing required seam in browser profile.
+
+### Slice `S2`: scheduler call-site replacement
+
+1. Replace direct platform wake/schedule calls with `SchedulerSeam` operations.
+2. Keep lane ordering decisions in core scheduler logic; seam only mediates host interaction.
+
+Verification:
+
+1. fairness fixtures (`seam.scheduler.*`) stay green.
+2. deterministic fingerprint unchanged for preserved scenarios.
+
+### Slice `S3`: timer path extraction
+
+1. Route deadline registration/cancel through `TimeSeam`.
+2. Isolate monotonic clock reads behind seam contract.
+
+Verification:
+
+1. timer idempotence + ordering fixtures stay green.
+2. cancellation latency parity checks show no regression beyond budget.
+
+### Slice `S4`: reactor/io extraction
+
+1. Replace direct reactor registration and readiness delivery calls with `IoSeam`.
+2. Keep token generation and stale-event handling in core invariant path.
+
+Verification:
+
+1. token-generation stale-event fixture remains deterministic.
+2. unknown-token path remains diagnostic/non-panicking.
+
+### Slice `S5`: capability gate hardening
+
+1. Require `AuthoritySeam` validation at all host-effect call boundaries.
+2. Remove any implicit host fallback path from runtime internals.
+
+Verification:
+
+1. deny-by-default tests for missing/invalid capability.
+2. trace events include capability lineage for authorized effects.
+
+### Slice `S6`: parity stabilization and cleanup
+
+1. Remove superseded direct platform calls after seam path proves parity.
+2. Lock in regression harness comparing native vs browser seam backends.
+
+Verification:
+
+1. native/browser parity matrix (required scenario families) passes.
+2. lock-order audits confirm no new inversions (`E -> D -> B -> A -> C`).
+
+## Invariant Protection Rules for Refactor Work
+
+1. Seam extraction must not move ownership semantics out of core runtime logic.
+2. Cancellation phase transitions remain core-owned; seams may observe but not redefine transition law.
+3. Obligation commit/abort remains linear and auditable; seams cannot auto-commit implicit side effects.
+4. Any refactor that changes event ordering keys requires deterministic replay evidence and compatibility sign-off.
+
+## Blocking Verification Checklist
+
+1. Unit fixtures:
+   - all `seam.*` fixtures green with deterministic seeds.
+2. Integration/E2E:
+   - native vs browser-adapter parity scenarios pass with matching fingerprints.
+3. Diagnostics:
+   - contract event schema present on all seam operations.
+4. Repro commands:
+   - cargo-heavy checks via `rch exec -- ...`,
+   - command bundle + artifact pointers attached to CI report.
+
+## Rollback Triggers for `4.2`
+
+1. Any retained invariant regression in seam-extracted runtime path.
+2. Deterministic replay divergence for previously stable scenario fingerprints.
+3. Lock-order violation introduced in runtime state/scheduler/obligation interactions.
+
+Rollback target:
+
+Revert to last slice-stable seam boundary (`S{n-1}`), preserve evidence, and reopen the failing slice with explicit root-cause note.

@@ -116,6 +116,94 @@ Purpose: preserve runtime progress while preventing UI starvation and perpetual 
 - Browser APIs (`setTimeout`, channel post, entropy/time reads) must route through capability-scoped handles.
 - No direct global API usage in semantic core.
 
+## 3.1 Worker Offload Strategy Contract (`asupersync-umelq.5.4`)
+
+CPU-heavy runtime paths may offload to Web Workers only under explicit policy
+control. Canonical policy artifacts:
+
+- `.github/wasm_worker_offload_policy.json`
+- `scripts/check_wasm_worker_offload_policy.py`
+- `artifacts/wasm_worker_offload_summary.json`
+
+### W1: Offload Trigger Law
+
+Offload from main-thread scheduler is permitted only when all of these are
+true:
+
+1. Estimated compute cost exceeds `min_estimated_cpu_ns`.
+2. Inline execution would exceed `max_main_thread_slice_ns`.
+3. Queue pressure exceeds `queue_backpressure_threshold` OR inline retry count
+   exceeded `max_inline_retry_count`.
+
+This prevents opportunistic offload that would hide scheduling policy bugs.
+
+### W2: Ownership and Region Affinity
+
+Worker jobs remain owned by the originating region/task tuple:
+
+1. Worker envelopes must carry `region_id`, `task_id`, and `obligation_id`.
+2. Cross-region handoff is forbidden.
+3. Stale generation messages must fail with typed errors (no panic, no silent
+   drop).
+
+### W3: Worker Message Protocol
+
+Worker control uses typed envelopes with deterministic sequencing:
+
+1. Required fields include `message_id`, `job_id`, `op`, `seq_no`, `seed`,
+   `issued_at_turn`, and ownership fields.
+2. Allowed operations are limited to:
+   - `spawn_job`
+   - `poll_status`
+   - `cancel_job`
+   - `drain_job`
+   - `finalize_job`
+   - `shutdown_worker`
+3. Terminal states are only `completed` or `failed`.
+
+### W4: Cancellation Across Worker Boundary
+
+Worker lifecycle must preserve runtime cancellation semantics:
+
+1. Cancel request (`cancel_job`) is acknowledged within `request_timeout_ms`.
+2. Worker executes bounded drain (`drain_job`) and bounded finalize
+   (`finalize_job`).
+3. Required trace events:
+   - `worker_cancel_requested`
+   - `worker_cancel_acknowledged`
+   - `worker_drain_started`
+   - `worker_drain_completed`
+   - `worker_finalize_completed`
+
+### W5: Deterministic Replay Contract
+
+Offloaded execution remains replay-safe only when the worker envelope includes:
+
+1. `seed`
+2. `decision_seq`
+3. `host_turn_id`
+4. replay hash / digest key
+
+Missing any of these is a policy violation.
+
+### W6: Required Worker-Offload Test Matrix
+
+The following scenarios are release-blocking for worker-offload policy:
+
+1. `WKR-OFFLOAD-CPU-BURST`
+2. `WKR-CANCEL-PROPAGATION`
+3. `WKR-OWNERSHIP-NO-CROSS-REGION`
+4. `WKR-DETERMINISTIC-REPLAY`
+5. `WKR-PAYLOAD-BOUNDARY`
+
+Deterministic validation commands:
+
+```bash
+python3 scripts/check_wasm_worker_offload_policy.py --self-test
+python3 scripts/check_wasm_worker_offload_policy.py \
+  --policy .github/wasm_worker_offload_policy.json
+```
+
 ## Failure Semantics
 
 ### F1 Reentrancy Attempt
