@@ -41,6 +41,119 @@ A frontend team can install `@asupersync/browser`, orchestrate complex async wor
 4. Keep capability boundaries explicit and auditable.
 5. Do not ship a wasm artifact that weakens semantics for convenience.
 
+### 1.1 ADR Governance Contract (WASM Program)
+
+This program is governed by a formal ADR series. Any browser-facing semantic decision that can affect invariants, determinism, cancellation behavior, capability boundaries, or interoperability must land through this process.
+
+Compatibility stance:
+
+1. Browser adaptation is correctness-first, not compatibility-first.
+2. Backwards compatibility is not guaranteed during this phase; semantic correctness is mandatory.
+3. Any compatibility concession is allowed only when invariant-preserving and explicitly documented in an ADR with expiration criteria.
+
+### 1.2 ADR Index (program baseline)
+
+| ADR ID | Title | Status | Primary Owner | Scope |
+|---|---|---|---|---|
+| `WASM-ADR-001` | Browser Semantic Contract Boundary | accepted | runtime-core | Defines what semantic behavior must remain identical to native mode |
+| `WASM-ADR-002` | Platform Seam Taxonomy | accepted | runtime-core | Defines scheduler/time/io/authority seam model and responsibilities |
+| `WASM-ADR-003` | Runtime Profile Model (`live-main-thread`, `live-worker`, `deterministic`) | accepted | runtime-core | Defines supported execution profiles and constraints |
+| `WASM-ADR-004` | Capability Authority Envelope for Browser APIs | proposed | security/runtime | Defines explicit authority boundaries for fetch/storage/worker APIs |
+| `WASM-ADR-005` | Deterministic Replay Artifact Contract for Browser Mode | proposed | trace/lab | Defines browser trace/replay schema guarantees |
+| `WASM-ADR-006` | Deferred Native Surface Register Policy | accepted | architecture | Defines gate/defer criteria for native-only modules |
+| `WASM-ADR-007` | Versioned WASM ABI and Break Policy | proposed | bindings/api | Defines ABI stability, versioning, and break handling rules |
+| `WASM-ADR-008` | CI Gating and Evidence Promotion Rules | proposed | qa/ci | Defines evidence required for merge/release gates |
+
+### 1.3 Explicitly Rejected Alternatives
+
+These alternatives are intentionally rejected and must not be reintroduced without a superseding ADR:
+
+1. Silent semantic weakening for browser convenience (for example: best-effort cancellation that can leak obligations).
+2. Ambient authority wrappers around browser globals (`window`, `fetch`, timers) without explicit capability paths.
+3. "Compile-only parity" acceptance criteria that skip deterministic replay/evidence requirements.
+4. Ad-hoc per-feature policy exceptions without decision records and expiry.
+
+### 1.4 ADR Decision Template (required for each browser-semantic decision)
+
+```markdown
+# WASM-ADR-XXX: <Title>
+
+- Status: proposed | accepted | superseded | deprecated
+- Date: YYYY-MM-DD
+- Owners: <team/people>
+- Related beads: <ids>
+- Supersedes: <optional ADR IDs>
+
+## Context
+- What exact semantic/runtime problem is being solved?
+- Which invariants are at risk if this is done incorrectly?
+- Which alternatives were considered and why rejected?
+
+## Decision
+- Concrete decision statement (normative language: MUST/SHOULD/MAY).
+- Exact surfaces affected (modules, feature flags, API boundaries).
+
+## Allowed Tradeoffs
+- Tradeoffs accepted for this decision (explicit, bounded, testable).
+
+## Forbidden Compromises
+- Explicitly disallowed shortcuts that would violate invariants.
+
+## Invariant Impact Checklist
+- [ ] Structured ownership preserved
+- [ ] Cancel protocol preserved (`request -> drain -> finalize`)
+- [ ] Loser-drain preserved
+- [ ] No obligation leaks introduced
+- [ ] Region-close quiescence preserved
+- [ ] Deterministic profile reproducibility preserved
+- [ ] Capability boundaries remain explicit
+
+## Required Evidence
+- Unit evidence:
+- Conformance/e2e evidence:
+- Replay/trace evidence:
+- CI gate evidence:
+
+## Rollout + Rollback
+- Rollout plan:
+- Rollback trigger conditions:
+- Rollback execution path:
+
+## Compatibility Statement
+- Explicitly state compatibility impact and migration obligations.
+```
+
+### 1.5 Review Protocol and Sign-Off
+
+Any ADR marked `accepted` requires:
+
+1. One runtime-core approver.
+2. One invariants/testing approver.
+3. One integration/security approver when capability or boundary surfaces are touched.
+
+Required review checklist:
+
+1. Decision is scoped to named surfaces and is testable.
+2. Rejected alternatives are explicit and technically justified.
+3. Invariant impact checklist is complete with linked evidence.
+4. CI/replay artifacts are reproducible with pinned commands.
+5. Failure/rollback criteria are concrete and operational.
+
+Promotion gates:
+
+1. `proposed` -> `accepted`: requires evidence links + sign-off checklist complete.
+2. `accepted` -> implemented rollout: requires bead links and CI pass on required lanes.
+3. superseding/deprecating an ADR: must reference old/new IDs and migration obligations.
+
+### 1.6 Cadence and Audit Rules
+
+1. ADR index is reviewed weekly during browser program triage.
+2. Every merged PR that changes browser semantic behavior must link an ADR ID.
+3. Any semantic drift discovered in replay/conformance must file:
+   - a corrective bead,
+   - an ADR amendment (or superseding ADR),
+   - and a root-cause note in the affected ADR.
+
 ---
 
 ## 2. Verified Baseline and Facts
@@ -272,24 +385,136 @@ Portability classes:
 2. `A` amber: moderate coupling, abstraction needed
 3. `R` red: strong native coupling, gate or replace
 
-| Area | LOC | Class | v1 Action |
-|---|---:|---|---|
-| types | 12k | G | move/retain in core |
-| cancel | 4k+ | G | core |
-| obligation | 28k | G/A | core with backend seams |
-| combinator | 17k | G/A | core |
-| channel | 10k | G/A | core with wake abstraction |
-| sync | 11k | A | refactor runtime coupling |
-| cx | 12k | A | backend handle abstraction |
-| time | 8k | A | backend-specific timer implementations |
-| trace | 36k | G/A | core + browser sink adapters |
-| lab | 38k | A | deterministic browser profile adaptation |
-| runtime | 49k | A/R | split semantic scheduler vs native workers |
-| net | 26k | R | gate native stack; build browser adapters |
-| fs | 4k+ | R | gate out for browser v1 |
-| signal | 1.8k | R | gate out for browser v1 |
-| process | 1.4k | R | gate out for browser v1 |
-| server | 1.8k | R | gate out for browser v1 |
+### 6.1 Census Method (Deterministic, Reproducible)
+
+The module census below is generated from crate surfaces declared in `src/lib.rs` and measured against live source using stable `rg` queries.
+
+```bash
+rg --no-filename '^pub mod [a-z_]+' src/lib.rs
+rg -n "crate::<module>(::|;)" src -g '*.rs'              # fan-in
+rg -o "crate::[a-z_]+" src/<module>{.rs,/} -g '*.rs'     # fan-out
+rg -n "std::os::|libc|nix::|socket2|polling::|io_uring|kqueue|epoll|std::fs|std::net|signal" \
+  src/<module>{.rs,/} -g '*.rs'                           # implicit OS assumptions
+```
+
+Snapshot timestamp: `2026-02-28`.
+
+### 6.2 Public Module-by-Module Census (src/lib.rs surface)
+
+Disposition semantics:
+
+1. `required`: in browser-v1 semantic subset (or required to keep deterministic correctness workflow intact).
+2. `optional`: not required for browser-v1 core path, but portable enough for later browser expansion.
+3. `out-of-scope`: native-first surface gated out for browser-v1.
+
+| Module | Surface Kind | Browser v1 Disposition | Fan-in | Fan-out | Native Hits | Implicit OS Assumptions |
+|---|---|---|---:|---:|---:|---|
+| actor | public module | optional | 4 | 12 | 1 | light native OS coupling |
+| app | public module | optional | 14 | 10 | 0 | no explicit OS primitive coupling |
+| audit | public module | optional | 0 | 0 | 9 | light native OS coupling |
+| bytes | public module | required | 39 | 28 | 0 | no explicit OS primitive coupling |
+| cancel | public module | required | 0 | 6 | 0 | no explicit OS primitive coupling |
+| channel | public module | required | 66 | 59 | 19 | light native OS coupling |
+| cli | public module | out-of-scope | 0 | 33 | 112 | strong native OS coupling |
+| codec | public module | optional | 24 | 21 | 0 | no explicit OS primitive coupling |
+| combinator | public module | required | 45 | 30 | 0 | no explicit OS primitive coupling |
+| config | public module | optional | 12 | 3 | 2 | light native OS coupling |
+| conformance | public module | optional | 2 | 4 | 0 | no explicit OS primitive coupling |
+| console | public module | optional | 9 | 5 | 0 | no explicit OS primitive coupling |
+| cx | public module | required | 300 | 33 | 5 | light native OS coupling |
+| database | public module | out-of-scope | 0 | 14 | 5 | light native OS coupling |
+| decoding | public module | optional | 3 | 10 | 0 | no explicit OS primitive coupling |
+| distributed | public module | optional | 9 | 36 | 0 | no explicit OS primitive coupling |
+| encoding | public module | optional | 5 | 4 | 0 | no explicit OS primitive coupling |
+| epoch | public module | optional | 0 | 11 | 0 | no explicit OS primitive coupling |
+| error | public module | required | 109 | 2 | 0 | no explicit OS primitive coupling |
+| evidence | public module | optional | 12 | 5 | 8 | light native OS coupling |
+| evidence_sink | public module | optional | 15 | 2 | 0 | no explicit OS primitive coupling |
+| fs | public module | out-of-scope | 33 | 58 | 141 | strong native OS coupling |
+| gen_server | public module | optional | 5 | 15 | 1 | light native OS coupling |
+| grpc | public module | out-of-scope | 4 | 48 | 2 | light native OS coupling |
+| http | public module | out-of-scope | 31 | 52 | 52 | moderate native OS coupling |
+| io | public module | out-of-scope | 49 | 49 | 2 | light native OS coupling |
+| lab | public module | optional | 122 | 186 | 9 | light native OS coupling |
+| link | public module | optional | 2 | 2 | 73 | moderate native OS coupling |
+| messaging | public module | out-of-scope | 1 | 16 | 2 | light native OS coupling |
+| migration | public module | optional | 0 | 2 | 0 | no explicit OS primitive coupling |
+| monitor | public module | optional | 23 | 2 | 0 | no explicit OS primitive coupling |
+| net | public module | out-of-scope | 45 | 121 | 161 | strong native OS coupling |
+| obligation | public module | required | 49 | 89 | 10 | light native OS coupling |
+| observability | public module | required | 29 | 36 | 22 | moderate native OS coupling |
+| plan | public module | required | 19 | 20 | 0 | no explicit OS primitive coupling |
+| process | public module | out-of-scope | 0 | 7 | 29 | moderate native OS coupling |
+| raptorq | public module | optional | 48 | 33 | 2 | light native OS coupling |
+| record | public module | required | 177 | 34 | 0 | no explicit OS primitive coupling |
+| remote | public module | optional | 20 | 6 | 0 | no explicit OS primitive coupling |
+| runtime | public module | required | 253 | 223 | 406 | strong native OS coupling |
+| security | public module | optional | 64 | 7 | 0 | no explicit OS primitive coupling |
+| server | public module | out-of-scope | 4 | 18 | 198 | strong native OS coupling |
+| service | public module | optional | 4 | 32 | 2 | light native OS coupling |
+| session | public module | optional | 0 | 7 | 0 | no explicit OS primitive coupling |
+| signal | public module | out-of-scope | 3 | 24 | 167 | strong native OS coupling |
+| spork | public module | optional | 1 | 13 | 1 | light native OS coupling |
+| stream | public module | required | 40 | 120 | 0 | no explicit OS primitive coupling |
+| supervision | public module | optional | 32 | 10 | 0 | no explicit OS primitive coupling |
+| sync | public module | required | 32 | 45 | 16 | light native OS coupling |
+| test_logging | public module | optional | 6 | 6 | 17 | light native OS coupling |
+| test_ndjson | public module | optional | 1 | 4 | 6 | light native OS coupling |
+| test_utils | public module | optional | 265 | 7 | 0 | no explicit OS primitive coupling |
+| time | public module | required | 85 | 52 | 0 | no explicit OS primitive coupling |
+| tls | public module | out-of-scope | 14 | 18 | 2 | light native OS coupling |
+| trace | public module | required | 142 | 80 | 28 | moderate native OS coupling |
+| tracing_compat | public module | optional | 67 | 5 | 0 | no explicit OS primitive coupling |
+| transport | public module | optional | 32 | 46 | 7 | light native OS coupling |
+| types | public module | required | 666 | 27 | 2 | light native OS coupling |
+| util | public module | required | 149 | 2 | 0 | no explicit OS primitive coupling |
+| web | public module | optional | 38 | 13 | 2 | light native OS coupling |
+
+### 6.3 Internal Runtime Surface Census (non-lib.rs seams)
+
+| Internal Surface | Browser v1 Disposition | Fan-in/Fan-out Role | Implicit OS Assumptions |
+|---|---|---|---|
+| `runtime/scheduler/three_lane.rs` | required (semantic core), with backend seam extraction | very high fan-in scheduler hub | currently assumes multi-worker parking/unparking and native thread model |
+| `runtime/sharded_state.rs` | required | high fan-in state-mutation hub | lock-strategy assumptions; no hard OS syscall coupling required |
+| `runtime/region_heap.rs` | required | medium fan-in allocator/state substrate | no direct syscall assumptions; deterministic handle semantics portable |
+| `runtime/reactor/*` | out-of-scope for browser-v1 native path | high fan-out to IO stack | explicit epoll/kqueue/io_uring/FD token assumptions |
+| `runtime/io_driver.rs` | out-of-scope for browser-v1 native path | hub between scheduler and reactor | evented FD readiness and OS reactor wake assumptions |
+| `runtime/blocking_pool.rs` | out-of-scope for browser-v1 | medium fan-in for sync bridge | native thread creation/parking assumptions |
+| `runtime/local.rs` | required (adapted) | low fan-in local-task pinning layer | currently thread-local storage assumptions; must map to browser worker identity model |
+| `runtime/deadline_monitor.rs` | optional for v1 live profile, required for deterministic diagnostics profile | medium fan-in observability path | wall-clock fallback assumptions need browser monotonic timer substitution |
+
+### 6.4 Workspace Crate Census
+
+| Workspace Crate | Surface Kind | Browser v1 Disposition | Dependency Fan-in/Fan-out | Implicit OS Assumptions |
+|---|---|---|---|---|
+| `asupersync` | primary runtime library surface | required | fan-in: highest; fan-out: depends on macros + FrankenSuite crates (+ feature-gated tooling) | mixed; strong native assumptions concentrated in gated modules |
+| `asupersync-macros` | proc-macro compile-time surface | optional (ergonomics) | fan-in: consumed by `asupersync` when `proc-macros` enabled | none (compile-time syntax transformation only) |
+| `asupersync-conformance` | test/conformance surface | optional for shipping runtime; required for CI quality gates | fan-in: validation-only; fan-out: serde/tempfile | light filesystem assumptions via test tooling |
+| `franken-kernel` | shared type substrate | required (transitively used by runtime decision/evidence surfaces) | fan-in: `asupersync`, `franken-decision` | no OS coupling |
+| `franken-evidence` | evidence ledger schema | required for evidence pipeline | fan-in: `asupersync`, `franken-decision` | no OS coupling |
+| `franken-decision` | decision-contract runtime | required for scheduler decision-contract path | fan-in: `asupersync` | no OS coupling |
+| `frankenlab` | deterministic harness CLI/package | optional for browser runtime artifact; required for replay/forensics workflows | fan-in: operator/testing workflows, depends on `asupersync` | mostly tooling assumptions (CLI/file outputs), not runtime-core OS dependency |
+
+### 6.5 Browser-v1 Subset Summary (from census)
+
+Required semantic set:
+
+1. `types`, `error`, `cancel`, `obligation`, `record`
+2. `cx`, `runtime` (semantic slice only), `time`
+3. `channel`, `combinator`, `sync`, `stream`
+4. `trace`, `plan`, `observability`, `util`, `bytes`
+
+Out-of-scope native set (gated in browser-v1):
+
+1. `net`, `fs`, `process`, `signal`, `server`
+2. `io` (native reactor path), `http`, `grpc`, `tls`
+3. `database`, `messaging`, `cli`
+
+Critical implicit OS assumptions requiring explicit seam replacement before browser execution:
+
+1. Reactor/event-loop assumptions (`epoll`, `kqueue`, `io_uring`, tokenized FD readiness).
+2. Threading and parking assumptions (`Parker`, worker unparks, TLS task pinning).
+3. Filesystem/process/signal assumptions in runtime-adjacent tooling and native integrations.
 
 ---
 
@@ -416,25 +641,43 @@ All JS async operations are represented as capsules with explicit lifecycle:
 
 ## 10.2 Feature profile design
 
-Proposed profiles:
+Canonical browser build profiles (normative):
 
-1. `native-runtime`
-2. `wasm-runtime`
-3. `browser-io`
-4. `deterministic-mode`
-5. `browser-trace`
+| Profile ID | Profile name | Intended use | Required features | Allowed optional features | Forbidden features/surfaces | Promotion gate |
+|---|---|---|---|---|---|---|
+| `FP-BR-DEV` | `wasm-browser-dev` | local dev, fast iteration, diagnostics | `wasm-runtime`, `browser-io` | `browser-trace`, `tracing-integration`, `test-internals` | `native-runtime`, `cli`, `tls`, `sqlite`, `postgres`, `mysql`, `kafka`, any tokio-backed surface | must compile on `wasm32-unknown-unknown` and pass browser smoke suite |
+| `FP-BR-PROD` | `wasm-browser-prod` | production browser package | `wasm-runtime`, `browser-io` | `browser-trace` (bounded), `trace-compression` | `test-internals`, `native-runtime`, `cli`, database/network-native stacks, any tokio-backed surface | size/perf/security gates + invariant parity suite green |
+| `FP-BR-DET` | `wasm-browser-deterministic` | replay, incident forensics, CI deterministic checks | `wasm-runtime`, `deterministic-mode`, `browser-trace` | `trace-compression` | `native-runtime`, ambient-time shortcuts, non-deterministic entropy/time sources without capture hooks | deterministic replay matrix green for pinned traces |
+| `FP-BR-MIN` | `wasm-browser-minimal` | minimal embed footprint | `wasm-runtime` | none by default | `browser-io`, `browser-trace`, all non-essential integrations | compiles clean and passes core scheduler/cancel invariants |
+
+Profile normalization rules:
+
+1. Browser targets MUST select exactly one `FP-BR-*` canonical profile.
+2. `FP-BR-PROD` is the default release profile; all others are explicit opt-in.
+3. Any new browser feature must declare:
+   - which `FP-BR-*` profiles permit it,
+   - expected size/perf impact,
+   - deterministic-mode impact (`FP-BR-DET`).
+4. Any profile deviation requires ADR reference and expiration criteria.
 
 ## 10.3 Feature compatibility enforcement
 
-| Feature | Native | wasm |
-|---|---|---|
-| native-runtime | allowed | forbidden |
-| wasm-runtime | optional | required |
-| browser-io | no-op/forbidden | allowed |
-| cli | allowed | forbidden |
-| tls/sqlite/postgres/mysql/kafka | allowed | forbidden |
+| Feature/surface | Native target | wasm browser target | Enforcement mode |
+|---|---|---|---|
+| `native-runtime` | allowed | forbidden | compile-time `cfg` + compile-fail tests |
+| `wasm-runtime` | optional | required | profile validator + CI gate |
+| `browser-io` | no-op/forbidden | allowed in `FP-BR-DEV/PROD` | feature-compat matrix tests |
+| `deterministic-mode` | allowed | required for `FP-BR-DET` | deterministic lane gate |
+| `browser-trace` | optional | required for `FP-BR-DET`; optional bounded for PROD | artifact schema + replay gates |
+| `cli` | allowed | forbidden | target-gated manifest + compile-fail tests |
+| `tls/sqlite/postgres/mysql/kafka` | allowed by profile | forbidden for browser profiles | manifest policy checks |
+| tokio-backed surface | forbidden in core semantics | forbidden | dependency closure audit + deny-list |
 
-Implement compile-time guardrails for invalid combinations.
+Enforcement implementation requirements:
+
+1. Add profile validation checks that fail build on illegal feature combinations.
+2. Keep a committed compatibility matrix artifact and diff it in CI.
+3. Require per-profile reproducible commands in gate docs (all heavy checks run via `rch exec -- ...`).
 
 ---
 
@@ -655,22 +898,22 @@ Rule: every retained browser feature/invariant must map to at least one `L0-unit
 
 ## 17.5 Feature and invariant traceability matrix
 
-| Trace ID | Retained feature/invariant | Risk | Required L0 unit coverage | Required higher-level coverage | Deterministic replay required | Owner |
-|---|---|---|---|---|---|---|
-| `WVT-001` | Structured task ownership (no orphan tasks) | R0-critical | region tree ownership + close checks | L1 region close integration; L2 unmount-driven scope teardown | yes (`RP-REGION-001`) | Runtime backend owner |
-| `WVT-002` | Region close implies quiescence | R0-critical | region final-state machine tests | L1 quiescence oracle parity native vs wasm | yes (`RP-QUIESCE-001`) | Runtime backend owner |
-| `WVT-003` | Cancel protocol `request -> drain -> finalize` | R0-critical | cancel phase transition tables | L1 cancel-drain integration under deadlines; L2 route-transition cancel flow | yes (`RP-CANCEL-001`, `RP-CANCEL-002`) | Cancellation + runtime owner |
-| `WVT-004` | Loser drain after race | R0-critical | race combinator loser-drain unit suite | L1 concurrent race integration with obligation accounting | yes (`RP-RACE-001`) | Combinator owner |
-| `WVT-005` | No obligation leaks (permit/ack/lease) | R0-critical | obligation table lifecycle tests | L1 leak oracle across fetch/websocket capsules | yes (`RP-OBL-001`) | Obligation owner |
-| `WVT-006` | Deterministic mode parity | R0-critical | virtual clock + tie-break ordering tests | L1 seed parity native/wasm; L3 fingerprint equivalence | yes (`RP-DET-001`) | Determinism owner |
-| `WVT-007` | Browser scheduler fairness and cancel streak bounds | R1-high | lane budget and streak limit tests | L1 scheduler stress integration; L2 UI latency smoke | yes (`RP-SCHED-001`) | Runtime backend owner |
-| `WVT-008` | Browser timer semantics and deadlines | R1-high | timer wheel/tick conversion tests | L1 timeout propagation integration in wasm profile | yes (`RP-TIME-001`) | Time subsystem owner |
-| `WVT-009` | Fetch capsule authority + cancellation bridge | R0-critical | capability check + lifecycle transition tests | L1 fetch abort integration; L2 framework data-load cancel path | yes (`RP-FETCH-001`) | Browser IO owner |
-| `WVT-010` | WebSocket capsule close/finalize mapping | R1-high | websocket state transition tests | L1 socket close/drain integration | yes (`RP-WS-001`) | Browser IO owner |
-| `WVT-011` | wasm handle generation safety (stale handle rejection) | R0-critical | handle registry and generation mismatch tests | L2 browser API misuse scenarios | yes (`RP-HANDLE-001`) | Bindings owner |
-| `WVT-012` | Trace schema integrity and replay import/export | R1-high | schema encode/decode unit tests | L1 artifact contract validation; L3 replay consistency | yes (`RP-TRACE-001`) | Replay + observability owner |
-| `WVT-013` | React integration lifecycle correctness | R2-medium | hook state-machine tests | L2 React integration e2e | optional (`RP-REACT-001`) | Framework owner |
-| `WVT-014` | Next.js App Router boundary correctness | R2-medium | boundary helper unit tests | L2 Next integration e2e/hydration safety | optional (`RP-NEXT-001`) | Framework owner |
+| Trace ID | Retained feature/invariant | Risk | Implementation loci (authoritative surfaces) | Required L0 unit coverage | Required higher-level coverage | Required evidence artifacts | Deterministic replay required | Owner |
+|---|---|---|---|---|---|---|---|---|
+| `WVT-001` | Structured task ownership (no orphan tasks) | R0-critical | `src/runtime/state.rs`, `src/runtime/region_table.rs`, `src/cx/scope.rs` | region tree ownership + close checks | L1 region close integration; L2 unmount-driven scope teardown | `EV-WVT-001-L0`, `EV-WVT-001-L1`, `RP-REGION-001` | yes (`RP-REGION-001`) | Runtime backend owner |
+| `WVT-002` | Region close implies quiescence | R0-critical | `src/runtime/state.rs`, `src/record/region.rs`, `src/lab/runtime.rs` | region final-state machine tests | L1 quiescence oracle parity native vs wasm | `EV-WVT-002-L0`, `EV-WVT-002-L1`, `RP-QUIESCE-001` | yes (`RP-QUIESCE-001`) | Runtime backend owner |
+| `WVT-003` | Cancel protocol `request -> drain -> finalize` | R0-critical | `src/cancel/*`, `src/runtime/state.rs`, `src/types/cancel.rs` | cancel phase transition tables | L1 cancel-drain integration under deadlines; L2 route-transition cancel flow | `EV-WVT-003-L0`, `EV-WVT-003-L1`, `RP-CANCEL-001`, `RP-CANCEL-002` | yes (`RP-CANCEL-001`, `RP-CANCEL-002`) | Cancellation + runtime owner |
+| `WVT-004` | Loser drain after race | R0-critical | `src/combinator/race.rs`, `src/combinator/select.rs`, `src/cancel/*` | race combinator loser-drain unit suite | L1 concurrent race integration with obligation accounting | `EV-WVT-004-L0`, `EV-WVT-004-L1`, `RP-RACE-001` | yes (`RP-RACE-001`) | Combinator owner |
+| `WVT-005` | No obligation leaks (permit/ack/lease) | R0-critical | `src/obligation/*`, `src/runtime/obligation_table.rs`, `src/runtime/state.rs` | obligation table lifecycle tests | L1 leak oracle across fetch/websocket capsules | `EV-WVT-005-L0`, `EV-WVT-005-L1`, `RP-OBL-001` | yes (`RP-OBL-001`) | Obligation owner |
+| `WVT-006` | Deterministic mode parity | R0-critical | `src/lab/runtime.rs`, `src/time/*`, `src/trace/canonicalize.rs` | virtual clock + tie-break ordering tests | L1 seed parity native/wasm; L3 fingerprint equivalence | `EV-WVT-006-L0`, `EV-WVT-006-L1`, `RP-DET-001` | yes (`RP-DET-001`) | Determinism owner |
+| `WVT-007` | Browser scheduler fairness and cancel streak bounds | R1-high | `src/runtime/scheduler/three_lane.rs`, `src/runtime/scheduler/priority.rs` | lane budget and streak limit tests | L1 scheduler stress integration; L2 UI latency smoke | `EV-WVT-007-L0`, `EV-WVT-007-L1`, `RP-SCHED-001` | yes (`RP-SCHED-001`) | Runtime backend owner |
+| `WVT-008` | Browser timer semantics and deadlines | R1-high | `src/time/driver.rs`, `src/time/wheel.rs`, `src/runtime/timer.rs` | timer wheel/tick conversion tests | L1 timeout propagation integration in wasm profile | `EV-WVT-008-L0`, `EV-WVT-008-L1`, `RP-TIME-001` | yes (`RP-TIME-001`) | Time subsystem owner |
+| `WVT-009` | Fetch capsule authority + cancellation bridge | R0-critical | `src/cx/cx.rs`, `src/io/*`, browser adapter seam layer | capability check + lifecycle transition tests | L1 fetch abort integration; L2 framework data-load cancel path | `EV-WVT-009-L0`, `EV-WVT-009-L1`, `RP-FETCH-001` | yes (`RP-FETCH-001`) | Browser IO owner |
+| `WVT-010` | WebSocket capsule close/finalize mapping | R1-high | `src/net/websocket/*`, `src/cancel/*`, browser adapter seam layer | websocket state transition tests | L1 socket close/drain integration | `EV-WVT-010-L0`, `EV-WVT-010-L1`, `RP-WS-001` | yes (`RP-WS-001`) | Browser IO owner |
+| `WVT-011` | wasm handle generation safety (stale handle rejection) | R0-critical | `src/runtime/region_heap.rs`, bindings handle registry layer | handle registry and generation mismatch tests | L2 browser API misuse scenarios | `EV-WVT-011-L0`, `EV-WVT-011-L2`, `RP-HANDLE-001` | yes (`RP-HANDLE-001`) | Bindings owner |
+| `WVT-012` | Trace schema integrity and replay import/export | R1-high | `src/trace/*`, `src/lab/replay.rs`, schema contract docs | schema encode/decode unit tests | L1 artifact contract validation; L3 replay consistency | `EV-WVT-012-L0`, `EV-WVT-012-L1`, `RP-TRACE-001` | yes (`RP-TRACE-001`) | Replay + observability owner |
+| `WVT-013` | React integration lifecycle correctness | R2-medium | `@asupersync/react`, `src/web/*` bindings boundary | hook state-machine tests | L2 React integration e2e | `EV-WVT-013-L0`, `EV-WVT-013-L2`, `RP-REACT-001` | optional (`RP-REACT-001`) | Framework owner |
+| `WVT-014` | Next.js App Router boundary correctness | R2-medium | `@asupersync/next`, route/runtime boundary helpers | boundary helper unit tests | L2 Next integration e2e/hydration safety | `EV-WVT-014-L0`, `EV-WVT-014-L2`, `RP-NEXT-001` | optional (`RP-NEXT-001`) | Framework owner |
 
 ## 17.6 Coverage targets and pass/fail thresholds
 
@@ -750,72 +993,47 @@ Cadence:
 
 ## 19. Phase Plan with Entry/Exit Gates
 
-## Phase 0: Baseline and ADR lock
+### 19.1 Phase-gate operating contract
 
-Entry:
+1. Gates are ordered and monotonic (`PG-0` through `PG-9`); no skipping and no parallel promotion.
+2. A gate is only promotable when all exit evidence links are present and replayable.
+3. Any kill criterion is a stop-the-line event: freeze forward work on affected tracks until disposition is documented.
+4. Every rollback must pin:
+   - rollback trigger ID,
+   - last known-good gate,
+   - exact revert scope (PRs/beads),
+   - deterministic repro bundle (`RP-*`, `EV-*`).
+5. Promotion authority is triad approval: runtime owner + invariants/testing owner + integration/security owner (for capability/interop gates).
 
-1. current baseline identified
+### 19.2 Gate matrix: entry, exit, kill, rollback
 
-Exit:
+| Gate | Phase | Entry | Exit | Kill criteria (stop-the-line) | Rollback trigger and target |
+|---|---|---|---|---|---|
+| `PG-0` | Phase 0: Baseline and ADR lock | Baseline inventory and blocker scan complete | wasm CI lane active; blocker report stable; ADR baseline approved | Any retained invariant lacks owning ADR; blocker evidence non-reproducible | `RB-0A`: ADR contradiction or missing owner -> rollback to pre-ADR-lock state and re-run baseline inventory |
+| `PG-1` | Phase 1: Dependency closure repair | `PG-0` accepted | wasm profile reaches crate compilation stage | wasm compile blocked by unresolved native dependency chain for 2 consecutive milestone cycles | `RB-1A`: closure regression -> revert offending dependency/profile changes to last green `PG-0/1` commit set |
+| `PG-2` | Phase 2: Surface gating | `PG-1` accepted | wasm path excludes native-only surfaces cleanly | Any required browser-v1 surface removed without deferred-register entry; cfg fences permit forbidden native path in wasm profile | `RB-2A`: surface regression -> revert fence/export edits to last green `PG-1` and regenerate census |
+| `PG-3` | Phase 3: Semantic seam extraction | `PG-2` accepted | backend interfaces wired; native parity preserved | Native parity regressions on retained invariants (`WVT-*`) or lock-order violations introduced by seam wiring | `RB-3A`: seam parity break -> rollback seam extraction PR batch to last green `PG-2` |
+| `PG-4` | Phase 4: Browser scheduler/time alpha | `PG-3` accepted | scheduler and timer suites pass in browser harness | Deterministic profile replay mismatch on identical seed; starvation/fairness regression above agreed threshold in scheduler suites | `RB-4A`: scheduler drift -> rollback browser scheduler/time backend to last green `PG-3` traits-only state |
+| `PG-5` | Phase 5: Browser I/O alpha | `PG-4` accepted | fetch/websocket cancel semantics verified | Obligation leaks, loser-drain failures, or capability-boundary violations in browser I/O suites | `RB-5A`: I/O semantic violation -> rollback adapter implementation while retaining seam interfaces |
+| `PG-6` | Phase 6: Bindings and TS alpha | `PG-5` accepted | strict TS integration green | ABI break without version bump/migration note; ownership/lifecycle mismatch across JS<->WASM boundary | `RB-6A`: binding contract break -> rollback binding layer to last green ABI schema version |
+| `PG-7` | Phase 7: React/Next beta | `PG-6` accepted | example apps and framework e2e suites green | Framework integration hides cancellation/ownership semantics or introduces nondeterministic failure clusters | `RB-7A`: framework semantic mismatch -> rollback framework adapters/hooks to last green TS core |
+| `PG-8` | Phase 8: Replay beta | `PG-7` accepted | deterministic reproduction of real trace bug demonstrated | Replay pipeline cannot reproduce captured incidents from pinned artifact set | `RB-8A`: replay non-reproducible -> rollback trace/replay schema changes to last green `PG-7` |
+| `PG-9` | Phase 9: Hardening + GA | `PG-8` accepted | GA criteria satisfied across correctness, perf/size, security, release ops | Any red gate in GA board: invariant, security, perf/size budget, or release automation | `RB-9A`: GA blocker -> rollback release candidate to last green `PG-8` and reopen blocked bead cluster |
 
-1. wasm CI lane active
-2. blocker report stable
-3. ADRs approved
+### 19.3 Rollback execution protocol (mandatory)
 
-## Phase 1: Dependency closure repair
-
-Exit:
-
-1. wasm profile reaches crate compilation stage
-
-## Phase 2: Surface gating
-
-Exit:
-
-1. wasm path excludes native-only surfaces cleanly
-
-## Phase 3: Semantic seam extraction
-
-Exit:
-
-1. backend interfaces wired
-2. native parity preserved
-
-## Phase 4: Browser scheduler/time alpha
-
-Exit:
-
-1. scheduler and timer suites pass in browser harness
-
-## Phase 5: Browser I/O alpha
-
-Exit:
-
-1. fetch/websocket cancel semantics verified
-
-## Phase 6: Bindings and TS alpha
-
-Exit:
-
-1. strict TS integration green
-
-## Phase 7: React/Next beta
-
-Exit:
-
-1. example apps and framework e2e suites green
-
-## Phase 8: Replay beta
-
-Exit:
-
-1. deterministic reproduction of real trace bug demonstrated
-
-## Phase 9: Hardening + GA
-
-Exit:
-
-1. all GA criteria satisfied
+1. Incident declaration:
+   - issue ID `RB-*` opened with gate ID and trigger statement.
+2. Freeze scope:
+   - pause promotions on affected track until rollback decision lands.
+3. Reproduce deterministically:
+   - attach `rch exec -- cargo check --all-targets` / `rch exec -- cargo test` / relevant replay command output as artifact links.
+4. Execute rollback:
+   - revert only the scoped PR/bead set tied to the trigger; do not widen blast radius without a second approval.
+5. Verify rollback target:
+   - rerun required gate evidence and confirm return to last known-green state.
+6. Resume conditions:
+   - corrective bead created, owner assigned, and prevention check added to gate evidence.
 
 ---
 
@@ -894,14 +1112,37 @@ Exit:
 
 ## 22. Risk Register
 
-| Risk | Trigger | Impact | Mitigation |
-|---|---|---|---|
-| dependency regression | unguarded native dep added | wasm build breaks | dependency CI gate |
-| semantic drift | backend divergence | invariant regressions | parity matrix + oracle gates |
-| UI jank | oversized tick work | poor UX | budget/yield/worker mode |
-| weak binding semantics | lifecycle leaks | correctness issues | capsule model + handle safety |
-| size creep | feature accretion | adoption friction | package tiers + size gates |
-| security issues | stale/forged handle usage | runtime misuse | generation checks + fuzz tests |
+### 22.1 Owner-assigned risk control table
+
+| Risk ID | Risk | Trigger signal | Impact | Mitigation owner | Mitigation controls | Verification evidence | Review cadence | Escalation trigger |
+|---|---|---|---|---|---|---|---|---|
+| `R-01` | Dependency regression | New native dependency enters wasm profile closure checks | wasm build break, release delay | Build/Dependency owner | dependency CI gate, feature-profile closure checks, forbidden-dep policy checks | `cargo tree` diff artifact, wasm compile evidence bundle | Every PR + weekly triage | 2 consecutive red wasm lane runs |
+| `R-02` | Semantic drift | Native vs browser parity mismatch on retained invariants | cancellation/quiescence correctness loss | Runtime invariants owner | `WVT-*` parity matrix, oracle suites, seam contract checks | parity report with reproducible seed/trace IDs | Every milestone gate | Any invariant gate failure (`PG-3` to `PG-9`) |
+| `R-03` | Scheduler fairness/jank regression | Queue starvation or event-loop budget overruns | degraded UX, latent task completion | Browser scheduler owner | fairness budget checks, yield discipline, worker-offload policy | scheduler benchmark + determinism run artifacts | Weekly + perf gate | p95/p99 fairness budget miss in 2 runs |
+| `R-04` | Binding lifecycle unsoundness | JS<->WASM ownership mismatch, leaked handles, stale refs | correctness and stability regressions | Bindings/API owner | ABI versioning policy, handle-generation checks, lifecycle conformance tests | ABI contract tests + leak/lifecycle reports | Every PR touching bindings | Any high-severity binding conformance failure |
+| `R-05` | Size/perf budget creep | Bundle/runtime metrics exceed defined budgets | adoption friction, runtime sluggishness | Perf/Release owner | budget thresholds, tiered package outputs, CI regression gates | size/perf trend report with baseline deltas | Weekly + release checkpoint | 10% budget overrun without approved waiver ADR |
+| `R-06` | Security/capability boundary breach | Implicit authority path or forged capability handle | misuse/exfiltration risk | Security/Capability owner | default-deny capsules, capability scope audits, fuzz/adversarial tests | security gate report + red-team scenario logs | Weekly security review | any unmitigated high-severity security finding |
+| `R-07` | Replay non-determinism | Same trace seed reproduces divergent outcomes | incident forensics become untrusted | Trace/Replay owner | trace schema contract tests, replay-delta verifier, artifact immutability checks | replay reproducibility ledger (`RP-*`) | Every replay change + weekly | any non-reproducible critical incident replay |
+| `R-08` | Coordination drift between beads and gates | Bead status, gate status, and evidence links diverge | blocked delivery and audit gaps | Program architecture owner | bead-thread discipline, gate board audits, ownership rebalancing | weekly audit report linking beads->gates->evidence | Weekly triage + bi-weekly milestone | orphaned high-priority bead for >1 milestone |
+
+### 22.2 Review rhythm and governance protocol
+
+1. Weekly risk review:
+   - validate trigger signals, owner status, and mitigation progress for all `R-*`.
+2. Bi-weekly milestone board:
+   - map open risks to `PG-*` promotion decisions and capture waivers/blocks explicitly.
+3. PR-time obligation:
+   - any PR touching risky surfaces must reference affected `R-*` rows and updated evidence.
+4. Escalation SLA:
+   - escalation triggers must be acknowledged by the mitigation owner within one working day.
+
+### 22.3 Risk closure criteria
+
+1. A risk row can be marked mitigated only when:
+   - trigger signal is controlled,
+   - verification evidence is green for two consecutive review cycles,
+   - and residual risk is documented with explicit owner acceptance.
+2. No `R-*` in escalated state is allowed at `PG-9` promotion.
 
 ---
 
