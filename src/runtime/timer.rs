@@ -74,9 +74,12 @@ impl TimerHeap {
         self.heap.peek().map(|e| e.deadline)
     }
 
-    /// Pops all tasks whose deadline is `<= now`.
-    pub fn pop_expired(&mut self, now: Time) -> Vec<TaskId> {
-        let mut expired = Vec::with_capacity(4);
+    /// Pops all tasks whose deadline is `<= now` into a caller-supplied buffer.
+    ///
+    /// The buffer is cleared before use. Using a reusable buffer avoids a heap
+    /// allocation on every tick when no timers have expired.
+    pub fn pop_expired_into(&mut self, now: Time, expired: &mut Vec<TaskId>) {
+        expired.clear();
         while let Some(entry) = self.heap.peek() {
             if entry.deadline <= now {
                 if let Some(entry) = self.heap.pop() {
@@ -88,6 +91,15 @@ impl TimerHeap {
                 break;
             }
         }
+    }
+
+    /// Pops all tasks whose deadline is `<= now`.
+    ///
+    /// Convenience wrapper that allocates a new Vec. Prefer
+    /// [`pop_expired_into`](Self::pop_expired_into) on hot paths.
+    pub fn pop_expired(&mut self, now: Time) -> Vec<TaskId> {
+        let mut expired = Vec::with_capacity(4);
+        self.pop_expired_into(now, &mut expired);
         expired
     }
 

@@ -54,6 +54,8 @@ pub struct Worker {
     scratch_local: Cell<Vec<TaskId>>,
     /// Pre-allocated scratch vec for global waiters (reused across polls).
     scratch_global: Cell<Vec<TaskId>>,
+    /// Pre-allocated scratch vec for foreign-worker wakers (reused across polls).
+    scratch_foreign_wakers: Cell<Vec<Waker>>,
 }
 
 impl std::fmt::Debug for Worker {
@@ -101,6 +103,7 @@ impl Worker {
             metrics,
             scratch_local: Cell::new(Vec::with_capacity(16)),
             scratch_global: Cell::new(Vec::with_capacity(16)),
+            scratch_foreign_wakers: Cell::new(Vec::with_capacity(4)),
         }
     }
 
@@ -249,9 +252,10 @@ impl Worker {
                     let finalizers = state.drain_ready_async_finalizers();
                     let mut local_waiters = self.worker.scratch_local.take();
                     let mut global_waiters = self.worker.scratch_global.take();
-                    let mut foreign_wakers = Vec::new();
+                    let mut foreign_wakers = self.worker.scratch_foreign_wakers.take();
                     local_waiters.clear();
                     global_waiters.clear();
+                    foreign_wakers.clear();
 
                     for waiter in waiters {
                         if let Some(record) = state.task(waiter) {
@@ -285,7 +289,7 @@ impl Worker {
                     }
                     drop(state);
 
-                    for waker in foreign_wakers {
+                    while let Some(waker) = foreign_wakers.pop() {
                         waker.wake();
                     }
 
@@ -295,6 +299,7 @@ impl Worker {
                     self.worker.local.push_many(&local_waiters);
                     self.worker.scratch_local.set(local_waiters);
                     self.worker.scratch_global.set(global_waiters);
+                    self.worker.scratch_foreign_wakers.set(foreign_wakers);
                     for (finalizer_task, _) in finalizers {
                         self.worker.global.push(finalizer_task);
                     }
@@ -440,9 +445,10 @@ impl Worker {
                 let finalizers = state.drain_ready_async_finalizers();
                 let mut local_waiters = self.scratch_local.take();
                 let mut global_waiters = self.scratch_global.take();
-                let mut foreign_wakers = Vec::new();
+                let mut foreign_wakers = self.scratch_foreign_wakers.take();
                 local_waiters.clear();
                 global_waiters.clear();
+                foreign_wakers.clear();
 
                 for waiter in waiters {
                     if let Some(record) = state.task(waiter) {
@@ -477,7 +483,7 @@ impl Worker {
                 }
                 drop(state);
 
-                for waker in foreign_wakers {
+                while let Some(waker) = foreign_wakers.pop() {
                     waker.wake();
                 }
 
@@ -487,6 +493,7 @@ impl Worker {
                 self.local.push_many(&local_waiters);
                 self.scratch_local.set(local_waiters);
                 self.scratch_global.set(global_waiters);
+                self.scratch_foreign_wakers.set(foreign_wakers);
                 for (finalizer_task, _) in finalizers {
                     self.global.push(finalizer_task);
                 }
