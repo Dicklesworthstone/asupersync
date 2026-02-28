@@ -512,10 +512,14 @@ impl<T> Drop for WriteFuture<'_, '_, T> {
         let mut state = self.lock.state.lock();
 
         if let Some(waiter_id) = self.waiter_id {
-            let removed = state.writer_queue.iter().position(|w| w.id == waiter_id).is_some_and(|pos| {
-                state.writer_queue.remove(pos);
-                true
-            });
+            let removed = state
+                .writer_queue
+                .iter()
+                .position(|w| w.id == waiter_id)
+                .is_some_and(|pos| {
+                    state.writer_queue.remove(pos);
+                    true
+                });
 
             state.writer_waiters = state.writer_waiters.saturating_sub(1);
 
@@ -849,10 +853,14 @@ impl<T> Drop for OwnedWriteFuture<'_, T> {
         let mut state = self.lock.state.lock();
 
         if let Some(waiter_id) = self.waiter_id {
-            let removed = state.writer_queue.iter().position(|w| w.id == waiter_id).is_some_and(|pos| {
-                state.writer_queue.remove(pos);
-                true
-            });
+            let removed = state
+                .writer_queue
+                .iter()
+                .position(|w| w.id == waiter_id)
+                .is_some_and(|pos| {
+                    state.writer_queue.remove(pos);
+                    true
+                });
 
             state.writer_waiters = state.writer_waiters.saturating_sub(1);
 
