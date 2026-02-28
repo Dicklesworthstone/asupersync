@@ -302,6 +302,37 @@ Missing fuzz targets to add: WebSocket frame parser and gRPC message framing.
 - Record reasons for protocol errors (without leaking secrets)
 - Never write to stdout/stderr in core runtime paths
 
+## Automated Security Release Gate (`asupersync-umelq.14.5`)
+
+The security release gate validates policy compliance in CI before every release.
+
+- Policy: `.github/security_release_policy.json`
+- Gate script: `scripts/check_security_release_gate.py`
+- Report artifact: `artifacts/security_release_gate_report.json`
+- Event log: `artifacts/security_release_gate_events.ndjson`
+
+Release-blocking checks (SEC-BLOCK-01 through SEC-BLOCK-06):
+
+1. **Dependency audit**: No forbidden runtime crates in WASM profiles.
+2. **Capability authority**: FetchAuthority/StorageAuthority default-deny enforcement.
+3. **Protocol bounds**: All protocol parsers enforce documented size limits.
+4. **Telemetry redaction**: Sensitive data scrubbed before emission.
+5. **Structured concurrency**: No orphan tasks or obligation leaks.
+6. **Supply chain**: All conditional dependencies have non-expired transition plans.
+
+Warning checks (non-blocking): fuzz target coverage, credential escalation prevention.
+
+Adversarial scenarios (ADV-01 through ADV-06) are validated for test coverage against
+`tests/security_invariants.rs`.
+
+Validator commands:
+
+```bash
+python3 scripts/check_security_release_gate.py --self-test
+python3 scripts/check_security_release_gate.py \
+  --policy .github/security_release_policy.json
+```
+
 ## Open Items (bd-2827)
 
 - Add fuzz targets for WebSocket frame parsing and gRPC message framing

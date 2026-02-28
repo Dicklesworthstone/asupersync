@@ -86,6 +86,25 @@ jobs:
             artifacts/wasm_perf_gate_events.ndjson
           retention-days: 30
 
+      - name: Security release gate self-test
+        run: python3 scripts/check_security_release_gate.py --self-test
+
+      - name: Security release gate
+        run: |
+          mkdir -p artifacts
+          python3 scripts/check_security_release_gate.py \
+            --policy .github/security_release_policy.json
+
+      - name: Upload security release gate report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-release-gate-report
+          path: |
+            artifacts/security_release_gate_report.json
+            artifacts/security_release_gate_events.ndjson
+          retention-days: 30
+
       - name: Clippy lints
         run: cargo clippy --all-targets --all-features -- -D warnings
 

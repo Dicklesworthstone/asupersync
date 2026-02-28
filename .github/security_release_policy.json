@@ -1,0 +1,176 @@
+{
+  "schema_version": "security-release-policy-v1",
+  "source_documents": [
+    "docs/security_threat_model.md",
+    "WASM_SIZE_PERF_BUDGETS.md"
+  ],
+  "release_blocking_criteria": [
+    {
+      "id": "SEC-BLOCK-01",
+      "category": "dependency_audit",
+      "title": "No forbidden runtime dependencies in WASM profiles",
+      "severity": "critical",
+      "description": "All WASM browser profiles must pass the dependency policy gate. Forbidden crates (tokio, hyper, reqwest, axum, async-std, smol) must not appear in the dependency closure.",
+      "validation": "scripts/check_wasm_dependency_policy.py",
+      "policy_file": ".github/wasm_dependency_policy.json",
+      "blocks_release": true
+    },
+    {
+      "id": "SEC-BLOCK-02",
+      "category": "capability_authority",
+      "title": "Default-deny capability enforcement",
+      "severity": "critical",
+      "description": "FetchAuthority and StorageAuthority must default to deny-all. No ambient network or storage access is permitted without explicit capability grant.",
+      "test_module": "tests/security_invariants.rs::browser_fetch_security",
+      "blocks_release": true
+    },
+    {
+      "id": "SEC-BLOCK-03",
+      "category": "protocol_bounds",
+      "title": "Protocol size limits enforced",
+      "severity": "high",
+      "description": "All protocol parsers must enforce documented size limits. HTTP/1 (64KiB headers, 16MiB body, 128 headers, 8192 request line), HTTP/2 (16384 frame, 65536 header list), gRPC (4MiB message), WebSocket (16MiB payload, 64MiB message).",
+      "test_module": "tests/security_invariants.rs",
+      "blocks_release": true,
+      "limits": {
+        "http1_max_headers_size": 65536,
+        "http1_max_body_size": 16777216,
+        "http1_max_headers": 128,
+        "http1_max_request_line": 8192,
+        "http2_max_frame_size": 16384,
+        "http2_max_header_list_size": 65536,
+        "grpc_max_message_size": 4194304,
+        "ws_max_payload_size": 16777216,
+        "ws_max_message_size": 67108864
+      }
+    },
+    {
+      "id": "SEC-BLOCK-04",
+      "category": "telemetry_redaction",
+      "title": "Sensitive data redaction in telemetry",
+      "severity": "high",
+      "description": "Storage telemetry must apply redaction policy. Keys matching redact_keys patterns and values in redact_namespaces must be scrubbed before emission.",
+      "test_module": "tests/security_invariants.rs::browser_storage_security",
+      "blocks_release": true
+    },
+    {
+      "id": "SEC-BLOCK-05",
+      "category": "structured_concurrency",
+      "title": "No orphan tasks or obligation leaks",
+      "severity": "critical",
+      "description": "Structured concurrency invariants must hold: region close implies quiescence, cancellation follows request-drain-finalize protocol, no obligation leaks.",
+      "test_files": [
+        "tests/close_quiescence_regression.rs",
+        "tests/obligation_wasm_parity.rs"
+      ],
+      "blocks_release": true
+    },
+    {
+      "id": "SEC-BLOCK-06",
+      "category": "supply_chain",
+      "title": "Dependency transition tracking current",
+      "severity": "high",
+      "description": "All conditional dependencies must have active (non-expired) transition plans. Expired transitions are treated as forbidden dependencies.",
+      "validation": "scripts/check_wasm_dependency_policy.py",
+      "blocks_release": true
+    }
+  ],
+  "release_warning_criteria": [
+    {
+      "id": "SEC-WARN-01",
+      "category": "fuzz_coverage",
+      "title": "Fuzz target coverage for protocol parsers",
+      "severity": "medium",
+      "description": "All protocol parsers should have associated fuzz targets. Missing targets are tracked but do not block release.",
+      "required_targets": [
+        "fuzz_http1_request",
+        "fuzz_http1_response",
+        "fuzz_hpack_decode",
+        "fuzz_http2_frame",
+        "fuzz_interest_flags"
+      ],
+      "desired_targets": [
+        "fuzz_websocket_frame",
+        "fuzz_grpc_message"
+      ],
+      "blocks_release": false
+    },
+    {
+      "id": "SEC-WARN-02",
+      "category": "credential_handling",
+      "title": "Credential escalation prevention",
+      "severity": "medium",
+      "description": "Fetch requests must not escalate credentials without explicit FetchAuthority.allow_credentials grant.",
+      "test_module": "tests/security_invariants.rs::browser_fetch_security",
+      "blocks_release": false
+    }
+  ],
+  "adversarial_scenarios": [
+    {
+      "id": "ADV-01",
+      "title": "Privilege escalation via method override",
+      "description": "Attempt to send POST when only GET is authorized. Must be rejected.",
+      "attack_class": "capability_bypass",
+      "expected_result": "MethodDenied error"
+    },
+    {
+      "id": "ADV-02",
+      "title": "Origin spoofing via untrusted origin",
+      "description": "Attempt fetch to unauthorized origin. Must be rejected.",
+      "attack_class": "capability_bypass",
+      "expected_result": "OriginDenied error"
+    },
+    {
+      "id": "ADV-03",
+      "title": "Storage namespace escalation",
+      "description": "Attempt to access storage namespace outside granted scope. Must be rejected.",
+      "attack_class": "capability_bypass",
+      "expected_result": "NamespaceDenied error"
+    },
+    {
+      "id": "ADV-04",
+      "title": "Header count overflow",
+      "description": "Send request with headers exceeding max_header_count. Must be rejected.",
+      "attack_class": "resource_exhaustion",
+      "expected_result": "TooManyHeaders error"
+    },
+    {
+      "id": "ADV-05",
+      "title": "Credential injection without grant",
+      "description": "Set credentials flag without allow_credentials grant. Must be rejected.",
+      "attack_class": "credential_theft",
+      "expected_result": "CredentialsDenied error"
+    },
+    {
+      "id": "ADV-06",
+      "title": "Telemetry data exfiltration",
+      "description": "Verify that sensitive storage labels are redacted in telemetry output.",
+      "attack_class": "data_leakage",
+      "expected_result": "Redacted label in telemetry"
+    }
+  ],
+  "escalation_process": {
+    "critical_findings": {
+      "action": "block_release",
+      "owner_routing": "runtime-core",
+      "sla_hours": 24,
+      "requires_bead": true
+    },
+    "high_findings": {
+      "action": "block_release",
+      "owner_routing": "runtime-core",
+      "sla_hours": 72,
+      "requires_bead": true
+    },
+    "medium_findings": {
+      "action": "warn_and_track",
+      "owner_routing": "runtime-core",
+      "sla_hours": 168,
+      "requires_bead": true
+    }
+  },
+  "output": {
+    "report_path": "artifacts/security_release_gate_report.json",
+    "event_log_path": "artifacts/security_release_gate_events.ndjson"
+  }
+}
