@@ -221,15 +221,21 @@ impl SymbolPool {
 
     /// Returns a buffer to the pool.
     pub fn deallocate(&mut self, mut buffer: SymbolBuffer) {
+        let expected_len = self.config.symbol_size as usize;
         debug_assert!(
             buffer.in_use,
             "deallocating a buffer that is not marked in-use"
         );
         debug_assert_eq!(
             buffer.len(),
-            self.config.symbol_size as usize,
+            expected_len,
             "deallocating a buffer with wrong symbol_size"
         );
+
+        if !buffer.in_use || buffer.len() != expected_len {
+            return;
+        }
+
         buffer.mark_free();
         self.free_list.push(buffer);
         self.allocated = self.allocated.saturating_sub(1);
@@ -953,6 +959,29 @@ mod tests {
         pool.deallocate(b2);
         pool.deallocate(b3);
         pool.deallocate(b4);
+    }
+
+    #[test]
+    fn deallocate_rejects_invalid_buffers() {
+        let mut pool = SymbolPool::new(PoolConfig {
+            symbol_size: 1024,
+            initial_size: 0,
+            max_size: 8,
+            allow_growth: false,
+            growth_increment: 1,
+        });
+
+        let baseline = pool.stats().clone();
+
+        // Wrong length and not marked in-use.
+        pool.deallocate(SymbolBuffer::new(8));
+        assert_eq!(pool.stats().deallocations, baseline.deallocations);
+        assert_eq!(pool.stats().current_usage, baseline.current_usage);
+
+        // Correct length but still not marked in-use.
+        pool.deallocate(SymbolBuffer::new(1024));
+        assert_eq!(pool.stats().deallocations, baseline.deallocations);
+        assert_eq!(pool.stats().current_usage, baseline.current_usage);
     }
 
     #[test]
