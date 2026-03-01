@@ -481,15 +481,16 @@ impl SporkScenarioRunner {
     }
 
     /// Register a scenario specification.
-    pub fn register(&mut self, scenario: SporkScenarioSpec) -> Result<(), ScenarioRunnerError> {
-        let id = scenario.id().trim();
+    pub fn register(&mut self, mut scenario: SporkScenarioSpec) -> Result<(), ScenarioRunnerError> {
+        let id = scenario.id().trim().to_string();
         if id.is_empty() {
             return Err(ScenarioRunnerError::InvalidScenarioId);
         }
-        if self.scenarios.contains_key(id) {
-            return Err(ScenarioRunnerError::DuplicateScenarioId(id.to_string()));
+        if self.scenarios.contains_key(&id) {
+            return Err(ScenarioRunnerError::DuplicateScenarioId(id.clone()));
         }
-        self.scenarios.insert(id.to_string(), scenario);
+        scenario.id = id.clone();
+        self.scenarios.insert(id, scenario);
         Ok(())
     }
 
@@ -699,6 +700,27 @@ mod tests {
         ));
 
         crate::test_complete!("scenario_runner_rejects_duplicate_ids");
+    }
+
+    #[test]
+    fn scenario_runner_normalizes_whitespace_ids() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("scenario_runner_normalizes_whitespace_ids");
+
+        let mut runner = SporkScenarioRunner::new();
+        runner
+            .register(SporkScenarioSpec::new("  normalized.id  ", |_| {
+                AppSpec::new("normalized_app")
+            }))
+            .unwrap();
+
+        assert_eq!(runner.scenario_ids(), vec!["normalized.id"]);
+
+        let result = runner.run("normalized.id").unwrap();
+        assert_eq!(result.scenario_id, "normalized.id");
+        assert_eq!(result.report.app, "normalized_app");
+
+        crate::test_complete!("scenario_runner_normalizes_whitespace_ids");
     }
 
     // -----------------------------------------------------------------------
