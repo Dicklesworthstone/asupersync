@@ -131,6 +131,30 @@ impl CrdtObligationEntry {
             *entry = (*entry).max(count);
         }
     }
+
+    fn is_compact_tombstone_for(&self, local_node: &NodeId) -> bool {
+        let witness_ok = self.witnesses.len() == 1
+            && self.witnesses.get(local_node).copied() == Some(self.state);
+        let acquire_ok = self.acquire_counts.len() == 1
+            && self.acquire_counts.get(local_node).copied() == Some(1);
+        let resolve_ok = self.resolve_counts.len() == 1
+            && self.resolve_counts.get(local_node).copied() == Some(1);
+        witness_ok && acquire_ok && resolve_ok
+    }
+
+    fn compact_terminal_tombstone(&mut self, local_node: &NodeId) -> bool {
+        if self.is_compact_tombstone_for(local_node) {
+            return false;
+        }
+
+        self.witnesses.clear();
+        self.witnesses.insert(local_node.clone(), self.state);
+        self.acquire_counts.clear();
+        self.resolve_counts.clear();
+        self.acquire_counts.insert(local_node.clone(), 1);
+        self.resolve_counts.insert(local_node.clone(), 1);
+        true
+    }
 }
 
 // ─── CRDT Obligation Ledger ─────────────────────────────────────────────────
@@ -244,7 +268,11 @@ impl CrdtObligationLedger {
             .entry(id)
             .or_insert_with(CrdtObligationEntry::new);
         entry.state = entry.state.join(terminal);
-        entry.witnesses.insert(self.local_node.clone(), terminal);
+        let witness = entry
+            .witnesses
+            .entry(self.local_node.clone())
+            .or_insert(LatticeState::Unknown);
+        *witness = witness.join(terminal);
         *entry
             .resolve_counts
             .entry(self.local_node.clone())
@@ -328,17 +356,25 @@ impl CrdtObligationLedger {
             .all(|e| e.is_linear() && !e.is_conflict())
     }
 
-    /// Compacts the ledger by removing fully resolved obligations whose
-    /// state is terminal and linear. This is safe because terminal states
-    /// are absorbing — any future merge with a stale replica will re-join
-    /// to the same terminal, and the counter invariant is already satisfied.
+    /// Compacts the ledger by reducing terminal, linear entries to
+    /// minimal tombstones (state + one local witness/counter pair).
+    ///
+    /// We intentionally retain a terminal tombstone so stale replicas that
+    /// still carry `Reserved` cannot resurrect completed obligations on merge.
     ///
     /// Returns the number of entries compacted.
     pub fn compact(&mut self) -> usize {
-        let before = self.entries.len();
-        self.entries
-            .retain(|_, e| !(e.is_terminal() && e.is_linear() && !e.is_conflict()));
-        before - self.entries.len()
+        let mut compacted = 0;
+        for entry in self.entries.values_mut() {
+            if entry.is_terminal()
+                && entry.is_linear()
+                && !entry.is_conflict()
+                && entry.compact_terminal_tombstone(&self.local_node)
+            {
+                compacted += 1;
+            }
+        }
+        compacted
     }
 
     /// Returns a diagnostic snapshot of the ledger.
@@ -650,7 +686,7 @@ mod tests {
     // ── Compaction ──────────────────────────────────────────────────────
 
     #[test]
-    fn compact_removes_terminal_linear_entries() {
+    fn compact_tombstones_terminal_linear_entries() {
         let mut ledger = CrdtObligationLedger::new(node("A"));
         ledger.record_acquire(oid(1), ObligationKind::SendPermit);
         ledger.record_commit(oid(1));
@@ -659,9 +695,18 @@ mod tests {
 
         let compacted = ledger.compact();
         assert_eq!(compacted, 1);
-        assert_eq!(ledger.len(), 1);
-        assert_eq!(ledger.get(&oid(1)), LatticeState::Unknown); // removed
+        assert_eq!(ledger.len(), 2);
+        assert_eq!(ledger.get(&oid(1)), LatticeState::Committed); // tombstoned
         assert_eq!(ledger.get(&oid(2)), LatticeState::Reserved); // kept
+        let entry = ledger.get_entry(&oid(1)).expect("entry should exist");
+        assert!(entry.is_terminal());
+        assert!(entry.is_linear());
+        assert_eq!(entry.total_acquires(), 1);
+        assert_eq!(entry.total_resolves(), 1);
+        assert_eq!(
+            *entry.witnesses.get(&node("A")).expect("local witness"),
+            LatticeState::Committed
+        );
     }
 
     #[test]
@@ -691,6 +736,28 @@ mod tests {
 
         let compacted = ledger.compact();
         assert_eq!(compacted, 0); // violation not compacted
+    }
+
+    #[test]
+    fn compact_prevents_stale_reserved_resurrection() {
+        let id = oid(11);
+        let mut a = CrdtObligationLedger::new(node("A"));
+        a.record_acquire(id, ObligationKind::SendPermit);
+        a.record_commit(id);
+
+        let compacted = a.compact();
+        assert_eq!(compacted, 1);
+        assert_eq!(a.get(&id), LatticeState::Committed);
+
+        // Stale replica only observed the pre-terminal reserved state.
+        let mut stale = CrdtObligationLedger::new(node("B"));
+        stale.record_acquire(id, ObligationKind::SendPermit);
+        assert_eq!(stale.get(&id), LatticeState::Reserved);
+
+        a.merge(&stale);
+
+        // Terminal state must remain dominant after merge.
+        assert_eq!(a.get(&id), LatticeState::Committed);
     }
 
     // ── Pending / snapshot ──────────────────────────────────────────────
@@ -921,5 +988,35 @@ mod tests {
         assert_eq!(s2.pending, 3);
         let dbg = format!("{s2:?}");
         assert!(dbg.contains("LedgerSnapshot"));
+    }
+
+    #[test]
+    fn record_resolve_joins_witness_instead_of_overwriting() {
+        // Regression: record_resolve used `insert` (overwrite) instead of `join`
+        // for witnesses, losing provenance when a node makes conflicting resolutions.
+        let mut ledger = CrdtObligationLedger::new(node("A"));
+        let id = oid(99);
+        ledger.record_acquire(id, ObligationKind::Ack);
+
+        // First resolve: commit
+        ledger.record_commit(id);
+        let entry = ledger.get_entry(&id).expect("entry exists");
+        assert_eq!(
+            *entry.witnesses.get(&node("A")).unwrap(),
+            LatticeState::Committed,
+        );
+
+        // Second resolve on same obligation: abort.
+        // Committed and Aborted are incomparable in the diamond lattice,
+        // so their join is Conflict. With the old `insert`, witness would
+        // just become Aborted (overwrite), hiding the commit provenance.
+        // With `join`, Committed ⊔ Aborted = Conflict — correctly capturing
+        // that this node made contradictory resolutions.
+        ledger.record_abort(id);
+        let entry = ledger.get_entry(&id).expect("entry exists");
+        let witness = *entry.witnesses.get(&node("A")).unwrap();
+        assert_eq!(witness, LatticeState::Conflict);
+        // The global state should also reflect the conflict
+        assert_eq!(entry.state, LatticeState::Conflict);
     }
 }
