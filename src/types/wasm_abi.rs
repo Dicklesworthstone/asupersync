@@ -735,6 +735,492 @@ impl WasmAbiBoundaryEvent {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Memory Ownership Protocol
+// ---------------------------------------------------------------------------
+//
+// The WASM boundary uses a strict ownership model:
+//
+// 1. **No shared memory**: All values crossing JS<->WASM are serialized.
+//    There are no raw pointers, `Arc`s, or shared buffers.
+//
+// 2. **Handle ownership**: WASM owns all entities. JS receives opaque
+//    `WasmHandleRef` tokens (slot + generation) that reference WASM-side
+//    state. JS cannot inspect or mutate the underlying entity.
+//
+// 3. **Pinning**: While a handle is in `Active` or `Cancelling` state,
+//    the WASM-side entity is pinned and must not be deallocated.
+//
+// 4. **Release protocol**: JS must explicitly close/release handles.
+//    Leaked handles are detected by the `WasmHandleTable` diagnostics.
+//
+// 5. **Generation counters**: Prevent use-after-free by invalidating stale
+//    handles after slot reuse.
+//
+// Ownership invariants:
+//   - `WasmOwned` + `Active` = WASM entity is live, JS holds reference
+//   - `WasmOwned` + `Closed` = WASM may reclaim slot after JS releases
+//   - `TransferredToJs` = ownership moved to JS (e.g., detached buffer)
+//   - `Released` = handle is dead; any access returns `InvalidHandle`
+
+/// Ownership side for a boundary handle.
+///
+/// Tracks which side of the JS<->WASM boundary currently owns the
+/// entity's lifetime. Most handles remain `WasmOwned` throughout their
+/// lifecycle; `TransferredToJs` is reserved for detached buffer patterns
+/// where JS takes full ownership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WasmHandleOwnership {
+    /// WASM runtime owns the entity; JS holds an opaque reference.
+    WasmOwned,
+    /// Ownership transferred to JS (e.g., detached `ArrayBuffer`).
+    /// WASM must not access the underlying data after transfer.
+    TransferredToJs,
+    /// Handle has been released; any access is use-after-free.
+    Released,
+}
+
+/// Entry in the handle table tracking one boundary-visible entity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WasmHandleEntry {
+    /// Handle reference visible to JS.
+    pub handle: WasmHandleRef,
+    /// Current boundary lifecycle state.
+    pub state: WasmBoundaryState,
+    /// Ownership side.
+    pub ownership: WasmHandleOwnership,
+    /// Whether the entity is pinned against deallocation.
+    ///
+    /// Pinned entities cannot be reclaimed by WASM even if the boundary
+    /// state reaches `Closed`. The pin must be explicitly dropped before
+    /// the slot can be recycled.
+    pub pinned: bool,
+}
+
+/// Error when a handle operation violates ownership protocol.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum WasmHandleError {
+    /// Handle slot does not exist in the table.
+    #[error("handle slot {slot} out of range (table size {table_size})")]
+    SlotOutOfRange {
+        /// Requested slot.
+        slot: u32,
+        /// Current table capacity.
+        table_size: u32,
+    },
+    /// Handle generation does not match (stale handle / use-after-free).
+    #[error("stale handle: slot {slot} generation {expected} != {actual}")]
+    StaleGeneration {
+        /// Slot index.
+        slot: u32,
+        /// Expected generation at the slot.
+        expected: u32,
+        /// Generation in the provided handle.
+        actual: u32,
+    },
+    /// Handle has already been released.
+    #[error("handle slot {slot} already released")]
+    AlreadyReleased {
+        /// Slot index.
+        slot: u32,
+    },
+    /// Cannot transfer ownership of a handle that is not `WasmOwned`.
+    #[error("cannot transfer handle slot {slot}: current ownership is {current:?}")]
+    InvalidTransfer {
+        /// Slot index.
+        slot: u32,
+        /// Current ownership state.
+        current: WasmHandleOwnership,
+    },
+    /// Cannot unpin a handle that is not pinned.
+    #[error("handle slot {slot} is not pinned")]
+    NotPinned {
+        /// Slot index.
+        slot: u32,
+    },
+    /// Cannot release a pinned handle without unpinning first.
+    #[error("handle slot {slot} is pinned; unpin before releasing")]
+    ReleasePinned {
+        /// Slot index.
+        slot: u32,
+    },
+}
+
+/// Handle table managing all boundary-visible entity handles.
+///
+/// Implements slot-based allocation with generation counters for
+/// use-after-free prevention. All operations are deterministic
+/// (no randomness, no time-dependence).
+///
+/// # Capacity
+///
+/// Grows dynamically. Free slots are recycled LIFO for cache locality.
+///
+/// # Thread Safety
+///
+/// This type is `!Sync` — boundary calls are serialized through the
+/// WASM event loop (single-threaded by spec). If multi-threaded WASM
+/// is added later, wrap in the runtime's `ContendedMutex`.
+#[derive(Debug)]
+pub struct WasmHandleTable {
+    /// Slot storage. `None` means the slot is free.
+    slots: Vec<Option<WasmHandleEntry>>,
+    /// Generation counter per slot. Incremented on each release.
+    generations: Vec<u32>,
+    /// Free slot indices (LIFO stack).
+    free_list: Vec<u32>,
+    /// Count of live (non-released) handles.
+    live_count: usize,
+}
+
+impl Default for WasmHandleTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WasmHandleTable {
+    /// Creates an empty handle table.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            slots: Vec::new(),
+            generations: Vec::new(),
+            free_list: Vec::new(),
+            live_count: 0,
+        }
+    }
+
+    /// Creates a table with pre-allocated capacity.
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            slots: Vec::with_capacity(capacity),
+            generations: Vec::with_capacity(capacity),
+            free_list: Vec::new(),
+            live_count: 0,
+        }
+    }
+
+    /// Allocates a new handle for an entity.
+    ///
+    /// Returns a `WasmHandleRef` that JS can use as an opaque token.
+    /// The handle starts in `Unbound` state with `WasmOwned` ownership.
+    pub fn allocate(&mut self, kind: WasmHandleKind) -> WasmHandleRef {
+        let slot = if let Some(recycled) = self.free_list.pop() {
+            recycled
+        } else {
+            let slot = u32::try_from(self.slots.len()).expect("handle table overflow");
+            self.slots.push(None);
+            self.generations.push(0);
+            slot
+        };
+
+        let generation = self.generations[slot as usize];
+        let handle = WasmHandleRef {
+            kind,
+            slot,
+            generation,
+        };
+
+        self.slots[slot as usize] = Some(WasmHandleEntry {
+            handle,
+            state: WasmBoundaryState::Unbound,
+            ownership: WasmHandleOwnership::WasmOwned,
+            pinned: false,
+        });
+        self.live_count += 1;
+
+        handle
+    }
+
+    /// Looks up an entry by handle, validating generation.
+    pub fn get(&self, handle: &WasmHandleRef) -> Result<&WasmHandleEntry, WasmHandleError> {
+        let slot = handle.slot as usize;
+        if slot >= self.slots.len() {
+            return Err(WasmHandleError::SlotOutOfRange {
+                slot: handle.slot,
+                table_size: u32::try_from(self.slots.len()).unwrap_or(u32::MAX),
+            });
+        }
+        let current_gen = self.generations[slot];
+        if handle.generation != current_gen {
+            return Err(WasmHandleError::StaleGeneration {
+                slot: handle.slot,
+                expected: current_gen,
+                actual: handle.generation,
+            });
+        }
+        self.slots[slot].as_ref().map_or(
+            Err(WasmHandleError::AlreadyReleased { slot: handle.slot }),
+            |entry| {
+                if entry.ownership == WasmHandleOwnership::Released {
+                    Err(WasmHandleError::AlreadyReleased { slot: handle.slot })
+                } else {
+                    Ok(entry)
+                }
+            },
+        )
+    }
+
+    /// Looks up a mutable entry by handle, validating generation.
+    pub fn get_mut(
+        &mut self,
+        handle: &WasmHandleRef,
+    ) -> Result<&mut WasmHandleEntry, WasmHandleError> {
+        let slot = handle.slot as usize;
+        if slot >= self.slots.len() {
+            return Err(WasmHandleError::SlotOutOfRange {
+                slot: handle.slot,
+                table_size: u32::try_from(self.slots.len()).unwrap_or(u32::MAX),
+            });
+        }
+        let current_gen = self.generations[slot];
+        if handle.generation != current_gen {
+            return Err(WasmHandleError::StaleGeneration {
+                slot: handle.slot,
+                expected: current_gen,
+                actual: handle.generation,
+            });
+        }
+        self.slots[slot].as_mut().map_or(
+            Err(WasmHandleError::AlreadyReleased { slot: handle.slot }),
+            |entry| {
+                if entry.ownership == WasmHandleOwnership::Released {
+                    Err(WasmHandleError::AlreadyReleased { slot: handle.slot })
+                } else {
+                    Ok(entry)
+                }
+            },
+        )
+    }
+
+    /// Advances the boundary state of a handle.
+    ///
+    /// Validates that the transition is legal per the boundary state machine.
+    pub fn transition(
+        &mut self,
+        handle: &WasmHandleRef,
+        to: WasmBoundaryState,
+    ) -> Result<(), WasmHandleError> {
+        let entry = self.get_mut(handle)?;
+        validate_wasm_boundary_transition(entry.state, to).map_err(|_| {
+            // Re-read state for the error (entry borrow ended)
+            WasmHandleError::InvalidTransfer {
+                slot: handle.slot,
+                current: WasmHandleOwnership::WasmOwned,
+            }
+        })?;
+        // Re-borrow after validation
+        let entry = self.slots[handle.slot as usize].as_mut().unwrap();
+        entry.state = to;
+        Ok(())
+    }
+
+    /// Pins a handle, preventing WASM-side deallocation.
+    ///
+    /// Pinning is idempotent: pinning an already-pinned handle is a no-op.
+    pub fn pin(&mut self, handle: &WasmHandleRef) -> Result<(), WasmHandleError> {
+        let entry = self.get_mut(handle)?;
+        entry.pinned = true;
+        Ok(())
+    }
+
+    /// Unpins a handle, allowing future deallocation.
+    pub fn unpin(&mut self, handle: &WasmHandleRef) -> Result<(), WasmHandleError> {
+        let entry = self.get_mut(handle)?;
+        if !entry.pinned {
+            return Err(WasmHandleError::NotPinned { slot: handle.slot });
+        }
+        entry.pinned = false;
+        Ok(())
+    }
+
+    /// Transfers ownership of a handle's underlying data to JS.
+    ///
+    /// After transfer, WASM must not access the data. The handle remains
+    /// in the table for bookkeeping but cannot be used for WASM-side ops.
+    pub fn transfer_to_js(&mut self, handle: &WasmHandleRef) -> Result<(), WasmHandleError> {
+        let entry = self.get_mut(handle)?;
+        if entry.ownership != WasmHandleOwnership::WasmOwned {
+            return Err(WasmHandleError::InvalidTransfer {
+                slot: handle.slot,
+                current: entry.ownership,
+            });
+        }
+        entry.ownership = WasmHandleOwnership::TransferredToJs;
+        Ok(())
+    }
+
+    /// Releases a handle, recycling the slot for future allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ReleasePinned` if the handle is still pinned.
+    /// Returns `AlreadyReleased` if the handle was previously released.
+    pub fn release(&mut self, handle: &WasmHandleRef) -> Result<(), WasmHandleError> {
+        let entry = self.get_mut(handle)?;
+        if entry.pinned {
+            return Err(WasmHandleError::ReleasePinned { slot: handle.slot });
+        }
+        entry.ownership = WasmHandleOwnership::Released;
+        self.slots[handle.slot as usize] = None;
+        self.generations[handle.slot as usize] =
+            self.generations[handle.slot as usize].wrapping_add(1);
+        self.free_list.push(handle.slot);
+        self.live_count -= 1;
+        Ok(())
+    }
+
+    /// Number of live (non-released) handles.
+    #[must_use]
+    pub fn live_count(&self) -> usize {
+        self.live_count
+    }
+
+    /// Total allocated capacity (including free slots).
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Generates a memory report for diagnostics and leak detection.
+    #[must_use]
+    pub fn memory_report(&self) -> WasmMemoryReport {
+        let mut by_kind = BTreeMap::new();
+        let mut by_state = BTreeMap::new();
+        let mut pinned_count: usize = 0;
+
+        for entry in self.slots.iter().flatten() {
+            if entry.ownership != WasmHandleOwnership::Released {
+                *by_kind
+                    .entry(format!("{:?}", entry.handle.kind).to_lowercase())
+                    .or_insert(0usize) += 1;
+                *by_state
+                    .entry(format!("{:?}", entry.state).to_lowercase())
+                    .or_insert(0usize) += 1;
+                if entry.pinned {
+                    pinned_count += 1;
+                }
+            }
+        }
+
+        WasmMemoryReport {
+            live_handles: self.live_count,
+            capacity: self.slots.len(),
+            free_slots: self.free_list.len(),
+            pinned_count,
+            by_kind,
+            by_state,
+        }
+    }
+
+    /// Returns handles that appear leaked: `Closed` state but not released.
+    #[must_use]
+    pub fn detect_leaks(&self) -> Vec<WasmHandleRef> {
+        self.slots
+            .iter()
+            .flatten()
+            .filter(|entry| {
+                entry.state == WasmBoundaryState::Closed
+                    && entry.ownership != WasmHandleOwnership::Released
+            })
+            .map(|entry| entry.handle)
+            .collect()
+    }
+}
+
+/// Diagnostic report for boundary memory state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WasmMemoryReport {
+    /// Number of live (non-released) handles.
+    pub live_handles: usize,
+    /// Total slot capacity.
+    pub capacity: usize,
+    /// Number of free slots available for recycling.
+    pub free_slots: usize,
+    /// Number of pinned handles.
+    pub pinned_count: usize,
+    /// Live handle counts by kind.
+    pub by_kind: BTreeMap<String, usize>,
+    /// Live handle counts by boundary state.
+    pub by_state: BTreeMap<String, usize>,
+}
+
+/// Buffer transfer descriptor for large data crossing the boundary.
+///
+/// When passing `Bytes` payloads, this descriptor tracks the ownership
+/// transfer semantics. For small payloads, copy semantics are used
+/// (serialized in the value envelope). For large payloads, a zero-copy
+/// transfer via `ArrayBuffer.transfer()` may be used if the runtime
+/// supports it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WasmBufferTransfer {
+    /// Handle to the buffer's parent entity (e.g., the task that produced it).
+    pub source_handle: WasmHandleRef,
+    /// Byte length of the buffer.
+    pub byte_length: u64,
+    /// Transfer mode.
+    pub mode: WasmBufferTransferMode,
+}
+
+/// How a buffer crosses the JS<->WASM boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WasmBufferTransferMode {
+    /// Buffer is copied (serialized in the value envelope).
+    /// Safe default; no ownership transfer.
+    Copy,
+    /// Buffer is transferred via `ArrayBuffer.transfer()`.
+    /// Source loses access; receiver gets exclusive ownership.
+    /// Only valid when source ownership is `WasmOwned`.
+    Transfer,
+}
+
+impl WasmBufferTransferMode {
+    /// Returns true if the buffer is copied (no ownership change).
+    #[must_use]
+    pub const fn is_copy(self) -> bool {
+        matches!(self, Self::Copy)
+    }
+}
+
+/// Structured event emitted during handle lifecycle for diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WasmHandleLifecycleEvent {
+    /// The handle involved.
+    pub handle: WasmHandleRef,
+    /// Event kind.
+    pub event: WasmHandleEventKind,
+    /// Ownership before the event.
+    pub ownership_before: WasmHandleOwnership,
+    /// Ownership after the event.
+    pub ownership_after: WasmHandleOwnership,
+    /// Boundary state before the event.
+    pub state_before: WasmBoundaryState,
+    /// Boundary state after the event.
+    pub state_after: WasmBoundaryState,
+}
+
+/// Handle lifecycle event kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WasmHandleEventKind {
+    /// Handle was allocated.
+    Allocated,
+    /// Handle boundary state was advanced.
+    StateTransition,
+    /// Handle was pinned.
+    Pinned,
+    /// Handle was unpinned.
+    Unpinned,
+    /// Ownership was transferred to JS.
+    TransferredToJs,
+    /// Handle was released (slot recycled).
+    Released,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1101,5 +1587,310 @@ mod tests {
         );
         assert!(!fields.contains_key("compatibility_producer_minor"));
         assert!(!fields.contains_key("compatibility_consumer_minor"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Memory Ownership Protocol Tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn handle_table_allocate_and_get() {
+        let mut table = WasmHandleTable::new();
+        assert_eq!(table.live_count(), 0);
+
+        let h1 = table.allocate(WasmHandleKind::Runtime);
+        assert_eq!(h1.slot, 0);
+        assert_eq!(h1.generation, 0);
+        assert_eq!(h1.kind, WasmHandleKind::Runtime);
+        assert_eq!(table.live_count(), 1);
+
+        let entry = table.get(&h1).unwrap();
+        assert_eq!(entry.state, WasmBoundaryState::Unbound);
+        assert_eq!(entry.ownership, WasmHandleOwnership::WasmOwned);
+        assert!(!entry.pinned);
+
+        let h2 = table.allocate(WasmHandleKind::Task);
+        assert_eq!(h2.slot, 1);
+        assert_eq!(table.live_count(), 2);
+    }
+
+    #[test]
+    fn handle_table_full_lifecycle() {
+        let mut table = WasmHandleTable::new();
+        let h = table.allocate(WasmHandleKind::Region);
+
+        // Unbound -> Bound -> Active -> Cancelling -> Draining -> Closed
+        table.transition(&h, WasmBoundaryState::Bound).unwrap();
+        assert_eq!(table.get(&h).unwrap().state, WasmBoundaryState::Bound);
+
+        table.transition(&h, WasmBoundaryState::Active).unwrap();
+        assert_eq!(table.get(&h).unwrap().state, WasmBoundaryState::Active);
+
+        table.transition(&h, WasmBoundaryState::Cancelling).unwrap();
+        assert_eq!(table.get(&h).unwrap().state, WasmBoundaryState::Cancelling);
+
+        table.transition(&h, WasmBoundaryState::Draining).unwrap();
+        assert_eq!(table.get(&h).unwrap().state, WasmBoundaryState::Draining);
+
+        table.transition(&h, WasmBoundaryState::Closed).unwrap();
+        assert_eq!(table.get(&h).unwrap().state, WasmBoundaryState::Closed);
+
+        // Release the closed handle
+        table.release(&h).unwrap();
+        assert_eq!(table.live_count(), 0);
+    }
+
+    #[test]
+    fn handle_table_slot_recycling_with_generation_bump() {
+        let mut table = WasmHandleTable::new();
+        let h1 = table.allocate(WasmHandleKind::Task);
+        assert_eq!(h1.slot, 0);
+        assert_eq!(h1.generation, 0);
+
+        // Release h1
+        table.release(&h1).unwrap();
+
+        // Allocate again — should reuse slot 0 with bumped generation
+        let h2 = table.allocate(WasmHandleKind::Region);
+        assert_eq!(h2.slot, 0);
+        assert_eq!(h2.generation, 1);
+
+        // h1 is now stale
+        let err = table.get(&h1).unwrap_err();
+        assert!(matches!(
+            err,
+            WasmHandleError::StaleGeneration {
+                slot: 0,
+                expected: 1,
+                actual: 0,
+            }
+        ));
+
+        // h2 is valid
+        assert!(table.get(&h2).is_ok());
+    }
+
+    #[test]
+    fn handle_table_stale_handle_rejected() {
+        let mut table = WasmHandleTable::new();
+        let h = table.allocate(WasmHandleKind::CancelToken);
+        table.release(&h).unwrap();
+
+        // Try to use released handle
+        let err = table.get(&h).unwrap_err();
+        assert!(matches!(err, WasmHandleError::StaleGeneration { .. }));
+    }
+
+    #[test]
+    fn handle_table_out_of_range() {
+        let table = WasmHandleTable::new();
+        let fake = WasmHandleRef {
+            kind: WasmHandleKind::Runtime,
+            slot: 999,
+            generation: 0,
+        };
+        let err = table.get(&fake).unwrap_err();
+        assert!(matches!(
+            err,
+            WasmHandleError::SlotOutOfRange {
+                slot: 999,
+                table_size: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn handle_table_pin_unpin() {
+        let mut table = WasmHandleTable::new();
+        let h = table.allocate(WasmHandleKind::Task);
+
+        // Pin
+        table.pin(&h).unwrap();
+        assert!(table.get(&h).unwrap().pinned);
+
+        // Pinning again is idempotent
+        table.pin(&h).unwrap();
+        assert!(table.get(&h).unwrap().pinned);
+
+        // Cannot release while pinned
+        let err = table.release(&h).unwrap_err();
+        assert!(matches!(err, WasmHandleError::ReleasePinned { slot: 0 }));
+
+        // Unpin
+        table.unpin(&h).unwrap();
+        assert!(!table.get(&h).unwrap().pinned);
+
+        // Can release after unpin
+        table.release(&h).unwrap();
+        assert_eq!(table.live_count(), 0);
+    }
+
+    #[test]
+    fn handle_table_unpin_not_pinned_is_error() {
+        let mut table = WasmHandleTable::new();
+        let h = table.allocate(WasmHandleKind::Runtime);
+
+        let err = table.unpin(&h).unwrap_err();
+        assert!(matches!(err, WasmHandleError::NotPinned { slot: 0 }));
+    }
+
+    #[test]
+    fn handle_table_transfer_to_js() {
+        let mut table = WasmHandleTable::new();
+        let h = table.allocate(WasmHandleKind::FetchRequest);
+
+        table.transfer_to_js(&h).unwrap();
+        assert_eq!(
+            table.get(&h).unwrap().ownership,
+            WasmHandleOwnership::TransferredToJs
+        );
+
+        // Cannot transfer again
+        let err = table.transfer_to_js(&h).unwrap_err();
+        assert!(matches!(err, WasmHandleError::InvalidTransfer { .. }));
+    }
+
+    #[test]
+    fn handle_table_detect_leaks() {
+        let mut table = WasmHandleTable::new();
+        let h1 = table.allocate(WasmHandleKind::Task);
+        let h2 = table.allocate(WasmHandleKind::Region);
+        let h3 = table.allocate(WasmHandleKind::Runtime);
+
+        // h1: close but don't release (leaked)
+        table.transition(&h1, WasmBoundaryState::Bound).unwrap();
+        table.transition(&h1, WasmBoundaryState::Closed).unwrap();
+
+        // h2: still active (not leaked yet)
+        table.transition(&h2, WasmBoundaryState::Bound).unwrap();
+        table.transition(&h2, WasmBoundaryState::Active).unwrap();
+
+        // h3: properly released
+        table.release(&h3).unwrap();
+
+        let leaks = table.detect_leaks();
+        assert_eq!(leaks.len(), 1);
+        assert_eq!(leaks[0], h1);
+    }
+
+    #[test]
+    fn handle_table_memory_report() {
+        let mut table = WasmHandleTable::with_capacity(8);
+        let h1 = table.allocate(WasmHandleKind::Runtime);
+        let h2 = table.allocate(WasmHandleKind::Task);
+        let h3 = table.allocate(WasmHandleKind::Task);
+
+        table.transition(&h1, WasmBoundaryState::Bound).unwrap();
+        table.transition(&h1, WasmBoundaryState::Active).unwrap();
+        table.pin(&h2).unwrap();
+
+        let report = table.memory_report();
+        assert_eq!(report.live_handles, 3);
+        assert_eq!(report.pinned_count, 1);
+        assert_eq!(report.by_kind.get("task"), Some(&2));
+        assert_eq!(report.by_kind.get("runtime"), Some(&1));
+
+        // h3 is still unbound
+        assert_eq!(report.by_state.get("unbound"), Some(&2));
+        assert_eq!(report.by_state.get("active"), Some(&1));
+    }
+
+    #[test]
+    fn handle_table_release_already_released() {
+        let mut table = WasmHandleTable::new();
+        let h = table.allocate(WasmHandleKind::Task);
+        table.release(&h).unwrap();
+
+        // Stale generation
+        let err = table.release(&h).unwrap_err();
+        assert!(matches!(err, WasmHandleError::StaleGeneration { .. }));
+    }
+
+    #[test]
+    fn buffer_transfer_mode_copy_is_default() {
+        assert!(WasmBufferTransferMode::Copy.is_copy());
+        assert!(!WasmBufferTransferMode::Transfer.is_copy());
+    }
+
+    #[test]
+    fn buffer_transfer_serialization_round_trip() {
+        let transfer = WasmBufferTransfer {
+            source_handle: WasmHandleRef {
+                kind: WasmHandleKind::FetchRequest,
+                slot: 5,
+                generation: 2,
+            },
+            byte_length: 1024,
+            mode: WasmBufferTransferMode::Transfer,
+        };
+        let json = serde_json::to_string(&transfer).unwrap();
+        let back: WasmBufferTransfer = serde_json::from_str(&json).unwrap();
+        assert_eq!(transfer, back);
+    }
+
+    #[test]
+    fn handle_ownership_serialization_round_trip() {
+        for ownership in [
+            WasmHandleOwnership::WasmOwned,
+            WasmHandleOwnership::TransferredToJs,
+            WasmHandleOwnership::Released,
+        ] {
+            let json = serde_json::to_string(&ownership).unwrap();
+            let back: WasmHandleOwnership = serde_json::from_str(&json).unwrap();
+            assert_eq!(ownership, back);
+        }
+    }
+
+    #[test]
+    fn handle_lifecycle_event_captures_transitions() {
+        let event = WasmHandleLifecycleEvent {
+            handle: WasmHandleRef {
+                kind: WasmHandleKind::Task,
+                slot: 3,
+                generation: 0,
+            },
+            event: WasmHandleEventKind::StateTransition,
+            ownership_before: WasmHandleOwnership::WasmOwned,
+            ownership_after: WasmHandleOwnership::WasmOwned,
+            state_before: WasmBoundaryState::Active,
+            state_after: WasmBoundaryState::Cancelling,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let back: WasmHandleLifecycleEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, back);
+    }
+
+    #[test]
+    fn handle_table_cancellation_and_release_flow() {
+        // Simulates a typical task lifecycle: create → activate → cancel → drain → close → release
+        let mut table = WasmHandleTable::new();
+        let h = table.allocate(WasmHandleKind::Task);
+
+        table.transition(&h, WasmBoundaryState::Bound).unwrap();
+        table.transition(&h, WasmBoundaryState::Active).unwrap();
+
+        // Pin during active work
+        table.pin(&h).unwrap();
+
+        // Cancel arrives
+        table.transition(&h, WasmBoundaryState::Cancelling).unwrap();
+        table.transition(&h, WasmBoundaryState::Draining).unwrap();
+        table.transition(&h, WasmBoundaryState::Closed).unwrap();
+
+        // Still pinned — cannot release
+        assert!(table.release(&h).is_err());
+
+        // Unpin and release
+        table.unpin(&h).unwrap();
+        table.release(&h).unwrap();
+        assert_eq!(table.live_count(), 0);
+        assert!(table.detect_leaks().is_empty());
+    }
+
+    #[test]
+    fn handle_table_with_capacity_preallocates() {
+        let table = WasmHandleTable::with_capacity(16);
+        assert_eq!(table.live_count(), 0);
+        assert_eq!(table.capacity(), 0); // No actual slots until allocated
     }
 }
