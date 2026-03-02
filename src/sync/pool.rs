@@ -1353,12 +1353,19 @@ where
         let waker = {
             let mut state = self.state.lock();
             state.creating = state.creating.saturating_sub(1);
+            state.total_created += 1;
+
+            if state.closed {
+                // Drop the resource instead of leaking it in the idle queue of a closed pool
+                drop(state);
+                return;
+            }
+
             state.idle.push_back(IdleResource {
                 resource,
                 idle_since: Instant::now(),
                 created_at: Instant::now(),
             });
-            state.total_created += 1;
 
             let total = state.active + state.idle.len() + state.creating;
             let available = state.idle.len() + self.config.max_size.saturating_sub(total);
