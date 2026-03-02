@@ -66,6 +66,18 @@ NDJSON log artifact:
 These fields are release-critical because rollback and incident triage require
 exact policy+artifact reproducibility.
 
+Supply-chain artifact bundle (release-blocking via `SEC-BLOCK-07`):
+
+- `docs/wasm_browser_sbom_v1.json`
+- `docs/wasm_browser_provenance_attestation_v1.json`
+- `docs/wasm_browser_artifact_integrity_manifest_v1.json`
+
+Integrity rule:
+
+- every required bundle artifact must appear in the integrity manifest,
+- each manifest SHA-256 digest must match committed bytes exactly,
+- mismatches or missing artifacts are release-blocking failures.
+
 ## Adversarial Check Expectations
 
 The dependency gate must defend against:
@@ -104,6 +116,15 @@ Release-gate path (dependency checks enabled):
 
 ```bash
 python3 scripts/check_security_release_gate.py \
+  --check-deps \
+  --dep-policy .github/wasm_dependency_policy.json
+```
+
+Artifact-integrity gate path:
+
+```bash
+python3 scripts/check_security_release_gate.py \
+  --policy .github/security_release_policy.json \
   --check-deps \
   --dep-policy .github/wasm_dependency_policy.json
 ```

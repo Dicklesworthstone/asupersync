@@ -1,0 +1,17 @@
+{
+  "schema_version": "asupersync-wasm-artifact-integrity-v1",
+  "bead": "asupersync-umelq.14.3",
+  "hash_algorithm": "sha256",
+  "entries": [
+    {
+      "path": "docs/wasm_browser_sbom_v1.json",
+      "sha256": "a15a8dc73288d1d17a00a0efa14a9414c0ffd3f1eedfd17cde8543ea54179a57",
+      "kind": "sbom"
+    },
+    {
+      "path": "docs/wasm_browser_provenance_attestation_v1.json",
+      "sha256": "ba2d32aaf4735cfcd973a597f4fa6b8ce629c93639c9ec33be17df82ecd5d188",
+      "kind": "provenance"
+    }
+  ]
+}

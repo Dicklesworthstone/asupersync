@@ -1,0 +1,35 @@
+{
+  "schema_version": "asupersync-wasm-provenance-v1",
+  "bead": "asupersync-umelq.14.3",
+  "predicate_type": "https://slsa.dev/provenance/v1",
+  "builder": {
+    "id": "rch-remote-build-fleet"
+  },
+  "invocation": {
+    "config_source": {
+      "uri": "git+https://github.com/Dicklesworthstone/asupersync",
+      "digest": {
+        "sha1": "HEAD"
+      }
+    },
+    "command_provenance": [
+      "rch exec -- cargo check --all-targets",
+      "rch exec -- cargo clippy --all-targets -- -D warnings",
+      "rch exec -- cargo fmt --check"
+    ]
+  },
+  "subject": [
+    {
+      "name": "docs/wasm_browser_sbom_v1.json",
+      "digest": {
+        "sha256": "a15a8dc73288d1d17a00a0efa14a9414c0ffd3f1eedfd17cde8543ea54179a57"
+      }
+    }
+  ],
+  "materials": [
+    "Cargo.toml",
+    "Cargo.lock",
+    ".github/security_release_policy.json",
+    ".github/wasm_dependency_policy.json"
+  ]
+}

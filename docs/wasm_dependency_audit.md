@@ -41,6 +41,15 @@ Summary-level provenance includes:
 - `policy_schema_version`
 - per-profile scan command metadata
 
+Transition-level provenance is release-gate critical:
+
+- `crate`
+- `status` (`active|resolved`)
+- `owner`
+- `replacement_issue`
+- `expires_at_utc` (timezone-required ISO-8601)
+- `notes`
+
 ## Tooling
 
 - Script: `scripts/check_wasm_dependency_policy.py`
@@ -48,13 +57,21 @@ Summary-level provenance includes:
 - Artifact outputs:
   - `artifacts/wasm_dependency_audit_summary.json`
   - `artifacts/wasm_dependency_audit_log.ndjson`
+  - `docs/wasm_browser_sbom_v1.json`
+  - `docs/wasm_browser_provenance_attestation_v1.json`
+  - `docs/wasm_browser_artifact_integrity_manifest_v1.json`
 
 ### Local Reproduction
 
 ```bash
 python3 scripts/check_wasm_dependency_policy.py --self-test
+python3 scripts/check_security_release_gate.py --self-test
 python3 scripts/check_wasm_dependency_policy.py \
   --policy .github/wasm_dependency_policy.json
+python3 scripts/check_security_release_gate.py \
+  --policy .github/security_release_policy.json \
+  --check-deps \
+  --dep-policy .github/wasm_dependency_policy.json
 ```
 
 ### CI Gate
@@ -65,6 +82,14 @@ The CI check job runs:
 2. policy audit generation,
 3. merge-blocking failure on forbidden dependencies or expired transitions,
 4. release-gate dependency validation via `check_security_release_gate.py --check-deps`.
+
+Release-gate dependency validation additionally enforces transition provenance
+schema integrity (owner/replacement/timestamp/notes) so policy drift or partial
+transition records cannot silently bypass release checks.
+
+Release-gate supply-chain integrity validation additionally enforces SBOM +
+provenance artifact presence and SHA-256 manifest matching via:
+`docs/wasm_browser_artifact_integrity_manifest_v1.json`.
 
 ## Adversarial Policy Assertions
 
