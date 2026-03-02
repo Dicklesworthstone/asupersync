@@ -297,7 +297,7 @@ impl Sleep {
         };
 
         for handle in fallback_handles {
-            drop(handle);
+            let _ = handle.join();
         }
 
         // Cancel any existing timer - will be re-registered on next poll
@@ -334,7 +334,7 @@ impl Sleep {
         };
 
         for handle in fallback_handles {
-            drop(handle);
+            let _ = handle.join();
         }
 
         // Cancel any existing timer - will be re-registered on next poll
