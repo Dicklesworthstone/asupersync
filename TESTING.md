@@ -122,6 +122,8 @@ Deterministic incident drill surfaces for browser replay triage:
   `bash ./scripts/run_all_e2e.sh --suite wasm-incident-forensics`
 - Direct drill runner:
   `TEST_SEED=4242 bash ./scripts/test_wasm_incident_forensics_e2e.sh`
+- Contract-only fallback:
+  `INCIDENT_FORENSICS_DRY_RUN=1 TEST_SEED=4242 bash ./scripts/test_wasm_incident_forensics_e2e.sh`
 - Playbook contract check:
   `python3 ./scripts/check_incident_forensics_playbook.py`
 

@@ -261,6 +261,9 @@ minimum evidence required before closure.
 # 1) Deterministic replay drill (writes summary + repro bundle artifacts)
 TEST_SEED=4242 bash ./scripts/test_wasm_incident_forensics_e2e.sh
 
+# 1b) Contract-only fallback (when remote compile fleet is saturated)
+INCIDENT_FORENSICS_DRY_RUN=1 TEST_SEED=4242 bash ./scripts/test_wasm_incident_forensics_e2e.sh
+
 # 2) Single-suite orchestration path (for matrix + replay command routing)
 bash ./scripts/run_all_e2e.sh --suite wasm-incident-forensics
 

@@ -25,7 +25,7 @@
 //!     .build()?;
 //!
 //! // Connect to a server
-//! let tls_stream = connector.connect("example.com", tcp_stream).await?;
+//! let tls_stream = connector.connect(&cx, "example.com", tcp_stream).await?;
 //! ```
 //!
 //! # Cancel-Safety
