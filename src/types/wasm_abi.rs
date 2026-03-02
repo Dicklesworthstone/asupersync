@@ -2788,6 +2788,337 @@ impl ReactProviderState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// React Hook Contracts
+// ---------------------------------------------------------------------------
+//
+// These types define the semantic contracts for React hooks that bridge
+// component lifecycle with structured concurrency primitives. Each hook
+// manages owned resources (scopes, tasks, handles) and guarantees cleanup
+// on unmount or dependency change.
+//
+// The hooks are:
+//
+// - `useScope`: Creates a child scope owned by the component. Scope closes
+//   (cancelling all child work) when the component unmounts.
+//
+// - `useTask`: Spawns a task tied to dependencies. When deps change, the
+//   previous task is cancelled before spawning a new one. No leak possible.
+//
+// - `useRace`: Races N tasks; first to resolve wins, losers are cancelled
+//   and drained before the result is delivered.
+//
+// - `useCancellation`: Observes the cancellation state of the enclosing
+//   scope, and provides a trigger to request cancellation.
+
+/// Lifecycle phase of a React hook instance.
+///
+/// Hooks progress through these phases during component rendering and
+/// effect execution. StrictMode may cause Idle → Active → Cleanup → Active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReactHookPhase {
+    /// Hook registered but effect not yet fired.
+    Idle,
+    /// Effect fired; resources are allocated and active.
+    Active,
+    /// Cleanup running; resources are being released.
+    Cleanup,
+    /// Hook unmounted; all resources released. Terminal.
+    Unmounted,
+    /// Hook entered an error state during setup or cleanup.
+    Error,
+}
+
+/// Returns true when a hook phase transition is valid.
+#[must_use]
+pub fn is_valid_hook_transition(from: ReactHookPhase, to: ReactHookPhase) -> bool {
+    if from == to {
+        return true;
+    }
+    matches!(
+        (from, to),
+        (
+            ReactHookPhase::Idle,
+            ReactHookPhase::Active | ReactHookPhase::Error
+        ) | (ReactHookPhase::Active, ReactHookPhase::Cleanup)
+            | (
+                ReactHookPhase::Cleanup,
+                ReactHookPhase::Unmounted | ReactHookPhase::Active | ReactHookPhase::Error
+            )
+            | (ReactHookPhase::Unmounted, ReactHookPhase::Active)
+    )
+}
+
+/// Error for invalid hook phase transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("invalid hook transition: {from:?} -> {to:?}")]
+pub struct ReactHookTransitionError {
+    /// Current phase.
+    pub from: ReactHookPhase,
+    /// Requested next phase.
+    pub to: ReactHookPhase,
+}
+
+/// Validates a hook phase transition, returning an error if invalid.
+pub fn validate_hook_transition(
+    from: ReactHookPhase,
+    to: ReactHookPhase,
+) -> Result<(), ReactHookTransitionError> {
+    if is_valid_hook_transition(from, to) {
+        Ok(())
+    } else {
+        Err(ReactHookTransitionError { from, to })
+    }
+}
+
+/// Identifies which hook type produced a diagnostic event or error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReactHookKind {
+    /// `useScope` — child scope ownership.
+    Scope,
+    /// `useTask` — dependency-keyed task spawning.
+    Task,
+    /// `useRace` — N-way task race with loser drain.
+    Race,
+    /// `useCancellation` — cancellation observation/trigger.
+    Cancellation,
+}
+
+// -- useScope contract --
+
+/// Configuration for the `useScope` hook.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UseScopeConfig {
+    /// Human-readable label for diagnostics.
+    pub label: String,
+    /// Whether to propagate cancellation from this scope to the parent.
+    /// Default: true (structured concurrency).
+    pub propagate_cancel: bool,
+}
+
+impl Default for UseScopeConfig {
+    fn default() -> Self {
+        Self {
+            label: "scope".to_string(),
+            propagate_cancel: true,
+        }
+    }
+}
+
+/// Snapshot of `useScope` hook state for DevTools/diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UseScopeSnapshot {
+    /// Current lifecycle phase.
+    pub phase: ReactHookPhase,
+    /// Hook configuration.
+    pub config: UseScopeConfig,
+    /// Handle to the owned scope (if active).
+    pub scope_handle: Option<WasmHandleRef>,
+    /// Number of tasks spawned within this scope.
+    pub task_count: usize,
+    /// Number of child scopes nested under this one.
+    pub child_scope_count: usize,
+}
+
+// -- useTask contract --
+
+/// Cancellation behavior when task dependencies change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskDepChangePolicy {
+    /// Cancel the running task immediately, then spawn new one.
+    CancelAndRestart,
+    /// Let the running task finish, discard its result, then spawn new one.
+    DiscardAndRestart,
+    /// Keep the running task; ignore the dependency change.
+    KeepRunning,
+}
+
+/// Configuration for the `useTask` hook.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UseTaskConfig {
+    /// Human-readable label for diagnostics.
+    pub label: String,
+    /// Policy when dependencies change while a task is running.
+    pub dep_change_policy: TaskDepChangePolicy,
+    /// Whether the task result should be memoized across re-renders
+    /// when dependencies haven't changed.
+    pub memoize_result: bool,
+}
+
+impl Default for UseTaskConfig {
+    fn default() -> Self {
+        Self {
+            label: "task".to_string(),
+            dep_change_policy: TaskDepChangePolicy::CancelAndRestart,
+            memoize_result: true,
+        }
+    }
+}
+
+/// Current execution state of a `useTask` hook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UseTaskStatus {
+    /// No task spawned yet (initial render, deps not ready).
+    Idle,
+    /// Task is executing.
+    Running,
+    /// Task completed successfully.
+    Success,
+    /// Task completed with an error.
+    Error,
+    /// Task was cancelled (dep change, unmount, or explicit).
+    Cancelled,
+}
+
+/// Snapshot of `useTask` hook state for DevTools/diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UseTaskSnapshot {
+    /// Hook lifecycle phase.
+    pub phase: ReactHookPhase,
+    /// Task execution status.
+    pub status: UseTaskStatus,
+    /// Hook configuration.
+    pub config: UseTaskConfig,
+    /// Handle to the current task (if running).
+    pub task_handle: Option<WasmHandleRef>,
+    /// Scope the task runs within.
+    pub scope_handle: Option<WasmHandleRef>,
+    /// Number of times the task has been (re)spawned.
+    pub spawn_count: u32,
+    /// Number of times the task was cancelled due to dep changes.
+    pub dep_cancel_count: u32,
+}
+
+// -- useRace contract --
+
+/// Configuration for the `useRace` hook.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UseRaceConfig {
+    /// Human-readable label for diagnostics.
+    pub label: String,
+    /// Maximum number of concurrent racers.
+    pub max_racers: usize,
+    /// Whether loser drain must complete before the winner result is
+    /// delivered. Default: true (no leaked work).
+    pub drain_losers_before_resolve: bool,
+}
+
+impl Default for UseRaceConfig {
+    fn default() -> Self {
+        Self {
+            label: "race".to_string(),
+            max_racers: 8,
+            drain_losers_before_resolve: true,
+        }
+    }
+}
+
+/// Current state of an individual racer within a `useRace`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RacerState {
+    /// Racer is executing.
+    Running,
+    /// Racer finished — won the race.
+    Won,
+    /// Racer is being cancelled (loser drain).
+    Draining,
+    /// Racer fully drained.
+    Drained,
+}
+
+/// Snapshot of a single racer for diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RacerSnapshot {
+    /// Index of this racer in the race.
+    pub index: usize,
+    /// Racer's current state.
+    pub state: RacerState,
+    /// Handle to the racer's task.
+    pub task_handle: WasmHandleRef,
+    /// Optional label.
+    pub label: Option<String>,
+}
+
+/// Snapshot of `useRace` hook state for DevTools/diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UseRaceSnapshot {
+    /// Hook lifecycle phase.
+    pub phase: ReactHookPhase,
+    /// Hook configuration.
+    pub config: UseRaceConfig,
+    /// Scope the race runs within.
+    pub scope_handle: Option<WasmHandleRef>,
+    /// Per-racer snapshots.
+    pub racers: Vec<RacerSnapshot>,
+    /// Number of races completed.
+    pub race_count: u32,
+    /// Whether a winner has been determined for the current race.
+    pub has_winner: bool,
+    /// Whether all losers have been drained for the current race.
+    pub losers_drained: bool,
+}
+
+// -- useCancellation contract --
+
+/// Configuration for the `useCancellation` hook.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UseCancellationConfig {
+    /// Human-readable label for diagnostics.
+    pub label: String,
+    /// Whether this hook can trigger cancellation (vs. observe only).
+    pub can_trigger: bool,
+}
+
+impl Default for UseCancellationConfig {
+    fn default() -> Self {
+        Self {
+            label: "cancellation".to_string(),
+            can_trigger: false,
+        }
+    }
+}
+
+/// Snapshot of `useCancellation` hook state for DevTools/diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UseCancellationSnapshot {
+    /// Hook lifecycle phase.
+    pub phase: ReactHookPhase,
+    /// Hook configuration.
+    pub config: UseCancellationConfig,
+    /// Scope being observed.
+    pub scope_handle: Option<WasmHandleRef>,
+    /// Whether cancellation has been requested in the observed scope.
+    pub is_cancelled: bool,
+    /// Cancellation details (if cancelled).
+    pub cancellation: Option<WasmAbiCancellation>,
+}
+
+/// Unified diagnostic event emitted by any React hook.
+///
+/// These events feed into the `WasmBoundaryEventLog` for DevTools and
+/// structured logging. Each event identifies the hook instance, the
+/// transition, and any associated handles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReactHookDiagnosticEvent {
+    /// Which hook emitted the event.
+    pub hook_kind: ReactHookKind,
+    /// Hook instance label (from config).
+    pub label: String,
+    /// Phase before the transition.
+    pub from_phase: ReactHookPhase,
+    /// Phase after the transition.
+    pub to_phase: ReactHookPhase,
+    /// Handles involved (scope, task, etc.).
+    pub handles: Vec<WasmHandleRef>,
+    /// Optional detail message.
+    pub detail: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4713,5 +5044,194 @@ mod tests {
         assert!(cfg.strict_mode_resilient);
         assert!(!cfg.devtools_diagnostics);
         assert!(cfg.consumer_version.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // React Hook Contract Tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hook_phase_transitions_valid() {
+        use ReactHookPhase::*;
+        assert!(is_valid_hook_transition(Idle, Active));
+        assert!(is_valid_hook_transition(Idle, Error));
+        assert!(is_valid_hook_transition(Active, Cleanup));
+        assert!(is_valid_hook_transition(Cleanup, Unmounted));
+        assert!(is_valid_hook_transition(Cleanup, Active)); // StrictMode remount
+        assert!(is_valid_hook_transition(Cleanup, Error));
+        assert!(is_valid_hook_transition(Unmounted, Active)); // StrictMode
+        // Identity
+        assert!(is_valid_hook_transition(Active, Active));
+    }
+
+    #[test]
+    fn hook_phase_transitions_invalid() {
+        use ReactHookPhase::*;
+        assert!(!is_valid_hook_transition(Idle, Cleanup));
+        assert!(!is_valid_hook_transition(Idle, Unmounted));
+        assert!(!is_valid_hook_transition(Active, Idle));
+        assert!(!is_valid_hook_transition(Active, Unmounted));
+        assert!(!is_valid_hook_transition(Error, Active));
+        assert!(validate_hook_transition(Idle, Cleanup).is_err());
+    }
+
+    #[test]
+    fn use_scope_config_defaults() {
+        let cfg = UseScopeConfig::default();
+        assert_eq!(cfg.label, "scope");
+        assert!(cfg.propagate_cancel);
+    }
+
+    #[test]
+    fn use_scope_snapshot_round_trip() {
+        let snap = UseScopeSnapshot {
+            phase: ReactHookPhase::Active,
+            config: UseScopeConfig::default(),
+            scope_handle: None,
+            task_count: 3,
+            child_scope_count: 1,
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let decoded: UseScopeSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(snap, decoded);
+    }
+
+    #[test]
+    fn use_task_config_defaults() {
+        let cfg = UseTaskConfig::default();
+        assert_eq!(cfg.label, "task");
+        assert_eq!(cfg.dep_change_policy, TaskDepChangePolicy::CancelAndRestart);
+        assert!(cfg.memoize_result);
+    }
+
+    #[test]
+    fn use_task_snapshot_round_trip() {
+        let snap = UseTaskSnapshot {
+            phase: ReactHookPhase::Active,
+            status: UseTaskStatus::Running,
+            config: UseTaskConfig::default(),
+            task_handle: None,
+            scope_handle: None,
+            spawn_count: 2,
+            dep_cancel_count: 1,
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let decoded: UseTaskSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(snap, decoded);
+    }
+
+    #[test]
+    fn use_race_config_defaults() {
+        let cfg = UseRaceConfig::default();
+        assert_eq!(cfg.label, "race");
+        assert_eq!(cfg.max_racers, 8);
+        assert!(cfg.drain_losers_before_resolve);
+    }
+
+    #[test]
+    fn racer_snapshot_round_trip() {
+        let mut table = WasmHandleTable::new();
+        let h = table.allocate(WasmHandleKind::Task);
+        let racer = RacerSnapshot {
+            index: 0,
+            state: RacerState::Won,
+            task_handle: h,
+            label: Some("fast-path".to_string()),
+        };
+        let json = serde_json::to_string(&racer).unwrap();
+        let decoded: RacerSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(racer, decoded);
+    }
+
+    #[test]
+    fn use_race_snapshot_round_trip() {
+        let snap = UseRaceSnapshot {
+            phase: ReactHookPhase::Active,
+            config: UseRaceConfig::default(),
+            scope_handle: None,
+            racers: vec![],
+            race_count: 1,
+            has_winner: true,
+            losers_drained: true,
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let decoded: UseRaceSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(snap, decoded);
+    }
+
+    #[test]
+    fn use_cancellation_config_defaults() {
+        let cfg = UseCancellationConfig::default();
+        assert_eq!(cfg.label, "cancellation");
+        assert!(!cfg.can_trigger);
+    }
+
+    #[test]
+    fn use_cancellation_snapshot_round_trip() {
+        let snap = UseCancellationSnapshot {
+            phase: ReactHookPhase::Active,
+            config: UseCancellationConfig {
+                label: "cancel-observer".to_string(),
+                can_trigger: true,
+            },
+            scope_handle: None,
+            is_cancelled: true,
+            cancellation: Some(WasmAbiCancellation {
+                kind: "timeout".to_string(),
+                phase: "completed".to_string(),
+                origin_region: "R0".to_string(),
+                origin_task: None,
+                timestamp_nanos: 0,
+                message: None,
+                truncated: false,
+            }),
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let decoded: UseCancellationSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(snap, decoded);
+    }
+
+    #[test]
+    fn hook_diagnostic_event_round_trip() {
+        let mut table = WasmHandleTable::new();
+        let h = table.allocate(WasmHandleKind::Region);
+        let evt = ReactHookDiagnosticEvent {
+            hook_kind: ReactHookKind::Scope,
+            label: "panel".to_string(),
+            from_phase: ReactHookPhase::Idle,
+            to_phase: ReactHookPhase::Active,
+            handles: vec![h],
+            detail: Some("mounted".to_string()),
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        let decoded: ReactHookDiagnosticEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(evt, decoded);
+    }
+
+    #[test]
+    fn task_dep_change_policy_serde() {
+        for policy in [
+            TaskDepChangePolicy::CancelAndRestart,
+            TaskDepChangePolicy::DiscardAndRestart,
+            TaskDepChangePolicy::KeepRunning,
+        ] {
+            let json = serde_json::to_string(&policy).unwrap();
+            let decoded: TaskDepChangePolicy = serde_json::from_str(&json).unwrap();
+            assert_eq!(policy, decoded);
+        }
+    }
+
+    #[test]
+    fn hook_kind_serde() {
+        for kind in [
+            ReactHookKind::Scope,
+            ReactHookKind::Task,
+            ReactHookKind::Race,
+            ReactHookKind::Cancellation,
+        ] {
+            let json = serde_json::to_string(&kind).unwrap();
+            let decoded: ReactHookKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(kind, decoded);
+        }
     }
 }

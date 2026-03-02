@@ -48,8 +48,11 @@ pub use typed_symbol::{
     TypeRegistry, TypedDecoder, TypedEncoder, TypedSymbol,
 };
 pub use wasm_abi::{
-    ReactProviderConfig, ReactProviderPhase, ReactProviderSnapshot, ReactProviderState,
-    ReactProviderTransitionError, WASM_ABI_MAJOR_VERSION, WASM_ABI_MINOR_VERSION,
+    RacerSnapshot, RacerState, ReactHookDiagnosticEvent, ReactHookKind, ReactHookPhase,
+    ReactHookTransitionError, ReactProviderConfig, ReactProviderPhase, ReactProviderSnapshot,
+    ReactProviderState, ReactProviderTransitionError, TaskDepChangePolicy, UseCancellationConfig,
+    UseCancellationSnapshot, UseRaceConfig, UseRaceSnapshot, UseScopeConfig, UseScopeSnapshot,
+    UseTaskConfig, UseTaskSnapshot, UseTaskStatus, WASM_ABI_MAJOR_VERSION, WASM_ABI_MINOR_VERSION,
     WASM_ABI_SIGNATURE_FINGERPRINT_V1, WASM_ABI_SIGNATURES_V1, WasmAbiBoundaryEvent,
     WasmAbiCancellation, WasmAbiChangeClass, WasmAbiCompatibilityDecision, WasmAbiErrorCode,
     WasmAbiFailure, WasmAbiOutcomeEnvelope, WasmAbiPayloadShape, WasmAbiRecoverability,
@@ -60,7 +63,8 @@ pub use wasm_abi::{
     WasmFetchRequest, WasmHandleKind, WasmHandleRef, WasmOutcomeExt, WasmScopeEnterBuilder,
     WasmScopeEnterRequest, WasmTaskCancelRequest, WasmTaskSpawnBuilder, WasmTaskSpawnRequest,
     apply_abort_signal_event, apply_runtime_cancel_phase_event, classify_wasm_abi_compatibility,
-    is_valid_provider_transition, is_valid_wasm_boundary_transition, required_wasm_abi_bump,
-    validate_provider_transition, validate_wasm_boundary_transition,
-    wasm_abi_signature_fingerprint, wasm_boundary_state_for_cancel_phase,
+    is_valid_hook_transition, is_valid_provider_transition, is_valid_wasm_boundary_transition,
+    required_wasm_abi_bump, validate_hook_transition, validate_provider_transition,
+    validate_wasm_boundary_transition, wasm_abi_signature_fingerprint,
+    wasm_boundary_state_for_cancel_phase,
 };
