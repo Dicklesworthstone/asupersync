@@ -152,11 +152,10 @@ impl<T> Mutex<T> {
 
     /// Tries to acquire the mutex without waiting.
     pub fn try_lock(&self) -> Result<MutexGuard<'_, T>, TryLockError> {
+        let mut state = self.state.lock();
         if self.is_poisoned() {
             return Err(TryLockError::Poisoned);
         }
-
-        let mut state = self.state.lock();
         if state.locked {
             return Err(TryLockError::Locked);
         }
@@ -223,11 +222,11 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
             return Poll::Ready(Err(LockError::Cancelled));
         }
 
+        let mut state = self.mutex.state.lock();
+
         if self.mutex.is_poisoned() {
             return Poll::Ready(Err(LockError::Poisoned));
         }
-
-        let mut state = self.mutex.state.lock();
 
         if !state.locked {
             // Acquire lock
@@ -410,10 +409,10 @@ impl<T> OwnedMutexGuard<T> {
                 if self.cx.checkpoint().is_err() {
                     return Poll::Ready(Err(LockError::Cancelled));
                 }
+                let mut state = self.mutex.state.lock();
                 if self.mutex.is_poisoned() {
                     return Poll::Ready(Err(LockError::Poisoned));
                 }
-                let mut state = self.mutex.state.lock();
                 if !state.locked {
                     state.locked = true;
 
@@ -474,11 +473,11 @@ impl<T> OwnedMutexGuard<T> {
 
     /// Tries to acquire the mutex without waiting.
     pub fn try_lock(mutex: Arc<Mutex<T>>) -> Result<Self, TryLockError> {
-        if mutex.is_poisoned() {
-            return Err(TryLockError::Poisoned);
-        }
         {
             let mut state = mutex.state.lock();
+            if mutex.is_poisoned() {
+                return Err(TryLockError::Poisoned);
+            }
             if state.locked {
                 return Err(TryLockError::Locked);
             }

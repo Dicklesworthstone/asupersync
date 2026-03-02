@@ -560,7 +560,7 @@ impl Future for Sleep {
 
                 drop(state);
                 for handle in finished_handles {
-                    drop(handle);
+                    let _ = handle.join();
                 }
 
                 Poll::Pending
@@ -589,7 +589,7 @@ impl Drop for Sleep {
         };
 
         for handle in fallback_handles {
-            drop(handle);
+            let _ = handle.join();
         }
 
         if let (Some(handle), Some(driver)) = (handle, driver) {

@@ -89,7 +89,7 @@ impl TlsAcceptor {
     /// # Cancel-Safety
     /// Handshake is NOT cancel-safe. If cancelled mid-handshake, drop the stream.
     #[cfg(feature = "tls")]
-    pub async fn accept<IO>(&self, io: IO) -> Result<TlsStream<IO>, TlsError>
+    pub async fn accept<IO>(&self, cx: &crate::cx::Cx, io: IO) -> Result<TlsStream<IO>, TlsError>
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
@@ -98,7 +98,7 @@ impl TlsAcceptor {
         let mut stream = TlsStream::new_server(io, conn);
         if let Some(timeout) = self.handshake_timeout {
             match crate::time::timeout(
-                super::wall_clock_now(),
+                cx.now(),
                 timeout,
                 poll_fn(|cx| stream.poll_handshake(cx)),
             )
@@ -129,7 +129,7 @@ impl TlsAcceptor {
 
     /// Accept a connection (disabled-mode fallback when TLS is disabled).
     #[cfg(not(feature = "tls"))]
-    pub async fn accept<IO>(&self, _io: IO) -> Result<TlsStream<IO>, TlsError>
+    pub async fn accept<IO>(&self, _cx: &crate::cx::Cx, _io: IO) -> Result<TlsStream<IO>, TlsError>
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {

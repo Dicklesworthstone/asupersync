@@ -263,11 +263,11 @@ impl<T> RwLock<T> {
 
     #[inline]
     fn try_acquire_read_state(&self) -> Result<(), TryReadError> {
+        let mut state = self.state.lock();
         if self.is_poisoned() {
             return Err(TryReadError::Poisoned);
         }
 
-        let mut state = self.state.lock();
         if state.writer_active || state.writer_waiters > 0 {
             return Err(TryReadError::Locked);
         }
@@ -279,11 +279,11 @@ impl<T> RwLock<T> {
 
     #[inline]
     fn try_acquire_write_state(&self) -> Result<(), TryWriteError> {
+        let mut state = self.state.lock();
         if self.is_poisoned() {
             return Err(TryWriteError::Poisoned);
         }
 
-        let mut state = self.state.lock();
         // Do not let try_write() bypass queued async writers. If there are
         // waiters, preserve queue order and report Locked.
         if state.writer_active || state.readers > 0 || state.writer_waiters > 0 {
@@ -360,15 +360,15 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.lock.is_poisoned() {
-            return Poll::Ready(Err(RwLockError::Poisoned));
-        }
-
         if self.cx.checkpoint().is_err() {
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
 
         let mut state = self.lock.state.lock();
+
+        if self.lock.is_poisoned() {
+            return Poll::Ready(Err(RwLockError::Poisoned));
+        }
 
         if !state.writer_active && state.writer_waiters == 0 {
             state.readers += 1;
@@ -435,15 +435,16 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.lock.is_poisoned() {
-            return Poll::Ready(Err(RwLockError::Poisoned));
-        }
-
         if self.cx.checkpoint().is_err() {
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
 
         let mut state = self.lock.state.lock();
+
+        if self.lock.is_poisoned() {
+            return Poll::Ready(Err(RwLockError::Poisoned));
+        }
+
         if !self.counted {
             state.writer_waiters += 1;
             self.counted = true;
@@ -700,15 +701,16 @@ impl<T> Future for OwnedReadFuture<'_, T> {
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.lock.is_poisoned() {
-            return Poll::Ready(Err(RwLockError::Poisoned));
-        }
-
         if self.cx.checkpoint().is_err() {
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
 
         let mut state = self.lock.state.lock();
+
+        if self.lock.is_poisoned() {
+            return Poll::Ready(Err(RwLockError::Poisoned));
+        }
+
         if !state.writer_active && state.writer_waiters == 0 {
             state.readers += 1;
             drop(state);
@@ -776,10 +778,6 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.lock.is_poisoned() {
-            return Poll::Ready(Err(RwLockError::Poisoned));
-        }
-
         if self.cx.checkpoint().is_err() {
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
@@ -787,6 +785,11 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
         // Clone the Arc to avoid borrow conflict with self.counted
         let lock = Arc::clone(&self.lock);
         let mut state = lock.state.lock();
+
+        if lock.is_poisoned() {
+            return Poll::Ready(Err(RwLockError::Poisoned));
+        }
+
         if !self.counted {
             state.writer_waiters += 1;
             self.counted = true;
