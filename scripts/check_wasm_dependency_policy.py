@@ -510,6 +510,12 @@ def run_self_tests() -> int:
             raise AssertionError(message)
 
     now = parse_iso8601_utc("2026-01-01T00:00:00Z")
+    try:
+        parse_iso8601_utc("2026-01-01T00:00:00")
+    except PolicyError:
+        pass
+    else:
+        raise AssertionError("timestamps without timezone must raise PolicyError")
 
     depth, crate, version = parse_tree_line("2serde_json v1.0.149")
     expect(depth == 2, "depth parsing failed")
@@ -556,6 +562,82 @@ def run_self_tests() -> int:
         transition_issue == "asupersync-umelq.3.2",
         "tower transition issue should match expected bead",
     )
+
+    transitions_expired = {
+        "tower": Transition(
+            crate="tower",
+            status="active",
+            owner="runtime-core",
+            replacement_issue="asupersync-umelq.3.2",
+            expires_at_utc="2025-12-31T23:59:59Z",
+            notes="expired",
+        )
+    }
+    (
+        _decision_tower_expired,
+        _reason_tower_expired,
+        _rem_tower_expired,
+        _risk_tower_expired,
+        transition_tower_expired,
+        _transition_issue_expired,
+    ) = classify_dependency("tower", forbidden, conditional, transitions_expired, now)
+    expect(transition_tower_expired == "expired", "expired transition classification failed")
+
+    try:
+        load_transitions(
+            [
+                {
+                    "crate": "tower",
+                    "status": "active",
+                    "replacement_issue": "asupersync-umelq.3.2",
+                    "expires_at_utc": "2026-06-01T00:00:00Z",
+                    "notes": "missing owner should fail",
+                }
+            ]
+        )
+    except PolicyError:
+        pass
+    else:
+        raise AssertionError("missing transition owner should raise PolicyError")
+
+    passed, gate_summary = evaluate_gate(
+        [
+            Finding(
+                profile_id="FP-BR-DEV",
+                target="wasm32-unknown-unknown",
+                crate="tokio",
+                version="v1.0.0",
+                transitive_chain=("asupersync", "tokio"),
+                decision="forbidden",
+                decision_reason="forbidden runtime",
+                remediation="remove tokio",
+                risk_score=100,
+                transition_status="none",
+                transition_issue=None,
+            ),
+            Finding(
+                profile_id="FP-BR-DEV",
+                target="wasm32-unknown-unknown",
+                crate="tower",
+                version="v0.5.3",
+                transitive_chain=("asupersync", "tower"),
+                decision="conditional",
+                decision_reason="adapter-only",
+                remediation="track transition",
+                risk_score=90,
+                transition_status="expired",
+                transition_issue="asupersync-umelq.3.2",
+            ),
+        ],
+        85,
+    )
+    expect(not passed, "gate should fail with forbidden or expired findings")
+    expect(gate_summary["forbidden_count"] == 1, "forbidden summary count mismatch")
+    expect(
+        gate_summary["unresolved_high_risk_count"] == 2,
+        "unresolved high risk summary count mismatch",
+    )
+    expect(gate_summary["expired_transition_count"] == 1, "expired summary count mismatch")
 
     try:
         validate_policy_cross_refs(
