@@ -171,6 +171,12 @@ impl LocalStoredTask {
         self.task_id = Some(task_id);
     }
 
+    /// Returns the task ID associated with this task.
+    #[must_use]
+    pub fn task_id(&self) -> Option<TaskId> {
+        self.task_id
+    }
+
     /// Sets the budget polls remaining.
     #[inline]
     pub fn set_polls_remaining(&mut self, remaining: u32) {

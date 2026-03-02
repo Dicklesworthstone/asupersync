@@ -37,11 +37,14 @@ impl LocalTaskStore {
 
     fn remove(&mut self, task_id: TaskId) -> Option<LocalStoredTask> {
         let slot = task_id.arena_index().index() as usize;
-        let taken = self.slots.get_mut(slot)?.take();
-        if taken.is_some() {
+        let slot_ref = self.slots.get_mut(slot)?;
+        if slot_ref.as_ref()?.task_id() == Some(task_id) {
+            let taken = slot_ref.take();
             self.len -= 1;
+            taken
+        } else {
+            None
         }
-        taken
     }
 
     fn len(&self) -> usize {

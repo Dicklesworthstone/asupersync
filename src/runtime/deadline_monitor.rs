@@ -236,7 +236,7 @@ impl DeadlineMonitor {
                 .monitored
                 .get(slot)
                 .and_then(Option::as_ref)
-                .is_some_and(|entry| entry.violated);
+                .is_some_and(|entry| entry.task_id == task_id && entry.violated);
             if deadline_exceeded && !already_violated {
                 let over_by = Duration::from_nanos(now.duration_since(deadline));
                 self.emit_deadline_violation(task_type, over_by);
@@ -245,7 +245,11 @@ impl DeadlineMonitor {
 
         let slot = task_id.arena_index().index() as usize;
         if slot < self.monitored.len() {
-            self.monitored[slot].take();
+            if let Some(entry) = &self.monitored[slot] {
+                if entry.task_id == task_id {
+                    self.monitored[slot].take();
+                }
+            }
         }
     }
 
@@ -375,6 +379,13 @@ impl DeadlineMonitor {
                 if slot >= self.monitored.len() {
                     self.monitored.resize_with(slot + 1, || None);
                 }
+                
+                if let Some(existing) = &self.monitored[slot] {
+                    if existing.task_id != task.id {
+                        self.monitored[slot] = None;
+                    }
+                }
+                
                 let entry = self.monitored[slot].get_or_insert_with(|| MonitoredTask {
                     task_id: task.id,
                     region_id: task.owner,

@@ -100,7 +100,7 @@ pub struct ObligationCreateArgs {
 pub struct ObligationTable {
     obligations: Arena<ObligationRecord>,
     /// Secondary index: task → obligation IDs, indexed by arena slot.
-    by_holder: Vec<Option<SmallVec<[ObligationId; 4]>>>,
+    by_holder: Vec<Option<(TaskId, SmallVec<[ObligationId; 4]>)>>,
     /// Cached count of pending (Reserved) obligations.
     ///
     /// Maintained incrementally: +1 on create, -1 on commit/abort/leak.
@@ -152,9 +152,12 @@ impl ObligationTable {
         if slot >= self.by_holder.len() {
             self.by_holder.resize_with(slot + 1, || None);
         }
-        self.by_holder[slot]
-            .get_or_insert_with(SmallVec::new)
-            .push(ob_id);
+        let entry = self.by_holder[slot].get_or_insert_with(|| (holder, SmallVec::new()));
+        if entry.0 != holder {
+            entry.0 = holder;
+            entry.1.clear();
+        }
+        entry.1.push(ob_id);
     }
 
     /// Inserts a new obligation record produced by `f` into the arena.
@@ -184,10 +187,12 @@ impl ObligationTable {
         }
         let ob_id = ObligationId::from_arena(index);
         let slot = record.holder.arena_index().index() as usize;
-        if let Some(Some(ids)) = self.by_holder.get_mut(slot) {
-            ids.retain(|id| *id != ob_id);
-            if ids.is_empty() {
-                self.by_holder[slot] = None;
+        if let Some(Some((holder, ids))) = self.by_holder.get_mut(slot) {
+            if *holder == record.holder {
+                ids.retain(|id| *id != ob_id);
+                if ids.is_empty() {
+                    self.by_holder[slot] = None;
+                }
             }
         }
         Some(record)
@@ -375,10 +380,12 @@ impl ObligationTable {
     #[must_use]
     pub fn ids_for_holder(&self, task_id: TaskId) -> &[ObligationId] {
         let slot = task_id.arena_index().index() as usize;
-        self.by_holder
-            .get(slot)
-            .and_then(Option::as_ref)
-            .map_or(&[], SmallVec::as_slice)
+        if let Some(Some((holder, ids))) = self.by_holder.get(slot) {
+            if *holder == task_id {
+                return ids.as_slice();
+            }
+        }
+        &[]
     }
 
     /// Collects pending obligation IDs for a task using the holder index.
