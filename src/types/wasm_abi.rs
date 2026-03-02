@@ -5522,4 +5522,195 @@ mod tests {
             assert_eq!(kind, decoded);
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Next.js App Router Integration Tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn render_environment_supports_wasm() {
+        assert!(NextjsRenderEnvironment::ClientHydrated.supports_wasm_runtime());
+        assert!(!NextjsRenderEnvironment::ClientSsr.supports_wasm_runtime());
+        assert!(!NextjsRenderEnvironment::ServerComponent.supports_wasm_runtime());
+        assert!(!NextjsRenderEnvironment::EdgeRuntime.supports_wasm_runtime());
+        assert!(!NextjsRenderEnvironment::NodeServer.supports_wasm_runtime());
+    }
+
+    #[test]
+    fn render_environment_has_browser_apis() {
+        assert!(NextjsRenderEnvironment::ClientHydrated.has_browser_apis());
+        assert!(NextjsRenderEnvironment::ClientSsr.has_browser_apis());
+        assert!(!NextjsRenderEnvironment::ServerComponent.has_browser_apis());
+        assert!(!NextjsRenderEnvironment::EdgeRuntime.has_browser_apis());
+        assert!(!NextjsRenderEnvironment::NodeServer.has_browser_apis());
+    }
+
+    #[test]
+    fn render_environment_is_server_side() {
+        assert!(NextjsRenderEnvironment::ServerComponent.is_server_side());
+        assert!(NextjsRenderEnvironment::EdgeRuntime.is_server_side());
+        assert!(NextjsRenderEnvironment::NodeServer.is_server_side());
+        assert!(!NextjsRenderEnvironment::ClientSsr.is_server_side());
+        assert!(!NextjsRenderEnvironment::ClientHydrated.is_server_side());
+    }
+
+    #[test]
+    fn capability_matrix_wasm_runtime() {
+        use NextjsCapability::WasmRuntime;
+        assert!(is_capability_available(
+            NextjsRenderEnvironment::ClientHydrated,
+            WasmRuntime
+        ));
+        assert!(!is_capability_available(
+            NextjsRenderEnvironment::ClientSsr,
+            WasmRuntime
+        ));
+        assert!(!is_capability_available(
+            NextjsRenderEnvironment::ServerComponent,
+            WasmRuntime
+        ));
+    }
+
+    #[test]
+    fn capability_matrix_server_only() {
+        use NextjsCapability::{NodeApis, RequestContext, ServerCookies};
+        for cap in [ServerCookies, RequestContext] {
+            assert!(is_capability_available(
+                NextjsRenderEnvironment::ServerComponent,
+                cap
+            ));
+            assert!(is_capability_available(
+                NextjsRenderEnvironment::EdgeRuntime,
+                cap
+            ));
+            assert!(is_capability_available(
+                NextjsRenderEnvironment::NodeServer,
+                cap
+            ));
+            assert!(!is_capability_available(
+                NextjsRenderEnvironment::ClientHydrated,
+                cap
+            ));
+        }
+        assert!(is_capability_available(
+            NextjsRenderEnvironment::NodeServer,
+            NodeApis
+        ));
+        assert!(!is_capability_available(
+            NextjsRenderEnvironment::EdgeRuntime,
+            NodeApis
+        ));
+    }
+
+    #[test]
+    fn capability_matrix_client_only() {
+        use NextjsCapability::{BrowserStorage, DomAccess, WebWorkers};
+        for cap in [DomAccess, WebWorkers, BrowserStorage] {
+            assert!(is_capability_available(
+                NextjsRenderEnvironment::ClientHydrated,
+                cap
+            ));
+            assert!(!is_capability_available(
+                NextjsRenderEnvironment::ClientSsr,
+                cap
+            ));
+            assert!(!is_capability_available(
+                NextjsRenderEnvironment::ServerComponent,
+                cap
+            ));
+        }
+    }
+
+    #[test]
+    fn anti_pattern_explanations_non_empty() {
+        let patterns = [
+            NextjsAntiPattern::WasmImportInServerComponent,
+            NextjsAntiPattern::RuntimeCallDuringSsr,
+            NextjsAntiPattern::RuntimeInitInRender,
+            NextjsAntiPattern::HandlesSharingAcrossRoutes,
+            NextjsAntiPattern::RuntimeInEdgeMiddleware,
+            NextjsAntiPattern::BlockingHydration,
+            NextjsAntiPattern::HandlesInServerActions,
+        ];
+        for ap in patterns {
+            assert!(
+                !ap.explanation().is_empty(),
+                "anti-pattern {ap:?} has empty explanation"
+            );
+        }
+    }
+
+    #[test]
+    fn navigation_type_runtime_survives() {
+        assert!(NextjsNavigationType::SoftNavigation.runtime_survives());
+        assert!(!NextjsNavigationType::HardNavigation.runtime_survives());
+        assert!(!NextjsNavigationType::PopState.runtime_survives());
+    }
+
+    #[test]
+    fn bootstrap_transitions_valid() {
+        use NextjsBootstrapPhase::*;
+        assert!(is_valid_bootstrap_transition(ServerRendered, Hydrating));
+        assert!(is_valid_bootstrap_transition(Hydrating, Hydrated));
+        assert!(is_valid_bootstrap_transition(Hydrated, RuntimeReady));
+        assert!(is_valid_bootstrap_transition(Hydrated, RuntimeFailed));
+        // Identity
+        assert!(is_valid_bootstrap_transition(Hydrated, Hydrated));
+    }
+
+    #[test]
+    fn bootstrap_transitions_invalid() {
+        use NextjsBootstrapPhase::*;
+        assert!(!is_valid_bootstrap_transition(ServerRendered, Hydrated));
+        assert!(!is_valid_bootstrap_transition(ServerRendered, RuntimeReady));
+        assert!(!is_valid_bootstrap_transition(Hydrating, RuntimeReady));
+        assert!(!is_valid_bootstrap_transition(RuntimeReady, Hydrating));
+        assert!(validate_bootstrap_transition(ServerRendered, RuntimeReady).is_err());
+    }
+
+    #[test]
+    fn component_placement_round_trip() {
+        let placement = NextjsComponentPlacement {
+            environment: NextjsRenderEnvironment::ClientHydrated,
+            route_segment: "/dashboard/settings".to_string(),
+            inside_suspense: true,
+            inside_error_boundary: false,
+            layout_depth: 2,
+        };
+        let json = serde_json::to_string(&placement).unwrap();
+        let decoded: NextjsComponentPlacement = serde_json::from_str(&json).unwrap();
+        assert_eq!(placement, decoded);
+    }
+
+    #[test]
+    fn integration_snapshot_round_trip() {
+        let snap = NextjsIntegrationSnapshot {
+            bootstrap_phase: NextjsBootstrapPhase::RuntimeReady,
+            environment: NextjsRenderEnvironment::ClientHydrated,
+            route_segment: "/app".to_string(),
+            active_provider_count: 1,
+            wasm_module_loaded: true,
+            navigation_count: 3,
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let decoded: NextjsIntegrationSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(snap, decoded);
+    }
+
+    #[test]
+    fn anti_pattern_serde() {
+        for ap in [
+            NextjsAntiPattern::WasmImportInServerComponent,
+            NextjsAntiPattern::RuntimeCallDuringSsr,
+            NextjsAntiPattern::RuntimeInitInRender,
+            NextjsAntiPattern::HandlesSharingAcrossRoutes,
+            NextjsAntiPattern::RuntimeInEdgeMiddleware,
+            NextjsAntiPattern::BlockingHydration,
+            NextjsAntiPattern::HandlesInServerActions,
+        ] {
+            let json = serde_json::to_string(&ap).unwrap();
+            let decoded: NextjsAntiPattern = serde_json::from_str(&json).unwrap();
+            assert_eq!(ap, decoded);
+        }
+    }
 }
