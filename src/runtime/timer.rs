@@ -18,7 +18,7 @@ impl Ord for TimerEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse ordering for min-heap (earliest deadline first).
         other.deadline.cmp(&self.deadline).then_with(|| {
-            let diff = other.generation.wrapping_sub(self.generation) as i64;
+            let diff = other.generation.wrapping_sub(self.generation).cast_signed();
             diff.cmp(&0)
         })
     }

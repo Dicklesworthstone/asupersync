@@ -852,6 +852,7 @@ impl SymbolicObligationRegistry {
                 entry.1.clear();
             }
             entry.1.push(id);
+            drop(by_region);
         }
     }
 }
