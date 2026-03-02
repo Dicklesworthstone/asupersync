@@ -589,7 +589,8 @@ impl HttpClient {
                 {
                     let domain = parsed.host.trim_start_matches('[').trim_end_matches(']');
 
-                    let builder = TlsConnectorBuilder::new().alpn_http();
+                    let builder = TlsConnectorBuilder::new()
+                        .alpn_protocols(vec![b"http/1.1".to_vec()]);
 
                     #[cfg(feature = "tls-native-roots")]
                     let builder = builder
