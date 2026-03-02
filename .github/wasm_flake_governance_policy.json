@@ -1,0 +1,67 @@
+{
+  "schema_version": "wasm-flake-governance-policy-v1",
+  "scope": "wasm-browser-verification",
+  "bead": "asupersync-umelq.18.5",
+  "detection": {
+    "runner_command": "scripts/run_semantic_flake_detector.sh --iterations 5 --json",
+    "dashboard_schema_version": "sem-variance-dashboard-v1",
+    "dashboard_path": "target/semantic-verification/flake/latest/variance_dashboard.json",
+    "required_suites": [
+      "witness_seed_equivalence",
+      "cross_seed_replay"
+    ]
+  },
+  "quarantine": {
+    "automation_required": true,
+    "manifest_schema_version": "wasm-flake-quarantine-v1",
+    "manifest_path": "artifacts/wasm_flake_quarantine_manifest.json",
+    "statuses": [
+      "open",
+      "resolved",
+      "reactivated"
+    ],
+    "required_fields": [
+      "id",
+      "suite",
+      "severity",
+      "status",
+      "owner",
+      "opened_at_utc",
+      "sla_hours",
+      "replay_command",
+      "trace_pointer",
+      "reactivation_criteria"
+    ]
+  },
+  "quality_thresholds": {
+    "max_flake_rate_pct": 0.0,
+    "max_false_positive_rate_pct": 5.0,
+    "max_unresolved_high_severity_flakes": 0,
+    "max_unresolved_critical_severity_flakes": 0,
+    "max_critical_test_failures": 0
+  },
+  "sla_targets_hours": {
+    "critical": 24,
+    "high": 72,
+    "medium": 168
+  },
+  "forensics_playbook": {
+    "doc_path": "docs/wasm_flake_governance_and_forensics.md",
+    "required_commands": [
+      "bash ./scripts/run_all_e2e.sh --suite wasm-incident-forensics",
+      "TEST_SEED=4242 bash ./scripts/test_wasm_incident_forensics_e2e.sh",
+      "python3 ./scripts/check_incident_forensics_playbook.py",
+      "python3 ./scripts/check_wasm_flake_governance.py --policy .github/wasm_flake_governance_policy.json"
+    ]
+  },
+  "release_blocking_conditions": [
+    "critical test failures in deterministic replay suites",
+    "unresolved high/critical severity flakes in quarantine manifest",
+    "missing incident forensics replay pointers for failed suites",
+    "flake-rate or false-positive proxy thresholds breached"
+  ],
+  "output": {
+    "report_path": "artifacts/wasm_flake_governance_report.json",
+    "events_path": "artifacts/wasm_flake_governance_events.ndjson"
+  }
+}

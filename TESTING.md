@@ -137,6 +137,32 @@ Expected per-run artifacts:
 - `repro_bundle.json` (`incident-forensics-repro-bundle-v1`)
 - replay payloads (`replay_run1.json`, `replay_run2.json`) and failure probe diagnostics (`expected_failure.log`)
 
+### WASM Flake Governance Gate (asupersync-umelq.18.5)
+
+Browser verification release quality now includes an explicit flake-governance
+contract.
+
+Policy source of truth:
+- `.github/wasm_flake_governance_policy.json`
+
+Gate checker:
+- `python3 ./scripts/check_wasm_flake_governance.py --policy .github/wasm_flake_governance_policy.json`
+
+Core governance workflow:
+- `scripts/run_semantic_flake_detector.sh --iterations 5 --json`
+- `bash scripts/check_semantic_signal_quality.sh --report target/semantic-verification/verification_report.json --dashboard target/semantic-verification/flake/latest/variance_dashboard.json --output target/semantic-verification/signal-quality/signal_quality_report.json`
+- `bash ./scripts/run_all_e2e.sh --suite wasm-incident-forensics`
+- `python3 ./scripts/check_incident_forensics_playbook.py`
+
+Required quarantine manifest:
+- `artifacts/wasm_flake_quarantine_manifest.json` (`schema_version=wasm-flake-quarantine-v1`)
+
+Release-blocking conditions:
+- critical test failures in deterministic replay suites,
+- unresolved high/critical flakes in quarantine manifest,
+- missing forensics replay linkage (`replay_command` + `trace_pointer`),
+- flake-rate/false-positive threshold breaches from policy.
+
 Example structured log entry (start/end markers include the same context):
 
 ```text
