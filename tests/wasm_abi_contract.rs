@@ -1,15 +1,19 @@
 #![allow(missing_docs)]
 
+use asupersync::types::wasm_abi::ErrorBoundaryAction;
 use asupersync::types::{
     CancelPhase, NextjsBootstrapPhase, NextjsIntegrationSnapshot, NextjsNavigationType,
     NextjsRenderEnvironment, is_valid_bootstrap_transition,
 };
 use asupersync::{
+    ProgressiveLoadSlot, ProgressiveLoadSnapshot, SuspenseBoundaryState, TransitionTaskState,
     WASM_ABI_MAJOR_VERSION, WASM_ABI_MINOR_VERSION, WASM_ABI_SIGNATURE_FINGERPRINT_V1,
-    WASM_ABI_SIGNATURES_V1, WasmAbiBoundaryEvent, WasmAbiCompatibilityDecision,
-    WasmAbiPayloadShape, WasmAbiSymbol, WasmAbiVersion, WasmAbortInteropSnapshot,
-    WasmAbortPropagationMode, WasmBoundaryState, apply_abort_signal_event,
-    apply_runtime_cancel_phase_event, classify_wasm_abi_compatibility,
+    WASM_ABI_SIGNATURES_V1, WasmAbiBoundaryEvent, WasmAbiCancellation,
+    WasmAbiCompatibilityDecision, WasmAbiErrorCode, WasmAbiFailure, WasmAbiOutcomeEnvelope,
+    WasmAbiPayloadShape, WasmAbiRecoverability, WasmAbiSymbol, WasmAbiValue, WasmAbiVersion,
+    WasmAbortInteropSnapshot, WasmAbortPropagationMode, WasmBoundaryState,
+    apply_abort_signal_event, apply_runtime_cancel_phase_event, classify_wasm_abi_compatibility,
+    outcome_to_error_boundary_action, outcome_to_suspense_state, outcome_to_transition_state,
     wasm_abi_signature_fingerprint,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -70,6 +74,26 @@ fn nextjs_bootstrap_log_fields(
         snapshot.wasm_module_loaded.to_string(),
     );
     fields
+}
+
+fn transient_failure(message: &str) -> WasmAbiOutcomeEnvelope {
+    WasmAbiOutcomeEnvelope::Err {
+        failure: WasmAbiFailure {
+            code: WasmAbiErrorCode::InternalFailure,
+            recoverability: WasmAbiRecoverability::Transient,
+            message: message.to_string(),
+        },
+    }
+}
+
+fn permanent_failure(message: &str) -> WasmAbiOutcomeEnvelope {
+    WasmAbiOutcomeEnvelope::Err {
+        failure: WasmAbiFailure {
+            code: WasmAbiErrorCode::CompatibilityRejected,
+            recoverability: WasmAbiRecoverability::Permanent,
+            message: message.to_string(),
+        },
+    }
 }
 
 #[test]
@@ -377,4 +401,170 @@ fn nextjs_bootstrap_log_fields_are_deterministic_and_replayable() {
     assert_eq!(fields["recovery_action"], "retry_after_cancel");
     assert_eq!(fields["route_segment"], "/dashboard");
     assert_eq!(fields["wasm_module_loaded"], "false");
+}
+
+#[test]
+fn wasm_suspense_and_transition_outcome_mappings_are_deterministic() {
+    let ok = WasmAbiOutcomeEnvelope::Ok {
+        value: WasmAbiValue::Unit,
+    };
+    assert_eq!(
+        outcome_to_suspense_state(&ok),
+        SuspenseBoundaryState::Resolved
+    );
+    assert_eq!(
+        outcome_to_error_boundary_action(&ok),
+        ErrorBoundaryAction::None
+    );
+    assert_eq!(
+        outcome_to_transition_state(&ok),
+        TransitionTaskState::Committed
+    );
+
+    let recoverable_err = transient_failure("temporary backend timeout");
+    assert_eq!(
+        outcome_to_suspense_state(&recoverable_err),
+        SuspenseBoundaryState::ErrorRecoverable
+    );
+    assert_eq!(
+        outcome_to_error_boundary_action(&recoverable_err),
+        ErrorBoundaryAction::ShowWithRetry
+    );
+    assert_eq!(
+        outcome_to_transition_state(&recoverable_err),
+        TransitionTaskState::Reverted
+    );
+
+    let fatal_err = permanent_failure("invalid contract shape");
+    assert_eq!(
+        outcome_to_suspense_state(&fatal_err),
+        SuspenseBoundaryState::ErrorFatal
+    );
+    assert_eq!(
+        outcome_to_error_boundary_action(&fatal_err),
+        ErrorBoundaryAction::ShowFatal
+    );
+    assert_eq!(
+        outcome_to_transition_state(&fatal_err),
+        TransitionTaskState::Reverted
+    );
+
+    let cancelled = WasmAbiOutcomeEnvelope::Cancelled {
+        cancellation: WasmAbiCancellation {
+            kind: "user".to_string(),
+            phase: "completed".to_string(),
+            origin_region: "r:1".to_string(),
+            origin_task: Some("t:2".to_string()),
+            timestamp_nanos: 42,
+            message: Some("route_change".to_string()),
+            truncated: false,
+        },
+    };
+    assert_eq!(
+        outcome_to_suspense_state(&cancelled),
+        SuspenseBoundaryState::Cancelled
+    );
+    assert_eq!(
+        outcome_to_error_boundary_action(&cancelled),
+        ErrorBoundaryAction::None
+    );
+    assert_eq!(
+        outcome_to_transition_state(&cancelled),
+        TransitionTaskState::Cancelled
+    );
+
+    let panicked = WasmAbiOutcomeEnvelope::Panicked {
+        message: "panic in hook".to_string(),
+    };
+    assert_eq!(
+        outcome_to_suspense_state(&panicked),
+        SuspenseBoundaryState::ErrorFatal
+    );
+    assert_eq!(
+        outcome_to_error_boundary_action(&panicked),
+        ErrorBoundaryAction::ShowFatal
+    );
+    assert_eq!(
+        outcome_to_transition_state(&panicked),
+        TransitionTaskState::Reverted
+    );
+}
+
+#[test]
+fn progressive_loading_state_aggregation_respects_required_slot_precedence() {
+    let slots = vec![
+        ProgressiveLoadSlot {
+            label: "required-users".to_string(),
+            required: true,
+            state: SuspenseBoundaryState::Pending,
+            task_handle: None,
+        },
+        ProgressiveLoadSlot {
+            label: "optional-metrics".to_string(),
+            required: false,
+            state: SuspenseBoundaryState::ErrorFatal,
+            task_handle: None,
+        },
+    ];
+    assert_eq!(
+        ProgressiveLoadSnapshot::compute_overall_state(&slots),
+        SuspenseBoundaryState::Pending
+    );
+
+    let slots = vec![
+        ProgressiveLoadSlot {
+            label: "required-users".to_string(),
+            required: true,
+            state: SuspenseBoundaryState::Resolved,
+            task_handle: None,
+        },
+        ProgressiveLoadSlot {
+            label: "required-permissions".to_string(),
+            required: true,
+            state: SuspenseBoundaryState::ErrorRecoverable,
+            task_handle: None,
+        },
+    ];
+    assert_eq!(
+        ProgressiveLoadSnapshot::compute_overall_state(&slots),
+        SuspenseBoundaryState::ErrorRecoverable
+    );
+
+    let slots = vec![
+        ProgressiveLoadSlot {
+            label: "required-users".to_string(),
+            required: true,
+            state: SuspenseBoundaryState::Resolved,
+            task_handle: None,
+        },
+        ProgressiveLoadSlot {
+            label: "required-permissions".to_string(),
+            required: true,
+            state: SuspenseBoundaryState::ErrorFatal,
+            task_handle: None,
+        },
+    ];
+    assert_eq!(
+        ProgressiveLoadSnapshot::compute_overall_state(&slots),
+        SuspenseBoundaryState::ErrorFatal
+    );
+
+    let slots = vec![
+        ProgressiveLoadSlot {
+            label: "required-users".to_string(),
+            required: true,
+            state: SuspenseBoundaryState::Resolved,
+            task_handle: None,
+        },
+        ProgressiveLoadSlot {
+            label: "required-permissions".to_string(),
+            required: true,
+            state: SuspenseBoundaryState::Cancelled,
+            task_handle: None,
+        },
+    ];
+    assert_eq!(
+        ProgressiveLoadSnapshot::compute_overall_state(&slots),
+        SuspenseBoundaryState::Resolved
+    );
 }
