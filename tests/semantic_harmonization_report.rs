@@ -91,10 +91,7 @@ fn report_mentions_all_gate_ids_and_current_posture() {
     let report = load_report();
     let gates = ["G1", "G2", "G3", "G4", "G5", "G6", "G7"];
     for gate in gates {
-        assert!(
-            report.contains(gate),
-            "report must include gate {gate}"
-        );
+        assert!(report.contains(gate), "report must include gate {gate}");
     }
     assert!(
         report.contains("PASS") && report.contains("DEFER"),
