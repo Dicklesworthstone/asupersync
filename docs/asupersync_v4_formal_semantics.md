@@ -39,6 +39,8 @@ o ∈ ObligationId = ℕ
 
 ### 1.2 Outcomes
 
+> **Rule IDs**: `def.outcome.four_valued` #29, `def.outcome.severity_lattice` #30
+
 Four-valued, severity-ordered:
 
 ```
@@ -500,7 +502,7 @@ Finalizing → Completed(Cancelled)
 
 These guards make cancellation **phase-structured** rather than an ambient flag.
 
-#### 3.2.2 Idempotence (proof sketch) — `inv.cancel.idempotence` (#5)
+#### 3.2.2 Idempotence (proof sketch) — `inv.cancel.idempotence` #5
 
 Cancellation requests are **idempotent**:
 
@@ -512,7 +514,7 @@ Because `strengthen` is associative, commutative, and idempotent (max on severit
 min on deadlines), repeated cancel requests only **tighten** the reason; they never
 weaken or duplicate state.
 
-#### 3.2.3 Bounded cleanup (proof sketch) — `prog.cancel.drains` (#9)
+#### 3.2.3 Bounded cleanup (proof sketch) — `prog.cancel.drains` #9
 
 Under fair scheduling and **sufficient cleanup budgets**, every task that enters
 `CancelRequested` eventually reaches `Completed(Cancelled)`:
@@ -1051,7 +1053,7 @@ Preconditions:
 
 Combinators are defined in terms of primitives:
 
-### 4.1 join(f1, f2) — `comb.join` (#37), `def.outcome.join_semantics` (#31)
+### 4.1 join(f1, f2) — `comb.join` #37, `def.outcome.join_semantics` #31
 
 ```
 join(r, f1, f2) =
@@ -1064,7 +1066,7 @@ join(r, f1, f2) =
 
 Policy handles fail-fast: if o1 errors and policy = FailFast, t2 is cancelled.
 
-### 4.2 race(f1, f2) — `comb.race` (#38), `inv.combinator.loser_drained` (#40)
+### 4.2 race(f1, f2) — `comb.race` #38, `inv.combinator.loser_drained` #40
 
 ```
 race(r, f1, f2) =
@@ -1078,7 +1080,7 @@ race(r, f1, f2) =
 
 **Critical invariant**: losers are always drained, never abandoned.
 
-### 4.3 timeout(duration, f) — `comb.timeout` (#39)
+### 4.3 timeout(duration, f) — `comb.timeout` #39
 
 ```
 timeout(r, d, f) =
@@ -1091,11 +1093,14 @@ timeout(r, d, f) =
 
 These must hold in all reachable states:
 
-### INV-TREE: Ownership tree structure (`def.ownership.region_tree` #35)
+### INV-TREE: Ownership tree structure (`def.ownership.region_tree` #35, `inv.ownership.single_owner` #33)
 
 ```
 ∀r ∈ dom(R):
   r = root ∨ (R[r].parent ∈ dom(R) ∧ r ∈ R[R[r].parent].subregions)
+
+∀t ∈ dom(T):
+  |{ r | t ∈ R[r].children }| ≤ 1    // single owner (inv.ownership.single_owner)
 ```
 
 ### INV-TASK-OWNED: Every live task has an owner (`inv.ownership.task_owned` #34)
@@ -1126,7 +1131,7 @@ These must hold in all reachable states:
 
 Thus, any region that reaches `Closed(_)` must satisfy the quiescence predicate
 (`children completed ∧ subregions closed ∧ ledger empty`), which is exactly the
-`Quiescent(r)` definition (§1.12). This is a safety property (invariant), and
+`Quiescent(r)` definition (§1.13). This is a safety property (invariant), and
 progress (eventual closure) is handled separately in §6.
 
 ### INV-CANCEL-PROPAGATES: Cancel flows downward (`inv.cancel.propagates_down` #6)
@@ -1194,6 +1199,19 @@ After race(f1, f2) returns:
   t ∈ S.timed_lane   ⇒ lane(t) = Timed
   t ∈ S.ready_lane   ⇒ lane(t) = Ready
 ```
+
+### INV-DETERMINISM: Replay determinism (`inv.determinism.replayable` #46, `def.determinism.seed_equivalence` #47)
+
+```
+∀ seed, config:
+  run(seed, config) produces trace T₁
+  run(seed, config) produces trace T₂
+  ⟹ T₁ = T₂   // byte-identical traces under same seed and config
+```
+
+Two seeds are equivalent (`def.determinism.seed_equivalence` #47) iff they produce
+identical trace certificates. The lab runtime enforces this by construction: all
+nondeterminism is derived from the seed via a deterministic PRNG.
 
 ### Meta: Compositional specs (separation + rely/guarantee) [Explanatory]
 
