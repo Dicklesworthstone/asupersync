@@ -558,6 +558,9 @@ struct ObligationEntry {
     state: SymbolicObligationState,
 }
 
+type HolderSlot = Option<(TaskId, Vec<ObligationId>)>;
+type RegionSlot = Option<(RegionId, Vec<ObligationId>)>;
+
 /// Registry that tracks all active symbolic obligations.
 ///
 /// Provides indexed lookup by ID, object, task, and region. Used by the
@@ -568,9 +571,9 @@ pub struct SymbolicObligationRegistry {
     /// Obligations by object ID.
     by_object: RwLock<HashMap<ObjectId, Vec<ObligationId>>>,
     /// Obligations by holder task (arena-slot indexed).
-    by_holder: RwLock<Vec<Option<(TaskId, Vec<ObligationId>)>>>,
+    by_holder: RwLock<Vec<HolderSlot>>,
     /// Obligations by region (arena-slot indexed).
-    by_region: RwLock<Vec<Option<(RegionId, Vec<ObligationId>)>>>,
+    by_region: RwLock<Vec<RegionSlot>>,
     /// Next obligation ID.
     next_id: AtomicU64,
 }
@@ -695,6 +698,7 @@ impl SymbolicObligationRegistry {
                 return ids.clone();
             }
         }
+        drop(guard);
         Vec::new()
     }
 
@@ -708,6 +712,7 @@ impl SymbolicObligationRegistry {
                 return ids.clone();
             }
         }
+        drop(guard);
         Vec::new()
     }
 
@@ -839,6 +844,7 @@ impl SymbolicObligationRegistry {
                 entry.1.clear();
             }
             entry.1.push(id);
+            drop(by_holder);
         }
         {
             let region_slot = region.arena_index().index() as usize;
