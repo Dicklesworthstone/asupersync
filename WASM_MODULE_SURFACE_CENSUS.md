@@ -252,3 +252,69 @@ Deferred module set:
    - host servers in-browser, manage OS signals/processes, direct DB/broker wire clients from wasm runtime.
 3. Migration expectation:
    - deferred jobs require backend service adapters in v1 and become candidates for phased expansion after parity gates are stable.
+
+## 10. Workspace Slicing and Optionalization Strategy (`asupersync-umelq.3.4`)
+
+### 10.1 Objective
+
+Define a concrete workspace/package slicing plan so browser builds keep semantic
+guarantees while minimizing payload and dependency closure.
+
+### 10.2 Normative slices
+
+| Slice ID | Included crates/modules | Browser profile target | Policy |
+|---|---|---|---|
+| `WS-CORE` | `asupersync` required + adapter-required module sets (Sections 8-9) | `FP-BR-DEV`, `FP-BR-PROD`, `FP-BR-DET`, `FP-BR-MIN` | Must preserve `SEM-INV-*` style invariants (ownership/cancel/quiescence/obligations). |
+| `WS-OPT-EVIDENCE` | `franken_kernel`, `franken_evidence`, `franken_decision` integration surfaces | Optional for `FP-BR-DEV/DET`; off by default for `FP-BR-PROD/MIN` | Allowed only behind explicit feature flags; no implicit pull-in from default feature set. |
+| `WS-TOOLING` | `conformance`, `frankenlab`, `cli`, native-only docs/scripts | Native/tooling lanes only | Must remain outside browser artifact closure and wasm profile manifests. |
+
+### 10.3 Optionalization rules
+
+1. Browser profiles are authoritative:
+   - `wasm-browser-dev`
+   - `wasm-browser-prod`
+   - `wasm-browser-deterministic`
+   - `wasm-browser-minimal`
+2. Native-only surfaces remain hard-forbidden in wasm profiles (`cli`, `tls`,
+   `sqlite`, `postgres`, `mysql`, `kafka`, `native-runtime`).
+3. Optional evidence/policy crates are opt-in only; browser production defaults
+   cannot depend on them transitively.
+4. `WS-TOOLING` crates are validated in separate CI lanes and must not be
+   required to compile browser runtime artifacts.
+
+### 10.4 Implementation sequencing (smallest safe slices)
+
+1. `SLICE-A` Manifest closure:
+   - enforce target-gated native dependencies in root `Cargo.toml`;
+   - verify all browser profiles resolve without tooling-only crates.
+2. `SLICE-B` Module export fences:
+   - keep platform-specific modules gated from wasm;
+   - ensure required/adapter sets remain available under browser profiles.
+3. `SLICE-C` Optional-evidence lane:
+   - introduce explicit feature toggles for `WS-OPT-EVIDENCE` paths;
+   - confirm default browser profiles exclude them.
+4. `SLICE-D` CI and policy integration:
+   - wire profile validation + dependency policy + size/perf gates as blocking.
+
+### 10.5 Verification contract (for implementation beads)
+
+Required evidence per slice:
+
+1. Deterministic unit evidence for profile closure and feature gating behavior.
+2. Browser-path integration evidence (at least one e2e or parity scenario) for
+   any user-visible surface retained in `WS-CORE`.
+3. Reproducible command bundle (use `rch exec -- ...` for cargo-heavy checks):
+   ```bash
+   rch exec -- cargo check -p asupersync --target wasm32-unknown-unknown --no-default-features --features wasm-browser-minimal
+   rch exec -- cargo check -p asupersync --target wasm32-unknown-unknown --no-default-features --features wasm-browser-dev
+   rch exec -- cargo check -p asupersync --target wasm32-unknown-unknown --no-default-features --features wasm-browser-prod
+   rch exec -- cargo check -p asupersync --target wasm32-unknown-unknown --no-default-features --features wasm-browser-deterministic
+   ```
+
+### 10.6 Handoff to downstream bead
+
+`asupersync-umelq.3.5` should consume this section as normative input for:
+
+1. dependency minimization policy updates,
+2. feature/profile closure enforcement,
+3. regression gates preventing workspace-slice drift.

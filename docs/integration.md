@@ -157,7 +157,11 @@ and fuzzing instructions.
 Browser-targeted compilation is explicitly gated to prevent accidental partial
 builds with semantic holes:
 
-- `target_arch = "wasm32"` requires `--features wasm-browser-preview`.
+- `target_arch = "wasm32"` requires exactly one canonical browser profile:
+  - `wasm-browser-minimal`
+  - `wasm-browser-dev`
+  - `wasm-browser-prod`
+  - `wasm-browser-deterministic`
 - The following features are compile-time rejected on wasm32:
   - `cli`
   - `io-uring`
@@ -169,6 +173,14 @@ builds with semantic holes:
   - `mysql`
   - `kafka`
 
+Profile composition rules:
+
+- `wasm-browser-minimal` = `wasm-runtime` only (ABI/contract validation lane)
+- `wasm-browser-dev` = `wasm-runtime + browser-io`
+- `wasm-browser-prod` = `wasm-runtime + browser-io`
+- `wasm-browser-deterministic` = `wasm-runtime + deterministic-mode + browser-trace`
+- `native-runtime` is forbidden on wasm32 browser builds
+
 Policy and deterministic dependency-audit profiles are documented in
 `docs/wasm_dependency_audit_policy.md`.
 
@@ -177,6 +189,49 @@ Optimization-variant policy (`dev`/`canary`/`release`) is defined in
 `scripts/check_wasm_optimization_policy.py`, which emits
 `artifacts/wasm_optimization_pipeline_summary.json` for downstream perf/reliability
 gates.
+
+### WASM Workspace Slicing Matrix (WASM-02 / `asupersync-umelq.3.4`)
+
+This matrix is the canonical slicing contract for browser compilation closure.
+It defines what stays in the wasm browser core path vs what remains optional or
+native-only.
+
+| Slice | Browser status | Surface |
+|---|---|---|
+| Semantic core (required) | always-on in browser profiles | `types`, `record`, `cx`, `cancel`, `obligation`, `combinator`, `runtime` scheduler/cancellation core, `trace` core schema |
+| Browser capability/runtime adapters | on for browser profiles that include I/O | `runtime::reactor::browser`, browser-facing I/O/time seams, wasm ABI boundary types |
+| Deterministic diagnostics overlay | only in deterministic profile | `browser-trace`, deterministic replay-oriented trace hooks and artifact surfaces |
+| Feature-gated optional adapters | off by default in browser profiles | `proc-macros`, `metrics`, `tracing-integration`, `tower`, `trace-compression`, `config-file`, `lock-metrics` |
+| Native-only deferred slice | excluded from wasm32 builds | `fs`, `grpc`, `messaging`, `process`, `server`, `signal`, plus `tls`/`database`/`kafka` feature families |
+
+Extraction and optionalization rules:
+
+1. If a module requires native OS primitives (`libc`, `nix`, sockets, process/signal),
+   it must stay behind `cfg(not(target_arch = "wasm32"))`.
+2. Browser profiles must compile without enabling any deferred native surface.
+3. New browser-path code must route effects through explicit capability seams; no
+   ambient host access.
+4. Changes to this matrix must be reflected in `Cargo.toml` feature closure and
+   in `src/lib.rs` compile-time guardrails.
+
+Deterministic validation bundle for this matrix:
+
+```bash
+rch exec -- cargo check --target wasm32-unknown-unknown \
+  --no-default-features --features wasm-browser-minimal
+
+rch exec -- cargo check --target wasm32-unknown-unknown \
+  --no-default-features --features wasm-browser-dev
+
+rch exec -- cargo check --target wasm32-unknown-unknown \
+  --no-default-features --features wasm-browser-deterministic
+```
+
+Expected outcomes:
+
+- each profile compiles in isolation,
+- selecting multiple canonical profiles fails at compile time,
+- native-only modules remain excluded from wasm32 closure.
 
 ### Browser Edition Documentation IA (WASM-15 / `asupersync-umelq.16.1`)
 

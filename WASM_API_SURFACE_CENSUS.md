@@ -231,7 +231,8 @@ This census directly unblocks:
 
 1. `asupersync-umelq.2.2` portability-classification elaboration (portable / adapter / deferred).
 2. `asupersync-umelq.2.5` deferred-surface register with reintegration criteria.
-3. `asupersync-umelq.3.4` workspace slicing + optionalization sequencing.
+3. `asupersync-umelq.3.4` workspace slicing + optionalization sequencing
+   (now codified in `WASM_MODULE_SURFACE_CENSUS.md` Section 10).
 4. `asupersync-umelq.6.3` obligation-ledger parity for wasm permits/acks/leases.
 
 ## 8. Repro Commands

@@ -50,6 +50,39 @@ Guardrails:
 Reference: `docs/integration.md` ("wasm32 Guardrails"), `src/lib.rs` compile
 error gates.
 
+## Workspace Slicing Checkpoint (WASM-02 / `asupersync-umelq.3.4`)
+
+Before onboarding framework adapters, verify workspace slicing closure for the
+browser path.
+
+Core slicing intent:
+
+1. Keep semantic runtime invariants in the wasm-safe core path.
+2. Keep native-only modules behind `cfg(not(target_arch = "wasm32"))`.
+3. Keep optional adapters out of default browser closure unless explicitly needed.
+
+Validation commands:
+
+```bash
+rch exec -- cargo check --target wasm32-unknown-unknown \
+  --no-default-features --features wasm-browser-minimal \
+  | tee artifacts/onboarding/profile-minimal-check.log
+
+rch exec -- cargo check --target wasm32-unknown-unknown \
+  --no-default-features --features wasm-browser-dev \
+  | tee artifacts/onboarding/profile-dev-check.log
+
+rch exec -- cargo check --target wasm32-unknown-unknown \
+  --no-default-features --features wasm-browser-deterministic \
+  | tee artifacts/onboarding/profile-deterministic-check.log
+```
+
+Expected outcomes:
+
+- each profile compiles independently,
+- no native-only module leaks into wasm32 compilation closure,
+- profile guardrails reject invalid multi-profile feature combinations.
+
 ## Quickstart Flows
 
 Each flow has:
