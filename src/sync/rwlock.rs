@@ -335,10 +335,12 @@ impl<T> RwLock<T> {
                 if waker.is_some() {
                     state.writer_active = true;
                 }
+                drop(state);
                 (waker, SmallVec::new())
             } else {
                 let wakers = Self::drain_reader_waiters(&mut state);
                 state.readers += wakers.len();
+                drop(state);
                 (None, wakers)
             }
         };
@@ -387,13 +389,12 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
                 }
                 drop(state);
                 return Poll::Pending;
-            } else {
-                // Dequeued - we were pre-granted the lock by release_writer!
-                // `state.readers` was already incremented for us.
-                self.waiter_id = None;
-                drop(state);
-                return Poll::Ready(Ok(RwLockReadGuard { lock: self.lock }));
             }
+            // Dequeued - we were pre-granted the lock by release_writer!
+            // `state.readers` was already incremented for us.
+            self.waiter_id = None;
+            drop(state);
+            return Poll::Ready(Ok(RwLockReadGuard { lock: self.lock }));
         }
 
         if !state.writer_active && state.writer_waiters == 0 {
@@ -473,16 +474,15 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
                 }
                 drop(state);
                 return Poll::Pending;
-            } else {
-                // Dequeued - we were pre-granted the lock!
-                self.waiter_id = None;
-                if self.counted {
-                    state.writer_waiters = state.writer_waiters.saturating_sub(1);
-                    self.counted = false;
-                }
-                drop(state);
-                return Poll::Ready(Ok(RwLockWriteGuard { lock: self.lock }));
             }
+            // Dequeued - we were pre-granted the lock!
+            self.waiter_id = None;
+            if self.counted {
+                state.writer_waiters = state.writer_waiters.saturating_sub(1);
+                self.counted = false;
+            }
+            drop(state);
+            return Poll::Ready(Ok(RwLockWriteGuard { lock: self.lock }));
         }
 
         let can_acquire = !state.writer_active && state.readers == 0 && state.writer_waiters == 1;
@@ -725,45 +725,39 @@ impl<T> Future for OwnedReadFuture<'_, T> {
             return Poll::Ready(Err(RwLockError::Poisoned));
         }
 
-        if !state.writer_active && state.writer_waiters == 0 {
-            state.readers += 1;
-            drop(state);
-            self.waiter_id = None;
-            return Poll::Ready(Ok(OwnedRwLockReadGuard {
-                lock: Arc::clone(&self.lock),
-            }));
-        }
-
         if let Some(waiter_id) = self.waiter_id {
             if let Some(existing) = state.reader_waiters.iter_mut().find(|w| w.id == waiter_id) {
                 if !existing.waker.will_wake(context.waker()) {
                     existing.waker.clone_from(context.waker());
                 }
-            } else {
-                // Dequeued — re-register at back to maintain FIFO fairness.
-                let new_id = state.next_waiter_id;
-                state.next_waiter_id += 1;
-                state.reader_waiters.push_back(Waiter {
-                    waker: context.waker().clone(),
-                    id: new_id,
-                });
                 drop(state);
-                self.waiter_id = Some(new_id);
                 return Poll::Pending;
             }
-        } else {
-            let id = state.next_waiter_id;
-            state.next_waiter_id += 1;
-            state.reader_waiters.push_back(Waiter {
-                waker: context.waker().clone(),
-                id,
-            });
+            // Dequeued - we were pre-granted the lock by release_writer!
+            // `state.readers` was already incremented for us.
+            self.waiter_id = None;
             drop(state);
-            self.waiter_id = Some(id);
-            return Poll::Pending;
+            return Poll::Ready(Ok(OwnedRwLockReadGuard {
+                lock: Arc::clone(&self.lock),
+            }));
         }
-        drop(state);
 
+        if !state.writer_active && state.writer_waiters == 0 {
+            state.readers += 1;
+            drop(state);
+            return Poll::Ready(Ok(OwnedRwLockReadGuard {
+                lock: Arc::clone(&self.lock),
+            }));
+        }
+
+        let id = state.next_waiter_id;
+        state.next_waiter_id += 1;
+        state.reader_waiters.push_back(Waiter {
+            waker: context.waker().clone(),
+            id,
+        });
+        drop(state);
+        self.waiter_id = Some(id);
         Poll::Pending
     }
 }
@@ -774,6 +768,19 @@ impl<T> Drop for OwnedReadFuture<'_, T> {
             let mut state = self.lock.state.lock();
             if let Some(pos) = state.reader_waiters.iter().position(|w| w.id == waiter_id) {
                 state.reader_waiters.remove(pos);
+            } else {
+                // We were granted the lock but dropped before taking it!
+                state.readers = state.readers.saturating_sub(1);
+                if state.readers == 0 && state.writer_waiters > 0 {
+                    let waker = RwLock::<T>::pop_writer_waiter(&mut state);
+                    if waker.is_some() {
+                        state.writer_active = true;
+                    }
+                    drop(state);
+                    if let Some(waker) = waker {
+                        waker.wake();
+                    }
+                }
             }
         }
     }
@@ -809,12 +816,26 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
             self.counted = true;
         }
 
-        let dequeued = self
-            .waiter_id
-            .is_some_and(|id| !state.writer_queue.iter().any(|w| w.id == id));
-        let can_acquire = !state.writer_active
-            && state.readers == 0
-            && (dequeued || (self.waiter_id.is_none() && state.writer_waiters == 1));
+        if let Some(waiter_id) = self.waiter_id {
+            if let Some(existing) = state.writer_queue.iter_mut().find(|w| w.id == waiter_id) {
+                if !existing.waker.will_wake(context.waker()) {
+                    existing.waker.clone_from(context.waker());
+                }
+                drop(state);
+                return Poll::Pending;
+            } else {
+                // Dequeued - we were pre-granted the lock!
+                self.waiter_id = None;
+                if self.counted {
+                    state.writer_waiters = state.writer_waiters.saturating_sub(1);
+                    self.counted = false;
+                }
+                drop(state);
+                return Poll::Ready(Ok(OwnedRwLockWriteGuard { lock }));
+            }
+        }
+
+        let can_acquire = !state.writer_active && state.readers == 0 && state.writer_waiters == 1;
 
         if can_acquire {
             state.writer_active = true;
@@ -826,35 +847,14 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
             return Poll::Ready(Ok(OwnedRwLockWriteGuard { lock }));
         }
 
-        if let Some(waiter_id) = self.waiter_id {
-            if let Some(existing) = state.writer_queue.iter_mut().find(|w| w.id == waiter_id) {
-                if !existing.waker.will_wake(context.waker()) {
-                    existing.waker.clone_from(context.waker());
-                }
-            } else {
-                let new_id = state.next_waiter_id;
-                state.next_waiter_id += 1;
-                state.writer_queue.push_front(Waiter {
-                    waker: context.waker().clone(),
-                    id: new_id,
-                });
-                drop(state);
-                self.waiter_id = Some(new_id);
-                return Poll::Pending;
-            }
-        } else {
-            let id = state.next_waiter_id;
-            state.next_waiter_id += 1;
-            state.writer_queue.push_back(Waiter {
-                waker: context.waker().clone(),
-                id,
-            });
-            drop(state);
-            self.waiter_id = Some(id);
-            return Poll::Pending;
-        }
+        let id = state.next_waiter_id;
+        state.next_waiter_id += 1;
+        state.writer_queue.push_back(Waiter {
+            waker: context.waker().clone(),
+            id,
+        });
         drop(state);
-
+        self.waiter_id = Some(id);
         Poll::Pending
     }
 }
