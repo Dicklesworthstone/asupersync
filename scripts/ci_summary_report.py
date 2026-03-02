@@ -7,6 +7,7 @@ import argparse
 import datetime as dt
 import fnmatch
 import json
+import os
 import re
 import subprocess
 import sys
@@ -28,6 +29,25 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=True)
         handle.write("\n")
+
+
+def load_ndjson(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if not path.is_file():
+        return rows
+    with path.open("r", encoding="utf-8") as handle:
+        for line_no, raw_line in enumerate(handle, start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                parsed.setdefault("_line", line_no)
+                rows.append(parsed)
+    return rows
 
 
 def parse_iso8601_utc(raw: str) -> dt.datetime:
@@ -212,9 +232,144 @@ def delta(current: dict[str, Any], previous: dict[str, Any] | None, keys: list[s
     return round(float(current_value) - float(previous_value), 4)
 
 
+def ci_context() -> dict[str, Any]:
+    context = {
+        "run_id": os.getenv("GITHUB_RUN_ID"),
+        "run_attempt": os.getenv("GITHUB_RUN_ATTEMPT"),
+        "sha": os.getenv("GITHUB_SHA"),
+        "ref": os.getenv("GITHUB_REF"),
+        "workflow": os.getenv("GITHUB_WORKFLOW"),
+    }
+    return {key: value for key, value in context.items() if value}
+
+
+def resolve_forensics_scenarios_file(
+    forensics_report_path: Path, forensics_payload: dict[str, Any]
+) -> Path | None:
+    candidates: list[Path] = []
+    raw = forensics_payload.get("scenario_log")
+    if isinstance(raw, str) and raw:
+        raw_path = Path(raw)
+        if raw_path.is_absolute():
+            candidates.append(raw_path)
+        else:
+            candidates.append((forensics_report_path.parent / raw_path).resolve())
+
+    # CI artifacts intentionally copy scenarios.ndjson beside summary.json.
+    candidates.append(forensics_report_path.parent / "scenarios.ndjson")
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def collect_reproduction_instructions(
+    e2e_matrix: dict[str, Any],
+    forensics: dict[str, Any],
+    forensics_report_path: Path,
+) -> list[dict[str, Any]]:
+    instructions: list[dict[str, Any]] = []
+
+    for row in e2e_matrix.get("suite_rows", []):
+        if not isinstance(row, dict) or row.get("row_ok") is True:
+            continue
+        instructions.append(
+            {
+                "source": "e2e_matrix_suite",
+                "scenario_id": row.get("scenario_id"),
+                "suite": row.get("suite"),
+                "artifact_path": row.get("artifact_root"),
+                "replay_command": row.get("replay_command"),
+                "reason": "scenario matrix row contract failed",
+            }
+        )
+
+    for row in e2e_matrix.get("raptorq_rows", []):
+        if not isinstance(row, dict) or row.get("row_ok") is True:
+            continue
+        instructions.append(
+            {
+                "source": "e2e_matrix_raptorq",
+                "scenario_id": row.get("scenario_id"),
+                "suite": "raptorq-forensics",
+                "artifact_path": row.get("artifacts_expected"),
+                "replay_command": row.get("replay_command"),
+                "reason": "raptorq scenario matrix row contract failed",
+            }
+        )
+
+    scenarios_file = resolve_forensics_scenarios_file(forensics_report_path, forensics)
+    for scenario in load_ndjson(scenarios_file) if scenarios_file else []:
+        status = str(scenario.get("status", "")).lower()
+        tests_failed = scenario.get("tests_failed")
+        exit_code = scenario.get("exit_code")
+        failed = status == "fail"
+        if isinstance(tests_failed, int) and tests_failed > 0:
+            failed = True
+        if isinstance(exit_code, int) and exit_code != 0:
+            failed = True
+        if not failed:
+            continue
+        instructions.append(
+            {
+                "source": "forensics_scenario",
+                "scenario_id": scenario.get("scenario_id"),
+                "suite": "raptorq-forensics",
+                "artifact_path": scenario.get("artifact_path"),
+                "log_path": scenario.get("log_path"),
+                "replay_command": scenario.get("repro_command"),
+                "reason": "forensics scenario failed",
+            }
+        )
+
+    if forensics.get("status") == "fail" and not any(
+        item.get("source") == "forensics_scenario" for item in instructions
+    ):
+        instructions.append(
+            {
+                "source": "forensics_suite",
+                "scenario_id": "RQ-E2E-SUITE-D6",
+                "suite": "raptorq-forensics",
+                "artifact_path": forensics.get("artifact_dir"),
+                "replay_command": "NO_PREFLIGHT=1 bash ./scripts/run_raptorq_e2e.sh --profile forensics",
+                "reason": "forensics suite failed; inspect scenarios.ndjson for scenario-level failure metadata",
+            }
+        )
+
+    return instructions
+
+
+def collect_ci_matrix_reproduction_instructions(
+    ci_matrix: dict[str, Any],
+    ci_matrix_report_path: Path,
+) -> list[dict[str, Any]]:
+    instructions: list[dict[str, Any]] = []
+    for lane in ci_matrix.get("lanes", []):
+        if not isinstance(lane, dict) or lane.get("status") == "pass":
+            continue
+        missing = lane.get("missing_contracts", [])
+        if not isinstance(missing, list):
+            missing = []
+        reason = "ci lane contract failed"
+        if missing:
+            reason = f"ci lane contract failed: {', '.join(str(item) for item in missing)}"
+        instructions.append(
+            {
+                "source": "ci_matrix_lane",
+                "scenario_id": f"CI-LANE-{lane.get('lane_id', '<unknown-lane>')}",
+                "suite": "ci-matrix-policy",
+                "artifact_path": str(ci_matrix_report_path),
+                "replay_command": lane.get("replay_command"),
+                "reason": reason,
+            }
+        )
+    return instructions
+
+
 def compose_summary(
     coverage_report: Path,
     no_mock_report: Path,
+    ci_matrix_report: Path,
     e2e_matrix_report: Path,
     forensics_report: Path,
     output_json: Path,
@@ -224,6 +379,7 @@ def compose_summary(
 ) -> int:
     coverage = read_report(coverage_report, "coverage-ratchet-report-v1", "coverage report")
     no_mock = read_report(no_mock_report, "no-mock-policy-report-v1", "no-mock report")
+    ci_matrix = read_report(ci_matrix_report, "ci-matrix-policy-report-v1", "ci-matrix report")
     e2e_matrix = read_report(e2e_matrix_report, "e2e-scenario-matrix-validation-v1", "e2e matrix report")
     forensics = read_report(forensics_report, "raptorq-e2e-suite-log-v1", "forensics report")
     previous = read_previous(previous_report)
@@ -247,6 +403,12 @@ def compose_summary(
         "allowlist_paths": no_mock.get("policy_counts", {}).get("allowlist_paths", 0),
         "active_waivers": no_mock.get("policy_counts", {}).get("waivers_active", 0),
     }
+    ci_matrix_section = {
+        "status": ci_matrix.get("status", "fail"),
+        "lane_count": ci_matrix.get("lane_count", 0),
+        "failing_lane_count": ci_matrix.get("failing_lane_count", 0),
+        "failing_lane_ids": ci_matrix.get("failing_lane_ids", []),
+    }
     e2e_matrix_section = {
         "status": e2e_matrix.get("status", "fail"),
         "suite_row_count": e2e_matrix.get("suite_row_count", 0),
@@ -261,14 +423,32 @@ def compose_summary(
         "passed_scenarios": forensics.get("passed_scenarios", 0),
         "failed_scenarios": forensics.get("failed_scenarios", 0),
     }
+    reproduction_instructions = collect_reproduction_instructions(
+        e2e_matrix=e2e_matrix,
+        forensics=forensics,
+        forensics_report_path=forensics_report,
+    )
+    reproduction_instructions.extend(
+        collect_ci_matrix_reproduction_instructions(
+            ci_matrix=ci_matrix,
+            ci_matrix_report_path=ci_matrix_report,
+        )
+    )
 
     sections = {
         "coverage": coverage_section,
         "no_mock": no_mock_section,
+        "ci_matrix": ci_matrix_section,
         "e2e_matrix": e2e_matrix_section,
         "forensics": forensics_section,
     }
     overall_status = "pass" if all(section.get("status") == "pass" for section in sections.values()) else "fail"
+    if overall_status == "pass" and not reproduction_instructions:
+        reproduction_status = "none_required"
+    elif reproduction_instructions:
+        reproduction_status = "action_required"
+    else:
+        reproduction_status = "insufficient_data"
 
     report = {
         "schema_version": "ci-summary-report-v1",
@@ -277,11 +457,18 @@ def compose_summary(
         "sources": {
             "coverage_report": str(coverage_report),
             "no_mock_report": str(no_mock_report),
+            "ci_matrix_report": str(ci_matrix_report),
             "e2e_matrix_report": str(e2e_matrix_report),
             "forensics_report": str(forensics_report),
             "previous_report": str(previous_report) if previous_report else None,
         },
         "sections": sections,
+        "reproduction": {
+            "status": reproduction_status,
+            "instruction_count": len(reproduction_instructions),
+            "ci_context": ci_context() or None,
+            "instructions": reproduction_instructions,
+        },
         "trends": {
             "coverage_global_line_pct_delta": delta(
                 {"sections": sections}, previous, ["sections", "coverage", "global_line_pct"]
@@ -291,6 +478,9 @@ def compose_summary(
             ),
             "no_mock_violating_paths_delta": delta(
                 {"sections": sections}, previous, ["sections", "no_mock", "violating_paths"]
+            ),
+            "ci_matrix_failing_lanes_delta": delta(
+                {"sections": sections}, previous, ["sections", "ci_matrix", "failing_lane_count"]
             ),
             "e2e_matrix_failures_delta": delta(
                 {"sections": sections}, previous, ["sections", "e2e_matrix", "suite_failures"]
@@ -326,6 +516,12 @@ def compose_summary(
             f"delta_violations={report['trends']['no_mock_violating_paths_delta']} |"
         ),
         (
+            "| CI matrix policy | "
+            f"`{ci_matrix_section['status']}` | "
+            f"lanes={ci_matrix_section['lane_count']} failing={ci_matrix_section['failing_lane_count']} | "
+            f"delta_failing_lanes={report['trends']['ci_matrix_failing_lanes_delta']} |"
+        ),
+        (
             "| E2E matrix (D4) | "
             f"`{e2e_matrix_section['status']}` | "
             f"suite_failures={e2e_matrix_section['suite_failures']} "
@@ -342,8 +538,25 @@ def compose_summary(
         "",
         "## Notes",
         f"- Coverage failing subsystems: `{coverage_section['failing_subsystems']}`",
+        f"- CI matrix failing lanes: `{ci_matrix_section['failing_lane_ids']}`",
         "- Trend deltas are `None` when no previous D5 summary artifact was provided.",
+        "",
+        "## Reproduction Instructions",
+        f"- Reproduction status: `{reproduction_status}`",
+        f"- Instruction count: `{len(reproduction_instructions)}`",
     ]
+    if reproduction_instructions:
+        md_lines.append("")
+        for instruction in reproduction_instructions:
+            md_lines.append(
+                "- "
+                f"{instruction.get('suite', '<unknown-suite>')} / "
+                f"{instruction.get('scenario_id', '<unknown-scenario>')}: "
+                f"`{instruction.get('replay_command', '<missing-replay-command>')}` "
+                f"(artifact: `{instruction.get('artifact_path', '<missing-artifact-path>')}`)"
+            )
+    else:
+        md_lines.append("- All CI gates passed; no explicit repro commands required for this run.")
     output_markdown.parent.mkdir(parents=True, exist_ok=True)
     output_markdown.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
 
@@ -373,6 +586,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     compose_parser.add_argument("--coverage-report", required=True, type=Path)
     compose_parser.add_argument("--no-mock-report", required=True, type=Path)
+    compose_parser.add_argument("--ci-matrix-report", required=True, type=Path)
     compose_parser.add_argument("--e2e-matrix-report", required=True, type=Path)
     compose_parser.add_argument("--forensics-report", required=True, type=Path)
     compose_parser.add_argument("--output-json", required=True, type=Path)
@@ -393,6 +607,7 @@ def main() -> int:
         return compose_summary(
             coverage_report=args.coverage_report,
             no_mock_report=args.no_mock_report,
+            ci_matrix_report=args.ci_matrix_report,
             e2e_matrix_report=args.e2e_matrix_report,
             forensics_report=args.forensics_report,
             output_json=args.output_json,

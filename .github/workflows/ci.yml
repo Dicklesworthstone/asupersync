@@ -48,6 +48,25 @@ jobs:
           path: ci-summaries/no_mock_policy_report.json
           retention-days: 30
 
+      - name: CI matrix policy self-test
+        run: python3 scripts/check_ci_matrix_policy.py --self-test
+
+      - name: CI matrix policy gate
+        run: |
+          mkdir -p artifacts
+          python3 scripts/check_ci_matrix_policy.py \
+            --policy .github/ci_matrix_policy.json \
+            --workflow .github/workflows/ci.yml
+
+      - name: Upload CI matrix policy report (D5 input)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-matrix-policy-report
+          path: |
+            artifacts/ci_matrix_policy_summary.json
+            artifacts/ci_matrix_policy_events.ndjson
+          retention-days: 30
+
       - name: WASM dependency policy self-test
         run: python3 scripts/check_wasm_dependency_policy.py --self-test
 
@@ -1338,6 +1357,12 @@ jobs:
           name: no-mock-policy-report
           path: ci-summary-inputs/no-mock
 
+      - name: Download CI matrix policy report (D5 input)
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-matrix-policy-report
+          path: ci-summary-inputs/ci-matrix
+
       - name: Download coverage report (D5 input)
         uses: actions/download-artifact@v4
         with:
@@ -1356,6 +1381,7 @@ jobs:
           python3 scripts/ci_summary_report.py compose \
             --coverage-report ci-summary-inputs/coverage/coverage_ratchet_report.json \
             --no-mock-report ci-summary-inputs/no-mock/no_mock_policy_report.json \
+            --ci-matrix-report ci-summary-inputs/ci-matrix/ci_matrix_policy_summary.json \
             --e2e-matrix-report ci-summary-inputs/phase6/e2e-scenario-matrix/scenario_matrix_validation.json \
             --forensics-report ci-summary-inputs/phase6/raptorq-forensics/summary.json \
             --output-json ci-summary/ci_summary_report.json \

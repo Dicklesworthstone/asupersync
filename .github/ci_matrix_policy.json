@@ -1,0 +1,128 @@
+{
+  "schema_version": "ci-matrix-policy-v1",
+  "policy_id": "asupersync-umelq-15.1-ci-matrix",
+  "updated_at_utc": "2026-03-02T00:00:00Z",
+  "workflow_path": ".github/workflows/ci.yml",
+  "output": {
+    "summary_path": "artifacts/ci_matrix_policy_summary.json",
+    "events_path": "artifacts/ci_matrix_policy_events.ndjson"
+  },
+  "threshold_defaults": {
+    "max_failures": 0,
+    "required_artifacts_min": 1
+  },
+  "lanes": [
+    {
+      "lane_id": "unit",
+      "title": "Unit and library correctness lane",
+      "owner": "runtime-core",
+      "required_job_ids": ["test"],
+      "required_step_names": ["Run unit tests"],
+      "required_artifact_names": [],
+      "replay_command": "cargo test --lib --all-features",
+      "failure_taxonomy": ["compile_failure", "unit_assertion_failure", "nondeterministic_seed_behavior"],
+      "thresholds": {
+        "max_failures": 0,
+        "required_artifacts_min": 0
+      }
+    },
+    {
+      "lane_id": "integration",
+      "title": "Integration and component boundary lane",
+      "owner": "runtime-core",
+      "required_job_ids": ["test"],
+      "required_step_names": ["Run integration tests"],
+      "required_artifact_names": [],
+      "replay_command": "cargo test --test '*' --all-features",
+      "failure_taxonomy": ["integration_contract_failure", "cross_component_regression"],
+      "thresholds": {
+        "max_failures": 0,
+        "required_artifacts_min": 0
+      }
+    },
+    {
+      "lane_id": "e2e",
+      "title": "Deterministic E2E scenario matrix lane",
+      "owner": "verification-infra",
+      "required_job_ids": ["phase6-e2e", "ci-summary-d5"],
+      "required_step_names": ["E2E scenario-matrix completeness gate (D4)", "Compose CI summary reports (D5)"],
+      "required_artifact_names": ["phase6-e2e-artifacts", "ci-summary-report"],
+      "replay_command": "bash ./scripts/run_all_e2e.sh --verify-matrix",
+      "failure_taxonomy": ["missing_scenario_row", "artifact_route_not_configured", "replay_command_missing"],
+      "thresholds": {
+        "max_failures": 0,
+        "required_artifacts_min": 2
+      }
+    },
+    {
+      "lane_id": "replay",
+      "title": "Forensics replay and diagnostic lane",
+      "owner": "verification-infra",
+      "required_job_ids": ["phase6-e2e"],
+      "required_step_names": ["RAPTORQ – Forensic logging contract gate (D3)"],
+      "required_artifact_names": ["phase6-e2e-artifacts"],
+      "replay_command": "NO_PREFLIGHT=1 bash ./scripts/run_raptorq_e2e.sh --profile forensics",
+      "failure_taxonomy": ["missing_forensics_artifact", "scenario_log_schema_violation", "replay_bundle_incomplete"],
+      "thresholds": {
+        "max_failures": 0,
+        "required_artifacts_min": 1
+      }
+    },
+    {
+      "lane_id": "security",
+      "title": "Security and capability gate lane",
+      "owner": "security-runtime",
+      "required_job_ids": ["check", "ci-summary-d5"],
+      "required_step_names": ["No-mock policy (allowlist + waiver expiry)", "Security release gate"],
+      "required_artifact_names": ["no-mock-policy-report", "security-release-gate-report"],
+      "replay_command": "python3 scripts/check_security_release_gate.py --policy .github/security_release_policy.json",
+      "failure_taxonomy": ["policy_violation", "waiver_expired", "sensitive_field_exposure"],
+      "thresholds": {
+        "max_failures": 0,
+        "required_artifacts_min": 2
+      }
+    },
+    {
+      "lane_id": "perf",
+      "title": "Performance regression lane",
+      "owner": "performance-runtime",
+      "required_job_ids": ["check", "phase6-e2e"],
+      "required_step_names": ["Perf regression gate", "RAPTORQ – Perf smoke regression gate (G2)"],
+      "required_artifact_names": ["wasm-perf-regression-report", "phase6-e2e-artifacts"],
+      "replay_command": "./scripts/run_perf_e2e.sh --bench raptorq_benchmark --bench phase0_baseline --seed 424242 --compare baselines/baseline_latest.json --metric median_ns --max-regression-pct 10 --timeout 1200",
+      "failure_taxonomy": ["budget_regression", "benchmark_instability", "baseline_missing"],
+      "thresholds": {
+        "max_failures": 0,
+        "required_artifacts_min": 2
+      }
+    },
+    {
+      "lane_id": "docs-validation",
+      "title": "Documentation and doctest validation lane",
+      "owner": "developer-experience",
+      "required_job_ids": ["test", "docs"],
+      "required_step_names": ["Run doc tests", "Build documentation"],
+      "required_artifact_names": [],
+      "replay_command": "cargo test --doc --all-features && cargo doc --all-features --no-deps",
+      "failure_taxonomy": ["doctest_failure", "rustdoc_warning", "documentation_build_regression"],
+      "thresholds": {
+        "max_failures": 0,
+        "required_artifacts_min": 0
+      }
+    },
+    {
+      "lane_id": "wasm-native-parity",
+      "title": "WASM/native profile parity lane",
+      "owner": "wasm-runtime",
+      "required_job_ids": ["check", "test"],
+      "required_step_names": ["WASM dependency policy gate", "WASM ABI contract gate", "Run unit tests", "Run integration tests"],
+      "required_artifact_names": ["wasm-dependency-audit-report", "wasm-abi-contract-report"],
+      "replay_command": "python3 scripts/check_wasm_dependency_policy.py --policy .github/wasm_dependency_policy.json && python3 scripts/check_wasm_abi_policy.py --policy .github/wasm_abi_policy.json",
+      "failure_taxonomy": ["forbidden_dependency", "abi_contract_drift", "native_wasm_behavior_drift"],
+      "thresholds": {
+        "max_failures": 0,
+        "required_artifacts_min": 2
+      }
+    }
+  ]
+}
