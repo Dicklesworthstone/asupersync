@@ -237,7 +237,7 @@ fn e2e_tracked_mpsc_commit_with_lab_replay() {
                 return;
             };
             let permit = tx.reserve(&cx).await.expect("reserve");
-            let proof = permit.send(42);
+            let proof = permit.send(42).expect("send via permit");
             tracing::info!(proof_kind = ?proof.kind(), "tracked permit committed");
         })
         .expect("create send task");
