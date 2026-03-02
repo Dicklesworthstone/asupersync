@@ -1256,6 +1256,121 @@ pub struct E2eHarnessArtifactIndexEntry {
     pub checksum_hint: String,
 }
 
+/// Deterministic scenario-coverage contract for doctor e2e workflows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorScenarioCoveragePacksContract {
+    /// Contract version for compatibility checks.
+    pub contract_version: String,
+    /// Required e2e harness contract dependency.
+    pub e2e_harness_contract_version: String,
+    /// Required structured logging contract dependency.
+    pub logging_contract_version: String,
+    /// Supported deterministic selection modes in lexical order.
+    pub selection_modes: Vec<String>,
+    /// Required pack-spec fields in lexical order.
+    pub required_pack_fields: Vec<String>,
+    /// Required run-report fields in lexical order.
+    pub required_run_fields: Vec<String>,
+    /// Required structured-log summary fields in lexical order.
+    pub required_log_fields: Vec<String>,
+    /// Minimum required pack ids in lexical order.
+    pub minimum_required_pack_ids: Vec<String>,
+    /// Policy guardrails for adding new coverage packs.
+    pub add_pack_policy: Vec<String>,
+    /// Canonical pack specifications in lexical `pack_id` order.
+    pub coverage_packs: Vec<DoctorScenarioCoveragePackSpec>,
+}
+
+/// One deterministic scenario coverage-pack specification.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorScenarioCoveragePackSpec {
+    /// Stable pack identifier.
+    pub pack_id: String,
+    /// Stable scenario identifier.
+    pub scenario_id: String,
+    /// Workflow variant (`cancellation`, `retry`, `degraded_dependency`, `recovery`).
+    pub workflow_variant: String,
+    /// Expected top-level outcome (`success`, `failed`, `cancelled`).
+    pub expected_outcome: String,
+    /// Deterministic stages used to build the transcript.
+    pub stages: Vec<String>,
+    /// Required artifact classes in lexical order.
+    pub required_artifact_classes: Vec<String>,
+    /// Failure-clustering key used by structured logs.
+    pub failure_cluster: String,
+    /// Operator-facing description for this pack.
+    pub description: String,
+}
+
+/// Structured log summary emitted for one scenario-pack run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorScenarioCoverageStructuredLogSummary {
+    /// Pack identifier.
+    pub pack_id: String,
+    /// Scenario identifier.
+    pub scenario_id: String,
+    /// Correlation identifier.
+    pub correlation_id: String,
+    /// Root deterministic seed.
+    pub seed: String,
+    /// Normalized stage outcomes in sequence order.
+    pub stage_outcomes: Vec<String>,
+    /// Final outcome class.
+    pub outcome_class: String,
+    /// Failure cluster classification.
+    pub failure_cluster: String,
+    /// Canonical transcript artifact path.
+    pub transcript_path: String,
+    /// Canonical artifact-manifest path.
+    pub artifact_manifest_path: String,
+}
+
+/// One deterministic scenario-pack execution report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorScenarioCoveragePackRun {
+    /// Pack identifier.
+    pub pack_id: String,
+    /// Scenario identifier.
+    pub scenario_id: String,
+    /// Workflow variant for this run.
+    pub workflow_variant: String,
+    /// Selection mode that included this pack.
+    pub selected_mode: String,
+    /// Expected top-level outcome (`success`, `failed`, `cancelled`).
+    pub expected_outcome: String,
+    /// Observed terminal state (`completed`, `failed`, `cancelled`).
+    pub terminal_state: String,
+    /// Run status (`passed` when expected and observed outcomes align).
+    pub status: String,
+    /// Failure cluster classification.
+    pub failure_cluster: String,
+    /// Deterministic rerun command.
+    pub repro_command: String,
+    /// Deterministic transcript bundle.
+    pub transcript: E2eHarnessTranscript,
+    /// Deterministic artifact index.
+    pub artifact_index: Vec<E2eHarnessArtifactIndexEntry>,
+    /// Structured log summary.
+    pub structured_log_summary: DoctorScenarioCoverageStructuredLogSummary,
+}
+
+/// Deterministic smoke report spanning selected scenario packs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DoctorScenarioCoveragePackSmokeReport {
+    /// Report schema version.
+    pub schema_version: String,
+    /// Selection mode used for this report.
+    pub selection_mode: String,
+    /// Requester identity.
+    pub requested_by: String,
+    /// Root deterministic seed.
+    pub seed: String,
+    /// Distinct failure clusters in lexical order.
+    pub failure_clusters: Vec<String>,
+    /// Ordered pack-run reports.
+    pub runs: Vec<DoctorScenarioCoveragePackRun>,
+}
+
 /// Deterministic beads/bv command-center contract.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BeadsCommandCenterContract {
@@ -1487,6 +1602,156 @@ pub struct AgentMailPaneWorkflowTranscript {
     pub scenario_id: String,
     /// Ordered workflow steps.
     pub steps: Vec<AgentMailPaneWorkflowStep>,
+}
+
+/// Deterministic timeline explorer contract for findings/evidence drill-down.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvidenceTimelineContract {
+    /// Contract version for compatibility checks.
+    pub contract_version: String,
+    /// Core diagnostics report contract this timeline contract depends on.
+    pub core_report_contract_version: String,
+    /// Canonical command surface for fetching timeline material.
+    pub timeline_source_command: String,
+    /// Required timeline node fields in lexical order.
+    pub required_node_fields: Vec<String>,
+    /// Required timeline group fields in lexical order.
+    pub required_group_fields: Vec<String>,
+    /// Supported deterministic sort modes in lexical order.
+    pub sort_modes: Vec<String>,
+    /// Supported deterministic filter modes in lexical order.
+    pub filter_modes: Vec<String>,
+    /// Supported deterministic group modes in lexical order.
+    pub group_modes: Vec<String>,
+    /// Canonical keyboard bindings for timeline interactions.
+    pub keyboard_bindings: Vec<EvidenceTimelineKeyboardBinding>,
+    /// Structured event taxonomy in lexical order.
+    pub event_taxonomy: Vec<String>,
+    /// Compatibility/versioning guidance for consumers.
+    pub compatibility: ContractCompatibility,
+    /// Downstream report/export consumers in lexical order.
+    pub downstream_consumers: Vec<String>,
+}
+
+/// One deterministic keyboard binding for the evidence timeline explorer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvidenceTimelineKeyboardBinding {
+    /// Key chord.
+    pub key: String,
+    /// Action executed by this binding.
+    pub action: String,
+    /// Source panel for this action.
+    pub from_panel: String,
+    /// Destination panel for this action.
+    pub to_panel: String,
+}
+
+/// One normalized timeline node for findings/evidence drill-down.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvidenceTimelineNode {
+    /// Stable timeline node identifier.
+    pub node_id: String,
+    /// Deterministic timestamp string (RFC3339 expected).
+    pub occurred_at: String,
+    /// Linked finding identifier.
+    pub finding_id: String,
+    /// Human-readable finding title.
+    pub title: String,
+    /// Finding severity (`critical`, `high`, `medium`, `low`).
+    pub severity: String,
+    /// Finding status (`open`, `in_progress`, `resolved`).
+    pub status: String,
+    /// Normalized outcome class.
+    pub outcome_class: String,
+    /// Linked evidence identifiers in lexical order.
+    pub evidence_refs: Vec<String>,
+    /// Linked command identifiers in lexical order.
+    pub command_refs: Vec<String>,
+    /// Causal parent node identifiers in lexical order.
+    pub causal_parents: Vec<String>,
+    /// Causal child node identifiers in lexical order.
+    pub causal_children: Vec<String>,
+    /// Missing causal references for diagnostics in lexical order.
+    pub missing_causal_refs: Vec<String>,
+    /// Whether this node has missing required links.
+    pub has_missing_links: bool,
+}
+
+/// One deterministic timeline group.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvidenceTimelineGroup {
+    /// Group key (e.g. `critical`, `open`, `failed`).
+    pub group_key: String,
+    /// Node identifiers in deterministic order.
+    pub node_ids: Vec<String>,
+}
+
+/// One structured timeline event for diagnostics and replay.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvidenceTimelineEvent {
+    /// Event kind (`timeline_interaction`, `causal_expansion_decision`, ...).
+    pub event_kind: String,
+    /// Source stream (`timeline`, `grouping`, `interaction`, `snapshot`).
+    pub source: String,
+    /// Optional timeline node identifier.
+    pub node_id: Option<String>,
+    /// Deterministic event message.
+    pub message: String,
+}
+
+/// Deterministic snapshot for the evidence timeline explorer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvidenceTimelineSnapshot {
+    /// Schema version.
+    pub schema_version: String,
+    /// Active sort mode.
+    pub sort_mode: String,
+    /// Active filter mode.
+    pub filter_mode: String,
+    /// Active grouping mode.
+    pub group_mode: String,
+    /// Focused panel id (`context_panel`, `primary_panel`, `action_panel`, `evidence_panel`).
+    pub focused_panel: String,
+    /// Selected timeline node identifier.
+    pub selected_node: Option<String>,
+    /// Evidence-panel node identifier when drill-down is open.
+    pub evidence_panel_node: Option<String>,
+    /// Timeline nodes after sorting/filtering.
+    pub nodes: Vec<EvidenceTimelineNode>,
+    /// Timeline groups after grouping.
+    pub groups: Vec<EvidenceTimelineGroup>,
+    /// Parse/validation errors captured during snapshot assembly.
+    pub parse_errors: Vec<String>,
+    /// Deterministic refresh fingerprint.
+    pub refresh_fingerprint: String,
+    /// Structured timeline events.
+    pub events: Vec<EvidenceTimelineEvent>,
+}
+
+/// One deterministic keyboard-interaction step for timeline workflows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvidenceTimelineInteractionStep {
+    /// Step identifier.
+    pub step_id: String,
+    /// Key chord exercised by this step.
+    pub key_chord: String,
+    /// Focused panel after applying this key.
+    pub focused_panel: String,
+    /// Selected node after applying this key.
+    pub selected_node: Option<String>,
+    /// Evidence-panel node after applying this key.
+    pub evidence_panel_node: Option<String>,
+    /// Snapshot captured at this step.
+    pub snapshot: EvidenceTimelineSnapshot,
+}
+
+/// Deterministic keyboard-flow transcript for the evidence timeline explorer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvidenceTimelineWorkflowTranscript {
+    /// Scenario identifier.
+    pub scenario_id: String,
+    /// Ordered interaction steps.
+    pub steps: Vec<EvidenceTimelineInteractionStep>,
 }
 
 /// Core diagnostics report contract for doctor report consumers.
@@ -2656,6 +2921,10 @@ const SCENARIO_COMPOSER_CONTRACT_VERSION: &str = "doctor-scenario-composer-v1";
 const E2E_HARNESS_CONTRACT_VERSION: &str = "doctor-e2e-harness-v1";
 const BEADS_COMMAND_CENTER_CONTRACT_VERSION: &str = "doctor-beads-command-center-v1";
 const AGENT_MAIL_PANE_CONTRACT_VERSION: &str = "doctor-agent-mail-pane-v1";
+const EVIDENCE_TIMELINE_CONTRACT_VERSION: &str = "doctor-evidence-timeline-v1";
+const DOCTOR_SCENARIO_COVERAGE_PACK_CONTRACT_VERSION: &str = "doctor-scenario-coverage-packs-v1";
+const DOCTOR_SCENARIO_COVERAGE_PACK_REPORT_VERSION: &str =
+    "doctor-scenario-coverage-pack-report-v1";
 const CORE_DIAGNOSTICS_REPORT_VERSION: &str = "doctor-core-report-v1";
 const ADVANCED_DIAGNOSTICS_REPORT_VERSION: &str = "doctor-advanced-report-v1";
 const VISUAL_LANGUAGE_VERSION: &str = "doctor-visual-language-v1";
@@ -8900,6 +9169,561 @@ pub fn build_e2e_harness_artifact_index(
     Ok(entries)
 }
 
+fn expected_terminal_state_for_outcome(expected_outcome: &str) -> Result<&'static str, String> {
+    match expected_outcome {
+        "success" => Ok("completed"),
+        "failed" => Ok("failed"),
+        "cancelled" => Ok("cancelled"),
+        _ => Err(format!("unsupported expected_outcome {expected_outcome}")),
+    }
+}
+
+/// Returns the canonical scenario-coverage-pack contract for doctor e2e flows.
+#[must_use]
+pub fn doctor_scenario_coverage_packs_contract() -> DoctorScenarioCoveragePacksContract {
+    DoctorScenarioCoveragePacksContract {
+        contract_version: DOCTOR_SCENARIO_COVERAGE_PACK_CONTRACT_VERSION.to_string(),
+        e2e_harness_contract_version: E2E_HARNESS_CONTRACT_VERSION.to_string(),
+        logging_contract_version: STRUCTURED_LOGGING_CONTRACT_VERSION.to_string(),
+        selection_modes: vec![
+            "all".to_string(),
+            "cancellation".to_string(),
+            "degraded_dependency".to_string(),
+            "recovery".to_string(),
+            "retry".to_string(),
+        ],
+        required_pack_fields: vec![
+            "description".to_string(),
+            "expected_outcome".to_string(),
+            "failure_cluster".to_string(),
+            "pack_id".to_string(),
+            "required_artifact_classes".to_string(),
+            "scenario_id".to_string(),
+            "stages".to_string(),
+            "workflow_variant".to_string(),
+        ],
+        required_run_fields: vec![
+            "artifact_index".to_string(),
+            "expected_outcome".to_string(),
+            "failure_cluster".to_string(),
+            "pack_id".to_string(),
+            "repro_command".to_string(),
+            "scenario_id".to_string(),
+            "selected_mode".to_string(),
+            "status".to_string(),
+            "structured_log_summary".to_string(),
+            "terminal_state".to_string(),
+            "transcript".to_string(),
+            "workflow_variant".to_string(),
+        ],
+        required_log_fields: vec![
+            "artifact_manifest_path".to_string(),
+            "correlation_id".to_string(),
+            "failure_cluster".to_string(),
+            "outcome_class".to_string(),
+            "pack_id".to_string(),
+            "scenario_id".to_string(),
+            "seed".to_string(),
+            "stage_outcomes".to_string(),
+            "transcript_path".to_string(),
+        ],
+        minimum_required_pack_ids: vec![
+            "pack-cancellation".to_string(),
+            "pack-degraded-dependency".to_string(),
+            "pack-recovery".to_string(),
+            "pack-retry".to_string(),
+        ],
+        add_pack_policy: vec![
+            "New packs must declare workflow_variant and expected_outcome using canonical enums."
+                .to_string(),
+            "New packs must define deterministic stage ids and remain replayable with fixed seed."
+                .to_string(),
+            "New packs must include failure_cluster and required_artifact_classes for triage joins."
+                .to_string(),
+            "Any added pack must include unit coverage and be exercised by the scenario-pack e2e script."
+                .to_string(),
+        ],
+        coverage_packs: vec![
+            DoctorScenarioCoveragePackSpec {
+                pack_id: "pack-cancellation".to_string(),
+                scenario_id: "doctor-pack-cancellation".to_string(),
+                workflow_variant: "cancellation".to_string(),
+                expected_outcome: "cancelled".to_string(),
+                stages: vec![
+                    "bootstrap".to_string(),
+                    "compose".to_string(),
+                    "queue".to_string(),
+                    "cancel_request".to_string(),
+                    "drain_finalize".to_string(),
+                ],
+                required_artifact_classes: vec![
+                    "structured_log".to_string(),
+                    "summary".to_string(),
+                    "transcript".to_string(),
+                ],
+                failure_cluster: "cluster-cancellation-path".to_string(),
+                description:
+                    "Cancellation path coverage pack validates request->drain->finalize semantics."
+                        .to_string(),
+            },
+            DoctorScenarioCoveragePackSpec {
+                pack_id: "pack-degraded-dependency".to_string(),
+                scenario_id: "doctor-pack-degraded-dependency".to_string(),
+                workflow_variant: "degraded_dependency".to_string(),
+                expected_outcome: "failed".to_string(),
+                stages: vec![
+                    "bootstrap".to_string(),
+                    "compose".to_string(),
+                    "queue".to_string(),
+                    "dependency_degraded".to_string(),
+                    "run_failed".to_string(),
+                    "triage".to_string(),
+                ],
+                required_artifact_classes: vec![
+                    "structured_log".to_string(),
+                    "summary".to_string(),
+                    "transcript".to_string(),
+                ],
+                failure_cluster: "cluster-degraded-dependency".to_string(),
+                description: "Degraded-dependency pack exercises deterministic failure diagnostics."
+                    .to_string(),
+            },
+            DoctorScenarioCoveragePackSpec {
+                pack_id: "pack-recovery".to_string(),
+                scenario_id: "doctor-pack-recovery".to_string(),
+                workflow_variant: "recovery".to_string(),
+                expected_outcome: "success".to_string(),
+                stages: vec![
+                    "bootstrap".to_string(),
+                    "compose".to_string(),
+                    "queue".to_string(),
+                    "recovery_plan".to_string(),
+                    "rerun".to_string(),
+                    "recovery_verify".to_string(),
+                ],
+                required_artifact_classes: vec![
+                    "structured_log".to_string(),
+                    "summary".to_string(),
+                    "transcript".to_string(),
+                ],
+                failure_cluster: "cluster-recovery".to_string(),
+                description:
+                    "Recovery pack validates deterministic remediation loop and successful rerun."
+                        .to_string(),
+            },
+            DoctorScenarioCoveragePackSpec {
+                pack_id: "pack-retry".to_string(),
+                scenario_id: "doctor-pack-retry".to_string(),
+                workflow_variant: "retry".to_string(),
+                expected_outcome: "success".to_string(),
+                stages: vec![
+                    "bootstrap".to_string(),
+                    "compose".to_string(),
+                    "queue".to_string(),
+                    "run_attempt_1".to_string(),
+                    "retry_dispatch".to_string(),
+                    "run_attempt_2".to_string(),
+                    "verify".to_string(),
+                ],
+                required_artifact_classes: vec![
+                    "structured_log".to_string(),
+                    "summary".to_string(),
+                    "transcript".to_string(),
+                ],
+                failure_cluster: "cluster-retry".to_string(),
+                description:
+                    "Retry pack validates deterministic retry scheduling and terminal success."
+                        .to_string(),
+            },
+        ],
+    }
+}
+
+/// Validates invariants for [`DoctorScenarioCoveragePacksContract`].
+///
+/// # Errors
+///
+/// Returns `Err` when ordering, required-variant, or schema invariants fail.
+pub fn validate_doctor_scenario_coverage_packs_contract(
+    contract: &DoctorScenarioCoveragePacksContract,
+) -> Result<(), String> {
+    if contract.contract_version != DOCTOR_SCENARIO_COVERAGE_PACK_CONTRACT_VERSION {
+        return Err(format!(
+            "unexpected contract_version {}",
+            contract.contract_version
+        ));
+    }
+    if contract.e2e_harness_contract_version != E2E_HARNESS_CONTRACT_VERSION {
+        return Err(format!(
+            "unexpected e2e_harness_contract_version {}",
+            contract.e2e_harness_contract_version
+        ));
+    }
+    if contract.logging_contract_version != STRUCTURED_LOGGING_CONTRACT_VERSION {
+        return Err(format!(
+            "unexpected logging_contract_version {}",
+            contract.logging_contract_version
+        ));
+    }
+
+    validate_lexical_string_set(&contract.selection_modes, "selection_modes")?;
+    for required_mode in [
+        "all",
+        "cancellation",
+        "degraded_dependency",
+        "recovery",
+        "retry",
+    ] {
+        if !contract
+            .selection_modes
+            .iter()
+            .any(|mode| mode == required_mode)
+        {
+            return Err(format!("selection_modes missing {required_mode}"));
+        }
+    }
+
+    validate_lexical_string_set(&contract.required_pack_fields, "required_pack_fields")?;
+    for required in [
+        "description",
+        "expected_outcome",
+        "failure_cluster",
+        "pack_id",
+        "required_artifact_classes",
+        "scenario_id",
+        "stages",
+        "workflow_variant",
+    ] {
+        if !contract
+            .required_pack_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_pack_fields missing {required}"));
+        }
+    }
+
+    validate_lexical_string_set(&contract.required_run_fields, "required_run_fields")?;
+    for required in [
+        "artifact_index",
+        "expected_outcome",
+        "failure_cluster",
+        "pack_id",
+        "repro_command",
+        "scenario_id",
+        "selected_mode",
+        "status",
+        "structured_log_summary",
+        "terminal_state",
+        "transcript",
+        "workflow_variant",
+    ] {
+        if !contract
+            .required_run_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_run_fields missing {required}"));
+        }
+    }
+
+    validate_lexical_string_set(&contract.required_log_fields, "required_log_fields")?;
+    for required in [
+        "artifact_manifest_path",
+        "correlation_id",
+        "failure_cluster",
+        "outcome_class",
+        "pack_id",
+        "scenario_id",
+        "seed",
+        "stage_outcomes",
+        "transcript_path",
+    ] {
+        if !contract
+            .required_log_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_log_fields missing {required}"));
+        }
+    }
+
+    validate_lexical_string_set(
+        &contract.minimum_required_pack_ids,
+        "minimum_required_pack_ids",
+    )?;
+    if contract.add_pack_policy.is_empty() {
+        return Err("add_pack_policy must be non-empty".to_string());
+    }
+    if contract
+        .add_pack_policy
+        .iter()
+        .any(|line| line.trim().is_empty())
+    {
+        return Err("add_pack_policy must not contain empty entries".to_string());
+    }
+    if contract.coverage_packs.is_empty() {
+        return Err("coverage_packs must be non-empty".to_string());
+    }
+
+    let pack_ids = contract
+        .coverage_packs
+        .iter()
+        .map(|pack| pack.pack_id.clone())
+        .collect::<Vec<_>>();
+    validate_lexical_string_set(&pack_ids, "coverage_packs.pack_id")?;
+    for required_pack_id in &contract.minimum_required_pack_ids {
+        if !pack_ids
+            .iter()
+            .any(|candidate| candidate == required_pack_id)
+        {
+            return Err(format!(
+                "minimum_required_pack_ids references unknown pack_id {required_pack_id}"
+            ));
+        }
+    }
+
+    let mut variants = BTreeSet::new();
+    for pack in &contract.coverage_packs {
+        if !is_slug_like(&pack.pack_id) {
+            return Err(format!("pack_id must be slug-like: {}", pack.pack_id));
+        }
+        if !is_slug_like(&pack.scenario_id) {
+            return Err(format!(
+                "scenario_id must be slug-like: {}",
+                pack.scenario_id
+            ));
+        }
+        if !matches!(
+            pack.workflow_variant.as_str(),
+            "cancellation" | "retry" | "degraded_dependency" | "recovery"
+        ) {
+            return Err(format!(
+                "workflow_variant must be canonical for pack {}",
+                pack.pack_id
+            ));
+        }
+        if !matches!(
+            pack.expected_outcome.as_str(),
+            "success" | "failed" | "cancelled"
+        ) {
+            return Err(format!(
+                "unsupported expected_outcome for pack {}",
+                pack.pack_id
+            ));
+        }
+        if pack.description.trim().is_empty() {
+            return Err(format!(
+                "description must be non-empty for pack {}",
+                pack.pack_id
+            ));
+        }
+        if !is_slug_like(&pack.failure_cluster) {
+            return Err(format!(
+                "failure_cluster must be slug-like for pack {}",
+                pack.pack_id
+            ));
+        }
+        validate_lexical_string_set(
+            &pack.required_artifact_classes,
+            &format!("coverage_packs.{}.required_artifact_classes", pack.pack_id),
+        )?;
+        if pack.required_artifact_classes
+            != vec![
+                "structured_log".to_string(),
+                "summary".to_string(),
+                "transcript".to_string(),
+            ]
+        {
+            return Err(format!(
+                "required_artifact_classes must be [structured_log, summary, transcript] for pack {}",
+                pack.pack_id
+            ));
+        }
+        if pack.stages.is_empty() {
+            return Err(format!(
+                "stages must be non-empty for pack {}",
+                pack.pack_id
+            ));
+        }
+        let mut stage_set = BTreeSet::new();
+        for stage in &pack.stages {
+            if !is_slug_like(stage) {
+                return Err(format!(
+                    "stage {stage} must be slug-like for pack {}",
+                    pack.pack_id
+                ));
+            }
+            if !stage_set.insert(stage.clone()) {
+                return Err(format!("duplicate stage {stage} for pack {}", pack.pack_id));
+            }
+        }
+        variants.insert(pack.workflow_variant.clone());
+    }
+
+    for required_variant in ["cancellation", "retry", "degraded_dependency", "recovery"] {
+        if !variants.contains(required_variant) {
+            return Err(format!(
+                "coverage_packs missing required workflow_variant {required_variant}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Selects deterministic scenario packs by mode.
+///
+/// # Errors
+///
+/// Returns `Err` when mode is unsupported or validation fails.
+pub fn select_doctor_scenario_coverage_packs(
+    contract: &DoctorScenarioCoveragePacksContract,
+    selection_mode: &str,
+) -> Result<Vec<DoctorScenarioCoveragePackSpec>, String> {
+    validate_doctor_scenario_coverage_packs_contract(contract)?;
+    let mode = selection_mode.trim();
+    if !contract
+        .selection_modes
+        .iter()
+        .any(|candidate| candidate == mode)
+    {
+        return Err(format!("unsupported selection_mode {mode}"));
+    }
+
+    let mut selected = contract
+        .coverage_packs
+        .iter()
+        .filter(|pack| mode == "all" || pack.workflow_variant == mode)
+        .cloned()
+        .collect::<Vec<_>>();
+    selected.sort_by(|left, right| left.pack_id.cmp(&right.pack_id));
+    if selected.is_empty() {
+        return Err(format!("selection_mode {mode} produced no packs"));
+    }
+    Ok(selected)
+}
+
+/// Builds deterministic scenario-pack smoke report with transcript assertions.
+///
+/// # Errors
+///
+/// Returns `Err` when validation, selection, or transcript generation fails.
+pub fn build_doctor_scenario_coverage_pack_smoke_report(
+    contract: &DoctorScenarioCoveragePacksContract,
+    selection_mode: &str,
+    seed: &str,
+) -> Result<DoctorScenarioCoveragePackSmokeReport, String> {
+    validate_doctor_scenario_coverage_packs_contract(contract)?;
+    let normalized_seed = seed.trim();
+    if !is_slug_like(normalized_seed) {
+        return Err("seed must be slug-like".to_string());
+    }
+    let mode = selection_mode.trim();
+    let selected = select_doctor_scenario_coverage_packs(contract, mode)?;
+    let harness_contract = e2e_harness_core_contract();
+
+    let mut runs = Vec::with_capacity(selected.len());
+    for (index, pack) in selected.iter().enumerate() {
+        let run_id = format!("run-doctor-pack-{:02}-{}", index + 1, pack.pack_id);
+        let correlation_id = format!("corr-{}", pack.pack_id);
+        let script_id = format!("script-{}", pack.pack_id);
+        let mut raw = BTreeMap::new();
+        raw.insert("run_id".to_string(), run_id.clone());
+        raw.insert("scenario_id".to_string(), pack.scenario_id.clone());
+        raw.insert("correlation_id".to_string(), correlation_id.clone());
+        raw.insert("seed".to_string(), normalized_seed.to_string());
+        raw.insert("script_id".to_string(), script_id);
+        raw.insert(
+            "requested_by".to_string(),
+            "doctor_scenario_coverage_pack_smoke".to_string(),
+        );
+        raw.insert("timeout_secs".to_string(), "180".to_string());
+        raw.insert(
+            "expected_outcome".to_string(),
+            pack.expected_outcome.clone(),
+        );
+
+        let config = parse_e2e_harness_config(&harness_contract, &raw)?;
+        let transcript = build_e2e_harness_transcript(&harness_contract, &config, &pack.stages)?;
+        let artifact_index = build_e2e_harness_artifact_index(&harness_contract, &transcript)?;
+
+        let expected_terminal = expected_terminal_state_for_outcome(&pack.expected_outcome)?;
+        let terminal_state = transcript
+            .events
+            .last()
+            .ok_or_else(|| format!("transcript empty for pack {}", pack.pack_id))?
+            .state
+            .clone();
+        if terminal_state != expected_terminal {
+            return Err(format!(
+                "terminal_state mismatch for {}: expected {} observed {}",
+                pack.pack_id, expected_terminal, terminal_state
+            ));
+        }
+
+        let stage_outcomes = transcript
+            .events
+            .iter()
+            .map(|event| format!("{}:{}:{}", event.stage, event.state, event.outcome_class))
+            .collect::<Vec<_>>();
+        let transcript_path = artifact_index
+            .iter()
+            .find(|entry| entry.artifact_class == "transcript")
+            .map(|entry| entry.artifact_path.clone())
+            .ok_or_else(|| format!("missing transcript artifact for {}", pack.pack_id))?;
+        let artifact_manifest_path = format!(
+            "artifacts/{}/doctor/e2e/{}-artifact-index.json",
+            transcript.run_id, transcript.scenario_id
+        );
+
+        runs.push(DoctorScenarioCoveragePackRun {
+            pack_id: pack.pack_id.clone(),
+            scenario_id: pack.scenario_id.clone(),
+            workflow_variant: pack.workflow_variant.clone(),
+            selected_mode: mode.to_string(),
+            expected_outcome: pack.expected_outcome.clone(),
+            terminal_state,
+            status: "passed".to_string(),
+            failure_cluster: pack.failure_cluster.clone(),
+            repro_command: format!(
+                "asupersync doctor scenario-coverage-pack-smoke --selection-mode {} --seed {}",
+                mode, normalized_seed
+            ),
+            transcript,
+            artifact_index,
+            structured_log_summary: DoctorScenarioCoverageStructuredLogSummary {
+                pack_id: pack.pack_id.clone(),
+                scenario_id: pack.scenario_id.clone(),
+                correlation_id,
+                seed: normalized_seed.to_string(),
+                stage_outcomes,
+                outcome_class: pack.expected_outcome.clone(),
+                failure_cluster: pack.failure_cluster.clone(),
+                transcript_path,
+                artifact_manifest_path,
+            },
+        });
+    }
+
+    runs.sort_by(|left, right| left.pack_id.cmp(&right.pack_id));
+    let mut failure_clusters = runs
+        .iter()
+        .map(|run| run.failure_cluster.clone())
+        .collect::<Vec<_>>();
+    failure_clusters.sort();
+    failure_clusters.dedup();
+
+    Ok(DoctorScenarioCoveragePackSmokeReport {
+        schema_version: DOCTOR_SCENARIO_COVERAGE_PACK_REPORT_VERSION.to_string(),
+        selection_mode: mode.to_string(),
+        requested_by: "doctor_scenario_coverage_pack_smoke".to_string(),
+        seed: normalized_seed.to_string(),
+        failure_clusters,
+        runs,
+    })
+}
+
 /// Returns the canonical beads/bv command-center contract.
 #[must_use]
 pub fn beads_command_center_contract() -> BeadsCommandCenterContract {
@@ -10181,6 +11005,791 @@ pub fn run_agent_mail_pane_smoke(
                 step_id: "reply".to_string(),
                 action: "reply in-thread and verify continuity".to_string(),
                 snapshot: reply_step,
+            },
+        ],
+    })
+}
+
+/// Returns the canonical evidence-timeline explorer contract.
+#[must_use]
+pub fn evidence_timeline_contract() -> EvidenceTimelineContract {
+    EvidenceTimelineContract {
+        contract_version: EVIDENCE_TIMELINE_CONTRACT_VERSION.to_string(),
+        core_report_contract_version: CORE_DIAGNOSTICS_REPORT_VERSION.to_string(),
+        timeline_source_command:
+            "asupersync doctor report-contract --json && asupersync doctor logging-contract --json"
+                .to_string(),
+        required_node_fields: vec![
+            "causal_children".to_string(),
+            "causal_parents".to_string(),
+            "command_refs".to_string(),
+            "evidence_refs".to_string(),
+            "finding_id".to_string(),
+            "has_missing_links".to_string(),
+            "missing_causal_refs".to_string(),
+            "node_id".to_string(),
+            "occurred_at".to_string(),
+            "outcome_class".to_string(),
+            "severity".to_string(),
+            "status".to_string(),
+            "title".to_string(),
+        ],
+        required_group_fields: vec!["group_key".to_string(), "node_ids".to_string()],
+        sort_modes: vec![
+            "chronological_asc".to_string(),
+            "chronological_desc".to_string(),
+        ],
+        filter_modes: vec![
+            "all".to_string(),
+            "critical_only".to_string(),
+            "open_only".to_string(),
+            "with_missing_links".to_string(),
+        ],
+        group_modes: vec![
+            "outcome".to_string(),
+            "severity".to_string(),
+            "status".to_string(),
+        ],
+        keyboard_bindings: vec![
+            EvidenceTimelineKeyboardBinding {
+                key: "enter".to_string(),
+                action: "open_evidence_panel".to_string(),
+                from_panel: "primary_panel".to_string(),
+                to_panel: "evidence_panel".to_string(),
+            },
+            EvidenceTimelineKeyboardBinding {
+                key: "esc".to_string(),
+                action: "close_evidence_panel".to_string(),
+                from_panel: "evidence_panel".to_string(),
+                to_panel: "primary_panel".to_string(),
+            },
+            EvidenceTimelineKeyboardBinding {
+                key: "j".to_string(),
+                action: "cursor_next".to_string(),
+                from_panel: "primary_panel".to_string(),
+                to_panel: "primary_panel".to_string(),
+            },
+            EvidenceTimelineKeyboardBinding {
+                key: "k".to_string(),
+                action: "cursor_prev".to_string(),
+                from_panel: "primary_panel".to_string(),
+                to_panel: "primary_panel".to_string(),
+            },
+            EvidenceTimelineKeyboardBinding {
+                key: "tab".to_string(),
+                action: "focus_cycle".to_string(),
+                from_panel: "context_panel".to_string(),
+                to_panel: "primary_panel".to_string(),
+            },
+        ],
+        event_taxonomy: vec![
+            "causal_expansion_decision".to_string(),
+            "command_invoked".to_string(),
+            "missing_link_diagnostic".to_string(),
+            "parse_failure".to_string(),
+            "snapshot_built".to_string(),
+            "timeline_interaction".to_string(),
+        ],
+        compatibility: ContractCompatibility {
+            minimum_reader_version: EVIDENCE_TIMELINE_CONTRACT_VERSION.to_string(),
+            supported_reader_versions: vec![EVIDENCE_TIMELINE_CONTRACT_VERSION.to_string()],
+            migration_guidance: vec![MigrationGuidance {
+                from_version: "doctor-evidence-timeline-v0".to_string(),
+                to_version: EVIDENCE_TIMELINE_CONTRACT_VERSION.to_string(),
+                breaking: false,
+                required_actions: vec![
+                    "Honor deterministic chronological sort tie-breakers by node_id.".to_string(),
+                    "Treat missing causal references as explicit diagnostics, not silent drops."
+                        .to_string(),
+                    "Preserve timeline grouping keys exactly for downstream report/export joins."
+                        .to_string(),
+                ],
+            }],
+        },
+        downstream_consumers: vec![
+            "doctor-core-report-v1".to_string(),
+            "doctor-report-export-json-v1".to_string(),
+            "doctor-report-export-markdown-v1".to_string(),
+        ],
+    }
+}
+
+/// Validates invariants for [`EvidenceTimelineContract`].
+///
+/// # Errors
+///
+/// Returns `Err` when ordering, required fields, or compatibility invariants
+/// are violated.
+pub fn validate_evidence_timeline_contract(
+    contract: &EvidenceTimelineContract,
+) -> Result<(), String> {
+    if contract.contract_version != EVIDENCE_TIMELINE_CONTRACT_VERSION {
+        return Err(format!(
+            "unexpected contract_version {}",
+            contract.contract_version
+        ));
+    }
+    if contract.core_report_contract_version != CORE_DIAGNOSTICS_REPORT_VERSION {
+        return Err(format!(
+            "unexpected core_report_contract_version {}",
+            contract.core_report_contract_version
+        ));
+    }
+    if contract.timeline_source_command.trim().is_empty() {
+        return Err("timeline_source_command must be non-empty".to_string());
+    }
+
+    validate_lexical_string_set(&contract.required_node_fields, "required_node_fields")?;
+    for required in [
+        "causal_children",
+        "causal_parents",
+        "command_refs",
+        "evidence_refs",
+        "finding_id",
+        "has_missing_links",
+        "missing_causal_refs",
+        "node_id",
+        "occurred_at",
+        "outcome_class",
+        "severity",
+        "status",
+        "title",
+    ] {
+        if !contract
+            .required_node_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_node_fields missing {required}"));
+        }
+    }
+
+    validate_lexical_string_set(&contract.required_group_fields, "required_group_fields")?;
+    for required in ["group_key", "node_ids"] {
+        if !contract
+            .required_group_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_group_fields missing {required}"));
+        }
+    }
+
+    validate_lexical_string_set(&contract.sort_modes, "sort_modes")?;
+    for required in ["chronological_asc", "chronological_desc"] {
+        if !contract.sort_modes.iter().any(|mode| mode == required) {
+            return Err(format!("sort_modes missing {required}"));
+        }
+    }
+
+    validate_lexical_string_set(&contract.filter_modes, "filter_modes")?;
+    for required in ["all", "critical_only", "open_only", "with_missing_links"] {
+        if !contract.filter_modes.iter().any(|mode| mode == required) {
+            return Err(format!("filter_modes missing {required}"));
+        }
+    }
+
+    validate_lexical_string_set(&contract.group_modes, "group_modes")?;
+    for required in ["outcome", "severity", "status"] {
+        if !contract.group_modes.iter().any(|mode| mode == required) {
+            return Err(format!("group_modes missing {required}"));
+        }
+    }
+
+    if contract.keyboard_bindings.is_empty() {
+        return Err("keyboard_bindings must be non-empty".to_string());
+    }
+    let mut binding_fingerprints = Vec::new();
+    for binding in &contract.keyboard_bindings {
+        if binding.key.trim().is_empty()
+            || binding.action.trim().is_empty()
+            || binding.from_panel.trim().is_empty()
+            || binding.to_panel.trim().is_empty()
+        {
+            return Err("keyboard binding fields must be non-empty".to_string());
+        }
+        binding_fingerprints.push(format!(
+            "{}|{}|{}|{}",
+            binding.key, binding.action, binding.from_panel, binding.to_panel
+        ));
+    }
+    let mut sorted_binding_fingerprints = binding_fingerprints.clone();
+    sorted_binding_fingerprints.sort();
+    sorted_binding_fingerprints.dedup();
+    if sorted_binding_fingerprints != binding_fingerprints {
+        return Err("keyboard_bindings must be unique and lexically ordered".to_string());
+    }
+
+    validate_lexical_string_set(&contract.event_taxonomy, "event_taxonomy")?;
+    for required in [
+        "causal_expansion_decision",
+        "command_invoked",
+        "missing_link_diagnostic",
+        "parse_failure",
+        "snapshot_built",
+        "timeline_interaction",
+    ] {
+        if !contract.event_taxonomy.iter().any(|kind| kind == required) {
+            return Err(format!("event_taxonomy missing {required}"));
+        }
+    }
+
+    if contract.compatibility.minimum_reader_version != contract.contract_version {
+        return Err("compatibility.minimum_reader_version must equal contract_version".to_string());
+    }
+    if !contract
+        .compatibility
+        .supported_reader_versions
+        .iter()
+        .any(|version| version == &contract.contract_version)
+    {
+        return Err("supported_reader_versions must include contract_version".to_string());
+    }
+    if contract.compatibility.migration_guidance.is_empty() {
+        return Err("compatibility.migration_guidance must be non-empty".to_string());
+    }
+
+    validate_lexical_string_set(&contract.downstream_consumers, "downstream_consumers")?;
+    for required in [
+        "doctor-core-report-v1",
+        "doctor-report-export-json-v1",
+        "doctor-report-export-markdown-v1",
+    ] {
+        if !contract
+            .downstream_consumers
+            .iter()
+            .any(|consumer| consumer == required)
+        {
+            return Err(format!("downstream_consumers missing {required}"));
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct ParsedTimelineNode {
+    node_id: String,
+    occurred_at: String,
+    finding_id: String,
+    title: String,
+    severity: String,
+    status: String,
+    outcome_class: String,
+    evidence_refs: Vec<String>,
+    command_refs: Vec<String>,
+    causal_refs: Vec<String>,
+}
+
+fn parse_required_string_array_field(
+    entry: &serde_json::Value,
+    field: &str,
+    source: &str,
+    index: usize,
+) -> Result<Vec<String>, String> {
+    let value = entry
+        .get(field)
+        .ok_or_else(|| format!("parse_failure: {source}[{index}] missing field {field}"))?;
+    let array = value.as_array().ok_or_else(|| {
+        format!("parse_failure: {source}[{index}] field {field} must be an array")
+    })?;
+    let mut items = Vec::new();
+    for (item_index, item) in array.iter().enumerate() {
+        let text = item.as_str().ok_or_else(|| {
+            format!("parse_failure: {source}[{index}].{field}[{item_index}] must be a string")
+        })?;
+        if text.trim().is_empty() {
+            return Err(format!(
+                "parse_failure: {source}[{index}].{field}[{item_index}] must be non-empty"
+            ));
+        }
+        items.push(text.to_string());
+    }
+    items.sort();
+    items.dedup();
+    Ok(items)
+}
+
+fn parse_optional_string_array_field(
+    entry: &serde_json::Value,
+    field: &str,
+    source: &str,
+    index: usize,
+) -> Result<Vec<String>, String> {
+    let Some(value) = entry.get(field) else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let array = value.as_array().ok_or_else(|| {
+        format!("parse_failure: {source}[{index}] field {field} must be an array")
+    })?;
+    let mut items = Vec::new();
+    for (item_index, item) in array.iter().enumerate() {
+        let text = item.as_str().ok_or_else(|| {
+            format!("parse_failure: {source}[{index}].{field}[{item_index}] must be a string")
+        })?;
+        if text.trim().is_empty() {
+            return Err(format!(
+                "parse_failure: {source}[{index}].{field}[{item_index}] must be non-empty"
+            ));
+        }
+        items.push(text.to_string());
+    }
+    items.sort();
+    items.dedup();
+    Ok(items)
+}
+
+/// Parses evidence-timeline nodes from JSON payloads.
+///
+/// # Errors
+///
+/// Returns `Err` when required fields are missing, malformed, or when node ids
+/// are duplicated.
+pub fn parse_evidence_timeline_nodes(
+    contract: &EvidenceTimelineContract,
+    raw_json: &str,
+) -> Result<Vec<EvidenceTimelineNode>, String> {
+    validate_evidence_timeline_contract(contract)?;
+    let payload: serde_json::Value = serde_json::from_str(raw_json)
+        .map_err(|err| format!("parse_failure: timeline JSON: {err}"))?;
+    let entries = parse_result_array(&payload, "timeline")?;
+
+    let mut parsed = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        parsed.push(ParsedTimelineNode {
+            node_id: parse_required_string_field(entry, "id", "timeline", index)?,
+            occurred_at: parse_required_string_field(entry, "occurred_at", "timeline", index)?,
+            finding_id: parse_required_string_field(entry, "finding_id", "timeline", index)?,
+            title: parse_required_string_field(entry, "title", "timeline", index)?,
+            severity: parse_required_string_field(entry, "severity", "timeline", index)?,
+            status: parse_required_string_field(entry, "status", "timeline", index)?,
+            outcome_class: parse_required_string_field(entry, "outcome_class", "timeline", index)?,
+            evidence_refs: parse_required_string_array_field(
+                entry,
+                "evidence_refs",
+                "timeline",
+                index,
+            )?,
+            command_refs: parse_required_string_array_field(
+                entry,
+                "command_refs",
+                "timeline",
+                index,
+            )?,
+            causal_refs: parse_optional_string_array_field(
+                entry,
+                "causal_refs",
+                "timeline",
+                index,
+            )?,
+        });
+    }
+
+    let mut id_set = BTreeSet::new();
+    for node in &parsed {
+        if !id_set.insert(node.node_id.clone()) {
+            return Err(format!(
+                "parse_failure: duplicate timeline node id {}",
+                node.node_id
+            ));
+        }
+    }
+
+    let mut children: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut nodes = Vec::with_capacity(parsed.len());
+    for node in parsed {
+        let mut causal_parents = Vec::new();
+        let mut missing_causal_refs = Vec::new();
+        for ref_id in node.causal_refs {
+            if ref_id == node.node_id || !id_set.contains(&ref_id) {
+                missing_causal_refs.push(ref_id);
+                continue;
+            }
+            causal_parents.push(ref_id.clone());
+            children
+                .entry(ref_id)
+                .or_default()
+                .insert(node.node_id.clone());
+        }
+        causal_parents.sort();
+        causal_parents.dedup();
+        missing_causal_refs.sort();
+        missing_causal_refs.dedup();
+        let has_missing_links = node.evidence_refs.is_empty() || !missing_causal_refs.is_empty();
+        nodes.push(EvidenceTimelineNode {
+            node_id: node.node_id,
+            occurred_at: node.occurred_at,
+            finding_id: node.finding_id,
+            title: node.title,
+            severity: node.severity,
+            status: node.status,
+            outcome_class: node.outcome_class,
+            evidence_refs: node.evidence_refs,
+            command_refs: node.command_refs,
+            causal_parents,
+            causal_children: Vec::new(),
+            missing_causal_refs,
+            has_missing_links,
+        });
+    }
+
+    let node_index = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.node_id.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    for (parent_id, child_ids) in children {
+        if let Some(index) = node_index.get(&parent_id).copied() {
+            nodes[index].causal_children = child_ids.into_iter().collect();
+        }
+    }
+
+    nodes.sort_by(|left, right| {
+        left.occurred_at
+            .cmp(&right.occurred_at)
+            .then_with(|| left.node_id.cmp(&right.node_id))
+    });
+    Ok(nodes)
+}
+
+/// Builds one deterministic evidence-timeline snapshot.
+///
+/// # Errors
+///
+/// Returns `Err` when the contract or selected controls are invalid.
+#[allow(clippy::too_many_lines)]
+pub fn build_evidence_timeline_snapshot(
+    contract: &EvidenceTimelineContract,
+    timeline_json: &str,
+    sort_mode: &str,
+    filter_mode: &str,
+    group_mode: &str,
+    focused_panel: &str,
+    selected_node: Option<&str>,
+) -> Result<EvidenceTimelineSnapshot, String> {
+    validate_evidence_timeline_contract(contract)?;
+    if !contract.sort_modes.iter().any(|mode| mode == sort_mode) {
+        return Err(format!("unsupported sort_mode {sort_mode}"));
+    }
+    if !contract.filter_modes.iter().any(|mode| mode == filter_mode) {
+        return Err(format!("unsupported filter_mode {filter_mode}"));
+    }
+    if !contract.group_modes.iter().any(|mode| mode == group_mode) {
+        return Err(format!("unsupported group_mode {group_mode}"));
+    }
+    if !matches!(
+        focused_panel,
+        "context_panel" | "primary_panel" | "action_panel" | "evidence_panel"
+    ) {
+        return Err(format!("unsupported focused_panel {focused_panel}"));
+    }
+
+    let mut events = vec![EvidenceTimelineEvent {
+        event_kind: "command_invoked".to_string(),
+        source: "timeline".to_string(),
+        node_id: None,
+        message: contract.timeline_source_command.clone(),
+    }];
+    let mut parse_errors = Vec::new();
+
+    let mut nodes = match parse_evidence_timeline_nodes(contract, timeline_json) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            events.push(EvidenceTimelineEvent {
+                event_kind: "parse_failure".to_string(),
+                source: "timeline".to_string(),
+                node_id: None,
+                message: err.clone(),
+            });
+            parse_errors.push(err);
+            Vec::new()
+        }
+    };
+
+    match filter_mode {
+        "all" => {}
+        "critical_only" => nodes.retain(|node| node.severity == "critical"),
+        "open_only" => nodes.retain(|node| node.status == "open" || node.status == "in_progress"),
+        "with_missing_links" => nodes.retain(|node| node.has_missing_links),
+        _ => return Err(format!("unsupported filter_mode {filter_mode}")),
+    }
+
+    nodes.sort_by(|left, right| {
+        left.occurred_at
+            .cmp(&right.occurred_at)
+            .then_with(|| left.node_id.cmp(&right.node_id))
+    });
+    if sort_mode == "chronological_desc" {
+        nodes.reverse();
+    }
+
+    let selected_node = selected_node.map(str::to_string);
+    let evidence_panel_node = if focused_panel == "evidence_panel" {
+        selected_node.clone()
+    } else {
+        None
+    };
+
+    if let Some(node_id) = selected_node.as_ref() {
+        if let Some(node) = nodes.iter().find(|node| node.node_id == *node_id) {
+            if focused_panel == "evidence_panel" {
+                events.push(EvidenceTimelineEvent {
+                    event_kind: "causal_expansion_decision".to_string(),
+                    source: "interaction".to_string(),
+                    node_id: Some(node.node_id.clone()),
+                    message: format!(
+                        "expanded node {} (parents={} children={})",
+                        node.node_id,
+                        node.causal_parents.len(),
+                        node.causal_children.len()
+                    ),
+                });
+            }
+        } else {
+            events.push(EvidenceTimelineEvent {
+                event_kind: "missing_link_diagnostic".to_string(),
+                source: "interaction".to_string(),
+                node_id: Some(node_id.clone()),
+                message: "selected node does not exist in current filtered timeline".to_string(),
+            });
+        }
+    }
+
+    for node in &nodes {
+        if node.has_missing_links {
+            let detail = if node.evidence_refs.is_empty() && node.missing_causal_refs.is_empty() {
+                "missing evidence refs".to_string()
+            } else if node.evidence_refs.is_empty() {
+                format!(
+                    "missing evidence refs; missing causal refs={}",
+                    node.missing_causal_refs.join(",")
+                )
+            } else if node.missing_causal_refs.is_empty() {
+                "missing link detected".to_string()
+            } else {
+                format!("missing causal refs={}", node.missing_causal_refs.join(","))
+            };
+            events.push(EvidenceTimelineEvent {
+                event_kind: "missing_link_diagnostic".to_string(),
+                source: "timeline".to_string(),
+                node_id: Some(node.node_id.clone()),
+                message: detail,
+            });
+        }
+    }
+
+    let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for node in &nodes {
+        let group_key = match group_mode {
+            "severity" => node.severity.clone(),
+            "status" => node.status.clone(),
+            "outcome" => node.outcome_class.clone(),
+            _ => return Err(format!("unsupported group_mode {group_mode}")),
+        };
+        grouped
+            .entry(group_key)
+            .or_default()
+            .push(node.node_id.clone());
+    }
+    let groups = grouped
+        .into_iter()
+        .map(|(group_key, node_ids)| EvidenceTimelineGroup {
+            group_key,
+            node_ids,
+        })
+        .collect::<Vec<_>>();
+
+    events.push(EvidenceTimelineEvent {
+        event_kind: "timeline_interaction".to_string(),
+        source: "interaction".to_string(),
+        node_id: selected_node.clone(),
+        message: format!(
+            "sort={sort_mode} filter={filter_mode} group={group_mode} panel={focused_panel}"
+        ),
+    });
+    events.push(EvidenceTimelineEvent {
+        event_kind: "snapshot_built".to_string(),
+        source: "snapshot".to_string(),
+        node_id: selected_node.clone(),
+        message: format!(
+            "nodes={} groups={} errors={}",
+            nodes.len(),
+            groups.len(),
+            parse_errors.len()
+        ),
+    });
+
+    let node_fingerprint = nodes
+        .iter()
+        .map(|node| format!("{}@{}", node.node_id, node.occurred_at))
+        .collect::<Vec<_>>()
+        .join(",");
+    let group_fingerprint = groups
+        .iter()
+        .map(|group| format!("{}={}", group.group_key, group.node_ids.join("+")))
+        .collect::<Vec<_>>()
+        .join(",");
+    let refresh_fingerprint = format!(
+        "sort={sort_mode};filter={filter_mode};group={group_mode};panel={focused_panel};selected={};nodes={node_fingerprint};groups={group_fingerprint}",
+        selected_node.as_deref().unwrap_or("-")
+    );
+
+    Ok(EvidenceTimelineSnapshot {
+        schema_version: contract.contract_version.clone(),
+        sort_mode: sort_mode.to_string(),
+        filter_mode: filter_mode.to_string(),
+        group_mode: group_mode.to_string(),
+        focused_panel: focused_panel.to_string(),
+        selected_node,
+        evidence_panel_node,
+        nodes,
+        groups,
+        parse_errors,
+        refresh_fingerprint,
+        events,
+    })
+}
+
+/// Runs a deterministic keyboard-driven smoke workflow for timeline drill-down.
+///
+/// # Errors
+///
+/// Returns `Err` when any workflow snapshot assembly step fails.
+pub fn run_evidence_timeline_keyboard_flow_smoke(
+    contract: &EvidenceTimelineContract,
+) -> Result<EvidenceTimelineWorkflowTranscript, String> {
+    let timeline_json = r#"{
+  "result": [
+    {
+      "id": "timeline-001",
+      "occurred_at": "2026-03-01T10:00:00Z",
+      "finding_id": "finding-queue-overflow",
+      "title": "Queue pressure exceeded threshold",
+      "severity": "high",
+      "status": "open",
+      "outcome_class": "failed",
+      "evidence_refs": ["evidence-001"],
+      "command_refs": ["cmd-001"],
+      "causal_refs": []
+    },
+    {
+      "id": "timeline-002",
+      "occurred_at": "2026-03-01T10:02:00Z",
+      "finding_id": "finding-cancel-tail",
+      "title": "Cancellation tail entered stalled phase",
+      "severity": "critical",
+      "status": "in_progress",
+      "outcome_class": "failed",
+      "evidence_refs": ["evidence-002"],
+      "command_refs": ["cmd-002"],
+      "causal_refs": ["timeline-001"]
+    },
+    {
+      "id": "timeline-003",
+      "occurred_at": "2026-03-01T10:04:00Z",
+      "finding_id": "finding-ghost-link",
+      "title": "Unlinked evidence node detected",
+      "severity": "medium",
+      "status": "open",
+      "outcome_class": "cancelled",
+      "evidence_refs": [],
+      "command_refs": ["cmd-003"],
+      "causal_refs": ["timeline-missing"]
+    }
+  ]
+}"#;
+
+    let boot = build_evidence_timeline_snapshot(
+        contract,
+        timeline_json,
+        "chronological_asc",
+        "all",
+        "severity",
+        "context_panel",
+        Some("timeline-001"),
+    )?;
+    let focus_primary = build_evidence_timeline_snapshot(
+        contract,
+        timeline_json,
+        "chronological_asc",
+        "all",
+        "severity",
+        "primary_panel",
+        Some("timeline-001"),
+    )?;
+    let cursor_next = build_evidence_timeline_snapshot(
+        contract,
+        timeline_json,
+        "chronological_asc",
+        "all",
+        "severity",
+        "primary_panel",
+        Some("timeline-002"),
+    )?;
+    let drill_down = build_evidence_timeline_snapshot(
+        contract,
+        timeline_json,
+        "chronological_asc",
+        "all",
+        "severity",
+        "evidence_panel",
+        Some("timeline-002"),
+    )?;
+    let close_drill = build_evidence_timeline_snapshot(
+        contract,
+        timeline_json,
+        "chronological_asc",
+        "all",
+        "severity",
+        "primary_panel",
+        Some("timeline-002"),
+    )?;
+
+    Ok(EvidenceTimelineWorkflowTranscript {
+        scenario_id: "doctor-evidence-timeline-keyboard-smoke".to_string(),
+        steps: vec![
+            EvidenceTimelineInteractionStep {
+                step_id: "boot".to_string(),
+                key_chord: "boot".to_string(),
+                focused_panel: "context_panel".to_string(),
+                selected_node: Some("timeline-001".to_string()),
+                evidence_panel_node: None,
+                snapshot: boot,
+            },
+            EvidenceTimelineInteractionStep {
+                step_id: "focus_primary".to_string(),
+                key_chord: "tab".to_string(),
+                focused_panel: "primary_panel".to_string(),
+                selected_node: Some("timeline-001".to_string()),
+                evidence_panel_node: None,
+                snapshot: focus_primary,
+            },
+            EvidenceTimelineInteractionStep {
+                step_id: "cursor_next".to_string(),
+                key_chord: "j".to_string(),
+                focused_panel: "primary_panel".to_string(),
+                selected_node: Some("timeline-002".to_string()),
+                evidence_panel_node: None,
+                snapshot: cursor_next,
+            },
+            EvidenceTimelineInteractionStep {
+                step_id: "drill_down".to_string(),
+                key_chord: "enter".to_string(),
+                focused_panel: "evidence_panel".to_string(),
+                selected_node: Some("timeline-002".to_string()),
+                evidence_panel_node: Some("timeline-002".to_string()),
+                snapshot: drill_down,
+            },
+            EvidenceTimelineInteractionStep {
+                step_id: "close_drill".to_string(),
+                key_chord: "esc".to_string(),
+                focused_panel: "primary_panel".to_string(),
+                selected_node: Some("timeline-002".to_string()),
+                evidence_panel_node: None,
+                snapshot: close_drill,
             },
         ],
     })
@@ -15778,6 +17387,298 @@ impl RuntimeState {
                 "scenario-e2e-transcript".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn doctor_scenario_coverage_packs_contract_validates() {
+        let contract = doctor_scenario_coverage_packs_contract();
+        validate_doctor_scenario_coverage_packs_contract(&contract).expect("valid contract");
+    }
+
+    #[test]
+    fn doctor_scenario_coverage_packs_contract_round_trip_json() {
+        let contract = doctor_scenario_coverage_packs_contract();
+        let json = serde_json::to_string(&contract).expect("serialize");
+        let parsed: DoctorScenarioCoveragePacksContract =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(contract, parsed);
+        validate_doctor_scenario_coverage_packs_contract(&parsed).expect("parsed contract valid");
+    }
+
+    #[test]
+    fn select_doctor_scenario_coverage_packs_filters_variants() {
+        let contract = doctor_scenario_coverage_packs_contract();
+        let cancellation =
+            select_doctor_scenario_coverage_packs(&contract, "cancellation").expect("select");
+        assert_eq!(cancellation.len(), 1);
+        assert_eq!(cancellation[0].workflow_variant, "cancellation");
+
+        let all = select_doctor_scenario_coverage_packs(&contract, "all").expect("select");
+        let variants = all
+            .iter()
+            .map(|pack| pack.workflow_variant.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            variants,
+            BTreeSet::from([
+                "cancellation".to_string(),
+                "degraded_dependency".to_string(),
+                "recovery".to_string(),
+                "retry".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn doctor_scenario_coverage_pack_smoke_report_is_deterministic() {
+        let contract = doctor_scenario_coverage_packs_contract();
+        let first = build_doctor_scenario_coverage_pack_smoke_report(&contract, "all", "seed-4242")
+            .expect("first");
+        let second =
+            build_doctor_scenario_coverage_pack_smoke_report(&contract, "all", "seed-4242")
+                .expect("second");
+        assert_eq!(first, second);
+        assert_eq!(first.runs.len(), 4);
+        assert_eq!(
+            first
+                .runs
+                .iter()
+                .map(|run| run.workflow_variant.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                "cancellation".to_string(),
+                "degraded_dependency".to_string(),
+                "recovery".to_string(),
+                "retry".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn doctor_scenario_coverage_pack_smoke_report_aligns_terminal_outcomes() {
+        let contract = doctor_scenario_coverage_packs_contract();
+        let report = build_doctor_scenario_coverage_pack_smoke_report(&contract, "all", "seed-900")
+            .expect("report");
+        for run in &report.runs {
+            let expected_terminal =
+                expected_terminal_state_for_outcome(&run.expected_outcome).expect("mapping");
+            assert_eq!(
+                run.terminal_state, expected_terminal,
+                "pack {}",
+                run.pack_id
+            );
+            assert_eq!(run.status, "passed");
+            assert_eq!(
+                run.artifact_index
+                    .iter()
+                    .map(|entry| entry.artifact_class.clone())
+                    .collect::<Vec<_>>(),
+                vec![
+                    "structured_log".to_string(),
+                    "summary".to_string(),
+                    "transcript".to_string(),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn evidence_timeline_contract_validates() {
+        let contract = evidence_timeline_contract();
+        validate_evidence_timeline_contract(&contract).expect("valid contract");
+    }
+
+    #[test]
+    fn evidence_timeline_contract_round_trip_json() {
+        let contract = evidence_timeline_contract();
+        let json = serde_json::to_string(&contract).expect("serialize");
+        let parsed: EvidenceTimelineContract = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(contract, parsed);
+        validate_evidence_timeline_contract(&parsed).expect("parsed contract valid");
+    }
+
+    #[test]
+    fn build_evidence_timeline_snapshot_orders_groups_and_filters() {
+        let contract = evidence_timeline_contract();
+        let timeline_json = r#"[
+  {
+    "id":"timeline-010",
+    "occurred_at":"2026-03-01T10:05:00Z",
+    "finding_id":"finding-b",
+    "title":"B",
+    "severity":"critical",
+    "status":"open",
+    "outcome_class":"failed",
+    "evidence_refs":["evidence-010"],
+    "command_refs":["cmd-010"],
+    "causal_refs":["timeline-005"]
+  },
+  {
+    "id":"timeline-005",
+    "occurred_at":"2026-03-01T10:00:00Z",
+    "finding_id":"finding-a",
+    "title":"A",
+    "severity":"high",
+    "status":"resolved",
+    "outcome_class":"success",
+    "evidence_refs":["evidence-005"],
+    "command_refs":["cmd-005"],
+    "causal_refs":[]
+  },
+  {
+    "id":"timeline-020",
+    "occurred_at":"2026-03-01T10:10:00Z",
+    "finding_id":"finding-c",
+    "title":"C",
+    "severity":"critical",
+    "status":"in_progress",
+    "outcome_class":"failed",
+    "evidence_refs":["evidence-020"],
+    "command_refs":["cmd-020"],
+    "causal_refs":["timeline-010"]
+  }
+]"#;
+
+        let all_snapshot = build_evidence_timeline_snapshot(
+            &contract,
+            timeline_json,
+            "chronological_asc",
+            "all",
+            "severity",
+            "primary_panel",
+            Some("timeline-010"),
+        )
+        .expect("snapshot");
+        let all_ids = all_snapshot
+            .nodes
+            .iter()
+            .map(|node| node.node_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            all_ids,
+            vec![
+                "timeline-005".to_string(),
+                "timeline-010".to_string(),
+                "timeline-020".to_string(),
+            ]
+        );
+        assert_eq!(
+            all_snapshot
+                .groups
+                .iter()
+                .map(|group| group.group_key.clone())
+                .collect::<Vec<_>>(),
+            vec!["critical".to_string(), "high".to_string()]
+        );
+
+        let critical_desc_snapshot = build_evidence_timeline_snapshot(
+            &contract,
+            timeline_json,
+            "chronological_desc",
+            "critical_only",
+            "status",
+            "primary_panel",
+            Some("timeline-020"),
+        )
+        .expect("snapshot");
+        let filtered_ids = critical_desc_snapshot
+            .nodes
+            .iter()
+            .map(|node| node.node_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            filtered_ids,
+            vec!["timeline-020".to_string(), "timeline-010".to_string()]
+        );
+        assert_eq!(
+            critical_desc_snapshot
+                .groups
+                .iter()
+                .map(|group| group.group_key.clone())
+                .collect::<Vec<_>>(),
+            vec!["in_progress".to_string(), "open".to_string()]
+        );
+    }
+
+    #[test]
+    fn build_evidence_timeline_snapshot_emits_missing_link_and_causal_events() {
+        let contract = evidence_timeline_contract();
+        let timeline_json = r#"{
+  "result": [
+    {
+      "id":"timeline-a",
+      "occurred_at":"2026-03-01T12:00:00Z",
+      "finding_id":"finding-a",
+      "title":"A",
+      "severity":"high",
+      "status":"open",
+      "outcome_class":"failed",
+      "evidence_refs":["evidence-a"],
+      "command_refs":["cmd-a"],
+      "causal_refs":[]
+    },
+    {
+      "id":"timeline-b",
+      "occurred_at":"2026-03-01T12:01:00Z",
+      "finding_id":"finding-b",
+      "title":"B",
+      "severity":"critical",
+      "status":"in_progress",
+      "outcome_class":"failed",
+      "evidence_refs":[],
+      "command_refs":["cmd-b"],
+      "causal_refs":["timeline-a","timeline-missing"]
+    }
+  ]
+}"#;
+
+        let snapshot = build_evidence_timeline_snapshot(
+            &contract,
+            timeline_json,
+            "chronological_asc",
+            "all",
+            "outcome",
+            "evidence_panel",
+            Some("timeline-b"),
+        )
+        .expect("snapshot");
+
+        assert_eq!(snapshot.evidence_panel_node.as_deref(), Some("timeline-b"));
+        assert!(
+            snapshot.events.iter().any(|event| {
+                event.event_kind == "causal_expansion_decision"
+                    && event.node_id.as_deref() == Some("timeline-b")
+            }),
+            "missing causal_expansion_decision event"
+        );
+        assert!(
+            snapshot.events.iter().any(|event| {
+                event.event_kind == "missing_link_diagnostic"
+                    && event.node_id.as_deref() == Some("timeline-b")
+            }),
+            "missing missing_link_diagnostic event"
+        );
+    }
+
+    #[test]
+    fn evidence_timeline_keyboard_flow_smoke_is_deterministic() {
+        let contract = evidence_timeline_contract();
+        let first = run_evidence_timeline_keyboard_flow_smoke(&contract).expect("first smoke");
+        let second = run_evidence_timeline_keyboard_flow_smoke(&contract).expect("second smoke");
+        assert_eq!(first, second);
+        assert_eq!(first.steps.len(), 5);
+        assert_eq!(first.steps[1].focused_panel, "primary_panel");
+        assert_eq!(
+            first.steps[2].selected_node.as_deref(),
+            Some("timeline-002")
+        );
+        assert_eq!(first.steps[3].focused_panel, "evidence_panel");
+        assert_eq!(
+            first.steps[3].evidence_panel_node.as_deref(),
+            Some("timeline-002")
+        );
+        assert_eq!(first.steps[4].focused_panel, "primary_panel");
+        assert!(first.steps[4].evidence_panel_node.is_none());
     }
 
     #[test]

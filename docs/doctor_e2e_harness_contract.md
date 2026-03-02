@@ -135,3 +135,42 @@ artifact records:
 
 These guarantees align with `doctor-logging-v1` and the execution adapter to
 keep scenario replay deterministic and auditable.
+
+## Scenario Coverage Packs Extension
+
+Track 3 scenario-coverage packs (`asupersync-2b4jj.3.5`) are represented by
+`DoctorScenarioCoveragePacksContract` and `DoctorScenarioCoveragePackSmokeReport`
+in `src/cli/doctor/mod.rs`.
+
+Contract version:
+
+- `doctor-scenario-coverage-packs-v1`
+- depends on `doctor-e2e-harness-v1`
+- depends on `doctor-logging-v1`
+
+Canonical CLI exports:
+
+- `asupersync doctor scenario-coverage-pack-contract --format json`
+- `asupersync doctor scenario-coverage-pack-smoke --selection-mode all --seed seed-4242 --format json`
+
+Minimum required packs (must always exist):
+
+1. `pack-cancellation`
+2. `pack-retry`
+3. `pack-degraded-dependency`
+4. `pack-recovery`
+
+Each pack must define:
+
+1. deterministic `stages` (slug-like ids) for transcript generation
+2. canonical `workflow_variant` and `expected_outcome`
+3. `required_artifact_classes` = `structured_log`, `summary`, `transcript`
+4. `failure_cluster` for failure clustering and triage joins
+
+Policy for adding a new high-value pack:
+
+1. Specify the new workflow gap and why existing four packs do not cover it.
+2. Add deterministic stages and expected terminal-outcome oracle.
+3. Add/extend unit tests covering selection behavior and oracle checks.
+4. Ensure `scripts/test_doctor_scenario_coverage_packs_e2e.sh` validates the new pack.
+5. Keep contract arrays lexically sorted and update `minimum_required_pack_ids` only when justified.

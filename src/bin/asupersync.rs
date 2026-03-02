@@ -1,13 +1,24 @@
 //! Asupersync CLI tools (feature-gated).
 #![allow(clippy::result_large_err)]
 
+use asupersync::cli::doctor::{
+    advanced_diagnostics_report_bundle, build_doctor_scenario_coverage_pack_smoke_report,
+    doctor_scenario_coverage_packs_contract, evidence_timeline_contract,
+    run_evidence_timeline_keyboard_flow_smoke, validate_advanced_diagnostics_report_extension,
+    validate_advanced_diagnostics_report_extension_contract, AdvancedCollaborationEntry,
+    AdvancedDiagnosticsFixture, AdvancedDiagnosticsReportBundle, AdvancedRemediationDelta,
+    AdvancedTroubleshootingPlaybook, AdvancedTrustTransition,
+    DoctorScenarioCoveragePackSmokeReport, DoctorScenarioCoveragePacksContract,
+    EvidenceTimelineContract, EvidenceTimelineWorkflowTranscript,
+};
 use asupersync::cli::{
     analyze_workspace_invariants, analyze_workspace_lock_contention,
     core_diagnostics_report_bundle, core_diagnostics_report_contract, operator_model_contract,
     parse_color_choice, parse_output_format, remediation_recipe_bundle, scan_workspace,
     screen_engine_contract, structured_logging_contract, validate_core_diagnostics_report,
-    CliError, ColorChoice, CommonArgs, CoreDiagnosticsReport, CoreDiagnosticsReportBundle,
-    ExitCode, InvariantAnalyzerReport, LockContentionAnalyzerReport, OperatorModelContract, Output,
+    validate_core_diagnostics_report_contract, CliError, ColorChoice, CommonArgs,
+    CoreDiagnosticsReport, CoreDiagnosticsReportBundle, CoreDiagnosticsSummary, ExitCode,
+    InvariantAnalyzerReport, LockContentionAnalyzerReport, OperatorModelContract, Output,
     OutputFormat, Outputtable, RemediationRecipeBundle, ScreenEngineContract,
     StructuredLoggingContract, WorkspaceScanReport,
 };
@@ -274,6 +285,16 @@ enum DoctorCommand {
     RemediationContract,
     /// Emit core diagnostics report contract and deterministic fixture bundle
     ReportContract,
+    /// Emit deterministic evidence-timeline explorer contract
+    EvidenceTimelineContract,
+    /// Emit deterministic keyboard-flow transcript for timeline drill-down smoke flow
+    EvidenceTimelineSmoke,
+    /// Emit deterministic scenario-coverage packs contract for Track 3 e2e suites
+    ScenarioCoveragePackContract,
+    /// Emit deterministic scenario-pack smoke report with transcript assertions
+    ScenarioCoveragePackSmoke(DoctorScenarioCoveragePackSmokeArgs),
+    /// Export advanced diagnostics reports to deterministic markdown/json artifacts
+    ReportExport(DoctorReportExportArgs),
     /// Export core diagnostics reports into FrankenSuite evidence/decision artifacts
     FrankenExport(DoctorFrankenExportArgs),
 }
@@ -334,6 +355,63 @@ struct DoctorFrankenExportArgs {
         default_value = "target/e2e-results/doctor_frankensuite_export/artifacts"
     )]
     out_dir: PathBuf,
+}
+
+#[derive(Args, Debug)]
+struct DoctorScenarioCoveragePackSmokeArgs {
+    /// Scenario-pack selection mode (`all`, `cancellation`, `retry`, `degraded_dependency`, `recovery`)
+    #[arg(long = "selection-mode", default_value = "all")]
+    selection_mode: String,
+
+    /// Deterministic root seed used for pack transcript generation
+    #[arg(long = "seed", default_value = "seed-4242")]
+    seed: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum DoctorReportExportFormat {
+    Markdown,
+    Json,
+}
+
+impl DoctorReportExportFormat {
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Markdown => "md",
+            Self::Json => "json",
+        }
+    }
+
+    fn as_cli_value(self) -> &'static str {
+        match self {
+            Self::Markdown => "markdown",
+            Self::Json => "json",
+        }
+    }
+}
+
+#[derive(Args, Debug)]
+struct DoctorReportExportArgs {
+    /// Optional advanced fixture id from `doctor` report bundle
+    #[arg(long = "fixture-id")]
+    fixture_id: Option<String>,
+
+    /// Output directory for markdown/json report artifacts
+    #[arg(
+        long = "out-dir",
+        default_value = "target/e2e-results/doctor_report_export/artifacts"
+    )]
+    out_dir: PathBuf,
+
+    /// Export format(s): markdown and/or json
+    #[arg(
+        long = "format",
+        value_enum,
+        value_delimiter = ',',
+        default_values_t = [DoctorReportExportFormat::Markdown, DoctorReportExportFormat::Json]
+    )]
+    formats: Vec<DoctorReportExportFormat>,
 }
 
 // =========================================================================
@@ -694,6 +772,15 @@ fn run_doctor(args: DoctorArgs, output: &mut Output) -> Result<(), CliError> {
         DoctorCommand::LoggingContract => doctor_logging_contract(output),
         DoctorCommand::RemediationContract => doctor_remediation_contract(output),
         DoctorCommand::ReportContract => doctor_report_contract(output),
+        DoctorCommand::EvidenceTimelineContract => doctor_evidence_timeline_contract(output),
+        DoctorCommand::EvidenceTimelineSmoke => doctor_evidence_timeline_smoke(output),
+        DoctorCommand::ScenarioCoveragePackContract => {
+            doctor_scenario_coverage_pack_contract(output)
+        }
+        DoctorCommand::ScenarioCoveragePackSmoke(smoke_args) => {
+            doctor_scenario_coverage_pack_smoke(&smoke_args, output)
+        }
+        DoctorCommand::ReportExport(export_args) => doctor_report_export(&export_args, output),
         DoctorCommand::FrankenExport(export_args) => doctor_franken_export(&export_args, output),
     }
 }
@@ -795,6 +882,194 @@ fn doctor_report_contract(output: &mut Output) -> Result<(), CliError> {
     Ok(())
 }
 
+fn doctor_evidence_timeline_contract(output: &mut Output) -> Result<(), CliError> {
+    let contract: EvidenceTimelineContract = evidence_timeline_contract();
+    let payload = DoctorEvidenceTimelineContractOutput { contract };
+    output.write(&payload).map_err(|err| {
+        CliError::new("output_error", "Failed to write output").detail(err.to_string())
+    })?;
+    Ok(())
+}
+
+fn doctor_evidence_timeline_smoke(output: &mut Output) -> Result<(), CliError> {
+    let contract: EvidenceTimelineContract = evidence_timeline_contract();
+    let transcript: EvidenceTimelineWorkflowTranscript =
+        run_evidence_timeline_keyboard_flow_smoke(&contract).map_err(|err| {
+            CliError::new(
+                "doctor_timeline_smoke_error",
+                "Failed to build evidence timeline smoke transcript",
+            )
+            .detail(err)
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+    let payload = DoctorEvidenceTimelineSmokeOutput { transcript };
+    output.write(&payload).map_err(|err| {
+        CliError::new("output_error", "Failed to write output").detail(err.to_string())
+    })?;
+    Ok(())
+}
+
+fn doctor_scenario_coverage_pack_contract(output: &mut Output) -> Result<(), CliError> {
+    let contract: DoctorScenarioCoveragePacksContract = doctor_scenario_coverage_packs_contract();
+    let payload = DoctorScenarioCoveragePackContractOutput { contract };
+    output.write(&payload).map_err(|err| {
+        CliError::new("output_error", "Failed to write output").detail(err.to_string())
+    })?;
+    Ok(())
+}
+
+fn doctor_scenario_coverage_pack_smoke(
+    args: &DoctorScenarioCoveragePackSmokeArgs,
+    output: &mut Output,
+) -> Result<(), CliError> {
+    let contract: DoctorScenarioCoveragePacksContract = doctor_scenario_coverage_packs_contract();
+    let report: DoctorScenarioCoveragePackSmokeReport =
+        build_doctor_scenario_coverage_pack_smoke_report(
+            &contract,
+            &args.selection_mode,
+            &args.seed,
+        )
+        .map_err(|err| {
+            CliError::new(
+                "doctor_scenario_coverage_pack_smoke_error",
+                "Failed to build scenario coverage-pack smoke report",
+            )
+            .detail(err)
+            .context("selection_mode", args.selection_mode.clone())
+            .context("seed", args.seed.clone())
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+    let payload = DoctorScenarioCoveragePackSmokeOutput { report };
+    output.write(&payload).map_err(|err| {
+        CliError::new("output_error", "Failed to write output").detail(err.to_string())
+    })?;
+    Ok(())
+}
+
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+struct DoctorReportExportOutput {
+    schema_version: String,
+    core_schema_version: String,
+    extension_schema_version: String,
+    export_root: String,
+    formats: Vec<String>,
+    exports: Vec<DoctorReportExportArtifact>,
+    rerun_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+struct DoctorReportExportArtifact {
+    fixture_id: String,
+    report_id: String,
+    output_files: Vec<String>,
+    finding_count: usize,
+    evidence_count: usize,
+    command_count: usize,
+    remediation_outcome_count: usize,
+    validation_status: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+struct DoctorReportExportDocument {
+    schema_version: String,
+    fixture_id: String,
+    report_id: String,
+    core_contract_version: String,
+    extension_contract_version: String,
+    summary: CoreDiagnosticsSummary,
+    findings: Vec<asupersync::cli::CoreDiagnosticsFinding>,
+    evidence_links: Vec<asupersync::cli::CoreDiagnosticsEvidence>,
+    command_provenance: Vec<asupersync::cli::CoreDiagnosticsCommand>,
+    remediation_outcomes: Vec<AdvancedRemediationDelta>,
+    trust_transitions: Vec<AdvancedTrustTransition>,
+    collaboration_trail: Vec<AdvancedCollaborationEntry>,
+    troubleshooting_playbooks: Vec<AdvancedTroubleshootingPlaybook>,
+    provenance: asupersync::cli::CoreDiagnosticsProvenance,
+}
+
+impl Outputtable for DoctorReportExportOutput {
+    fn human_format(&self) -> String {
+        let mut lines = vec![
+            format!("Schema: {}", self.schema_version),
+            format!("Core schema: {}", self.core_schema_version),
+            format!("Extension schema: {}", self.extension_schema_version),
+            format!("Export root: {}", self.export_root),
+            format!("Formats: {}", self.formats.join(", ")),
+            format!("Artifacts: {}", self.exports.len()),
+        ];
+        for artifact in &self.exports {
+            lines.push(format!(
+                "  - {} [{}] files={} findings={} evidence={} commands={} remediation={} status={}",
+                artifact.fixture_id,
+                artifact.report_id,
+                artifact.output_files.len(),
+                artifact.finding_count,
+                artifact.evidence_count,
+                artifact.command_count,
+                artifact.remediation_outcome_count,
+                artifact.validation_status
+            ));
+            for file in &artifact.output_files {
+                lines.push(format!("    - {file}"));
+            }
+        }
+        lines.push("Rerun commands:".to_string());
+        for command in &self.rerun_commands {
+            lines.push(format!("  {command}"));
+        }
+        lines.join("\n")
+    }
+}
+
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+struct DoctorEvidenceTimelineContractOutput {
+    contract: EvidenceTimelineContract,
+}
+
+impl Outputtable for DoctorEvidenceTimelineContractOutput {
+    fn human_format(&self) -> String {
+        serde_json::to_string_pretty(&self.contract)
+            .unwrap_or_else(|_| "failed to render evidence timeline contract".to_string())
+    }
+}
+
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+struct DoctorEvidenceTimelineSmokeOutput {
+    transcript: EvidenceTimelineWorkflowTranscript,
+}
+
+impl Outputtable for DoctorEvidenceTimelineSmokeOutput {
+    fn human_format(&self) -> String {
+        serde_json::to_string_pretty(&self.transcript)
+            .unwrap_or_else(|_| "failed to render evidence timeline smoke transcript".to_string())
+    }
+}
+
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+struct DoctorScenarioCoveragePackContractOutput {
+    contract: DoctorScenarioCoveragePacksContract,
+}
+
+impl Outputtable for DoctorScenarioCoveragePackContractOutput {
+    fn human_format(&self) -> String {
+        serde_json::to_string_pretty(&self.contract).unwrap_or_else(|_| {
+            "failed to render scenario coverage-pack contract payload".to_string()
+        })
+    }
+}
+
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+struct DoctorScenarioCoveragePackSmokeOutput {
+    report: DoctorScenarioCoveragePackSmokeReport,
+}
+
+impl Outputtable for DoctorScenarioCoveragePackSmokeOutput {
+    fn human_format(&self) -> String {
+        serde_json::to_string_pretty(&self.report)
+            .unwrap_or_else(|_| "failed to render scenario coverage-pack smoke payload".to_string())
+    }
+}
+
 #[derive(Debug, serde::Serialize, PartialEq, Eq)]
 struct DoctorFrankenExportOutput {
     schema_version: String,
@@ -839,6 +1114,438 @@ impl Outputtable for DoctorFrankenExportOutput {
         }
         lines.join("\n")
     }
+}
+
+fn doctor_report_export(
+    args: &DoctorReportExportArgs,
+    output: &mut Output,
+) -> Result<(), CliError> {
+    let formats = normalize_requested_report_export_formats(&args.formats)?;
+    fs::create_dir_all(&args.out_dir).map_err(|err| {
+        CliError::new("doctor_export_error", "Failed to create export directory")
+            .detail(err.to_string())
+            .context("path", args.out_dir.display().to_string())
+            .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+
+    let (bundle, fixtures) = select_advanced_fixtures_for_report_export(args)?;
+    let mut exports = Vec::with_capacity(fixtures.len());
+    for fixture in fixtures {
+        exports.push(export_advanced_report_fixture(
+            &bundle,
+            &fixture,
+            &formats,
+            &args.out_dir,
+        )?);
+    }
+    exports.sort_by(|left, right| left.fixture_id.cmp(&right.fixture_id));
+
+    let format_arg = formats
+        .iter()
+        .map(|format| format.as_cli_value())
+        .collect::<Vec<_>>()
+        .join(",");
+    let fixture_suffix = args
+        .fixture_id
+        .as_ref()
+        .map_or_else(String::new, |fixture_id| {
+            format!(" --fixture-id {fixture_id}")
+        });
+    let rerun_commands = vec![
+        format!(
+            "asupersync doctor report-export --out-dir {} --format {}{}",
+            args.out_dir.display(),
+            format_arg,
+            fixture_suffix
+        ),
+        "asupersync doctor report-contract".to_string(),
+    ];
+    let format_names = formats
+        .iter()
+        .map(|format| format.as_cli_value().to_string())
+        .collect::<Vec<_>>();
+    let payload = DoctorReportExportOutput {
+        schema_version: "doctor-report-export-v1".to_string(),
+        core_schema_version: bundle.core_contract.contract_version.clone(),
+        extension_schema_version: bundle.extension_contract.contract_version.clone(),
+        export_root: args.out_dir.display().to_string(),
+        formats: format_names,
+        exports,
+        rerun_commands,
+    };
+    output.write(&payload).map_err(output_cli_error)
+}
+
+fn normalize_requested_report_export_formats(
+    requested: &[DoctorReportExportFormat],
+) -> Result<Vec<DoctorReportExportFormat>, CliError> {
+    let mut formats = requested.to_vec();
+    formats.sort_by_key(|format| format.as_cli_value());
+    formats.dedup();
+    if formats.is_empty() {
+        return Err(
+            CliError::new("invalid_argument", "At least one --format must be provided")
+                .context("supported_formats", "markdown,json".to_string())
+                .exit_code(ExitCode::USER_ERROR),
+        );
+    }
+    Ok(formats)
+}
+
+fn select_advanced_fixtures_for_report_export(
+    args: &DoctorReportExportArgs,
+) -> Result<
+    (
+        AdvancedDiagnosticsReportBundle,
+        Vec<AdvancedDiagnosticsFixture>,
+    ),
+    CliError,
+> {
+    let bundle = advanced_diagnostics_report_bundle();
+    validate_core_diagnostics_report_contract(&bundle.core_contract).map_err(|reason| {
+        CliError::new(
+            "doctor_export_error",
+            "Core diagnostics report contract validation failed",
+        )
+        .detail(reason)
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
+    validate_advanced_diagnostics_report_extension_contract(&bundle.extension_contract).map_err(
+        |reason| {
+            CliError::new(
+                "doctor_export_error",
+                "Advanced diagnostics extension contract validation failed",
+            )
+            .detail(reason)
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        },
+    )?;
+
+    let mut fixtures = if let Some(fixture_id) = &args.fixture_id {
+        if let Some(fixture) = bundle
+            .fixtures
+            .iter()
+            .find(|entry| entry.fixture_id == *fixture_id)
+        {
+            vec![fixture.clone()]
+        } else {
+            let mut available = bundle
+                .fixtures
+                .iter()
+                .map(|fixture| fixture.fixture_id.as_str())
+                .collect::<Vec<_>>();
+            available.sort_unstable();
+            return Err(
+                CliError::new("invalid_argument", "Unknown --fixture-id value")
+                    .detail(fixture_id.clone())
+                    .context("available_fixtures", available.join(", "))
+                    .exit_code(ExitCode::USER_ERROR),
+            );
+        }
+    } else {
+        bundle.fixtures.clone()
+    };
+    fixtures.sort_by(|left, right| left.fixture_id.cmp(&right.fixture_id));
+    Ok((bundle, fixtures))
+}
+
+fn export_advanced_report_fixture(
+    bundle: &AdvancedDiagnosticsReportBundle,
+    fixture: &AdvancedDiagnosticsFixture,
+    formats: &[DoctorReportExportFormat],
+    out_dir: &Path,
+) -> Result<DoctorReportExportArtifact, CliError> {
+    let document = build_report_export_document(bundle, fixture)?;
+    let export_stem = sanitize_export_stem(fixture.fixture_id.as_str());
+    let mut output_files = Vec::with_capacity(formats.len());
+    for format in formats {
+        let path = out_dir.join(format!(
+            "{export_stem}_report_export.{}",
+            format.extension()
+        ));
+        match format {
+            DoctorReportExportFormat::Json => write_report_export_json(&path, &document)?,
+            DoctorReportExportFormat::Markdown => write_report_export_markdown(&path, &document)?,
+        }
+        output_files.push(path.display().to_string());
+    }
+    output_files.sort();
+    Ok(DoctorReportExportArtifact {
+        fixture_id: document.fixture_id.clone(),
+        report_id: document.report_id.clone(),
+        output_files,
+        finding_count: document.findings.len(),
+        evidence_count: document.evidence_links.len(),
+        command_count: document.command_provenance.len(),
+        remediation_outcome_count: document.remediation_outcomes.len(),
+        validation_status: "valid".to_string(),
+    })
+}
+
+fn build_report_export_document(
+    bundle: &AdvancedDiagnosticsReportBundle,
+    fixture: &AdvancedDiagnosticsFixture,
+) -> Result<DoctorReportExportDocument, CliError> {
+    validate_advanced_diagnostics_report_extension(
+        &fixture.extension,
+        &fixture.core_report,
+        &bundle.extension_contract,
+        &bundle.core_contract,
+    )
+    .map_err(|reason| {
+        CliError::new(
+            "doctor_export_error",
+            "Advanced diagnostics report extension validation failed",
+        )
+        .detail(reason)
+        .context("fixture_id", fixture.fixture_id.clone())
+        .context("report_id", fixture.core_report.report_id.clone())
+        .exit_code(ExitCode::USER_ERROR)
+    })?;
+
+    let mut findings = fixture.core_report.findings.clone();
+    for finding in &mut findings {
+        finding.command_refs.sort();
+        finding.evidence_refs.sort();
+    }
+    findings.sort_by(|left, right| left.finding_id.cmp(&right.finding_id));
+
+    let mut evidence_links = fixture.core_report.evidence.clone();
+    evidence_links.sort_by(|left, right| left.evidence_id.cmp(&right.evidence_id));
+
+    let mut command_provenance = fixture.core_report.commands.clone();
+    command_provenance.sort_by(|left, right| left.command_id.cmp(&right.command_id));
+
+    let mut remediation_outcomes = fixture.extension.remediation_deltas.clone();
+    for remediation in &mut remediation_outcomes {
+        remediation.verification_evidence_refs.sort();
+    }
+    remediation_outcomes.sort_by(|left, right| left.delta_id.cmp(&right.delta_id));
+
+    let mut trust_transitions = fixture.extension.trust_transitions.clone();
+    trust_transitions.sort_by(|left, right| left.transition_id.cmp(&right.transition_id));
+
+    let mut collaboration_trail = fixture.extension.collaboration_trail.clone();
+    collaboration_trail.sort_by(|left, right| left.entry_id.cmp(&right.entry_id));
+
+    let mut troubleshooting_playbooks = fixture.extension.troubleshooting_playbooks.clone();
+    for playbook in &mut troubleshooting_playbooks {
+        playbook.command_refs.sort();
+        playbook.evidence_refs.sort();
+    }
+    troubleshooting_playbooks.sort_by(|left, right| left.playbook_id.cmp(&right.playbook_id));
+
+    Ok(DoctorReportExportDocument {
+        schema_version: "doctor-report-export-v1".to_string(),
+        fixture_id: fixture.fixture_id.clone(),
+        report_id: fixture.core_report.report_id.clone(),
+        core_contract_version: bundle.core_contract.contract_version.clone(),
+        extension_contract_version: bundle.extension_contract.contract_version.clone(),
+        summary: fixture.core_report.summary.clone(),
+        findings,
+        evidence_links,
+        command_provenance,
+        remediation_outcomes,
+        trust_transitions,
+        collaboration_trail,
+        troubleshooting_playbooks,
+        provenance: fixture.core_report.provenance.clone(),
+    })
+}
+
+fn write_report_export_json(
+    path: &Path,
+    document: &DoctorReportExportDocument,
+) -> Result<(), CliError> {
+    let payload = serde_json::to_vec_pretty(document).map_err(|err| {
+        CliError::new(
+            "doctor_export_error",
+            "Failed to serialize report export JSON payload",
+        )
+        .detail(err.to_string())
+        .context("path", path.display().to_string())
+        .exit_code(ExitCode::INTERNAL_ERROR)
+    })?;
+    fs::write(path, payload).map_err(|err| {
+        CliError::new(
+            "doctor_export_error",
+            "Failed to write report export JSON payload",
+        )
+        .detail(err.to_string())
+        .context("path", path.display().to_string())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })
+}
+
+fn write_report_export_markdown(
+    path: &Path,
+    document: &DoctorReportExportDocument,
+) -> Result<(), CliError> {
+    let markdown = render_doctor_report_markdown(document);
+    fs::write(path, markdown).map_err(|err| {
+        CliError::new(
+            "doctor_export_error",
+            "Failed to write report export markdown payload",
+        )
+        .detail(err.to_string())
+        .context("path", path.display().to_string())
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })
+}
+
+fn render_doctor_report_markdown(document: &DoctorReportExportDocument) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Doctor Diagnostics Export: {}", document.fixture_id);
+    let _ = writeln!(out);
+    let _ = writeln!(out, "- Schema: {}", document.schema_version);
+    let _ = writeln!(out, "- Core contract: {}", document.core_contract_version);
+    let _ = writeln!(
+        out,
+        "- Extension contract: {}",
+        document.extension_contract_version
+    );
+    let _ = writeln!(out, "- Report ID: {}", document.report_id);
+    let _ = writeln!(out, "- Run ID: {}", document.provenance.run_id);
+    let _ = writeln!(out, "- Scenario ID: {}", document.provenance.scenario_id);
+    let _ = writeln!(out, "- Trace ID: {}", document.provenance.trace_id);
+    let _ = writeln!(out, "- Seed: {}", document.provenance.seed);
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Summary");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "- Status: {}", document.summary.status);
+    let _ = writeln!(out, "- Outcome: {}", document.summary.overall_outcome);
+    let _ = writeln!(out, "- Total findings: {}", document.summary.total_findings);
+    let _ = writeln!(
+        out,
+        "- Critical findings: {}",
+        document.summary.critical_findings
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Findings");
+    let _ = writeln!(out);
+    for finding in &document.findings {
+        let _ = writeln!(
+            out,
+            "- `{}` {} (severity={}, status={})",
+            finding.finding_id, finding.title, finding.severity, finding.status
+        );
+        let _ = writeln!(
+            out,
+            "  - evidence_refs: {}",
+            finding.evidence_refs.join(", ")
+        );
+        let _ = writeln!(out, "  - command_refs: {}", finding.command_refs.join(", "));
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Evidence Links");
+    let _ = writeln!(out);
+    for evidence in &document.evidence_links {
+        let _ = writeln!(
+            out,
+            "- `{}` source={} outcome={} artifact={} replay={}",
+            evidence.evidence_id,
+            evidence.source,
+            evidence.outcome_class,
+            evidence.artifact_pointer,
+            evidence.replay_pointer
+        );
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Command Provenance");
+    let _ = writeln!(out);
+    for command in &document.command_provenance {
+        let _ = writeln!(
+            out,
+            "- `{}` [{}] exit={} outcome={} command=`{}`",
+            command.command_id,
+            command.tool,
+            command.exit_code,
+            command.outcome_class,
+            command.command
+        );
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Remediation Outcomes");
+    let _ = writeln!(out);
+    for delta in &document.remediation_outcomes {
+        let _ = writeln!(
+            out,
+            "- `{}` finding={} {} -> {} outcome={} class={} dimension={}",
+            delta.delta_id,
+            delta.finding_id,
+            delta.previous_status,
+            delta.next_status,
+            delta.delta_outcome,
+            delta.mapped_taxonomy_class,
+            delta.mapped_taxonomy_dimension
+        );
+        let _ = writeln!(
+            out,
+            "  - verification_evidence_refs: {}",
+            delta.verification_evidence_refs.join(", ")
+        );
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Trust Transitions");
+    let _ = writeln!(out);
+    for transition in &document.trust_transitions {
+        let _ = writeln!(
+            out,
+            "- `{}` stage={} {} -> {} outcome={} severity={} rationale={}",
+            transition.transition_id,
+            transition.stage,
+            transition.previous_score,
+            transition.next_score,
+            transition.outcome_class,
+            transition.mapped_taxonomy_severity,
+            transition.rationale
+        );
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Collaboration Trail");
+    let _ = writeln!(out);
+    for entry in &document.collaboration_trail {
+        let _ = writeln!(
+            out,
+            "- `{}` channel={} actor={} action={} thread={} message={} bead={}",
+            entry.entry_id,
+            entry.channel,
+            entry.actor,
+            entry.action,
+            entry.thread_id,
+            entry.message_ref,
+            entry.bead_ref
+        );
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "## Troubleshooting Playbooks");
+    let _ = writeln!(out);
+    for playbook in &document.troubleshooting_playbooks {
+        let _ = writeln!(
+            out,
+            "- `{}` {} (class={}, severity={})",
+            playbook.playbook_id,
+            playbook.title,
+            playbook.trigger_taxonomy_class,
+            playbook.trigger_taxonomy_severity
+        );
+        let _ = writeln!(
+            out,
+            "  - ordered_steps: {}",
+            playbook.ordered_steps.join(" -> ")
+        );
+        let _ = writeln!(
+            out,
+            "  - command_refs: {}",
+            playbook.command_refs.join(", ")
+        );
+        let _ = writeln!(
+            out,
+            "  - evidence_refs: {}",
+            playbook.evidence_refs.join(", ")
+        );
+    }
+    out
 }
 
 fn doctor_franken_export(
@@ -2808,6 +3515,195 @@ mod tests {
         let saved = fs::read_to_string(&output_path).expect("read replay artifact");
         assert!(saved.contains("\"scenario_id\": \"smoke-happy-path\""));
         assert!(saved.contains("\"rerun_commands\""));
+    }
+
+    #[test]
+    fn doctor_evidence_timeline_contract_command_parses() {
+        let cli = Cli::try_parse_from(["asupersync", "doctor", "evidence-timeline-contract"])
+            .expect("parse doctor evidence-timeline-contract");
+
+        let Command::Doctor(DoctorArgs {
+            command: DoctorCommand::EvidenceTimelineContract,
+        }) = cli.command
+        else {
+            panic!("expected doctor evidence-timeline-contract command");
+        };
+    }
+
+    #[test]
+    fn doctor_evidence_timeline_smoke_command_parses() {
+        let cli = Cli::try_parse_from(["asupersync", "doctor", "evidence-timeline-smoke"])
+            .expect("parse doctor evidence-timeline-smoke");
+
+        let Command::Doctor(DoctorArgs {
+            command: DoctorCommand::EvidenceTimelineSmoke,
+        }) = cli.command
+        else {
+            panic!("expected doctor evidence-timeline-smoke command");
+        };
+    }
+
+    #[test]
+    fn doctor_scenario_coverage_pack_contract_command_parses() {
+        let cli = Cli::try_parse_from(["asupersync", "doctor", "scenario-coverage-pack-contract"])
+            .expect("parse doctor scenario-coverage-pack-contract");
+
+        let Command::Doctor(DoctorArgs {
+            command: DoctorCommand::ScenarioCoveragePackContract,
+        }) = cli.command
+        else {
+            panic!("expected doctor scenario-coverage-pack-contract command");
+        };
+    }
+
+    #[test]
+    fn doctor_scenario_coverage_pack_smoke_command_parses() {
+        let cli = Cli::try_parse_from([
+            "asupersync",
+            "doctor",
+            "scenario-coverage-pack-smoke",
+            "--selection-mode",
+            "retry",
+            "--seed",
+            "seed-007",
+        ])
+        .expect("parse doctor scenario-coverage-pack-smoke");
+
+        let Command::Doctor(DoctorArgs {
+            command: DoctorCommand::ScenarioCoveragePackSmoke(args),
+        }) = cli.command
+        else {
+            panic!("expected doctor scenario-coverage-pack-smoke command");
+        };
+        assert_eq!(args.selection_mode, "retry");
+        assert_eq!(args.seed, "seed-007");
+    }
+
+    #[test]
+    fn doctor_report_export_args_parse_flags() {
+        let cli = Cli::try_parse_from([
+            "asupersync",
+            "doctor",
+            "report-export",
+            "--fixture-id",
+            "advanced_failure_path",
+            "--out-dir",
+            "target/e2e-results/doctor_report_export",
+            "--format",
+            "json,markdown",
+        ])
+        .expect("parse doctor report-export args");
+
+        let Command::Doctor(DoctorArgs {
+            command: DoctorCommand::ReportExport(args),
+        }) = cli.command
+        else {
+            panic!("expected doctor report-export command");
+        };
+
+        assert_eq!(args.fixture_id.as_deref(), Some("advanced_failure_path"));
+        assert_eq!(
+            args.out_dir,
+            PathBuf::from("target/e2e-results/doctor_report_export")
+        );
+        assert_eq!(
+            args.formats,
+            vec![
+                DoctorReportExportFormat::Json,
+                DoctorReportExportFormat::Markdown
+            ]
+        );
+    }
+
+    #[test]
+    fn select_advanced_fixtures_for_report_export_rejects_unknown_fixture() {
+        let args = DoctorReportExportArgs {
+            fixture_id: Some("missing-fixture".to_string()),
+            out_dir: PathBuf::from("target/e2e-results/doctor_report_export"),
+            formats: vec![DoctorReportExportFormat::Json],
+        };
+        let err = select_advanced_fixtures_for_report_export(&args)
+            .expect_err("missing fixture should fail");
+        assert_eq!(err.error_type, "invalid_argument");
+        assert!(err.title.contains("Unknown --fixture-id value"));
+    }
+
+    #[test]
+    fn export_advanced_report_fixture_is_deterministic() {
+        let bundle = advanced_diagnostics_report_bundle();
+        let fixture = bundle
+            .fixtures
+            .iter()
+            .find(|entry| entry.fixture_id == "advanced_failure_path")
+            .expect("fixture exists")
+            .clone();
+        let formats = vec![
+            DoctorReportExportFormat::Markdown,
+            DoctorReportExportFormat::Json,
+        ];
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let first = export_advanced_report_fixture(&bundle, &fixture, &formats, temp.path())
+            .expect("first export");
+        let second = export_advanced_report_fixture(&bundle, &fixture, &formats, temp.path())
+            .expect("second export");
+
+        assert_eq!(first.output_files, second.output_files);
+        assert_eq!(
+            first.remediation_outcome_count,
+            second.remediation_outcome_count
+        );
+        assert_eq!(first.validation_status, "valid");
+        assert_eq!(second.validation_status, "valid");
+        assert_eq!(first.output_files.len(), 2);
+
+        let first_json = first
+            .output_files
+            .iter()
+            .find(|path| path.ends_with(".json"))
+            .expect("json path");
+        let first_md = first
+            .output_files
+            .iter()
+            .find(|path| path.ends_with(".md"))
+            .expect("markdown path");
+        let second_json = second
+            .output_files
+            .iter()
+            .find(|path| path.ends_with(".json"))
+            .expect("json path");
+        let second_md = second
+            .output_files
+            .iter()
+            .find(|path| path.ends_with(".md"))
+            .expect("markdown path");
+
+        let first_json_payload = fs::read_to_string(first_json).expect("read first json");
+        let second_json_payload = fs::read_to_string(second_json).expect("read second json");
+        assert_eq!(first_json_payload, second_json_payload);
+
+        let first_md_payload = fs::read_to_string(first_md).expect("read first markdown");
+        let second_md_payload = fs::read_to_string(second_md).expect("read second markdown");
+        assert_eq!(first_md_payload, second_md_payload);
+    }
+
+    #[test]
+    fn render_doctor_report_markdown_includes_required_sections() {
+        let bundle = advanced_diagnostics_report_bundle();
+        let fixture = bundle
+            .fixtures
+            .iter()
+            .find(|entry| entry.fixture_id == "advanced_failure_path")
+            .expect("fixture exists");
+        let document = build_report_export_document(&bundle, fixture).expect("document");
+        let markdown = render_doctor_report_markdown(&document);
+
+        assert!(markdown.contains("## Evidence Links"));
+        assert!(markdown.contains("## Command Provenance"));
+        assert!(markdown.contains("## Remediation Outcomes"));
+        assert!(markdown.contains("## Trust Transitions"));
+        assert!(markdown.contains("## Collaboration Trail"));
+        assert!(markdown.contains("## Troubleshooting Playbooks"));
     }
 
     #[test]
