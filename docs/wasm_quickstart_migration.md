@@ -148,6 +148,9 @@ python3 scripts/run_browser_onboarding_checks.py --scenario react
 python3 scripts/run_browser_onboarding_checks.py --scenario next
 ```
 
+Canonical framework examples and deterministic replay pointers:
+`docs/wasm_canonical_examples.md`.
+
 ### Flow A: Baseline Browser Smoke (Vanilla)
 
 Goal: verify scheduler, cancellation/quiescence, and capability boundaries.
@@ -200,6 +203,9 @@ Expected outcomes:
 
 Goal: verify profile closure and dependency policy before wiring App Router
 boundaries.
+
+Reference template and deployment guidance:
+`docs/wasm_nextjs_template_cookbook.md`.
 
 ```bash
 python3 scripts/check_wasm_dependency_policy.py \

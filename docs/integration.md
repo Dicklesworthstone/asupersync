@@ -273,6 +273,8 @@ Browser Edition doc map (current canonical locations):
    - `docs/security_threat_model.md`
 5. This integration guide:
    - `docs/integration.md` (entrypoint index + integration orientation)
+6. Canonical framework examples:
+   - `docs/wasm_canonical_examples.md`
 
 Doc-drift verification hooks (required for Browser Edition doc changes):
 
@@ -306,6 +308,7 @@ Examples live in `examples/` and cover:
 - Cancellation injection: `examples/cancellation_injection.rs`
 - Chaos testing: `examples/chaos_testing.rs`
 - Metrics dashboards: `examples/prometheus_metrics.rs`, `examples/grafana_dashboard.json`
+- Browser canonical examples + replay commands: `docs/wasm_canonical_examples.md`
 
 ### Module dependency sketch (high level)
 
