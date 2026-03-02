@@ -1,20 +1,18 @@
 {
     "status": "pass",
     "exit_code": 0,
-    "distinct_states": "23998",
-    "violations": 0,
+    "distinct_states": "13686",
+    "violations": 0
+0,
     "spec": "formal/tla/Asupersync.tla",
     "config": "formal/tla/Asupersync_MC.cfg",
-    "log": "tlc_20260302_123022.log",
+    "log": "tlc_20260302_131347.log",
     "bead": "bd-11g3i",
     "invariants_checked": [
         "TypeInvariant",
         "WellFormedInvariant",
         "NoOrphanTasks",
         "NoLeakedObligations",
-        "CloseImpliesQuiescent",
-        "MaskBoundedInvariant",
-        "MaskMonotoneInvariant",
-        "CancelIdempotenceStructural"
+        "CloseImpliesQuiescent"
     ]
 }
