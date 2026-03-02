@@ -100,8 +100,7 @@ fn cadence_tiers_have_checklists() {
     let checkbox_count = cadence.matches("- [ ]").count();
     assert!(
         checkbox_count >= 10,
-        "Must have at least 10 audit checklist items, found {}",
-        checkbox_count
+        "Must have at least 10 audit checklist items, found {checkbox_count}",
     );
 }
 
