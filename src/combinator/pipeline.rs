@@ -930,7 +930,7 @@ mod tests {
             assert_eq!(value, 2);
             assert_eq!(stages_completed, 2);
         } else {
-            panic!("Expected Completed");
+            unreachable!("Expected Completed");
         }
     }
 
@@ -943,7 +943,7 @@ mod tests {
             assert_eq!(error, "stage1 error");
             assert!(failed_at.is_first());
         } else {
-            panic!("Expected Failed");
+            unreachable!("Expected Failed");
         }
     }
 
@@ -957,7 +957,7 @@ mod tests {
             assert!(failed_at.is_last());
             assert_eq!(failed_at.index, 1);
         } else {
-            panic!("Expected Failed");
+            unreachable!("Expected Failed");
         }
     }
 
@@ -1006,7 +1006,7 @@ mod tests {
             assert_eq!(value, 3);
             assert_eq!(stages_completed, 3);
         } else {
-            panic!("Expected Completed");
+            unreachable!("Expected Completed");
         }
     }
 
@@ -1209,7 +1209,7 @@ mod tests {
             assert_eq!(value, 3);
             assert_eq!(stages_completed, 3);
         } else {
-            panic!("Expected Completed");
+            unreachable!("Expected Completed");
         }
     }
 
@@ -1224,7 +1224,7 @@ mod tests {
             assert_eq!(failed_at.index, 0);
             assert_eq!(failed_at.total_stages, 3);
         } else {
-            panic!("Expected Failed");
+            unreachable!("Expected Failed");
         }
     }
 
@@ -1259,7 +1259,7 @@ mod tests {
             assert_eq!(value, 20);
             assert_eq!(stages_completed, 2); // Only 2 of 5 stages provided
         } else {
-            panic!("Expected Completed");
+            unreachable!("Expected Completed");
         }
     }
 
@@ -1277,7 +1277,7 @@ mod tests {
             assert_eq!(value, 42);
             assert_eq!(stages_completed, 1);
         } else {
-            panic!("Expected Completed");
+            unreachable!("Expected Completed");
         }
     }
 
@@ -1292,7 +1292,7 @@ mod tests {
             assert!(failed_at.is_first());
             assert!(failed_at.is_last());
         } else {
-            panic!("Expected Failed");
+            unreachable!("Expected Failed");
         }
     }
 
@@ -1394,7 +1394,7 @@ mod tests {
         if let PipelineResult::Completed { value, .. } = result {
             assert_eq!(value, 99);
         } else {
-            panic!("Expected Completed");
+            unreachable!("Expected Completed");
         }
     }
 

@@ -203,7 +203,7 @@ where
                 }
 
                 BracketPhase::Done => {
-                    panic!("Bracket polled after completion");
+                    unreachable!("Bracket polled after completion");
                 }
             }
         }
@@ -467,7 +467,7 @@ mod tests {
         let mut boxed = Box::pin(fut);
         match boxed.as_mut().poll(&mut cx) {
             Poll::Ready(output) => output,
-            Poll::Pending => panic!("Expected future to be ready"),
+            Poll::Pending => unreachable!("Expected future to be ready"),
         }
     }
 

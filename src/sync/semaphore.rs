@@ -412,7 +412,7 @@ impl OwnedSemaphorePermit {
         let permit = semaphore.try_acquire(count)?;
         // Transfer ownership: forget the borrow-based permit so it doesn't
         // release on drop; the OwnedSemaphorePermit will release in its own Drop.
-        let _ = std::mem::ManuallyDrop::new(permit);
+        permit.forget();
         Ok(Self { semaphore, count })
     }
 
@@ -431,7 +431,7 @@ impl OwnedSemaphorePermit {
         let permit = semaphore.try_acquire(count)?;
         // Transfer ownership: forget the borrow-based permit so it doesn't
         // release on drop; the OwnedSemaphorePermit will release in its own Drop.
-        let _ = std::mem::ManuallyDrop::new(permit);
+        permit.forget();
         Ok(Self {
             semaphore: semaphore.clone(),
             count,
