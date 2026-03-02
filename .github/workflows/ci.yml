@@ -1269,6 +1269,40 @@ jobs:
           latest_dir="$(ls -1dt target/e2e-results/orchestrator_* | head -n1)"
           mkdir -p phase6-artifacts/e2e-scenario-matrix
           cp "$latest_dir/scenario_matrix_validation.json" phase6-artifacts/e2e-scenario-matrix/scenario_matrix_validation.json
+          cp "$latest_dir/artifact_lifecycle_policy.json" phase6-artifacts/e2e-scenario-matrix/artifact_lifecycle_policy.json
+
+          lifecycle_file="phase6-artifacts/e2e-scenario-matrix/artifact_lifecycle_policy.json"
+          privacy_policy_file=".github/security_release_policy.json"
+          ci_allowed_modes="$(jq -c '.trace_telemetry_privacy.opt_in_levels.ci_allowed_modes' "$privacy_policy_file")"
+          required_redacted_fields="$(jq -c '.trace_telemetry_privacy.sensitive_field_policy.required_redacted_fields' "$privacy_policy_file")"
+          allowed_path_fragments="$(jq -c '.trace_telemetry_privacy.storage_scope.allowed_path_fragments' "$privacy_policy_file")"
+          ci_retention_max="$(jq -r '.trace_telemetry_privacy.retention_days.ci_max' "$privacy_policy_file")"
+          replay_required="$(jq -r '.trace_telemetry_privacy.retrieval_contract.replay_command_required' "$privacy_policy_file")"
+
+          if [[ ! "$ci_retention_max" =~ ^[0-9]+$ ]]; then
+            echo "::error::trace_telemetry_privacy.retention_days.ci_max must be numeric"
+            exit 1
+          fi
+
+          jq -e \
+            --argjson ci_allowed_modes "$ci_allowed_modes" \
+            --argjson required_redacted_fields "$required_redacted_fields" \
+            --argjson allowed_path_fragments "$allowed_path_fragments" \
+            --argjson ci_retention_max "$ci_retention_max" \
+            --argjson replay_required "$replay_required" \
+            '
+            . as $doc
+            | ($doc.schema_version == "e2e-artifact-lifecycle-policy-v1")
+            and ($doc.environment_class == "ci")
+            and ($doc.retention_days | type == "number" and . >= 1 and . <= $ci_retention_max)
+            and ($doc.redaction_policy.mode as $mode | any($ci_allowed_modes[]; . == $mode))
+            and (all($required_redacted_fields[]; ($doc.redaction_policy.redacted_fields | index(.) != null)))
+            and (all($doc.storage_roots[]; . as $root | any($allowed_path_fragments[]; $root | contains(.))))
+            and ($doc.retrieval_contract.replay_command_required == $replay_required)
+            and ($doc.suites | type == "array" and length > 0)
+            and (all($doc.suites[]; .artifact_route_configured == true and .replay_route_configured == true))
+            ' "$lifecycle_file" >/dev/null
+          echo "Trace telemetry privacy policy gate passed for $lifecycle_file"
 
       - name: PLAN – Certified rewrite pipeline E2E
         run: cargo test --test golden_outputs --all-features -- --nocapture

@@ -149,6 +149,55 @@
       "expected_result": "Redacted label in telemetry"
     }
   ],
+  "trace_telemetry_privacy": {
+    "schema_version": "trace-telemetry-privacy-v1",
+    "default_redaction_mode": "metadata_only",
+    "retention_days": {
+      "local_default": 14,
+      "local_max": 14,
+      "ci_default": 30,
+      "ci_max": 30
+    },
+    "opt_in_levels": {
+      "local_allowed_modes": [
+        "metadata_only",
+        "strict",
+        "none"
+      ],
+      "ci_allowed_modes": [
+        "metadata_only",
+        "strict"
+      ],
+      "ci_forbidden_modes": [
+        "none"
+      ]
+    },
+    "sensitive_field_policy": {
+      "required_redacted_fields": [
+        "suite_log"
+      ],
+      "denylist_patterns": [
+        "(?i)authorization",
+        "(?i)cookie",
+        "(?i)secret",
+        "(?i)token",
+        "(?i)password",
+        "(?i)apikey"
+      ]
+    },
+    "storage_scope": {
+      "allowed_path_fragments": [
+        "/target/e2e-results/",
+        "/target/phase6-e2e",
+        "/target/test-results/",
+        "/test_logs"
+      ]
+    },
+    "retrieval_contract": {
+      "replay_command_required": true,
+      "command_template": "bash ./scripts/run_all_e2e.sh --suite <suite>"
+    }
+  },
   "escalation_process": {
     "critical_findings": {
       "action": "block_release",

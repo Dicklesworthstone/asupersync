@@ -175,6 +175,40 @@ $ASUPERSYNC_TEST_ARTIFACTS_DIR/
 - The seed is stored in `repro_manifest.json` (future work may add a seed-hash
   subdirectory when bd-30pc lands).
 
+### Artifact Lifecycle (Local + CI)
+
+Artifact storage, retention, redaction, and retrieval are explicit:
+
+- Storage:
+  - Failure bundles: `$ASUPERSYNC_TEST_ARTIFACTS_DIR/{test_id}/...`
+  - E2E suite artifacts: `target/e2e-results/<suite>/`
+  - Orchestrator reports: `target/e2e-results/orchestrator_<timestamp>/`
+- Retention defaults:
+  - local runs: `ARTIFACT_RETENTION_DAYS_LOCAL=14`
+  - CI runs: `ARTIFACT_RETENTION_DAYS_CI=30`
+- Redaction policy:
+  - `ARTIFACT_REDACTION_MODE=metadata_only` by default
+  - accepted values: `metadata_only`, `none`, `strict`
+  - CI-allowed values: `metadata_only`, `strict` (`none` is local-only)
+  - required redacted fields include: `suite_log`
+- Privacy contract source:
+  - `.github/security_release_policy.json` (`trace_telemetry_privacy`)
+  - schema: `trace-telemetry-privacy-v1`
+- Retrieval:
+  - rerun one suite: `bash ./scripts/run_all_e2e.sh --suite <suite>`
+  - verify matrix + lifecycle contract: `bash ./scripts/run_all_e2e.sh --verify-matrix`
+
+The orchestrator emits a deterministic lifecycle descriptor:
+`target/e2e-results/orchestrator_<timestamp>/artifact_lifecycle_policy.json`
+containing retention settings, redaction mode, suite artifact roots, and replay commands.
+
+In CI, the D4 matrix gate enforces the privacy policy contract:
+- retention must be numeric and <= CI cap
+- redaction mode must be in the CI-allowed set
+- required redacted fields must be present
+- storage roots must match approved artifact path fragments
+- suites must keep replay/artifact routing enabled
+
 **`repro_manifest.json` schema (minimum, current):**
 ```json
 {

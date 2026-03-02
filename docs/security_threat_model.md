@@ -108,6 +108,42 @@ cargo test --test security_invariants browser_fetch_security -- --nocapture
 | Replay artifact over-collection | Traces can capture sensitive operational context if emitted too broadly | Redaction guidance + scoped diagnostics + no secret stdout/stderr | Automated artifact redaction validation gate in CI |
 | Host bridge misuse by integrators | Browser embedding layer can accidentally widen authority in app code | Explicit `FetchAuthority` contract with default-deny grants (origin/method/credentials) | Contract tests for all host adapters plus policy check in release gate |
 
+## Trace/Telemetry Privacy Model (`asupersync-umelq.14.4`)
+
+Normative policy source: `.github/security_release_policy.json` section
+`trace_telemetry_privacy` (`trace-telemetry-privacy-v1`).
+
+Data minimization classes:
+- `secret`: credentials/tokens/password-like material; never persisted in replay/telemetry artifacts.
+- `sensitive`: potentially identifying payload/log details; allowed only in redacted form.
+- `metadata`: routing + reproducibility metadata (`suite`, `scenario_id`, `seed`, replay command) retained for forensics.
+
+Redaction modes and opt-in levels:
+- `metadata_only` (default): keeps deterministic reproduction metadata, strips sensitive payload fields.
+- `strict`: stronger minimization with the same replay contract guarantees.
+- `none`: local-only opt-in for debugging; forbidden in CI.
+
+Retention and storage scope:
+- Local default/max: 14 days.
+- CI default/max: 30 days.
+- Approved artifact path fragments:
+  - `/target/e2e-results/`
+  - `/target/phase6-e2e`
+  - `/target/test-results/`
+  - `/test_logs`
+
+Release-blocking privacy assertions:
+- `artifact_lifecycle_policy.json` must declare CI-safe redaction mode (`metadata_only` or `strict`).
+- Required redacted fields must include `suite_log`.
+- Retention days must be numeric and within CI cap.
+- Every suite must keep replay and artifact routing enabled.
+
+CI enforcement:
+- `.github/workflows/ci.yml` D4 gate validates lifecycle artifacts against
+  `.github/security_release_policy.json.trace_telemetry_privacy`.
+- Security release gate (`scripts/check_security_release_gate.py`) and CI report artifacts
+  provide audit evidence for incident review.
+
 ## Threats and Mitigations by Component
 
 ### Runtime Core

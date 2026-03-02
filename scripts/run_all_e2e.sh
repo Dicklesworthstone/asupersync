@@ -26,6 +26,7 @@ REPORT_DIR="${PROJECT_ROOT}/target/e2e-results/orchestrator_${TIMESTAMP}"
 MANIFEST_NDJSON="${REPORT_DIR}/artifact_manifest.ndjson"
 MANIFEST_JSON="${REPORT_DIR}/artifact_manifest.json"
 REPLAY_VERIFICATION_FILE="${REPORT_DIR}/replay_verification.json"
+ARTIFACT_LIFECYCLE_FILE="${REPORT_DIR}/artifact_lifecycle_policy.json"
 REPORT_FILE="${REPORT_DIR}/report.json"
 
 export TEST_LOG_LEVEL="${TEST_LOG_LEVEL:-info}"
@@ -33,6 +34,9 @@ export RUST_LOG="${RUST_LOG:-asupersync=info}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 export TEST_SEED="${TEST_SEED:-0xDEADBEEF}"
 E2E_TIMEOUT="${E2E_TIMEOUT:-300}"
+ARTIFACT_RETENTION_DAYS_LOCAL="${ARTIFACT_RETENTION_DAYS_LOCAL:-14}"
+ARTIFACT_RETENTION_DAYS_CI="${ARTIFACT_RETENTION_DAYS_CI:-30}"
+ARTIFACT_REDACTION_MODE="${ARTIFACT_REDACTION_MODE:-metadata_only}"
 
 # Helpers
 json_escape() {
@@ -145,6 +149,135 @@ validate_suite_summary_contract() {
     ' "$summary_file" >/dev/null 2>&1
 }
 
+artifact_environment_class() {
+    if [[ -n "${CI:-}" ]]; then
+        printf 'ci'
+    else
+        printf 'local'
+    fi
+}
+
+artifact_retention_days() {
+    local env_class="$1"
+    if [[ "$env_class" == "ci" ]]; then
+        printf '%s' "$ARTIFACT_RETENTION_DAYS_CI"
+    else
+        printf '%s' "$ARTIFACT_RETENTION_DAYS_LOCAL"
+    fi
+}
+
+validate_artifact_lifecycle_inputs() {
+    if [[ ! "$ARTIFACT_RETENTION_DAYS_LOCAL" =~ ^[0-9]+$ ]]; then
+        echo "ARTIFACT_RETENTION_DAYS_LOCAL must be numeric" >&2
+        return 1
+    fi
+    if [[ ! "$ARTIFACT_RETENTION_DAYS_CI" =~ ^[0-9]+$ ]]; then
+        echo "ARTIFACT_RETENTION_DAYS_CI must be numeric" >&2
+        return 1
+    fi
+    case "$ARTIFACT_REDACTION_MODE" in
+        metadata_only|none|strict)
+            ;;
+        *)
+            echo "ARTIFACT_REDACTION_MODE must be one of: metadata_only, none, strict" >&2
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+emit_artifact_lifecycle_policy_from_matrix() {
+    local matrix_file="$1"
+    local lifecycle_file="$2"
+    local env_class="$3"
+    local retention_days="$4"
+    jq \
+        --arg schema_version "e2e-artifact-lifecycle-policy-v1" \
+        --arg generated_ts "$TIMESTAMP" \
+        --arg env_class "$env_class" \
+        --argjson retention_days "$retention_days" \
+        --arg redaction_mode "$ARTIFACT_REDACTION_MODE" \
+        '
+        {
+          schema_version: $schema_version,
+          generated_ts: $generated_ts,
+          source: "run_all_e2e.sh --verify-matrix",
+          environment_class: $env_class,
+          retention_days: $retention_days,
+          redaction_policy: {
+            mode: $redaction_mode,
+            redacted_fields: ["suite_log"],
+            notes: "metadata-only artifact policy; replay command and artifact roots are preserved"
+          },
+          storage_roots: ([.suite_rows[].artifact_root] | map(select(length > 0)) | unique | sort),
+          retrieval_contract: {
+            replay_command_required: true,
+            command_template: "bash ./scripts/run_all_e2e.sh --suite <suite>"
+          },
+          suites: (
+            .suite_rows
+            | map({
+                suite,
+                scenario_id,
+                artifact_root,
+                summary_glob,
+                artifact_dir_glob,
+                artifact_route_configured,
+                replay_command,
+                replay_route_configured
+              })
+            | sort_by(.suite)
+          )
+        }
+        ' "$matrix_file" > "$lifecycle_file"
+}
+
+emit_artifact_lifecycle_policy_from_manifest() {
+    local manifest_file="$1"
+    local lifecycle_file="$2"
+    local env_class="$3"
+    local retention_days="$4"
+    jq \
+        --arg schema_version "e2e-artifact-lifecycle-policy-v1" \
+        --arg generated_ts "$TIMESTAMP" \
+        --arg env_class "$env_class" \
+        --argjson retention_days "$retention_days" \
+        --arg redaction_mode "$ARTIFACT_REDACTION_MODE" \
+        '
+        {
+          schema_version: $schema_version,
+          generated_ts: $generated_ts,
+          source: "run_all_e2e.sh",
+          environment_class: $env_class,
+          retention_days: $retention_days,
+          redaction_policy: {
+            mode: $redaction_mode,
+            redacted_fields: ["suite_log"],
+            notes: "suite logs remain on filesystem; lifecycle report only exports metadata pointers"
+          },
+          storage_roots: ([.[].artifact_root] | map(select(length > 0)) | unique | sort),
+          retrieval_contract: {
+            replay_command_required: true,
+            command_template: "bash ./scripts/run_all_e2e.sh --suite <suite>"
+          },
+          suites: (
+            map({
+              suite,
+              scenario_id,
+              result,
+              artifact_root,
+              artifact_dir,
+              summary_file,
+              replay_command,
+              replay_verified,
+              artifact_complete
+            })
+            | sort_by(.suite)
+          )
+        }
+        ' "$manifest_file" > "$lifecycle_file"
+}
+
 # Suite definitions: name -> script path
 declare -A SUITES=(
     [websocket]="test_websocket_e2e.sh"
@@ -162,6 +295,7 @@ declare -A SUITES=(
     [doctor-workspace-scan]="test_doctor_workspace_scan_e2e.sh"
     [doctor-replay-launcher]="test_doctor_replay_launcher_e2e.sh"
     [doctor-orchestration-state-machine]="test_doctor_orchestration_state_machine_e2e.sh"
+    [doctor-scenario-coverage-packs]="test_doctor_scenario_coverage_packs_e2e.sh"
     [doctor-frankensuite-export]="test_doctor_frankensuite_export_e2e.sh"
     [phase6]="run_phase6_e2e.sh"
 )
@@ -183,6 +317,7 @@ declare -A SUITE_ARTIFACT_ROOTS=(
     [doctor-workspace-scan]="target/e2e-results/doctor_workspace_scan"
     [doctor-replay-launcher]="target/e2e-results/doctor_replay_launcher"
     [doctor-orchestration-state-machine]="target/e2e-results/doctor_orchestration_state_machine"
+    [doctor-scenario-coverage-packs]="target/e2e-results/doctor_scenario_coverage_packs"
     [doctor-frankensuite-export]="target/e2e-results/doctor_frankensuite_export"
     [phase6]="target/phase6-e2e"
 )
@@ -204,6 +339,7 @@ declare -A SUITE_SUMMARY_GLOBS=(
     [doctor-workspace-scan]="summary.json"
     [doctor-replay-launcher]="summary.json"
     [doctor-orchestration-state-machine]="summary.json"
+    [doctor-scenario-coverage-packs]="summary.json"
     [doctor-frankensuite-export]="summary.json"
     [phase6]="summary_*.json"
 )
@@ -225,6 +361,7 @@ declare -A SUITE_ARTIFACT_DIR_GLOBS=(
     [doctor-workspace-scan]="artifacts_*"
     [doctor-replay-launcher]="artifacts_*"
     [doctor-orchestration-state-machine]="artifacts_*"
+    [doctor-scenario-coverage-packs]="artifacts_*"
     [doctor-frankensuite-export]="artifacts_*"
     [phase6]=""
 )
@@ -246,6 +383,7 @@ declare -A SUITE_CANONICAL_SCENARIO_ID=(
     [doctor-workspace-scan]="E2E-SUITE-DOCTOR-WORKSPACE-SCAN"
     [doctor-replay-launcher]="E2E-SUITE-DOCTOR-REPLAY-LAUNCHER"
     [doctor-orchestration-state-machine]="E2E-SUITE-DOCTOR-ORCHESTRATION-STATE-MACHINE"
+    [doctor-scenario-coverage-packs]="E2E-SUITE-DOCTOR-SCENARIO-COVERAGE-PACKS"
     [doctor-frankensuite-export]="E2E-SUITE-DOCTOR-FRANKENSUITE-EXPORT"
     [phase6]="E2E-SUITE-PHASE6"
 )
@@ -267,13 +405,17 @@ SUITE_ORDER=(
     websocket http messaging transport database distributed
     h2-security net-hardening redis
     combinators cancel-attribution scheduler doctor-workspace-scan
-    doctor-replay-launcher doctor-orchestration-state-machine doctor-frankensuite-export
+    doctor-replay-launcher doctor-orchestration-state-machine doctor-scenario-coverage-packs
+    doctor-frankensuite-export
     phase6
 )
 
 verify_matrix_gate() {
     local matrix_report_dir="${PROJECT_ROOT}/target/e2e-results/orchestrator_${TIMESTAMP}"
     local matrix_file="${matrix_report_dir}/scenario_matrix_validation.json"
+    local lifecycle_file="${matrix_report_dir}/artifact_lifecycle_policy.json"
+    local env_class
+    local retention_days
     local suite_failures=0
     local raptorq_failures=0
     local total_suite_rows=0
@@ -286,6 +428,8 @@ verify_matrix_gate() {
     local raptorq_list_output=""
 
     mkdir -p "$matrix_report_dir"
+    env_class="$(artifact_environment_class)"
+    retention_days="$(artifact_retention_days "$env_class")"
 
     if [[ -f "$raptorq_script" ]]; then
         raptorq_script_exists=1
@@ -413,8 +557,14 @@ verify_matrix_gate() {
         echo "  \"status\": \"${overall_status}\""
         echo "}"
     } > "$matrix_file"
+    emit_artifact_lifecycle_policy_from_matrix \
+        "$matrix_file" \
+        "$lifecycle_file" \
+        "$env_class" \
+        "$retention_days"
 
     echo "Scenario matrix validation artifact: ${matrix_file}"
+    echo "Artifact lifecycle policy: ${lifecycle_file}"
     if [[ "$suite_failures" -gt 0 || "$raptorq_failures" -gt 0 ]]; then
         echo "Scenario matrix completeness: FAILED (suite_failures=${suite_failures}, raptorq_failures=${raptorq_failures})"
         return 1
@@ -470,6 +620,8 @@ if [[ -n "$FILTER" && -z "${SUITES[$FILTER]+x}" ]]; then
     echo "Run with --list to see available suites"
     exit 1
 fi
+
+validate_artifact_lifecycle_inputs
 
 mkdir -p "$REPORT_DIR"
 : > "$MANIFEST_NDJSON"
@@ -758,6 +910,14 @@ done
     echo "]"
 } > "$MANIFEST_JSON"
 
+env_class="$(artifact_environment_class)"
+retention_days="$(artifact_retention_days "$env_class")"
+emit_artifact_lifecycle_policy_from_manifest \
+    "$MANIFEST_JSON" \
+    "$ARTIFACT_LIFECYCLE_FILE" \
+    "$env_class" \
+    "$retention_days"
+
 verification_status="pass"
 if [[ "$FAILURE_CONTRACT_VIOLATIONS" -gt 0 ]]; then
     verification_status="fail"
@@ -802,6 +962,7 @@ fi
     echo "  \"skipped\": ${SKIP},"
     echo "  \"manifest_ndjson\": \"$(json_escape "$MANIFEST_NDJSON")\","
     echo "  \"manifest_json\": \"$(json_escape "$MANIFEST_JSON")\","
+    echo "  \"artifact_lifecycle\": \"$(json_escape "$ARTIFACT_LIFECYCLE_FILE")\","
     echo "  \"replay_verification\": \"$(json_escape "$REPLAY_VERIFICATION_FILE")\","
     echo "  \"suites\": {"
     first=true
@@ -847,6 +1008,7 @@ echo ""
 echo "  Report:   ${REPORT_FILE}"
 echo "  Logs:     ${REPORT_DIR}/"
 echo "  Manifest: ${MANIFEST_JSON}"
+echo "  Lifecycle:${ARTIFACT_LIFECYCLE_FILE}"
 echo "  Replay:   ${REPLAY_VERIFICATION_FILE}"
 echo ""
 

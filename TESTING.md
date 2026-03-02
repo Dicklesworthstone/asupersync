@@ -58,6 +58,48 @@ $ASUPERSYNC_TEST_ARTIFACTS_DIR/
   cancellation_conformance_summary.json
 ```
 
+### Trace Artifact Lifecycle Policy (asupersync-umelq.12.4)
+
+Trace/replay artifacts follow one explicit lifecycle contract for local and CI workflows.
+
+- Storage roots:
+  - Unit/integration failure bundles: `$ASUPERSYNC_TEST_ARTIFACTS_DIR`
+  - E2E suite bundles: `target/e2e-results/<suite>/`
+  - E2E orchestrator metadata: `target/e2e-results/orchestrator_<timestamp>/`
+- Retention defaults:
+  - Local: `ARTIFACT_RETENTION_DAYS_LOCAL=14`
+  - CI: `ARTIFACT_RETENTION_DAYS_CI=30`
+- Redaction mode:
+  - `ARTIFACT_REDACTION_MODE=metadata_only` (default)
+  - Allowed values: `metadata_only`, `none`, `strict`
+- Privacy policy source of truth:
+  - `.github/security_release_policy.json` -> `trace_telemetry_privacy`
+  - schema id: `trace-telemetry-privacy-v1`
+- Retrieval contract:
+  - Per-suite rerun command: `bash ./scripts/run_all_e2e.sh --suite <suite>`
+  - Matrix verification command: `bash ./scripts/run_all_e2e.sh --verify-matrix`
+  - Replay verification pointer: `target/e2e-results/orchestrator_<timestamp>/replay_verification.json`
+
+CI privacy constraints (release blocking):
+- CI redaction modes are restricted to `metadata_only` or `strict`
+- `none` is local-only and treated as policy violation in CI
+- CI retention is capped at 30 days
+- Required redacted fields must include `suite_log`
+- Artifact roots must stay inside approved path fragments (`/target/e2e-results/`, `/target/phase6-e2e`, `/target/test-results/`, `/test_logs`)
+
+`scripts/run_all_e2e.sh` now emits
+`artifact_lifecycle_policy.json` in the orchestrator report directory.
+The file is deterministic and includes:
+- environment class (`local` or `ci`)
+- retention policy values
+- redaction policy
+- per-suite artifact roots + replay commands
+
+CI evidence:
+- `.github/workflows/ci.yml` D4 gate validates `artifact_lifecycle_policy.json`
+  against `.github/security_release_policy.json.trace_telemetry_privacy`
+  and fails on retention, mode, redaction-field, or storage-scope violations.
+
 Example structured log entry (start/end markers include the same context):
 
 ```text
