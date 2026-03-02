@@ -947,7 +947,7 @@ impl Consumer {
             warn!(
                 subject = %sub.subject(),
                 sid,
-                error = ?err,
+                error = ?_err,
                 "JetStream pull unsubscribe failed"
             );
         }

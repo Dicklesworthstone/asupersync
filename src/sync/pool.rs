@@ -861,6 +861,27 @@ where
     }
 }
 
+struct HealthCheckGuard<'a, R, F>
+where
+    R: Send + 'static,
+    F: AsyncResourceFactory<Resource = R>,
+{
+    pool: &'a GenericPool<R, F>,
+    completed: bool,
+}
+
+impl<R, F> Drop for HealthCheckGuard<'_, R, F>
+where
+    R: Send + 'static,
+    F: AsyncResourceFactory<Resource = R>,
+{
+    fn drop(&mut self) {
+        if !self.completed {
+            self.pool.reject_unhealthy_idle_resource();
+        }
+    }
+}
+
 /// Reservation for an in-flight resource creation slot.
 ///
 /// This ensures pool capacity accounting remains correct across async suspend
@@ -1144,6 +1165,7 @@ where
                 None
             }
         };
+
         if let Some(waker) = waker {
             waker.wake();
         }
@@ -1504,7 +1526,19 @@ where
 
                 // Try to get a healthy idle resource.
                 while let Some((resource, created_at)) = self.try_get_idle(cleanup.waiter_id) {
-                    if self.config.health_check_on_acquire && !self.is_healthy(&resource) {
+                    let is_healthy = if self.config.health_check_on_acquire {
+                        let mut guard = HealthCheckGuard {
+                            pool: self,
+                            completed: false,
+                        };
+                        let healthy = self.is_healthy(&resource);
+                        guard.completed = true;
+                        healthy
+                    } else {
+                        true
+                    };
+
+                    if !is_healthy {
                         self.reject_unhealthy_idle_resource();
                         continue;
                     }
@@ -1614,7 +1648,19 @@ where
         }
 
         while let Some((resource, created_at)) = self.try_get_idle(None) {
-            if self.config.health_check_on_acquire && !self.is_healthy(&resource) {
+            let is_healthy = if self.config.health_check_on_acquire {
+                let mut guard = HealthCheckGuard {
+                    pool: self,
+                    completed: false,
+                };
+                let healthy = self.is_healthy(&resource);
+                guard.completed = true;
+                healthy
+            } else {
+                true
+            };
+
+            if !is_healthy {
                 self.reject_unhealthy_idle_resource();
                 continue;
             }

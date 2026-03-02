@@ -88,7 +88,7 @@ impl WakerState {
             };
             trace!(
                 task_id = ?task,
-                wake_source = source_label,
+                wake_source = _source_label,
                 "task woken"
             );
         }
