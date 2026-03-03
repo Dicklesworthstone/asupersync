@@ -85,6 +85,92 @@ impl GoldenTraceFixture {
     pub fn verify(&self, actual: &Self) -> Result<(), GoldenTraceDiff> {
         GoldenTraceDiff::from_fixtures(self, actual).into_result()
     }
+
+    /// Build a structured replay-delta report against another fixture.
+    #[must_use]
+    pub fn delta_report(&self, actual: &Self) -> GoldenTraceDeltaReport {
+        GoldenTraceDiff::from_fixtures(self, actual).to_delta_report(self, actual)
+    }
+}
+
+/// Category of replay-delta mismatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoldenTraceDeltaClass {
+    /// Runtime configuration or schema changed.
+    Config,
+    /// Timing envelope changed while replay semantics may still match.
+    Timing,
+    /// Core semantic behavior changed (event stream/fingerprint/prefix).
+    Semantic,
+    /// Diagnostic or oracle-surface behavior changed.
+    Observability,
+}
+
+/// Severity for replay-delta mismatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoldenTraceDeltaSeverity {
+    /// Informational drift that does not typically fail a gate.
+    Info,
+    /// Drift that should trigger review and potential gate escalation.
+    Warning,
+    /// Drift that should fail verification unless explicitly approved.
+    Error,
+}
+
+/// Single replay-delta mismatch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoldenTraceDelta {
+    /// Logical drift class for this mismatch.
+    pub class: GoldenTraceDeltaClass,
+    /// Severity assigned to this mismatch.
+    pub severity: GoldenTraceDeltaSeverity,
+    /// Stable field identifier for machine parsing.
+    pub field: String,
+    /// Human-readable mismatch summary.
+    pub message: String,
+}
+
+/// Structured replay-delta report between two fixtures.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct GoldenTraceDeltaReport {
+    /// Fingerprint recorded in the baseline fixture.
+    pub expected_fingerprint: u64,
+    /// Fingerprint recorded in the candidate fixture.
+    pub actual_fingerprint: u64,
+    /// Event count from the baseline fixture.
+    pub expected_event_count: u64,
+    /// Event count from the candidate fixture.
+    pub actual_event_count: u64,
+    /// True when schema or configuration changed.
+    pub config_drift: bool,
+    /// True when core semantic behavior changed.
+    pub semantic_drift: bool,
+    /// True when replay timing envelope changed.
+    pub timing_drift: bool,
+    /// True when oracle/diagnostic surface changed.
+    pub observability_drift: bool,
+    /// Detailed mismatch entries.
+    pub deltas: Vec<GoldenTraceDelta>,
+}
+
+impl GoldenTraceDeltaReport {
+    /// Returns true when no drift is present.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.deltas.is_empty()
+    }
+
+    /// Serialize the report to pretty JSON for CI artifacts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization fails.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
 }
 
 /// Diff between two golden trace fixtures.
@@ -151,6 +237,89 @@ impl GoldenTraceDiff {
 
     fn into_result(self) -> Result<(), Self> {
         if self.is_empty() { Ok(()) } else { Err(self) }
+    }
+
+    /// Convert mismatch data to a structured replay-delta report.
+    #[must_use]
+    pub fn to_delta_report(
+        &self,
+        expected: &GoldenTraceFixture,
+        actual: &GoldenTraceFixture,
+    ) -> GoldenTraceDeltaReport {
+        let mut config_drift = false;
+        let mut semantic_drift = false;
+        let mut timing_drift = false;
+        let mut observability_drift = false;
+        let mut deltas = Vec::with_capacity(self.mismatches.len());
+
+        for mismatch in &self.mismatches {
+            let (class, severity, field) = classify_delta(mismatch);
+            match class {
+                GoldenTraceDeltaClass::Config => config_drift = true,
+                GoldenTraceDeltaClass::Timing => timing_drift = true,
+                GoldenTraceDeltaClass::Semantic => semantic_drift = true,
+                GoldenTraceDeltaClass::Observability => observability_drift = true,
+            }
+            deltas.push(GoldenTraceDelta {
+                class,
+                severity,
+                field: field.to_string(),
+                message: mismatch.to_string(),
+            });
+        }
+
+        GoldenTraceDeltaReport {
+            expected_fingerprint: expected.fingerprint,
+            actual_fingerprint: actual.fingerprint,
+            expected_event_count: expected.event_count,
+            actual_event_count: actual.event_count,
+            config_drift,
+            semantic_drift,
+            timing_drift,
+            observability_drift,
+            deltas,
+        }
+    }
+}
+
+fn classify_delta(
+    mismatch: &GoldenTraceMismatch,
+) -> (
+    GoldenTraceDeltaClass,
+    GoldenTraceDeltaSeverity,
+    &'static str,
+) {
+    match mismatch {
+        GoldenTraceMismatch::SchemaVersion { .. } => (
+            GoldenTraceDeltaClass::Config,
+            GoldenTraceDeltaSeverity::Error,
+            "schema_version",
+        ),
+        GoldenTraceMismatch::Config { .. } => (
+            GoldenTraceDeltaClass::Config,
+            GoldenTraceDeltaSeverity::Error,
+            "config",
+        ),
+        GoldenTraceMismatch::Fingerprint { .. } => (
+            GoldenTraceDeltaClass::Semantic,
+            GoldenTraceDeltaSeverity::Error,
+            "fingerprint",
+        ),
+        GoldenTraceMismatch::EventCount { .. } => (
+            GoldenTraceDeltaClass::Timing,
+            GoldenTraceDeltaSeverity::Warning,
+            "event_count",
+        ),
+        GoldenTraceMismatch::CanonicalPrefix { .. } => (
+            GoldenTraceDeltaClass::Semantic,
+            GoldenTraceDeltaSeverity::Error,
+            "canonical_prefix",
+        ),
+        GoldenTraceMismatch::OracleViolations { .. } => (
+            GoldenTraceDeltaClass::Observability,
+            GoldenTraceDeltaSeverity::Warning,
+            "oracle_violations",
+        ),
     }
 }
 
@@ -514,5 +683,56 @@ mod tests {
         let b: Vec<Vec<TraceEventKey>> = vec![];
         let m = first_prefix_mismatch(&a, &b);
         assert!(m.is_some());
+    }
+
+    #[test]
+    fn golden_trace_delta_report_clean_when_equal() {
+        let config = GoldenTraceConfig {
+            seed: 1,
+            entropy_seed: 1,
+            worker_count: 1,
+            trace_capacity: 32,
+            max_steps: Some(128),
+            canonical_prefix_layers: 2,
+            canonical_prefix_events: 8,
+        };
+        let expected = GoldenTraceFixture::from_events(config, &[], std::iter::empty::<String>());
+        let report = expected.delta_report(&expected);
+        assert!(report.is_clean());
+        assert!(!report.config_drift);
+        assert!(!report.semantic_drift);
+        assert!(!report.timing_drift);
+        assert!(!report.observability_drift);
+        assert!(report.to_json().expect("json").contains("\"deltas\""));
+    }
+
+    #[test]
+    fn golden_trace_delta_report_detects_drift_classes() {
+        let config = GoldenTraceConfig {
+            seed: 1,
+            entropy_seed: 1,
+            worker_count: 1,
+            trace_capacity: 32,
+            max_steps: Some(128),
+            canonical_prefix_layers: 2,
+            canonical_prefix_events: 8,
+        };
+        let expected = GoldenTraceFixture::from_events(config, &[], std::iter::empty::<String>());
+        let mut actual = expected.clone();
+        actual.config.seed = 2;
+        actual.fingerprint ^= 0xA5A5;
+        actual.event_count = actual.event_count.saturating_add(1);
+        actual.oracle_summary.violations = vec!["TaskLeak".to_string()];
+
+        let report = expected.delta_report(&actual);
+        assert!(!report.is_clean());
+        assert!(report.config_drift);
+        assert!(report.semantic_drift);
+        assert!(report.timing_drift);
+        assert!(report.observability_drift);
+        assert!(report.deltas.iter().any(|d| d.field == "config"));
+        assert!(report.deltas.iter().any(|d| d.field == "fingerprint"));
+        assert!(report.deltas.iter().any(|d| d.field == "event_count"));
+        assert!(report.deltas.iter().any(|d| d.field == "oracle_violations"));
     }
 }

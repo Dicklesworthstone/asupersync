@@ -41,6 +41,34 @@ Deterministic replay only works when the environment is fully controlled. The co
 
 If any precondition is violated, replay should fail fast with explicit diagnostics rather than “best-effort.”
 
+## Golden Replay-Delta Verification
+
+When the same scenario is expected to remain stable across releases, compare
+its golden fixtures instead of only checking pass/fail.
+
+- Build fixtures from deterministic runs (`GoldenTraceFixture::from_events`).
+- Compare expected vs actual using `delta_report`.
+- Persist the JSON report as CI artifact for triage.
+- Emit a triage bundle with a one-command repro string for fast incident handoff.
+
+```rust
+use asupersync::trace::format::{GoldenTraceConfig, GoldenTraceFixture};
+
+let expected = GoldenTraceFixture::from_events(cfg.clone(), &expected_events, std::iter::empty::<String>());
+let actual = GoldenTraceFixture::from_events(cfg, &actual_events, std::iter::empty::<String>());
+let report = expected.delta_report(&actual);
+
+assert!(report.is_clean(), "golden replay drift detected: {}", report.to_json()?);
+```
+
+The report classifies drift into `config`, `timing`, `semantic`, and `observability` and
+includes per-field mismatch entries (`fingerprint`, `canonical_prefix`,
+`event_count`, `oracle_violations`, etc.) for stable machine parsing.
+
+In CI/E2E flows, write both:
+- `golden_trace_replay_delta_report.json` (full drift report)
+- `golden_trace_replay_delta_triage_bundle.json` (scenario metadata, drift fields, repro command)
+
 ---
 
 ## Schedule Exploration (Seed Sweep + DPOR)
