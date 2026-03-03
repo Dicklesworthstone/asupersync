@@ -6,12 +6,30 @@ use std::io::{self, ErrorKind, IoSliceMut};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+/// Generates a trait method that returns a read-integer future.
+macro_rules! read_int_trait_method {
+    ($method:ident, $future:ident, $ty:ty, $size:literal, $order:literal) => {
+        #[doc = concat!("Read a `", stringify!($ty), "` in ", $order, " byte order.")]
+        ///
+        /// Not cancel-safe: internal buffer may have been partially filled.
+        fn $method(&mut self) -> $future<'_, Self>
+        where
+            Self: Unpin,
+        {
+            $future {
+                reader: self,
+                buf: [0u8; $size],
+                pos: 0,
+            }
+        }
+    };
+}
+
 /// Extension trait for `AsyncRead`.
 pub trait AsyncReadExt: AsyncRead {
     /// Read some bytes into `buf`, returning the number of bytes read.
     ///
-    /// This is a convenience wrapper around `poll_read`. Returns 0 on EOF.
-    /// Not cancel-safe: partial reads may have occurred.
+    /// Returns 0 on EOF. Not cancel-safe.
     fn read<'a>(&'a mut self, buf: &'a mut [u8]) -> Read<'a, Self>
     where
         Self: Unpin,
@@ -62,7 +80,7 @@ pub trait AsyncReadExt: AsyncRead {
         }
     }
 
-    /// Read a single byte.
+    /// Read a single unsigned byte.
     fn read_u8(&mut self) -> ReadU8<'_, Self>
     where
         Self: Unpin,
@@ -70,13 +88,34 @@ pub trait AsyncReadExt: AsyncRead {
         ReadU8 { reader: self }
     }
 
-    /// Read a signed 8-bit integer.
+    /// Read a single signed byte.
     fn read_i8(&mut self) -> ReadI8<'_, Self>
     where
         Self: Unpin,
     {
         ReadI8 { reader: self }
     }
+
+    read_int_trait_method!(read_u16, ReadU16, u16, 2, "big-endian");
+    read_int_trait_method!(read_u16_le, ReadU16Le, u16, 2, "little-endian");
+    read_int_trait_method!(read_i16, ReadI16, i16, 2, "big-endian");
+    read_int_trait_method!(read_i16_le, ReadI16Le, i16, 2, "little-endian");
+    read_int_trait_method!(read_u32, ReadU32, u32, 4, "big-endian");
+    read_int_trait_method!(read_u32_le, ReadU32Le, u32, 4, "little-endian");
+    read_int_trait_method!(read_i32, ReadI32, i32, 4, "big-endian");
+    read_int_trait_method!(read_i32_le, ReadI32Le, i32, 4, "little-endian");
+    read_int_trait_method!(read_u64, ReadU64, u64, 8, "big-endian");
+    read_int_trait_method!(read_u64_le, ReadU64Le, u64, 8, "little-endian");
+    read_int_trait_method!(read_i64, ReadI64, i64, 8, "big-endian");
+    read_int_trait_method!(read_i64_le, ReadI64Le, i64, 8, "little-endian");
+    read_int_trait_method!(read_u128, ReadU128, u128, 16, "big-endian");
+    read_int_trait_method!(read_u128_le, ReadU128Le, u128, 16, "little-endian");
+    read_int_trait_method!(read_i128, ReadI128, i128, 16, "big-endian");
+    read_int_trait_method!(read_i128_le, ReadI128Le, i128, 16, "little-endian");
+    read_int_trait_method!(read_f32, ReadF32, f32, 4, "big-endian");
+    read_int_trait_method!(read_f32_le, ReadF32Le, f32, 4, "little-endian");
+    read_int_trait_method!(read_f64, ReadF64, f64, 8, "big-endian");
+    read_int_trait_method!(read_f64_le, ReadF64Le, f64, 8, "little-endian");
 
     /// Chain this reader with another.
     fn chain<R: AsyncRead>(self, next: R) -> Chain<Self, R>
@@ -95,46 +134,7 @@ pub trait AsyncReadExt: AsyncRead {
     }
 }
 
-macro_rules! read_integer_ext {
-    ($method:ident, $future:ident, $ty:ty, $size:literal, $from:ident) => {
-        #[doc = concat!("Read a `", stringify!($ty), "` in ", stringify!($from), " byte order.")]
-        fn $method(&mut self) -> $future<'_, Self>
-        where
-            Self: Unpin,
-        {
-            $future {
-                reader: self,
-                buf: [0u8; $size],
-                pos: 0,
-            }
-        }
-    };
-}
-
-impl<R: AsyncRead + ?Sized> AsyncReadExt for R {
-    read_integer_ext!(read_u16, ReadU16, u16, 2, big_endian);
-    read_integer_ext!(read_u16_le, ReadU16Le, u16, 2, little_endian);
-    read_integer_ext!(read_i16, ReadI16, i16, 2, big_endian);
-    read_integer_ext!(read_i16_le, ReadI16Le, i16, 2, little_endian);
-    read_integer_ext!(read_u32, ReadU32, u32, 4, big_endian);
-    read_integer_ext!(read_u32_le, ReadU32Le, u32, 4, little_endian);
-    read_integer_ext!(read_i32, ReadI32, i32, 4, big_endian);
-    read_integer_ext!(read_i32_le, ReadI32Le, i32, 4, little_endian);
-    read_integer_ext!(read_u64, ReadU64, u64, 8, big_endian);
-    read_integer_ext!(read_u64_le, ReadU64Le, u64, 8, little_endian);
-    read_integer_ext!(read_i64, ReadI64, i64, 8, big_endian);
-    read_integer_ext!(read_i64_le, ReadI64Le, i64, 8, little_endian);
-    read_integer_ext!(read_u128, ReadU128, u128, 16, big_endian);
-    read_integer_ext!(read_u128_le, ReadU128Le, u128, 16, little_endian);
-    read_integer_ext!(read_i128, ReadI128, i128, 16, big_endian);
-    read_integer_ext!(read_i128_le, ReadI128Le, i128, 16, little_endian);
-    read_integer_ext!(read_f32, ReadF32, f32, 4, big_endian);
-    read_integer_ext!(read_f32_le, ReadF32Le, f32, 4, little_endian);
-    read_integer_ext!(read_f64, ReadF64, f64, 8, big_endian);
-    read_integer_ext!(read_f64_le, ReadF64Le, f64, 8, little_endian);
-}
-
-// Default trait method impls provided by macro above in the impl block.
+impl<R: AsyncRead + ?Sized> AsyncReadExt for R {}
 
 /// Extension trait for `AsyncReadVectored`.
 pub trait AsyncReadVectoredExt: AsyncReadVectored {
@@ -149,7 +149,34 @@ pub trait AsyncReadVectoredExt: AsyncReadVectored {
 
 impl<R: AsyncReadVectored + ?Sized> AsyncReadVectoredExt for R {}
 
-/// Future for read_vectored.
+// ---------------------------------------------------------------------------
+// Future types
+// ---------------------------------------------------------------------------
+
+/// Future for `read`.
+pub struct Read<'a, R: ?Sized> {
+    reader: &'a mut R,
+    buf: &'a mut [u8],
+}
+
+impl<R> Future for Read<'_, R>
+where
+    R: AsyncRead + Unpin + ?Sized,
+{
+    type Output = io::Result<usize>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let mut read_buf = ReadBuf::new(this.buf);
+        match Pin::new(&mut *this.reader).poll_read(cx, &mut read_buf) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+        }
+    }
+}
+
+/// Future for `read_vectored`.
 pub struct ReadVectored<'a, R: ?Sized> {
     reader: &'a mut R,
     bufs: &'a mut [IoSliceMut<'a>],
@@ -167,7 +194,7 @@ where
     }
 }
 
-/// Future for read_exact.
+/// Future for `read_exact`.
 pub struct ReadExact<'a, R: ?Sized> {
     reader: &'a mut R,
     buf: &'a mut [u8],
@@ -213,7 +240,7 @@ where
     }
 }
 
-/// Future for read_to_end.
+/// Future for `read_to_end`.
 pub struct ReadToEnd<'a, R: ?Sized> {
     reader: &'a mut R,
     buf: &'a mut Vec<u8>,
@@ -259,7 +286,7 @@ where
     }
 }
 
-/// Future for read_to_string.
+/// Future for `read_to_string`.
 pub struct ReadToString<'a, R: ?Sized> {
     reader: &'a mut R,
     buf: &'a mut String,
@@ -352,7 +379,7 @@ where
     }
 }
 
-/// Future for reading a single byte.
+/// Future for reading a single unsigned byte.
 pub struct ReadU8<'a, R: ?Sized> {
     reader: &'a mut R,
 }
@@ -380,6 +407,101 @@ where
         }
     }
 }
+
+/// Future for reading a single signed byte.
+pub struct ReadI8<'a, R: ?Sized> {
+    reader: &'a mut R,
+}
+
+impl<R> Future for ReadI8<'_, R>
+where
+    R: AsyncRead + Unpin + ?Sized,
+{
+    type Output = io::Result<i8>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let mut one = [0u8; 1];
+        let mut read_buf = ReadBuf::new(&mut one);
+        match Pin::new(&mut *this.reader).poll_read(cx, &mut read_buf) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Ready(Ok(())) => {
+                if read_buf.filled().is_empty() {
+                    Poll::Ready(Err(io::Error::from(io::ErrorKind::UnexpectedEof)))
+                } else {
+                    Poll::Ready(Ok(read_buf.filled()[0] as i8))
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-byte integer/float read futures (macro-generated)
+// ---------------------------------------------------------------------------
+
+/// Generates a future struct + `Future` impl for reading a fixed-size integer.
+macro_rules! read_int_future {
+    ($future:ident, $ty:ty, $size:literal, $convert:expr) => {
+        #[doc = concat!("Future for reading a `", stringify!($ty), "`.")]
+        pub struct $future<'a, R: ?Sized> {
+            reader: &'a mut R,
+            buf: [u8; $size],
+            pos: usize,
+        }
+
+        impl<R> Future for $future<'_, R>
+        where
+            R: AsyncRead + Unpin + ?Sized,
+        {
+            type Output = io::Result<$ty>;
+
+            fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                let this = self.get_mut();
+                while this.pos < $size {
+                    let mut read_buf = ReadBuf::new(&mut this.buf[this.pos..]);
+                    match Pin::new(&mut *this.reader).poll_read(cx, &mut read_buf) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                        Poll::Ready(Ok(())) => {
+                            let n = read_buf.filled().len();
+                            if n == 0 {
+                                return Poll::Ready(Err(io::Error::from(
+                                    io::ErrorKind::UnexpectedEof,
+                                )));
+                            }
+                            this.pos += n;
+                        }
+                    }
+                }
+                let convert: fn([u8; $size]) -> $ty = $convert;
+                Poll::Ready(Ok(convert(this.buf)))
+            }
+        }
+    };
+}
+
+read_int_future!(ReadU16, u16, 2, u16::from_be_bytes);
+read_int_future!(ReadU16Le, u16, 2, u16::from_le_bytes);
+read_int_future!(ReadI16, i16, 2, i16::from_be_bytes);
+read_int_future!(ReadI16Le, i16, 2, i16::from_le_bytes);
+read_int_future!(ReadU32, u32, 4, u32::from_be_bytes);
+read_int_future!(ReadU32Le, u32, 4, u32::from_le_bytes);
+read_int_future!(ReadI32, i32, 4, i32::from_be_bytes);
+read_int_future!(ReadI32Le, i32, 4, i32::from_le_bytes);
+read_int_future!(ReadU64, u64, 8, u64::from_be_bytes);
+read_int_future!(ReadU64Le, u64, 8, u64::from_le_bytes);
+read_int_future!(ReadI64, i64, 8, i64::from_be_bytes);
+read_int_future!(ReadI64Le, i64, 8, i64::from_le_bytes);
+read_int_future!(ReadU128, u128, 16, u128::from_be_bytes);
+read_int_future!(ReadU128Le, u128, 16, u128::from_le_bytes);
+read_int_future!(ReadI128, i128, 16, i128::from_be_bytes);
+read_int_future!(ReadI128Le, i128, 16, i128::from_le_bytes);
+read_int_future!(ReadF32, f32, 4, f32::from_be_bytes);
+read_int_future!(ReadF32Le, f32, 4, f32::from_le_bytes);
+read_int_future!(ReadF64, f64, 8, f64::from_be_bytes);
+read_int_future!(ReadF64Le, f64, 8, f64::from_le_bytes);
 
 #[cfg(test)]
 mod tests {
@@ -413,6 +535,35 @@ mod tests {
             }
         }
         None
+    }
+
+    #[test]
+    fn read_basic_returns_bytes() {
+        init_test("read_basic_returns_bytes");
+        let mut reader: &[u8] = b"hello";
+        let mut buf = [0u8; 16];
+        let mut fut = reader.read(&mut buf);
+        let mut fut = Pin::new(&mut fut);
+        let n = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .unwrap();
+        crate::assert_with_log!(n == 5, "bytes read", 5, n);
+        crate::assert_with_log!(&buf[..5] == b"hello", "content", b"hello", &buf[..5]);
+        crate::test_complete!("read_basic_returns_bytes");
+    }
+
+    #[test]
+    fn read_basic_returns_zero_on_eof() {
+        init_test("read_basic_returns_zero_on_eof");
+        let mut reader: &[u8] = b"";
+        let mut buf = [0u8; 16];
+        let mut fut = reader.read(&mut buf);
+        let mut fut = Pin::new(&mut fut);
+        let n = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .unwrap();
+        crate::assert_with_log!(n == 0, "bytes read", 0, n);
+        crate::test_complete!("read_basic_returns_zero_on_eof");
     }
 
     #[test]
@@ -580,6 +731,122 @@ mod tests {
             .unwrap();
         crate::assert_with_log!(byte == b'z', "byte", b'z', byte);
         crate::test_complete!("read_u8_reads_byte");
+    }
+
+    #[test]
+    fn read_i8_reads_signed() {
+        init_test("read_i8_reads_signed");
+        let mut reader: &[u8] = &[0xFE]; // -2 as i8
+        let mut fut = reader.read_i8();
+        let mut fut = Pin::new(&mut fut);
+        let val = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .unwrap();
+        crate::assert_with_log!(val == -2, "i8 value", -2, val);
+        crate::test_complete!("read_i8_reads_signed");
+    }
+
+    #[test]
+    fn read_u16_big_endian() {
+        init_test("read_u16_big_endian");
+        let mut reader: &[u8] = &[0x01, 0x02]; // 258 in BE
+        let mut fut = reader.read_u16();
+        let mut fut = Pin::new(&mut fut);
+        let val = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .unwrap();
+        crate::assert_with_log!(val == 0x0102, "u16 BE", 0x0102u16, val);
+        crate::test_complete!("read_u16_big_endian");
+    }
+
+    #[test]
+    fn read_u16_le_little_endian() {
+        init_test("read_u16_le_little_endian");
+        let mut reader: &[u8] = &[0x02, 0x01]; // 258 in LE
+        let mut fut = reader.read_u16_le();
+        let mut fut = Pin::new(&mut fut);
+        let val = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .unwrap();
+        crate::assert_with_log!(val == 0x0102, "u16 LE", 0x0102u16, val);
+        crate::test_complete!("read_u16_le_little_endian");
+    }
+
+    #[test]
+    fn read_u32_big_endian() {
+        init_test("read_u32_big_endian");
+        let mut reader: &[u8] = &[0x00, 0x01, 0x00, 0x00]; // 65536 in BE
+        let mut fut = reader.read_u32();
+        let mut fut = Pin::new(&mut fut);
+        let val = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .unwrap();
+        crate::assert_with_log!(val == 0x0001_0000, "u32 BE", 0x0001_0000u32, val);
+        crate::test_complete!("read_u32_big_endian");
+    }
+
+    #[test]
+    fn read_u64_big_endian() {
+        init_test("read_u64_big_endian");
+        let mut reader: &[u8] = &0x0102030405060708u64.to_be_bytes();
+        let mut fut = reader.read_u64();
+        let mut fut = Pin::new(&mut fut);
+        let val = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .unwrap();
+        crate::assert_with_log!(
+            val == 0x0102030405060708,
+            "u64 BE",
+            0x0102030405060708u64,
+            val
+        );
+        crate::test_complete!("read_u64_big_endian");
+    }
+
+    #[test]
+    fn read_f32_big_endian() {
+        init_test("read_f32_big_endian");
+        let expected: f32 = 1.5;
+        let mut reader: &[u8] = &expected.to_be_bytes();
+        let mut fut = reader.read_f32();
+        let mut fut = Pin::new(&mut fut);
+        let val = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .unwrap();
+        crate::assert_with_log!((val - expected).abs() < f32::EPSILON, "f32 BE", expected, val);
+        crate::test_complete!("read_f32_big_endian");
+    }
+
+    #[test]
+    fn read_f64_le_little_endian() {
+        init_test("read_f64_le_little_endian");
+        let expected: f64 = core::f64::consts::PI;
+        let mut reader: &[u8] = &expected.to_le_bytes();
+        let mut fut = reader.read_f64_le();
+        let mut fut = Pin::new(&mut fut);
+        let val = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .unwrap();
+        crate::assert_with_log!((val - expected).abs() < f64::EPSILON, "f64 LE", expected, val);
+        crate::test_complete!("read_f64_le_little_endian");
+    }
+
+    #[test]
+    fn read_int_eof_returns_unexpected_eof() {
+        init_test("read_int_eof_returns_unexpected_eof");
+        let mut reader: &[u8] = &[0x01]; // only 1 byte for a u32
+        let mut fut = reader.read_u32();
+        let mut fut = Pin::new(&mut fut);
+        let err = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .unwrap_err();
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::UnexpectedEof,
+            "error kind",
+            io::ErrorKind::UnexpectedEof,
+            err.kind()
+        );
+        crate::test_complete!("read_int_eof_returns_unexpected_eof");
     }
 
     #[test]
