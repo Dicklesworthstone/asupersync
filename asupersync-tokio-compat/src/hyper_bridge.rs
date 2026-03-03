@@ -74,9 +74,7 @@ where
         //
         // For now, this is a compile-time placeholder to validate the
         // trait implementation compiles correctly.
-        unimplemented!(
-            "AsupersyncExecutor::execute requires T7.4 (runtime adapter primitives)"
-        );
+        unimplemented!("AsupersyncExecutor::execute requires T7.4 (runtime adapter primitives)");
     }
 }
 
@@ -124,11 +122,7 @@ impl hyper::rt::Timer for AsupersyncTimer {
         })
     }
 
-    fn reset(
-        &self,
-        sleep: &mut Pin<Box<dyn hyper::rt::Sleep>>,
-        new_deadline: Instant,
-    ) {
+    fn reset(&self, sleep: &mut Pin<Box<dyn hyper::rt::Sleep>>, new_deadline: Instant) {
         // Create a new sleep and replace the old one.
         *sleep = self.sleep_until(new_deadline);
     }
@@ -168,8 +162,8 @@ mod tests {
 
     #[test]
     fn executor_implements_hyper_trait() {
-        let _exec: Box<dyn hyper::rt::Executor<Pin<Box<dyn Future<Output = ()> + Send>>>>
-            = Box::new(AsupersyncExecutor::new());
+        let _exec: Box<dyn hyper::rt::Executor<Pin<Box<dyn Future<Output = ()> + Send>>>> =
+            Box::new(AsupersyncExecutor::new());
     }
 
     #[test]

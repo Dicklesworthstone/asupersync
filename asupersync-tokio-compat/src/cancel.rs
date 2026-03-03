@@ -80,9 +80,7 @@ impl<F: Future> Future for CancelAware<F> {
                 CancellationMode::BestEffort => {
                     // Try to complete, but if pending, report cancelled.
                     match this.future.poll(cx) {
-                        Poll::Ready(output) => {
-                            Poll::Ready(CancelResult::Completed(output))
-                        }
+                        Poll::Ready(output) => Poll::Ready(CancelResult::Completed(output)),
                         Poll::Pending => Poll::Ready(CancelResult::Cancelled),
                     }
                 }
@@ -99,9 +97,7 @@ impl<F: Future> Future for CancelAware<F> {
                     // In a full implementation, this would use a timer.
                     // For scaffolding, behave like BestEffort.
                     match this.future.poll(cx) {
-                        Poll::Ready(output) => {
-                            Poll::Ready(CancelResult::Completed(output))
-                        }
+                        Poll::Ready(output) => Poll::Ready(CancelResult::Completed(output)),
                         Poll::Pending => Poll::Ready(CancelResult::Cancelled),
                     }
                 }
@@ -157,10 +153,7 @@ mod tests {
         // SAFETY: The vtable functions are correct no-ops.
         #[allow(unsafe_code)]
         unsafe {
-            std::task::Waker::from_raw(std::task::RawWaker::new(
-                std::ptr::null(),
-                &VTABLE,
-            ))
+            std::task::Waker::from_raw(std::task::RawWaker::new(std::ptr::null(), &VTABLE))
         }
     }
 }

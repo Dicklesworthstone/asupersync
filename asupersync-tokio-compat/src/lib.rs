@@ -157,7 +157,10 @@ impl<E: std::fmt::Display> std::fmt::Display for AdapterError<E> {
             Self::Service(e) => write!(f, "adapter service error: {e}"),
             Self::Cancelled => write!(f, "operation cancelled"),
             Self::Timeout => write!(f, "operation timed out"),
-            Self::InsufficientBudget { remaining, required } => {
+            Self::InsufficientBudget {
+                remaining,
+                required,
+            } => {
                 write!(
                     f,
                     "insufficient budget: {remaining} remaining, {required} required"
