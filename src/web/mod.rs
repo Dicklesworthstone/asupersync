@@ -58,8 +58,7 @@ pub mod router;
 pub mod security;
 
 pub use extract::{
-    Cookie, CookieJar, Form, FromRequest, FromRequestParts, Json as JsonExtract, Path, Query,
-    State,
+    Cookie, CookieJar, Form, FromRequest, FromRequestParts, Json as JsonExtract, Path, Query, State,
 };
 pub use handler::{
     AsyncCxFnHandler, AsyncCxFnHandler1, AsyncCxFnHandler2, AsyncCxFnHandler3, AsyncCxFnHandler4,

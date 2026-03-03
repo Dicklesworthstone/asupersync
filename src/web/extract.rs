@@ -887,8 +887,7 @@ mod tests {
 
     #[test]
     fn cookie_jar_parses_cookie_pairs() {
-        let req =
-            Request::new("GET", "/").with_header("cookie", "session=abc; theme=dark; id=42");
+        let req = Request::new("GET", "/").with_header("cookie", "session=abc; theme=dark; id=42");
         let jar = CookieJar::from_request_parts(&req).unwrap();
         assert_eq!(jar.get("session"), Some("abc"));
         assert_eq!(jar.get("theme"), Some("dark"));
