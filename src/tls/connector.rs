@@ -77,11 +77,7 @@ impl TlsConnector {
     /// # Cancel-Safety
     /// Handshake is NOT cancel-safe. If cancelled mid-handshake, drop the stream.
     #[cfg(feature = "tls")]
-    pub async fn connect<IO>(
-        &self,
-        domain: &str,
-        io: IO,
-    ) -> Result<TlsStream<IO>, TlsError>
+    pub async fn connect<IO>(&self, domain: &str, io: IO) -> Result<TlsStream<IO>, TlsError>
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
@@ -91,8 +87,12 @@ impl TlsConnector {
             .map_err(|e| TlsError::Configuration(e.to_string()))?;
         let mut stream = TlsStream::new_client(io, conn);
         if let Some(timeout) = self.handshake_timeout {
-            match crate::time::timeout(super::wall_clock_now(), timeout, poll_fn(|cx| stream.poll_handshake(cx)))
-                .await
+            match crate::time::timeout(
+                super::wall_clock_now(),
+                timeout,
+                poll_fn(|cx| stream.poll_handshake(cx)),
+            )
+            .await
             {
                 Ok(result) => result?,
                 Err(_) => return Err(TlsError::Timeout(timeout)),

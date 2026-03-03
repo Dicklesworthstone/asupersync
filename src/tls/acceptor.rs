@@ -97,8 +97,12 @@ impl TlsAcceptor {
             .map_err(|e| TlsError::Configuration(e.to_string()))?;
         let mut stream = TlsStream::new_server(io, conn);
         if let Some(timeout) = self.handshake_timeout {
-            match crate::time::timeout(super::wall_clock_now(), timeout, poll_fn(|cx| stream.poll_handshake(cx)))
-                .await
+            match crate::time::timeout(
+                super::wall_clock_now(),
+                timeout,
+                poll_fn(|cx| stream.poll_handshake(cx)),
+            )
+            .await
             {
                 Ok(result) => result?,
                 Err(_) => return Err(TlsError::Timeout(timeout)),
@@ -759,10 +763,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
                 "127.0.0.1:5003".parse().unwrap(),
             );
 
-            let err = connector
-                .connect("localhost", client_io)
-                .await
-                .unwrap_err();
+            let err = connector.connect("localhost", client_io).await.unwrap_err();
             assert!(matches!(err, TlsError::Timeout(_)));
         });
     }
