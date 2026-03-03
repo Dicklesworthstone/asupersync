@@ -7,9 +7,11 @@ use asupersync::channel::mpsc;
 use asupersync::channel::session::tracked_channel;
 use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::messaging::{ConsumerConfig, KafkaConsumer, TopicPartitionOffset};
 use asupersync::types::{Budget, CancelReason};
 use parking_lot::Mutex;
 use std::sync::Arc;
+use std::time::Duration;
 
 // =========================================================================
 // MPSC Queue: exactly-once delivery
@@ -386,5 +388,65 @@ fn e2e_tracked_mpsc_leak_detection_panics() {
         let (tx, _rx) = tracked_channel::<u64>(1);
         let permit = tx.reserve(&cx).await.expect("reserve");
         drop(permit);
+    });
+}
+
+#[test]
+fn e2e_kafka_consumer_lifecycle() {
+    common::init_test_logging();
+    common::run_test_with_cx(|cx| async move {
+        test_phase!("Kafka Consumer Lifecycle");
+
+        let consumer = KafkaConsumer::new(ConsumerConfig::new(
+            vec!["localhost:9092".into()],
+            "group-a",
+        ))
+        .expect("consumer creation");
+
+        test_section!("subscribe");
+        consumer
+            .subscribe(&cx, &["orders", "payments"])
+            .await
+            .expect("subscribe");
+
+        test_section!("commit_and_seek");
+        consumer
+            .commit_offsets(
+                &cx,
+                &[
+                    TopicPartitionOffset::new("orders", 0, 10),
+                    TopicPartitionOffset::new("payments", 0, 4),
+                ],
+            )
+            .await
+            .expect("commit");
+        consumer
+            .seek(&cx, &TopicPartitionOffset::new("orders", 0, 11))
+            .await
+            .expect("seek");
+
+        assert_eq!(consumer.committed_offset("orders", 0), Some(10));
+        assert_eq!(consumer.committed_offset("payments", 0), Some(4));
+        assert_eq!(consumer.position("orders", 0), Some(11));
+
+        test_section!("poll_then_close");
+        let poll = consumer
+            .poll(&cx, Duration::from_millis(1))
+            .await
+            .expect("poll");
+        assert!(poll.is_none());
+
+        consumer.close(&cx).await.expect("close");
+        assert!(consumer.is_closed());
+
+        let err = consumer
+            .poll(&cx, Duration::from_millis(1))
+            .await
+            .expect_err("poll after close should fail");
+        assert!(
+            matches!(err, asupersync::messaging::KafkaError::Config(msg) if msg.contains("closed"))
+        );
+
+        test_complete!("e2e_kafka_consumer_lifecycle");
     });
 }

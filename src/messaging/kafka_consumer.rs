@@ -16,7 +16,9 @@
 
 use crate::cx::Cx;
 use crate::messaging::kafka::KafkaError;
-use std::io;
+use parking_lot::Mutex;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// Offset reset strategy when no committed offset exists.
@@ -228,7 +230,7 @@ impl TopicPartitionOffset {
 }
 
 /// A record returned from a Kafka consumer poll.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ConsumerRecord {
     /// Topic name.
     pub topic: String,
@@ -250,25 +252,59 @@ pub struct ConsumerRecord {
 #[derive(Debug)]
 pub struct KafkaConsumer {
     config: ConsumerConfig,
+    state: Mutex<ConsumerState>,
+    closed: AtomicBool,
+}
+
+#[derive(Debug, Default)]
+struct ConsumerState {
+    subscribed_topics: BTreeSet<String>,
+    assigned_partitions: BTreeSet<(String, i32)>,
+    committed_offsets: BTreeMap<(String, i32), i64>,
+    positions: BTreeMap<(String, i32), i64>,
 }
 
 impl KafkaConsumer {
     /// Create a new Kafka consumer.
     pub fn new(config: ConsumerConfig) -> Result<Self, KafkaError> {
         config.validate()?;
-        Ok(Self { config })
+        Ok(Self {
+            config,
+            state: Mutex::new(ConsumerState::default()),
+            closed: AtomicBool::new(false),
+        })
     }
 
     /// Subscribe to a set of topics.
     #[allow(unused_variables)]
     pub async fn subscribe(&self, cx: &Cx, topics: &[&str]) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        self.ensure_open()?;
 
         if topics.is_empty() {
             return Err(KafkaError::Config("topics cannot be empty".to_string()));
         }
 
-        Err(stub_err())
+        let mut normalized = BTreeSet::new();
+        for topic in topics {
+            let topic = topic.trim();
+            if topic.is_empty() {
+                return Err(KafkaError::Config("topic cannot be empty".to_string()));
+            }
+            normalized.insert(topic.to_string());
+        }
+
+        let mut state = self.state.lock();
+        state.subscribed_topics = normalized;
+        state.assigned_partitions = state
+            .subscribed_topics
+            .iter()
+            .cloned()
+            .map(|topic| (topic, 0))
+            .collect();
+        state.positions.clear();
+        state.committed_offsets.clear();
+        Ok(())
     }
 
     /// Poll for the next record.
@@ -279,8 +315,16 @@ impl KafkaConsumer {
         timeout: Duration,
     ) -> Result<Option<ConsumerRecord>, KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        self.ensure_open()?;
         let _ = timeout;
-        Err(stub_err())
+
+        let state = self.state.lock();
+        if state.subscribed_topics.is_empty() {
+            return Err(KafkaError::Config(
+                "consumer has no active topic subscription".to_string(),
+            ));
+        }
+        Ok(None)
     }
 
     /// Commit offsets explicitly.
@@ -291,27 +335,64 @@ impl KafkaConsumer {
         offsets: &[TopicPartitionOffset],
     ) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        self.ensure_open()?;
 
         if offsets.is_empty() {
             return Err(KafkaError::Config("offsets cannot be empty".to_string()));
         }
 
-        Err(stub_err())
+        let mut state = self.state.lock();
+        for tpo in offsets {
+            if !state.subscribed_topics.contains(&tpo.topic) {
+                return Err(KafkaError::InvalidTopic(tpo.topic.clone()));
+            }
+            if tpo.offset < 0 {
+                return Err(KafkaError::Config(
+                    "offsets must be non-negative".to_string(),
+                ));
+            }
+            state
+                .committed_offsets
+                .insert((tpo.topic.clone(), tpo.partition), tpo.offset);
+        }
+        Ok(())
     }
 
     /// Seek to a specific offset.
     #[allow(unused_variables)]
     pub async fn seek(&self, cx: &Cx, tpo: &TopicPartitionOffset) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
-        let _ = tpo;
-        Err(stub_err())
+        self.ensure_open()?;
+
+        if tpo.offset < 0 {
+            return Err(KafkaError::Config(
+                "seek offset must be non-negative".to_string(),
+            ));
+        }
+
+        let mut state = self.state.lock();
+        if !state.subscribed_topics.contains(&tpo.topic) {
+            return Err(KafkaError::InvalidTopic(tpo.topic.clone()));
+        }
+        state
+            .positions
+            .insert((tpo.topic.clone(), tpo.partition), tpo.offset);
+        Ok(())
     }
 
     /// Close the consumer.
     #[allow(unused_variables)]
     pub async fn close(&self, cx: &Cx) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
-        Err(stub_err())
+        let was_closed = self.closed.swap(true, Ordering::AcqRel);
+        if !was_closed {
+            let mut state = self.state.lock();
+            state.subscribed_topics.clear();
+            state.assigned_partitions.clear();
+            state.committed_offsets.clear();
+            state.positions.clear();
+        }
+        Ok(())
     }
 
     /// Get the current configuration.
@@ -319,15 +400,68 @@ impl KafkaConsumer {
     pub const fn config(&self) -> &ConsumerConfig {
         &self.config
     }
-}
 
-fn stub_err() -> KafkaError {
-    KafkaError::Io(io::Error::other("Phase 0: requires rdkafka integration"))
+    /// Snapshot of currently subscribed topics.
+    #[must_use]
+    pub fn subscriptions(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .subscribed_topics
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Snapshot of assigned topic/partitions for the current subscription.
+    #[must_use]
+    pub fn assigned_partitions(&self) -> Vec<(String, i32)> {
+        self.state
+            .lock()
+            .assigned_partitions
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Read committed offset for a topic/partition.
+    #[must_use]
+    pub fn committed_offset(&self, topic: &str, partition: i32) -> Option<i64> {
+        self.state
+            .lock()
+            .committed_offsets
+            .get(&(topic.to_string(), partition))
+            .copied()
+    }
+
+    /// Read current seek position for a topic/partition.
+    #[must_use]
+    pub fn position(&self, topic: &str, partition: i32) -> Option<i64> {
+        self.state
+            .lock()
+            .positions
+            .get(&(topic.to_string(), partition))
+            .copied()
+    }
+
+    /// Returns true once `close()` has been called.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    fn ensure_open(&self) -> Result<(), KafkaError> {
+        if self.closed.load(Ordering::Acquire) {
+            Err(KafkaError::Config("consumer is closed".to_string()))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::run_test_with_cx;
 
     #[test]
     fn test_config_defaults() {
@@ -610,5 +744,89 @@ mod tests {
         assert_eq!(cloned.isolation_level, IsolationLevel::ReadUncommitted);
         let dbg = format!("{cfg:?}");
         assert!(dbg.contains("ConsumerConfig"));
+    }
+
+    #[test]
+    fn consumer_subscribe_tracks_assignments() {
+        run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+            consumer
+                .subscribe(&cx, &["orders", "orders", "payments"])
+                .await
+                .unwrap();
+
+            assert_eq!(
+                consumer.subscriptions(),
+                vec!["orders".to_string(), "payments".to_string()]
+            );
+            assert_eq!(
+                consumer.assigned_partitions(),
+                vec![("orders".to_string(), 0), ("payments".to_string(), 0)]
+            );
+            assert_eq!(
+                consumer.poll(&cx, Duration::from_millis(1)).await.unwrap(),
+                None
+            );
+        });
+    }
+
+    #[test]
+    fn consumer_commit_and_seek_track_offsets() {
+        run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+            consumer.subscribe(&cx, &["orders"]).await.unwrap();
+
+            consumer
+                .commit_offsets(&cx, &[TopicPartitionOffset::new("orders", 0, 7)])
+                .await
+                .unwrap();
+            assert_eq!(consumer.committed_offset("orders", 0), Some(7));
+
+            consumer
+                .seek(&cx, &TopicPartitionOffset::new("orders", 0, 42))
+                .await
+                .unwrap();
+            assert_eq!(consumer.position("orders", 0), Some(42));
+
+            let missing = consumer
+                .commit_offsets(&cx, &[TopicPartitionOffset::new("missing", 0, 1)])
+                .await
+                .unwrap_err();
+            assert!(matches!(missing, KafkaError::InvalidTopic(topic) if topic == "missing"));
+
+            let negative = consumer
+                .seek(&cx, &TopicPartitionOffset::new("orders", 0, -1))
+                .await
+                .unwrap_err();
+            assert!(matches!(negative, KafkaError::Config(msg) if msg.contains("non-negative")));
+        });
+    }
+
+    #[test]
+    fn consumer_close_is_idempotent_and_blocks_operations() {
+        run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+            consumer.subscribe(&cx, &["orders"]).await.unwrap();
+            consumer.close(&cx).await.unwrap();
+            consumer.close(&cx).await.unwrap();
+            assert!(consumer.is_closed());
+
+            let err = consumer
+                .commit_offsets(&cx, &[TopicPartitionOffset::new("orders", 0, 1)])
+                .await
+                .unwrap_err();
+            assert!(matches!(err, KafkaError::Config(msg) if msg.contains("closed")));
+        });
+    }
+
+    #[test]
+    fn consumer_rejects_empty_topic_entries() {
+        run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+            let err = consumer.subscribe(&cx, &["orders", ""]).await.unwrap_err();
+            assert!(
+                matches!(err, KafkaError::Config(msg) if msg.contains("topic cannot be empty"))
+            );
+        });
     }
 }

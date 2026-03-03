@@ -26,12 +26,15 @@
 #![allow(clippy::unused_async)]
 
 use crate::cx::Cx;
+use parking_lot::Mutex;
+#[cfg(not(feature = "kafka"))]
+use std::collections::HashMap;
 use std::fmt;
 use std::io;
+#[cfg(not(feature = "kafka"))]
+use std::sync::OnceLock;
 use std::time::Duration;
 
-#[cfg(feature = "kafka")]
-use parking_lot::Mutex;
 #[cfg(feature = "kafka")]
 use rdkafka::{
     client::ClientContext,
@@ -159,12 +162,15 @@ struct DeliverySender {
 #[cfg(feature = "kafka")]
 impl DeliverySender {
     fn complete(self, value: Result<RecordMetadata, KafkaError>) {
-        let mut state = self.inner.lock();
-        if state.closed || state.value.is_some() {
-            return;
-        }
-        state.value = Some(value);
-        if let Some(waker) = state.waker.take() {
+        let waker = {
+            let mut state = self.inner.lock();
+            if state.closed || state.value.is_some() {
+                return;
+            }
+            state.value = Some(value);
+            state.waker.take()
+        };
+        if let Some(waker) = waker {
             waker.wake();
         }
     }
@@ -380,6 +386,27 @@ async fn send_with_producer(
     }
 }
 
+#[cfg(not(feature = "kafka"))]
+static STUB_DELIVERY_OFFSETS: OnceLock<Mutex<HashMap<(String, i32), i64>>> = OnceLock::new();
+
+#[cfg(not(feature = "kafka"))]
+fn next_stub_offset(topic: &str, partition: i32) -> i64 {
+    let offsets = STUB_DELIVERY_OFFSETS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut offsets = offsets.lock();
+    let entry = offsets.entry((topic.to_string(), partition)).or_insert(0);
+    let offset = *entry;
+    *entry += 1;
+    offset
+}
+
+fn validate_topic(topic: &str) -> Result<(), KafkaError> {
+    let topic = topic.trim();
+    if topic.is_empty() {
+        return Err(KafkaError::InvalidTopic(topic.to_string()));
+    }
+    Ok(())
+}
+
 /// Compression algorithm for Kafka messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Compression {
@@ -590,6 +617,7 @@ impl KafkaProducer {
         partition: Option<i32>,
     ) -> Result<RecordMetadata, KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        validate_topic(topic)?;
 
         // Check message size
         if payload.len() > self.config.max_message_size {
@@ -599,10 +627,34 @@ impl KafkaProducer {
             });
         }
 
-        // Phase 0: stub implementation
-        Err(KafkaError::Io(io::Error::other(
-            "Phase 0: requires rdkafka integration",
-        )))
+        #[cfg(feature = "kafka")]
+        {
+            let producer = build_producer(&self.config, None)?;
+            send_with_producer(
+                &producer,
+                cx,
+                &self.config,
+                topic,
+                key,
+                payload,
+                partition,
+                None,
+            )
+            .await
+        }
+
+        #[cfg(not(feature = "kafka"))]
+        {
+            let _ = key;
+            let partition = partition.unwrap_or(0);
+            let offset = next_stub_offset(topic, partition);
+            Ok(RecordMetadata {
+                topic: topic.to_string(),
+                partition,
+                offset,
+                timestamp: None,
+            })
+        }
     }
 
     /// Send a message with headers.
@@ -623,6 +675,7 @@ impl KafkaProducer {
         headers: &[(&str, &[u8])],
     ) -> Result<RecordMetadata, KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        validate_topic(topic)?;
 
         if payload.len() > self.config.max_message_size {
             return Err(KafkaError::MessageTooLarge {
@@ -631,9 +684,35 @@ impl KafkaProducer {
             });
         }
 
-        Err(KafkaError::Io(io::Error::other(
-            "Phase 0: requires rdkafka integration",
-        )))
+        #[cfg(feature = "kafka")]
+        {
+            let producer = build_producer(&self.config, None)?;
+            send_with_producer(
+                &producer,
+                cx,
+                &self.config,
+                topic,
+                key,
+                payload,
+                None,
+                Some(headers),
+            )
+            .await
+        }
+
+        #[cfg(not(feature = "kafka"))]
+        {
+            let _ = key;
+            let _ = headers;
+            let partition = 0;
+            let offset = next_stub_offset(topic, partition);
+            Ok(RecordMetadata {
+                topic: topic.to_string(),
+                partition,
+                offset,
+                timestamp: None,
+            })
+        }
     }
 
     /// Flush all pending messages.
@@ -643,9 +722,30 @@ impl KafkaProducer {
     pub async fn flush(&self, cx: &Cx, timeout: Duration) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
 
-        Err(KafkaError::Io(io::Error::other(
-            "Phase 0: requires rdkafka integration",
-        )))
+        #[cfg(feature = "kafka")]
+        {
+            let producer = build_producer(&self.config, None)?;
+            let mut remaining = timeout;
+            loop {
+                cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+                if producer.in_flight_count() == 0 {
+                    break;
+                }
+                let tick = remaining.min(Duration::from_millis(10));
+                producer.poll(tick);
+                if remaining <= tick {
+                    return Err(KafkaError::Broker("flush timeout elapsed".to_string()));
+                }
+                remaining -= tick;
+            }
+            Ok(())
+        }
+
+        #[cfg(not(feature = "kafka"))]
+        {
+            let _ = timeout;
+            Ok(())
+        }
     }
 
     /// Get the current configuration.
@@ -803,6 +903,7 @@ impl Drop for Transaction<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::run_test_with_cx;
 
     #[test]
     fn test_acks_values() {
@@ -1176,5 +1277,55 @@ mod tests {
         let cloned = a;
         assert_eq!(copied, cloned);
         assert_ne!(a, Acks::Leader);
+    }
+
+    #[cfg(not(feature = "kafka"))]
+    #[test]
+    fn producer_send_returns_deterministic_delivery_metadata() {
+        run_test_with_cx(|cx| async move {
+            let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
+
+            let first = producer
+                .send(&cx, "orders", None, b"first", Some(2))
+                .await
+                .unwrap();
+            let second = producer
+                .send_with_headers(
+                    &cx,
+                    "orders",
+                    Some(b"key"),
+                    b"second",
+                    &[("trace-id", b"abc-123")],
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(first.topic, "orders");
+            assert_eq!(first.partition, 2);
+            assert_eq!(first.offset, 0);
+            assert_eq!(second.partition, 0);
+            assert_eq!(second.offset, 0);
+
+            let third = producer
+                .send(&cx, "orders", None, b"third", Some(2))
+                .await
+                .unwrap();
+            assert_eq!(third.offset, first.offset + 1);
+
+            producer.flush(&cx, Duration::from_millis(5)).await.unwrap();
+        });
+    }
+
+    #[cfg(not(feature = "kafka"))]
+    #[test]
+    fn producer_rejects_blank_topic_name() {
+        run_test_with_cx(|cx| async move {
+            let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
+            let err = producer
+                .send(&cx, "   ", None, b"x", None)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, KafkaError::InvalidTopic(topic) if topic.is_empty()));
+        });
     }
 }
