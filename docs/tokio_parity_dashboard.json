@@ -1,0 +1,1765 @@
+{
+  "schema_version": "tokio-parity-dashboard-v1",
+  "bead_id": "asupersync-2oh2u.1.4.1",
+  "program_id": "asupersync-2oh2u",
+  "generated_at": "2026-03-03T19:37:18Z",
+  "generated_by": "scripts/generate_tokio_parity_dashboard.py",
+  "inputs": {
+    "issues_path": ".beads/issues.jsonl",
+    "inventory_doc_path": "docs/tokio_ecosystem_capability_inventory.md",
+    "issues_sha256": "21bc960c6b01c44a3238298435831ce296ba4b92d7fec067dc66a17add60153d",
+    "inventory_sha256": "90304b9a5e876e8ecf9ce1dd7d8b43d4dcd71670e2d26b15368ee9a0daa69ead"
+  },
+  "summary": {
+    "program_id": "asupersync-2oh2u",
+    "program_issue_count": 124,
+    "status_counts": {
+      "open": 80,
+      "in_progress": 8,
+      "closed": 36,
+      "other": 0
+    },
+    "track_count": 9,
+    "capability_family_count": 28,
+    "capability_parity_counts": {
+      "complete": 8,
+      "active": 16,
+      "partial": 3,
+      "adapter": 1
+    },
+    "unresolved_blocker_count": 59
+  },
+  "tracks": [
+    {
+      "track": "T1",
+      "name": "Definition-of-Done baseline",
+      "root_bead_id": "asupersync-2oh2u.1",
+      "root_status": "open",
+      "root_title": "[TOKIO-REPLACE][T1] Replacement Definition-of-Done and Gap Baseline",
+      "children_total": 20,
+      "children_closed": 17,
+      "children_in_progress": 2,
+      "children_open": 1,
+      "completion_ratio": 0.85,
+      "evidence": {
+        "required_count": 9,
+        "present_count": 9,
+        "completeness_ratio": 1.0,
+        "artifacts": [
+          {
+            "path": "docs/tokio_ecosystem_capability_inventory.md",
+            "exists": true,
+            "sha256": "90304b9a5e876e8ecf9ce1dd7d8b43d4dcd71670e2d26b15368ee9a0daa69ead"
+          },
+          {
+            "path": "docs/tokio_capability_evidence_map.md",
+            "exists": true,
+            "sha256": "b1d30c3988201b86e4c264135e78929d065169b9acb9ed9ccc9cb68184c6d09b"
+          },
+          {
+            "path": "docs/tokio_capability_risk_register.md",
+            "exists": true,
+            "sha256": "55e73155a02f2e78edda81c86f0abfff4af2a4ed1eb9e11a5498ad4d5395cd3a"
+          },
+          {
+            "path": "docs/tokio_gap_scoring_rubric.md",
+            "exists": true,
+            "sha256": "245660da90521a33fea5b28dce2e967319e9d37f261266424916054df7bdaa2c"
+          },
+          {
+            "path": "docs/tokio_gap_wave_classification.md",
+            "exists": true,
+            "sha256": "1e3845ea9215718a48448a0469fa30174c33650ef56b14b9b5cd911c7f2df826"
+          },
+          {
+            "path": "docs/tokio_functional_parity_contract.md",
+            "exists": true,
+            "sha256": "f6ce98084e01bfab4053e21f6e37e122e45dc8b948483402f08f9e8302e98ff0"
+          },
+          {
+            "path": "docs/tokio_nonfunctional_closure_criteria.md",
+            "exists": true,
+            "sha256": "a9923decc6404563a1e27e09f5172a43bd741017ea357de1c052731b5ce395d2"
+          },
+          {
+            "path": "docs/tokio_evidence_checklist.md",
+            "exists": true,
+            "sha256": "b4bb93e5b7660efa5b15019894fd571de6a88534e1dae31784ef56f9d2b4753d"
+          },
+          {
+            "path": "docs/tokio_replacement_roadmap.md",
+            "exists": true,
+            "sha256": "747a5bb91a4095d13ae2f706ec3483322eb34e37616f518f260a1049f34954ee"
+          }
+        ]
+      },
+      "unresolved_blocker_count": 0,
+      "top_blocker_chain": null
+    },
+    {
+      "track": "T2",
+      "name": "I/O and tokio-util",
+      "root_bead_id": "asupersync-2oh2u.2",
+      "root_status": "open",
+      "root_title": "[TOKIO-REPLACE][T2] Async IO, tokio-util, and trait-surface parity",
+      "children_total": 10,
+      "children_closed": 3,
+      "children_in_progress": 2,
+      "children_open": 5,
+      "completion_ratio": 0.3,
+      "evidence": {
+        "required_count": 2,
+        "present_count": 2,
+        "completeness_ratio": 1.0,
+        "artifacts": [
+          {
+            "path": "docs/tokio_io_parity_audit.md",
+            "exists": true,
+            "sha256": "3411d32eeb675c6c503ed57f006204af8bf249534c7bc91b9a20434f513713df"
+          },
+          {
+            "path": "tests/tokio_io_parity_audit.rs",
+            "exists": true,
+            "sha256": "f2ca75f46f7774b80b59d9652bdf97ae5ce5eea1c7ef27710176d28deecfdbd7"
+          }
+        ]
+      },
+      "unresolved_blocker_count": 5,
+      "top_blocker_chain": {
+        "issue_id": "asupersync-2oh2u.2.10",
+        "status": "open",
+        "chain": [
+          "asupersync-2oh2u.2.10",
+          "asupersync-2oh2u.2.8",
+          "asupersync-2oh2u.2.5",
+          "asupersync-2oh2u.2.3"
+        ],
+        "cycle_detected": false
+      }
+    },
+    {
+      "track": "T3",
+      "name": "Filesystem/process/signal",
+      "root_bead_id": "asupersync-2oh2u.3",
+      "root_status": "open",
+      "root_title": "[TOKIO-REPLACE][T3] Filesystem, process, and signal parity hardening",
+      "children_total": 10,
+      "children_closed": 3,
+      "children_in_progress": 1,
+      "children_open": 6,
+      "completion_ratio": 0.3,
+      "evidence": {
+        "required_count": 3,
+        "present_count": 3,
+        "completeness_ratio": 1.0,
+        "artifacts": [
+          {
+            "path": "docs/tokio_fs_process_signal_parity_matrix.md",
+            "exists": true,
+            "sha256": "0ae7cee78a1436489adf7f599794b274ddda591c18a54f1231af980c5f11601d"
+          },
+          {
+            "path": "docs/tokio_fs_process_signal_parity_matrix.json",
+            "exists": true,
+            "sha256": "50127b51ece7429000986a5f5cba7f9a00421862fe0dc267b3a6f0729e0d9ca6"
+          },
+          {
+            "path": "tests/tokio_fs_process_signal_parity_matrix.rs",
+            "exists": true,
+            "sha256": "3be7171c24fac0508121fae976e281765a4fcde2a23ebdcde3cda17f9849bc57"
+          }
+        ]
+      },
+      "unresolved_blocker_count": 5,
+      "top_blocker_chain": {
+        "issue_id": "asupersync-2oh2u.3.10",
+        "status": "open",
+        "chain": [
+          "asupersync-2oh2u.3.10",
+          "asupersync-2oh2u.3.9",
+          "asupersync-2oh2u.3.3"
+        ],
+        "cycle_detected": false
+      }
+    },
+    {
+      "track": "T4",
+      "name": "QUIC and HTTP/3",
+      "root_bead_id": "asupersync-2oh2u.4",
+      "root_status": "open",
+      "root_title": "[TOKIO-REPLACE][T4] QUIC, HTTP3, and advanced networking closure",
+      "children_total": 11,
+      "children_closed": 0,
+      "children_in_progress": 1,
+      "children_open": 10,
+      "completion_ratio": 0.0,
+      "evidence": {
+        "required_count": 0,
+        "present_count": 0,
+        "completeness_ratio": 1.0,
+        "artifacts": []
+      },
+      "unresolved_blocker_count": 10,
+      "top_blocker_chain": {
+        "issue_id": "asupersync-2oh2u.4.10",
+        "status": "open",
+        "chain": [
+          "asupersync-2oh2u.4.10",
+          "asupersync-2oh2u.4.2",
+          "asupersync-2oh2u.4.1"
+        ],
+        "cycle_detected": false
+      }
+    },
+    {
+      "track": "T5",
+      "name": "Web, middleware, gRPC",
+      "root_bead_id": "asupersync-2oh2u.5",
+      "root_status": "open",
+      "root_title": "[TOKIO-REPLACE][T5] Web framework + middleware + gRPC parity",
+      "children_total": 12,
+      "children_closed": 2,
+      "children_in_progress": 0,
+      "children_open": 10,
+      "completion_ratio": 0.1667,
+      "evidence": {
+        "required_count": 2,
+        "present_count": 2,
+        "completeness_ratio": 1.0,
+        "artifacts": [
+          {
+            "path": "docs/tokio_web_grpc_parity_map.md",
+            "exists": true,
+            "sha256": "ae64959fdd8fc993c17dbfab0ce7e2073b91b786fd154104194d486c15ff7189"
+          },
+          {
+            "path": "tests/tokio_web_grpc_parity_map.rs",
+            "exists": true,
+            "sha256": "e330e600cc01d1723327488e2cebe59e99edd502c32a41fa71a3f57cade49cc8"
+          }
+        ]
+      },
+      "unresolved_blocker_count": 8,
+      "top_blocker_chain": {
+        "issue_id": "asupersync-2oh2u.5.10",
+        "status": "open",
+        "chain": [
+          "asupersync-2oh2u.5.10",
+          "asupersync-2oh2u.5.11",
+          "asupersync-2oh2u.5.3"
+        ],
+        "cycle_detected": false
+      }
+    },
+    {
+      "track": "T6",
+      "name": "Database and messaging",
+      "root_bead_id": "asupersync-2oh2u.6",
+      "root_status": "open",
+      "root_title": "[TOKIO-REPLACE][T6] Database and messaging ecosystem closure",
+      "children_total": 13,
+      "children_closed": 1,
+      "children_in_progress": 0,
+      "children_open": 12,
+      "completion_ratio": 0.0769,
+      "evidence": {
+        "required_count": 2,
+        "present_count": 2,
+        "completeness_ratio": 1.0,
+        "artifacts": [
+          {
+            "path": "docs/tokio_db_messaging_gap_baseline.md",
+            "exists": true,
+            "sha256": "886176967974a3d2bbb9cf642941d8adbb05bcef7756a667aca3b90a685ca071"
+          },
+          {
+            "path": "tests/tokio_db_messaging_gap_baseline.rs",
+            "exists": true,
+            "sha256": "ea73db543209732fc5160742d881d276745da4f1594b1e669a5d54d8cd6f50a6"
+          }
+        ]
+      },
+      "unresolved_blocker_count": 6,
+      "top_blocker_chain": {
+        "issue_id": "asupersync-2oh2u.6.10",
+        "status": "open",
+        "chain": [
+          "asupersync-2oh2u.6.10",
+          "asupersync-2oh2u.2.5",
+          "asupersync-2oh2u.2.3"
+        ],
+        "cycle_detected": false
+      }
+    },
+    {
+      "track": "T7",
+      "name": "Interop adapters",
+      "root_bead_id": "asupersync-2oh2u.7",
+      "root_status": "open",
+      "root_title": "[TOKIO-REPLACE][T7] Tokio-locked third-party crate interoperability",
+      "children_total": 11,
+      "children_closed": 3,
+      "children_in_progress": 1,
+      "children_open": 7,
+      "completion_ratio": 0.2727,
+      "evidence": {
+        "required_count": 2,
+        "present_count": 2,
+        "completeness_ratio": 1.0,
+        "artifacts": [
+          {
+            "path": "docs/tokio_interop_target_ranking.md",
+            "exists": true,
+            "sha256": "40df3e422321d5629691b72cb1824c6cb39dad00481db4731d8e8214784de2a0"
+          },
+          {
+            "path": "tests/tokio_interop_target_ranking.rs",
+            "exists": true,
+            "sha256": "e46ad63c4ca3a63d015593b5450b164257194a9e62c2bae4c38f5df366bc63f9"
+          }
+        ]
+      },
+      "unresolved_blocker_count": 7,
+      "top_blocker_chain": {
+        "issue_id": "asupersync-2oh2u.7.10",
+        "status": "open",
+        "chain": [
+          "asupersync-2oh2u.7.10",
+          "asupersync-2oh2u.7.4"
+        ],
+        "cycle_detected": false
+      }
+    },
+    {
+      "track": "T8",
+      "name": "Conformance and CI gates",
+      "root_bead_id": "asupersync-2oh2u.10",
+      "root_status": "open",
+      "root_title": "[TOKIO-REPLACE][T8] Determinism, conformance, and quality-gate expansion",
+      "children_total": 13,
+      "children_closed": 4,
+      "children_in_progress": 1,
+      "children_open": 8,
+      "completion_ratio": 0.3077,
+      "evidence": {
+        "required_count": 6,
+        "present_count": 6,
+        "completeness_ratio": 1.0,
+        "artifacts": [
+          {
+            "path": "docs/tokio_deterministic_lab_model_expansion.md",
+            "exists": true,
+            "sha256": "ac4f6cc1b63c835e2760266901c955a36a3b89a6a11663868588c92fc3350f96"
+          },
+          {
+            "path": "docs/tokio_executable_conformance_contracts.md",
+            "exists": true,
+            "sha256": "63ea6944e5148de4632618f2bbc2c1c7fbbdfc432f7995170caa46dcb6bab8ba"
+          },
+          {
+            "path": "docs/tokio_ci_quality_gate_enforcement.md",
+            "exists": true,
+            "sha256": "e2f19b04b7526e5581ffbd5f06b8ed74022e8cde6f39d761d8af5f329159966c"
+          },
+          {
+            "path": "tests/tokio_deterministic_lab_model_expansion.rs",
+            "exists": true,
+            "sha256": "1f57383491273f8efa51120eed06f41ff53258d90399087d94736252eed6371c"
+          },
+          {
+            "path": "tests/tokio_executable_conformance_contracts.rs",
+            "exists": true,
+            "sha256": "42178653b3103288949eceee0f8ccdde7fd2977b3376e993821372e422670e39"
+          },
+          {
+            "path": "tests/tokio_ci_quality_gate_enforcement.rs",
+            "exists": true,
+            "sha256": "ec46caa9014fb912cc8d8c4fb7c7f90d839bc47574ce0122775d87b33161d2a7"
+          }
+        ]
+      },
+      "unresolved_blocker_count": 7,
+      "top_blocker_chain": {
+        "issue_id": "asupersync-2oh2u.10.10",
+        "status": "open",
+        "chain": [
+          "asupersync-2oh2u.10.10",
+          "asupersync-2oh2u.11.11",
+          "asupersync-2oh2u.10.13",
+          "asupersync-2oh2u.10.12",
+          "asupersync-2oh2u.10.11",
+          "asupersync-2oh2u.2.9",
+          "asupersync-2oh2u.2.3"
+        ],
+        "cycle_detected": false
+      }
+    },
+    {
+      "track": "T9",
+      "name": "Migration and GA",
+      "root_bead_id": "asupersync-2oh2u.11",
+      "root_status": "open",
+      "root_title": "[TOKIO-REPLACE][T9] Migration DX, compatibility policy, and release program",
+      "children_total": 12,
+      "children_closed": 1,
+      "children_in_progress": 0,
+      "children_open": 11,
+      "completion_ratio": 0.0833,
+      "evidence": {
+        "required_count": 2,
+        "present_count": 2,
+        "completeness_ratio": 1.0,
+        "artifacts": [
+          {
+            "path": "docs/tokio_migration_strategy_decision_framework.md",
+            "exists": true,
+            "sha256": "87e953f69a1e26fa4f999ee12e11e2451a4ff62be678c0f79ca801eebe762741"
+          },
+          {
+            "path": "tests/tokio_migration_strategy_decision_framework.rs",
+            "exists": true,
+            "sha256": "c44a622b6ce0acdd42274e3d0f95e4cca92bcfb241652067bf3d7245f3fbb1f9"
+          }
+        ]
+      },
+      "unresolved_blocker_count": 11,
+      "top_blocker_chain": {
+        "issue_id": "asupersync-2oh2u.11.10",
+        "status": "open",
+        "chain": [
+          "asupersync-2oh2u.11.10",
+          "asupersync-2oh2u.10.12",
+          "asupersync-2oh2u.10.11",
+          "asupersync-2oh2u.2.9",
+          "asupersync-2oh2u.2.3"
+        ],
+        "cycle_detected": false
+      }
+    }
+  ],
+  "capability_families": [
+    {
+      "family_id": "F01",
+      "title": "Core Runtime and Task Execution",
+      "parity": "complete",
+      "maturity": "mature",
+      "determinism": "strong"
+    },
+    {
+      "family_id": "F02",
+      "title": "Structured Concurrency and Cancellation Protocol",
+      "parity": "complete",
+      "maturity": "mature",
+      "determinism": "strong"
+    },
+    {
+      "family_id": "F03",
+      "title": "Channels",
+      "parity": "complete",
+      "maturity": "mature",
+      "determinism": "strong"
+    },
+    {
+      "family_id": "F04",
+      "title": "Synchronization Primitives",
+      "parity": "complete",
+      "maturity": "mature",
+      "determinism": "strong"
+    },
+    {
+      "family_id": "F05",
+      "title": "Time and Timers",
+      "parity": "complete",
+      "maturity": "mature",
+      "determinism": "strong"
+    },
+    {
+      "family_id": "F06",
+      "title": "Async I/O Traits and Extensions",
+      "parity": "active",
+      "maturity": "active",
+      "determinism": "mixed"
+    },
+    {
+      "family_id": "F07",
+      "title": "Codec and Framing Layer",
+      "parity": "active",
+      "maturity": "active",
+      "determinism": "mixed"
+    },
+    {
+      "family_id": "F08",
+      "title": "Byte Buffers",
+      "parity": "complete",
+      "maturity": "mature",
+      "determinism": "n/a_(pure_data_structure)"
+    },
+    {
+      "family_id": "F09",
+      "title": "Reactor / I/O Event Backend",
+      "parity": "active",
+      "maturity": "active",
+      "determinism": "mixed"
+    },
+    {
+      "family_id": "F10",
+      "title": "TCP / UDP / Unix Sockets",
+      "parity": "active",
+      "maturity": "active",
+      "determinism": "mixed"
+    },
+    {
+      "family_id": "F11",
+      "title": "DNS Resolution",
+      "parity": "active",
+      "maturity": "active",
+      "determinism": "mixed"
+    },
+    {
+      "family_id": "F12",
+      "title": "TLS",
+      "parity": "active",
+      "maturity": "active",
+      "determinism": "mixed"
+    },
+    {
+      "family_id": "F13",
+      "title": "WebSocket",
+      "parity": "active",
+      "maturity": "active",
+      "determinism": "mixed"
+    },
+    {
+      "family_id": "F14",
+      "title": "HTTP/1.1 + HTTP/2",
+      "parity": "active",
+      "maturity": "active",
+      "determinism": "mixed"
+    },
+    {
+      "family_id": "F15",
+      "title": "QUIC + HTTP/3",
+      "parity": "partial",
+      "maturity": "active",
+      "determinism": "n/a"
+    },
+    {
+      "family_id": "F16",
+      "title": "Web Framework",
+      "parity": "active",
+      "maturity": "active",
+      "determinism": "mixed"
+    },
+    {
+      "family_id": "F17",
+      "title": "gRPC",
+      "parity": "active",
+      "maturity": "active",
+      "determinism": "mixed"
+    },
+    {
+      "family_id": "F18",
+      "title": "Database Clients",
+      "parity": "active",
+      "maturity": "active",
+      "determinism": "mixed"
+    },
+    {
+      "family_id": "F19",
+      "title": "Messaging Clients",
+      "parity": "partial",
+      "maturity": "early",
+      "determinism": "mixed"
+    },
+    {
+      "family_id": "F20",
+      "title": "Service / Middleware Stack",
+      "parity": "active",
+      "maturity": "active",
+      "determinism": "strong_(lab-compatible)"
+    },
+    {
+      "family_id": "F21",
+      "title": "Filesystem APIs",
+      "parity": "partial",
+      "maturity": "early",
+      "determinism": "mixed"
+    },
+    {
+      "family_id": "F22",
+      "title": "Process Management",
+      "parity": "active",
+      "maturity": "active",
+      "determinism": "mixed"
+    },
+    {
+      "family_id": "F23",
+      "title": "Signals",
+      "parity": "active",
+      "maturity": "active",
+      "determinism": "mixed"
+    },
+    {
+      "family_id": "F24",
+      "title": "Streams and Adapters",
+      "parity": "active",
+      "maturity": "active",
+      "determinism": "strong_(lab-compatible)"
+    },
+    {
+      "family_id": "F25",
+      "title": "Observability",
+      "parity": "active",
+      "maturity": "active",
+      "determinism": "mixed"
+    },
+    {
+      "family_id": "F26",
+      "title": "Deterministic Concurrency Testing",
+      "parity": "complete",
+      "maturity": "mature",
+      "determinism": "strong_(this_is_the_determinism_layer)"
+    },
+    {
+      "family_id": "F27",
+      "title": "Resilience Combinators",
+      "parity": "complete",
+      "maturity": "active",
+      "determinism": "strong_(lab-compatible)"
+    },
+    {
+      "family_id": "F28",
+      "title": "Tokio-Locked Third-Party Crate Interoperability",
+      "parity": "adapter",
+      "maturity": "n/a",
+      "determinism": "n/a"
+    }
+  ],
+  "blocker_chains": [
+    {
+      "issue_id": "asupersync-2oh2u.11.9",
+      "title": "[T9.9] Execute GA readiness checklist and launch review",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.10.9",
+        "asupersync-2oh2u.11.10",
+        "asupersync-2oh2u.11.8"
+      ],
+      "chain": [
+        "asupersync-2oh2u.11.9",
+        "asupersync-2oh2u.10.9",
+        "asupersync-2oh2u.10.10",
+        "asupersync-2oh2u.11.11",
+        "asupersync-2oh2u.10.13",
+        "asupersync-2oh2u.10.12",
+        "asupersync-2oh2u.10.11",
+        "asupersync-2oh2u.2.9",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 9,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.10.9",
+      "title": "[T8.9] Build final replacement-readiness gate aggregator",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.10.10",
+        "asupersync-2oh2u.10.11",
+        "asupersync-2oh2u.10.12",
+        "asupersync-2oh2u.10.13",
+        "asupersync-2oh2u.10.7",
+        "asupersync-2oh2u.10.8",
+        "asupersync-2oh2u.11.10",
+        "asupersync-2oh2u.2.7",
+        "asupersync-2oh2u.2.8",
+        "asupersync-2oh2u.3.8",
+        "asupersync-2oh2u.4.9",
+        "asupersync-2oh2u.5.10",
+        "asupersync-2oh2u.6.11",
+        "asupersync-2oh2u.7.9"
+      ],
+      "chain": [
+        "asupersync-2oh2u.10.9",
+        "asupersync-2oh2u.10.10",
+        "asupersync-2oh2u.11.11",
+        "asupersync-2oh2u.10.13",
+        "asupersync-2oh2u.10.12",
+        "asupersync-2oh2u.10.11",
+        "asupersync-2oh2u.2.9",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 8,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.11.12",
+      "title": "[T9.12] Operator enablement pack: incident drills, runbooks, and support decision trees",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.10.10",
+        "asupersync-2oh2u.11.10",
+        "asupersync-2oh2u.11.11",
+        "asupersync-2oh2u.11.7"
+      ],
+      "chain": [
+        "asupersync-2oh2u.11.12",
+        "asupersync-2oh2u.10.10",
+        "asupersync-2oh2u.11.11",
+        "asupersync-2oh2u.10.13",
+        "asupersync-2oh2u.10.12",
+        "asupersync-2oh2u.10.11",
+        "asupersync-2oh2u.2.9",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 8,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.11.5",
+      "title": "[T9.5] Define release channels and stabilization policy for replacement surfaces",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.10.10",
+        "asupersync-2oh2u.10.9",
+        "asupersync-2oh2u.11.10",
+        "asupersync-2oh2u.11.3"
+      ],
+      "chain": [
+        "asupersync-2oh2u.11.5",
+        "asupersync-2oh2u.10.10",
+        "asupersync-2oh2u.11.11",
+        "asupersync-2oh2u.10.13",
+        "asupersync-2oh2u.10.12",
+        "asupersync-2oh2u.10.11",
+        "asupersync-2oh2u.2.9",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 8,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.11.7",
+      "title": "[T9.7] Run external validation and publish comparative benchmark/evidence packs",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.10.10",
+        "asupersync-2oh2u.10.12",
+        "asupersync-2oh2u.10.13",
+        "asupersync-2oh2u.11.10",
+        "asupersync-2oh2u.11.4",
+        "asupersync-2oh2u.11.5"
+      ],
+      "chain": [
+        "asupersync-2oh2u.11.7",
+        "asupersync-2oh2u.10.10",
+        "asupersync-2oh2u.11.11",
+        "asupersync-2oh2u.10.13",
+        "asupersync-2oh2u.10.12",
+        "asupersync-2oh2u.10.11",
+        "asupersync-2oh2u.2.9",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 8,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.11.8",
+      "title": "[T9.8] Author final replacement claim RFC and sign-off record",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.10.10",
+        "asupersync-2oh2u.10.9",
+        "asupersync-2oh2u.11.11",
+        "asupersync-2oh2u.11.12",
+        "asupersync-2oh2u.11.6",
+        "asupersync-2oh2u.11.7"
+      ],
+      "chain": [
+        "asupersync-2oh2u.11.8",
+        "asupersync-2oh2u.10.10",
+        "asupersync-2oh2u.11.11",
+        "asupersync-2oh2u.10.13",
+        "asupersync-2oh2u.10.12",
+        "asupersync-2oh2u.10.11",
+        "asupersync-2oh2u.2.9",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 8,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.10.10",
+      "title": "[T8.10] Publish incident-response and rollback playbooks for replacement features",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.11.11"
+      ],
+      "chain": [
+        "asupersync-2oh2u.10.10",
+        "asupersync-2oh2u.11.11",
+        "asupersync-2oh2u.10.13",
+        "asupersync-2oh2u.10.12",
+        "asupersync-2oh2u.10.11",
+        "asupersync-2oh2u.2.9",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 7,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.7.9",
+      "title": "[T7.9] Publish support matrix and long-term interop policy",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.7.8"
+      ],
+      "chain": [
+        "asupersync-2oh2u.7.9",
+        "asupersync-2oh2u.7.8",
+        "asupersync-2oh2u.7.7",
+        "asupersync-2oh2u.7.5",
+        "asupersync-2oh2u.5.7",
+        "asupersync-2oh2u.5.6",
+        "asupersync-2oh2u.2.4"
+      ],
+      "chain_length": 7,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.11.11",
+      "title": "[T9.11] Diagnostics and error-message UX hardening from real migration failures",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.10.13",
+        "asupersync-2oh2u.11.10"
+      ],
+      "chain": [
+        "asupersync-2oh2u.11.11",
+        "asupersync-2oh2u.10.13",
+        "asupersync-2oh2u.10.12",
+        "asupersync-2oh2u.10.11",
+        "asupersync-2oh2u.2.9",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 6,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.11.2",
+      "title": "[T9.2] Publish domain-specific migration cookbooks across all capability tracks",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.10.13",
+        "asupersync-2oh2u.2.10",
+        "asupersync-2oh2u.2.7",
+        "asupersync-2oh2u.3.10",
+        "asupersync-2oh2u.3.8",
+        "asupersync-2oh2u.4.11",
+        "asupersync-2oh2u.4.9",
+        "asupersync-2oh2u.5.10",
+        "asupersync-2oh2u.5.12",
+        "asupersync-2oh2u.6.11",
+        "asupersync-2oh2u.6.13",
+        "asupersync-2oh2u.7.11",
+        "asupersync-2oh2u.7.9"
+      ],
+      "chain": [
+        "asupersync-2oh2u.11.2",
+        "asupersync-2oh2u.10.13",
+        "asupersync-2oh2u.10.12",
+        "asupersync-2oh2u.10.11",
+        "asupersync-2oh2u.2.9",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 6,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.11.3",
+      "title": "[T9.3] Publish compatibility and limitation matrix with rationale",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.11.10",
+        "asupersync-2oh2u.11.2"
+      ],
+      "chain": [
+        "asupersync-2oh2u.11.3",
+        "asupersync-2oh2u.11.10",
+        "asupersync-2oh2u.10.12",
+        "asupersync-2oh2u.10.11",
+        "asupersync-2oh2u.2.9",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 6,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.11.6",
+      "title": "[T9.6] Define compatibility governance and deprecation policy",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.11.10",
+        "asupersync-2oh2u.11.5"
+      ],
+      "chain": [
+        "asupersync-2oh2u.11.6",
+        "asupersync-2oh2u.11.10",
+        "asupersync-2oh2u.10.12",
+        "asupersync-2oh2u.10.11",
+        "asupersync-2oh2u.2.9",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 6,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.7.8",
+      "title": "[T7.8] Establish adapter performance and correctness budgets",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.7.7"
+      ],
+      "chain": [
+        "asupersync-2oh2u.7.8",
+        "asupersync-2oh2u.7.7",
+        "asupersync-2oh2u.7.5",
+        "asupersync-2oh2u.5.7",
+        "asupersync-2oh2u.5.6",
+        "asupersync-2oh2u.2.4"
+      ],
+      "chain_length": 6,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.10.13",
+      "title": "[T8.13] Golden log corpus and schema-evolution regression harness",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.10.12"
+      ],
+      "chain": [
+        "asupersync-2oh2u.10.13",
+        "asupersync-2oh2u.10.12",
+        "asupersync-2oh2u.10.11",
+        "asupersync-2oh2u.2.9",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 5,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.11.10",
+      "title": "[T9.10] User-journey migration labs with friction KPIs and success thresholds",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.10.12",
+        "asupersync-2oh2u.11.2"
+      ],
+      "chain": [
+        "asupersync-2oh2u.11.10",
+        "asupersync-2oh2u.10.12",
+        "asupersync-2oh2u.10.11",
+        "asupersync-2oh2u.2.9",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 5,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.11.4",
+      "title": "[T9.4] Deliver production-grade reference applications and templates",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.10.12",
+        "asupersync-2oh2u.10.13",
+        "asupersync-2oh2u.11.2"
+      ],
+      "chain": [
+        "asupersync-2oh2u.11.4",
+        "asupersync-2oh2u.10.12",
+        "asupersync-2oh2u.10.11",
+        "asupersync-2oh2u.2.9",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 5,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.2.7",
+      "title": "[T2.7] Publish direct migration patterns for I/O and codec APIs",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.2.10",
+        "asupersync-2oh2u.2.5",
+        "asupersync-2oh2u.2.8",
+        "asupersync-2oh2u.2.9"
+      ],
+      "chain": [
+        "asupersync-2oh2u.2.7",
+        "asupersync-2oh2u.2.10",
+        "asupersync-2oh2u.2.8",
+        "asupersync-2oh2u.2.5",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 5,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.4.7",
+      "title": "[T4.7] Add long-haul soak and adversarial network simulations",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.4.6"
+      ],
+      "chain": [
+        "asupersync-2oh2u.4.7",
+        "asupersync-2oh2u.4.6",
+        "asupersync-2oh2u.4.5",
+        "asupersync-2oh2u.4.2",
+        "asupersync-2oh2u.4.1"
+      ],
+      "chain_length": 5,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.6.13",
+      "title": "[T6.13] Build end-to-end data-path scripts with detailed reliability logging",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.6.12"
+      ],
+      "chain": [
+        "asupersync-2oh2u.6.13",
+        "asupersync-2oh2u.6.12",
+        "asupersync-2oh2u.6.10",
+        "asupersync-2oh2u.2.5",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 5,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.7.7",
+      "title": "[T7.7] Build interop conformance suites against prioritized third-party crates",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.7.5",
+        "asupersync-2oh2u.7.6"
+      ],
+      "chain": [
+        "asupersync-2oh2u.7.7",
+        "asupersync-2oh2u.7.5",
+        "asupersync-2oh2u.5.7",
+        "asupersync-2oh2u.5.6",
+        "asupersync-2oh2u.2.4"
+      ],
+      "chain_length": 5,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.10.12",
+      "title": "[T8.12] Enforce cross-track e2e logging schema, redaction, and log-quality gates",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.10.11",
+        "asupersync-2oh2u.2.10",
+        "asupersync-2oh2u.3.10",
+        "asupersync-2oh2u.4.11",
+        "asupersync-2oh2u.5.12",
+        "asupersync-2oh2u.6.13",
+        "asupersync-2oh2u.7.11"
+      ],
+      "chain": [
+        "asupersync-2oh2u.10.12",
+        "asupersync-2oh2u.10.11",
+        "asupersync-2oh2u.2.9",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 4,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.2.10",
+      "title": "[T2.10] Build end-to-end I/O protocol scripts with structured detailed logging",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.2.8",
+        "asupersync-2oh2u.2.9"
+      ],
+      "chain": [
+        "asupersync-2oh2u.2.10",
+        "asupersync-2oh2u.2.8",
+        "asupersync-2oh2u.2.5",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 4,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.3.8",
+      "title": "[T3.8] Publish migration playbook for fs/process/signal users",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.3.10",
+        "asupersync-2oh2u.3.7",
+        "asupersync-2oh2u.3.9"
+      ],
+      "chain": [
+        "asupersync-2oh2u.3.8",
+        "asupersync-2oh2u.3.10",
+        "asupersync-2oh2u.3.9",
+        "asupersync-2oh2u.3.3"
+      ],
+      "chain_length": 4,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.4.11",
+      "title": "[T4.11] Build end-to-end QUIC/H3 network scenario scripts with deep telemetry logs",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.4.10"
+      ],
+      "chain": [
+        "asupersync-2oh2u.4.11",
+        "asupersync-2oh2u.4.10",
+        "asupersync-2oh2u.4.2",
+        "asupersync-2oh2u.4.1"
+      ],
+      "chain_length": 4,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.4.4",
+      "title": "[T4.4] Implement 0-RTT, resumption, migration, and key-update hardening",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.4.3"
+      ],
+      "chain": [
+        "asupersync-2oh2u.4.4",
+        "asupersync-2oh2u.4.3",
+        "asupersync-2oh2u.4.2",
+        "asupersync-2oh2u.4.1"
+      ],
+      "chain_length": 4,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.4.6",
+      "title": "[T4.6] Build interoperability matrix against external QUIC/H3 implementations",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.4.5"
+      ],
+      "chain": [
+        "asupersync-2oh2u.4.6",
+        "asupersync-2oh2u.4.5",
+        "asupersync-2oh2u.4.2",
+        "asupersync-2oh2u.4.1"
+      ],
+      "chain_length": 4,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.4.8",
+      "title": "[T4.8] Add first-class observability for QUIC/H3 (qlog, traces, counters)",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.4.5"
+      ],
+      "chain": [
+        "asupersync-2oh2u.4.8",
+        "asupersync-2oh2u.4.5",
+        "asupersync-2oh2u.4.2",
+        "asupersync-2oh2u.4.1"
+      ],
+      "chain_length": 4,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.4.9",
+      "title": "[T4.9] Stabilize public QUIC/H3 API and migration guidance",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.4.10",
+        "asupersync-2oh2u.4.11",
+        "asupersync-2oh2u.4.7",
+        "asupersync-2oh2u.4.8"
+      ],
+      "chain": [
+        "asupersync-2oh2u.4.9",
+        "asupersync-2oh2u.4.10",
+        "asupersync-2oh2u.4.2",
+        "asupersync-2oh2u.4.1"
+      ],
+      "chain_length": 4,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.5.8",
+      "title": "[T5.8] Build cross-implementation interoperability suites for web and gRPC",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.5.7"
+      ],
+      "chain": [
+        "asupersync-2oh2u.5.8",
+        "asupersync-2oh2u.5.7",
+        "asupersync-2oh2u.5.6",
+        "asupersync-2oh2u.2.4"
+      ],
+      "chain_length": 4,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.6.11",
+      "title": "[T6.11] Publish migration packs for database and messaging ecosystems",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.6.10",
+        "asupersync-2oh2u.6.12"
+      ],
+      "chain": [
+        "asupersync-2oh2u.6.11",
+        "asupersync-2oh2u.6.10",
+        "asupersync-2oh2u.2.5",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 4,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.6.12",
+      "title": "[T6.12] Build exhaustive unit tests for database and messaging semantics",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.6.10",
+        "asupersync-2oh2u.6.2",
+        "asupersync-2oh2u.6.3",
+        "asupersync-2oh2u.6.4",
+        "asupersync-2oh2u.6.5",
+        "asupersync-2oh2u.6.6",
+        "asupersync-2oh2u.6.7",
+        "asupersync-2oh2u.6.8",
+        "asupersync-2oh2u.6.9"
+      ],
+      "chain": [
+        "asupersync-2oh2u.6.12",
+        "asupersync-2oh2u.6.10",
+        "asupersync-2oh2u.2.5",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 4,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.7.5",
+      "title": "[T7.5] Add boundary adapters for tower/hyper/tonic-heavy ecosystems",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.5.7",
+        "asupersync-2oh2u.7.4"
+      ],
+      "chain": [
+        "asupersync-2oh2u.7.5",
+        "asupersync-2oh2u.5.7",
+        "asupersync-2oh2u.5.6",
+        "asupersync-2oh2u.2.4"
+      ],
+      "chain_length": 4,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.10.11",
+      "title": "[T8.11] Enforce cross-track unit-test coverage and quality thresholds",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.2.9",
+        "asupersync-2oh2u.3.9",
+        "asupersync-2oh2u.4.10",
+        "asupersync-2oh2u.5.11",
+        "asupersync-2oh2u.6.12",
+        "asupersync-2oh2u.7.10"
+      ],
+      "chain": [
+        "asupersync-2oh2u.10.11",
+        "asupersync-2oh2u.2.9",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 3,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.2.8",
+      "title": "[T2.8] Add I/O track conformance and performance gates",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.2.5"
+      ],
+      "chain": [
+        "asupersync-2oh2u.2.8",
+        "asupersync-2oh2u.2.5",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 3,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.3.10",
+      "title": "[T3.10] Build end-to-end fs/process/signal scripts with forensic-grade logging",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.3.9"
+      ],
+      "chain": [
+        "asupersync-2oh2u.3.10",
+        "asupersync-2oh2u.3.9",
+        "asupersync-2oh2u.3.3"
+      ],
+      "chain_length": 3,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.3.7",
+      "title": "[T3.7] Add deterministic conformance and fault-injection suites for this track",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.3.6"
+      ],
+      "chain": [
+        "asupersync-2oh2u.3.7",
+        "asupersync-2oh2u.3.6",
+        "asupersync-2oh2u.3.3"
+      ],
+      "chain_length": 3,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.4.10",
+      "title": "[T4.10] Build exhaustive unit/protocol tests for QUIC and HTTP/3 state machines",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.4.2",
+        "asupersync-2oh2u.4.3",
+        "asupersync-2oh2u.4.4",
+        "asupersync-2oh2u.4.5",
+        "asupersync-2oh2u.4.6",
+        "asupersync-2oh2u.4.7",
+        "asupersync-2oh2u.4.8"
+      ],
+      "chain": [
+        "asupersync-2oh2u.4.10",
+        "asupersync-2oh2u.4.2",
+        "asupersync-2oh2u.4.1"
+      ],
+      "chain_length": 3,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.4.3",
+      "title": "[T4.3] Finalize flow-control and congestion-control correctness under stress",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.4.2"
+      ],
+      "chain": [
+        "asupersync-2oh2u.4.3",
+        "asupersync-2oh2u.4.2",
+        "asupersync-2oh2u.4.1"
+      ],
+      "chain_length": 3,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.4.5",
+      "title": "[T4.5] Complete HTTP/3 protocol layer integration and QPACK behavior",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.4.2",
+        "asupersync-2oh2u.4.4"
+      ],
+      "chain": [
+        "asupersync-2oh2u.4.5",
+        "asupersync-2oh2u.4.2",
+        "asupersync-2oh2u.4.1"
+      ],
+      "chain_length": 3,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.5.10",
+      "title": "[T5.10] Finalize migration docs and operator runbooks for app-stack replacement",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.5.11",
+        "asupersync-2oh2u.5.12",
+        "asupersync-2oh2u.5.9"
+      ],
+      "chain": [
+        "asupersync-2oh2u.5.10",
+        "asupersync-2oh2u.5.11",
+        "asupersync-2oh2u.5.3"
+      ],
+      "chain_length": 3,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.5.12",
+      "title": "[T5.12] Build end-to-end service scripts with detailed structured request/trace logging",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.5.11",
+        "asupersync-2oh2u.5.9"
+      ],
+      "chain": [
+        "asupersync-2oh2u.5.12",
+        "asupersync-2oh2u.5.11",
+        "asupersync-2oh2u.5.3"
+      ],
+      "chain_length": 3,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.5.7",
+      "title": "[T5.7] Add gRPC production features (deadlines, compression, interceptors, health, reflection)",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.5.6"
+      ],
+      "chain": [
+        "asupersync-2oh2u.5.7",
+        "asupersync-2oh2u.5.6",
+        "asupersync-2oh2u.2.4"
+      ],
+      "chain_length": 3,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.5.9",
+      "title": "[T5.9] Publish end-to-end reference services covering critical migration patterns",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.5.5",
+        "asupersync-2oh2u.5.8"
+      ],
+      "chain": [
+        "asupersync-2oh2u.5.9",
+        "asupersync-2oh2u.5.5",
+        "asupersync-2oh2u.5.3"
+      ],
+      "chain_length": 3,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.6.10",
+      "title": "[T6.10] Build deterministic integration and fault-injection suites for this track",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.2.5",
+        "asupersync-2oh2u.6.9"
+      ],
+      "chain": [
+        "asupersync-2oh2u.6.10",
+        "asupersync-2oh2u.2.5",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 3,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.6.9",
+      "title": "[T6.9] Unify retry, idempotency, and failure contracts for data and messaging paths",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.6.5",
+        "asupersync-2oh2u.6.6",
+        "asupersync-2oh2u.6.7",
+        "asupersync-2oh2u.6.8"
+      ],
+      "chain": [
+        "asupersync-2oh2u.6.9",
+        "asupersync-2oh2u.6.5",
+        "asupersync-2oh2u.6.2"
+      ],
+      "chain_length": 3,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.7.11",
+      "title": "[T7.11] Build end-to-end interoperability scripts with detailed compatibility logs",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.7.10"
+      ],
+      "chain": [
+        "asupersync-2oh2u.7.11",
+        "asupersync-2oh2u.7.10",
+        "asupersync-2oh2u.7.4"
+      ],
+      "chain_length": 3,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.10.7",
+      "title": "[T8.7] Establish track-level performance regression budgets and alarms",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.10.3"
+      ],
+      "chain": [
+        "asupersync-2oh2u.10.7",
+        "asupersync-2oh2u.10.3"
+      ],
+      "chain_length": 2,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.10.8",
+      "title": "[T8.8] Perform capability-security and authority-flow audits for new surfaces",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.10.5"
+      ],
+      "chain": [
+        "asupersync-2oh2u.10.8",
+        "asupersync-2oh2u.10.5"
+      ],
+      "chain_length": 2,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.2.5",
+      "title": "[T2.5] Prove cancellation-correctness for all I/O and codec losers",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.2.3",
+        "asupersync-2oh2u.2.4"
+      ],
+      "chain": [
+        "asupersync-2oh2u.2.5",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 2,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.2.9",
+      "title": "[T2.9] Build exhaustive unit-test matrix for Async I/O and codec semantics",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.2.3",
+        "asupersync-2oh2u.2.4",
+        "asupersync-2oh2u.2.5"
+      ],
+      "chain": [
+        "asupersync-2oh2u.2.9",
+        "asupersync-2oh2u.2.3"
+      ],
+      "chain_length": 2,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.3.6",
+      "title": "[T3.6] Prove cancellation-safe integration across fs/process/signal flows",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.3.3",
+        "asupersync-2oh2u.3.4"
+      ],
+      "chain": [
+        "asupersync-2oh2u.3.6",
+        "asupersync-2oh2u.3.3"
+      ],
+      "chain_length": 2,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.3.9",
+      "title": "[T3.9] Build exhaustive unit-test matrix for fs/process/signal correctness",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.3.3",
+        "asupersync-2oh2u.3.6",
+        "asupersync-2oh2u.3.7"
+      ],
+      "chain": [
+        "asupersync-2oh2u.3.9",
+        "asupersync-2oh2u.3.3"
+      ],
+      "chain_length": 2,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.4.2",
+      "title": "[T4.2] Complete QUIC transport core parity (connection, stream, loss recovery)",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.4.1"
+      ],
+      "chain": [
+        "asupersync-2oh2u.4.2",
+        "asupersync-2oh2u.4.1"
+      ],
+      "chain_length": 2,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.5.11",
+      "title": "[T5.11] Build exhaustive unit tests for web/middleware/gRPC contracts",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.5.3",
+        "asupersync-2oh2u.5.4",
+        "asupersync-2oh2u.5.5",
+        "asupersync-2oh2u.5.6",
+        "asupersync-2oh2u.5.7",
+        "asupersync-2oh2u.5.8"
+      ],
+      "chain": [
+        "asupersync-2oh2u.5.11",
+        "asupersync-2oh2u.5.3"
+      ],
+      "chain_length": 2,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.5.5",
+      "title": "[T5.5] Harden server lifecycle: startup, graceful shutdown, drain, and backpressure",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.5.3",
+        "asupersync-2oh2u.5.4"
+      ],
+      "chain": [
+        "asupersync-2oh2u.5.5",
+        "asupersync-2oh2u.5.3"
+      ],
+      "chain_length": 2,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.5.6",
+      "title": "[T5.6] Close gRPC protocol parity for unary and streaming RPCs",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.2.4"
+      ],
+      "chain": [
+        "asupersync-2oh2u.5.6",
+        "asupersync-2oh2u.2.4"
+      ],
+      "chain_length": 2,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.6.5",
+      "title": "[T6.5] Standardize pool, transaction, and observability contracts across databases",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.6.2",
+        "asupersync-2oh2u.6.3",
+        "asupersync-2oh2u.6.4"
+      ],
+      "chain": [
+        "asupersync-2oh2u.6.5",
+        "asupersync-2oh2u.6.2"
+      ],
+      "chain_length": 2,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.7.10",
+      "title": "[T7.10] Build exhaustive unit tests for adapter boundary correctness",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.7.4",
+        "asupersync-2oh2u.7.5",
+        "asupersync-2oh2u.7.6",
+        "asupersync-2oh2u.7.7",
+        "asupersync-2oh2u.7.8"
+      ],
+      "chain": [
+        "asupersync-2oh2u.7.10",
+        "asupersync-2oh2u.7.4"
+      ],
+      "chain_length": 2,
+      "cycle_detected": false
+    },
+    {
+      "issue_id": "asupersync-2oh2u.7.6",
+      "title": "[T7.6] Implement safe blocking bridge and context propagation boundaries",
+      "status": "open",
+      "direct_unresolved_dependencies": [
+        "asupersync-2oh2u.7.4"
+      ],
+      "chain": [
+        "asupersync-2oh2u.7.6",
+        "asupersync-2oh2u.7.4"
+      ],
+      "chain_length": 2,
+      "cycle_detected": false
+    }
+  ],
+  "drift_detection_rules": [
+    {
+      "id": "PD-DRIFT-01",
+      "rule": "dashboard must be generated from .beads/issues.jsonl and capability inventory markdown"
+    },
+    {
+      "id": "PD-DRIFT-02",
+      "rule": "all TOKIO-REPLACE tracks T1..T9 must be present with stable root bead mapping"
+    },
+    {
+      "id": "PD-DRIFT-03",
+      "rule": "evidence completeness must be recomputed from in-repo artifact existence"
+    },
+    {
+      "id": "PD-DRIFT-04",
+      "rule": "unresolved blocker chains must be derived from live dependency edges (excluding parent-child)"
+    },
+    {
+      "id": "PD-DRIFT-05",
+      "rule": "JSON and markdown artifacts must be emitted from the same in-memory payload"
+    }
+  ],
+  "ci_policy": {
+    "policy_id": "tokio-parity-dashboard-drift-v1",
+    "hard_fail_conditions": [
+      "dependency_cycle_detected",
+      "closed_with_missing_evidence",
+      "closed_with_unresolved_blockers",
+      "closed_with_incomplete_children",
+      "dashboard_artifact_drift"
+    ],
+    "promotion_criteria": [
+      "all hard-fail conditions clear",
+      "dashboard artifacts are regenerated and committed",
+      "tokio_parity_dashboard contract tests pass in CI"
+    ],
+    "rollback_or_exception_criteria": [
+      "if hard-fail triggers, block promotion and open/append remediation bead comments",
+      "exceptions require explicit owner approval and follow-up bead with due date",
+      "nightly failures must be triaged before next release promotion window"
+    ],
+    "ownership": {
+      "primary_owner": "tokio-replacement track owner",
+      "escalation_owner": "runtime maintainers"
+    }
+  },
+  "drift_routing": {
+    "policy_id": "tokio-parity-drift-routing-v1",
+    "generated_at": "2026-03-03T19:37:18Z",
+    "owner_roles": [
+      "tokio-replacement track owner",
+      "runtime maintainers"
+    ],
+    "alert_count": 0,
+    "alerts": []
+  },
+  "ci_commands": [
+    "python3 scripts/generate_tokio_parity_dashboard.py",
+    "rch exec -- cargo test --test tokio_parity_dashboard -- --nocapture"
+  ]
+}
