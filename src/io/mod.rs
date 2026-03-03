@@ -53,9 +53,14 @@ pub use copy::{
     copy_buf, copy_with_progress,
 };
 pub use ext::{
-    AsyncReadExt, AsyncReadVectoredExt, ReadExact, ReadToEnd, ReadToString, ReadU8, ReadVectored,
+    AsyncReadExt, AsyncReadVectoredExt, Read, ReadExact, ReadI8, ReadToEnd, ReadToString, ReadU8,
+    ReadVectored,
 };
-pub use ext::{AsyncWriteExt, Buf, Flush, Shutdown, WriteAll, WriteAllBuf, WriteU8, WriteVectored};
+pub use ext::{AsyncSeekExt, Seek};
+pub use ext::{
+    AsyncWriteExt, Buf, Flush, Shutdown, Write, WriteAll, WriteAllBuf, WriteI8, WriteU8,
+    WriteVectored,
+};
 pub use read::{AsyncRead, AsyncReadVectored, Chain, Take};
 pub use read_buf::ReadBuf;
 pub use seek::AsyncSeek;

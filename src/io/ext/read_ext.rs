@@ -430,7 +430,7 @@ where
                 if read_buf.filled().is_empty() {
                     Poll::Ready(Err(io::Error::from(io::ErrorKind::UnexpectedEof)))
                 } else {
-                    Poll::Ready(Ok(read_buf.filled()[0] as i8))
+                    Poll::Ready(Ok(read_buf.filled()[0].cast_signed()))
                 }
             }
         }

@@ -106,7 +106,7 @@ pub trait AsyncWriteExt: AsyncWrite {
     {
         WriteI8 {
             writer: self,
-            byte: n as u8,
+            byte: n.cast_unsigned(),
         }
     }
 
