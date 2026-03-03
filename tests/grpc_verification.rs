@@ -9,6 +9,8 @@
 //!   - Server infrastructure (031-034)
 //!   - Client infrastructure (035-037)
 //!   - Interceptor middleware (038-045)
+//!   - Reflection service (046-048)
+//!   - Production metadata propagation (049-050)
 //!
 //! Bead: bd-hszn
 
@@ -28,6 +30,7 @@ use asupersync::grpc::{
     Channel,
     ChannelConfig,
     ClientStreaming,
+    CompressionEncoding,
     // Status types
     Code,
     FramedCodec,
@@ -51,6 +54,7 @@ use asupersync::grpc::{
     MetadataValue,
     // Service types
     MethodDescriptor,
+    MetadataInterceptor,
     NamedService,
     ReflectedMethod,
     ReflectionDescribeServiceRequest,
@@ -1503,6 +1507,78 @@ fn grpc_verify_048_reflection_async_helpers() {
     assert_eq!(describe.get_ref().service.methods[0].path, "/pkg.Api/Get");
 
     test_complete!("grpc_verify_048_reflection_async_helpers");
+}
+
+/// GRPC-VERIFY-049: Channel compression configuration is surfaced on metadata
+///
+/// Outbound unary calls should include compression negotiation headers when
+/// channel compression options are configured.
+#[test]
+fn grpc_verify_049_channel_compression_metadata() {
+    init_test("grpc_verify_049_channel_compression_metadata");
+
+    let channel = futures_lite::future::block_on(
+        Channel::builder("http://localhost:50051")
+            .send_compression(CompressionEncoding::Gzip)
+            .accept_compressions([CompressionEncoding::Identity, CompressionEncoding::Gzip])
+            .connect(),
+    )
+    .expect("channel should connect");
+
+    let mut client = GrpcClient::new(channel);
+    let response: Response<String> = futures_lite::future::block_on(
+        client.unary("/pkg.Echo/Ping", Request::new("payload".to_owned())),
+    )
+    .expect("unary call should succeed");
+
+    match response.metadata().get("grpc-encoding") {
+        Some(MetadataValue::Ascii(value)) => assert_eq!(value, "gzip"),
+        other => panic!("expected grpc-encoding metadata, got: {other:?}"),
+    }
+    match response.metadata().get("grpc-accept-encoding") {
+        Some(MetadataValue::Ascii(value)) => assert_eq!(value, "identity,gzip"),
+        other => panic!("expected grpc-accept-encoding metadata, got: {other:?}"),
+    }
+
+    test_complete!("grpc_verify_049_channel_compression_metadata");
+}
+
+/// GRPC-VERIFY-050: Client interceptor chain is applied on unary calls
+///
+/// Client interceptors should mutate outbound metadata before loopback
+/// response generation so metadata contracts are testable.
+#[test]
+fn grpc_verify_050_client_interceptor_chain() {
+    init_test("grpc_verify_050_client_interceptor_chain");
+
+    let channel = futures_lite::future::block_on(
+        Channel::builder("http://localhost:50051")
+            .timeout(Duration::from_millis(2500))
+            .connect(),
+    )
+    .expect("channel should connect");
+
+    let mut client = GrpcClient::new(channel)
+        .with_interceptor(timeout_interceptor(5000))
+        .with_interceptor(MetadataInterceptor::new().with_metadata("x-client-id", "verify-50"));
+
+    let response: Response<String> = futures_lite::future::block_on(
+        client.unary("/pkg.Echo/Ping", Request::new("payload".to_owned())),
+    )
+    .expect("unary call should succeed");
+
+    // channel timeout should be preserved because timeout interceptor does not
+    // overwrite existing grpc-timeout metadata.
+    match response.metadata().get("grpc-timeout") {
+        Some(MetadataValue::Ascii(value)) => assert_eq!(value, "2500m"),
+        other => panic!("expected grpc-timeout metadata, got: {other:?}"),
+    }
+    match response.metadata().get("x-client-id") {
+        Some(MetadataValue::Ascii(value)) => assert_eq!(value, "verify-50"),
+        other => panic!("expected x-client-id metadata, got: {other:?}"),
+    }
+
+    test_complete!("grpc_verify_050_client_interceptor_chain");
 }
 
 // =============================================================================
