@@ -30,8 +30,38 @@ impl Buf for &[u8] {
     }
 }
 
+/// Generates a trait method that returns a write-integer future.
+macro_rules! write_int_trait_method {
+    ($method:ident, $future:ident, $ty:ty, $size:literal, $order:literal, $to_bytes:ident) => {
+        #[doc = concat!("Write a `", stringify!($ty), "` in ", $order, " byte order.")]
+        ///
+        /// Not cancel-safe: partial writes may have occurred.
+        fn $method(&mut self, n: $ty) -> $future<'_, Self>
+        where
+            Self: Unpin,
+        {
+            $future {
+                writer: self,
+                buf: n.$to_bytes(),
+                pos: 0,
+            }
+        }
+    };
+}
+
 /// Extension trait for `AsyncWrite`.
 pub trait AsyncWriteExt: AsyncWrite {
+    /// Write some bytes from `buf`, returning the number of bytes written.
+    ///
+    /// Returns 0 only if `buf` is empty or the writer is closed.
+    /// Not cancel-safe.
+    fn write<'a>(&'a mut self, buf: &'a [u8]) -> Write<'a, Self>
+    where
+        Self: Unpin,
+    {
+        Write { writer: self, buf }
+    }
+
     /// Write all bytes from `buf`.
     fn write_all<'a>(&'a mut self, buf: &'a [u8]) -> WriteAll<'a, Self>
     where
@@ -58,7 +88,7 @@ pub trait AsyncWriteExt: AsyncWrite {
         }
     }
 
-    /// Write a single byte.
+    /// Write a single unsigned byte.
     fn write_u8(&mut self, n: u8) -> WriteU8<'_, Self>
     where
         Self: Unpin,
@@ -68,6 +98,108 @@ pub trait AsyncWriteExt: AsyncWrite {
             byte: n,
         }
     }
+
+    /// Write a single signed byte.
+    fn write_i8(&mut self, n: i8) -> WriteI8<'_, Self>
+    where
+        Self: Unpin,
+    {
+        WriteI8 {
+            writer: self,
+            byte: n as u8,
+        }
+    }
+
+    write_int_trait_method!(write_u16, WriteU16, u16, 2, "big-endian", to_be_bytes);
+    write_int_trait_method!(
+        write_u16_le,
+        WriteU16Le,
+        u16,
+        2,
+        "little-endian",
+        to_le_bytes
+    );
+    write_int_trait_method!(write_i16, WriteI16, i16, 2, "big-endian", to_be_bytes);
+    write_int_trait_method!(
+        write_i16_le,
+        WriteI16Le,
+        i16,
+        2,
+        "little-endian",
+        to_le_bytes
+    );
+    write_int_trait_method!(write_u32, WriteU32, u32, 4, "big-endian", to_be_bytes);
+    write_int_trait_method!(
+        write_u32_le,
+        WriteU32Le,
+        u32,
+        4,
+        "little-endian",
+        to_le_bytes
+    );
+    write_int_trait_method!(write_i32, WriteI32, i32, 4, "big-endian", to_be_bytes);
+    write_int_trait_method!(
+        write_i32_le,
+        WriteI32Le,
+        i32,
+        4,
+        "little-endian",
+        to_le_bytes
+    );
+    write_int_trait_method!(write_u64, WriteU64, u64, 8, "big-endian", to_be_bytes);
+    write_int_trait_method!(
+        write_u64_le,
+        WriteU64Le,
+        u64,
+        8,
+        "little-endian",
+        to_le_bytes
+    );
+    write_int_trait_method!(write_i64, WriteI64, i64, 8, "big-endian", to_be_bytes);
+    write_int_trait_method!(
+        write_i64_le,
+        WriteI64Le,
+        i64,
+        8,
+        "little-endian",
+        to_le_bytes
+    );
+    write_int_trait_method!(write_u128, WriteU128, u128, 16, "big-endian", to_be_bytes);
+    write_int_trait_method!(
+        write_u128_le,
+        WriteU128Le,
+        u128,
+        16,
+        "little-endian",
+        to_le_bytes
+    );
+    write_int_trait_method!(write_i128, WriteI128, i128, 16, "big-endian", to_be_bytes);
+    write_int_trait_method!(
+        write_i128_le,
+        WriteI128Le,
+        i128,
+        16,
+        "little-endian",
+        to_le_bytes
+    );
+    write_int_trait_method!(write_f32, WriteF32, f32, 4, "big-endian", to_be_bytes);
+    write_int_trait_method!(
+        write_f32_le,
+        WriteF32Le,
+        f32,
+        4,
+        "little-endian",
+        to_le_bytes
+    );
+    write_int_trait_method!(write_f64, WriteF64, f64, 8, "big-endian", to_be_bytes);
+    write_int_trait_method!(
+        write_f64_le,
+        WriteF64Le,
+        f64,
+        8,
+        "little-endian",
+        to_le_bytes
+    );
 
     /// Flush buffered data.
     fn flush(&mut self) -> Flush<'_, Self>
@@ -96,7 +228,29 @@ pub trait AsyncWriteExt: AsyncWrite {
 
 impl<W: AsyncWrite + ?Sized> AsyncWriteExt for W {}
 
-/// Future for write_all.
+// ---------------------------------------------------------------------------
+// Future types
+// ---------------------------------------------------------------------------
+
+/// Future for `write`.
+pub struct Write<'a, W: ?Sized> {
+    writer: &'a mut W,
+    buf: &'a [u8],
+}
+
+impl<W> Future for Write<'_, W>
+where
+    W: AsyncWrite + Unpin + ?Sized,
+{
+    type Output = io::Result<usize>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        Pin::new(&mut *this.writer).poll_write(cx, this.buf)
+    }
+}
+
+/// Future for `write_all`.
 pub struct WriteAll<'a, W: ?Sized> {
     writer: &'a mut W,
     buf: &'a [u8],
@@ -140,7 +294,7 @@ where
     }
 }
 
-/// Future for write_all_buf.
+/// Future for `write_all_buf`.
 pub struct WriteAllBuf<'a, W: ?Sized, B: ?Sized> {
     writer: &'a mut W,
     buf: &'a mut B,
@@ -186,7 +340,7 @@ where
     }
 }
 
-/// Future for writing a single byte.
+/// Future for writing a single unsigned byte.
 pub struct WriteU8<'a, W: ?Sized> {
     writer: &'a mut W,
     byte: u8,
@@ -215,7 +369,36 @@ where
     }
 }
 
-/// Future for flush.
+/// Future for writing a single signed byte.
+pub struct WriteI8<'a, W: ?Sized> {
+    writer: &'a mut W,
+    byte: u8,
+}
+
+impl<W> Future for WriteI8<'_, W>
+where
+    W: AsyncWrite + Unpin + ?Sized,
+{
+    type Output = io::Result<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let buf = [this.byte];
+        match Pin::new(&mut *this.writer).poll_write(cx, &buf) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Ready(Ok(n)) => {
+                if n == 0 {
+                    Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)))
+                } else {
+                    Poll::Ready(Ok(()))
+                }
+            }
+        }
+    }
+}
+
+/// Future for `flush`.
 pub struct Flush<'a, W: ?Sized> {
     writer: &'a mut W,
 }
@@ -232,7 +415,7 @@ where
     }
 }
 
-/// Future for shutdown.
+/// Future for `shutdown`.
 pub struct Shutdown<'a, W: ?Sized> {
     writer: &'a mut W,
 }
@@ -249,7 +432,7 @@ where
     }
 }
 
-/// Future for write_vectored.
+/// Future for `write_vectored`.
 pub struct WriteVectored<'a, W: ?Sized> {
     writer: &'a mut W,
     bufs: &'a [IoSlice<'a>],
@@ -266,6 +449,67 @@ where
         Pin::new(&mut *this.writer).poll_write_vectored(cx, this.bufs)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Multi-byte integer/float write futures (macro-generated)
+// ---------------------------------------------------------------------------
+
+/// Generates a future struct + `Future` impl for writing a fixed-size value.
+macro_rules! write_int_future {
+    ($future:ident, $ty:ty, $size:literal) => {
+        #[doc = concat!("Future for writing a `", stringify!($ty), "`.")]
+        pub struct $future<'a, W: ?Sized> {
+            writer: &'a mut W,
+            buf: [u8; $size],
+            pos: usize,
+        }
+
+        impl<W> Future for $future<'_, W>
+        where
+            W: AsyncWrite + Unpin + ?Sized,
+        {
+            type Output = io::Result<()>;
+
+            fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                let this = self.get_mut();
+                while this.pos < $size {
+                    match Pin::new(&mut *this.writer).poll_write(cx, &this.buf[this.pos..]) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                        Poll::Ready(Ok(n)) => {
+                            if n == 0 {
+                                return Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)));
+                            }
+                            this.pos += n;
+                        }
+                    }
+                }
+                Poll::Ready(Ok(()))
+            }
+        }
+    };
+}
+
+write_int_future!(WriteU16, u16, 2);
+write_int_future!(WriteU16Le, u16, 2);
+write_int_future!(WriteI16, i16, 2);
+write_int_future!(WriteI16Le, i16, 2);
+write_int_future!(WriteU32, u32, 4);
+write_int_future!(WriteU32Le, u32, 4);
+write_int_future!(WriteI32, i32, 4);
+write_int_future!(WriteI32Le, i32, 4);
+write_int_future!(WriteU64, u64, 8);
+write_int_future!(WriteU64Le, u64, 8);
+write_int_future!(WriteI64, i64, 8);
+write_int_future!(WriteI64Le, i64, 8);
+write_int_future!(WriteU128, u128, 16);
+write_int_future!(WriteU128Le, u128, 16);
+write_int_future!(WriteI128, i128, 16);
+write_int_future!(WriteI128Le, i128, 16);
+write_int_future!(WriteF32, f32, 4);
+write_int_future!(WriteF32Le, f32, 4);
+write_int_future!(WriteF64, f64, 8);
+write_int_future!(WriteF64Le, f64, 8);
 
 #[cfg(test)]
 mod tests {
@@ -300,6 +544,18 @@ mod tests {
     }
 
     #[test]
+    fn write_basic_returns_bytes_written() {
+        init_test("write_basic_returns_bytes_written");
+        let mut output = Vec::new();
+        let mut fut = output.write(b"hello");
+        let mut fut = Pin::new(&mut fut);
+        let n = poll_ready(&mut fut).unwrap();
+        crate::assert_with_log!(n == 5, "bytes written", 5, n);
+        crate::assert_with_log!(output == b"hello", "output", b"hello", output);
+        crate::test_complete!("write_basic_returns_bytes_written");
+    }
+
+    #[test]
     fn write_all_ok() {
         init_test("write_all_ok");
         let mut output = Vec::new();
@@ -321,6 +577,79 @@ mod tests {
         crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
         crate::assert_with_log!(output == vec![0x42], "output", vec![0x42], output);
         crate::test_complete!("write_u8_ok");
+    }
+
+    #[test]
+    fn write_i8_ok() {
+        init_test("write_i8_ok");
+        let mut output = Vec::new();
+        let mut fut = output.write_i8(-2);
+        let mut fut = Pin::new(&mut fut);
+        let result = poll_ready(&mut fut);
+        crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
+        crate::assert_with_log!(output == vec![0xFE], "output", vec![0xFE], output);
+        crate::test_complete!("write_i8_ok");
+    }
+
+    #[test]
+    fn write_u16_big_endian() {
+        init_test("write_u16_big_endian");
+        let mut output = Vec::new();
+        let mut fut = output.write_u16(0x0102);
+        let mut fut = Pin::new(&mut fut);
+        let result = poll_ready(&mut fut);
+        crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
+        crate::assert_with_log!(
+            output == vec![0x01, 0x02],
+            "output BE",
+            vec![0x01, 0x02],
+            output
+        );
+        crate::test_complete!("write_u16_big_endian");
+    }
+
+    #[test]
+    fn write_u16_le_little_endian() {
+        init_test("write_u16_le_little_endian");
+        let mut output = Vec::new();
+        let mut fut = output.write_u16_le(0x0102);
+        let mut fut = Pin::new(&mut fut);
+        let result = poll_ready(&mut fut);
+        crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
+        crate::assert_with_log!(
+            output == vec![0x02, 0x01],
+            "output LE",
+            vec![0x02, 0x01],
+            output
+        );
+        crate::test_complete!("write_u16_le_little_endian");
+    }
+
+    #[test]
+    fn write_u32_big_endian() {
+        init_test("write_u32_big_endian");
+        let mut output = Vec::new();
+        let mut fut = output.write_u32(0x01020304);
+        let mut fut = Pin::new(&mut fut);
+        let result = poll_ready(&mut fut);
+        crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
+        let expected = vec![0x01, 0x02, 0x03, 0x04];
+        crate::assert_with_log!(output == expected, "output BE", expected, output);
+        crate::test_complete!("write_u32_big_endian");
+    }
+
+    #[test]
+    fn write_f64_le_little_endian() {
+        init_test("write_f64_le_little_endian");
+        let val: f64 = core::f64::consts::PI;
+        let mut output = Vec::new();
+        let mut fut = output.write_f64_le(val);
+        let mut fut = Pin::new(&mut fut);
+        let result = poll_ready(&mut fut);
+        crate::assert_with_log!(result.is_ok(), "result ok", true, result.is_ok());
+        let expected = val.to_le_bytes().to_vec();
+        crate::assert_with_log!(output == expected, "output f64 LE", expected, output);
+        crate::test_complete!("write_f64_le_little_endian");
     }
 
     #[test]
@@ -374,5 +703,31 @@ mod tests {
         crate::assert_with_log!(empty, "input empty", true, empty);
         crate::assert_with_log!(output == b"buffered", "output", b"buffered", output);
         crate::test_complete!("write_all_buf_ok");
+    }
+
+    #[test]
+    fn write_read_roundtrip_u32() {
+        init_test("write_read_roundtrip_u32");
+        use crate::io::ext::read_ext::AsyncReadExt;
+        let expected: u32 = 0xDEADBEEF;
+        let mut output = Vec::new();
+
+        // Write
+        let mut fut = output.write_u32(expected);
+        let mut fut = Pin::new(&mut fut);
+        poll_ready(&mut fut).unwrap();
+
+        // Read back
+        let mut reader: &[u8] = &output;
+        let mut fut = reader.read_u32();
+        let mut fut = Pin::new(&mut fut);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let val = match fut.as_mut().poll(&mut cx) {
+            Poll::Ready(Ok(v)) => v,
+            other => panic!("unexpected poll result: {other:?}"),
+        };
+        crate::assert_with_log!(val == expected, "roundtrip u32", expected, val);
+        crate::test_complete!("write_read_roundtrip_u32");
     }
 }

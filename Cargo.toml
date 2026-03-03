@@ -181,6 +181,8 @@ hmac = "0.12"
 rdkafka = { version = "0.39", default-features = false, optional = true }
 # Systematic concurrency testing for scheduler (loom-tests feature)
 loom = { version = "0.7", optional = true }
+# Lightweight async helpers used by web handler adapter shims.
+futures-lite = "2.6"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.7.11", optional = true }
@@ -203,7 +205,6 @@ ring = { version = "0.17", optional = true }
 [dev-dependencies]
 proptest = "1.10"
 criterion = { version = "0.8", features = ["html_reports"] }
-futures-lite = "2.6"
 conformance = { package = "asupersync-conformance", version = "0.2.6", path = "conformance" }
 tempfile = "3.25"
 tracing = "0.1"

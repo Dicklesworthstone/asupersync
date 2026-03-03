@@ -813,7 +813,12 @@ mod tests {
         let val = poll_ready(&mut fut)
             .expect("future did not resolve")
             .unwrap();
-        crate::assert_with_log!((val - expected).abs() < f32::EPSILON, "f32 BE", expected, val);
+        crate::assert_with_log!(
+            (val - expected).abs() < f32::EPSILON,
+            "f32 BE",
+            expected,
+            val
+        );
         crate::test_complete!("read_f32_big_endian");
     }
 
@@ -827,7 +832,12 @@ mod tests {
         let val = poll_ready(&mut fut)
             .expect("future did not resolve")
             .unwrap();
-        crate::assert_with_log!((val - expected).abs() < f64::EPSILON, "f64 LE", expected, val);
+        crate::assert_with_log!(
+            (val - expected).abs() < f64::EPSILON,
+            "f64 LE",
+            expected,
+            val
+        );
         crate::test_complete!("read_f64_le_little_endian");
     }
 
