@@ -453,7 +453,7 @@ impl<T> OnceCell<T> {
             } else {
                 // Dequeued while still waiting; re-register.
                 let new_id = guard.next_waiter_id;
-                guard.next_waiter_id += 1;
+                guard.next_waiter_id = guard.next_waiter_id.wrapping_add(1);
                 guard.waiters.push(InitWaiter {
                     waker: waker.clone(),
                     id: new_id,
@@ -463,7 +463,7 @@ impl<T> OnceCell<T> {
         } else {
             // First time: create new waiter id.
             let id = guard.next_waiter_id;
-            guard.next_waiter_id += 1;
+            guard.next_waiter_id = guard.next_waiter_id.wrapping_add(1);
             guard.waiters.push(InitWaiter {
                 waker: waker.clone(),
                 id,

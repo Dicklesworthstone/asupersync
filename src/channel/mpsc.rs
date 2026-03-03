@@ -417,7 +417,7 @@ impl<'a, T> Future for Reserve<'a, T> {
         } else {
             // New waiter — assign monotonic id, store waker inline.
             let id = inner.next_waiter_id;
-            inner.next_waiter_id += 1;
+            inner.next_waiter_id = inner.next_waiter_id.wrapping_add(1);
             inner.send_wakers.push_back(SendWaiter {
                 id,
                 waker: ctx.waker().clone(),
