@@ -215,6 +215,7 @@ mod tests {
 
     #[test]
     fn scan_debug() {
+        #[allow(clippy::unnecessary_wraps)]
         fn sum(acc: &mut i32, x: i32) -> Option<i32> {
             *acc += x;
             Some(*acc)
