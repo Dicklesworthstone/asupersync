@@ -17,10 +17,11 @@ struct TimerEntry {
 impl Ord for TimerEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse ordering for min-heap (earliest deadline first).
-        other.deadline.cmp(&self.deadline).then_with(|| {
-            let diff = other.generation.wrapping_sub(self.generation).cast_signed();
-            diff.cmp(&0)
-        })
+        other
+            .deadline
+            .cmp(&self.deadline)
+            // Lower generation (earlier insertion) wins for equal deadlines.
+            .then_with(|| other.generation.cmp(&self.generation))
     }
 }
 

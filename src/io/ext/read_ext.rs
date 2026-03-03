@@ -8,6 +8,17 @@ use std::task::{Context, Poll};
 
 /// Extension trait for `AsyncRead`.
 pub trait AsyncReadExt: AsyncRead {
+    /// Read some bytes into `buf`, returning the number of bytes read.
+    ///
+    /// This is a convenience wrapper around `poll_read`. Returns 0 on EOF.
+    /// Not cancel-safe: partial reads may have occurred.
+    fn read<'a>(&'a mut self, buf: &'a mut [u8]) -> Read<'a, Self>
+    where
+        Self: Unpin,
+    {
+        Read { reader: self, buf }
+    }
+
     /// Read the exact number of bytes to fill `buf`.
     fn read_exact<'a>(&'a mut self, buf: &'a mut [u8]) -> ReadExact<'a, Self>
     where
@@ -17,6 +28,7 @@ pub trait AsyncReadExt: AsyncRead {
             reader: self,
             buf,
             pos: 0,
+            yield_counter: 0,
         }
     }
 
@@ -58,6 +70,14 @@ pub trait AsyncReadExt: AsyncRead {
         ReadU8 { reader: self }
     }
 
+    /// Read a signed 8-bit integer.
+    fn read_i8(&mut self) -> ReadI8<'_, Self>
+    where
+        Self: Unpin,
+    {
+        ReadI8 { reader: self }
+    }
+
     /// Chain this reader with another.
     fn chain<R: AsyncRead>(self, next: R) -> Chain<Self, R>
     where
@@ -75,7 +95,46 @@ pub trait AsyncReadExt: AsyncRead {
     }
 }
 
-impl<R: AsyncRead + ?Sized> AsyncReadExt for R {}
+macro_rules! read_integer_ext {
+    ($method:ident, $future:ident, $ty:ty, $size:literal, $from:ident) => {
+        #[doc = concat!("Read a `", stringify!($ty), "` in ", stringify!($from), " byte order.")]
+        fn $method(&mut self) -> $future<'_, Self>
+        where
+            Self: Unpin,
+        {
+            $future {
+                reader: self,
+                buf: [0u8; $size],
+                pos: 0,
+            }
+        }
+    };
+}
+
+impl<R: AsyncRead + ?Sized> AsyncReadExt for R {
+    read_integer_ext!(read_u16, ReadU16, u16, 2, big_endian);
+    read_integer_ext!(read_u16_le, ReadU16Le, u16, 2, little_endian);
+    read_integer_ext!(read_i16, ReadI16, i16, 2, big_endian);
+    read_integer_ext!(read_i16_le, ReadI16Le, i16, 2, little_endian);
+    read_integer_ext!(read_u32, ReadU32, u32, 4, big_endian);
+    read_integer_ext!(read_u32_le, ReadU32Le, u32, 4, little_endian);
+    read_integer_ext!(read_i32, ReadI32, i32, 4, big_endian);
+    read_integer_ext!(read_i32_le, ReadI32Le, i32, 4, little_endian);
+    read_integer_ext!(read_u64, ReadU64, u64, 8, big_endian);
+    read_integer_ext!(read_u64_le, ReadU64Le, u64, 8, little_endian);
+    read_integer_ext!(read_i64, ReadI64, i64, 8, big_endian);
+    read_integer_ext!(read_i64_le, ReadI64Le, i64, 8, little_endian);
+    read_integer_ext!(read_u128, ReadU128, u128, 16, big_endian);
+    read_integer_ext!(read_u128_le, ReadU128Le, u128, 16, little_endian);
+    read_integer_ext!(read_i128, ReadI128, i128, 16, big_endian);
+    read_integer_ext!(read_i128_le, ReadI128Le, i128, 16, little_endian);
+    read_integer_ext!(read_f32, ReadF32, f32, 4, big_endian);
+    read_integer_ext!(read_f32_le, ReadF32Le, f32, 4, little_endian);
+    read_integer_ext!(read_f64, ReadF64, f64, 8, big_endian);
+    read_integer_ext!(read_f64_le, ReadF64Le, f64, 8, little_endian);
+}
+
+// Default trait method impls provided by macro above in the impl block.
 
 /// Extension trait for `AsyncReadVectored`.
 pub trait AsyncReadVectoredExt: AsyncReadVectored {
@@ -113,6 +172,7 @@ pub struct ReadExact<'a, R: ?Sized> {
     reader: &'a mut R,
     buf: &'a mut [u8],
     pos: usize,
+    yield_counter: u8,
 }
 
 impl<R> Future for ReadExact<'_, R>
@@ -125,9 +185,19 @@ where
         let this = self.get_mut();
 
         while this.pos < this.buf.len() {
+            if this.yield_counter > 32 {
+                this.yield_counter = 0;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            this.yield_counter += 1;
+
             let mut read_buf = ReadBuf::new(&mut this.buf[this.pos..]);
             match Pin::new(&mut *this.reader).poll_read(cx, &mut read_buf) {
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    this.yield_counter = 0;
+                    return Poll::Pending;
+                }
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                 Poll::Ready(Ok(())) => {
                     let n = read_buf.filled().len();

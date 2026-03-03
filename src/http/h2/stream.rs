@@ -674,13 +674,13 @@ impl StreamStore {
                 if id < self.next_server_stream_id {
                     return Err(H2Error::protocol("stream ID already used"));
                 }
-                self.next_server_stream_id = id + 2;
+                self.next_server_stream_id = id.saturating_add(2);
             } else if !self.is_client && is_client_stream {
                 // Client-initiated stream received by server
                 if id < self.next_client_stream_id {
                     return Err(H2Error::protocol("stream ID already used"));
                 }
-                self.next_client_stream_id = id + 2;
+                self.next_client_stream_id = id.saturating_add(2);
             }
 
             let stream = Stream::new(id, self.initial_window_size, self.max_header_list_size);
@@ -711,7 +711,7 @@ impl StreamStore {
             if id < self.next_server_stream_id {
                 return Err(H2Error::protocol("stream ID already used"));
             }
-            self.next_server_stream_id = id + 2;
+            self.next_server_stream_id = id.saturating_add(2);
         } else {
             if !is_client_stream {
                 return Err(H2Error::protocol("invalid promised stream ID"));
@@ -719,7 +719,7 @@ impl StreamStore {
             if id < self.next_client_stream_id {
                 return Err(H2Error::protocol("stream ID already used"));
             }
-            self.next_client_stream_id = id + 2;
+            self.next_client_stream_id = id.saturating_add(2);
         }
 
         let stream =
@@ -735,11 +735,13 @@ impl StreamStore {
 
     /// Allocate a new stream ID.
     pub fn allocate_stream_id(&mut self) -> Result<u32, H2Error> {
-        let active_count = self
-            .streams
-            .values()
-            .filter(|s| !s.state.is_closed())
-            .count() as u32;
+        let active_count = u32::try_from(
+            self.streams
+                .values()
+                .filter(|s| !s.state.is_closed())
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
         if active_count >= self.max_concurrent_streams {
             return Err(H2Error::protocol("max concurrent streams exceeded"));
         }
@@ -749,14 +751,14 @@ impl StreamStore {
                 return Err(H2Error::protocol("stream ID exhausted"));
             }
             let id = self.next_client_stream_id;
-            self.next_client_stream_id += 2;
+            self.next_client_stream_id = id.saturating_add(2);
             id
         } else {
             if self.next_server_stream_id > MAX_STREAM_ID {
                 return Err(H2Error::protocol("stream ID exhausted"));
             }
             let id = self.next_server_stream_id;
-            self.next_server_stream_id += 2;
+            self.next_server_stream_id = id.saturating_add(2);
             id
         };
 
