@@ -152,6 +152,36 @@ Promotion or demotion decisions must capture:
 5. blocking criterion IDs (if demoted),
 6. owning bead ID for remediation.
 
+## Workflow Contract + Package Assumptions
+
+The canonical automation entrypoint for this contract is:
+
+- `.github/workflows/publish.yml`
+
+Release automation for this workflow is tied to:
+
+- contract id: `wasm-release-channel-strategy-v1`
+- active bead scope: `asupersync-umelq.15.2`
+
+Policy wiring expectations:
+
+1. WASM release gates produce a traceability artifact linking this contract
+   to security release-block criteria in `.github/security_release_policy.json`
+   (for example `SEC-BLOCK-01`, `SEC-BLOCK-06`, and `SEC-BLOCK-07`).
+2. Required gate report artifacts are retained alongside release artifacts:
+   - `artifacts/wasm_optimization_pipeline_summary.json`
+   - `artifacts/wasm_dependency_audit_summary.json`
+   - `artifacts/security_release_gate_report.json`
+3. npm release assumptions are explicit and artifactized:
+   - package discovery glob: `packages/*/package.json`
+   - assumptions artifact: `artifacts/npm/npm_release_assumptions.json`
+   - publish outcome artifact: `artifacts/npm/publish_outcome.json`
+   - rollback outcome artifact (when rollback mode is used): `artifacts/npm/rollback_outcome.json`
+4. Missing package manifests are treated as an explicit controlled skip
+   (artifactized) rather than an implicit silent bypass.
+5. Rollback mode requires both target version and operator reason; the executed
+   dist-tag commands must be captured in release artifacts.
+
 ## Non-Negotiable Constraints
 
 1. No channel promotion can bypass dependency or security gates.

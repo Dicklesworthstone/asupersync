@@ -48,6 +48,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_TOOLCHAIN: nightly-2026-02-05
+  WASM_RELEASE_CONTRACT_ID: wasm-release-channel-strategy-v1
+  WASM_RELEASE_BEAD_ID: asupersync-umelq.15.2
 
 jobs:
   plan:
@@ -195,6 +197,39 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Generate release traceability artifact
+        run: |
+          mkdir -p artifacts/wasm/release
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          security_policy = Path(".github/security_release_policy.json")
+          if not security_policy.exists():
+              raise SystemExit("missing .github/security_release_policy.json")
+
+          data = json.loads(security_policy.read_text(encoding="utf-8"))
+          criteria = [item.get("id", "") for item in data.get("release_blocking_criteria", []) if isinstance(item, dict)]
+          report = {
+              "schema_version": "wasm-release-traceability-v1",
+              "contract_id": "${{ env.WASM_RELEASE_CONTRACT_ID }}",
+              "bead_id": "${{ env.WASM_RELEASE_BEAD_ID }}",
+              "workflow": ".github/workflows/publish.yml",
+              "version": "${{ needs.plan.outputs.version }}",
+              "tag": "${{ needs.plan.outputs.tag }}",
+              "security_policy_file": str(security_policy),
+              "release_blocking_criteria": criteria,
+              "required_gate_reports": [
+                  "artifacts/wasm_optimization_pipeline_summary.json",
+                  "artifacts/wasm_dependency_audit_summary.json",
+                  "artifacts/security_release_gate_report.json",
+              ],
+          }
+          Path("artifacts/wasm/release/release_traceability.json").write_text(
+              json.dumps(report, indent=2) + "\n", encoding="utf-8"
+          )
+          PY
+
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -294,6 +329,7 @@ jobs:
           name: wasm-release-bundle
           path: |
             artifacts/wasm/release/
+            artifacts/wasm/release/release_traceability.json
             artifacts/wasm_optimization_pipeline_summary.json
             artifacts/wasm_dependency_audit_summary.json
             artifacts/wasm_dependency_audit_log.ndjson
@@ -344,14 +380,38 @@ jobs:
         id: discover
         run: |
           mkdir -p artifacts/npm
-          mapfile -t pkg_jsons < <(find packages -mindepth 2 -maxdepth 2 -name package.json -print 2>/dev/null | sort || true)
-          if [ "${#pkg_jsons[@]}" -eq 0 ]; then
+          : > artifacts/npm/package_json_paths.txt
+          find packages -mindepth 2 -maxdepth 2 -name package.json -print 2>/dev/null | sort > artifacts/npm/package_json_paths.txt || true
+          pkg_count="$(grep -c . artifacts/npm/package_json_paths.txt || true)"
+          echo "package_count=${pkg_count}" >> "$GITHUB_OUTPUT"
+          if [ "${pkg_count}" -eq 0 ]; then
             echo "found=false" >> "$GITHUB_OUTPUT"
             echo "No npm package manifests found under packages/*; skipping npm publish."
           else
-            printf "%s\n" "${pkg_jsons[@]}" > artifacts/npm/package_json_paths.txt
             echo "found=true" >> "$GITHUB_OUTPUT"
           fi
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          pkg_path_file = Path("artifacts/npm/package_json_paths.txt")
+          paths = [line.strip() for line in pkg_path_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+          payload = {
+              "schema_version": "npm-release-assumptions-v1",
+              "contract_id": "${{ env.WASM_RELEASE_CONTRACT_ID }}",
+              "bead_id": "${{ env.WASM_RELEASE_BEAD_ID }}",
+              "package_discovery_glob": "packages/*/package.json",
+              "discovered_package_manifests": paths,
+              "discovered_package_count": len(paths),
+              "publish_enabled": "${{ needs.plan.outputs.publish_npm }}" == "true",
+              "npm_tag": "${{ needs.plan.outputs.npm_tag }}",
+          }
+          Path("artifacts/npm/npm_release_assumptions.json").write_text(
+              json.dumps(payload, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
 
       - name: Validate rollback controls
         if: ${{ steps.discover.outputs.found == 'true' && needs.plan.outputs.rollback_npm_to_version != '' }}
@@ -368,6 +428,13 @@ jobs:
         run: |
           if [[ -z "${NODE_AUTH_TOKEN}" ]]; then
             echo "NPM_TOKEN is not configured; skipping npm publish."
+            cat > artifacts/npm/publish_outcome.json <<'EOF'
+            {
+              "schema_version": "npm-publish-outcome-v1",
+              "published": false,
+              "reason": "NPM_TOKEN missing"
+            }
+            EOF
             exit 0
           fi
 
@@ -383,6 +450,21 @@ jobs:
             )
             echo "${pkg_name}" >> artifacts/npm/published_packages.txt
           done < artifacts/npm/package_json_paths.txt
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          published = [line.strip() for line in Path("artifacts/npm/published_packages.txt").read_text(encoding="utf-8").splitlines() if line.strip()]
+          payload = {
+              "schema_version": "npm-publish-outcome-v1",
+              "published": True,
+              "published_packages": published,
+              "published_count": len(published),
+              "npm_tag": "${{ needs.plan.outputs.npm_tag }}",
+          }
+          Path("artifacts/npm/publish_outcome.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+          PY
 
       - name: Execute npm dist-tag rollback
         if: ${{ steps.discover.outputs.found == 'true' && needs.plan.outputs.rollback_npm_to_version != '' }}
@@ -404,8 +486,24 @@ jobs:
             bash -lc "$cmd"
           done < artifacts/npm/package_json_paths.txt
 
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          actions = [line.strip() for line in Path("artifacts/npm/rollback_actions.txt").read_text(encoding="utf-8").splitlines() if line.strip()]
+          payload = {
+              "schema_version": "npm-rollback-outcome-v1",
+              "rollback_version": "${{ needs.plan.outputs.rollback_npm_to_version }}",
+              "rollback_reason": "${{ needs.plan.outputs.rollback_reason }}",
+              "npm_tag": "${{ needs.plan.outputs.npm_tag }}",
+              "actions_executed": actions,
+              "action_count": len(actions),
+          }
+          Path("artifacts/npm/rollback_outcome.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+          PY
+
       - name: Upload npm publish/rollback artifacts
-        if: ${{ steps.discover.outputs.found == 'true' }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: npm-release-controls
