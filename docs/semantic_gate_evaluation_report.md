@@ -128,7 +128,7 @@ Cross-artifact conformance matrix (`target/evidence-bundle/cross_artifact/confor
 | Partial (1-2) | 47 | 47 |
 | Uncovered | 0 | 47 |
 
-**Note**: Lean coverage shows 0 because the conformance matrix regex (`#N` pattern) doesn't match Lean's theorem naming convention. Lean actually covers ~30+ rules via named theorems (e.g., `cancelRequest_preserves_wellformed` for rule #1). The matrix generator should be enhanced to parse Lean theorem names in a future iteration.
+**Note**: Lean coverage shows 0 because the conformance matrix regex (`#N` pattern) doesn't match Lean's theorem naming convention. Lean actually covers ~30+ rules via named theorems (e.g., `cancel_request_preserves_wellformed` for rule #1). The matrix generator should be enhanced to parse Lean theorem names in a future iteration.
 
 ---
 

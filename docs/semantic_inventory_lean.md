@@ -31,14 +31,14 @@ preservation, progress, safety, and bounded termination.
 
 | # | concept_id | row_type | Lean Citation | Coverage | Notes |
 |---|-----------|----------|--------------|----------|-------|
-| 1 | `rule.cancel.request` | transition_rule | `Step.cancelRequest` L437–453 | **Proved** | Preconditions: task not completed, region exists. Updates task state to `cancelRequested`, strengthens region cancel. Preservation: `cancelRequest_preserves_wellformed` L2613–2641. |
+| 1 | `rule.cancel.request` | transition_rule | `Step.cancelRequest` L437–453 | **Proved** | Preconditions: task not completed, region exists. Updates task state to `cancelRequested`, strengthens region cancel. Preservation: `cancel_request_preserves_wellformed` L2613–2641. |
 | 2 | `rule.cancel.acknowledge` | transition_rule | `Step.cancelAcknowledge` L469–477 | **Proved** | Precondition: mask = 0. Transitions `cancelRequested → cancelling`. Progress: `cancel_ack_step` L1689–1701. |
-| 3 | `rule.cancel.drain` | transition_rule | `Step.closeCancelChildren` L539–555 | **Proved** | Region transitions `closing → draining`, sets cancel reason. Covered by `cancelRequest_preserves_wellformed` L2639–2641. |
+| 3 | `rule.cancel.drain` | transition_rule | `Step.closeCancelChildren` L539–555 | **Proved** | Region transitions `closing → draining`, sets cancel reason. Covered by `cancel_request_preserves_wellformed` L2639–2641. |
 | 4 | `rule.cancel.finalize` | transition_rule | `Step.cancelFinalize` L479–486 | **Proved** | Transitions `cancelling → finalizing`. Progress: `cancel_finalize_step` L1703–1714. |
-| 5 | `inv.cancel.idempotence` | invariant | `strengthenOpt` L66–71, `strengthenReason` L52–59 | **Proved** | `strengthenOpt_rank_ge_incoming` L1253–1261 proves rank monotonicity. Repeated cancel requests can only strengthen the reason, never weaken. |
+| 5 | `inv.cancel.idempotence` | invariant | `strengthenOpt` L66–71, `strengthenReason` L52–59 | **Proved** | `strengthen_opt_rank_ge_incoming` L1253–1261 proves rank monotonicity. Repeated cancel requests can only strengthen the reason, never weaken. |
 | 6 | `inv.cancel.propagates_down` | invariant | `Step.cancelPropagate` L499–511, `Step.cancelChild` L513–528 | **Proved** | `cancelPropagate` pushes to subregions via `parentCancelledReason`. `cancelChild` marks child tasks. Both preserve WF: `step_preserves_wellformed` L3174–3257. |
 | 7 | `def.cancel.reason_kinds` | definition | `CancelKind` inductive L38–43, `CancelReason` L33–36 | **Defined** | Four variants: `explicit`, `parentCancelled`, `timeout`, `panicked`. |
-| 8 | `def.cancel.severity_ordering` | definition | `CancelKind.rank` L45–50, `strengthenReason` L52–59 | **Proved** | `strengthenReason_rank_ge_left` L1017–1022 and `strengthenReason_rank_ge_right` L1024–1029 prove monotonicity in both arguments. |
+| 8 | `def.cancel.severity_ordering` | definition | `CancelKind.rank` L45–50, `strengthenReason` L52–59 | **Proved** | `strengthen_reason_rank_ge_left` L1017–1022 and `strengthen_reason_rank_ge_right` L1024–1029 prove monotonicity in both arguments. |
 | 9 | `prog.cancel.drains` | progress_property | `cancel_protocol_terminates` L3375–3400 | **Proved** | Induction on mask depth: exactly `mask + 3` steps from `cancelRequested` to `completed(cancelled)`. Also: `cancel_terminates_from_cancelling` L3402–3414 (2 steps), `cancel_terminates_from_finalizing` L3416–3425 (1 step). |
 
 ### 2.2 Masking (domain: `cancel`)
@@ -47,7 +47,7 @@ preservation, progress, safety, and bounded termination.
 |---|-----------|----------|--------------|----------|-------|
 | 10 | `rule.cancel.checkpoint_masked` | transition_rule | `Step.cancelMasked` L455–467 | **Proved** | Precondition: `mask > 0`. Decrements mask, keeps `cancelRequested` state. Progress: `cancel_masked_step` L1669–1687. |
 | 11 | `inv.cancel.mask_bounded` | invariant | `cancel_steps_testable_bound` L3430–3438, `maxMaskDepth` = 64 L3368 | **Proved** | Cancel potential bounded by `maxMaskDepth + 3 = 67` when mask ≤ 64. |
-| 12 | `inv.cancel.mask_monotone` | invariant | `cancelMasked_potential_decreases` L3292–3304 | **Proved** | `cancel_potential` strictly decreases by 1 per `cancelMasked` step. Full Lyapunov function: `cancel_potential` L3282–3289. |
+| 12 | `inv.cancel.mask_monotone` | invariant | `cancel_masked_potential_decreases` L3292–3304 | **Proved** | `cancel_potential` strictly decreases by 1 per `cancelMasked` step. Full Lyapunov function: `cancel_potential` L3282–3289. |
 
 ### 2.3 Obligations (domain: `obligation`)
 
@@ -81,7 +81,7 @@ preservation, progress, safety, and bounded termination.
 |---|-----------|----------|--------------|----------|-------|
 | 29 | `def.outcome.four_valued` | definition | `Outcome` inductive L27–31 | **Defined** | Four constructors: `ok`, `err`, `cancelled`, `panicked`. Parameterized by `Value`, `Error`, `CancelInfo`, `Panic`. |
 | 30 | `def.outcome.severity_lattice` | definition | `Severity` L3715–3720, `Severity.rank` L3723–3727 | **Proved** | Ok=0 < Err=1 < Cancelled=2 < Panicked=3. Total order: `le_total` L3766, `le_trans` L3770, `le_refl` L3774. Antisymmetry: `rank_eq_of_le_le` L3778. |
-| 31 | `def.outcome.join_semantics` | definition | `strengthenReason` L52–59, `strengthenOpt` L66–71 | **Proved** | Join = max-rank. `strengthenReason_rank_ge_left` L1017–1022, `strengthenReason_rank_ge_right` L1024–1029. Budget combine: `Budget.combine_comm` L1243–1245, `Budget.combine_assoc` L1640–1642 (min-plus semiring). |
+| 31 | `def.outcome.join_semantics` | definition | `strengthenReason` L52–59, `strengthenOpt` L66–71 | **Proved** | Join = max-rank. `strengthen_reason_rank_ge_left` L1017–1022, `strengthen_reason_rank_ge_right` L1024–1029. Budget combine: `Budget.combine_comm` L1243–1245, `Budget.combine_assoc` L1640–1642 (min-plus semiring). |
 | 32 | `def.cancel.reason_ordering` | definition | `CancelKind.rank` L45–50 | **Proved** | explicit=0 < parentCancelled=1 < timeout=2 < panicked=3. Monotonicity via `strengthenReason_rank_ge_*` theorems. |
 
 ### 2.6 Structured Ownership (domain: `ownership`)
