@@ -7053,8 +7053,8 @@ pub fn remediation_recipe_contract() -> RemediationRecipeContract {
             "score".to_string(),
         ],
         allowed_fix_intents: vec![
-            "adjust_timeout_budget".to_string(),
             "add_cancellation_checkpoint".to_string(),
+            "adjust_timeout_budget".to_string(),
             "enforce_lock_order".to_string(),
             "harden_retry_backoff".to_string(),
             "reduce_lock_scope".to_string(),
@@ -7132,9 +7132,9 @@ pub fn remediation_recipe_contract() -> RemediationRecipeContract {
                 to_version: REMEDIATION_RECIPE_CONTRACT_VERSION.to_string(),
                 breaking: false,
                 required_actions: vec![
-                    "Validate lexical ordering for all deterministic array fields.".to_string(),
-                    "Require confidence input weights to sum to exactly 10_000 bps.".to_string(),
                     "Fail recipe parsing when fix_intent/predicate/rollback strategy are outside allowlists.".to_string(),
+                    "Require confidence input weights to sum to exactly 10_000 bps.".to_string(),
+                    "Validate lexical ordering for all deterministic array fields.".to_string(),
                 ],
             }],
         },
@@ -7584,17 +7584,17 @@ pub fn remediation_recipe_fixtures() -> Vec<RemediationRecipeFixture> {
                 fix_intent: "adjust_timeout_budget".to_string(),
                 preconditions: vec![
                     RemediationPrecondition {
-                        key: "timeout_regression_detected".to_string(),
-                        predicate: "eq".to_string(),
-                        expected_value: "true".to_string(),
-                        evidence_ref: "evidence-timeout-001".to_string(),
-                        required: true,
-                    },
-                    RemediationPrecondition {
                         key: "rollback_artifact_exists".to_string(),
                         predicate: "exists".to_string(),
                         expected_value: "true".to_string(),
                         evidence_ref: "evidence-rollback-001".to_string(),
+                        required: true,
+                    },
+                    RemediationPrecondition {
+                        key: "timeout_regression_detected".to_string(),
+                        predicate: "eq".to_string(),
+                        expected_value: "true".to_string(),
+                        evidence_ref: "evidence-timeout-001".to_string(),
                         required: true,
                     },
                 ],
@@ -18071,6 +18071,71 @@ impl RuntimeState {
     }
 
     #[test]
+    fn parse_br_blocked_items_handles_string_and_object_blockers() {
+        let contract = beads_command_center_contract();
+        let raw = r#"[
+  {
+    "id":"asupersync-2b4jj.5.2",
+    "title":"Mail pane",
+    "status":"open",
+    "priority":2,
+    "blocked_by":["asupersync-2b4jj.2.1", {"id":"asupersync-2b4jj.2.1"}, {"id":"asupersync-2b4jj.2.0"}]
+  },
+  {
+    "id":"asupersync-2b4jj.5.3",
+    "title":"Franken export",
+    "status":"open",
+    "priority":1,
+    "blocked_by":["asupersync-2b4jj.5.2"]
+  }
+]"#;
+        let parsed = parse_br_blocked_items(&contract, raw).expect("parse");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].id, "asupersync-2b4jj.5.2");
+        assert_eq!(
+            parsed[0].blocked_by,
+            vec![
+                "asupersync-2b4jj.2.0".to_string(),
+                "asupersync-2b4jj.2.1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_bv_triage_recommendations_sorts_by_score_and_normalizes_reasons() {
+        let contract = beads_command_center_contract();
+        let raw = r#"{
+  "triage": {
+    "quick_ref": {
+      "top_picks": [
+        {
+          "id":"asupersync-2b4jj.5.1",
+          "title":"Command center",
+          "score":0.31,
+          "unblocks":3,
+          "reasons":["high impact","available","available"]
+        },
+        {
+          "id":"asupersync-2b4jj.5.2",
+          "title":"Mail pane",
+          "score":0.2,
+          "unblocks":2,
+          "reasons":["available"]
+        }
+      ]
+    }
+  }
+}"#;
+        let parsed = parse_bv_triage_recommendations(&contract, raw).expect("parse");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].id, "asupersync-2b4jj.5.1");
+        assert_eq!(
+            parsed[0].reasons,
+            vec!["available".to_string(), "high impact".to_string()]
+        );
+    }
+
+    #[test]
     fn build_beads_command_center_snapshot_filters_and_marks_stale() {
         let contract = beads_command_center_contract();
         let ready_json = r#"[
@@ -18254,6 +18319,47 @@ impl RuntimeState {
     }
 
     #[test]
+    fn parse_agent_mail_messages_rejects_invalid_direction() {
+        let contract = agent_mail_pane_contract();
+        let raw = r#"{"result":[]}"#;
+        let err =
+            parse_agent_mail_messages(&contract, raw, "inbox", "sideways").expect_err("must fail");
+        assert!(err.contains("direction must be inbox or outbox"));
+    }
+
+    #[test]
+    fn parse_agent_mail_contacts_sorts_and_handles_optional_fields() {
+        let contract = agent_mail_pane_contract();
+        let raw = r#"{
+  "result": [
+    {
+      "to":"ZuluAgent",
+      "status":"pending",
+      "reason":"Need handshake",
+      "updated_ts":"2026-02-27T20:00:00+00:00",
+      "expires_ts":"2026-03-06T20:00:00+00:00"
+    },
+    {
+      "to":"AlphaAgent",
+      "status":"approved",
+      "reason":"Already linked",
+      "updated_ts":"2026-02-27T19:00:00+00:00",
+      "expires_ts":""
+    }
+  ]
+}"#;
+        let contacts = parse_agent_mail_contacts(&contract, raw).expect("parse");
+        assert_eq!(contacts.len(), 2);
+        assert_eq!(contacts[0].peer, "AlphaAgent");
+        assert_eq!(contacts[0].expires_ts, None);
+        assert_eq!(contacts[1].peer, "ZuluAgent");
+        assert_eq!(
+            contacts[1].expires_ts.as_deref(),
+            Some("2026-03-06T20:00:00+00:00")
+        );
+    }
+
+    #[test]
     fn build_agent_mail_pane_snapshot_applies_ack_and_thread_filter() {
         let contract = agent_mail_pane_contract();
         let inbox_json = r#"{
@@ -18300,6 +18406,49 @@ impl RuntimeState {
                 .events
                 .iter()
                 .any(|event| event.event_kind == "ack_transition" && event.message_id == Some(2449))
+        );
+    }
+
+    #[test]
+    fn build_agent_mail_pane_snapshot_unacked_only_adds_ack_replay_command() {
+        let contract = agent_mail_pane_contract();
+        let inbox_json = r#"{
+  "result": [
+    {
+      "id": 3001,
+      "subject": "Needs ack",
+      "importance": "high",
+      "ack_required": true,
+      "created_ts": "2026-02-27T20:00:00+00:00",
+      "from": "BlackElk"
+    }
+  ]
+}"#;
+        let outbox_json = "[]";
+        let contacts_json = r#"{"result":[]}"#;
+
+        let snapshot = build_agent_mail_pane_snapshot(
+            &contract,
+            inbox_json,
+            outbox_json,
+            contacts_json,
+            None,
+            "unacked_only",
+            &[],
+        )
+        .expect("snapshot");
+        assert_eq!(snapshot.pending_ack_count, 1);
+        assert!(
+            snapshot
+                .replay_commands
+                .iter()
+                .any(|command| command == &contract.acknowledge_command)
+        );
+        assert!(
+            !snapshot
+                .replay_commands
+                .iter()
+                .any(|command| command == &contract.reply_command)
         );
     }
 
