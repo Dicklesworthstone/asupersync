@@ -72,20 +72,11 @@ impl<A: Future + Unpin, B: Future + Unpin> Future for Select<A, B> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
 
-        // CRITICAL: Poll both futures to ensure they're initialized.
-        // This is required for cancel-correctness: if a future wraps a JoinFuture,
-        // the JoinFuture must be created (by polling) so its Drop can abort the task
-        // when this Select is dropped. Without this, losers may never be polled,
-        // their JoinFutures never created, and tasks would leak (violating the
-        // "losers are drained" invariant).
-        let a_res = Pin::new(&mut this.a).poll(cx);
-        let b_res = Pin::new(&mut this.b).poll(cx);
-
-        if let Poll::Ready(val) = a_res {
+        if let Poll::Ready(val) = Pin::new(&mut this.a).poll(cx) {
             return Poll::Ready(Either::Left(val));
         }
 
-        if let Poll::Ready(val) = b_res {
+        if let Poll::Ready(val) = Pin::new(&mut this.b).poll(cx) {
             return Poll::Ready(Either::Right(val));
         }
 

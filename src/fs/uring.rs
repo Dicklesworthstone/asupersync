@@ -110,12 +110,19 @@ fn any_ops_pending(inner: &IoUringFileInner) -> bool {
 }
 
 fn mark_op_complete(state: &Mutex<OpState>, result: i32) {
-    let mut guard = state.lock();
-    if let OpState::Pending { waker } = &mut *guard {
-        if let Some(w) = waker.take() {
-            w.wake();
-        }
+    let waker_to_wake = {
+        let mut guard = state.lock();
+        let waker = if let OpState::Pending { waker } = &mut *guard {
+            waker.take()
+        } else {
+            None
+        };
         *guard = OpState::Complete(result);
+        waker
+    };
+
+    if let Some(w) = waker_to_wake {
+        w.wake();
     }
 }
 

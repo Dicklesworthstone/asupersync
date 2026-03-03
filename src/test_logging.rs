@@ -4159,6 +4159,7 @@ mod tests {
     #[test]
     fn test_harness_finish_auto_generates_manifest_on_failure() {
         init_test("test_harness_finish_auto_generates_manifest_on_failure");
+        let _guard = crate::test_utils::env_lock();
         let tmp = std::env::temp_dir().join("asupersync_harness_manifest_test");
         let _ = std::fs::remove_dir_all(&tmp);
 

@@ -541,11 +541,10 @@ impl Future for Sleep {
                                 remaining = duration.saturating_sub(elapsed);
                             }
 
-                            let mut state = state_clone.lock();
-                            if let Some(waker) = state.waker.take() {
+                            let waker = state_clone.lock().waker.take();
+                            if let Some(waker) = waker {
                                 waker.wake();
                             }
-                            drop(state);
                             completed_for_thread.store(true, Ordering::Release);
                         });
                         let thread = handle.thread().clone();

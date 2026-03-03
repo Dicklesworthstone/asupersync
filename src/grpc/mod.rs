@@ -50,7 +50,8 @@ pub mod streaming;
 
 // Re-export commonly used types
 pub use client::{
-    Channel, ChannelBuilder, ChannelConfig, CompressionEncoding, GrpcClient, ResponseStream,
+    Channel, ChannelBuilder, ChannelConfig, ClientInterceptor, CompressionEncoding, GrpcClient,
+    MetadataInterceptor, ResponseStream,
 };
 pub use codec::{Codec, FramedCodec, GrpcCodec, GrpcMessage, IdentityCodec};
 pub use health::{

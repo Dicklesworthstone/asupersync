@@ -547,7 +547,17 @@ fn encode_grpc_timeout(timeout: Duration) -> String {
     ];
 
     let timeout_nanos = timeout.as_nanos().max(1);
-    for (unit_nanos, suffix) in GRPC_TIMEOUT_UNITS {
+
+    for &(unit_nanos, suffix) in &GRPC_TIMEOUT_UNITS {
+        if timeout_nanos % unit_nanos == 0 {
+            let value = timeout_nanos / unit_nanos;
+            if value <= MAX_GRPC_TIMEOUT_VALUE {
+                return format!("{value}{suffix}");
+            }
+        }
+    }
+
+    for &(unit_nanos, suffix) in GRPC_TIMEOUT_UNITS.iter().rev() {
         let value = timeout_nanos.div_ceil(unit_nanos);
         if value <= MAX_GRPC_TIMEOUT_VALUE {
             return format!("{value}{suffix}");
@@ -642,26 +652,31 @@ impl<T> ResponseStream<T> {
     ///
     /// Returns an error if the stream has already been closed.
     pub fn push(&mut self, item: Result<T, Status>) -> Result<(), Status> {
-        let mut state = lock_unpoisoned(&self.state);
-        if state.closed {
-            return Err(Status::failed_precondition(
-                "cannot push to a closed response stream",
-            ));
+        let waiter = {
+            let mut state = lock_unpoisoned(&self.state);
+            if state.closed {
+                return Err(Status::failed_precondition(
+                    "cannot push to a closed response stream",
+                ));
+            }
+            state.items.push_back(item);
+            state.waiter.take()
+        };
+        if let Some(waker) = waiter {
+            waker.wake();
         }
-        state.items.push_back(item);
-        if let Some(waiter) = state.waiter.take() {
-            waiter.wake();
-        }
-        drop(state);
         Ok(())
     }
 
     /// Close the stream.
     pub fn close(&self) {
-        let mut state = lock_unpoisoned(&self.state);
-        state.closed = true;
-        if let Some(waiter) = state.waiter.take() {
-            waiter.wake();
+        let waiter = {
+            let mut state = lock_unpoisoned(&self.state);
+            state.closed = true;
+            state.waiter.take()
+        };
+        if let Some(waker) = waiter {
+            waker.wake();
         }
     }
 }
@@ -1057,7 +1072,7 @@ mod tests {
             config.accept_compression == vec![CompressionEncoding::Identity],
             "accept compression default",
             vec![CompressionEncoding::Identity],
-            config.accept_compression.clone()
+            config.accept_compression
         );
         crate::test_complete!("test_channel_config_default");
     }

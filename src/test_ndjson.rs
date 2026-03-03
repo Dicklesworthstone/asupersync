@@ -641,6 +641,7 @@ mod tests {
     fn test_write_artifact_bundle_roundtrip() {
         init_test("test_write_artifact_bundle_roundtrip");
 
+        let _guard = crate::test_utils::env_lock();
         let tmp = tempfile::TempDir::new().expect("create temp dir");
         // SAFETY: tests serialize env access with test_utils::env_lock.
         unsafe { std::env::set_var("ASUPERSYNC_TEST_ARTIFACTS_DIR", tmp.path()) };

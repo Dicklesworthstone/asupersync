@@ -390,13 +390,16 @@ impl VirtualTcpListener {
     /// The stream will be returned by the next `accept()` call.
     /// `remote_addr` is the address reported as the peer address.
     pub fn inject_connection(&self, stream: VirtualTcpStream, remote_addr: SocketAddr) {
-        let mut state = self.state.lock();
-        if state.closed {
-            // Listener is closed: do not enqueue new virtual connections.
-            return;
-        }
-        state.connections.push_back((stream, remote_addr));
-        if let Some(waker) = state.waker.take() {
+        let waker = {
+            let mut state = self.state.lock();
+            if state.closed {
+                // Listener is closed: do not enqueue new virtual connections.
+                return;
+            }
+            state.connections.push_back((stream, remote_addr));
+            state.waker.take()
+        };
+        if let Some(waker) = waker {
             waker.wake();
         }
     }
@@ -409,10 +412,13 @@ impl VirtualTcpListener {
 
     /// Close the listener, causing future `accept()` calls to return an error.
     pub fn close(&self) {
-        let mut state = self.state.lock();
-        state.closed = true;
-        state.connections.clear();
-        if let Some(waker) = state.waker.take() {
+        let waker = {
+            let mut state = self.state.lock();
+            state.closed = true;
+            state.connections.clear();
+            state.waker.take()
+        };
+        if let Some(waker) = waker {
             waker.wake();
         }
     }
@@ -438,13 +444,16 @@ pub struct VirtualConnectionInjector {
 impl VirtualConnectionInjector {
     /// Inject a connection into the listener's accept queue.
     pub fn inject(&self, stream: VirtualTcpStream, remote_addr: SocketAddr) {
-        let mut state = self.state.lock();
-        if state.closed {
-            // Listener is closed: do not enqueue new virtual connections.
-            return;
-        }
-        state.connections.push_back((stream, remote_addr));
-        if let Some(waker) = state.waker.take() {
+        let waker = {
+            let mut state = self.state.lock();
+            if state.closed {
+                // Listener is closed: do not enqueue new virtual connections.
+                return;
+            }
+            state.connections.push_back((stream, remote_addr));
+            state.waker.take()
+        };
+        if let Some(waker) = waker {
             waker.wake();
         }
     }

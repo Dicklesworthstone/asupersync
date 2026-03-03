@@ -1035,6 +1035,7 @@ mod tests {
 
     #[test]
     fn env_override_symbol_size() {
+        let _guard = crate::test_utils::env_lock();
         // SAFETY: tests serialize env access with test_utils::env_lock.
         unsafe { std::env::set_var("RAPTORQ_ENCODING_SYMBOL_SIZE", "512") };
         let config = ConfigLoader::default().load().unwrap();
