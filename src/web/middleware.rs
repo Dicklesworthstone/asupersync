@@ -43,13 +43,14 @@
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::combinator::bulkhead::{Bulkhead, BulkheadPolicy};
 use crate::combinator::circuit_breaker::{CircuitBreaker, CircuitBreakerPolicy};
 use crate::combinator::rate_limit::{RateLimitPolicy, RateLimiter};
 use crate::combinator::retry::RetryPolicy;
 use crate::http::compress::{ContentEncoding, negotiate_encoding};
+use crate::tracing_compat::{debug, warn};
 use crate::types::Time;
 
 use super::extract::Request;
@@ -733,6 +734,106 @@ impl<H: Handler> Handler for RequestIdMiddleware<H> {
     }
 }
 
+// ─── RequestTraceMiddleware ───────────────────────────────────────────────
+
+/// Policy for request/response tracing middleware.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestTracePolicy {
+    /// Response header for elapsed request time in milliseconds.
+    ///
+    /// Set to `None` to disable duration header injection.
+    pub duration_header: Option<String>,
+    /// Response header used for propagating the trace identifier.
+    ///
+    /// The middleware resolves trace ID from request extensions (`trace_id`,
+    /// then `request_id`) or request header `x-request-id`.
+    pub trace_header: Option<String>,
+}
+
+impl Default for RequestTracePolicy {
+    fn default() -> Self {
+        Self {
+            duration_header: Some("x-response-time-ms".to_string()),
+            trace_header: Some("x-trace-id".to_string()),
+        }
+    }
+}
+
+/// Middleware that emits request/response tracing events and optional metadata headers.
+pub struct RequestTraceMiddleware<H> {
+    inner: H,
+    policy: RequestTracePolicy,
+}
+
+impl<H: Handler> RequestTraceMiddleware<H> {
+    /// Wrap a handler with request/response tracing.
+    #[must_use]
+    pub fn new(inner: H, policy: RequestTracePolicy) -> Self {
+        Self { inner, policy }
+    }
+
+    fn resolve_trace_id(req: &Request) -> Option<String> {
+        req.extensions
+            .get("trace_id")
+            .or_else(|| req.extensions.get("request_id"))
+            .or_else(|| header_value(req, "x-request-id"))
+    }
+}
+
+impl<H: Handler> Handler for RequestTraceMiddleware<H> {
+    fn call(&self, req: Request) -> Response {
+        let method = req.method.clone();
+        let path = req.path.clone();
+        let trace_id = Self::resolve_trace_id(&req);
+        let start = Instant::now();
+
+        debug!(
+            method = %method,
+            path = %path,
+            trace_id = ?trace_id,
+            "http request start"
+        );
+
+        let mut resp = self.inner.call(req);
+        let elapsed = start.elapsed();
+        let duration_ms = elapsed.as_millis();
+        let status_code = resp.status.as_u16();
+
+        if let Some(header_name) = &self.policy.duration_header {
+            resp.headers
+                .insert(header_name.clone(), duration_ms.to_string());
+        }
+
+        if let (Some(header_name), Some(id)) = (&self.policy.trace_header, trace_id.as_ref()) {
+            resp.headers
+                .entry(header_name.clone())
+                .or_insert_with(|| id.clone());
+        }
+
+        if status_code >= 500 {
+            warn!(
+                method = %method,
+                path = %path,
+                status = status_code,
+                duration_ms = duration_ms,
+                trace_id = ?trace_id,
+                "http request completed with server error"
+            );
+        } else {
+            debug!(
+                method = %method,
+                path = %path,
+                status = status_code,
+                duration_ms = duration_ms,
+                trace_id = ?trace_id,
+                "http request completed"
+            );
+        }
+
+        resp
+    }
+}
+
 // ─── AuthMiddleware ────────────────────────────────────────────────────────
 
 /// Authorization policy for bearer-token middleware.
@@ -1206,6 +1307,17 @@ impl<H: Handler> MiddlewareStack<H> {
     ) -> MiddlewareStack<RequestIdMiddleware<H>> {
         MiddlewareStack {
             inner: RequestIdMiddleware::new(self.inner, header_name),
+        }
+    }
+
+    /// Add request/response tracing middleware.
+    #[must_use]
+    pub fn with_request_trace(
+        self,
+        policy: RequestTracePolicy,
+    ) -> MiddlewareStack<RequestTraceMiddleware<H>> {
+        MiddlewareStack {
+            inner: RequestTraceMiddleware::new(self.inner, policy),
         }
     }
 
@@ -2054,6 +2166,57 @@ mod tests {
         assert!(body.starts_with("req-"));
     }
 
+    // --- RequestTraceMiddleware ---
+
+    #[test]
+    fn request_trace_injects_duration_and_trace_headers() {
+        let mw = RequestTraceMiddleware::new(FnHandler::new(ok_handler), RequestTracePolicy::default());
+        let req = make_request().with_header("x-request-id", "trace-42");
+        let resp = mw.call(req);
+
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(resp.headers.get("x-trace-id"), Some(&"trace-42".to_string()));
+        let duration = resp
+            .headers
+            .get("x-response-time-ms")
+            .expect("duration header should be present");
+        assert!(
+            duration.parse::<u128>().is_ok(),
+            "duration header should be numeric: {duration}"
+        );
+    }
+
+    #[test]
+    fn request_trace_can_disable_duration_header() {
+        let policy = RequestTracePolicy {
+            duration_header: None,
+            trace_header: Some("x-trace-id".to_string()),
+        };
+        let mw = RequestTraceMiddleware::new(FnHandler::new(ok_handler), policy);
+        let resp = mw.call(make_request().with_header("x-request-id", "trace-7"));
+        assert_eq!(resp.status, StatusCode::OK);
+        assert!(!resp.headers.contains_key("x-response-time-ms"));
+        assert_eq!(resp.headers.get("x-trace-id"), Some(&"trace-7".to_string()));
+    }
+
+    #[test]
+    fn request_trace_preserves_existing_trace_header() {
+        fn header_handler() -> Response {
+            Response::new(StatusCode::OK, b"ok".to_vec()).header("x-trace-id", "inner-trace")
+        }
+
+        let mw = RequestTraceMiddleware::new(
+            FnHandler::new(header_handler),
+            RequestTracePolicy::default(),
+        );
+        let resp = mw.call(make_request().with_header("x-request-id", "outer-trace"));
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(
+            resp.headers.get("x-trace-id"),
+            Some(&"inner-trace".to_string())
+        );
+    }
+
     // --- CatchPanicMiddleware ---
 
     #[test]
@@ -2221,6 +2384,18 @@ mod tests {
     }
 
     #[test]
+    fn middleware_stack_with_request_trace() {
+        let handler = MiddlewareStack::new(FnHandler::new(ok_handler))
+            .with_request_trace(RequestTracePolicy::default())
+            .build();
+
+        let resp = handler.call(make_request().with_header("x-request-id", "trace-55"));
+        assert_eq!(resp.status, StatusCode::OK);
+        assert!(resp.headers.contains_key("x-response-time-ms"));
+        assert_eq!(resp.headers.get("x-trace-id"), Some(&"trace-55".to_string()));
+    }
+
+    #[test]
     fn middleware_stack_with_catch_panic() {
         let handler = MiddlewareStack::new(PanicHandler)
             .with_catch_panic()
@@ -2236,6 +2411,7 @@ mod tests {
             .with_catch_panic()
             .with_body_limit(10 * 1024 * 1024)
             .with_request_id("x-request-id")
+            .with_request_trace(RequestTracePolicy::default())
             .with_normalize_path(TrailingSlash::Trim)
             .with_timeout(Duration::from_secs(30))
             .with_cors(CorsPolicy::default())
@@ -2255,6 +2431,7 @@ mod tests {
         let resp = handler.call(req);
         assert_eq!(resp.status, StatusCode::OK);
         assert!(resp.headers.contains_key("x-request-id"));
+        assert!(resp.headers.contains_key("x-response-time-ms"));
         assert!(resp.headers.contains_key("access-control-allow-origin"));
         assert_eq!(
             resp.headers.get("x-content-type-options"),
