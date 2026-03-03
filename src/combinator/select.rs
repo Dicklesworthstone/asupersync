@@ -699,12 +699,12 @@ mod tests {
 
         // Loser was dropped (cleanup via Drop) but NOT drained (not polled to completion)
         assert!(dropped.load(Ordering::SeqCst), "loser must be dropped");
-        // Loser MUST be polled at least once to ensure cancel-correctness (initializing its drop guard).
-        // Select now polls all branches on each iteration, just like SelectAll.
+        // Loser should NOT be polled if the winner is immediately ready. Eager polling
+        // was removed to prevent dropping ready results (which swallows panics).
         assert_eq!(
             polled.load(Ordering::SeqCst),
-            1,
-            "loser should be polled exactly once even when winner is left-biased and immediately ready"
+            0,
+            "loser should not be polled if winner is left-biased and immediately ready"
         );
     }
 
