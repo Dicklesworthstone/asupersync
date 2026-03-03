@@ -60,19 +60,19 @@ where
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<B>> {
         let this = self.project();
-        let state = match this.state {
-            Some(s) => s,
-            None => return Poll::Ready(None),
+        let Some(state) = this.state else {
+            return Poll::Ready(None);
         };
 
         match this.stream.poll_next(cx) {
-            Poll::Ready(Some(item)) => match (this.f)(state, item) {
-                Some(value) => Poll::Ready(Some(value)),
-                None => {
+            Poll::Ready(Some(item)) => {
+                if let Some(value) = (this.f)(state, item) {
+                    Poll::Ready(Some(value))
+                } else {
                     *this.state = None;
                     Poll::Ready(None)
                 }
-            },
+            }
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn scan_running_sum() {
         init_test("scan_running_sum");
-        let mut stream = Scan::new(iter(vec![1, 2, 3, 4, 5]), 0i32, |acc, x| {
+        let mut stream = Scan::new(iter(vec![1, 2, 3, 4, 5]), 0i32, |acc: &mut i32, x: i32| {
             *acc += x;
             Some(*acc)
         });
@@ -130,7 +130,7 @@ mod tests {
     fn scan_early_termination() {
         init_test("scan_early_termination");
         // Terminate when accumulator exceeds 5.
-        let mut stream = Scan::new(iter(vec![1, 2, 3, 4, 5]), 0i32, |acc, x| {
+        let mut stream = Scan::new(iter(vec![1, 2, 3, 4, 5]), 0i32, |acc: &mut i32, x: i32| {
             *acc += x;
             if *acc > 5 { None } else { Some(*acc) }
         });
@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn scan_empty_stream() {
         init_test("scan_empty_stream");
-        let mut stream = Scan::new(iter(Vec::<i32>::new()), 0i32, |acc, x| {
+        let mut stream = Scan::new(iter(Vec::<i32>::new()), 0i32, |acc: &mut i32, x: i32| {
             *acc += x;
             Some(*acc)
         });
@@ -169,13 +169,17 @@ mod tests {
     #[test]
     fn scan_type_change() {
         init_test("scan_type_change");
-        let mut stream = Scan::new(iter(vec!["hello", "world"]), String::new(), |acc, item| {
-            if !acc.is_empty() {
-                acc.push(' ');
-            }
-            acc.push_str(item);
-            Some(acc.clone())
-        });
+        let mut stream = Scan::new(
+            iter(vec!["hello", "world"]),
+            String::new(),
+            |acc: &mut String, item| {
+                if !acc.is_empty() {
+                    acc.push(' ');
+                }
+                acc.push_str(item);
+                Some(acc.clone())
+            },
+        );
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
@@ -191,7 +195,7 @@ mod tests {
     #[test]
     fn scan_accessors() {
         init_test("scan_accessors");
-        let mut stream = Scan::new(iter(vec![1, 2, 3]), 0i32, |acc, x| {
+        let mut stream = Scan::new(iter(vec![1, 2, 3]), 0i32, |acc: &mut i32, x: i32| {
             *acc += x;
             Some(*acc)
         });
