@@ -1641,4 +1641,123 @@ mod tests {
         let dbg = format!("{info:?}");
         assert!(dbg.contains("ServerInfo"));
     }
+
+    // ====================================================================
+    // T6.7 Hardening tests
+    // ====================================================================
+
+    #[test]
+    fn test_max_read_buffer_constant() {
+        assert_eq!(MAX_READ_BUFFER, 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_read_buffer_rejects_oversized() {
+        let mut buf = NatsReadBuffer::new();
+        let big = vec![0u8; MAX_READ_BUFFER + 1];
+        let err = buf.extend(&big).unwrap_err();
+        assert!(matches!(err, NatsError::Protocol(_)));
+    }
+
+    #[test]
+    fn test_read_buffer_accepts_max() {
+        let mut buf = NatsReadBuffer::new();
+        let data = vec![0u8; MAX_READ_BUFFER];
+        buf.extend(&data).unwrap();
+        assert_eq!(buf.available().len(), MAX_READ_BUFFER);
+    }
+
+    #[test]
+    fn test_read_buffer_consumed_data_not_counted() {
+        let mut buf = NatsReadBuffer::new();
+        // Fill to near max
+        let data = vec![0u8; MAX_READ_BUFFER - 100];
+        buf.extend(&data).unwrap();
+        // Consume most of it
+        buf.consume(MAX_READ_BUFFER - 200);
+        // Now should be able to add more
+        let more = vec![0u8; 200];
+        buf.extend(&more).unwrap();
+    }
+
+    #[test]
+    fn test_config_max_payload_default() {
+        let config = NatsConfig::default();
+        assert_eq!(config.max_payload, 1_048_576);
+    }
+
+    #[test]
+    fn test_server_info_parse_max_payload() {
+        let json = r#"{"max_payload":524288}"#;
+        let info = ServerInfo::parse(json);
+        assert_eq!(info.max_payload, 524_288);
+    }
+
+    #[test]
+    fn test_validate_nats_token_accepts_valid() {
+        assert!(validate_nats_token("foo.bar.>", "subject").is_ok());
+        assert!(validate_nats_token("*", "subject").is_ok());
+        assert!(validate_nats_token("_INBOX.123.abc", "subject").is_ok());
+    }
+
+    #[test]
+    fn test_validate_nats_token_rejects_empty() {
+        assert!(validate_nats_token("", "subject").is_err());
+    }
+
+    #[test]
+    fn test_validate_nats_token_rejects_newline_injection() {
+        // A subject with \r\nPUB would inject a second command
+        assert!(validate_nats_token("foo\r\nPUB evil 0\r\n", "subject").is_err());
+    }
+
+    #[test]
+    fn test_validate_nats_token_rejects_tab() {
+        assert!(validate_nats_token("foo\tbar", "queue").is_err());
+    }
+
+    #[test]
+    fn test_nats_json_escape_empty() {
+        assert_eq!(nats_json_escape(""), "");
+    }
+
+    #[test]
+    fn test_nats_json_escape_tab_and_cr() {
+        assert_eq!(nats_json_escape("\t"), "\\t");
+        assert_eq!(nats_json_escape("\r"), "\\r");
+    }
+
+    #[test]
+    fn test_extract_json_string_with_escape() {
+        let json = r#"{"key":"val\"ue"}"#;
+        assert_eq!(
+            extract_json_string(json, "key"),
+            Some("val\\\"ue".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_json_i64_negative() {
+        let json = r#"{"val":-42}"#;
+        assert_eq!(extract_json_i64(json, "val"), Some(-42));
+    }
+
+    #[test]
+    fn test_extract_json_bool_missing() {
+        let json = r#"{"other":42}"#;
+        assert_eq!(extract_json_bool(json, "missing"), None);
+    }
+
+    #[test]
+    fn test_config_from_url_ipv6_default_port() {
+        let config = NatsConfig::from_url("nats://[::1]").unwrap();
+        assert_eq!(config.host, "[::1]");
+        assert_eq!(config.port, 4222);
+    }
+
+    #[test]
+    fn test_config_from_url_ipv6_invalid() {
+        let result = NatsConfig::from_url("nats://[::1");
+        assert!(matches!(result, Err(NatsError::InvalidUrl(_))));
+    }
 }

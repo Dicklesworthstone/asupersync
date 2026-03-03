@@ -318,8 +318,11 @@ impl KafkaConsumer {
         self.ensure_open()?;
         let _ = timeout;
 
-        let state = self.state.lock();
-        if state.subscribed_topics.is_empty() {
+        let has_subscriptions = {
+            let state = self.state.lock();
+            !state.subscribed_topics.is_empty()
+        };
+        if !has_subscriptions {
             return Err(KafkaError::Config(
                 "consumer has no active topic subscription".to_string(),
             ));
@@ -341,16 +344,22 @@ impl KafkaConsumer {
             return Err(KafkaError::Config("offsets cannot be empty".to_string()));
         }
 
+        {
+            let state = self.state.lock();
+            for tpo in offsets {
+                if !state.subscribed_topics.contains(&tpo.topic) {
+                    return Err(KafkaError::InvalidTopic(tpo.topic.clone()));
+                }
+                if tpo.offset < 0 {
+                    return Err(KafkaError::Config(
+                        "offsets must be non-negative".to_string(),
+                    ));
+                }
+            }
+        }
+
         let mut state = self.state.lock();
         for tpo in offsets {
-            if !state.subscribed_topics.contains(&tpo.topic) {
-                return Err(KafkaError::InvalidTopic(tpo.topic.clone()));
-            }
-            if tpo.offset < 0 {
-                return Err(KafkaError::Config(
-                    "offsets must be non-negative".to_string(),
-                ));
-            }
             state
                 .committed_offsets
                 .insert((tpo.topic.clone(), tpo.partition), tpo.offset);
@@ -370,10 +379,15 @@ impl KafkaConsumer {
             ));
         }
 
-        let mut state = self.state.lock();
-        if !state.subscribed_topics.contains(&tpo.topic) {
+        let is_subscribed = {
+            let state = self.state.lock();
+            state.subscribed_topics.contains(&tpo.topic)
+        };
+        if !is_subscribed {
             return Err(KafkaError::InvalidTopic(tpo.topic.clone()));
         }
+
+        let mut state = self.state.lock();
         state
             .positions
             .insert((tpo.topic.clone(), tpo.partition), tpo.offset);
@@ -763,9 +777,12 @@ mod tests {
                 consumer.assigned_partitions(),
                 vec![("orders".to_string(), 0), ("payments".to_string(), 0)]
             );
-            assert_eq!(
-                consumer.poll(&cx, Duration::from_millis(1)).await.unwrap(),
-                None
+            assert!(
+                consumer
+                    .poll(&cx, Duration::from_millis(1))
+                    .await
+                    .unwrap()
+                    .is_none()
             );
         });
     }

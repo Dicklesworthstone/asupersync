@@ -8,7 +8,7 @@ use asupersync::channel::session::tracked_channel;
 use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::messaging::{
-    ConsumerConfig, KafkaConsumer, KafkaError, KafkaProducer, ProducerConfig, TopicPartitionOffset,
+    KafkaConsumer, KafkaConsumerConfig, KafkaError, KafkaProducer, ProducerConfig, TopicPartitionOffset,
 };
 use asupersync::types::{Budget, CancelReason};
 use parking_lot::Mutex;
@@ -399,7 +399,7 @@ fn e2e_kafka_consumer_lifecycle() {
     common::run_test_with_cx(|cx| async move {
         test_phase!("Kafka Consumer Lifecycle");
 
-        let consumer = KafkaConsumer::new(ConsumerConfig::new(
+        let consumer = KafkaConsumer::new(KafkaConsumerConfig::new(
             vec!["localhost:9092".into()],
             "group-a",
         ))

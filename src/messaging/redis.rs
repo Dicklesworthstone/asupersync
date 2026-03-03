@@ -6,8 +6,6 @@
 
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWriteExt, ReadBuf};
-use crate::messaging::redis_pubsub::RedisPubSub;
-use crate::messaging::redis_transaction::Transaction;
 use crate::net::TcpStream;
 use crate::sync::{GenericPool, Pool as _, PoolConfig, PoolError, PooledResource};
 use std::fmt;
@@ -433,7 +431,7 @@ pub enum PubSubEvent {
     Pong(Option<Vec<u8>>),
 }
 
-fn expect_ok_response(resp: RespValue, command: &str) -> Result<(), RedisError> {
+fn expect_ok_response(resp: &RespValue, command: &str) -> Result<(), RedisError> {
     if resp.is_ok() {
         Ok(())
     } else {
@@ -943,7 +941,7 @@ impl RedisClient {
             args.push(key.as_bytes());
         }
         let resp = self.cmd_bytes(cx, &args).await?;
-        expect_ok_response(resp, "WATCH")
+        expect_ok_response(&resp, "WATCH")
     }
 
     /// Clear all watched keys on the connection selected for this command.
@@ -952,7 +950,7 @@ impl RedisClient {
     /// made on the same pooled connection previously used for `WATCH`.
     pub async fn unwatch(&self, cx: &Cx) -> Result<(), RedisError> {
         let resp = self.cmd_bytes(cx, &[b"UNWATCH"]).await?;
-        expect_ok_response(resp, "UNWATCH")
+        expect_ok_response(&resp, "UNWATCH")
     }
 
     /// Start a Redis transaction using `MULTI`/`EXEC`.
@@ -1084,7 +1082,7 @@ impl Transaction {
                 return Err(e);
             }
         };
-        if let Err(e) = expect_ok_response(resp, "MULTI") {
+        if let Err(e) = expect_ok_response(&resp, "MULTI") {
             conn.discard();
             return Err(e);
         }
@@ -1208,7 +1206,7 @@ impl Transaction {
                 return Err(e);
             }
         };
-        expect_ok_response(resp, "DISCARD")
+        expect_ok_response(&resp, "DISCARD")
     }
 }
 
@@ -1277,6 +1275,107 @@ impl RedisPubSub {
         }
     }
 
+    fn next_required(
+        iter: &mut impl Iterator<Item = RespValue>,
+        missing: &str,
+    ) -> Result<RespValue, RedisError> {
+        iter.next()
+            .ok_or_else(|| RedisError::Protocol(missing.to_string()))
+    }
+
+    fn ensure_no_trailing(
+        iter: &mut impl Iterator<Item = RespValue>,
+        message: &str,
+    ) -> Result<(), RedisError> {
+        if iter.next().is_some() {
+            Err(RedisError::Protocol(message.to_string()))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn parse_message_event(
+        iter: &mut impl Iterator<Item = RespValue>,
+    ) -> Result<PubSubEvent, RedisError> {
+        let channel = Self::decode_text(
+            Self::next_required(iter, "pubsub message missing channel")?,
+            "message.channel",
+        )?;
+        let payload = Self::decode_payload(
+            Self::next_required(iter, "pubsub message missing payload")?,
+            "message.payload",
+        )?;
+        Self::ensure_no_trailing(iter, "pubsub message has unexpected trailing fields")?;
+        Ok(PubSubEvent::Message(PubSubMessage {
+            channel,
+            pattern: None,
+            payload,
+        }))
+    }
+
+    fn parse_pmessage_event(
+        iter: &mut impl Iterator<Item = RespValue>,
+    ) -> Result<PubSubEvent, RedisError> {
+        let pattern = Self::decode_text(
+            Self::next_required(iter, "pubsub pmessage missing pattern")?,
+            "pmessage.pattern",
+        )?;
+        let channel = Self::decode_text(
+            Self::next_required(iter, "pubsub pmessage missing channel")?,
+            "pmessage.channel",
+        )?;
+        let payload = Self::decode_payload(
+            Self::next_required(iter, "pubsub pmessage missing payload")?,
+            "pmessage.payload",
+        )?;
+        Self::ensure_no_trailing(iter, "pubsub pmessage has unexpected trailing fields")?;
+        Ok(PubSubEvent::Message(PubSubMessage {
+            channel,
+            pattern: Some(pattern),
+            payload,
+        }))
+    }
+
+    fn parse_subscription_event(
+        kind: &str,
+        iter: &mut impl Iterator<Item = RespValue>,
+    ) -> Result<PubSubEvent, RedisError> {
+        let channel = Self::decode_text(
+            Self::next_required(iter, "pubsub subscription missing channel")?,
+            "subscription.channel",
+        )?;
+        let remaining = Self::decode_integer(
+            Self::next_required(iter, "pubsub subscription missing remaining-count")?,
+            "subscription.remaining",
+        )?;
+        Self::ensure_no_trailing(iter, "pubsub subscription has unexpected trailing fields")?;
+        let kind = if kind.eq_ignore_ascii_case("subscribe") {
+            PubSubSubscriptionKind::Subscribe
+        } else if kind.eq_ignore_ascii_case("unsubscribe") {
+            PubSubSubscriptionKind::Unsubscribe
+        } else if kind.eq_ignore_ascii_case("psubscribe") {
+            PubSubSubscriptionKind::PatternSubscribe
+        } else {
+            PubSubSubscriptionKind::PatternUnsubscribe
+        };
+        Ok(PubSubEvent::Subscription {
+            kind,
+            channel,
+            remaining,
+        })
+    }
+
+    fn parse_pong_event(
+        iter: &mut impl Iterator<Item = RespValue>,
+    ) -> Result<PubSubEvent, RedisError> {
+        let payload = match iter.next() {
+            None => None,
+            Some(value) => Some(Self::decode_payload(value, "pong.payload")?),
+        };
+        Self::ensure_no_trailing(iter, "pubsub pong has unexpected trailing fields")?;
+        Ok(PubSubEvent::Pong(payload))
+    }
+
     fn parse_event(value: RespValue) -> Result<PubSubEvent, RedisError> {
         let items = match value {
             RespValue::Array(Some(items)) => items,
@@ -1294,108 +1393,22 @@ impl RedisPubSub {
             "pubsub kind",
         )?;
 
-        match kind.to_ascii_lowercase().as_str() {
-            "message" => {
-                let channel = Self::decode_text(
-                    iter.next().ok_or_else(|| {
-                        RedisError::Protocol("pubsub message missing channel".to_string())
-                    })?,
-                    "message.channel",
-                )?;
-                let payload = Self::decode_payload(
-                    iter.next().ok_or_else(|| {
-                        RedisError::Protocol("pubsub message missing payload".to_string())
-                    })?,
-                    "message.payload",
-                )?;
-                if iter.next().is_some() {
-                    return Err(RedisError::Protocol(
-                        "pubsub message has unexpected trailing fields".to_string(),
-                    ));
-                }
-                Ok(PubSubEvent::Message(PubSubMessage {
-                    channel,
-                    pattern: None,
-                    payload,
-                }))
-            }
-            "pmessage" => {
-                let pattern = Self::decode_text(
-                    iter.next().ok_or_else(|| {
-                        RedisError::Protocol("pubsub pmessage missing pattern".to_string())
-                    })?,
-                    "pmessage.pattern",
-                )?;
-                let channel = Self::decode_text(
-                    iter.next().ok_or_else(|| {
-                        RedisError::Protocol("pubsub pmessage missing channel".to_string())
-                    })?,
-                    "pmessage.channel",
-                )?;
-                let payload = Self::decode_payload(
-                    iter.next().ok_or_else(|| {
-                        RedisError::Protocol("pubsub pmessage missing payload".to_string())
-                    })?,
-                    "pmessage.payload",
-                )?;
-                if iter.next().is_some() {
-                    return Err(RedisError::Protocol(
-                        "pubsub pmessage has unexpected trailing fields".to_string(),
-                    ));
-                }
-                Ok(PubSubEvent::Message(PubSubMessage {
-                    channel,
-                    pattern: Some(pattern),
-                    payload,
-                }))
-            }
-            "subscribe" | "unsubscribe" | "psubscribe" | "punsubscribe" => {
-                let channel = Self::decode_text(
-                    iter.next().ok_or_else(|| {
-                        RedisError::Protocol("pubsub subscription missing channel".to_string())
-                    })?,
-                    "subscription.channel",
-                )?;
-                let remaining = Self::decode_integer(
-                    iter.next().ok_or_else(|| {
-                        RedisError::Protocol(
-                            "pubsub subscription missing remaining-count".to_string(),
-                        )
-                    })?,
-                    "subscription.remaining",
-                )?;
-                if iter.next().is_some() {
-                    return Err(RedisError::Protocol(
-                        "pubsub subscription has unexpected trailing fields".to_string(),
-                    ));
-                }
-                let kind = match kind.as_str() {
-                    "subscribe" => PubSubSubscriptionKind::Subscribe,
-                    "unsubscribe" => PubSubSubscriptionKind::Unsubscribe,
-                    "psubscribe" => PubSubSubscriptionKind::PatternSubscribe,
-                    _ => PubSubSubscriptionKind::PatternUnsubscribe,
-                };
-                Ok(PubSubEvent::Subscription {
-                    kind,
-                    channel,
-                    remaining,
-                })
-            }
-            "pong" => {
-                let payload = match iter.next() {
-                    None => None,
-                    Some(value) => Some(Self::decode_payload(value, "pong.payload")?),
-                };
-                if iter.next().is_some() {
-                    return Err(RedisError::Protocol(
-                        "pubsub pong has unexpected trailing fields".to_string(),
-                    ));
-                }
-                Ok(PubSubEvent::Pong(payload))
-            }
-            other => Err(RedisError::Protocol(format!(
-                "unsupported pubsub event kind: {other}"
-            ))),
+        if kind.eq_ignore_ascii_case("message") {
+            Self::parse_message_event(&mut iter)
+        } else if kind.eq_ignore_ascii_case("pmessage") {
+            Self::parse_pmessage_event(&mut iter)
+        } else if kind.eq_ignore_ascii_case("subscribe")
+            || kind.eq_ignore_ascii_case("unsubscribe")
+            || kind.eq_ignore_ascii_case("psubscribe")
+            || kind.eq_ignore_ascii_case("punsubscribe")
+        {
+            Self::parse_subscription_event(&kind, &mut iter)
+        } else if kind.eq_ignore_ascii_case("pong") {
+            Self::parse_pong_event(&mut iter)
+        } else {
+            Err(RedisError::Protocol(format!(
+                "unsupported pubsub event kind: {kind}"
+            )))
         }
     }
 
@@ -1901,5 +1914,98 @@ mod tests {
         RespValue::SimpleString("PING".into()).encode_into(&mut buf);
         RespValue::Integer(1).encode_into(&mut buf);
         assert_eq!(&buf, b"+PING\r\n:1\r\n");
+    }
+
+    #[test]
+    fn expect_ok_response_accepts_ok() {
+        let resp = RespValue::SimpleString("OK".to_string());
+        assert!(expect_ok_response(&resp, "TEST").is_ok());
+    }
+
+    #[test]
+    fn expect_ok_response_rejects_non_ok() {
+        let resp = RespValue::SimpleString("PONG".to_string());
+        let err = expect_ok_response(&resp, "TEST").expect_err("must reject non-OK");
+        assert!(matches!(err, RedisError::Protocol(_)));
+    }
+
+    #[test]
+    fn pubsub_parse_message_event() {
+        let event = RedisPubSub::parse_event(RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"message".to_vec())),
+            RespValue::BulkString(Some(b"chan-1".to_vec())),
+            RespValue::BulkString(Some(b"payload".to_vec())),
+        ])))
+        .expect("message event should parse");
+
+        assert_eq!(
+            event,
+            PubSubEvent::Message(PubSubMessage {
+                channel: "chan-1".to_string(),
+                pattern: None,
+                payload: b"payload".to_vec(),
+            })
+        );
+    }
+
+    #[test]
+    fn pubsub_parse_pmessage_event() {
+        let event = RedisPubSub::parse_event(RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"pmessage".to_vec())),
+            RespValue::BulkString(Some(b"user.*".to_vec())),
+            RespValue::BulkString(Some(b"user.created".to_vec())),
+            RespValue::BulkString(Some(b"body".to_vec())),
+        ])))
+        .expect("pmessage event should parse");
+
+        assert_eq!(
+            event,
+            PubSubEvent::Message(PubSubMessage {
+                channel: "user.created".to_string(),
+                pattern: Some("user.*".to_string()),
+                payload: b"body".to_vec(),
+            })
+        );
+    }
+
+    #[test]
+    fn pubsub_parse_subscription_event() {
+        let event = RedisPubSub::parse_event(RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"subscribe".to_vec())),
+            RespValue::BulkString(Some(b"metrics".to_vec())),
+            RespValue::Integer(2),
+        ])))
+        .expect("subscribe event should parse");
+
+        assert_eq!(
+            event,
+            PubSubEvent::Subscription {
+                kind: PubSubSubscriptionKind::Subscribe,
+                channel: "metrics".to_string(),
+                remaining: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn pubsub_parse_pong_event() {
+        let event = RedisPubSub::parse_event(RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"pong".to_vec())),
+            RespValue::BulkString(Some(b"hello".to_vec())),
+        ])))
+        .expect("pong event should parse");
+
+        assert_eq!(event, PubSubEvent::Pong(Some(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn pubsub_parse_unknown_event_kind_fails() {
+        let err = RedisPubSub::parse_event(RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"weird".to_vec())),
+            RespValue::BulkString(Some(b"x".to_vec())),
+        ])))
+        .expect_err("unknown event should fail");
+
+        assert!(matches!(err, RedisError::Protocol(_)));
     }
 }
