@@ -1198,7 +1198,16 @@ impl Connection {
     }
 
     /// Send a WINDOW_UPDATE for connection-level flow control.
+    ///
+    /// # Errors
+    ///
+    /// Returns `H2Error` if `increment` is zero (RFC 7540 §6.9) or exceeds `i32::MAX`.
     pub fn send_connection_window_update(&mut self, increment: u32) -> Result<(), H2Error> {
+        if increment == 0 {
+            return Err(H2Error::flow_control(
+                "WINDOW_UPDATE increment must be non-zero (RFC 7540 §6.9)",
+            ));
+        }
         let delta = i32::try_from(increment)
             .map_err(|_| H2Error::flow_control("window increment too large"))?;
         let new_window = i64::from(self.recv_window) + i64::from(delta);
@@ -1214,11 +1223,20 @@ impl Connection {
     }
 
     /// Send a WINDOW_UPDATE for stream-level flow control.
+    ///
+    /// # Errors
+    ///
+    /// Returns `H2Error` if `increment` is zero (RFC 7540 §6.9) or exceeds `i32::MAX`.
     pub fn send_stream_window_update(
         &mut self,
         stream_id: u32,
         increment: u32,
     ) -> Result<(), H2Error> {
+        if increment == 0 {
+            return Err(H2Error::flow_control(
+                "WINDOW_UPDATE increment must be non-zero (RFC 7540 §6.9)",
+            ));
+        }
         let delta = i32::try_from(increment)
             .map_err(|_| H2Error::flow_control("window increment too large"))?;
         if let Some(stream) = self.streams.get_mut(stream_id) {
@@ -3217,5 +3235,36 @@ mod tests {
             }
             _ => panic!("expected GoAway"),
         }
+    }
+
+    #[test]
+    fn connection_window_update_rejects_zero_increment() {
+        let mut conn = Connection::server(Settings::default());
+        let err = conn.send_connection_window_update(0).unwrap_err();
+        assert_eq!(err.code, ErrorCode::FlowControlError);
+    }
+
+    #[test]
+    fn stream_window_update_rejects_zero_increment() {
+        let mut conn = Connection::server(Settings::default());
+        let err = conn.send_stream_window_update(1, 0).unwrap_err();
+        assert_eq!(err.code, ErrorCode::FlowControlError);
+    }
+
+    #[test]
+    fn connection_window_update_accepts_valid_increment() {
+        let mut conn = Connection::server(Settings::default());
+        assert!(conn.send_connection_window_update(1024).is_ok());
+        assert!(conn.has_pending_frames());
+    }
+
+    #[test]
+    fn stream_window_update_accepts_valid_increment() {
+        let mut conn = Connection::server(Settings::default());
+        // Open a stream first by processing a HEADERS frame.
+        let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+        conn.process_frame(headers).unwrap();
+        assert!(conn.send_stream_window_update(1, 4096).is_ok());
+        assert!(conn.has_pending_frames());
     }
 }
