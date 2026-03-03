@@ -41,6 +41,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 /// Global blocking pool for SQLite operations.
 ///
@@ -48,9 +49,25 @@ use std::sync::{Arc, OnceLock};
 /// `BlockingPoolHandle` would drop the pool immediately and put the
 /// handle into permanent shutdown state.
 static SQLITE_POOL: OnceLock<BlockingPool> = OnceLock::new();
+const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
 fn get_sqlite_pool() -> BlockingPoolHandle {
     SQLITE_POOL.get_or_init(|| BlockingPool::new(1, 4)).handle()
+}
+
+fn configure_connection_defaults(
+    conn: &rusqlite::Connection,
+    enable_wal: bool,
+) -> Result<(), SqliteError> {
+    conn.busy_timeout(DEFAULT_BUSY_TIMEOUT)
+        .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+    conn.pragma_update(None, "foreign_keys", "ON")
+        .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+    if enable_wal {
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+    }
+    Ok(())
 }
 
 /// Error type for SQLite operations.
@@ -357,8 +374,12 @@ impl SqliteConnection {
         let permit = tx.reserve(cx);
 
         let handle = pool.spawn(move || {
-            let result =
-                rusqlite::Connection::open(&path).map_err(|e| SqliteError::Sqlite(e.to_string()));
+            let result = (|| {
+                let conn = rusqlite::Connection::open(&path)
+                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+                configure_connection_defaults(&conn, true)?;
+                Ok(conn)
+            })();
             let _ = permit.send(result);
         });
 
@@ -402,8 +423,12 @@ impl SqliteConnection {
         let permit = tx.reserve(cx);
 
         let handle = pool.spawn(move || {
-            let result = rusqlite::Connection::open_in_memory()
-                .map_err(|e| SqliteError::Sqlite(e.to_string()));
+            let result = (|| {
+                let conn = rusqlite::Connection::open_in_memory()
+                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+                configure_connection_defaults(&conn, false)?;
+                Ok(conn)
+            })();
             let _ = permit.send(result);
         });
 
@@ -706,6 +731,46 @@ impl SqliteConnection {
         }
     }
 
+    /// Updates SQLite busy timeout for lock-contention retries.
+    pub async fn set_busy_timeout(&self, cx: &Cx, timeout: Duration) -> Outcome<(), SqliteError> {
+        if cx.is_cancel_requested() {
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
+        }
+
+        let inner = Arc::clone(&self.inner);
+        let (tx, mut rx) = crate::channel::oneshot::channel();
+        let permit = tx.reserve(cx);
+
+        let handle = self.pool.spawn(move || {
+            let result = (|| {
+                let guard = inner.lock();
+                let conn = guard.get()?;
+                conn.busy_timeout(timeout)
+                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+                Ok(())
+            })();
+            let _ = permit.send(result);
+        });
+
+        match rx.recv(cx).await {
+            Ok(Ok(())) => Outcome::Ok(()),
+            Ok(Err(e)) => Outcome::Err(e),
+            Err(crate::channel::oneshot::RecvError::Cancelled) => {
+                handle.cancel();
+                Outcome::Cancelled(
+                    cx.cancel_reason()
+                        .unwrap_or_else(|| CancelReason::user("cancelled")),
+                )
+            }
+            Err(crate::channel::oneshot::RecvError::Closed) => {
+                Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string()))
+            }
+        }
+    }
+
     /// Closes the connection.
     pub fn close(&self) -> Result<(), SqliteError> {
         self.inner.lock().close();
@@ -845,6 +910,7 @@ mod tests {
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
     use futures_lite::future::block_on;
+    use tempfile::tempdir;
 
     fn create_test_cx() -> Cx {
         Cx::new(
@@ -1257,6 +1323,176 @@ mod tests {
                     .is_ok_and(rusqlite::Connection::is_autocommit),
                 "connection should return to autocommit after cancelled commit drop path"
             );
+        });
+    }
+
+    #[test]
+    fn open_file_sets_wal_mode() {
+        let cx = create_test_cx();
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("wal_mode.sqlite3");
+
+        block_on(async {
+            let conn = match SqliteConnection::open(&cx, &db_path).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open failed: {other:?}"),
+            };
+
+            let rows = match conn.query(&cx, "PRAGMA journal_mode", &[]).await {
+                Outcome::Ok(rows) => rows,
+                other => panic!("query pragma failed: {other:?}"),
+            };
+            let mode = rows[0]
+                .get_idx(0)
+                .unwrap()
+                .as_text()
+                .unwrap()
+                .to_ascii_lowercase();
+            assert_eq!(mode, "wal");
+        });
+    }
+
+    #[test]
+    fn transaction_drop_rolls_back_uncommitted_work() {
+        let cx = create_test_cx();
+
+        block_on(async {
+            let conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+
+            match conn
+                .execute_batch(&cx, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);")
+                .await
+            {
+                Outcome::Ok(()) => {}
+                other => panic!("create table failed: {other:?}"),
+            }
+
+            let tx = if let Outcome::Ok(tx) = conn.begin(&cx).await {
+                tx
+            } else {
+                panic!("begin failed");
+            };
+            match tx
+                .execute(
+                    &cx,
+                    "INSERT INTO t(v) VALUES (?1)",
+                    &[SqliteValue::Text("x".to_string())],
+                )
+                .await
+            {
+                Outcome::Ok(1) => {}
+                other => panic!("insert in tx failed: {other:?}"),
+            }
+            drop(tx);
+
+            let rows = match conn.query(&cx, "SELECT COUNT(*) FROM t", &[]).await {
+                Outcome::Ok(rows) => rows,
+                other => panic!("count query failed: {other:?}"),
+            };
+            assert_eq!(rows[0].get_idx(0).unwrap().as_integer(), Some(0));
+        });
+    }
+
+    #[test]
+    fn busy_timeout_produces_lock_error_under_write_contention() {
+        let cx = create_test_cx();
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("busy_timeout.sqlite3");
+
+        block_on(async {
+            let conn1 = match SqliteConnection::open(&cx, &db_path).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open conn1 failed: {other:?}"),
+            };
+            let conn2 = match SqliteConnection::open(&cx, &db_path).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open conn2 failed: {other:?}"),
+            };
+
+            match conn1
+                .execute_batch(&cx, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);")
+                .await
+            {
+                Outcome::Ok(()) => {}
+                other => panic!("create table failed: {other:?}"),
+            }
+
+            match conn2.set_busy_timeout(&cx, Duration::from_millis(50)).await {
+                Outcome::Ok(()) => {}
+                other => panic!("set_busy_timeout failed: {other:?}"),
+            }
+
+            let tx = if let Outcome::Ok(tx) = conn1.begin_immediate(&cx).await {
+                tx
+            } else {
+                panic!("begin_immediate failed");
+            };
+
+            match conn2
+                .execute(
+                    &cx,
+                    "INSERT INTO t(v) VALUES (?1)",
+                    &[SqliteValue::Text("blocked".to_string())],
+                )
+                .await
+            {
+                Outcome::Err(SqliteError::Sqlite(msg)) => {
+                    let lower = msg.to_ascii_lowercase();
+                    assert!(
+                        lower.contains("database is locked") || lower.contains("database is busy"),
+                        "unexpected busy error message: {msg}"
+                    );
+                }
+                other => panic!("expected lock error, got: {other:?}"),
+            }
+
+            match tx.rollback(&cx).await {
+                Outcome::Ok(()) => {}
+                other => panic!("rollback failed: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn execute_with_cancelled_cx_does_not_mutate_state() {
+        let cx = create_test_cx();
+        let cancelled = create_test_cx();
+        cancelled.cancel_fast(crate::types::CancelKind::User);
+
+        block_on(async {
+            let conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+
+            match conn
+                .execute_batch(&cx, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);")
+                .await
+            {
+                Outcome::Ok(()) => {}
+                other => panic!("create table failed: {other:?}"),
+            }
+
+            match conn
+                .execute(
+                    &cancelled,
+                    "INSERT INTO t(v) VALUES (?1)",
+                    &[SqliteValue::Text("never".to_string())],
+                )
+                .await
+            {
+                Outcome::Cancelled(_) => {}
+                other => panic!("expected cancellation, got: {other:?}"),
+            }
+
+            let rows = match conn.query(&cx, "SELECT COUNT(*) FROM t", &[]).await {
+                Outcome::Ok(rows) => rows,
+                other => panic!("count query failed: {other:?}"),
+            };
+            assert_eq!(rows[0].get_idx(0).unwrap().as_integer(), Some(0));
         });
     }
 }
