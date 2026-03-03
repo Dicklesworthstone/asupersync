@@ -10,6 +10,36 @@ on:
         description: 'Release tag (e.g., v0.1.0)'
         required: true
         type: string
+      publish_wasm:
+        description: 'Run WASM release gates, build artifacts, and upload provenance bundle'
+        required: false
+        default: true
+        type: boolean
+      publish_npm:
+        description: 'Publish Browser Edition npm packages when package manifests exist'
+        required: false
+        default: true
+        type: boolean
+      npm_tag:
+        description: 'npm dist-tag to publish under (for example: latest, canary)'
+        required: false
+        default: latest
+        type: string
+      rollback_npm_to_version:
+        description: 'Optional rollback target version for npm dist-tag reassignment (workflow_dispatch only)'
+        required: false
+        default: ''
+        type: string
+      rollback_reason:
+        description: 'Reason for rollback when rollback_npm_to_version is set'
+        required: false
+        default: ''
+        type: string
+      allow_missing_changelog:
+        description: 'Permit release without CHANGELOG.md entry for the target version'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: publish
@@ -26,6 +56,13 @@ jobs:
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       version: ${{ steps.tag.outputs.version }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+      publish_wasm: ${{ steps.flags.outputs.publish_wasm }}
+      publish_npm: ${{ steps.flags.outputs.publish_npm }}
+      npm_tag: ${{ steps.flags.outputs.npm_tag }}
+      rollback_npm_to_version: ${{ steps.flags.outputs.rollback_npm_to_version }}
+      rollback_reason: ${{ steps.flags.outputs.rollback_reason }}
+      allow_missing_changelog: ${{ steps.flags.outputs.allow_missing_changelog }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,6 +84,39 @@ jobs:
 
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+          if [[ "$VERSION" == *-* ]]; then
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Resolve publish flags
+        id: flags
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "publish_wasm=${{ inputs.publish_wasm }}" >> "$GITHUB_OUTPUT"
+            echo "publish_npm=${{ inputs.publish_npm }}" >> "$GITHUB_OUTPUT"
+            echo "npm_tag=${{ inputs.npm_tag }}" >> "$GITHUB_OUTPUT"
+            echo "rollback_npm_to_version=${{ inputs.rollback_npm_to_version }}" >> "$GITHUB_OUTPUT"
+            echo "rollback_reason=${{ inputs.rollback_reason }}" >> "$GITHUB_OUTPUT"
+            echo "allow_missing_changelog=${{ inputs.allow_missing_changelog }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish_wasm=true" >> "$GITHUB_OUTPUT"
+            echo "publish_npm=true" >> "$GITHUB_OUTPUT"
+            echo "npm_tag=latest" >> "$GITHUB_OUTPUT"
+            echo "rollback_npm_to_version=" >> "$GITHUB_OUTPUT"
+            echo "rollback_reason=" >> "$GITHUB_OUTPUT"
+            echo "allow_missing_changelog=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate changelog entry
+        if: ${{ steps.flags.outputs.allow_missing_changelog != 'true' }}
+        run: |
+          version="${{ steps.tag.outputs.version }}"
+          if ! grep -Eq "^##[[:space:]]+(\[)?v?${version}(\])?([[:space:]]|$|-)" CHANGELOG.md; then
+            echo "Missing CHANGELOG entry for ${version}. Re-run with allow_missing_changelog=true only when justified."
+            exit 1
+          fi
 
   publish:
     name: Publish to crates.io
@@ -109,3 +179,248 @@ jobs:
           else
             echo "Skipped - CARGO_REGISTRY_TOKEN not configured" >> $GITHUB_STEP_SUMMARY
           fi
+
+  wasm_release:
+    name: Build WASM release artifacts and provenance bundle
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: ${{ needs.plan.outputs.publish_wasm == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: wasm32-unknown-unknown
+
+      - name: Run WASM optimization policy gate
+        run: |
+          mkdir -p artifacts
+          python3 scripts/check_wasm_optimization_policy.py \
+            --policy .github/wasm_optimization_policy.json
+
+      - name: Run WASM dependency policy gate
+        run: |
+          python3 scripts/check_wasm_dependency_policy.py \
+            --policy .github/wasm_dependency_policy.json
+
+      - name: Run security release gate (dependency checks enabled)
+        run: |
+          python3 scripts/check_security_release_gate.py \
+            --policy .github/security_release_policy.json \
+            --check-deps \
+            --dep-policy .github/wasm_dependency_policy.json
+
+      - name: Build WASM profile checks (dev/prod/deterministic)
+        run: |
+          cargo check --target wasm32-unknown-unknown \
+            --no-default-features --features wasm-browser-dev
+          cargo check --target wasm32-unknown-unknown \
+            --no-default-features --features wasm-browser-prod
+          cargo check --target wasm32-unknown-unknown \
+            --no-default-features --features wasm-browser-deterministic
+
+      - name: Build release-grade WASM artifacts
+        run: |
+          mkdir -p artifacts/wasm/release
+
+          cargo build --target wasm32-unknown-unknown --release \
+            --no-default-features --features wasm-browser-prod
+          cp target/wasm32-unknown-unknown/release/asupersync.wasm \
+            artifacts/wasm/release/asupersync.release.wasm
+
+          cargo build --target wasm32-unknown-unknown --release \
+            --no-default-features --features wasm-browser-deterministic
+          cp target/wasm32-unknown-unknown/release/asupersync.wasm \
+            artifacts/wasm/release/asupersync.deterministic.wasm
+
+          cargo build --target wasm32-unknown-unknown --release \
+            --no-default-features --features wasm-browser-minimal
+          cp target/wasm32-unknown-unknown/release/asupersync.wasm \
+            artifacts/wasm/release/asupersync.minimal.wasm
+
+      - name: Generate WASM release manifest
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          out = Path("artifacts/wasm/release")
+          out.mkdir(parents=True, exist_ok=True)
+          files = sorted(
+              [p for p in out.glob("*.wasm")] +
+              [Path("artifacts/wasm_optimization_pipeline_summary.json"),
+               Path("artifacts/wasm_dependency_audit_summary.json"),
+               Path("artifacts/wasm_dependency_audit_log.ndjson"),
+               Path("artifacts/security_release_gate_report.json"),
+               Path("artifacts/security_release_gate_events.ndjson")]
+          )
+          entries = []
+          for path in files:
+              if not path.exists():
+                  continue
+              data = path.read_bytes()
+              entries.append({
+                  "path": str(path),
+                  "sha256": hashlib.sha256(data).hexdigest(),
+                  "size_bytes": len(data),
+              })
+          manifest = {
+              "schema_version": "wasm-release-manifest-v1",
+              "tag": "${{ needs.plan.outputs.tag }}",
+              "version": "${{ needs.plan.outputs.version }}",
+              "prerelease": "${{ needs.plan.outputs.prerelease }}" == "true",
+              "entries": entries,
+              "required_gate_reports": [
+                  "artifacts/wasm_optimization_pipeline_summary.json",
+                  "artifacts/wasm_dependency_audit_summary.json",
+                  "artifacts/security_release_gate_report.json"
+              ]
+          }
+          (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload WASM release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-release-bundle
+          path: |
+            artifacts/wasm/release/
+            artifacts/wasm_optimization_pipeline_summary.json
+            artifacts/wasm_dependency_audit_summary.json
+            artifacts/wasm_dependency_audit_log.ndjson
+            artifacts/security_release_gate_report.json
+            artifacts/security_release_gate_events.ndjson
+
+      - name: Attest WASM release bundle provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: artifacts/wasm/release/*
+
+      - name: Emit rollback guidance artifact on failure
+        if: ${{ failure() }}
+        run: |
+          mkdir -p artifacts/wasm/release
+          cat > artifacts/wasm/release/rollback_instructions.md <<'EOF'
+          # WASM Release Rollback Guidance
+
+          Triggered because a WASM release gate failed.
+
+          Suggested rollback sequence:
+          1. Keep current stable channel frozen.
+          2. Demote promotion candidate (`stable -> canary` or `canary -> nightly`) per docs/wasm_release_channel_strategy.md.
+          3. Capture failing gate reports:
+             - artifacts/security_release_gate_report.json
+             - artifacts/wasm_dependency_audit_summary.json
+             - artifacts/wasm_optimization_pipeline_summary.json
+          4. Open remediation bead and attach this artifact set before re-promotion.
+          EOF
+
+  npm_publish:
+    name: Publish Browser Edition npm packages
+    needs: [plan, wasm_release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: ${{ needs.plan.outputs.publish_npm == 'true' && !contains(needs.plan.outputs.version, '-') && (needs.plan.outputs.publish_wasm != 'true' || needs.wasm_release.result == 'success') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Discover Browser Edition packages
+        id: discover
+        run: |
+          mkdir -p artifacts/npm
+          mapfile -t pkg_jsons < <(find packages -mindepth 2 -maxdepth 2 -name package.json -print 2>/dev/null | sort || true)
+          if [ "${#pkg_jsons[@]}" -eq 0 ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No npm package manifests found under packages/*; skipping npm publish."
+          else
+            printf "%s\n" "${pkg_jsons[@]}" > artifacts/npm/package_json_paths.txt
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate rollback controls
+        if: ${{ steps.discover.outputs.found == 'true' && needs.plan.outputs.rollback_npm_to_version != '' }}
+        run: |
+          if [[ -z "${{ needs.plan.outputs.rollback_reason }}" ]]; then
+            echo "rollback_reason is required when rollback_npm_to_version is set."
+            exit 1
+          fi
+
+      - name: Publish packages to npm
+        if: ${{ steps.discover.outputs.found == 'true' && needs.plan.outputs.rollback_npm_to_version == '' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [[ -z "${NODE_AUTH_TOKEN}" ]]; then
+            echo "NPM_TOKEN is not configured; skipping npm publish."
+            exit 0
+          fi
+
+          : > artifacts/npm/published_packages.txt
+          npm_tag="${{ needs.plan.outputs.npm_tag }}"
+          while IFS= read -r pkg_json; do
+            pkg_dir="$(dirname "$pkg_json")"
+            pkg_name="$(node -p "require('./${pkg_json}').name")"
+            echo "Publishing ${pkg_name} from ${pkg_dir} with tag ${npm_tag}"
+            (
+              cd "$pkg_dir"
+              npm publish --access public --provenance --tag "${npm_tag}"
+            )
+            echo "${pkg_name}" >> artifacts/npm/published_packages.txt
+          done < artifacts/npm/package_json_paths.txt
+
+      - name: Execute npm dist-tag rollback
+        if: ${{ steps.discover.outputs.found == 'true' && needs.plan.outputs.rollback_npm_to_version != '' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [[ -z "${NODE_AUTH_TOKEN}" ]]; then
+            echo "NPM_TOKEN is required for rollback but is not configured."
+            exit 1
+          fi
+
+          rollback_version="${{ needs.plan.outputs.rollback_npm_to_version }}"
+          npm_tag="${{ needs.plan.outputs.npm_tag }}"
+          : > artifacts/npm/rollback_actions.txt
+          while IFS= read -r pkg_json; do
+            pkg_name="$(node -p "require('./${pkg_json}').name")"
+            cmd="npm dist-tag add ${pkg_name}@${rollback_version} ${npm_tag}"
+            echo "$cmd" | tee -a artifacts/npm/rollback_actions.txt
+            bash -lc "$cmd"
+          done < artifacts/npm/package_json_paths.txt
+
+      - name: Upload npm publish/rollback artifacts
+        if: ${{ steps.discover.outputs.found == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-release-controls
+          path: artifacts/npm/
+
+      - name: Emit npm rollback guidance on failure
+        if: ${{ failure() }}
+        run: |
+          mkdir -p artifacts/npm
+          cat > artifacts/npm/rollback_instructions.md <<'EOF'
+          # npm Rollback Guidance
+
+          If publish partially succeeded, reassign dist-tags to a known good version:
+
+          npm dist-tag add <package>@<known-good-version> latest
+
+          Repeat for each package in artifacts/npm/published_packages.txt.
+          EOF
