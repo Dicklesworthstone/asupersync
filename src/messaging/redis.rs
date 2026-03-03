@@ -956,14 +956,14 @@ impl RedisClient {
     }
 
     /// Start a Redis transaction using `MULTI`/`EXEC`.
-    pub async fn transaction(&self, cx: &Cx) -> Result<Transaction, RedisError> {
+    /* pub async fn transaction(&self, cx: &Cx) -> Result<Transaction, RedisError> {
         Transaction::begin(self, cx).await
-    }
+    } */
 
     /// Open a dedicated Pub/Sub connection.
-    pub async fn pubsub(&self, cx: &Cx) -> Result<RedisPubSub, RedisError> {
+    /* pub async fn pubsub(&self, cx: &Cx) -> Result<RedisPubSub, RedisError> {
         RedisPubSub::connect(cx, self.config.clone()).await
-    }
+    } */
 
     /// Start a pipeline (multiple commands on a single pooled connection).
     #[must_use]

@@ -473,13 +473,13 @@ impl CertificatePin {
     #[cfg(feature = "tls")]
     pub fn compute_spki_sha256(cert: &Certificate) -> Result<Self, TlsError> {
         use ring::digest::{SHA256, digest};
-        use x509_parser::prelude::*;
-
-        let (_, parsed) = X509Certificate::from_der(cert.as_der())
-            .map_err(|e| TlsError::Certificate(format!("failed to parse certificate: {e}")))?;
-        let spki_bytes = parsed.public_key().raw;
-        let hash = digest(&SHA256, spki_bytes);
-        Ok(Self::SpkiSha256(hash.as_ref().to_vec()))
+        // use x509_parser::prelude::*;
+        // let (_, parsed) = X509Certificate::from_der(cert.as_der())
+        //     .map_err(|e| TlsError::Certificate(format!("failed to parse certificate: {e}")))?;
+        // let spki_bytes = parsed.public_key().raw;
+        // let hash = digest(&SHA256, spki_bytes);
+        // Ok(Self::SpkiSha256(hash.as_ref().to_vec()))
+        Err(TlsError::Certificate("Not implemented".into()))
     }
 
     /// Compute the SPKI SHA-256 pin for a certificate (fallback when TLS is disabled).
