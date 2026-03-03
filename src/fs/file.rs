@@ -59,9 +59,21 @@ impl File {
         OpenOptions::new()
     }
 
-    pub(crate) fn from_std(file: std::fs::File) -> Self {
+    /// Creates an async `File` from a standard library file handle.
+    #[must_use]
+    pub fn from_std(file: std::fs::File) -> Self {
         Self {
             inner: Arc::new(file),
+        }
+    }
+
+    /// Consumes this wrapper and returns a standard library file handle.
+    ///
+    /// If the underlying handle is shared, this returns a cloned handle.
+    pub fn into_std(self) -> io::Result<std::fs::File> {
+        match Arc::try_unwrap(self.inner) {
+            Ok(file) => Ok(file),
+            Err(shared) => shared.try_clone(),
         }
     }
 
@@ -323,5 +335,54 @@ mod tests {
             crate::assert_with_log!(metadata.is_file(), "file exists", true, metadata.is_file());
         });
         crate::test_complete!("test_cancellation_safety_soft_cancel");
+    }
+
+    #[test]
+    fn test_file_from_std_into_std_roundtrip() {
+        init_test("test_file_from_std_into_std_roundtrip");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("std_roundtrip.txt");
+
+            let std_file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .read(true)
+                .open(&path)
+                .unwrap();
+
+            let file = File::from_std(std_file);
+            let mut roundtrip = file.into_std().unwrap();
+            roundtrip.write_all(b"std bridge").unwrap();
+            roundtrip.sync_all().unwrap();
+            drop(roundtrip);
+
+            let mut file = File::open(&path).await.unwrap();
+            let mut contents = String::new();
+            file.read_to_string(&mut contents).await.unwrap();
+            crate::assert_with_log!(
+                contents == "std bridge",
+                "roundtrip contents",
+                "std bridge",
+                contents
+            );
+        });
+        crate::test_complete!("test_file_from_std_into_std_roundtrip");
+    }
+
+    #[test]
+    fn test_file_into_std_when_shared() {
+        init_test("test_file_into_std_when_shared");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("shared_into_std.txt");
+
+            let file = File::create(&path).await.unwrap();
+            let _other = file.try_clone().await.unwrap();
+            let std_file = file.into_std().unwrap();
+            let len = std_file.metadata().unwrap().len();
+            crate::assert_with_log!(len == 0, "shared into_std len", 0u64, len);
+        });
+        crate::test_complete!("test_file_into_std_when_shared");
     }
 }

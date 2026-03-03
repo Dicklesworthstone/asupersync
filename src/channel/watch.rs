@@ -399,9 +399,6 @@ impl<T> Receiver<T> {
     /// Returns `RecvError::Cancelled` if the operation was cancelled.
     pub fn changed<'a, 'b>(&'a mut self, cx: &'b Cx) -> ChangedFuture<'a, 'b, T> {
         cx.trace("watch::changed starting wait");
-        // Invalidate any stale waiter from a previous cancelled future so
-        // the new future re-registers with a fresh waker.
-        self.waiter = None;
         ChangedFuture { receiver: self, cx }
     }
 

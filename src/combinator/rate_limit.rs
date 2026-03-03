@@ -586,20 +586,8 @@ impl RateLimiter {
             self.total_wait_time_ms
                 .fetch_add(wait_ms, Ordering::Relaxed);
 
-            // CAS loop for max_wait_time_ms
             let new_max_ms = duration_to_millis_saturating(max_wait_time);
-            let mut cur = self.max_wait_time_ms.load(Ordering::Relaxed);
-            while new_max_ms > cur {
-                match self.max_wait_time_ms.compare_exchange_weak(
-                    cur,
-                    new_max_ms,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => break,
-                    Err(actual) => cur = actual,
-                }
-            }
+            self.max_wait_time_ms.fetch_max(new_max_ms, Ordering::Relaxed);
         }
 
         first_granted

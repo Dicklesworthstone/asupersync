@@ -160,6 +160,26 @@ fn e2e_path_read_write_roundtrip() {
 }
 
 #[test]
+fn e2e_try_exists_transitions() {
+    common::init_test_logging();
+    let base = unique_temp_dir("try_exists");
+    std::fs::create_dir_all(&base).unwrap();
+
+    future::block_on(async {
+        let path = base.join("probe.txt");
+        assert!(!fs::try_exists(&path).await.unwrap());
+
+        fs::write(&path, b"present").await.unwrap();
+        assert!(fs::try_exists(&path).await.unwrap());
+
+        fs::remove_file(&path).await.unwrap();
+        assert!(!fs::try_exists(&path).await.unwrap());
+    });
+
+    cleanup(&base);
+}
+
+#[test]
 fn e2e_copy_rename_remove_chain() {
     common::init_test_logging();
     let base = unique_temp_dir("copy_chain");

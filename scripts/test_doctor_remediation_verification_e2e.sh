@@ -13,15 +13,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-OUTPUT_DIR="${PROJECT_ROOT}/target/e2e-results/doctor_remediation_verification"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+OUTPUT_DIR="${PROJECT_ROOT}/target/e2e-results/doctor_remediation_verification"
+STAGING_ROOT="$(mktemp -d "/tmp/asupersync-doctor-remediation-verification-${TIMESTAMP}-XXXXXX")"
+STAGING_ARTIFACT_DIR="${STAGING_ROOT}/artifacts_${TIMESTAMP}"
 ARTIFACT_DIR="${OUTPUT_DIR}/artifacts_${TIMESTAMP}"
 SUMMARY_FILE="${ARTIFACT_DIR}/summary.json"
-RUN1_LOG="${ARTIFACT_DIR}/run1.log"
-RUN2_LOG="${ARTIFACT_DIR}/run2.log"
-RUN1_PASS_LIST="${ARTIFACT_DIR}/run1.passlist"
-RUN2_PASS_LIST="${ARTIFACT_DIR}/run2.passlist"
+RUN1_LOG="${STAGING_ARTIFACT_DIR}/run1.log"
+RUN2_LOG="${STAGING_ARTIFACT_DIR}/run2.log"
+RUN1_PASS_LIST="${STAGING_ARTIFACT_DIR}/run1.passlist"
+RUN2_PASS_LIST="${STAGING_ARTIFACT_DIR}/run2.passlist"
 UNIT_FILTER="verification_"
 SUITE_ID="doctor_remediation_verification_e2e"
 SCENARIO_ID="E2E-SUITE-DOCTOR-REMEDIATION-VERIFICATION"
@@ -45,7 +47,7 @@ if [[ ! -x "${RCH_BIN}" ]]; then
     exit 1
 fi
 
-mkdir -p "${OUTPUT_DIR}" "${ARTIFACT_DIR}"
+mkdir -p "${OUTPUT_DIR}" "${STAGING_ARTIFACT_DIR}"
 
 echo "==================================================================="
 echo "    Asupersync Doctor Remediation Verification E2E                 "
@@ -57,6 +59,7 @@ echo "  RUST_LOG:         ${RUST_LOG}"
 echo "  TEST_SEED:        ${TEST_SEED}"
 echo "  UNIT_FILTER:      ${UNIT_FILTER}"
 echo "  Retry attempts:   ${RCH_RETRY_ATTEMPTS}"
+echo "  Staging dir:      ${STAGING_ARTIFACT_DIR}"
 echo "  Artifact dir:     ${ARTIFACT_DIR}"
 echo ""
 
@@ -78,6 +81,7 @@ run_verification_slice() {
             cargo test --quiet -p asupersync --features cli --test doctor_remediation_unit_harness "${UNIT_FILTER}" -- --nocapture
         )
         attempt_log="${run_log%.log}.attempt${attempt}.log"
+        mkdir -p "$(dirname "${attempt_log}")"
 
         if timeout "${RCH_SCAN_TIMEOUT}s" "${RCH_BIN}" exec -- "${run_cmd[@]}" >"${attempt_log}" 2>&1; then
             rc=0
@@ -117,9 +121,9 @@ fi
 
 if [[ ${EXIT_CODE} -eq 0 ]]; then
     echo ">>> [3/5] Verifying deterministic pass-set across runs..."
-    if diff -u "${RUN1_PASS_LIST}" "${RUN2_PASS_LIST}" > "${ARTIFACT_DIR}/verification_passset.diff"; then
+    if diff -u "${RUN1_PASS_LIST}" "${RUN2_PASS_LIST}" > "${STAGING_ARTIFACT_DIR}/verification_passset.diff"; then
         CHECKS_PASSED=$((CHECKS_PASSED + 1))
-        rm -f "${ARTIFACT_DIR}/verification_passset.diff"
+        rm -f "${STAGING_ARTIFACT_DIR}/verification_passset.diff"
     else
         echo "  ERROR: verification pass-set mismatch across runs (see verification_passset.diff)"
         CHECK_FAILURES=$((CHECK_FAILURES + 1))
@@ -168,6 +172,9 @@ fi
 
 REPRO_COMMAND="TEST_LOG_LEVEL=${TEST_LOG_LEVEL} RUST_LOG=${RUST_LOG} TEST_SEED=${TEST_SEED} RCH_BIN=${RCH_BIN} bash ${SCRIPT_DIR}/$(basename "$0")"
 
+mkdir -p "${ARTIFACT_DIR}"
+cp -a "${STAGING_ARTIFACT_DIR}/." "${ARTIFACT_DIR}/"
+
 cat > "${SUMMARY_FILE}" <<ENDJSON
 {
   "schema_version": "e2e-suite-summary-v3",
@@ -187,7 +194,7 @@ cat > "${SUMMARY_FILE}" <<ENDJSON
   "tests_failed": ${TESTS_FAILED},
   "exit_code": ${EXIT_CODE},
   "pattern_failures": ${CHECK_FAILURES},
-  "log_file": "${RUN1_LOG}",
+  "log_file": "${ARTIFACT_DIR}/run1.log",
   "artifact_dir": "${ARTIFACT_DIR}",
   "checks_passed": ${CHECKS_PASSED}
 }

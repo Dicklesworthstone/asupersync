@@ -2,6 +2,7 @@
 //!
 //! Phase 0 uses synchronous std::fs calls under async wrappers.
 
+use crate::runtime::spawn_blocking_io;
 use crate::stream::Stream;
 use std::ffi::OsString;
 use std::fs::{FileType, Metadata};
@@ -38,7 +39,9 @@ impl ReadDir {
 ///
 /// This operation is cancel-safe in Phase 0.
 pub async fn read_dir<P: AsRef<Path>>(path: P) -> io::Result<ReadDir> {
-    std::fs::read_dir(path.as_ref()).map(|inner| ReadDir { inner })
+    let path = path.as_ref().to_owned();
+    let inner = spawn_blocking_io(move || std::fs::read_dir(path)).await?;
+    Ok(ReadDir { inner })
 }
 
 /// A directory entry returned by [`ReadDir`].

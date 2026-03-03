@@ -36,6 +36,8 @@ pub struct OpenOptions {
     create_new: bool,
     #[cfg(unix)]
     mode: Option<u32>,
+    #[cfg(unix)]
+    custom_flags: Option<i32>,
 }
 
 impl OpenOptions {
@@ -53,6 +55,8 @@ impl OpenOptions {
             create_new: false,
             #[cfg(unix)]
             mode: None,
+            #[cfg(unix)]
+            custom_flags: None,
         }
     }
 
@@ -127,6 +131,16 @@ impl OpenOptions {
         self
     }
 
+    /// Sets custom flags for the underlying `open(2)` call (Unix only).
+    ///
+    /// Mirrors Tokio's `OpenOptionsExt::custom_flags`.
+    #[cfg(unix)]
+    #[must_use]
+    pub fn custom_flags(mut self, flags: i32) -> Self {
+        self.custom_flags = Some(flags);
+        self
+    }
+
     /// Opens a file at `path` with the options specified by `self`.
     pub async fn open<P: AsRef<Path>>(&self, path: P) -> io::Result<File> {
         let path = path.as_ref().to_owned();
@@ -147,9 +161,14 @@ impl OpenOptions {
         opts.create_new(self.create_new);
 
         #[cfg(unix)]
-        if let Some(mode) = self.mode {
+        {
             use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(mode);
+            if let Some(mode) = self.mode {
+                opts.mode(mode);
+            }
+            if let Some(flags) = self.custom_flags {
+                opts.custom_flags(flags);
+            }
         }
 
         opts
@@ -223,6 +242,24 @@ mod tests {
 
         crate::assert_with_log!(opts.mode == Some(0o600), "mode", Some(0o600), opts.mode);
         crate::test_complete!("mode_option_unix");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn custom_flags_option_unix() {
+        init_test("custom_flags_option_unix");
+        let opts = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .custom_flags(libc::O_CLOEXEC);
+
+        crate::assert_with_log!(
+            opts.custom_flags == Some(libc::O_CLOEXEC),
+            "custom_flags",
+            Some(libc::O_CLOEXEC),
+            opts.custom_flags
+        );
+        crate::test_complete!("custom_flags_option_unix");
     }
 
     #[test]

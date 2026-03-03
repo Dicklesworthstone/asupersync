@@ -1477,8 +1477,9 @@ where
                     self.pool.process_returns();
                     if let Some(id) = self.waiter_id {
                         let mut state = self.pool.state.lock();
-                        let pos = state.waiters.iter().position(|w| w.id == id);
-                        state.waiters.retain(|w| w.id != id);
+                        if let Some(pos) = state.waiters.iter().position(|w| w.id == id) {
+                            state.waiters.remove(pos);
+                        }
 
                         let waker = if state.closed {
                             None

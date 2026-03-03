@@ -78,3 +78,12 @@ pub use path_ops::{symlink_dir, symlink_file};
 pub use std::io::SeekFrom;
 
 pub use vfs::{UnixVfs, UnixVfsFile, Vfs, VfsFile};
+
+/// Checks whether a path exists with explicit error reporting.
+///
+/// Unlike `Path::exists`, this preserves I/O errors instead of collapsing them
+/// to `false`. Behavior mirrors Tokio's `fs::try_exists`.
+pub async fn try_exists(path: impl AsRef<std::path::Path>) -> std::io::Result<bool> {
+    let path = path.as_ref().to_owned();
+    crate::runtime::spawn_blocking_io(move || path.try_exists()).await
+}
