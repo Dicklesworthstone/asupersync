@@ -14,13 +14,12 @@ use asupersync::cli::doctor::{
     GuidedRemediationSessionRequest, RemediationConfidenceInput, RemediationPrecondition,
     RemediationRecipe, RemediationRecipeBundle, RemediationRecipeContract, RemediationRollbackPlan,
     build_guided_remediation_patch_plan, compute_remediation_confidence_score,
-    compute_remediation_verification_scorecard,
-    parse_remediation_recipe, remediation_recipe_bundle, remediation_recipe_contract,
-    remediation_verification_scorecard_thresholds,
-    remediation_recipe_fixtures, run_guided_remediation_session,
+    compute_remediation_verification_scorecard, parse_remediation_recipe,
+    remediation_recipe_bundle, remediation_recipe_contract, remediation_recipe_fixtures,
+    remediation_verification_scorecard_thresholds, run_guided_remediation_session,
     run_guided_remediation_session_smoke, run_remediation_recipe_smoke,
-    run_remediation_verification_loop_smoke,
-    structured_logging_contract, validate_remediation_recipe, validate_remediation_recipe_contract,
+    run_remediation_verification_loop_smoke, structured_logging_contract,
+    validate_remediation_recipe, validate_remediation_recipe_contract,
     validate_structured_logging_event_stream,
 };
 use serde::Deserialize;
@@ -1475,7 +1474,129 @@ fn guided_session_smoke_is_deterministic_and_covers_success_and_failure() {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// 11. Document Coverage
+// 11. Post-Remediation Verification Loop + Trust Scorecard
+// ════════════════════════════════════════════════════════════════════
+
+#[test]
+fn verification_scorecard_thresholds_are_sane() {
+    let thresholds = remediation_verification_scorecard_thresholds();
+    assert!(thresholds.accept_min_score <= 100);
+    assert!(thresholds.escalate_below_score <= thresholds.accept_min_score);
+    assert!(thresholds.rollback_delta_threshold < 0);
+}
+
+#[test]
+fn verification_loop_smoke_is_deterministic_and_emits_scorecards() {
+    let recipe_contract = remediation_recipe_contract();
+    let logging_contract = structured_logging_contract();
+    let first = run_remediation_verification_loop_smoke(&recipe_contract, &logging_contract)
+        .expect("first smoke");
+    let second = run_remediation_verification_loop_smoke(&recipe_contract, &logging_contract)
+        .expect("second smoke");
+    assert_eq!(
+        first, second,
+        "verification loop smoke must be deterministic"
+    );
+    assert_eq!(
+        first.entries.len(),
+        2,
+        "smoke should include two scorecards"
+    );
+    validate_structured_logging_event_stream(&logging_contract, &first.events)
+        .expect("scorecard events must validate");
+}
+
+#[test]
+fn verification_scorecard_computes_trust_delta_and_recommendations() {
+    let recipe_contract = remediation_recipe_contract();
+    let logging_contract = structured_logging_contract();
+    let sessions = run_guided_remediation_session_smoke(&recipe_contract, &logging_contract)
+        .expect("sessions");
+    let thresholds = remediation_verification_scorecard_thresholds();
+    let report = compute_remediation_verification_scorecard(
+        &logging_contract,
+        "run-scorecard-tests",
+        &sessions,
+        &thresholds,
+    )
+    .expect("scorecard");
+
+    for entry in &report.entries {
+        assert_eq!(
+            entry.trust_delta,
+            i16::from(entry.trust_score_after) - i16::from(entry.trust_score_before),
+            "trust_delta must equal after-before for {}",
+            entry.scenario_id
+        );
+    }
+    assert!(
+        report
+            .entries
+            .iter()
+            .any(|entry| entry.recommendation == "accept"),
+        "scorecard must include acceptance path"
+    );
+    assert!(
+        report
+            .entries
+            .iter()
+            .any(|entry| entry.recommendation == "rollback"),
+        "scorecard must include rollback path"
+    );
+}
+
+#[test]
+fn verification_scorecard_logs_capture_before_after_unresolved_and_shift() {
+    let recipe_contract = remediation_recipe_contract();
+    let logging_contract = structured_logging_contract();
+    let report = run_remediation_verification_loop_smoke(&recipe_contract, &logging_contract)
+        .expect("scorecard smoke");
+    let per_scenario = report
+        .events
+        .iter()
+        .filter(|event| {
+            event.event_kind == "verification_summary"
+                && event
+                    .fields
+                    .get("scenario_id")
+                    .is_some_and(|id| id != "remediation-verification-scorecard")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        per_scenario.len(),
+        report.entries.len(),
+        "must emit one scorecard event per scenario"
+    );
+    for event in per_scenario {
+        assert!(
+            event.fields.contains_key("before_score"),
+            "scorecard event missing before_score"
+        );
+        assert!(
+            event.fields.contains_key("after_score"),
+            "scorecard event missing after_score"
+        );
+        assert!(
+            event.fields.contains_key("trust_delta"),
+            "scorecard event missing trust_delta"
+        );
+        assert!(
+            event.fields.contains_key("unresolved_findings"),
+            "scorecard event missing unresolved_findings"
+        );
+        assert!(
+            event.fields.contains_key("confidence_shift"),
+            "scorecard event missing confidence_shift"
+        );
+        assert!(
+            event.fields.contains_key("recommendation"),
+            "scorecard event missing recommendation"
+        );
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 12. Document Coverage
 // ════════════════════════════════════════════════════════════════════
 
 #[test]
@@ -1559,6 +1680,26 @@ fn doc_mentions_structured_logging() {
 }
 
 #[test]
+fn doc_mentions_trust_scorecard_loop() {
+    let doc = load_doc();
+    assert!(
+        doc.contains("compute_remediation_verification_scorecard")
+            || doc.contains("trust scorecard")
+            || doc.contains("Trust Scorecard"),
+        "doc must cover trust scorecard verification loop"
+    );
+}
+
+#[test]
+fn doc_mentions_accept_escalate_rollback_recommendations() {
+    let doc = load_doc();
+    assert!(
+        doc.contains("accept") && doc.contains("escalate") && doc.contains("rollback"),
+        "doc must define recommendation thresholds"
+    );
+}
+
+#[test]
 fn doc_mentions_rollback() {
     let doc = load_doc();
     assert!(
@@ -1568,7 +1709,7 @@ fn doc_mentions_rollback() {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// 12. Fixture Directory Integrity
+// 13. Fixture Directory Integrity
 // ════════════════════════════════════════════════════════════════════
 
 #[test]

@@ -187,6 +187,34 @@ Guidance text is embedded in patch plans and summary events:
 - when to reject and escalate for human approval
 - how to recover from partial application states (rollback + verify + rerun preview)
 
+## Post-Remediation Verification Loop and Trust Scorecard
+
+After preview/apply sessions complete, Track 4 verification uses:
+
+- `compute_remediation_verification_scorecard`
+- `run_remediation_verification_loop_smoke`
+
+The loop recomputes diagnostics from verify-stage evidence and emits per-scenario
+scorecard entries with:
+
+- `trust_score_before`
+- `trust_score_after`
+- `trust_delta`
+- `unresolved_findings`
+- `confidence_shift` (`improved|stable|degraded`)
+- `recommendation` (`accept|monitor|escalate|rollback`)
+
+Scorecard recommendation policy is threshold-driven:
+
+- accept when trust score and trust delta clear configured acceptance thresholds and no unresolved findings remain
+- escalate when score drops below escalation threshold or unresolved findings persist without positive movement
+- rollback when verification status explicitly requests rollback or trust delta crosses rollback threshold
+- monitor otherwise
+
+Structured logs for scorecards use `doctor-logging-v1` remediation
+`verification_summary` events and include before/after metrics, unresolved findings,
+confidence shifts, recommendation rationale, and replay pointers.
+
 ## Safe Extension Strategy
 
 1. Additive only within `doctor-remediation-recipe-v1`:

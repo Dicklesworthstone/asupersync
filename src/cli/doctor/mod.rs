@@ -992,6 +992,55 @@ pub struct GuidedRemediationSessionOutcome {
     pub events: Vec<StructuredLogEvent>,
 }
 
+/// Threshold policy for post-remediation trust-scorecard decisions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemediationVerificationScorecardThresholds {
+    /// Minimum score required for acceptance recommendation.
+    pub accept_min_score: u8,
+    /// Minimum positive trust delta required for acceptance recommendation.
+    pub accept_min_delta: i16,
+    /// Score below which escalation is recommended.
+    pub escalate_below_score: u8,
+    /// Trust delta at-or-below which rollback is recommended.
+    pub rollback_delta_threshold: i16,
+}
+
+/// One trust-scorecard entry derived from a guided remediation session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemediationVerificationScorecardEntry {
+    /// Stable scorecard entry id.
+    pub entry_id: String,
+    /// Scenario identifier.
+    pub scenario_id: String,
+    /// Trust score before remediation apply.
+    pub trust_score_before: u8,
+    /// Trust score after remediation verification.
+    pub trust_score_after: u8,
+    /// Signed trust delta (`after - before`).
+    pub trust_delta: i16,
+    /// Unresolved findings/risk indicators.
+    pub unresolved_findings: Vec<String>,
+    /// Confidence shift label (`improved|stable|degraded`).
+    pub confidence_shift: String,
+    /// Scorecard recommendation (`accept|monitor|escalate|rollback`).
+    pub recommendation: String,
+    /// Replay/evidence pointer for this scorecard entry.
+    pub evidence_pointer: String,
+}
+
+/// Deterministic report emitted by the post-remediation verification loop.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemediationVerificationScorecardReport {
+    /// Run identifier.
+    pub run_id: String,
+    /// Threshold policy used for recommendation decisions.
+    pub thresholds: RemediationVerificationScorecardThresholds,
+    /// Scorecard entries in lexical `scenario_id` order.
+    pub entries: Vec<RemediationVerificationScorecardEntry>,
+    /// Structured log events for per-scenario scorecards and summary.
+    pub events: Vec<StructuredLogEvent>,
+}
+
 /// Deterministic rch-backed execution-adapter contract for doctor orchestration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecutionAdapterContract {
@@ -8470,6 +8519,326 @@ pub fn run_guided_remediation_session_smoke(
     ];
     outcomes.sort_by(|left, right| left.scenario_id.cmp(&right.scenario_id));
     Ok(outcomes)
+}
+
+/// Returns canonical threshold policy for post-remediation trust scorecards.
+#[must_use]
+pub fn remediation_verification_scorecard_thresholds() -> RemediationVerificationScorecardThresholds
+{
+    RemediationVerificationScorecardThresholds {
+        accept_min_score: 80,
+        accept_min_delta: 5,
+        escalate_below_score: 55,
+        rollback_delta_threshold: -10,
+    }
+}
+
+fn validate_remediation_scorecard_thresholds(
+    thresholds: &RemediationVerificationScorecardThresholds,
+) -> Result<(), String> {
+    if thresholds.accept_min_score > 100 || thresholds.escalate_below_score > 100 {
+        return Err("scorecard thresholds must be in 0..=100".to_string());
+    }
+    if thresholds.escalate_below_score > thresholds.accept_min_score {
+        return Err("escalate_below_score must be <= accept_min_score".to_string());
+    }
+    Ok(())
+}
+
+fn scorecard_confidence_shift(trust_delta: i16) -> String {
+    if trust_delta > 0 {
+        "improved".to_string()
+    } else if trust_delta < 0 {
+        "degraded".to_string()
+    } else {
+        "stable".to_string()
+    }
+}
+
+fn split_unresolved_findings(raw: &str) -> Vec<String> {
+    if raw.trim().is_empty() || raw.trim() == "none" {
+        return Vec::new();
+    }
+    let mut findings = raw
+        .split(';')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    findings.sort();
+    findings.dedup();
+    findings
+}
+
+fn scorecard_recommendation(
+    entry: &RemediationVerificationScorecardEntry,
+    verify_status: &str,
+    thresholds: &RemediationVerificationScorecardThresholds,
+) -> String {
+    if verify_status == "rollback_recommended"
+        || entry.trust_delta <= thresholds.rollback_delta_threshold
+    {
+        return "rollback".to_string();
+    }
+    if entry.trust_score_after < thresholds.escalate_below_score
+        || (!entry.unresolved_findings.is_empty() && entry.trust_delta <= 0)
+    {
+        return "escalate".to_string();
+    }
+    if entry.trust_score_after >= thresholds.accept_min_score
+        && entry.trust_delta >= thresholds.accept_min_delta
+        && entry.unresolved_findings.is_empty()
+    {
+        return "accept".to_string();
+    }
+    "monitor".to_string()
+}
+
+/// Computes deterministic post-remediation scorecards from guided session outcomes.
+///
+/// # Errors
+///
+/// Returns `Err` when threshold/session validation fails or log emission fails.
+pub fn compute_remediation_verification_scorecard(
+    logging_contract: &StructuredLoggingContract,
+    run_id: &str,
+    sessions: &[GuidedRemediationSessionOutcome],
+    thresholds: &RemediationVerificationScorecardThresholds,
+) -> Result<RemediationVerificationScorecardReport, String> {
+    if run_id.trim().is_empty() {
+        return Err("run_id must be non-empty".to_string());
+    }
+    if sessions.is_empty() {
+        return Err("sessions must be non-empty".to_string());
+    }
+    validate_remediation_scorecard_thresholds(thresholds)?;
+
+    let mut entries = Vec::new();
+    let mut events = Vec::new();
+
+    for session in sessions {
+        let verify_event = session
+            .events
+            .iter()
+            .find(|event| {
+                event.event_kind == "remediation_verify"
+                    && event.fields.get("mode").is_some_and(|mode| mode == "apply")
+            })
+            .ok_or_else(|| {
+                format!(
+                    "session {} missing remediation_verify event",
+                    session.scenario_id
+                )
+            })?;
+        let unresolved_findings = split_unresolved_findings(
+            verify_event
+                .fields
+                .get("unresolved_risk_flags")
+                .map_or("none", String::as_str),
+        );
+        let trust_delta =
+            i16::from(session.trust_score_after) - i16::from(session.trust_score_before);
+        let confidence_shift = scorecard_confidence_shift(trust_delta);
+        let mut entry = RemediationVerificationScorecardEntry {
+            entry_id: format!("scorecard-{}", session.scenario_id),
+            scenario_id: session.scenario_id.clone(),
+            trust_score_before: session.trust_score_before,
+            trust_score_after: session.trust_score_after,
+            trust_delta,
+            unresolved_findings,
+            confidence_shift,
+            recommendation: "monitor".to_string(),
+            evidence_pointer: verify_event
+                .fields
+                .get("artifact_pointer")
+                .cloned()
+                .unwrap_or_else(|| "artifacts/unknown/verify.json".to_string()),
+        };
+        entry.recommendation = scorecard_recommendation(&entry, &session.verify_status, thresholds);
+        entries.push(entry);
+    }
+    entries.sort_by(|left, right| left.scenario_id.cmp(&right.scenario_id));
+
+    let mut accepted = 0usize;
+    let mut escalated = 0usize;
+    let mut rollback = 0usize;
+    for entry in &entries {
+        match entry.recommendation.as_str() {
+            "accept" => accepted += 1,
+            "escalate" => escalated += 1,
+            "rollback" => rollback += 1,
+            _ => {}
+        }
+
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            "artifact_pointer".to_string(),
+            format!("artifacts/{run_id}/{}/scorecard.json", entry.scenario_id),
+        );
+        fields.insert(
+            "command_provenance".to_string(),
+            "asupersync doctor remediation-contract --json".to_string(),
+        );
+        fields.insert("flow_id".to_string(), "remediation".to_string());
+        fields.insert(
+            "outcome_class".to_string(),
+            if entry.recommendation == "rollback" || entry.recommendation == "escalate" {
+                "failed".to_string()
+            } else {
+                "success".to_string()
+            },
+        );
+        fields.insert("run_id".to_string(), run_id.to_string());
+        fields.insert("scenario_id".to_string(), entry.scenario_id.clone());
+        fields.insert(
+            "trace_id".to_string(),
+            format!("trace-{}-scorecard", entry.scenario_id),
+        );
+        fields.insert(
+            "risk_score".to_string(),
+            entry.trust_score_after.to_string(),
+        );
+        fields.insert(
+            "before_score".to_string(),
+            entry.trust_score_before.to_string(),
+        );
+        fields.insert(
+            "after_score".to_string(),
+            entry.trust_score_after.to_string(),
+        );
+        fields.insert("trust_delta".to_string(), entry.trust_delta.to_string());
+        fields.insert(
+            "unresolved_findings".to_string(),
+            if entry.unresolved_findings.is_empty() {
+                "none".to_string()
+            } else {
+                entry.unresolved_findings.join(";")
+            },
+        );
+        fields.insert(
+            "confidence_shift".to_string(),
+            entry.confidence_shift.clone(),
+        );
+        fields.insert("recommendation".to_string(), entry.recommendation.clone());
+        fields.insert(
+            "decision_rationale".to_string(),
+            format!(
+                "recommendation={} trust_delta={} unresolved={}",
+                entry.recommendation,
+                entry.trust_delta,
+                entry.unresolved_findings.len()
+            ),
+        );
+        let event = emit_structured_log_event(
+            logging_contract,
+            "remediation",
+            "verification_summary",
+            &fields,
+        )?;
+        events.push(event);
+    }
+
+    let unresolved_total = entries
+        .iter()
+        .map(|entry| entry.unresolved_findings.len())
+        .sum::<usize>();
+    let mut summary_fields = BTreeMap::new();
+    summary_fields.insert(
+        "artifact_pointer".to_string(),
+        format!("artifacts/{run_id}/scorecard-summary.json"),
+    );
+    summary_fields.insert(
+        "command_provenance".to_string(),
+        "asupersync doctor remediation-contract --json".to_string(),
+    );
+    summary_fields.insert("flow_id".to_string(), "remediation".to_string());
+    summary_fields.insert(
+        "outcome_class".to_string(),
+        if escalated > 0 || rollback > 0 {
+            "failed".to_string()
+        } else {
+            "success".to_string()
+        },
+    );
+    summary_fields.insert("run_id".to_string(), run_id.to_string());
+    summary_fields.insert(
+        "scenario_id".to_string(),
+        "remediation-verification-scorecard".to_string(),
+    );
+    summary_fields.insert(
+        "trace_id".to_string(),
+        "trace-remediation-verification-scorecard-summary".to_string(),
+    );
+    summary_fields.insert(
+        "decision_rationale".to_string(),
+        format!(
+            "scorecard_summary accepted={} escalated={} rollback={} unresolved_findings={}",
+            accepted, escalated, rollback, unresolved_total
+        ),
+    );
+    summary_fields.insert(
+        "thresholds".to_string(),
+        format!(
+            "accept_min_score={} accept_min_delta={} escalate_below_score={} rollback_delta_threshold={}",
+            thresholds.accept_min_score,
+            thresholds.accept_min_delta,
+            thresholds.escalate_below_score,
+            thresholds.rollback_delta_threshold
+        ),
+    );
+    events.push(emit_structured_log_event(
+        logging_contract,
+        "remediation",
+        "verification_summary",
+        &summary_fields,
+    )?);
+
+    events.sort_by(|left, right| {
+        (
+            left.flow_id.as_str(),
+            left.event_kind.as_str(),
+            left.fields
+                .get("trace_id")
+                .map(String::as_str)
+                .unwrap_or_default(),
+        )
+            .cmp(&(
+                right.flow_id.as_str(),
+                right.event_kind.as_str(),
+                right
+                    .fields
+                    .get("trace_id")
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+            ))
+    });
+    validate_structured_logging_event_stream(logging_contract, &events)?;
+
+    Ok(RemediationVerificationScorecardReport {
+        run_id: run_id.to_string(),
+        thresholds: thresholds.clone(),
+        entries,
+        events,
+    })
+}
+
+/// Executes deterministic remediation+verification-loop smoke and emits scorecard report.
+///
+/// # Errors
+///
+/// Returns `Err` when guided-session or scorecard computation fails.
+pub fn run_remediation_verification_loop_smoke(
+    recipe_contract: &RemediationRecipeContract,
+    logging_contract: &StructuredLoggingContract,
+) -> Result<RemediationVerificationScorecardReport, String> {
+    let sessions = run_guided_remediation_session_smoke(recipe_contract, logging_contract)?;
+    let thresholds = remediation_verification_scorecard_thresholds();
+    compute_remediation_verification_scorecard(
+        logging_contract,
+        "run-guided-remediation-smoke",
+        &sessions,
+        &thresholds,
+    )
 }
 
 /// Returns the canonical rch-backed execution-adapter contract.
