@@ -4747,4 +4747,141 @@ theorem strengthen_opt_monotone_rank
 
 end CancelRequestIdempotence
 
+-- ==========================================================================
+-- RACE-LOSER FULL-DRAIN SEMANTICS (SEM-06.F3, asupersync-3cddg.6.8)
+--
+-- Proves that non-winning race branches (losers) are fully drained before
+-- a region can complete. The formal model ensures this structurally:
+--
+--   1. closeCancelChildren transitions closing → draining with cancel reason
+--   2. closeChildrenDone requires allTasksCompleted (all children must complete)
+--   3. close requires Quiescent which implies allTasksCompleted
+--   4. cancel_protocol_terminates guarantees each cancelled child completes
+--
+-- Together, these guarantee that any child task in a race that loses must
+-- go through full cancel protocol drain and reach a completed state before
+-- the region can close.
+--
+-- Cross-references:
+--   LoserDrained (line 274)
+--   Quiescent (line 268)
+--   allTasksCompleted (line 256)
+--   close_implies_quiescent (line 793)
+--   close_children_exist_completed (line 1406)
+--   close_children_done_step (line 1781)
+--   cancel_protocol_totality_tau (line 1833)
+--   cancel_protocol_terminates (line 3366)
+-- ==========================================================================
+
+section RaceLoserDrainSemantics
+
+/-- A closed region's children are all completed: closing a region
+    requires quiescence, which requires allTasksCompleted. This is the
+    foundational lemma for race-loser drain semantics. -/
+theorem closed_region_children_all_completed {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {r : RegionId}
+    {outcome : Outcome Value Error CancelReason Panic}
+    (hWF : WellFormed s)
+    (hStep : Step s (Label.close r outcome) s')
+    : ∃ region, getRegion s r = some region ∧
+        allTasksCompleted s region.children :=
+  let ⟨region, hRegion, hQ⟩ := close_implies_quiescent hStep
+  ⟨region, hRegion, hQ.1⟩
+
+/-- A specific child in a closed region is completed: given membership
+    in the children list, the child task exists and is taskCompleted. -/
+theorem closed_region_child_completed {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {r : RegionId} {t : TaskId}
+    {outcome : Outcome Value Error CancelReason Panic}
+    (hWF : WellFormed s)
+    (hStep : Step s (Label.close r outcome) s')
+    (hChild : ∃ region, getRegion s r = some region ∧ t ∈ region.children)
+    : ∃ task, getTask s t = some task ∧ taskCompleted task := by
+  obtain ⟨region, hRegion, hMem⟩ := hChild
+  obtain ⟨region', hRegion', hRegionEqFn⟩ := close_children_exist_completed hWF hStep
+  have hEq : region = region' := Option.some.inj (hRegion ▸ hRegion')
+  subst hEq
+  exact hRegionEqFn t hMem
+
+/-- Race-loser drain from quiescence: if a region is quiescent and two
+    tasks t1, t2 are both children of the region, then LoserDrained
+    holds — both tasks are completed. -/
+theorem loser_drained_from_quiescence {Value Error Panic : Type}
+    {s : State Value Error Panic} {r : Region Value Error Panic}
+    {t1 t2 : TaskId}
+    (hQ : Quiescent s r)
+    (hMem1 : t1 ∈ r.children)
+    (hMem2 : t2 ∈ r.children)
+    : LoserDrained s t1 t2 := by
+  have hAllCompleted := hQ.1
+  have h1 := listAll_mem (p := fun t =>
+    match getTask s t with
+    | some task => taskCompleted task
+    | none => False) hAllCompleted hMem1
+  have h2 := listAll_mem (p := fun t =>
+    match getTask s t with
+    | some task => taskCompleted task
+    | none => False) hAllCompleted hMem2
+  unfold LoserDrained
+  cases hG1 : getTask s t1 with
+  | none => simp [hG1] at h1
+  | some task1 =>
+    cases hG2 : getTask s t2 with
+    | none => simp [hG2] at h2
+    | some task2 =>
+      simp [hG1, hG2]
+      simp [hG1] at h1
+      simp [hG2] at h2
+      exact ⟨h1, h2⟩
+
+/-- Close-complete gate: a region cannot reach closed state without
+    having all children drained (completed). Follows from the
+    structural requirement that close needs Quiescent. -/
+theorem close_gate_requires_drain {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {r : RegionId}
+    {outcome : Outcome Value Error CancelReason Panic}
+    (hStep : Step s (Label.close r outcome) s')
+    : ∃ region, getRegion s r = some region ∧
+        allTasksCompleted s region.children ∧
+        allRegionsClosed s region.subregions ∧
+        region.ledger = [] ∧
+        region.finalizers = [] := by
+  obtain ⟨region, hRegion, hQ⟩ := close_implies_quiescent hStep
+  exact ⟨region, hRegion, hQ.1, hQ.2.1, hQ.2.2.1, hQ.2.2.2⟩
+
+/-- Race-loser drain completeness: after a region closes, any two
+    children t1 and t2 satisfy LoserDrained — both are completed.
+    This is the central theorem for SEM-06.F3. -/
+theorem race_loser_drain_completeness {Value Error Panic : Type}
+    {s s' : State Value Error Panic} {r : RegionId}
+    {t1 t2 : TaskId}
+    {outcome : Outcome Value Error CancelReason Panic}
+    (hStep : Step s (Label.close r outcome) s')
+    (hMem : ∃ region, getRegion s r = some region ∧
+      t1 ∈ region.children ∧ t2 ∈ region.children)
+    : LoserDrained s t1 t2 := by
+  obtain ⟨region, hRegion, hMem1, hMem2⟩ := hMem
+  obtain ⟨region', hRegion', hQ⟩ := close_implies_quiescent hStep
+  have hEq : region = region' := Option.some.inj (hRegion ▸ hRegion')
+  subst hEq
+  exact loser_drained_from_quiescence hQ hMem1 hMem2
+
+/-- Cancelled child has guaranteed progress: a child task in a
+    cancel-protocol state (cancelRequested, cancelling, or finalizing)
+    always has at least one enabled τ-step toward completion. This
+    ensures losers cannot be stuck indefinitely. -/
+theorem cancelled_child_progress {Value Error Panic : Type}
+    {s : State Value Error Panic} {t : TaskId}
+    {task : Task Value Error Panic}
+    (hTask : getTask s t = some task)
+    (hCP : ∃ reason cleanup,
+      task.state = TaskState.cancelRequested reason cleanup ∨
+      task.state = TaskState.cancelling reason cleanup ∨
+      task.state = TaskState.finalizing reason cleanup)
+    : ∃ s', Step s (Label.tau) s' := by
+  obtain ⟨reason, cleanup, hState⟩ := hCP
+  exact cancel_protocol_totality_tau hTask hState
+
+end RaceLoserDrainSemantics
+
 end Asupersync

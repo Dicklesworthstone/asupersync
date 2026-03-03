@@ -140,10 +140,16 @@
       "id": "inv.race.losers_drained",
       "name": "Losers are drained after races",
       "statement": "In a race, non-winning branches must be cancelled and fully drained before completion is considered safe.",
-      "lean_status": "unproven",
+      "lean_status": "proven",
       "lean_theorems": [
         "cancel_propagation_bounded",
-        "step_preserves_wellformed"
+        "step_preserves_wellformed",
+        "closed_region_children_all_completed",
+        "closed_region_child_completed",
+        "loser_drained_from_quiescence",
+        "close_gate_requires_drain",
+        "race_loser_drain_completeness",
+        "cancelled_child_progress"
       ],
       "test_refs": [
         "tests/e2e/combinator/cancel_correctness/loser_drain.rs",
@@ -151,12 +157,8 @@
         "tests/cancel_obligation_invariants.rs",
         "tests/runtime_e2e.rs"
       ],
-      "gaps": [
-        "No direct Lean theorem currently states and proves race-loser full-drain semantics."
-      ],
-      "follow_up_beads": [
-        "asupersync-3cddg.6.8"
-      ]
+      "gaps": [],
+      "follow_up_beads": []
     },
     {
       "id": "inv.obligation.no_leaks",
@@ -213,8 +215,8 @@
   ],
   "summary": {
     "fully_proven": 4,
-    "partially_proven": 0,
-    "unproven": 2,
+    "partially_proven": 1,
+    "unproven": 1,
     "proof_gap_audit_bead": "asupersync-3cddg.6.4",
     "proof_gap_audit_commands": [
       "jq extraction + theorem inventory reconciliation",

@@ -660,6 +660,30 @@
     {
       "line": 4731,
       "theorem": "strengthen_opt_monotone_rank"
+    },
+    {
+      "line": 4781,
+      "theorem": "closed_region_children_all_completed"
+    },
+    {
+      "line": 4793,
+      "theorem": "closed_region_child_completed"
+    },
+    {
+      "line": 4807,
+      "theorem": "loser_drained_from_quiescence"
+    },
+    {
+      "line": 4843,
+      "theorem": "close_gate_requires_drain"
+    },
+    {
+      "line": 4857,
+      "theorem": "race_loser_drain_completeness"
+    },
+    {
+      "line": 4873,
+      "theorem": "cancelled_child_progress"
     }
   ],
   "lemma_canonicalization": {
