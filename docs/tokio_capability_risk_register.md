@@ -58,16 +58,16 @@ Higher values indicate higher urgency for remediation.
 | F03 | Channels | M4 | R1 | D3 | 345 | 1 | None. Two-phase reserve/commit exceeds Tokio. |
 | F04 | Sync Primitives | M4 | R1 | D3 | 295 | 1 | None. All six Tokio primitives covered + extras. |
 | F05 | Time / Timers | M4 | R1 | D3 | 234 | 1 | None. Virtual time wheel for determinism. |
-| F06 | Async I/O | M3 | R2 | D2 | 198 | 4 | Missing: some tokio-util I/O adapters (ReaderStream, StreamReader). |
+| F06 | Async I/O | M3 | R2 | D2 | 198 | 4 | Missing: `tokio-util::io::SinkWriter` adapter. `ReaderStream`/`StreamReader` are implemented in `src/io/stream_adapters.rs`. |
 | F07 | Codec / Framing | M3 | R2 | D2 | 77 | 4 | Low test coverage. Need: conformance tests for production codecs. |
 | F08 | Byte Buffers | M4 | R1 | D3 | 86 | 1 | None. Complete Bytes/BytesMut implementation. |
-| F09 | Reactor | M3 | R2 | D2 | 247 | 4 | io_uring path needs hardening. Lab reactor is deterministic. |
+| F09 | Reactor | M3 | R2 | D2 | 247 | 4 | T2.6 parity contract added for epoll/kqueue/IOCP/io_uring readiness+reregister+wake-dedup semantics; continue io_uring performance hardening. |
 | F10 | TCP/UDP/Unix | M3 | R2 | D2 | 677 | 4 | Well-tested but mixed determinism for real I/O. |
 | F11 | DNS | M3 | R2 | D2 | 44 | 4 | Low test count. Needs: caching, TTL, resolver conformance. |
 | F12 | TLS | M3 | R2 | D2 | 134 | 4 | rustls-only (no native-tls). Feature-gated, well-tested. |
 | F13 | WebSocket | M3 | R2 | D2 | 185 | 4 | Native impl (no tungstenite). Good test coverage. |
 | F14 | HTTP/1+2 | M3 | R2 | D2 | 717 | 4 | Native impl. Pre-existing compile error in h2/connection.rs (in-flight fix by another agent). |
-| F15 | QUIC + HTTP/3 | M1 | **R4** | D1 | 472 | **48** | **CRITICAL.** Feature flags not exposed. Native rewrite parked. RFC 9002 incomplete. Upstream quinn/h3 pull Tokio transitively. |
+| F15 | QUIC + HTTP/3 | M1 | **R4** | D1 | 472 | **48** | **CRITICAL.** Native `quic`/`http3` feature surfaces are now exposed; RFC 9002 closure is still incomplete. Legacy quinn/h3 wrappers remain compat-only and off by default due Tokio-transitive risk. |
 | F16 | Web Framework | M3 | R2 | D2 | 111 | 4 | Missing: multipart, SSE, cookie extraction, CORS. Moderate gap. |
 | F17 | gRPC | M3 | R2 | D2 | 235 | 4 | Native impl (no tonic). Good coverage for unary/streaming. |
 | F18 | Database | M3 | R2 | D2 | 168 | 4 | Feature-gated. Missing: connection pool abstraction. Wire protocols present. |
@@ -180,3 +180,4 @@ This register establishes the t=0 baseline. Subsequent passes should show:
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-03-03 | SapphireHill | Initial risk register (v1.0) |
+| 2026-03-03 | CloudyHawk | Updated F09 risk note to reflect T2.6 reactor parity/readiness contract hardening artifacts. |

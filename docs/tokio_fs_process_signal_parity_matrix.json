@@ -1,0 +1,367 @@
+{
+  "bead_id": "asupersync-2oh2u.3.1",
+  "title": "[T3.1] Build complete filesystem/process/signal parity matrix",
+  "version": 2,
+  "generated_at": "2026-03-03",
+  "domains": ["filesystem", "process", "signal"],
+  "source_markdown": "docs/tokio_fs_process_signal_parity_matrix.md",
+  "ownership_matrix": [
+    {
+      "tokio_family": "tokio::fs",
+      "asupersync_surface": [
+        "src/fs/file.rs",
+        "src/fs/open_options.rs",
+        "src/fs/path_ops.rs",
+        "src/fs/dir.rs",
+        "src/fs/read_dir.rs",
+        "src/fs/metadata.rs",
+        "src/fs/buf_reader.rs",
+        "src/fs/buf_writer.rs",
+        "src/fs/vfs.rs",
+        "src/fs/uring.rs"
+      ],
+      "ownership_boundary": "core (+ io-uring feature path)",
+      "current_parity": "partial_active",
+      "existing_evidence": ["tests/fs_verification.rs", "tests/e2e_fs.rs"]
+    },
+    {
+      "tokio_family": "tokio::process",
+      "asupersync_surface": ["src/process.rs"],
+      "ownership_boundary": "core",
+      "current_parity": "active_with_critical_divergences",
+      "existing_evidence": [
+        "tests/compile_test_process.rs",
+        "src/process.rs"
+      ]
+    },
+    {
+      "tokio_family": "tokio::signal",
+      "asupersync_surface": [
+        "src/signal/signal.rs",
+        "src/signal/ctrl_c.rs",
+        "src/signal/kind.rs",
+        "src/signal/shutdown.rs",
+        "src/signal/graceful.rs"
+      ],
+      "ownership_boundary": "core (unix runtime behavior)",
+      "current_parity": "active_unix_partial_cross_platform",
+      "existing_evidence": [
+        "tests/e2e_signal.rs",
+        "src/signal/signal.rs",
+        "src/signal/ctrl_c.rs",
+        "src/signal/kind.rs"
+      ]
+    }
+  ],
+  "gaps": [
+    {
+      "id": "FS-G1",
+      "domain": "filesystem",
+      "severity": "medium",
+      "divergence_risk": "migration friction for tokio convenience wrappers",
+      "owner_modules": ["src/fs/mod.rs", "src/fs/path_ops.rs"],
+      "evidence_requirements": [
+        "contract checklist proving API/table completeness",
+        "integration tests in T3.2 artifacts"
+      ],
+      "downstream_bead": "asupersync-2oh2u.3.2"
+    },
+    {
+      "id": "FS-G2",
+      "domain": "filesystem",
+      "severity": "high",
+      "divergence_risk": "partial-write assumptions under cancellation",
+      "owner_modules": ["src/fs/file.rs", "src/fs/path_ops.rs"],
+      "evidence_requirements": [
+        "deterministic cancellation tests in tests/fs_verification.rs",
+        "explicit cancellation contract updates"
+      ],
+      "downstream_bead": "asupersync-2oh2u.3.6"
+    },
+    {
+      "id": "FS-G3",
+      "domain": "filesystem",
+      "severity": "high",
+      "divergence_risk": "cross-platform deterministic replay drift",
+      "owner_modules": ["src/fs/vfs.rs"],
+      "evidence_requirements": [
+        "lab/runtime parity tests for deterministic fs behavior"
+      ],
+      "downstream_bead": "asupersync-2oh2u.3.7"
+    },
+    {
+      "id": "FS-G4",
+      "domain": "filesystem",
+      "severity": "medium",
+      "divergence_risk": "io_uring path semantics drift from blocking path",
+      "owner_modules": ["src/fs/uring.rs", "src/fs/path_ops.rs"],
+      "evidence_requirements": [
+        "cross-path equivalence tests with io-uring on/off"
+      ],
+      "downstream_bead": "asupersync-2oh2u.3.3"
+    },
+    {
+      "id": "FS-G5",
+      "domain": "filesystem",
+      "severity": "medium",
+      "divergence_risk": "platform-specific symlink behavior mismatches",
+      "owner_modules": ["src/fs/path_ops.rs", "src/fs/mod.rs"],
+      "evidence_requirements": [
+        "platform matrix tests/docs for symlink_file/symlink_dir behavior"
+      ],
+      "downstream_bead": "asupersync-2oh2u.3.3"
+    },
+    {
+      "id": "PR-G1",
+      "domain": "process",
+      "severity": "high",
+      "divergence_risk": "blocking wait semantics vs async tokio behavior",
+      "owner_modules": ["src/process.rs"],
+      "evidence_requirements": [
+        "async wait parity tests under load and cancellation"
+      ],
+      "downstream_bead": "asupersync-2oh2u.3.4"
+    },
+    {
+      "id": "PR-G2",
+      "domain": "process",
+      "severity": "medium",
+      "divergence_risk": "missing PTY parity for interactive workloads",
+      "owner_modules": ["src/process.rs"],
+      "evidence_requirements": ["PTY capability matrix and e2e lifecycle tests"],
+      "downstream_bead": "asupersync-2oh2u.3.4"
+    },
+    {
+      "id": "PR-G3",
+      "domain": "process",
+      "severity": "medium",
+      "divergence_risk": "windows process behavior drift",
+      "owner_modules": ["src/process.rs"],
+      "evidence_requirements": [
+        "platform behavior table and CI evidence per supported OS"
+      ],
+      "downstream_bead": "asupersync-2oh2u.3.4"
+    },
+    {
+      "id": "PR-G4",
+      "domain": "process",
+      "severity": "high",
+      "divergence_risk": "zombie/leak or output truncation on cancellation",
+      "owner_modules": ["src/process.rs"],
+      "evidence_requirements": [
+        "deterministic cancellation drills with kill_on_drop variants"
+      ],
+      "downstream_bead": "asupersync-2oh2u.3.6"
+    },
+    {
+      "id": "SG-G1",
+      "domain": "signal",
+      "severity": "medium",
+      "divergence_risk": "missing windows signal parity surface",
+      "owner_modules": ["src/signal/mod.rs", "src/signal/ctrl_c.rs", "src/signal/signal.rs"],
+      "evidence_requirements": [
+        "windows-specific contract tests and behavior docs per signal class"
+      ],
+      "downstream_bead": "asupersync-2oh2u.3.5"
+    },
+    {
+      "id": "SG-G2",
+      "domain": "signal",
+      "severity": "medium",
+      "divergence_risk": "non-unix signal stream unsupported behavior ambiguity",
+      "owner_modules": ["src/signal/signal.rs", "src/signal/ctrl_c.rs"],
+      "evidence_requirements": [
+        "deterministic fallback tests and migration guidance for non-unix builds"
+      ],
+      "downstream_bead": "asupersync-2oh2u.3.5"
+    },
+    {
+      "id": "SG-G3",
+      "domain": "signal",
+      "severity": "medium",
+      "divergence_risk": "coalescing and ordering contract ambiguity",
+      "owner_modules": ["src/signal/signal.rs"],
+      "evidence_requirements": [
+        "burst-signal e2e tests with monotonic counters and no-loss assertions"
+      ],
+      "downstream_bead": "asupersync-2oh2u.3.5"
+    },
+    {
+      "id": "SG-G4",
+      "domain": "signal",
+      "severity": "high",
+      "divergence_risk": "inconsistent shutdown propagation under races",
+      "owner_modules": ["src/signal/shutdown.rs", "src/signal/graceful.rs"],
+      "evidence_requirements": [
+        "integration tests for controller plus os-signal race behavior"
+      ],
+      "downstream_bead": "asupersync-2oh2u.3.6"
+    }
+  ],
+  "platform_semantics": [
+    {
+      "surface": "filesystem_symlink_ops",
+      "unix": "symlink direct support",
+      "windows": "symlink_file and symlink_dir split",
+      "wasm": "n/a",
+      "known_divergence_risk": "link semantics and permissions differ by os"
+    },
+    {
+      "surface": "filesystem_acceleration",
+      "unix": "io_uring feature path available on linux",
+      "windows": "no io_uring path",
+      "wasm": "n/a",
+      "known_divergence_risk": "fast-path behavior may drift from blocking-offload path"
+    },
+    {
+      "surface": "process_primitives",
+      "unix": "primary implementation and test path",
+      "windows": "requires explicit parity verification",
+      "wasm": "n/a",
+      "known_divergence_risk": "wait/kill/stdio edge behavior can differ by platform"
+    },
+    {
+      "surface": "signal_stream_api",
+      "unix": "full async stream support",
+      "windows": "signal stream currently unsupported",
+      "wasm": "unsupported",
+      "known_divergence_risk": "cross-platform services need conditional handling"
+    },
+    {
+      "surface": "ctrl_c",
+      "unix": "backed by unix signal stream",
+      "windows": "api shape exposed with backend constraints",
+      "wasm": "unsupported",
+      "known_divergence_risk": "ctrl_c availability assumptions can fail off unix"
+    }
+  ],
+  "signal_contracts": [
+    {
+      "id": "SGC-01",
+      "bead_id": "asupersync-2oh2u.3.5",
+      "focus": "unix signal stream creation and delivery semantics",
+      "pass_criteria": [
+        "signal(SignalKind::terminate()) succeeds on unix",
+        "injected delivery is observed by recv() without silent drop",
+        "raw mapping includes SIGPIPE and SIGALRM"
+      ],
+      "failure_semantics": "emit SG-G3 diagnostics with owner module and failing test identifier",
+      "owner_modules": ["src/signal/signal.rs"],
+      "artifacts": ["src/signal/signal.rs"],
+      "contract_tests": [
+        "signal_creation_platform_contract",
+        "signal_recv_observes_delivery",
+        "unix_raw_signal_mapping_covers_pipe_and_alarm"
+      ],
+      "reproduction_command": "rch exec -- cargo test -p asupersync signal_recv_observes_delivery -- --nocapture"
+    },
+    {
+      "id": "SGC-02",
+      "bead_id": "asupersync-2oh2u.3.5",
+      "focus": "cross-platform fallback and unsupported semantics",
+      "pass_criteria": [
+        "non-unix behavior for signal() remains explicit via unsupported path",
+        "ctrl_c availability gate remains explicit and deterministic"
+      ],
+      "failure_semantics": "emit SG-G1/SG-G2 diagnostics with owner module and unsupported-path mismatch",
+      "owner_modules": ["src/signal/signal.rs", "src/signal/ctrl_c.rs"],
+      "artifacts": ["src/signal/signal.rs", "src/signal/ctrl_c.rs"],
+      "contract_tests": [
+        "signal_creation_platform_contract",
+        "ctrl_c_not_available"
+      ],
+      "reproduction_command": "rch exec -- cargo test -p asupersync ctrl_c_not_available -- --nocapture"
+    },
+    {
+      "id": "SGC-03",
+      "bead_id": "asupersync-2oh2u.3.5",
+      "focus": "shutdown propagation and idempotent coordination",
+      "pass_criteria": [
+        "shutdown reaches all subscribers",
+        "double shutdown is idempotent",
+        "late subscribers observe already-initiated shutdown",
+        "concurrent shutdown calls converge on a stable state"
+      ],
+      "failure_semantics": "emit SG-G4 diagnostics with e2e test case id and owner module",
+      "owner_modules": ["src/signal/shutdown.rs", "src/signal/graceful.rs"],
+      "artifacts": ["tests/e2e_signal.rs"],
+      "contract_tests": [
+        "e2e_multi_receiver_notification",
+        "e2e_double_shutdown_idempotent",
+        "e2e_late_subscriber_sees_shutdown",
+        "e2e_concurrent_shutdown_calls"
+      ],
+      "reproduction_command": "rch exec -- cargo test -p asupersync --test e2e_signal -- --nocapture"
+    },
+    {
+      "id": "SGC-04",
+      "bead_id": "asupersync-2oh2u.3.5",
+      "focus": "contract drift and diagnostics traceability",
+      "pass_criteria": [
+        "SG-G1..SG-G4 remain synchronized between markdown and json artifacts",
+        "signal contract rows remain complete with owner modules, artifacts, and repro commands",
+        "drift diagnostics map each violation to owning bead/module"
+      ],
+      "failure_semantics": "emit T3-DRIFT diagnostics with missing field/path and owning bead asupersync-2oh2u.3.5",
+      "owner_modules": [
+        "docs/tokio_fs_process_signal_parity_matrix.md",
+        "docs/tokio_fs_process_signal_parity_matrix.json",
+        "tests/tokio_fs_process_signal_parity_matrix.rs"
+      ],
+      "artifacts": [
+        "docs/tokio_fs_process_signal_parity_matrix.md",
+        "docs/tokio_fs_process_signal_parity_matrix.json",
+        "tests/tokio_fs_process_signal_parity_matrix.rs"
+      ],
+      "contract_tests": [
+        "matrix_includes_t35_signal_contract_pack_section",
+        "json_signal_contract_pack_is_complete",
+        "json_signal_contract_paths_and_commands_are_valid"
+      ],
+      "reproduction_command": "rch exec -- cargo test -p asupersync --test tokio_fs_process_signal_parity_matrix -- --nocapture"
+    }
+  ],
+  "drift_detection_rules": [
+    {
+      "id": "T3-DRIFT-01",
+      "rule": "all ownership and evidence paths referenced by the matrix must exist in-repo",
+      "enforced_by": ["tests/tokio_fs_process_signal_parity_matrix.rs"]
+    },
+    {
+      "id": "T3-DRIFT-02",
+      "rule": "gap coverage must retain fs/process/signal families without silent row loss",
+      "enforced_by": ["tests/tokio_fs_process_signal_parity_matrix.rs"]
+    },
+    {
+      "id": "T3-DRIFT-03",
+      "rule": "platform semantics coverage must include unix/windows/wasm rows",
+      "enforced_by": ["tests/tokio_fs_process_signal_parity_matrix.rs"]
+    },
+    {
+      "id": "T3-DRIFT-04",
+      "rule": "each gap must preserve concrete downstream bead mapping",
+      "enforced_by": ["tests/tokio_fs_process_signal_parity_matrix.rs"]
+    },
+    {
+      "id": "T3-DRIFT-05",
+      "rule": "markdown and json artifacts must agree on bead id and declared gap ids",
+      "enforced_by": ["tests/tokio_fs_process_signal_parity_matrix.rs"]
+    },
+    {
+      "id": "T3-DRIFT-06",
+      "rule": "signal_contracts must include SGC-01..SGC-04 with pass criteria, owner modules, artifacts, and reproduction command",
+      "enforced_by": ["tests/tokio_fs_process_signal_parity_matrix.rs"]
+    },
+    {
+      "id": "T3-DRIFT-07",
+      "rule": "all signal contract owner/artifact paths must exist and each reproduction command must be rch-routed",
+      "enforced_by": ["tests/tokio_fs_process_signal_parity_matrix.rs"]
+    }
+  ],
+  "ci_commands": [
+    "rch exec -- cargo test -p asupersync --test tokio_fs_process_signal_parity_matrix -- --nocapture",
+    "rch exec -- cargo test -p asupersync --test e2e_signal -- --nocapture",
+    "rch exec -- cargo test -p asupersync ctrl_c_not_available -- --nocapture",
+    "rch exec -- cargo test -p asupersync signal_recv_observes_delivery -- --nocapture"
+  ]
+}

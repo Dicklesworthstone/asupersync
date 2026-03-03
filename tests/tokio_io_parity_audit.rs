@@ -12,14 +12,23 @@ fn load_audit_doc() -> String {
     std::fs::read_to_string(path).expect("audit document must exist")
 }
 
+fn normalize_table_cell(cell: &str) -> String {
+    cell.trim()
+        .trim_matches('~')
+        .trim_matches('`')
+        .trim_matches('*')
+        .trim()
+        .to_string()
+}
+
 fn extract_gap_ids(doc: &str) -> BTreeSet<String> {
     let mut ids = BTreeSet::new();
     for line in doc.lines() {
         let trimmed = line.trim().trim_start_matches('|').trim();
         if let Some(id) = trimmed.split('|').next() {
-            let id = id.trim();
+            let id = normalize_table_cell(id);
             if id.starts_with("IO-G") && id.len() >= 4 {
-                ids.insert(id.to_string());
+                ids.insert(id);
             }
         }
     }
@@ -262,19 +271,18 @@ fn audit_covers_integer_read_write_gap() {
 fn extract_gap_summary_rows(doc: &str) -> Vec<(String, String, String)> {
     // Parse rows from the "Gap Summary" section.
     // Format: | ID | Description | Severity | Effort | Phase |
-    let summary = match doc.split("Gap Summary").nth(1) {
-        Some(s) => s,
-        None => return Vec::new(),
+    let Some(summary) = doc.split("Gap Summary").nth(1) else {
+        return Vec::new();
     };
     let mut gaps = Vec::new();
     for line in summary.lines() {
         let cols: Vec<&str> = line.split('|').map(str::trim).collect();
         if cols.len() >= 6 {
-            let id = cols[1];
-            let severity = cols[3];
+            let id = normalize_table_cell(cols[1]);
+            let severity = normalize_table_cell(cols[3]);
             let phase = cols.get(5).unwrap_or(&"");
             if id.starts_with("IO-G") {
-                gaps.push((id.to_string(), severity.to_string(), phase.to_string()));
+                gaps.push((id, severity, phase.to_string()));
             }
         }
     }
@@ -338,9 +346,10 @@ fn all_phases_are_valid() {
     let valid_phases = ["A", "B", "C", "D"];
 
     for (id, _, phase) in &gaps {
+        let closed_in_track = phase.starts_with('T');
         assert!(
-            valid_phases.iter().any(|p| phase.contains(p)),
-            "gap {id} has invalid phase '{phase}', expected one of {valid_phases:?}"
+            closed_in_track || valid_phases.iter().any(|p| phase.contains(p)),
+            "gap {id} has invalid phase '{phase}', expected one of {valid_phases:?} or a closure-track marker"
         );
     }
 }
@@ -391,12 +400,14 @@ fn codec_trait_parity_lists_decoder_encoder() {
 #[test]
 fn framed_transport_types_complete() {
     let doc = load_audit_doc();
-    let framed_types = ["Framed<T, U>", "FramedRead<R, D>", "FramedWrite<W, E>", "FramedParts"];
+    let framed_types = [
+        "Framed<T, U>",
+        "FramedRead<R, D>",
+        "FramedWrite<W, E>",
+        "FramedParts",
+    ];
     for ft in &framed_types {
-        assert!(
-            doc.contains(ft),
-            "framed transport section must list: {ft}"
-        );
+        assert!(doc.contains(ft), "framed transport section must list: {ft}");
     }
 }
 
@@ -456,10 +467,7 @@ fn asupersync_extensions_table_is_complete() {
         "CopyBidirectional",
     ];
     for ext in &extensions {
-        assert!(
-            doc.contains(ext),
-            "asupersync extensions must list: {ext}"
-        );
+        assert!(doc.contains(ext), "asupersync extensions must list: {ext}");
     }
 }
 
@@ -561,4 +569,75 @@ fn total_gap_count_matches_documented_14() {
         doc.contains("3 High") && doc.contains("5 Medium") && doc.contains("6 Low"),
         "document must state severity breakdown: 3 High, 5 Medium, 6 Low"
     );
+}
+
+#[test]
+fn audit_includes_t2_6_reactor_contract_section() {
+    let doc = load_audit_doc();
+    assert!(
+        doc.contains("Reactor Backend Parity and Readiness Consistency (T2.6)"),
+        "document must include explicit T2.6 reactor parity section"
+    );
+    for contract in ["R09.1", "R09.2", "R09.3", "R09.4", "R09.5", "R09.6"] {
+        assert!(
+            doc.contains(contract),
+            "T2.6 section must include contract id: {contract}"
+        );
+    }
+}
+
+#[test]
+fn reactor_contract_matrix_covers_all_backends() {
+    let doc = load_audit_doc();
+    for backend in ["epoll", "kqueue", "IOCP (windows)", "io_uring"] {
+        assert!(
+            doc.contains(backend),
+            "reactor contract matrix must include backend: {backend}"
+        );
+    }
+}
+
+#[test]
+fn reactor_contract_links_source_and_test_evidence() {
+    let doc = load_audit_doc();
+    for source in [
+        "src/runtime/reactor/epoll.rs",
+        "src/runtime/reactor/kqueue.rs",
+        "src/runtime/reactor/windows.rs",
+        "src/runtime/reactor/io_uring.rs",
+        "src/runtime/io_driver.rs",
+    ] {
+        assert!(
+            doc.contains(source),
+            "reactor contract must cite source anchor: {source}"
+        );
+    }
+
+    for test in [
+        "tests/io_uring_reactor.rs",
+        "tests/io_driver_concurrency.rs",
+        "tests/io_cancellation.rs",
+        "tests/tokio_io_parity_audit.rs",
+    ] {
+        assert!(
+            doc.contains(test),
+            "reactor contract must cite test anchor: {test}"
+        );
+    }
+}
+
+#[test]
+fn reactor_contract_includes_drift_rules() {
+    let doc = load_audit_doc();
+    for rule_token in [
+        "Drift-Detection Rules (T2.6)",
+        "stale-token behavior non-panicking",
+        "duplicate user-level wake dispatch",
+        "NotFound",
+    ] {
+        assert!(
+            doc.contains(rule_token),
+            "reactor drift rules must include token: {rule_token}"
+        );
+    }
 }

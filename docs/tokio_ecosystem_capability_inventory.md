@@ -115,7 +115,7 @@ Asupersync surface. Each family is classified on four axes:
 | Maturity | **active** |
 | Determinism | **mixed** — traits deterministic, underlying I/O real-time |
 | Key files | `io/cap.rs` (84K, capability-gated I/O), `io/copy.rs` (37K), `io/buf_reader.rs` (16K), `io/buf_writer.rs` (18K), `io/write_permit.rs` (two-phase writes) |
-| Gaps | `tokio-util::io::ReaderStream`, `SinkWriter`, `StreamReader` adapters — need audit |
+| Gaps | `tokio-util::io::SinkWriter` adapter remains missing. `ReaderStream` + `StreamReader` are now implemented in `src/io/stream_adapters.rs`. |
 
 ### F07 — Codec and Framing Layer
 
@@ -222,12 +222,12 @@ Asupersync surface. Each family is classified on four axes:
 |------|-------|
 | Tokio surface | `quinn`, `h3`, `h3-quinn` |
 | Asupersync surface | `src/net/{quic/, quic_core/, quic_native/}`, `src/http/{h3/, h3_native.rs}` |
-| Ownership | **core** (planned; feature-gating TBD) |
-| Parity | **partial** — native QUIC transport in progress; HTTP/3 framing partially implemented |
-| Maturity | **parked** — upstream quinn/h3 pull Tokio transitively; native rewrite tracked |
+| Ownership | **feature-gated** (`quic`, `http3`) for native rollout; **compat-only** (`quic-compat`, `http3-compat`) for legacy wrapper boundary |
+| Parity | **partial** — native QUIC transport and native HTTP/3 framing are exposed/testable; RFC-complete transport behavior remains in progress |
+| Maturity | **active** — feature surfaces are unparked in Cargo/public API while native closure continues |
 | Determinism | N/A |
 | Key files | `http/h3_native.rs` (84K), `net/quic_core/` directory, `net/quic_native/` directory |
-| Gaps | **CRITICAL for full-replacement claim.** QUIC handshake, connection migration, 0-RTT, congestion control (RFC 9002) all need completion. Feature flags commented out in Cargo.toml. |
+| Gaps | **CRITICAL for full-replacement claim.** QUIC handshake, connection migration, 0-RTT, congestion control (RFC 9002) still need completion. Legacy quinn/h3 wrappers remain quarantined behind compat-only feature gates. |
 
 ### F16 — Web Framework
 

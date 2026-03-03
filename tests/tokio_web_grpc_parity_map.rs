@@ -49,9 +49,9 @@ fn parity_references_correct_bead() {
 }
 
 #[test]
-fn parity_covers_all_four_tokio_crates() {
+fn parity_covers_all_tokio_comparison_crates() {
     let doc = load_parity_doc();
-    let crates = ["axum", "tower-http", "tonic", "hyper"];
+    let crates = ["axum", "warp", "tower-http", "tonic", "hyper"];
     for c in &crates {
         assert!(
             doc.contains(c),
@@ -74,6 +74,23 @@ fn parity_covers_web_framework_surface() {
     assert!(
         doc.contains("Path<T>") && doc.contains("Query<T>") && doc.contains("Json<T>"),
         "must cover core extractors"
+    );
+}
+
+#[test]
+fn parity_covers_warp_surface() {
+    let doc = load_parity_doc();
+    assert!(
+        doc.contains("warp::path!") || doc.contains("typed path"),
+        "must cover warp typed-path behavior"
+    );
+    assert!(
+        doc.contains("Filter") && doc.contains("and") && doc.contains("or"),
+        "must cover warp filter-combinator parity"
+    );
+    assert!(
+        doc.contains("reject") && doc.contains("recover"),
+        "must cover warp reject/recover behavior"
     );
 }
 
@@ -165,8 +182,8 @@ fn parity_total_gap_count() {
     let doc = load_parity_doc();
     let ids = extract_gap_ids(&doc);
     assert!(
-        ids.len() >= 30,
-        "parity map must identify >= 30 gaps across all domains, found {}",
+        ids.len() >= 40,
+        "parity map must identify >= 40 gaps across all domains, found {}",
         ids.len()
     );
 }
@@ -253,6 +270,23 @@ fn parity_has_execution_order_with_phases() {
 }
 
 #[test]
+fn parity_has_ownership_boundaries() {
+    let doc = load_parity_doc();
+    assert!(
+        doc.contains("Ownership Boundaries"),
+        "must include ownership boundaries section"
+    );
+    assert!(
+        doc.contains("Boundary Contract"),
+        "ownership boundaries must include boundary contract column"
+    );
+    assert!(
+        doc.contains("Owning Bead"),
+        "ownership boundaries must map domains to owning beads"
+    );
+}
+
+#[test]
 fn parity_covers_asupersync_extensions() {
     let doc = load_parity_doc();
     assert!(
@@ -323,5 +357,92 @@ fn parity_covers_non_blocking_gaps() {
     assert!(
         doc.contains("Non-Blocking"),
         "must classify non-blocking gaps"
+    );
+}
+
+#[test]
+fn parity_includes_t52_router_closure_scope() {
+    let doc = load_parity_doc();
+    for token in [
+        "asupersync-2oh2u.5.2",
+        "T5.2",
+        "Router Composition and Route-Matching Closure Contract",
+        "Version",
+        "1.2.0",
+    ] {
+        assert!(doc.contains(token), "missing T5.2 scope token: {token}");
+    }
+}
+
+#[test]
+fn parity_has_t52_success_failure_cancellation_contract_rows() {
+    let doc = load_parity_doc();
+    for token in [
+        "Contract ID",
+        "Success Path",
+        "Failure Path",
+        "Cancellation Path",
+        "Deterministic Assertion",
+        "T52-ROUTE-01",
+        "T52-ROUTE-02",
+        "T52-ROUTE-03",
+        "T52-ROUTE-04",
+        "T52-ROUTE-05",
+        "T52-ROUTE-06",
+    ] {
+        assert!(doc.contains(token), "missing T5.2 contract token: {token}");
+    }
+}
+
+#[test]
+fn parity_has_t52_deterministic_scenario_pack() {
+    let doc = load_parity_doc();
+    assert!(
+        doc.contains("T5.2 Deterministic Scenario Pack"),
+        "must include T5.2 deterministic scenario pack section"
+    );
+    for token in [
+        "T52-ROUTE-01",
+        "T52-ROUTE-04",
+        "T52-ROUTE-08",
+        "Expected Status",
+        "| success |",
+        "| failure |",
+        "| cancelled |",
+        "Required Log Fields",
+    ] {
+        assert!(doc.contains(token), "missing scenario-pack token: {token}");
+    }
+}
+
+#[test]
+fn parity_has_t52_validation_bundle_and_evidence_links() {
+    let doc = load_parity_doc();
+    for token in [
+        "br show asupersync-2oh2u.5.2 --json",
+        "rch exec -- cargo test --test tokio_web_grpc_parity_map",
+        "rch exec -- cargo test --test web_router_composition -- --nocapture",
+        "rch exec -- cargo test --test web_router_match_order -- --nocapture",
+        "src/web/router.rs",
+        "src/web/extract.rs",
+        "src/web/middleware.rs",
+    ] {
+        assert!(
+            doc.contains(token),
+            "missing validation/evidence token: {token}"
+        );
+    }
+}
+
+#[test]
+fn parity_revision_history_tracks_t52_update() {
+    let doc = load_parity_doc();
+    assert!(
+        doc.contains("| 2026-03-03 | WhiteDesert |"),
+        "revision history should include WhiteDesert v1.2 row"
+    );
+    assert!(
+        doc.contains("| 2026-03-03 | SapphireHill | Initial parity map (v1.0) |"),
+        "revision history should retain initial baseline row"
     );
 }

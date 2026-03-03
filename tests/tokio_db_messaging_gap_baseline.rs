@@ -259,9 +259,8 @@ fn baseline_has_per_domain_feature_tables() {
 fn extract_summary_table_gaps(doc: &str) -> Vec<(String, String, String)> {
     // Parse rows from the "Gap Summary Table" section.
     // Each row: | ID | Domain | Description | Severity | Phase |
-    let summary = match doc.split("Gap Summary Table").nth(1) {
-        Some(s) => s,
-        None => return Vec::new(),
+    let Some(summary) = doc.split("Gap Summary Table").nth(1) else {
+        return Vec::new();
     };
     let mut gaps = Vec::new();
     for line in summary.lines() {

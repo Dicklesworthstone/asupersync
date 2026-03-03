@@ -437,8 +437,82 @@ For each requirement ID above:
 
 ---
 
-## 7. Revision History
+## 7. Domain Definition-of-Done Synthesis (T1.2 Parent)
+
+This section consolidates T1.2.a (functional contracts), T1.2.b (non-functional
+closure thresholds), and T1.2.c (evidence checklist) into one domain-level
+sign-off matrix for the parent bead `asupersync-2oh2u.1.2`.
+
+### 7.1 Domain Closure Matrix
+
+| Capability Domain | Functional Contract Scope | Non-Functional Gate Families | Evidence Rows | Closure Rule |
+|-------------------|---------------------------|------------------------------|---------------|--------------|
+| Runtime | `D1`, `D2`, `D3`, `D4` | `NF01`-`NF05` | `F01`-`F05` | All linked `D*` MUST requirements pass conformance (`E1`), linked `NF*` hard ceilings pass (or approved deferred waiver), and all `M` evidence categories in linked `F*` rows are complete. |
+| Async I/O + Codec + Buffers | `D5` | `NF06`-`NF09` | `F06`-`F09` | Same as above, scoped to `D5` semantics and `F06`-`F09` evidence rows. |
+| Filesystem / Process / Signal | `D10` | `NF21`-`NF23` | `F21`-`F23` | `D10` MUST requirements verified; `NF21`-`NF23` ceilings met for in-scope surfaces; all mandatory evidence from `F21`-`F23` rows present. |
+| Networking Core + Protocol Stack | `D6`, `D7` | `NF10`-`NF15` | `F10`-`F15` | `D6`/`D7` MUST requirements verified (including cancellation/error semantics), network/protocol `NF*` gates met, and evidence rows `F10`-`F15` complete. |
+| Web Framework / Middleware | `D8` (web/middleware clauses) | `NF16` | `F16` | Web-specific `D8` MUST requirements pass; `NF16` gates meet hard ceilings; all mandatory `F16` evidence complete. |
+| gRPC | `D8` (gRPC clauses) | `NF17` | `F17` | gRPC `D8` MUST requirements and stream cancellation semantics pass; `NF17` gates and mandatory `F17` evidence complete. |
+| Database Clients | `D9` (Postgres/MySQL/SQLite clauses) | `NF18` | `F18` | DB-related `D9` MUST requirements pass; `NF18` gates and mandatory `F18` evidence complete. |
+| Messaging Clients | `D9` (Redis/NATS/Kafka clauses) | `NF19` | `F19` | Messaging-related `D9` MUST requirements pass; `NF19` gates and mandatory `F19` evidence complete. |
+| Interop Adapters | `D12` | `NF28` | `F28` | `D12` adapter boundary requirements pass, interop `NF28` gates satisfy thresholds/deferred policy, and `F28` mandatory evidence is complete. |
+| Observability + Deterministic Replay | `D11` | `NF25`, `NF26` | `F25`, `F26` | `D11` MUST requirements pass including replay determinism, observability/lab `NF*` gates pass, and `F25`/`F26` mandatory evidence is complete. |
+
+### 7.2 Machine-Readable Mapping
+
+```yaml
+dod_domain_map:
+  runtime:
+    functional_contracts: [D1, D2, D3, D4]
+    nonfunctional_families: [NF01, NF02, NF03, NF04, NF05]
+    evidence_rows: [F01, F02, F03, F04, F05]
+  io_codec_buffers:
+    functional_contracts: [D5]
+    nonfunctional_families: [NF06, NF07, NF08, NF09]
+    evidence_rows: [F06, F07, F08, F09]
+  fs_process_signal:
+    functional_contracts: [D10]
+    nonfunctional_families: [NF21, NF22, NF23]
+    evidence_rows: [F21, F22, F23]
+  networking_protocol:
+    functional_contracts: [D6, D7]
+    nonfunctional_families: [NF10, NF11, NF12, NF13, NF14, NF15]
+    evidence_rows: [F10, F11, F12, F13, F14, F15]
+  web:
+    functional_contracts: [D8]
+    nonfunctional_families: [NF16]
+    evidence_rows: [F16]
+  grpc:
+    functional_contracts: [D8]
+    nonfunctional_families: [NF17]
+    evidence_rows: [F17]
+  database:
+    functional_contracts: [D9]
+    nonfunctional_families: [NF18]
+    evidence_rows: [F18]
+  messaging:
+    functional_contracts: [D9]
+    nonfunctional_families: [NF19]
+    evidence_rows: [F19]
+  interop:
+    functional_contracts: [D12]
+    nonfunctional_families: [NF28]
+    evidence_rows: [F28]
+  observability:
+    functional_contracts: [D11]
+    nonfunctional_families: [NF25, NF26]
+    evidence_rows: [F25, F26]
+```
+
+### 7.3 Cross-Document References
+
+- Non-functional thresholds: `docs/tokio_nonfunctional_closure_criteria.md`
+- Evidence policy/checklists: `docs/tokio_evidence_checklist.md`
+- Executable contract gates: `docs/tokio_executable_conformance_contracts.md`
+
+## 8. Revision History
 
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-03-03 | FuchsiaGate | Initial functional parity contract baseline (T1.2.a) |
+| 2026-03-03 | DustySnow | Added T1.2 parent DoD synthesis matrix + machine-readable domain mapping across functional/non-functional/evidence gates. |

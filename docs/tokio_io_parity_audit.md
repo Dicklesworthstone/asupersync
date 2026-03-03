@@ -49,34 +49,34 @@ Asupersync-specific extensions (IoCap, BrowserStream, BrowserStorage) are noted 
 
 | Tokio Method | Asupersync | Status | Gap ID |
 |-------------|-----------|--------|--------|
-| `read(&mut buf)` | — | Missing | IO-G1 |
+| `read(&mut buf)` | `read` | Complete | ~~IO-G1~~ |
 | `read_buf(&mut buf)` | — | Missing | IO-G2 |
 | `read_exact(&mut buf)` | `read_exact` | Complete | — |
 | `read_to_end(&mut vec)` | `read_to_end` | Complete | — |
 | `read_to_string(&mut s)` | `read_to_string` | Complete | — |
 | `read_u8()` | `read_u8` | Complete | — |
-| `read_i8()` | — | Missing | IO-G3 |
-| `read_u16()` | — | Missing | IO-G3 |
-| `read_u16_le()` | — | Missing | IO-G3 |
-| `read_u32()` | — | Missing | IO-G3 |
-| `read_u32_le()` | — | Missing | IO-G3 |
-| `read_u64()` | — | Missing | IO-G3 |
-| `read_u64_le()` | — | Missing | IO-G3 |
-| `read_u128()` | — | Missing | IO-G3 |
-| `read_u128_le()` | — | Missing | IO-G3 |
-| `read_i16()` ... `read_i128_le()` | — | Missing | IO-G3 |
-| `read_f32()` / `read_f64()` | — | Missing | IO-G3 |
+| `read_i8()` | `read_i8` | Complete | ~~IO-G3~~ |
+| `read_u16()` | `read_u16` | Complete | ~~IO-G3~~ |
+| `read_u16_le()` | `read_u16_le` | Complete | ~~IO-G3~~ |
+| `read_u32()` | `read_u32` | Complete | ~~IO-G3~~ |
+| `read_u32_le()` | `read_u32_le` | Complete | ~~IO-G3~~ |
+| `read_u64()` | `read_u64` | Complete | ~~IO-G3~~ |
+| `read_u64_le()` | `read_u64_le` | Complete | ~~IO-G3~~ |
+| `read_u128()` | `read_u128` | Complete | ~~IO-G3~~ |
+| `read_u128_le()` | `read_u128_le` | Complete | ~~IO-G3~~ |
+| `read_i16()` ... `read_i128_le()` | all variants | Complete | ~~IO-G3~~ |
+| `read_f32()` / `read_f64()` | `read_f32` / `read_f64` + le | Complete | ~~IO-G3~~ |
 | `chain(next)` | `chain` | Complete | — |
 | `take(limit)` | `take` | Complete | — |
 
-### IO-G1: `read()` — Low Priority
-Missing basic `read(&mut [u8]) -> usize` wrapper. Users must use `poll_read` directly or `read_exact`. Low priority because `read_exact` is the safer, more common pattern.
+### ~~IO-G1~~: `read()` — CLOSED (T2.2)
+Implemented in `src/io/ext/read_ext.rs` as `AsyncReadExt::read()`. Returns `usize` bytes read.
 
 ### IO-G2: `read_buf()` — Medium Priority
 Missing `read_buf` that works with `BufMut` trait. Limits interop with `bytes` crate patterns.
 
-### IO-G3: Integer/Float Read Methods — Medium Priority
-Missing 20+ typed read methods (`read_u16`, `read_u32`, `read_u64`, `read_i16`, etc. in both big-endian and little-endian variants). These are heavily used in wire protocol implementations. Currently, database/messaging wire protocol code handles endianness manually.
+### ~~IO-G3~~: Integer/Float Read Methods — CLOSED (T2.2)
+All 20 typed read methods implemented via `read_int_trait_method!` macro in `src/io/ext/read_ext.rs`: `read_i8`, `read_u16`/`read_u16_le`, `read_i16`/`read_i16_le`, `read_u32`/`read_u32_le`, `read_i32`/`read_i32_le`, `read_u64`/`read_u64_le`, `read_i64`/`read_i64_le`, `read_u128`/`read_u128_le`, `read_i128`/`read_i128_le`, `read_f32`/`read_f32_le`, `read_f64`/`read_f64_le`. Cancel-safety documented. Tested.
 
 ---
 
@@ -84,28 +84,28 @@ Missing 20+ typed read methods (`read_u16`, `read_u32`, `read_u64`, `read_i16`, 
 
 | Tokio Method | Asupersync | Status | Gap ID |
 |-------------|-----------|--------|--------|
-| `write(&buf)` | — | Missing | IO-G4 |
+| `write(&buf)` | `write` | Complete | ~~IO-G4~~ |
 | `write_vectored(&bufs)` | `write_vectored` | Complete | — |
 | `write_buf(&mut buf)` | — | Missing | IO-G5 |
 | `write_all(&buf)` | `write_all` | Complete | — |
 | `write_all_buf(&mut buf)` | `write_all_buf` | Complete | — |
 | `write_u8(n)` | `write_u8` | Complete | — |
-| `write_i8(n)` | — | Missing | IO-G6 |
-| `write_u16(n)` | — | Missing | IO-G6 |
-| `write_u16_le(n)` | — | Missing | IO-G6 |
-| `write_u32(n)` ... `write_u128_le(n)` | — | Missing | IO-G6 |
-| `write_i16(n)` ... `write_i128_le(n)` | — | Missing | IO-G6 |
-| `write_f32(n)` / `write_f64(n)` | — | Missing | IO-G6 |
+| `write_i8(n)` | `write_i8` | Complete | ~~IO-G6~~ |
+| `write_u16(n)` | `write_u16` | Complete | ~~IO-G6~~ |
+| `write_u16_le(n)` | `write_u16_le` | Complete | ~~IO-G6~~ |
+| `write_u32(n)` ... `write_u128_le(n)` | all variants | Complete | ~~IO-G6~~ |
+| `write_i16(n)` ... `write_i128_le(n)` | all variants | Complete | ~~IO-G6~~ |
+| `write_f32(n)` / `write_f64(n)` | `write_f32` / `write_f64` + le | Complete | ~~IO-G6~~ |
 | `flush()` | `flush` | Complete | — |
 | `shutdown()` | `shutdown` | Complete | — |
 
-### IO-G4: `write()` — Low Priority
-Missing basic `write(&[u8]) -> usize` wrapper. Same rationale as IO-G1.
+### ~~IO-G4~~: `write()` — CLOSED (T2.2)
+Implemented in `src/io/ext/write_ext.rs` as `AsyncWriteExt::write()`. Returns `usize` bytes written.
 
 ### IO-G5: `write_buf()` — Medium Priority
-Missing `write_buf` for `Buf` trait. Asupersync has its own `Buf` trait but no `write_buf` method.
+Missing `write_buf` for `Buf` trait. Asupersync has its own `Buf` trait but no `write_buf` method. Workaround: use `write_all_buf()`.
 
-### IO-G6: Integer/Float Write Methods — Medium Priority
+### ~~IO-G6~~: Integer/Float Write Methods — CLOSED (T2.2)
 Same scope as IO-G3 but for writes. Missing 20+ typed write methods.
 
 ---
@@ -163,8 +163,8 @@ Missing `read_until`, `read_line`, and `split(byte)` convenience methods. The `L
 | `Sink` (discard writer) | — | Missing | IO-G10 |
 | `Duplex` (in-memory bidirectional) | — | Missing | IO-G11 |
 | `SimplexStream` (in-memory unidirectional) | — | Missing | IO-G11 |
-| `ReaderStream<R>` (AsyncRead → Stream) | — | Missing | IO-G12 |
-| `StreamReader<S>` (Stream → AsyncRead) | — | Missing | IO-G12 |
+| `ReaderStream<R>` (AsyncRead → Stream) | `io::ReaderStream<R>` | Complete | ~~IO-G12~~ |
+| `StreamReader<S>` (Stream → AsyncRead) | `io::StreamReader<S>` | Complete | ~~IO-G12~~ |
 | `SinkWriter<S>` (Sink → AsyncWrite) | — | Missing | IO-G12 |
 | `CopyToBytes` | — | Missing | IO-G13 |
 | `InspectReader<R, F>` | — | Missing | IO-G13 |
@@ -176,8 +176,9 @@ Missing `read_until`, `read_line`, and `split(byte)` convenience methods. The `L
 ### IO-G11: In-Memory Duplex/Simplex — High Priority
 `DuplexStream` and `SimplexStream` are essential for testing. Without `DuplexStream`, integration tests for bidirectional protocols require real sockets or custom mocks.
 
-### IO-G12: Stream/AsyncRead Bridge Adapters — High Priority
-`ReaderStream`, `StreamReader`, and `SinkWriter` bridge the `Stream` and `AsyncRead/AsyncWrite` worlds. These are used extensively in middleware (e.g., HTTP body streaming, gRPC streaming).
+### IO-G12: Stream/AsyncRead Bridge Adapters — High Priority (Partially Closed in T2.3)
+`ReaderStream` and `StreamReader` are now implemented in `src/io/stream_adapters.rs` and exported from `src/io/mod.rs`.
+Remaining gap surface is `SinkWriter` (Sink -> AsyncWrite), which still blocks full parity for sink-bridged writer workflows.
 
 ### IO-G13: Inspection Adapters — Low Priority
 `CopyToBytes`, `InspectReader`, `InspectWriter` are convenience wrappers. Nice to have for debugging.
@@ -268,38 +269,37 @@ Asupersync adds `WritePermit` for explicit two-phase cancel-safe writes — no T
 
 | ID | Description | Severity | Effort | Phase |
 |----|-------------|----------|--------|-------|
-| IO-G1 | `read()` basic method | Low | <1 day | D |
+| ~~IO-G1~~ | `read()` basic method | ~~Low~~ | CLOSED | T2.2 |
 | IO-G2 | `read_buf()` with BufMut | Medium | 1-2 days | C |
-| IO-G3 | Integer/float read methods (20+) | Medium | 2-3 days | B |
-| IO-G4 | `write()` basic method | Low | <1 day | D |
+| ~~IO-G3~~ | Integer/float read methods (20+) | ~~Medium~~ | CLOSED | T2.2 |
+| ~~IO-G4~~ | `write()` basic method | ~~Low~~ | CLOSED | T2.2 |
 | IO-G5 | `write_buf()` with Buf | Medium | 1-2 days | C |
-| IO-G6 | Integer/float write methods (20+) | Medium | 2-3 days | B |
+| ~~IO-G6~~ | Integer/float write methods (20+) | ~~Medium~~ | CLOSED | T2.2 |
 | IO-G7 | AsyncBufReadExt convenience | Medium | 1-2 days | C |
 | IO-G8 | BufStream combined type | Low | <1 day | D |
 | IO-G9 | Arc-based split (into_split) | High | 3-5 days | A |
 | IO-G10 | Empty/Repeat/Sink adapters | Low | <1 day | D |
 | IO-G11 | DuplexStream/SimplexStream | High | 2-3 days | A |
-| IO-G12 | ReaderStream/StreamReader/SinkWriter | High | 3-5 days | A |
+| IO-G12 | SinkWriter (ReaderStream/StreamReader closed in T2.3) | High | 1-2 days | A |
 | IO-G13 | Inspect/CopyToBytes adapters | Low | 1-2 days | D |
 | IO-G14 | AnyDelimiterCodec | Low | <1 day | D |
 
-**Total**: 14 gaps (3 High, 5 Medium, 6 Low)
+**Total**: 14 gaps identified, **6 closed** (T2.2: IO-G1, IO-G3, IO-G4, IO-G6; T2.3: ReaderStream + StreamReader slice of IO-G12). **8 remaining** (3 High, 3 Medium, 2 Low + 1 partial-high). Baseline severity distribution across all 14 gaps: 3 High, 5 Medium, 6 Low.
 
 ### Priority Ranking
 
 **Phase A — Critical for Migration** (IO-G9, IO-G11, IO-G12):
 - `into_split()` blocks bidirectional protocol migration
 - `DuplexStream` blocks integration testing
-- Stream/AsyncRead bridges block middleware migration
+- `SinkWriter` still blocks sink-bridged writer migration patterns
 
-**Phase B — Needed for Wire Protocols** (IO-G3, IO-G6):
-- Integer read/write methods used extensively in protocol implementations
-- Currently handled manually in database/messaging wire code
+**~~Phase B — Needed for Wire Protocols~~ CLOSED** (~~IO-G3, IO-G6~~):
+- All integer read/write methods implemented via macros in `read_ext.rs`/`write_ext.rs`
 
 **Phase C — Convenience** (IO-G2, IO-G5, IO-G7):
 - Useful but workarounds exist
 
-**Phase D — Polish** (IO-G1, IO-G4, IO-G8, IO-G10, IO-G13, IO-G14):
+**Phase D — Polish** (~~IO-G1, IO-G4,~~ IO-G8, IO-G10, IO-G13, IO-G14):
 - Trivial or niche
 
 ---
@@ -319,8 +319,53 @@ Asupersync adds `WritePermit` for explicit two-phase cancel-safe writes — no T
 
 ---
 
-## 11. Revision History
+## 11. Reactor Backend Parity and Readiness Consistency (T2.6)
+
+This section closes `asupersync-2oh2u.2.6` with an explicit backend-parity
+contract for readiness semantics across epoll, kqueue, IOCP, and io_uring.
+The intent is to prevent backend drift in edge-trigger behavior,
+reregistration correctness, and wake-path dedup/unknown-token handling.
+
+### 11.1 Cross-Backend Contract Matrix
+
+| Contract ID | Requirement | epoll | kqueue | IOCP (windows) | io_uring |
+|-------------|-------------|-------|--------|----------------|----------|
+| R09.1 | Registration rejects duplicate token/source identity | Yes (`AlreadyExists`) | Yes (`AlreadyExists`) | Yes (`AlreadyExists`) | Yes (`AlreadyExists`) |
+| R09.2 | Reregister/modify updates interest atomically or returns `NotFound` for stale registration | Yes (`modify_with_mode` + ENOENT/EBADF cleanup) | Yes (`modify` + tracked registration map) | Yes (`modify` + already-gone classification) | Yes (poll-remove + poll-add with stale cleanup) |
+| R09.3 | Deregister treats already-gone kernel state as cleanup success and removes bookkeeping | Yes (ENOENT/EBADF closed-fd path) | Yes (ENOENT/EBADF closed-fd path) | Yes (`ERROR_INVALID_HANDLE` / `ERROR_NOT_FOUND` / `WSAENOTSOCK`) | Yes (best-effort poll-remove + local map cleanup) |
+| R09.4 | Stale wake token MUST NOT wake unrelated/newly-reused registration | Enforced via token-keyed dispatch path | Enforced via token-keyed dispatch path | Enforced via token-keyed dispatch path | Enforced via registration lookup before event emission |
+| R09.5 | Wake path supports poll interruption without duplicate user-level wake dispatch | `Poller::notify()` | `Poller::notify()` | `Poller::notify()` | eventfd wake channel (`WAKE_USER_DATA`) |
+| R09.6 | Edge-triggered semantics documented and tested on edge-capable backends | EPOLLET | EV_CLEAR | readiness abstraction via polling | PollAdd re-arm unless ONESHOT |
+
+### 11.2 Source Evidence Anchors
+
+- `src/runtime/reactor/epoll.rs`
+- `src/runtime/reactor/kqueue.rs`
+- `src/runtime/reactor/windows.rs`
+- `src/runtime/reactor/io_uring.rs`
+- `src/runtime/io_driver.rs`
+
+### 11.3 Test and Replay Anchors
+
+- `tests/io_uring_reactor.rs` (integration readiness/lifecycle tests)
+- `tests/io_driver_concurrency.rs` (driver-side readiness dispatch under load)
+- `tests/io_cancellation.rs` (cancel cleanup + stale registration expectations)
+- `tests/tokio_io_parity_audit.rs` (this contract's anti-drift assertions)
+
+### 11.4 Drift-Detection Rules (T2.6)
+
+1. Any change to backend register/modify/deregister semantics MUST preserve
+   `R09.1`-`R09.4` outcomes and keep stale-token behavior non-panicking.
+2. Any change to wake paths MUST preserve `R09.5` semantics and avoid duplicate
+   user-level wake dispatch for a single readiness transition.
+3. Backend-specific error normalization MUST continue mapping stale/closed
+   registrations to deterministic `NotFound`/cleanup behavior.
+
+## 12. Revision History
 
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-03-03 | SapphireHill | Initial audit (v1.0) |
+| 2026-03-03 | SapphireHill | T2.2 closure: IO-G1, IO-G3, IO-G4, IO-G6 confirmed implemented, doc updated (v1.1) |
+| 2026-03-03 | IndigoHawk | T2.3 closure slice: ReaderStream + StreamReader implemented, IO-G12 narrowed to SinkWriter (v1.2) |
+| 2026-03-03 | CloudyHawk | T2.6 closure: added explicit reactor backend readiness/reregister/wake-dedup parity contract matrix and drift rules (v1.3). |

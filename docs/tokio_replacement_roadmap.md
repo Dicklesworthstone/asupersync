@@ -17,7 +17,7 @@ selection. All tracks sequence from this document.
 
 | Track | Bead Prefix | Domain | Gap Coverage | Entry Task |
 |-------|-------------|--------|-------------|------------|
-| T1 | 2oh2u.1.* | Baseline & DoD | — | **CLOSED** |
+| T1 | 2oh2u.1.* | Baseline & DoD | — | **CLOSED** (see `docs/tokio_functional_parity_contract.md` section "Domain Definition-of-Done Synthesis (T1.2 Parent)") |
 | T2 | 2oh2u.2.* | Async I/O & tokio-util | G11 | T2.1 |
 | T3 | 2oh2u.3.* | Filesystem / Process / Signal | G8, G12, G13 | T3.1 |
 | T4 | 2oh2u.4.* | QUIC / HTTP/3 | G1, G2 | T4.1 |
@@ -339,3 +339,4 @@ This roadmap should be re-baselined when:
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-03-03 | SapphireHill | Initial roadmap baseline (v1.0) |
+| 2026-03-03 | DustySnow | Added explicit T1 DoD-closure artifact pointer to keep roadmap entry state auditable. |

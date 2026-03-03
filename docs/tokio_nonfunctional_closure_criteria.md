@@ -7,6 +7,9 @@
 **Purpose**: Measurable non-functional thresholds per capability domain for
 replacement closure. Each criterion has explicit rationale tied to production
 migration risk.
+**T1.2 synthesis**: consolidated domain sign-off matrix is tracked in
+`docs/tokio_functional_parity_contract.md` section "Domain Definition-of-Done
+Synthesis (T1.2 Parent)".
 
 ---
 
@@ -417,3 +420,4 @@ Each NF domain maps to a test file for contract validation:
 |------|--------|--------|
 | 2026-03-03 | SapphireHill | Initial criteria (v1.0) |
 | 2026-03-03 | SapphireHill | v2.0: expanded to all 28 domains, added structured concurrency, codecs, reactor, DNS, WebSocket, fs, process, signals, streams, observability, lab, interop. Added regression policy, exemption policy, verification mapping. |
+| 2026-03-03 | DustySnow | Added explicit pointer to consolidated T1.2 domain DoD synthesis matrix for closure gating. |

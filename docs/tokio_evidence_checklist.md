@@ -6,6 +6,9 @@
 **Dependencies**: T1.2.a (functional contracts), T1.2.b (non-functional criteria)
 **Purpose**: Specify the exact evidence set required before marking any capability
 gap as closed. Includes failure policy for missing evidence.
+**T1.2 synthesis**: consolidated domain sign-off matrix is tracked in
+`docs/tokio_functional_parity_contract.md` section "Domain Definition-of-Done
+Synthesis (T1.2 Parent)".
 
 ---
 
@@ -216,3 +219,4 @@ The full Tokio-replacement claim requires:
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-03-03 | SapphireHill | Initial checklist (v1.0) |
+| 2026-03-03 | DustySnow | Added explicit pointer to consolidated T1.2 DoD synthesis matrix for domain closure gating. |

@@ -123,7 +123,9 @@ Counts are approximate (±10%) from automated `#[test]`/`#[cfg(test)]` scanning.
 | Src | `runtime/reactor/{epoll.rs,kqueue.rs,windows.rs,lab.rs,io_uring.rs,registration.rs}`, `runtime/io_driver.rs` |
 | Features | `io-uring` (Linux `dep:io-uring`), `native-runtime` |
 | Tests (inline) | Reactor source files |
-| Tests (integration) | `tests/io_uring_reactor.rs` |
+| Tests (integration) | `tests/io_uring_reactor.rs`, `tests/io_driver_concurrency.rs`, `tests/io_cancellation.rs` |
+| Tests (contract) | `tests/tokio_io_parity_audit.rs` (`R09.*` backend-readiness parity assertions) |
+| Docs | `docs/tokio_io_parity_audit.md` (Section 11, T2.6 reactor readiness contract) |
 | Test count | ~247 |
 | Deps | `polling 3.11` (non-wasm), `io-uring 0.7.11` (Linux, optional) |
 
@@ -184,11 +186,11 @@ Counts are approximate (±10%) from automated `#[test]`/`#[cfg(test)]` scanning.
 | Axis | Evidence |
 |------|----------|
 | Src | `net/quic/{connection,stream,config}.rs`, `net/quic_core/`, `net/quic_native/`, `http/h3/`, `http/h3_native.rs` |
-| Features | (not yet exposed — Cargo.toml line 86: "QUIC/HTTP3 feature flags are intentionally not exposed here yet") |
+| Features | `quic`, `http3` (native Tokio-free surfaces); `quic-compat`, `http3-compat` (legacy wrapper surfaces, off by default) |
 | Tests (inline) | Source files in quic_native, quic_core, h3_native |
 | Tests (integration) | `tests/quic_h3_e2e.rs`, `tests/quic_h3_e2e_cancel.rs`, `tests/quic_h3_e2e_loss.rs`, `tests/quic_h3_e2e_h3.rs`, `tests/quic_h3_e2e_violations.rs` |
 | Test count | ~472 |
-| Notes | Transport RFC 9002 partially implemented. Feature flags commented out in Cargo.toml (lines 172-178). |
+| Notes | Transport RFC 9002 is partially implemented. Native feature surfaces are exposed; compatibility wrappers remain explicitly separated and disabled by default. |
 
 ### F16 — Web Framework
 

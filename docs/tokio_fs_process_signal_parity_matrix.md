@@ -154,3 +154,79 @@ Track-level gap alignment from T1 artifacts:
 | `2oh2u.3.7` | FS-G3 + evidence section | deterministic conformance suites for fs/process/signal |
 
 This matrix is intentionally actionable: every identified gap has an owner surface, a risk statement, and evidence obligations required for closure.
+
+---
+
+## 8. Machine-Readable Contract Artifact
+
+Canonical machine-readable companion:
+
+- `docs/tokio_fs_process_signal_parity_matrix.json`
+
+Required schema invariants for CI/planning ingestion:
+
+1. `bead_id` MUST equal `asupersync-2oh2u.3.1`.
+2. `domains` MUST include `filesystem`, `process`, and `signal`.
+3. `gaps` MUST include all `FS-G*`, `PR-G*`, and `SG-G*` entries declared in this document.
+4. Every gap row MUST include:
+   - `id`
+   - `domain`
+   - `severity`
+   - `divergence_risk`
+   - `owner_modules`
+   - `evidence_requirements`
+   - `downstream_bead`
+5. `drift_detection_rules` MUST be present and non-empty.
+
+This markdown file is the human-readable authority; the JSON file is the canonical automation surface for policy gates and planning tools.
+
+---
+
+## 9. Drift-Detection Rules (Anti-Staleness)
+
+The following rules define stale/misleading parity drift and MUST be enforced by tests/CI:
+
+- `T3-DRIFT-01` Path existence: every module path referenced in ownership/evidence fields exists in-repo.
+- `T3-DRIFT-02` Gap completeness: exactly the declared fs/process/signal gap families remain represented (no silent row loss).
+- `T3-DRIFT-03` Platform coverage: parity matrix keeps explicit Unix/Windows/WASM behavior rows.
+- `T3-DRIFT-04` Dependency mapping integrity: each gap keeps a concrete downstream bead ID.
+- `T3-DRIFT-05` Artifact linkage: markdown and JSON artifacts agree on bead ID and gap IDs.
+
+Primary enforcement surface:
+
+- `tests/tokio_fs_process_signal_parity_matrix.rs`
+
+Recommended deterministic command:
+
+- `rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix -- --nocapture`
+
+---
+
+## 10. T3.5 Executable Cross-Platform Signal Contract Pack
+
+This section closes `asupersync-2oh2u.3.5` by defining executable signal contracts with explicit pass/fail semantics, deterministic repro commands, and module-level diagnostics ownership.
+
+### 10.1 Contract Rows
+
+| Contract ID | Contract Focus | Pass Criteria | Violation Diagnostics | Owner Modules | Evidence Artifacts | Repro Command |
+|---|---|---|---|---|---|---|
+| `SGC-01` | Unix signal stream creation and delivery semantics | `signal(SignalKind::terminate())` succeeds on Unix; injected delivery is observed by `recv()` without silent drop; raw mapping includes `SIGPIPE` and `SIGALRM`. | Emit `SG-G3` diagnostic with owner `src/signal/signal.rs` and failing test name. | `src/signal/signal.rs` | `src/signal/signal.rs` (tests: `signal_creation_platform_contract`, `signal_recv_observes_delivery`, `unix_raw_signal_mapping_covers_pipe_and_alarm`) | `rch exec -- cargo test -p asupersync signal_recv_observes_delivery -- --nocapture` |
+| `SGC-02` | Cross-platform fallback and unsupported semantics | Non-Unix behavior for `signal()` and `ctrl_c()` remains explicit and deterministic (`Unsupported` path + documented availability gate). | Emit `SG-G1`/`SG-G2` diagnostic with owner module + unsupported-path token mismatch. | `src/signal/signal.rs`, `src/signal/ctrl_c.rs` | `src/signal/signal.rs`, `src/signal/ctrl_c.rs` | `rch exec -- cargo test -p asupersync ctrl_c_not_available -- --nocapture` |
+| `SGC-03` | Shutdown propagation and idempotent coordination | Shutdown reaches all subscribers, double shutdown is idempotent, late subscribers observe shutdown immediately, and concurrent shutdown calls converge. | Emit `SG-G4` diagnostic with owner `src/signal/shutdown.rs` and failing e2e test case ID. | `src/signal/shutdown.rs`, `src/signal/graceful.rs` | `tests/e2e_signal.rs` (`e2e_multi_receiver_notification`, `e2e_double_shutdown_idempotent`, `e2e_late_subscriber_sees_shutdown`, `e2e_concurrent_shutdown_calls`) | `rch exec -- cargo test -p asupersync --test e2e_signal -- --nocapture` |
+| `SGC-04` | Contract drift and diagnostics traceability | Signal gap IDs (`SG-G1..SG-G4`), owner modules, and evidence artifacts remain synchronized between markdown and JSON contract surfaces. | Emit `T3-DRIFT` diagnostic with exact missing field/path/contract ID and owning bead `asupersync-2oh2u.3.5`. | `docs/tokio_fs_process_signal_parity_matrix.md`, `docs/tokio_fs_process_signal_parity_matrix.json`, `tests/tokio_fs_process_signal_parity_matrix.rs` | `docs/tokio_fs_process_signal_parity_matrix.{md,json}` + `tests/tokio_fs_process_signal_parity_matrix.rs` | `rch exec -- cargo test -p asupersync --test tokio_fs_process_signal_parity_matrix -- --nocapture` |
+
+### 10.2 Reproducible Artifact and Archive Requirements
+
+- Primary contract artifact set:
+  - `docs/tokio_fs_process_signal_parity_matrix.md`
+  - `docs/tokio_fs_process_signal_parity_matrix.json`
+  - `tests/tokio_fs_process_signal_parity_matrix.rs`
+  - `tests/e2e_signal.rs`
+- Every contract violation MUST report:
+  - Contract ID (`SGC-*`) and gap ID (`SG-G*`),
+  - owning module path,
+  - reproduction command, and
+  - test case name that failed.
+- Archive policy reference:
+  - `docs/tokio_evidence_checklist.md`
+  - `docs/tokio_replay_artifact_schema_policy.md`
