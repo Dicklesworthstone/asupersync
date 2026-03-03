@@ -183,9 +183,9 @@ impl<T: Clone> Sender<T> {
     /// Creates a new receiver subscribed to this channel.
     #[must_use]
     pub fn subscribe(&self) -> Receiver<T> {
-        self.channel.receiver_count.fetch_add(1, Ordering::Relaxed);
         let total_sent = {
             let inner = self.channel.inner.lock();
+            self.channel.receiver_count.fetch_add(1, Ordering::Relaxed);
             inner.total_sent
         };
 
