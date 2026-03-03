@@ -29,6 +29,10 @@ bash scripts/check_semantic_signal_quality.sh \
   --dashboard target/semantic-verification/flake/latest/variance_dashboard.json \
   --output target/semantic-verification/signal-quality/signal_quality_report.json
 python3 ./scripts/check_wasm_flake_governance.py --policy .github/wasm_flake_governance_policy.json
+python3 ./scripts/evaluate_wasm_pilot_cohort.py \
+  --telemetry-input artifacts/pilot/pilot_observability_events.json \
+  --telemetry-output artifacts/pilot/pilot_observability_summary.json \
+  --telemetry-log-output artifacts/pilot/pilot_observability_alerts.ndjson
 ```
 
 Release-blocking thresholds (`.github/wasm_flake_governance_policy.json`):
@@ -40,6 +44,11 @@ Release-blocking thresholds (`.github/wasm_flake_governance_policy.json`):
 - `max_critical_test_failures = 0`
 
 If any threshold is breached, the governance checker exits non-zero.
+
+Pilot operations note:
+
+- `pilot_observability_summary.json` must report `status=pass` and `ci_parity_ok=true`.
+- alert logs must contain owner routing and replay pointers for every breach.
 
 ## Quarantine Contract
 

@@ -78,6 +78,33 @@ Output contract:
 - `artifacts/pilot/pilot_cohort_eval.json` (`asupersync-pilot-cohort-eval-v1`)
 - `artifacts/pilot/pilot_intake.ndjson` (`pilot_intake_evaluation` events)
 
+## Pilot Telemetry and SLO Gate
+
+Contract document:
+
+- `docs/wasm_pilot_observability_contract.md`
+
+Run telemetry/SLO contract gate:
+
+```bash
+python3 scripts/evaluate_wasm_pilot_cohort.py \
+  --telemetry-input artifacts/pilot/pilot_observability_events.json \
+  --telemetry-output artifacts/pilot/pilot_observability_summary.json \
+  --telemetry-log-output artifacts/pilot/pilot_observability_alerts.ndjson
+```
+
+Run deterministic failure-injection e2e:
+
+```bash
+bash scripts/test_wasm_pilot_observability_e2e.sh
+```
+
+Gate expectation:
+
+- pass when threshold checks and wasm/native parity checks are both clean.
+- fail when threshold alerting or parity drift is detected.
+- all failures must include `owner_route`, `replay_command`, and `trace_pointer`.
+
 ## Intake Log Schema (Required Fields)
 
 Every intake event must include:
