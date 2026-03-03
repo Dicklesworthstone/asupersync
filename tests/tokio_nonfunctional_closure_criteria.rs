@@ -40,14 +40,14 @@ fn extract_domain_sections(doc: &str) -> BTreeMap<String, String> {
             let id = line
                 .trim_start_matches('#')
                 .trim()
-                .split(|c: char| c == ' ' || c == '\u{2014}')
+                .split([' ', '\u{2014}'])
                 .next()
                 .unwrap_or("")
                 .trim()
                 .to_string();
             current_domain = Some(id);
             current_content.clear();
-        } else if let Some(_) = &current_domain {
+        } else if current_domain.is_some() {
             current_content.push_str(line);
             current_content.push('\n');
         }
@@ -67,7 +67,7 @@ fn extract_criterion_ids(doc: &str) -> BTreeSet<String> {
             let id = id.trim();
             if (id.starts_with("NF") || id.starts_with("RS"))
                 && id.len() >= 4
-                && id.chars().nth(2).map_or(false, |c| c.is_ascii_digit())
+                && id.chars().nth(2).is_some_and(|c| c.is_ascii_digit())
             {
                 ids.insert(id.to_string());
             }
