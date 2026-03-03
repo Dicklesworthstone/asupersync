@@ -1057,6 +1057,561 @@ impl Pipeline<'_> {
     }
 }
 
+/// A Redis transaction started with `MULTI`.
+///
+/// Commands queued through [`Self::cmd`] / [`Self::cmd_bytes`] execute atomically
+/// when [`Self::exec`] is called.
+#[derive(Debug)]
+pub struct Transaction {
+    conn: Option<PooledResource<RedisConnection>>,
+    queued_commands: usize,
+    finished: bool,
+}
+
+impl Transaction {
+    async fn begin(client: &RedisClient, cx: &Cx) -> Result<Self, RedisError> {
+        let mut conn = client.acquire(cx).await?;
+        if let Err(e) = conn.ensure_initialized(cx).await {
+            conn.discard();
+            return Err(e);
+        }
+
+        let resp = match conn.exec_no_init(cx, &[b"MULTI"]).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                conn.discard();
+                return Err(e);
+            }
+        };
+        if let Err(e) = expect_ok_response(resp, "MULTI") {
+            conn.discard();
+            return Err(e);
+        }
+
+        Ok(Self {
+            conn: Some(conn),
+            queued_commands: 0,
+            finished: false,
+        })
+    }
+
+    fn conn_mut(&mut self) -> Result<&mut PooledResource<RedisConnection>, RedisError> {
+        self.conn
+            .as_mut()
+            .ok_or_else(|| RedisError::Protocol("transaction already finished".to_string()))
+    }
+
+    /// Number of commands queued so far.
+    #[must_use]
+    pub fn queued_commands(&self) -> usize {
+        self.queued_commands
+    }
+
+    /// Queue a command in this transaction.
+    pub async fn cmd(&mut self, cx: &Cx, args: &[&str]) -> Result<(), RedisError> {
+        let mut bytes: Vec<&[u8]> = Vec::with_capacity(args.len());
+        for s in args {
+            bytes.push(s.as_bytes());
+        }
+        self.cmd_bytes(cx, &bytes).await
+    }
+
+    /// Queue a command in this transaction.
+    pub async fn cmd_bytes(&mut self, cx: &Cx, args: &[&[u8]]) -> Result<(), RedisError> {
+        if self.finished {
+            return Err(RedisError::Protocol(
+                "cannot queue command after transaction completion".to_string(),
+            ));
+        }
+
+        let conn = self.conn_mut()?;
+        if let Err(e) = conn.write_command(cx, args).await {
+            conn.discard();
+            self.finished = true;
+            self.conn = None;
+            return Err(e);
+        }
+
+        let resp = match conn.read_response(cx).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                conn.discard();
+                self.finished = true;
+                self.conn = None;
+                return Err(e);
+            }
+        };
+
+        match resp {
+            RespValue::SimpleString(s) if s == "QUEUED" => {
+                self.queued_commands = self.queued_commands.saturating_add(1);
+                Ok(())
+            }
+            RespValue::Error(msg) => {
+                conn.discard();
+                self.finished = true;
+                self.conn = None;
+                Err(RedisError::Redis(msg))
+            }
+            other => {
+                conn.discard();
+                self.finished = true;
+                self.conn = None;
+                Err(RedisError::Protocol(format!(
+                    "queued command expected +QUEUED, got {other:?}"
+                )))
+            }
+        }
+    }
+
+    /// Execute the transaction with `EXEC`.
+    ///
+    /// Returns all command replies in queue order.
+    pub async fn exec(mut self, cx: &Cx) -> Result<Vec<RespValue>, RedisError> {
+        let mut conn = self.conn.take().ok_or_else(|| {
+            RedisError::Protocol("cannot EXEC: transaction already finished".to_string())
+        })?;
+        self.finished = true;
+
+        let resp = match conn.exec_no_init(cx, &[b"EXEC"]).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                conn.discard();
+                return Err(e);
+            }
+        };
+
+        match resp {
+            RespValue::Array(Some(values)) => Ok(values),
+            RespValue::Array(None) => Err(RedisError::Redis(
+                "EXEC returned null (WATCH condition failed)".to_string(),
+            )),
+            other => {
+                conn.discard();
+                Err(RedisError::Protocol(format!(
+                    "EXEC expected array reply, got {other:?}"
+                )))
+            }
+        }
+    }
+
+    /// Abort the transaction with `DISCARD`.
+    pub async fn discard(mut self, cx: &Cx) -> Result<(), RedisError> {
+        let mut conn = self.conn.take().ok_or_else(|| {
+            RedisError::Protocol("cannot DISCARD: transaction already finished".to_string())
+        })?;
+        self.finished = true;
+
+        let resp = match conn.exec_no_init(cx, &[b"DISCARD"]).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                conn.discard();
+                return Err(e);
+            }
+        };
+        expect_ok_response(resp, "DISCARD")
+    }
+}
+
+impl Drop for Transaction {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        if let Some(conn) = self.conn.take() {
+            // We cannot issue async DISCARD in Drop. Discarding the pooled
+            // connection ensures transaction state does not leak to future users.
+            conn.discard();
+        }
+        self.finished = true;
+    }
+}
+
+/// Dedicated Redis Pub/Sub connection.
+#[derive(Debug)]
+pub struct RedisPubSub {
+    conn: RedisConnection,
+    config: RedisConfig,
+    channels: Vec<String>,
+    patterns: Vec<String>,
+}
+
+impl RedisPubSub {
+    async fn connect(cx: &Cx, config: RedisConfig) -> Result<Self, RedisError> {
+        let mut conn = RedisConnection::connect(config.clone()).await?;
+        conn.ensure_initialized(cx).await?;
+        Ok(Self {
+            conn,
+            config,
+            channels: Vec::new(),
+            patterns: Vec::new(),
+        })
+    }
+
+    fn decode_text(value: RespValue, field: &str) -> Result<String, RedisError> {
+        match value {
+            RespValue::SimpleString(s) => Ok(s),
+            RespValue::BulkString(Some(bytes)) => String::from_utf8(bytes)
+                .map_err(|_| RedisError::Protocol(format!("{field} is not valid UTF-8"))),
+            other => Err(RedisError::Protocol(format!(
+                "expected text for {field}, got {other:?}"
+            ))),
+        }
+    }
+
+    fn decode_payload(value: RespValue, field: &str) -> Result<Vec<u8>, RedisError> {
+        match value {
+            RespValue::SimpleString(s) => Ok(s.into_bytes()),
+            RespValue::BulkString(Some(bytes)) => Ok(bytes),
+            other => Err(RedisError::Protocol(format!(
+                "expected payload for {field}, got {other:?}"
+            ))),
+        }
+    }
+
+    fn decode_integer(value: RespValue, field: &str) -> Result<i64, RedisError> {
+        match value {
+            RespValue::Integer(i) => Ok(i),
+            other => Err(RedisError::Protocol(format!(
+                "expected integer for {field}, got {other:?}"
+            ))),
+        }
+    }
+
+    fn parse_event(value: RespValue) -> Result<PubSubEvent, RedisError> {
+        let items = match value {
+            RespValue::Array(Some(items)) => items,
+            other => {
+                return Err(RedisError::Protocol(format!(
+                    "pubsub expected array event, got {other:?}"
+                )));
+            }
+        };
+
+        let mut iter = items.into_iter();
+        let kind = Self::decode_text(
+            iter.next()
+                .ok_or_else(|| RedisError::Protocol("pubsub event missing kind".to_string()))?,
+            "pubsub kind",
+        )?;
+
+        match kind.to_ascii_lowercase().as_str() {
+            "message" => {
+                let channel = Self::decode_text(
+                    iter.next().ok_or_else(|| {
+                        RedisError::Protocol("pubsub message missing channel".to_string())
+                    })?,
+                    "message.channel",
+                )?;
+                let payload = Self::decode_payload(
+                    iter.next().ok_or_else(|| {
+                        RedisError::Protocol("pubsub message missing payload".to_string())
+                    })?,
+                    "message.payload",
+                )?;
+                if iter.next().is_some() {
+                    return Err(RedisError::Protocol(
+                        "pubsub message has unexpected trailing fields".to_string(),
+                    ));
+                }
+                Ok(PubSubEvent::Message(PubSubMessage {
+                    channel,
+                    pattern: None,
+                    payload,
+                }))
+            }
+            "pmessage" => {
+                let pattern = Self::decode_text(
+                    iter.next().ok_or_else(|| {
+                        RedisError::Protocol("pubsub pmessage missing pattern".to_string())
+                    })?,
+                    "pmessage.pattern",
+                )?;
+                let channel = Self::decode_text(
+                    iter.next().ok_or_else(|| {
+                        RedisError::Protocol("pubsub pmessage missing channel".to_string())
+                    })?,
+                    "pmessage.channel",
+                )?;
+                let payload = Self::decode_payload(
+                    iter.next().ok_or_else(|| {
+                        RedisError::Protocol("pubsub pmessage missing payload".to_string())
+                    })?,
+                    "pmessage.payload",
+                )?;
+                if iter.next().is_some() {
+                    return Err(RedisError::Protocol(
+                        "pubsub pmessage has unexpected trailing fields".to_string(),
+                    ));
+                }
+                Ok(PubSubEvent::Message(PubSubMessage {
+                    channel,
+                    pattern: Some(pattern),
+                    payload,
+                }))
+            }
+            "subscribe" | "unsubscribe" | "psubscribe" | "punsubscribe" => {
+                let channel = Self::decode_text(
+                    iter.next().ok_or_else(|| {
+                        RedisError::Protocol("pubsub subscription missing channel".to_string())
+                    })?,
+                    "subscription.channel",
+                )?;
+                let remaining = Self::decode_integer(
+                    iter.next().ok_or_else(|| {
+                        RedisError::Protocol(
+                            "pubsub subscription missing remaining-count".to_string(),
+                        )
+                    })?,
+                    "subscription.remaining",
+                )?;
+                if iter.next().is_some() {
+                    return Err(RedisError::Protocol(
+                        "pubsub subscription has unexpected trailing fields".to_string(),
+                    ));
+                }
+                let kind = match kind.as_str() {
+                    "subscribe" => PubSubSubscriptionKind::Subscribe,
+                    "unsubscribe" => PubSubSubscriptionKind::Unsubscribe,
+                    "psubscribe" => PubSubSubscriptionKind::PatternSubscribe,
+                    _ => PubSubSubscriptionKind::PatternUnsubscribe,
+                };
+                Ok(PubSubEvent::Subscription {
+                    kind,
+                    channel,
+                    remaining,
+                })
+            }
+            "pong" => {
+                let payload = match iter.next() {
+                    None => None,
+                    Some(value) => Some(Self::decode_payload(value, "pong.payload")?),
+                };
+                if iter.next().is_some() {
+                    return Err(RedisError::Protocol(
+                        "pubsub pong has unexpected trailing fields".to_string(),
+                    ));
+                }
+                Ok(PubSubEvent::Pong(payload))
+            }
+            other => Err(RedisError::Protocol(format!(
+                "unsupported pubsub event kind: {other}"
+            ))),
+        }
+    }
+
+    fn track_subscribe(list: &mut Vec<String>, value: &str) {
+        if !list.iter().any(|existing| existing == value) {
+            list.push(value.to_string());
+        }
+    }
+
+    fn untrack_subscribe(list: &mut Vec<String>, value: &str) {
+        list.retain(|existing| existing != value);
+    }
+
+    /// Subscribe to one or more channels.
+    pub async fn subscribe(&mut self, cx: &Cx, channels: &[&str]) -> Result<(), RedisError> {
+        if channels.is_empty() {
+            return Err(RedisError::Protocol(
+                "SUBSCRIBE requires at least one channel".to_string(),
+            ));
+        }
+
+        let mut args: Vec<&[u8]> = Vec::with_capacity(channels.len() + 1);
+        args.push(b"SUBSCRIBE");
+        for channel in channels {
+            args.push(channel.as_bytes());
+        }
+        self.conn.write_command(cx, &args).await?;
+
+        for _ in 0..channels.len() {
+            let event = Self::parse_event(self.conn.read_response(cx).await?)?;
+            match event {
+                PubSubEvent::Subscription {
+                    kind: PubSubSubscriptionKind::Subscribe,
+                    channel,
+                    ..
+                } => Self::track_subscribe(&mut self.channels, &channel),
+                other => {
+                    return Err(RedisError::Protocol(format!(
+                        "expected subscribe acknowledgement, got {other:?}"
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Subscribe to one or more glob-style patterns.
+    pub async fn psubscribe(&mut self, cx: &Cx, patterns: &[&str]) -> Result<(), RedisError> {
+        if patterns.is_empty() {
+            return Err(RedisError::Protocol(
+                "PSUBSCRIBE requires at least one pattern".to_string(),
+            ));
+        }
+
+        let mut args: Vec<&[u8]> = Vec::with_capacity(patterns.len() + 1);
+        args.push(b"PSUBSCRIBE");
+        for pattern in patterns {
+            args.push(pattern.as_bytes());
+        }
+        self.conn.write_command(cx, &args).await?;
+
+        for _ in 0..patterns.len() {
+            let event = Self::parse_event(self.conn.read_response(cx).await?)?;
+            match event {
+                PubSubEvent::Subscription {
+                    kind: PubSubSubscriptionKind::PatternSubscribe,
+                    channel,
+                    ..
+                } => Self::track_subscribe(&mut self.patterns, &channel),
+                other => {
+                    return Err(RedisError::Protocol(format!(
+                        "expected psubscribe acknowledgement, got {other:?}"
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Unsubscribe from channels.
+    ///
+    /// Passing an empty slice unsubscribes from all channels currently tracked.
+    pub async fn unsubscribe(&mut self, cx: &Cx, channels: &[&str]) -> Result<(), RedisError> {
+        if channels.is_empty() && self.channels.is_empty() {
+            return Ok(());
+        }
+
+        let mut args: Vec<&[u8]> = Vec::with_capacity(channels.len() + 1);
+        args.push(b"UNSUBSCRIBE");
+        for channel in channels {
+            args.push(channel.as_bytes());
+        }
+        self.conn.write_command(cx, &args).await?;
+
+        let expected = if channels.is_empty() {
+            self.channels.len()
+        } else {
+            channels.len()
+        };
+        for _ in 0..expected {
+            let event = Self::parse_event(self.conn.read_response(cx).await?)?;
+            match event {
+                PubSubEvent::Subscription {
+                    kind: PubSubSubscriptionKind::Unsubscribe,
+                    channel,
+                    ..
+                } => Self::untrack_subscribe(&mut self.channels, &channel),
+                other => {
+                    return Err(RedisError::Protocol(format!(
+                        "expected unsubscribe acknowledgement, got {other:?}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Unsubscribe from patterns.
+    ///
+    /// Passing an empty slice unsubscribes from all patterns currently tracked.
+    pub async fn punsubscribe(&mut self, cx: &Cx, patterns: &[&str]) -> Result<(), RedisError> {
+        if patterns.is_empty() && self.patterns.is_empty() {
+            return Ok(());
+        }
+
+        let mut args: Vec<&[u8]> = Vec::with_capacity(patterns.len() + 1);
+        args.push(b"PUNSUBSCRIBE");
+        for pattern in patterns {
+            args.push(pattern.as_bytes());
+        }
+        self.conn.write_command(cx, &args).await?;
+
+        let expected = if patterns.is_empty() {
+            self.patterns.len()
+        } else {
+            patterns.len()
+        };
+        for _ in 0..expected {
+            let event = Self::parse_event(self.conn.read_response(cx).await?)?;
+            match event {
+                PubSubEvent::Subscription {
+                    kind: PubSubSubscriptionKind::PatternUnsubscribe,
+                    channel,
+                    ..
+                } => Self::untrack_subscribe(&mut self.patterns, &channel),
+                other => {
+                    return Err(RedisError::Protocol(format!(
+                        "expected punsubscribe acknowledgement, got {other:?}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Receive the next Pub/Sub event on this connection.
+    pub async fn next_event(&mut self, cx: &Cx) -> Result<PubSubEvent, RedisError> {
+        let response = self.conn.read_response(cx).await?;
+        Self::parse_event(response)
+    }
+
+    /// PING the Pub/Sub connection.
+    ///
+    /// Redis returns a `pong` event while subscribed.
+    pub async fn ping(&mut self, cx: &Cx, payload: Option<&[u8]>) -> Result<(), RedisError> {
+        if let Some(payload) = payload {
+            self.conn.write_command(cx, &[b"PING", payload]).await?;
+        } else {
+            self.conn.write_command(cx, &[b"PING"]).await?;
+        }
+        match self.next_event(cx).await? {
+            PubSubEvent::Pong(_) => Ok(()),
+            other => Err(RedisError::Protocol(format!(
+                "pubsub PING expected pong event, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Reconnect and restore tracked subscriptions.
+    pub async fn reconnect(&mut self, cx: &Cx) -> Result<(), RedisError> {
+        let channels = self.channels.clone();
+        let patterns = self.patterns.clone();
+
+        let mut conn = RedisConnection::connect(self.config.clone()).await?;
+        conn.ensure_initialized(cx).await?;
+        self.conn = conn;
+        self.channels.clear();
+        self.patterns.clear();
+
+        if !channels.is_empty() {
+            let channel_refs: Vec<&str> = channels.iter().map(String::as_str).collect();
+            self.subscribe(cx, &channel_refs).await?;
+        }
+        if !patterns.is_empty() {
+            let pattern_refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
+            self.psubscribe(cx, &pattern_refs).await?;
+        }
+        Ok(())
+    }
+
+    /// Active channel subscriptions tracked by this client.
+    #[must_use]
+    pub fn channels(&self) -> &[String] {
+        &self.channels
+    }
+
+    /// Active pattern subscriptions tracked by this client.
+    #[must_use]
+    pub fn patterns(&self) -> &[String] {
+        &self.patterns
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
