@@ -30,6 +30,14 @@
 //! - [`Zip`]: Pairs items from two streams
 //! - [`Merge`]: Interleaves items from multiple streams
 //!
+//! ## Stateful
+//! - [`Scan`]: Yields intermediate accumulator values (like `Iterator::scan`)
+//! - [`Peekable`]: Look at the next item without consuming it
+//!
+//! ## Rate Control
+//! - [`Throttle`]: Rate-limits to at most one item per period
+//! - [`Debounce`]: Suppresses rapid bursts, yielding after a quiet period
+//!
 //! ## Buffering
 //! - [`Buffered`]: Runs multiple futures while preserving order
 //! - [`BufferUnordered`]: Runs multiple futures without ordering guarantees
@@ -71,6 +79,7 @@ mod chain;
 mod chunks;
 mod collect;
 mod count;
+mod debounce;
 mod enumerate;
 mod filter;
 mod fold;
@@ -82,11 +91,14 @@ mod iter;
 mod map;
 mod merge;
 mod next;
+mod peekable;
 mod receiver_stream;
+mod scan;
 mod skip;
 mod stream;
 mod take;
 mod then;
+mod throttle;
 mod try_stream;
 mod watch_stream;
 mod zip;
@@ -98,6 +110,7 @@ pub use chain::Chain;
 pub use chunks::{Chunks, ReadyChunks};
 pub use collect::Collect;
 pub use count::Count;
+pub use debounce::Debounce;
 pub use enumerate::Enumerate;
 pub use filter::{Filter, FilterMap};
 pub use fold::Fold;
@@ -109,16 +122,20 @@ pub use iter::{Iter, iter};
 pub use map::Map;
 pub use merge::{Merge, merge};
 pub use next::Next;
+pub use peekable::Peekable;
 pub use receiver_stream::ReceiverStream;
+pub use scan::Scan;
 pub use skip::{Skip, SkipWhile};
 pub use stream::Stream;
 pub use take::{Take, TakeWhile};
 pub use then::Then;
+pub use throttle::Throttle;
 pub use try_stream::{TryCollect, TryFold, TryForEach};
 pub use watch_stream::WatchStream;
 pub use zip::Zip;
 
 use std::future::Future;
+use std::time::Duration;
 
 /// Extension trait providing combinator methods for streams.
 ///
@@ -379,6 +396,51 @@ pub trait StreamExt: Stream {
         F: FnMut(Self::Item) -> Result<(), E>,
     {
         TryForEach::new(self, f)
+    }
+
+    /// Yields intermediate accumulator values, like [`Iterator::scan`].
+    ///
+    /// For each item, calls `f(&mut state, item)`. If `f` returns
+    /// `Some(value)`, the value is yielded. If `f` returns `None`,
+    /// the stream terminates.
+    fn scan<St, B, F>(self, initial_state: St, f: F) -> Scan<Self, St, F>
+    where
+        Self: Sized,
+        F: FnMut(&mut St, Self::Item) -> Option<B>,
+    {
+        Scan::new(self, initial_state, f)
+    }
+
+    /// Creates a peekable stream that supports looking at the next
+    /// item without consuming it.
+    fn peekable(self) -> Peekable<Self>
+    where
+        Self: Sized + Unpin,
+    {
+        Peekable::new(self)
+    }
+
+    /// Rate-limits the stream to at most one item per `period`.
+    ///
+    /// The first item passes through immediately. Subsequent items
+    /// that arrive within the suppression window are dropped.
+    fn throttle(self, period: Duration) -> Throttle<Self>
+    where
+        Self: Sized,
+    {
+        Throttle::new(self, period)
+    }
+
+    /// Debounces the stream, emitting only after a quiet period.
+    ///
+    /// When items arrive, they are buffered. If no new item arrives
+    /// for `period`, the most recent item is yielded. When the
+    /// underlying stream ends, any buffered item is flushed immediately.
+    fn debounce(self, period: Duration) -> Debounce<Self>
+    where
+        Self: Sized,
+    {
+        Debounce::new(self, period)
     }
 }
 

@@ -1,0 +1,232 @@
+//! Debounce combinator for streams.
+//!
+//! The `Debounce` combinator suppresses rapid bursts of items, yielding
+//! only the most recent item after a quiet period has elapsed.
+
+use super::Stream;
+use pin_project::pin_project;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
+
+/// A stream that debounces items, emitting only after a quiet period.
+///
+/// Created by [`StreamExt::debounce`](super::StreamExt::debounce).
+///
+/// When the underlying stream produces an item, it is buffered. If no
+/// new item arrives for `period`, the buffered item is yielded. Each
+/// new item replaces the buffered value and resets the timer.
+///
+/// When the underlying stream ends, any buffered item is flushed
+/// immediately.
+///
+/// # Note
+///
+/// This combinator uses wall-clock time via `std::time::Instant` and
+/// requires the executor to re-poll after the quiet period expires.
+/// For proper async timer integration, consider pairing with a timeout
+/// or interval-driven polling loop.
+#[derive(Debug)]
+#[must_use = "streams do nothing unless polled"]
+#[pin_project]
+pub struct Debounce<S: Stream> {
+    #[pin]
+    stream: S,
+    period: Duration,
+    /// The most recently received item and when it was received.
+    pending: Option<(S::Item, Instant)>,
+    /// Whether the underlying stream has ended.
+    done: bool,
+}
+
+impl<S: Stream> Debounce<S> {
+    /// Creates a new `Debounce` stream.
+    pub(crate) fn new(stream: S, period: Duration) -> Self {
+        Self {
+            stream,
+            period,
+            pending: None,
+            done: false,
+        }
+    }
+
+    /// Returns a reference to the underlying stream.
+    pub fn get_ref(&self) -> &S {
+        &self.stream
+    }
+
+    /// Returns a mutable reference to the underlying stream.
+    pub fn get_mut(&mut self) -> &mut S {
+        &mut self.stream
+    }
+
+    /// Consumes the combinator, returning the underlying stream.
+    pub fn into_inner(self) -> S {
+        self.stream
+    }
+}
+
+impl<S: Stream + Unpin> Stream for Debounce<S> {
+    type Item = S::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<S::Item>> {
+        let mut this = self.project();
+
+        // Drain all immediately available items from the underlying stream.
+        if !*this.done {
+            loop {
+                match this.stream.as_mut().poll_next(cx) {
+                    Poll::Ready(Some(item)) => {
+                        *this.pending = Some((item, Instant::now()));
+                    }
+                    Poll::Ready(None) => {
+                        *this.done = true;
+                        break;
+                    }
+                    Poll::Pending => break,
+                }
+            }
+        }
+
+        // Check if the buffered item's quiet period has elapsed.
+        if let Some((_, received_at)) = this.pending.as_ref() {
+            if *this.done || received_at.elapsed() >= *this.period {
+                let (item, _) = this.pending.take().unwrap();
+                return Poll::Ready(Some(item));
+            }
+            // Not ready yet — register waker for future re-poll.
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+
+        if *this.done {
+            Poll::Ready(None)
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stream::iter;
+    use std::sync::Arc;
+    use std::task::{Wake, Waker};
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(NoopWaker))
+    }
+
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
+    #[test]
+    fn debounce_flushes_on_stream_end() {
+        init_test("debounce_flushes_on_stream_end");
+        // When the stream ends, the buffered item should be flushed immediately.
+        let mut stream = Debounce::new(iter(vec![1, 2, 3]), Duration::from_secs(999));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // All items arrive synchronously and stream ends.
+        // The last item (3) should be flushed.
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        assert_eq!(poll, Poll::Ready(Some(3)));
+
+        // Stream is done.
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        assert_eq!(poll, Poll::Ready(None));
+        crate::test_complete!("debounce_flushes_on_stream_end");
+    }
+
+    #[test]
+    fn debounce_zero_duration_passes_last() {
+        init_test("debounce_zero_duration_passes_last");
+        // With zero period, debounce should emit the last synchronously-available item.
+        let mut stream = Debounce::new(iter(vec![10, 20, 30]), Duration::ZERO);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        assert_eq!(poll, Poll::Ready(Some(30)));
+
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        assert_eq!(poll, Poll::Ready(None));
+        crate::test_complete!("debounce_zero_duration_passes_last");
+    }
+
+    #[test]
+    fn debounce_empty_stream() {
+        init_test("debounce_empty_stream");
+        let mut stream = Debounce::new(iter(Vec::<i32>::new()), Duration::from_millis(100));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        crate::test_complete!("debounce_empty_stream");
+    }
+
+    #[test]
+    fn debounce_single_item_flushes() {
+        init_test("debounce_single_item_flushes");
+        let mut stream = Debounce::new(iter(vec![42]), Duration::from_secs(10));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Single item + stream end → immediate flush.
+        assert_eq!(
+            Pin::new(&mut stream).poll_next(&mut cx),
+            Poll::Ready(Some(42))
+        );
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        crate::test_complete!("debounce_single_item_flushes");
+    }
+
+    #[test]
+    fn debounce_with_elapsed_quiet_period() {
+        init_test("debounce_with_elapsed_quiet_period");
+        // Use a very short debounce period.
+        let mut stream = Debounce::new(iter(vec![1, 2, 3]), Duration::from_millis(1));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // All items arrive synchronously. Since the stream ends, the last
+        // item is flushed regardless of debounce period.
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        assert_eq!(poll, Poll::Ready(Some(3)));
+        crate::test_complete!("debounce_with_elapsed_quiet_period");
+    }
+
+    #[test]
+    fn debounce_accessors() {
+        init_test("debounce_accessors");
+        let mut stream = Debounce::new(iter(vec![1, 2]), Duration::from_millis(100));
+        let _ref = stream.get_ref();
+        let _mut = stream.get_mut();
+        let inner = stream.into_inner();
+        let mut inner = inner;
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert_eq!(
+            Pin::new(&mut inner).poll_next(&mut cx),
+            Poll::Ready(Some(1))
+        );
+        crate::test_complete!("debounce_accessors");
+    }
+
+    #[test]
+    fn debounce_debug() {
+        let stream = Debounce::new(iter(vec![1, 2, 3]), Duration::from_millis(100));
+        let dbg = format!("{stream:?}");
+        assert!(dbg.contains("Debounce"));
+    }
+}
