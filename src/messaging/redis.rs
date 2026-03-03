@@ -1063,7 +1063,6 @@ impl Pipeline<'_> {
 ///
 /// Commands queued through [`Self::cmd`] / [`Self::cmd_bytes`] execute atomically
 /// when [`Self::exec`] is called.
-#[derive(Debug)]
 pub struct Transaction {
     conn: Option<PooledResource<RedisConnection>>,
     queued_commands: usize,
@@ -1103,6 +1102,13 @@ impl Transaction {
             .ok_or_else(|| RedisError::Protocol("transaction already finished".to_string()))
     }
 
+    fn discard_connection(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            conn.discard();
+        }
+        self.finished = true;
+    }
+
     /// Number of commands queued so far.
     #[must_use]
     pub fn queued_commands(&self) -> usize {
@@ -1126,20 +1132,15 @@ impl Transaction {
             ));
         }
 
-        let conn = self.conn_mut()?;
-        if let Err(e) = conn.write_command(cx, args).await {
-            conn.discard();
-            self.finished = true;
-            self.conn = None;
+        if let Err(e) = self.conn_mut()?.write_command(cx, args).await {
+            self.discard_connection();
             return Err(e);
         }
 
-        let resp = match conn.read_response(cx).await {
+        let resp = match self.conn_mut()?.read_response(cx).await {
             Ok(resp) => resp,
             Err(e) => {
-                conn.discard();
-                self.finished = true;
-                self.conn = None;
+                self.discard_connection();
                 return Err(e);
             }
         };
@@ -1150,15 +1151,11 @@ impl Transaction {
                 Ok(())
             }
             RespValue::Error(msg) => {
-                conn.discard();
-                self.finished = true;
-                self.conn = None;
+                self.discard_connection();
                 Err(RedisError::Redis(msg))
             }
             other => {
-                conn.discard();
-                self.finished = true;
-                self.conn = None;
+                self.discard_connection();
                 Err(RedisError::Protocol(format!(
                     "queued command expected +QUEUED, got {other:?}"
                 )))
