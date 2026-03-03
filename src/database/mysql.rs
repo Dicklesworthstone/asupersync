@@ -183,6 +183,10 @@ mod command {
 /// Maximum payload size for a single MySQL packet (16 MiB - 1 byte).
 const MAX_PACKET_SIZE: u32 = 16 * 1024 * 1024 - 1; // 16_777_215
 
+/// Default maximum number of rows returned from a single result set.
+/// Prevents unbounded memory growth from runaway SELECTs.
+const DEFAULT_MAX_RESULT_ROWS: usize = 1_000_000;
+
 /// MySQL column types for result set parsing.
 #[allow(dead_code, missing_docs)]
 pub mod column_type {
@@ -545,8 +549,19 @@ impl PacketBuffer {
     }
 
     /// Build packet with 4-byte header.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the payload exceeds `MAX_PACKET_SIZE` (16 MiB - 1).
+    /// MySQL protocol requires large payloads to be split across multiple
+    /// packets, which is not yet implemented.
     fn build_packet(&self) -> Vec<u8> {
         let len = self.buf.len();
+        assert!(
+            len <= MAX_PACKET_SIZE as usize,
+            "packet payload {len} exceeds MAX_PACKET_SIZE ({MAX_PACKET_SIZE}); \
+             large-payload splitting is not implemented"
+        );
         let mut result = Vec::with_capacity(4 + len);
         // 3 bytes length (little-endian)
         result.push((len & 0xFF) as u8);
@@ -762,17 +777,53 @@ pub enum SslMode {
     Required,
 }
 
+/// Percent-decode a URL component (e.g., user or password).
+/// Handles `%XX` hex pairs; passes through malformed sequences unchanged.
+fn percent_decode(input: &str) -> String {
+    let mut out = Vec::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (
+                hex_nibble(bytes[i + 1]),
+                hex_nibble(bytes[i + 2]),
+            ) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 impl MySqlConnectOptions {
     /// Parse a connection URL.
     ///
-    /// Format: `mysql://user:password@host:port/database`
+    /// Format: `mysql://user:password@host:port/database?param=value`
+    ///
+    /// Supported query parameters:
+    /// - `ssl-mode` or `sslmode`: `disabled`, `preferred`, `required`
+    /// - `connect_timeout`: seconds (integer)
     pub fn parse(url: &str) -> Result<Self, MySqlError> {
         let url = url
             .strip_prefix("mysql://")
             .ok_or_else(|| MySqlError::InvalidUrl("URL must start with mysql://".to_string()))?;
 
         // Split into auth@hostport/database?params
-        let (auth_host, _params) = url.split_once('?').unwrap_or((url, ""));
+        let (auth_host, params) = url.split_once('?').unwrap_or((url, ""));
 
         // Split database
         let (auth_host, database) = auth_host
@@ -785,7 +836,11 @@ impl MySqlConnectOptions {
             let (user, password) = auth
                 .split_once(':')
                 .map_or((auth, None), |(u, p)| (u, Some(p)));
-            (user.to_string(), password.map(String::from), host)
+            (
+                percent_decode(user),
+                password.map(percent_decode),
+                host,
+            )
         } else {
             ("root".to_string(), None, auth_host)
         };
@@ -795,14 +850,46 @@ impl MySqlConnectOptions {
             .rsplit_once(':')
             .map_or((host_port, 3306), |(h, p)| (h, p.parse().unwrap_or(3306)));
 
+        let mut connect_timeout = None;
+        let mut ssl_mode = SslMode::Disabled;
+
+        // Parse query parameters
+        if !params.is_empty() {
+            for pair in params.split('&') {
+                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+                match key {
+                    "ssl-mode" | "sslmode" => {
+                        ssl_mode = match value {
+                            "disabled" | "DISABLED" => SslMode::Disabled,
+                            "preferred" | "PREFERRED" => SslMode::Preferred,
+                            "required" | "REQUIRED" => SslMode::Required,
+                            _ => {
+                                return Err(MySqlError::InvalidUrl(format!(
+                                    "unknown ssl-mode: {value}"
+                                )));
+                            }
+                        };
+                    }
+                    "connect_timeout" => {
+                        if let Ok(secs) = value.parse::<u64>() {
+                            connect_timeout = Some(std::time::Duration::from_secs(secs));
+                        }
+                    }
+                    _ => {
+                        // Unknown parameters are silently ignored for forward-compat.
+                    }
+                }
+            }
+        }
+
         Ok(Self {
             host: host.to_string(),
             port,
             database,
             user,
             password,
-            connect_timeout: None,
-            ssl_mode: SslMode::Disabled,
+            connect_timeout,
+            ssl_mode,
         })
     }
 }
@@ -841,6 +928,11 @@ struct MySqlConnectionInner {
     closed: bool,
     /// Server version string.
     server_version: String,
+    /// True when a transaction was dropped without explicit commit/rollback.
+    /// The next command will issue an implicit ROLLBACK first.
+    needs_rollback: bool,
+    /// Maximum number of rows to return from a result set.
+    max_result_rows: usize,
 }
 
 /// An async MySQL connection.
@@ -914,6 +1006,8 @@ impl MySqlConnection {
                 sequence: 0,
                 closed: false,
                 server_version: String::new(),
+                needs_rollback: false,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
             },
         };
 
@@ -1227,6 +1321,8 @@ impl MySqlConnection {
     /// # Cancellation
     ///
     /// This operation checks for cancellation before starting.
+    /// If a previous transaction was dropped without commit/rollback,
+    /// an implicit ROLLBACK is issued first.
     pub async fn query(&mut self, cx: &Cx, sql: &str) -> Outcome<Vec<MySqlRow>, MySqlError> {
         if cx.is_cancel_requested() {
             return Outcome::Cancelled(
@@ -1237,6 +1333,10 @@ impl MySqlConnection {
 
         if self.inner.closed {
             return Outcome::Err(MySqlError::ConnectionClosed);
+        }
+
+        if let Err(e) = self.drain_abandoned_transaction().await {
+            return Outcome::Err(e);
         }
 
         // Send COM_QUERY
@@ -1282,10 +1382,13 @@ impl MySqlConnection {
     }
 
     /// Read a complete result set.
+    ///
+    /// Enforces `max_result_rows` to prevent unbounded memory growth.
     async fn read_result_set(&mut self, first_packet: &[u8]) -> Result<Vec<MySqlRow>, MySqlError> {
         let mut reader = PacketReader::new(first_packet);
         let column_count = reader.read_lenenc_int()? as usize;
         let deprecate_eof = self.inner.capabilities & capability::CLIENT_DEPRECATE_EOF != 0;
+        let max_rows = self.inner.max_result_rows;
 
         if column_count == 0 {
             return Ok(Vec::new());
@@ -1366,6 +1469,11 @@ impl MySqlConnection {
                 }
                 _ => match Self::parse_data_row_or_terminator(&data, &columns, deprecate_eof)? {
                     Some(values) => {
+                        if rows.len() >= max_rows {
+                            return Err(MySqlError::Protocol(format!(
+                                "result set exceeds maximum row limit ({max_rows})"
+                            )));
+                        }
                         rows.push(MySqlRow {
                             columns: Arc::clone(&columns),
                             column_indices: Arc::clone(&indices),
@@ -1499,6 +1607,9 @@ impl MySqlConnection {
     }
 
     /// Execute a command (INSERT, UPDATE, DELETE) and return affected rows.
+    ///
+    /// If a previous transaction was dropped without commit/rollback,
+    /// an implicit ROLLBACK is issued first.
     pub async fn execute(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
         if cx.is_cancel_requested() {
             return Outcome::Cancelled(
@@ -1509,6 +1620,10 @@ impl MySqlConnection {
 
         if self.inner.closed {
             return Outcome::Err(MySqlError::ConnectionClosed);
+        }
+
+        if let Err(e) = self.drain_abandoned_transaction().await {
+            return Outcome::Err(e);
         }
 
         // Send COM_QUERY
@@ -1641,9 +1756,50 @@ impl MySqlConnection {
         Ok(())
     }
 
+    /// Set the maximum number of rows returned from a single result set.
+    ///
+    /// Default is 1,000,000. Set to `usize::MAX` to disable.
+    pub fn set_max_result_rows(&mut self, max: usize) {
+        self.inner.max_result_rows = max;
+    }
+
+    /// Returns the current max result row limit.
+    #[must_use]
+    pub fn max_result_rows(&self) -> usize {
+        self.inner.max_result_rows
+    }
+
     // ========================================================================
     // Internal helpers
     // ========================================================================
+
+    /// If a prior transaction was dropped without commit/rollback, issue
+    /// an implicit ROLLBACK to return the connection to a clean state.
+    async fn drain_abandoned_transaction(&mut self) -> Result<(), MySqlError> {
+        if !self.inner.needs_rollback {
+            return Ok(());
+        }
+        self.inner.needs_rollback = false;
+
+        let mut buf = PacketBuffer::new();
+        buf.set_sequence(0);
+        buf.write_byte(command::COM_QUERY);
+        buf.write_bytes(b"ROLLBACK");
+        let packet = buf.build_packet();
+        self.write_all(&packet).await?;
+        self.inner.sequence = 1;
+
+        let (data, seq) = self.read_packet().await?;
+        self.inner.sequence = seq.wrapping_add(1);
+
+        match data.first() {
+            Some(0x00) => Ok(()),
+            Some(0xFF) => Err(Self::parse_error(&data)),
+            _ => Err(MySqlError::Protocol(
+                "unexpected response to implicit ROLLBACK".to_string(),
+            )),
+        }
+    }
 
     /// Write data to the stream.
     async fn write_all(&mut self, data: &[u8]) -> Result<(), MySqlError> {
@@ -1823,8 +1979,10 @@ impl MySqlTransaction<'_> {
 impl Drop for MySqlTransaction<'_> {
     fn drop(&mut self) {
         if !self.finished {
-            // Best-effort rollback on drop
-            // In practice, the server will auto-rollback when we send another command
+            // Mark the connection so the next command will issue an implicit
+            // ROLLBACK before proceeding. We cannot await inside Drop, so
+            // the actual ROLLBACK is deferred to `drain_abandoned_transaction`.
+            self.conn.inner.needs_rollback = true;
         }
     }
 }
