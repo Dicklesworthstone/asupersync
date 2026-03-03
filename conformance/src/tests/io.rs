@@ -48,7 +48,7 @@ pub fn io_001_file_write_read<RT: RuntimeInterface>() -> ConformanceTest<RT> {
         |rt| {
             rt.block_on(async {
                 // Create a temporary directory
-                let dir = match tempfile::tempdir() {
+                let dir: tempfile::TempDir = match tempfile::tempdir() {
                     Ok(d) => d,
                     Err(e) => return TestResult::failed(format!("Failed to create tempdir: {e}")),
                 };
@@ -116,7 +116,7 @@ pub fn io_002_file_seek<RT: RuntimeInterface>() -> ConformanceTest<RT> {
         },
         |rt| {
             rt.block_on(async {
-                let dir = match tempfile::tempdir() {
+                let dir: tempfile::TempDir = match tempfile::tempdir() {
                     Ok(d) => d,
                     Err(e) => return TestResult::failed(format!("Failed to create tempdir: {e}")),
                 };
@@ -599,7 +599,7 @@ pub fn io_006_buffered_io<RT: RuntimeInterface>() -> ConformanceTest<RT> {
         },
         |rt| {
             rt.block_on(async {
-                let dir = match tempfile::tempdir() {
+                let dir: tempfile::TempDir = match tempfile::tempdir() {
                     Ok(d) => d,
                     Err(e) => return TestResult::failed(format!("Failed to create tempdir: {e}")),
                 };
