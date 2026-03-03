@@ -331,6 +331,10 @@ fn random_suffix(cx: &Cx) -> String {
     format!("{:016x}", hi ^ lo)
 }
 
+/// Maximum read buffer size (8 MiB). Prevents unbounded memory growth
+/// if the server sends data faster than the client can consume.
+const MAX_READ_BUFFER: usize = 8 * 1024 * 1024;
+
 /// Internal read buffer for NATS protocol parsing.
 #[derive(Debug)]
 struct NatsReadBuffer {
@@ -350,8 +354,14 @@ impl NatsReadBuffer {
         &self.buf[self.pos..]
     }
 
-    fn extend(&mut self, bytes: &[u8]) {
+    fn extend(&mut self, bytes: &[u8]) -> Result<(), NatsError> {
+        if self.buf.len() + bytes.len() - self.pos > MAX_READ_BUFFER {
+            return Err(NatsError::Protocol(format!(
+                "read buffer exceeds maximum size ({MAX_READ_BUFFER} bytes)"
+            )));
+        }
         self.buf.extend_from_slice(bytes);
+        Ok(())
     }
 
     fn consume(&mut self, n: usize) {
@@ -460,6 +470,13 @@ impl NatsClient {
 
         // Read initial INFO from server
         let info = client.read_info(cx).await?;
+
+        // Enforce the server's max_payload if it is smaller than the client's.
+        // This prevents the client from sending payloads that the server will reject.
+        if info.max_payload > 0 && info.max_payload < client.config.max_payload {
+            client.config.max_payload = info.max_payload;
+        }
+
         *client.state.server_info.lock() = Some(info.clone());
 
         // Send CONNECT command

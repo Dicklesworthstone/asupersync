@@ -349,7 +349,10 @@ impl fmt::Debug for SqliteConnection {
         f.debug_struct("SqliteConnection")
             .field("open", &self.inner.lock().conn.is_some())
             .field("pool", &self.pool)
-            .field("needs_rollback", &self.needs_rollback.load(Ordering::Relaxed))
+            .field(
+                "needs_rollback",
+                &self.needs_rollback.load(Ordering::Relaxed),
+            )
             .finish()
     }
 }

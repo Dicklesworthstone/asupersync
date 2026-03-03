@@ -7,7 +7,9 @@ use asupersync::channel::mpsc;
 use asupersync::channel::session::tracked_channel;
 use asupersync::cx::Cx;
 use asupersync::lab::{LabConfig, LabRuntime};
-use asupersync::messaging::{ConsumerConfig, KafkaConsumer, TopicPartitionOffset};
+use asupersync::messaging::{
+    ConsumerConfig, KafkaConsumer, KafkaError, KafkaProducer, ProducerConfig, TopicPartitionOffset,
+};
 use asupersync::types::{Budget, CancelReason};
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -443,10 +445,42 @@ fn e2e_kafka_consumer_lifecycle() {
             .poll(&cx, Duration::from_millis(1))
             .await
             .expect_err("poll after close should fail");
-        assert!(
-            matches!(err, asupersync::messaging::KafkaError::Config(msg) if msg.contains("closed"))
-        );
+        assert!(matches!(err, KafkaError::Config(msg) if msg.contains("closed")));
 
         test_complete!("e2e_kafka_consumer_lifecycle");
+    });
+}
+
+#[test]
+fn e2e_kafka_producer_delivery_ack_metadata() {
+    common::init_test_logging();
+    common::run_test_with_cx(|cx| async move {
+        test_phase!("Kafka Producer Delivery Acks");
+
+        let producer = KafkaProducer::new(ProducerConfig::default()).expect("producer creation");
+
+        let first = producer
+            .send(&cx, "orders", None, b"one", Some(1))
+            .await
+            .expect("first send");
+        let second = producer
+            .send(&cx, "orders", None, b"two", Some(1))
+            .await
+            .expect("second send");
+
+        assert_eq!(first.topic, "orders");
+        assert_eq!(first.partition, 1);
+        assert_eq!(second.partition, 1);
+        assert_eq!(second.offset, first.offset + 1);
+
+        producer
+            .flush(&cx, Duration::from_millis(5))
+            .await
+            .expect("flush");
+
+        let blank_topic = producer.send(&cx, " ", None, b"bad", None).await;
+        assert!(matches!(blank_topic, Err(KafkaError::InvalidTopic(_))));
+
+        test_complete!("e2e_kafka_producer_delivery_ack_metadata");
     });
 }
