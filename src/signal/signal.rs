@@ -1,4 +1,4 @@
-//! Async signal streams for Unix signals.
+//! Async signal streams for supported platform signals.
 //!
 //! # Cancel Safety
 //!
@@ -6,22 +6,22 @@
 //!
 //! # Design
 //!
-//! On Unix, a global dispatcher thread is installed once and receives process
-//! signals via `signal-hook`. Delivered signals are fanned out to per-kind async
-//! waiters using `Notify` + monotone delivery counters.
+//! On Unix and Windows, a global dispatcher thread is installed once and receives
+//! process signals via `signal-hook`. Delivered signals are fanned out to
+//! per-kind async waiters using `Notify` + monotone delivery counters.
 
 use std::io;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::collections::HashMap;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::sync::{Arc, OnceLock};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::thread;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::sync::Notify;
 
 use super::SignalKind;
@@ -56,14 +56,14 @@ impl From<SignalError> for io::Error {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Debug)]
 struct SignalSlot {
     deliveries: AtomicU64,
     notify: Notify,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl SignalSlot {
     fn new() -> Self {
         Self {
@@ -78,14 +78,14 @@ impl SignalSlot {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Debug)]
 struct SignalDispatcher {
     slots: HashMap<SignalKind, Arc<SignalSlot>>,
     _handle: signal_hook::iterator::Handle,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl SignalDispatcher {
     fn start() -> io::Result<Self> {
         let mut slots = HashMap::with_capacity(8);
@@ -95,7 +95,7 @@ impl SignalDispatcher {
 
         let raw_signals: Vec<i32> = all_signal_kinds()
             .iter()
-            .map(SignalKind::as_raw_value)
+            .map(raw_signal_for_kind)
             .collect();
         let mut signals = signal_hook::iterator::Signals::new(raw_signals)?;
         let handle = signals.handle();
@@ -148,6 +148,21 @@ fn all_signal_kinds() -> [SignalKind; 10] {
     ]
 }
 
+#[cfg(windows)]
+fn all_signal_kinds() -> [SignalKind; 3] {
+    [SignalKind::Interrupt, SignalKind::Terminate, SignalKind::Quit]
+}
+
+#[cfg(unix)]
+fn raw_signal_for_kind(kind: &SignalKind) -> i32 {
+    kind.as_raw_value()
+}
+
+#[cfg(windows)]
+fn raw_signal_for_kind(kind: &SignalKind) -> i32 {
+    kind.as_raw_value().expect("windows supported signal kind")
+}
+
 #[cfg(unix)]
 fn signal_kind_from_raw(raw: i32) -> Option<SignalKind> {
     if raw == libc::SIGINT {
@@ -175,10 +190,23 @@ fn signal_kind_from_raw(raw: i32) -> Option<SignalKind> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(windows)]
+fn signal_kind_from_raw(raw: i32) -> Option<SignalKind> {
+    if raw == libc::SIGINT {
+        Some(SignalKind::Interrupt)
+    } else if raw == libc::SIGTERM {
+        Some(SignalKind::Terminate)
+    } else if raw == libc::SIGBREAK {
+        Some(SignalKind::Quit)
+    } else {
+        None
+    }
+}
+
+#[cfg(any(unix, windows))]
 static SIGNAL_DISPATCHER: OnceLock<io::Result<SignalDispatcher>> = OnceLock::new();
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn dispatcher_for(kind: SignalKind) -> Result<&'static SignalDispatcher, SignalError> {
     let result = SIGNAL_DISPATCHER.get_or_init(SignalDispatcher::start);
     match result {
@@ -211,9 +239,9 @@ fn dispatcher_for(kind: SignalKind) -> Result<&'static SignalDispatcher, SignalE
 #[derive(Debug)]
 pub struct Signal {
     kind: SignalKind,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     slot: Arc<SignalSlot>,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     seen_deliveries: u64,
 }
 
@@ -225,7 +253,7 @@ impl Signal {
     /// Returns an error if signal handling is not available for this platform
     /// or signal kind.
     fn new(kind: SignalKind) -> Result<Self, SignalError> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             let dispatcher = dispatcher_for(kind)?;
             let slot = dispatcher.slot(kind).ok_or_else(|| {
@@ -239,11 +267,11 @@ impl Signal {
             })
         }
 
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             Err(SignalError::unsupported(
                 kind,
-                "signal handling is only available on Unix in this build",
+                "signal handling is unavailable on this platform/build",
             ))
         }
     }
@@ -258,7 +286,7 @@ impl Signal {
     /// statement and some other branch completes first, no signal notification
     /// is lost.
     pub async fn recv(&mut self) -> Option<()> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             loop {
                 let current = self.slot.deliveries.load(Ordering::Acquire);
@@ -270,7 +298,7 @@ impl Signal {
             }
         }
 
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             None
         }
@@ -433,7 +461,7 @@ mod tests {
             crate::assert_with_log!(ok, "signal creation ok", true, ok);
         }
 
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let is_err = result.is_err();
             crate::assert_with_log!(is_err, "signal unsupported", true, is_err);
