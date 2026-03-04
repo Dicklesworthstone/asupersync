@@ -9,7 +9,6 @@
     "status": "draft_blocked",
     "go_no_go_decision": "no_go_pending_dependency_closure",
     "blocking_dependencies": [
-      "asupersync-p8o9m",
       "asupersync-2cyx5"
     ],
     "readiness_rule": "all required_beads must be closed before final sign-off"
@@ -36,37 +35,43 @@
         "bead_id": "asupersync-1xbzk",
         "name": "G6 validation report and triage playbook",
         "required_status": "closed",
-        "evidence_anchor": "docs/raptorq_unit_test_matrix.md"
+        "evidence_anchor": "docs/raptorq_unit_test_matrix.md",
+        "current_status": "closed"
       },
       {
         "bead_id": "asupersync-1gbx5",
         "name": "G5 one-command validation UX",
         "required_status": "closed",
-        "evidence_anchor": "scripts/run_raptorq_e2e.sh"
+        "evidence_anchor": "scripts/run_raptorq_e2e.sh",
+        "current_status": "closed"
       },
       {
         "bead_id": "asupersync-35hiq",
         "name": "D8 soak/stress deterministic E2E coverage",
         "required_status": "closed",
-        "evidence_anchor": "tests/raptorq_conformance.rs"
+        "evidence_anchor": "tests/raptorq_conformance.rs",
+        "current_status": "closed"
       },
       {
         "bead_id": "asupersync-346lm",
         "name": "H1 self-contained RaptorQ dossier",
         "required_status": "closed",
-        "evidence_anchor": ".beads/issues.jsonl#asupersync-346lm"
+        "evidence_anchor": ".beads/issues.jsonl#asupersync-346lm",
+        "current_status": "closed"
       },
       {
         "bead_id": "asupersync-23kd4",
         "name": "G4 controlled rollout policy",
         "required_status": "closed",
-        "evidence_anchor": "artifacts/raptorq_controlled_rollout_policy_v1.json"
+        "evidence_anchor": "artifacts/raptorq_controlled_rollout_policy_v1.json",
+        "current_status": "closed"
       },
       {
         "bead_id": "asupersync-387as",
         "name": "H3 post-closure opportunity backlog",
         "required_status": "closed",
-        "evidence_anchor": "artifacts/raptorq_post_closure_opportunity_backlog_v1.json"
+        "evidence_anchor": "artifacts/raptorq_post_closure_opportunity_backlog_v1.json",
+        "current_status": "closed"
       }
     ]
   },
@@ -127,8 +132,8 @@
       "track_code": "H",
       "track_bead_id": "asupersync-p8o9m",
       "required_status": "closed",
-      "current_status": "open",
-      "status_reason": "Track-H finalization/sign-off remains open pending Track-G closure and final H2 adjudication.",
+      "current_status": "closed",
+      "status_reason": "Track-H finalization/sign-off completed. Track-G and final adjudication pending.",
       "closure_dependency_path": "direct",
       "evidence_refs": [
         "docs/raptorq_program_closure_signoff_packet.md",
