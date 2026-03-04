@@ -609,8 +609,8 @@ impl KafkaProducer {
     ///
     /// # Errors
     /// Returns an error if the message cannot be sent.
-    #[allow(unused_variables)]
-    pub async fn send(
+    #[allow(unused_variables, clippy::unused_async)]
+    pub fn send(
         &self,
         cx: &Cx,
         topic: &str,
@@ -667,8 +667,8 @@ impl KafkaProducer {
     /// * `key` - Optional message key for partitioning
     /// * `payload` - Message payload
     /// * `headers` - Key-value header pairs
-    #[allow(unused_variables)]
-    pub async fn send_with_headers(
+    #[allow(unused_variables, clippy::unused_async)]
+    pub fn send_with_headers(
         &self,
         cx: &Cx,
         topic: &str,
@@ -720,8 +720,8 @@ impl KafkaProducer {
     /// Flush all pending messages.
     ///
     /// Blocks until all messages in the queue are sent or the timeout expires.
-    #[allow(unused_variables)]
-    pub async fn flush(&self, cx: &Cx, timeout: Duration) -> Result<(), KafkaError> {
+    #[allow(unused_variables, clippy::unused_async)]
+    pub fn flush(&self, cx: &Cx, timeout: Duration) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
 
         #[cfg(feature = "kafka")]
@@ -812,8 +812,8 @@ impl TransactionalProducer {
     /// Begin a new transaction.
     ///
     /// Returns a `Transaction` that must be committed or aborted.
-    #[allow(unused_variables)]
-    pub async fn begin_transaction(&self, cx: &Cx) -> Result<Transaction<'_>, KafkaError> {
+    #[allow(unused_variables, clippy::unused_async)]
+    pub fn begin_transaction(&self, cx: &Cx) -> Result<Transaction<'_>, KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
 
         // Phase 0: stub implementation
@@ -847,8 +847,8 @@ pub struct Transaction<'a> {
 
 impl Transaction<'_> {
     /// Send a message within the transaction.
-    #[allow(unused_variables)]
-    pub async fn send(
+    #[allow(unused_variables, clippy::unused_async)]
+    pub fn send(
         &self,
         cx: &Cx,
         topic: &str,
@@ -865,8 +865,8 @@ impl Transaction<'_> {
     /// Commit the transaction.
     ///
     /// Atomically publishes all messages sent within this transaction.
-    #[allow(unused_variables)]
-    pub async fn commit(mut self, cx: &Cx) -> Result<(), KafkaError> {
+    #[allow(unused_variables, clippy::unused_async)]
+    pub fn commit(mut self, cx: &Cx) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
 
         // Phase 0: stub - mark as committed to prevent drop warning
@@ -880,8 +880,8 @@ impl Transaction<'_> {
     /// Abort the transaction.
     ///
     /// Discards all messages sent within this transaction.
-    #[allow(unused_variables)]
-    pub async fn abort(mut self, cx: &Cx) -> Result<(), KafkaError> {
+    #[allow(unused_variables, clippy::unused_async)]
+    pub fn abort(mut self, cx: &Cx) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
 
         // Phase 0: stub - mark as committed to prevent drop warning
@@ -1289,7 +1289,6 @@ mod tests {
 
             let first = producer
                 .send(&cx, "orders", None, b"first", Some(2))
-                .await
                 .unwrap();
             let second = producer
                 .send_with_headers(
@@ -1299,7 +1298,6 @@ mod tests {
                     b"second",
                     &[("trace-id", b"abc-123")],
                 )
-                .await
                 .unwrap();
 
             assert_eq!(first.topic, "orders");
@@ -1310,11 +1308,10 @@ mod tests {
 
             let third = producer
                 .send(&cx, "orders", None, b"third", Some(2))
-                .await
                 .unwrap();
             assert_eq!(third.offset, first.offset + 1);
 
-            producer.flush(&cx, Duration::from_millis(5)).await.unwrap();
+            producer.flush(&cx, Duration::from_millis(5)).unwrap();
         });
     }
 
@@ -1323,10 +1320,7 @@ mod tests {
     fn producer_rejects_blank_topic_name() {
         run_test_with_cx(|cx| async move {
             let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
-            let err = producer
-                .send(&cx, "   ", None, b"x", None)
-                .await
-                .unwrap_err();
+            let err = producer.send(&cx, "   ", None, b"x", None).unwrap_err();
             assert!(matches!(err, KafkaError::InvalidTopic(topic) if topic.is_empty()));
         });
     }

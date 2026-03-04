@@ -479,8 +479,6 @@ fn split_invariant_2_write_half_commits_same_bytes() {
     let result = Pin::new(&mut write_half).poll_write(&mut cx, data);
     assert!(matches!(result, Poll::Ready(Ok(n)) if n == data.len()));
 
-    drop(write_half);
-    drop(_read_half);
     let inner = wrapper.into_inner();
     assert_eq!(
         inner.written, data,
@@ -520,10 +518,9 @@ fn split_invariant_4_drop_one_half_other_works() {
     init_test("split_invariant_4_drop_one_half_other_works");
 
     let wrapper = SplitStream::new(TestStream::new(b"drop test"));
-    let (mut read_half, write_half) = wrapper.split();
+    let (mut read_half, _write_half) = wrapper.split();
 
     // Drop write half
-    drop(write_half);
 
     // Read half should still work
     let waker = noop_waker();
@@ -566,7 +563,7 @@ fn lines_invariant_1_crlf_stripped_correctly() {
 
     match poll_lines_next(&mut lines) {
         Poll::Ready(Some(Ok(s))) => {
-            assert_eq!(s, "line1", "LINES-1: CRLF must strip both CR and LF")
+            assert_eq!(s, "line1", "LINES-1: CRLF must strip both CR and LF");
         }
         other => panic!("expected line1, got {other:?}"),
     }
@@ -592,7 +589,7 @@ fn lines_invariant_2_eof_without_newline() {
             assert_eq!(
                 s, "incomplete",
                 "LINES-2: EOF without newline must emit final line"
-            )
+            );
         }
         other => panic!("expected 'incomplete', got {other:?}"),
     }
@@ -685,8 +682,6 @@ fn buf_invariant_2_bufwriter_flushed_matches() {
     let flush = Pin::new(&mut wh).poll_flush(&mut cx);
     assert!(matches!(flush, Poll::Ready(Ok(()))));
 
-    drop(wh);
-    drop(_rh);
     let inner = wrapper.into_inner();
     assert_eq!(
         inner.written, data,

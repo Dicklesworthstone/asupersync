@@ -1477,10 +1477,7 @@ fn t310_failure_drills_are_complete() {
         "T310-FD-04",
         "T310-FD-05",
     ] {
-        assert!(
-            doc.contains(drill),
-            "T3.10 failure drills missing: {drill}"
-        );
+        assert!(doc.contains(drill), "T3.10 failure drills missing: {drill}");
     }
     // Quiescence checks
     for check in [
@@ -1583,9 +1580,7 @@ fn json_failure_drills_are_complete() {
 
     let mut ids = BTreeSet::new();
     for drill in drills {
-        let id = drill["id"]
-            .as_str()
-            .expect("drill must have string id");
+        let id = drill["id"].as_str().expect("drill must have string id");
         ids.insert(id.to_string());
         for field in ["failure_class", "quiescence_check"] {
             assert!(
@@ -1668,10 +1663,7 @@ fn json_e2e_migration_linkage_valid() {
         let arr = linkage[key]
             .as_array()
             .unwrap_or_else(|| panic!("migration_linkage missing: {key}"));
-        assert!(
-            !arr.is_empty(),
-            "migration_linkage {key} must be non-empty"
-        );
+        assert!(!arr.is_empty(), "migration_linkage {key} must be non-empty");
     }
 }
 

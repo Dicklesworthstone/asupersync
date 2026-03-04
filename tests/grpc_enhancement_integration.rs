@@ -8,9 +8,7 @@
 #![allow(clippy::nursery)]
 
 use asupersync::bytes::{BufMut, Bytes, BytesMut};
-use asupersync::grpc::codec::{
-    Codec, FramedCodec, GrpcCodec, GrpcMessage, IdentityCodec,
-};
+use asupersync::grpc::codec::{FramedCodec, GrpcCodec, GrpcMessage, IdentityCodec};
 use asupersync::grpc::status::{Code, GrpcError, Status};
 use asupersync::grpc::streaming::{Metadata, MetadataValue};
 use asupersync::grpc::web::{
@@ -21,7 +19,6 @@ use asupersync::grpc::web::{
 // ── F.1: Reflection Integration Tests ────────────────────────────────
 
 mod reflection {
-    use asupersync::bytes::Bytes;
     use asupersync::grpc::reflection::ReflectionService;
     use asupersync::grpc::service::{
         MethodDescriptor, NamedService, ServiceDescriptor, ServiceHandler,
@@ -181,7 +178,7 @@ mod compression {
 
     #[test]
     fn test_compressed_frame_without_decompressor_errors() {
-        let codec_no_decompress = FramedCodec::new(IdentityCodec);
+        let mut codec_no_decompress = FramedCodec::new(IdentityCodec);
         let mut buf = BytesMut::new();
 
         // Fabricate a compressed frame.
@@ -203,7 +200,10 @@ mod compression {
         use asupersync::grpc::client::CompressionEncoding;
 
         let identity = CompressionEncoding::Identity;
-        assert!(identity.frame_compressor().is_none(), "Identity has no compressor");
+        assert!(
+            identity.frame_compressor().is_none(),
+            "Identity has no compressor"
+        );
         assert!(
             identity.frame_decompressor().is_none(),
             "Identity has no decompressor"
@@ -435,7 +435,11 @@ mod grpc_web {
         match frame {
             WebFrame::Trailers(t) => {
                 // Status should be OK (from Status struct), not Internal (13).
-                assert_eq!(t.status.code(), Code::Ok, "status from struct, not metadata");
+                assert_eq!(
+                    t.status.code(),
+                    Code::Ok,
+                    "status from struct, not metadata"
+                );
                 assert!(
                     t.metadata.get("x-custom").is_some(),
                     "custom metadata preserved"
@@ -465,14 +469,15 @@ mod cross_feature {
         let mut buf = BytesMut::new();
 
         // Encode as compressed data frame.
-        codec
-            .encode_data(&compressed, true, &mut buf)
-            .unwrap();
+        codec.encode_data(&compressed, true, &mut buf).unwrap();
 
         // Decode and verify.
         let frame = codec.decode(&mut buf).unwrap().unwrap();
         match frame {
-            WebFrame::Data { compressed: c, data } => {
+            WebFrame::Data {
+                compressed: c,
+                data,
+            } => {
                 assert!(c, "compressed flag set");
                 // Decompress the payload.
                 use asupersync::grpc::codec::gzip_frame_decompress;
@@ -530,11 +535,14 @@ mod cross_feature {
 
     #[test]
     fn test_server_config_compression_defaults() {
-        use asupersync::grpc::server::ServerConfig;
         use asupersync::grpc::client::CompressionEncoding;
+        use asupersync::grpc::server::ServerConfig;
 
         let config = ServerConfig::default();
-        assert!(config.send_compression.is_none(), "no send compression by default");
+        assert!(
+            config.send_compression.is_none(),
+            "no send compression by default"
+        );
         assert_eq!(
             config.accept_compression,
             vec![CompressionEncoding::Identity],
@@ -544,8 +552,8 @@ mod cross_feature {
 
     #[test]
     fn test_server_builder_compression_config() {
-        use asupersync::grpc::server::ServerBuilder;
         use asupersync::grpc::client::CompressionEncoding;
+        use asupersync::grpc::server::ServerBuilder;
 
         let server = ServerBuilder::new()
             .send_compression(CompressionEncoding::Gzip)
@@ -602,7 +610,7 @@ mod cross_feature {
         let result = web_codec.encode_data(&[0u8; 100], false, &mut buf);
         assert!(matches!(result, Err(GrpcError::MessageTooLarge)));
 
-        let grpc_codec = GrpcCodec::with_max_size(50);
+        let mut grpc_codec = GrpcCodec::with_max_size(50);
         let mut buf2 = BytesMut::new();
         let msg = GrpcMessage::new(Bytes::from(vec![0u8; 100]));
         let result2 = grpc_codec.encode(msg, &mut buf2);

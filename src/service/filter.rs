@@ -237,7 +237,8 @@ mod tests {
     fn filter_layer_clone() {
         let layer = FilterLayer::new(true);
         let cloned = layer.clone();
-        assert_eq!(cloned.predicate, true);
+        assert!(cloned.predicate);
+        assert!(layer.predicate);
     }
 
     // ================================================================
@@ -250,7 +251,7 @@ mod tests {
     #[test]
     fn filter_new() {
         init_test("filter_new");
-        let filter = Filter::new(MockSvc, |_: &()| true);
+        let filter = Filter::new(MockSvc, |(): &()| true);
         let _ = filter.inner();
         let _ = filter.predicate();
         crate::test_complete!("filter_new");
@@ -258,14 +259,14 @@ mod tests {
 
     #[test]
     fn filter_inner_mut() {
-        let mut filter = Filter::new(42u32, |_: &()| true);
+        let mut filter = Filter::new(42u32, |(): &()| true);
         *filter.inner_mut() = 99;
         assert_eq!(*filter.inner(), 99);
     }
 
     #[test]
     fn filter_debug() {
-        let filter = Filter::new(MockSvc, |_: &()| true);
+        let filter = Filter::new(MockSvc, |(): &()| true);
         let dbg = format!("{filter:?}");
         assert!(dbg.contains("Filter"));
     }
@@ -275,6 +276,7 @@ mod tests {
         let filter = Filter::new(MockSvc, true);
         let cloned = filter.clone();
         assert!(cloned.predicate);
+        assert!(filter.predicate);
     }
 
     #[test]
@@ -289,7 +291,7 @@ mod tests {
     #[test]
     fn filter_layer_applies() {
         init_test("filter_layer_applies");
-        let layer = FilterLayer::new(|_: &()| true);
+        let layer = FilterLayer::new(|(): &()| true);
         let filter = layer.layer(MockSvc);
         let _ = filter.inner();
         crate::test_complete!("filter_layer_applies");
@@ -353,20 +355,20 @@ mod tests {
 
     #[test]
     fn async_filter_new() {
-        let af = AsyncFilter::new(MockSvc, |_: &()| true);
+        let af = AsyncFilter::new(MockSvc, |(): &()| true);
         let _ = af.inner();
     }
 
     #[test]
     fn async_filter_inner_mut() {
-        let mut af = AsyncFilter::new(42u32, |_: &()| true);
+        let mut af = AsyncFilter::new(42u32, |(): &()| true);
         *af.inner_mut() = 99;
         assert_eq!(*af.inner(), 99);
     }
 
     #[test]
     fn async_filter_debug() {
-        let af = AsyncFilter::new(MockSvc, |_: &()| true);
+        let af = AsyncFilter::new(MockSvc, |(): &()| true);
         let dbg = format!("{af:?}");
         assert!(dbg.contains("AsyncFilter"));
     }

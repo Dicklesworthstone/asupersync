@@ -131,11 +131,11 @@ impl Future for BarrierWaitFuture<'_> {
                         state.arrived -= 1;
                     }
                     // Remove our waker via O(1) swap_remove when possible,
-                    // falling back to O(N) retain for robustness.
+                    // falling back to O(N) scan + swap_remove for robustness.
                     if slot < state.waiters.len() && state.waiters[slot].0 == id {
                         state.waiters.swap_remove(slot);
-                    } else {
-                        state.waiters.retain(|w| w.0 != id);
+                    } else if let Some(idx) = state.waiters.iter().position(|w| w.0 == id) {
+                        state.waiters.swap_remove(idx);
                     }
                     drop(state);
 

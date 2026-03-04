@@ -1,3 +1,4 @@
+#![allow(clippy::items_after_statements)]
 //! Integration tests for the service layer ecosystem.
 //!
 //! Validates that buffer, discover, load_balance, reconnect, hedge,
@@ -35,7 +36,7 @@ fn static_discovery_feeds_load_balancer() {
         "10.0.0.2:80".parse().unwrap(),
         "10.0.0.3:80".parse().unwrap(),
     ];
-    let discovery = StaticList::new(endpoints.clone());
+    let discovery = StaticList::new(endpoints);
 
     // First poll yields all as Insert.
     let changes = discovery.poll_discover().unwrap();
@@ -184,7 +185,7 @@ fn reconnect_lazy_then_connect() {
     let maker = CountingMaker {
         call_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
     };
-    let mut rc = Reconnect::lazy(maker.clone());
+    let mut rc = Reconnect::lazy(maker);
 
     assert!(!rc.is_connected());
     rc.reconnect().unwrap();
@@ -229,7 +230,7 @@ fn hedge_configuration() {
     assert_eq!(config.delay, Duration::from_millis(50));
     assert_eq!(config.max_pending, 3);
 
-    let hedge = Hedge::new((), config.clone());
+    let hedge = Hedge::new((), config);
     assert_eq!(hedge.delay(), Duration::from_millis(50));
     assert_eq!(hedge.max_pending(), 3);
 
@@ -255,7 +256,7 @@ fn hedge_stats_tracking() {
     let hedge = Hedge::new((), HedgeConfig::new(Duration::from_millis(10)));
     assert_eq!(hedge.total_requests(), 0);
     assert_eq!(hedge.hedged_requests(), 0);
-    assert_eq!(hedge.hedge_rate(), 0.0);
+    assert!((hedge.hedge_rate() - 0.0).abs() < f64::EPSILON);
 
     hedge.record_request();
     hedge.record_request();
@@ -281,7 +282,7 @@ fn steer_routes_by_predicate() {
 
     // Route to service 0 for even, service 1 for odd.
     let svcs = vec!["even_handler", "odd_handler"];
-    let steer = Steer::new(svcs, |req: &i32| (*req as usize) % 2);
+    let steer = Steer::new(svcs, |req: &i32| req.unsigned_abs() as usize % 2);
 
     assert_eq!(steer.len(), 2);
     assert_eq!(steer.services()[0], "even_handler");
@@ -295,7 +296,7 @@ fn steer_wraps_index() {
     init_test("steer_wraps_index");
 
     let svcs = vec!["a", "b"];
-    let steer = Steer::new(svcs, |_: &()| 100);
+    let steer = Steer::new(svcs, |(): &()| 100);
 
     // Verify the steer wraps — 100 % 2 == 0, so service "a" is selected.
     assert_eq!(steer.len(), 2);
@@ -471,6 +472,7 @@ fn load_balancer_with_p2c_and_weighted() {
 #[test]
 fn error_types_display_and_debug() {
     init_test("error_types_display_and_debug");
+    use std::error::Error;
 
     // FilterError.
     let fe: FilterError<std::io::Error> = FilterError::Rejected;
@@ -483,7 +485,6 @@ fn error_types_display_and_debug() {
     assert!(format!("{se:?}").contains("NoServices"));
 
     // All implement std::error::Error.
-    use std::error::Error;
     assert!(fe.source().is_none());
     assert!(se.source().is_none());
 

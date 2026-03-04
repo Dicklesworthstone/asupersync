@@ -332,6 +332,7 @@ mod tests {
         assert!(dbg.contains("HedgeConfig"));
         let cloned = config.clone();
         assert_eq!(cloned.delay, Duration::from_millis(100));
+        assert_eq!(config.delay, Duration::from_millis(100));
     }
 
     // ================================================================
@@ -357,6 +358,7 @@ mod tests {
         let layer = HedgeLayer::with_delay(Duration::from_millis(100));
         let cloned = layer.clone();
         assert_eq!(cloned.config.delay, Duration::from_millis(100));
+        assert_eq!(layer.config.delay, Duration::from_millis(100));
     }
 
     // ================================================================
@@ -375,7 +377,7 @@ mod tests {
         assert_eq!(hedge.total_requests(), 0);
         assert_eq!(hedge.hedged_requests(), 0);
         assert_eq!(hedge.hedge_wins(), 0);
-        assert_eq!(hedge.hedge_rate(), 0.0);
+        assert!((hedge.hedge_rate() - 0.0).abs() < f64::EPSILON);
         crate::test_complete!("hedge_new");
     }
 
@@ -428,6 +430,7 @@ mod tests {
         // Stats are reset on clone.
         assert_eq!(cloned.total_requests(), 0);
         assert_eq!(cloned.delay(), Duration::from_millis(100));
+        assert_eq!(hedge.total_requests(), 1);
     }
 
     #[test]

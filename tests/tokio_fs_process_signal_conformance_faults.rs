@@ -10,7 +10,7 @@
 
 use asupersync::fs;
 use asupersync::process::{Command, Stdio};
-use asupersync::signal::{with_graceful_shutdown, GracefulOutcome, ShutdownController};
+use asupersync::signal::{GracefulOutcome, ShutdownController, with_graceful_shutdown};
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 

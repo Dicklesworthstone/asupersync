@@ -1,3 +1,4 @@
+#![allow(clippy::cast_precision_loss)]
 //! Contract tests for the QUIC/H3 Interoperability Matrix.
 //!
 //! Bead: asupersync-2oh2u.4.6 ([T4.6])
@@ -187,7 +188,7 @@ fn cross_language_peer_present() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|p| p["language"].as_str().map_or(false, |lang| lang != "Rust"));
+        .any(|p| p["language"].as_str().is_some_and(|lang| lang != "Rust"));
     assert!(
         has_non_rust,
         "must include at least one non-Rust peer for cross-language validation"
@@ -710,7 +711,7 @@ fn gaps_reference_rfcs() {
     }
 
     // At least 80% of gaps should reference an RFC.
-    let coverage = rfc_referenced as f64 / total_gaps as f64;
+    let coverage = f64::from(rfc_referenced) / total_gaps as f64;
     assert!(
         coverage >= 0.80,
         "RFC coverage {coverage:.2} below 0.80 threshold"

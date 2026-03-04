@@ -1047,10 +1047,7 @@ impl LabRuntime {
         crate::tracing_compat::warn!(
             "virtual clock jump detected: old_time_ms={}, new_time_ms={}, jump_ms={} \
              -- may affect lease/timeout correctness",
-            self.virtual_time
-                .as_nanos()
-                .saturating_sub(u128::from(skew_nanos))
-                / 1_000_000,
+            self.virtual_time.as_nanos().saturating_sub(skew_nanos) / 1_000_000,
             self.virtual_time.as_nanos() / 1_000_000,
             skew_nanos / 1_000_000
         );

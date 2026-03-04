@@ -198,7 +198,7 @@ mod tests {
     fn steer_picker_wraps() {
         // Index beyond services.len() should wrap.
         let svcs = vec![IdService { id: 0 }, IdService { id: 1 }];
-        let steer = Steer::new(svcs, |_: &()| 5);
+        let steer = Steer::new(svcs, |(): &()| 5);
         // 5 % 2 == 1, so service 1 would be selected.
         let idx = (steer.picker)(&()) % steer.len();
         assert_eq!(idx, 1);
