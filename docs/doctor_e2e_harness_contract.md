@@ -174,3 +174,20 @@ Policy for adding a new high-value pack:
 3. Add/extend unit tests covering selection behavior and oracle checks.
 4. Ensure `scripts/test_doctor_scenario_coverage_packs_e2e.sh` validates the new pack.
 5. Keep contract arrays lexically sorted and update `minimum_required_pack_ids` only when justified.
+
+## Remediation Failure-Injection Extension
+
+Track 4 remediation safety (`asupersync-2b4jj.4.4`) extends harness coverage with:
+
+- `scripts/test_doctor_remediation_failure_injection_e2e.sh`
+  - deterministic repeated execution via `rch`
+  - required guided-remediation failure-path tests
+  - deterministic pass-set diff checks and required-test enforcement
+  - `e2e-suite-summary-v3` artifact output under
+    `target/e2e-results/doctor_remediation_failure_injection/`
+
+Failure taxonomy assertions for this extension focus on:
+
+1. approval gating containment (`blocked_pending_approval`)
+2. partial apply failure requiring rollback (`partial_apply_failed`, `rollback_recommended`)
+3. diagnostic completeness (`decision_rationale`, `rollback_instructions`, `recovery_instructions`)

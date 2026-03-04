@@ -224,6 +224,18 @@ E2E coverage for this loop is provided by:
   - emits `e2e-suite-summary-v3` artifacts under
     `target/e2e-results/doctor_remediation_verification/`
 
+Failure-injection and rollback-path e2e coverage is provided by:
+
+- `scripts/test_doctor_remediation_failure_injection_e2e.sh`
+  - runs guided-remediation failure and rollback tests twice via `rch`
+  - asserts deterministic pass-set stability across runs
+  - enforces required failure-path tests for:
+    - mutation containment (`blocked_pending_approval`)
+    - apply-failure rollback recommendation (`partial_apply_failed` + `rollback_recommended`)
+    - rollback diagnostic payloads (`rollback_instructions`, `decision_rationale`, `recovery_instructions`)
+  - emits `e2e-suite-summary-v3` artifacts under
+    `target/e2e-results/doctor_remediation_failure_injection/`
+
 ## Safe Extension Strategy
 
 1. Additive only within `doctor-remediation-recipe-v1`:
