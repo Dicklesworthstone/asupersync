@@ -517,6 +517,18 @@ impl Http1Client {
     where
         T: AsyncRead + AsyncWrite + Unpin,
     {
+        let (response, _io) = Self::request_with_io(io, req).await?;
+        Ok(response)
+    }
+
+    /// Send a request over the given transport and return both response + transport.
+    ///
+    /// This is useful for higher-level clients that want to support HTTP/1.1
+    /// keep-alive connection reuse after fully draining the response body.
+    pub async fn request_with_io<T>(io: T, req: Request) -> Result<(Response, T), HttpError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
         // Reuse the method-aware streaming implementation so HEAD responses
         // correctly ignore Content-Length/Transfer-Encoding bodies.
         let mut streaming = Self::request_streaming(io, req).await?;
@@ -551,7 +563,8 @@ impl Http1Client {
             }
         }
 
-        Ok(response)
+        let io = streaming.body.into_inner();
+        Ok((response, io))
     }
 
     /// Send a request and return a streaming response body.
@@ -732,6 +745,14 @@ impl<T> ClientIncomingBody<T> {
             max_trailers_size: Self::DEFAULT_MAX_TRAILERS_SIZE,
             max_buffered_bytes: Self::DEFAULT_MAX_BUFFERED_BYTES,
         }
+    }
+
+    /// Consume the body and return the underlying transport.
+    ///
+    /// Callers should only use this once the body has been fully drained.
+    #[must_use]
+    pub fn into_inner(self) -> T {
+        self.io
     }
 
     fn try_decode_frame(&mut self) -> Result<Option<Frame<BytesCursor>>, HttpError> {
@@ -1250,6 +1271,29 @@ mod tests {
         let resp = block_on(Http1Client::request(io, req)).expect("response");
         assert_eq!(resp.status, 200);
         assert_eq!(resp.body, b"ok");
+    }
+
+    #[test]
+    fn request_with_io_returns_transport_for_reuse() {
+        let response_bytes = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+        let io = TestIo::new(response_bytes);
+
+        let req = Request {
+            method: Method::Get,
+            uri: "/reuse".to_string(),
+            version: Version::Http11,
+            headers: vec![("Host".to_string(), "example.com".to_string())],
+            body: Vec::new(),
+            trailers: Vec::new(),
+            peer_addr: None,
+        };
+
+        let (resp, io) = block_on(Http1Client::request_with_io(io, req)).expect("response");
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, b"ok");
+        let request_bytes = String::from_utf8(io.written).expect("request write should be utf8");
+        assert!(request_bytes.starts_with("GET /reuse HTTP/1.1\r\n"));
+        assert!(request_bytes.contains("Host: example.com\r\n"));
     }
 
     #[test]

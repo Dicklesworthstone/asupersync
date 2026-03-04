@@ -19,13 +19,16 @@ use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::net::tcp::stream::TcpStream;
 #[cfg(feature = "tls")]
 use crate::tls::{TlsConnectorBuilder, TlsStream};
+use crate::types::Time;
 use memchr::memmem;
 use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::future::poll_fn;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const CONNECT_MAX_HEADERS_SIZE: usize = 64 * 1024;
 
@@ -496,6 +499,7 @@ impl Default for HttpClientConfig {
 pub struct HttpClient {
     config: HttpClientConfig,
     pool: Mutex<Pool>,
+    idle_connections: Mutex<HashMap<PoolKey, Vec<(u64, ClientIo)>>>,
 }
 
 impl HttpClient {
@@ -518,6 +522,7 @@ impl HttpClient {
         Self {
             config,
             pool: Mutex::new(pool),
+            idle_connections: Mutex::new(HashMap::new()),
         }
     }
 
@@ -734,32 +739,24 @@ impl HttpClient {
         extra_headers: &[(String, String)],
         body: &[u8],
     ) -> Result<Response, ClientError> {
-        // Build the request
-        let mut headers = Vec::new();
-        headers.push(("Host".to_owned(), parsed.authority()));
+        let req = self.build_request(method, parsed, extra_headers, body);
 
-        if let Some(ref ua) = self.config.user_agent {
-            headers.push(("User-Agent".to_owned(), ua.clone()));
+        let key = parsed.pool_key();
+        let acquired = self.acquire_connection(parsed).await?;
+        match Http1Client::request_with_io(acquired.io, req).await {
+            Ok((response, io)) => {
+                if connection_can_be_reused(&response) {
+                    self.release_connection(&key, acquired.pool_id, acquired.fresh, io);
+                } else {
+                    self.drop_connection(&key, acquired.pool_id);
+                }
+                Ok(response)
+            }
+            Err(err) => {
+                self.drop_connection(&key, acquired.pool_id);
+                Err(ClientError::from(err))
+            }
         }
-
-        for (name, value) in extra_headers {
-            headers.push((name.clone(), value.clone()));
-        }
-
-        let req = Request {
-            method: method.clone(),
-            uri: parsed.path.clone(),
-            version: Version::Http11,
-            headers,
-            body: body.to_vec(),
-            trailers: Vec::new(),
-            peer_addr: None,
-        };
-
-        // Connect and send
-        let stream = self.connect_io(parsed).await?;
-        let resp = Http1Client::request(stream, req).await?;
-        Ok(resp)
     }
 
     /// Execute a single request (streaming; no redirect handling).
@@ -770,31 +767,31 @@ impl HttpClient {
         extra_headers: &[(String, String)],
         body: &[u8],
     ) -> Result<ClientStreamingResponse<ClientIo>, ClientError> {
-        // Build the request
-        let mut headers = Vec::new();
-        headers.push(("Host".to_owned(), parsed.authority()));
-
-        if let Some(ref ua) = self.config.user_agent {
-            headers.push(("User-Agent".to_owned(), ua.clone()));
-        }
-
-        for (name, value) in extra_headers {
-            headers.push((name.clone(), value.clone()));
-        }
-
-        let req = Request {
-            method: method.clone(),
-            uri: parsed.path.clone(),
-            version: Version::Http11,
-            headers,
-            body: body.to_vec(),
-            trailers: Vec::new(),
-            peer_addr: None,
-        };
+        let req = self.build_request(method, parsed, extra_headers, body);
 
         let stream = self.connect_io(parsed).await?;
         let resp = Http1Client::request_streaming(stream, req).await?;
         Ok(resp)
+    }
+
+    fn build_request(
+        &self,
+        method: &Method,
+        parsed: &ParsedUrl,
+        extra_headers: &[(String, String)],
+        body: &[u8],
+    ) -> Request {
+        let mut builder = Request::builder(method.clone(), parsed.path.clone())
+            .header("Host", parsed.authority());
+
+        if let Some(user_agent) = self.config.user_agent.as_deref() {
+            builder = builder.header("User-Agent", user_agent);
+        }
+
+        builder
+            .headers(extra_headers.iter().cloned())
+            .body(body.to_vec())
+            .build()
     }
 
     async fn connect_io(&self, parsed: &ParsedUrl) -> Result<ClientIo, ClientError> {
@@ -843,6 +840,105 @@ impl HttpClient {
         }
     }
 
+    async fn acquire_connection(
+        &self,
+        parsed: &ParsedUrl,
+    ) -> Result<AcquiredConnection, ClientError> {
+        let key = parsed.pool_key();
+        let now = pool_now();
+
+        let pooled_id = {
+            let mut pool = self.pool.lock();
+            pool.try_acquire(&key, now)
+        };
+        if let Some(pool_id) = pooled_id {
+            if let Some(io) = self.take_idle_connection(&key, pool_id) {
+                return Ok(AcquiredConnection {
+                    pool_id: Some(pool_id),
+                    io,
+                    fresh: false,
+                });
+            }
+            // Metadata can be stale if a prior request failed before reinserting.
+            self.pool.lock().remove(&key, pool_id);
+        }
+
+        let fresh_id = {
+            let mut pool = self.pool.lock();
+            if pool.can_create_connection(&key, now) {
+                Some(pool.register_connecting(key.clone(), now, 1))
+            } else {
+                None
+            }
+        };
+
+        let io = match self.connect_io(parsed).await {
+            Ok(io) => io,
+            Err(err) => {
+                if let Some(id) = fresh_id {
+                    self.pool.lock().remove(&key, id);
+                }
+                return Err(err);
+            }
+        };
+        Ok(AcquiredConnection {
+            pool_id: fresh_id,
+            io,
+            fresh: true,
+        })
+    }
+
+    fn release_connection(&self, key: &PoolKey, pool_id: Option<u64>, fresh: bool, io: ClientIo) {
+        if let Some(id) = pool_id {
+            let now = pool_now();
+            if fresh {
+                self.pool.lock().mark_connected(key, id, now);
+            } else {
+                self.pool.lock().release(key, id, now);
+            }
+            self.store_idle_connection(key.clone(), id, io);
+        }
+    }
+
+    fn drop_connection(&self, key: &PoolKey, pool_id: Option<u64>) {
+        if let Some(id) = pool_id {
+            self.pool.lock().remove(key, id);
+            self.remove_idle_connection(key, id);
+        }
+    }
+
+    fn take_idle_connection(&self, key: &PoolKey, id: u64) -> Option<ClientIo> {
+        let mut idle = self.idle_connections.lock();
+        let (io, remove_key) = {
+            let entries = idle.get_mut(key)?;
+            let position = entries.iter().position(|(entry_id, _)| *entry_id == id)?;
+            let (_, io) = entries.swap_remove(position);
+            (io, entries.is_empty())
+        };
+        if remove_key {
+            idle.remove(key);
+        }
+        drop(idle);
+        Some(io)
+    }
+
+    fn store_idle_connection(&self, key: PoolKey, id: u64, io: ClientIo) {
+        let mut idle = self.idle_connections.lock();
+        idle.entry(key).or_default().push((id, io));
+    }
+
+    fn remove_idle_connection(&self, key: &PoolKey, id: u64) {
+        let mut idle = self.idle_connections.lock();
+        if let Some(entries) = idle.get_mut(key) {
+            if let Some(position) = entries.iter().position(|(entry_id, _)| *entry_id == id) {
+                entries.swap_remove(position);
+            }
+            if entries.is_empty() {
+                idle.remove(key);
+            }
+        }
+    }
+
     /// Returns current pool statistics.
     pub fn pool_stats(&self) -> crate::http::pool::PoolStats {
         self.pool.lock().stats()
@@ -853,6 +949,12 @@ impl Default for HttpClient {
     fn default() -> Self {
         Self::new()
     }
+}
+
+struct AcquiredConnection {
+    pool_id: Option<u64>,
+    io: ClientIo,
+    fresh: bool,
 }
 
 /// Returns true if the status code is a redirect.
@@ -878,6 +980,31 @@ fn redirect_method(status: u16, original: &Method) -> Method {
         // 307/308 preserve method; all others preserve too
         _ => original.clone(),
     }
+}
+
+fn connection_can_be_reused(response: &Response) -> bool {
+    match response.version {
+        Version::Http11 => !header_has_token(&response.headers, "connection", "close"),
+        Version::Http10 => header_has_token(&response.headers, "connection", "keep-alive"),
+    }
+}
+
+fn header_has_token(headers: &[(String, String)], name: &str, token: &str) -> bool {
+    headers.iter().any(|(header_name, header_value)| {
+        header_name.eq_ignore_ascii_case(name)
+            && header_value
+                .split(',')
+                .any(|part| part.trim().eq_ignore_ascii_case(token))
+    })
+}
+
+fn pool_now() -> Time {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+        });
+    Time::from_nanos(nanos)
 }
 
 /// Resolve a redirect Location header relative to the current URL.
@@ -1604,5 +1731,54 @@ mod tests {
         let dbg = format!("{url:?}");
         assert!(dbg.contains("ParsedUrl"));
         assert!(dbg.contains("example.com"));
+    }
+
+    #[test]
+    fn header_has_token_matches_case_insensitive_csv_values() {
+        let headers = vec![
+            ("Connection".to_string(), "keep-alive, Upgrade".to_string()),
+            ("X-Test".to_string(), "value".to_string()),
+        ];
+        assert!(header_has_token(&headers, "connection", "keep-alive"));
+        assert!(header_has_token(&headers, "connection", "upgrade"));
+        assert!(!header_has_token(&headers, "connection", "close"));
+    }
+
+    #[test]
+    fn connection_can_be_reused_for_http11_without_close() {
+        let response = Response {
+            version: Version::Http11,
+            status: 200,
+            reason: "OK".into(),
+            headers: vec![("Connection".into(), "keep-alive".into())],
+            body: Vec::new(),
+            trailers: Vec::new(),
+        };
+        assert!(connection_can_be_reused(&response));
+
+        let close_response = Response {
+            headers: vec![("Connection".into(), "close".into())],
+            ..response
+        };
+        assert!(!connection_can_be_reused(&close_response));
+    }
+
+    #[test]
+    fn connection_can_be_reused_for_http10_only_with_keep_alive() {
+        let response = Response {
+            version: Version::Http10,
+            status: 200,
+            reason: "OK".into(),
+            headers: vec![("Connection".into(), "keep-alive".into())],
+            body: Vec::new(),
+            trailers: Vec::new(),
+        };
+        assert!(connection_can_be_reused(&response));
+
+        let no_header = Response {
+            headers: Vec::new(),
+            ..response
+        };
+        assert!(!connection_can_be_reused(&no_header));
     }
 }
