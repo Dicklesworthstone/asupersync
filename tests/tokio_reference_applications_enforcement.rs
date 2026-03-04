@@ -47,7 +47,10 @@ fn load_contract() -> String {
 fn t94_01_contract_exists_and_is_substantial() {
     init_test("t94_01_contract_exists_and_is_substantial");
 
-    assert!(contract_path().exists(), "reference apps contract must exist");
+    assert!(
+        contract_path().exists(),
+        "reference apps contract must exist"
+    );
     let doc = load_contract();
     assert!(doc.len() > 3000, "contract must be substantial");
 
@@ -59,10 +62,7 @@ fn t94_02_contract_references_bead_and_program() {
     init_test("t94_02_contract_references_bead_and_program");
 
     let doc = load_contract();
-    assert!(
-        doc.contains("asupersync-2oh2u.11.4"),
-        "must reference bead"
-    );
+    assert!(doc.contains("asupersync-2oh2u.11.4"), "must reference bead");
     assert!(doc.contains("[T9.4]"), "must reference T9.4");
 
     test_complete!("t94_02_contract_references_bead_and_program");
@@ -258,7 +258,10 @@ fn t94_13_operational_covers_production_concerns() {
     let doc = load_contract();
 
     assert!(doc.contains("Health"), "must require health checks");
-    assert!(doc.contains("Metrics") || doc.contains("metrics"), "must require metrics");
+    assert!(
+        doc.contains("Metrics") || doc.contains("metrics"),
+        "must require metrics"
+    );
     assert!(
         doc.contains("SIGTERM") || doc.contains("graceful"),
         "must require graceful shutdown"

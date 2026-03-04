@@ -48,7 +48,10 @@ fn load_contract() -> String {
 fn t89_01_contract_exists_and_is_substantial() {
     init_test("t89_01_contract_exists_and_is_substantial");
 
-    assert!(contract_path().exists(), "readiness gate contract must exist");
+    assert!(
+        contract_path().exists(),
+        "readiness gate contract must exist"
+    );
     let doc = load_contract();
     assert!(doc.len() > 3000, "contract must be substantial");
 
@@ -100,8 +103,14 @@ fn t89_04_all_evidence_dimensions_defined() {
     let doc = load_contract();
 
     for dim in [
-        "RG-DIM-01", "RG-DIM-02", "RG-DIM-03", "RG-DIM-04",
-        "RG-DIM-05", "RG-DIM-06", "RG-DIM-07", "RG-DIM-08",
+        "RG-DIM-01",
+        "RG-DIM-02",
+        "RG-DIM-03",
+        "RG-DIM-04",
+        "RG-DIM-05",
+        "RG-DIM-06",
+        "RG-DIM-07",
+        "RG-DIM-08",
     ] {
         test_section!(dim);
         assert!(doc.contains(dim), "missing evidence dimension: {dim}");
@@ -180,7 +189,10 @@ fn t89_08_aggregation_formula_defined() {
         "must define readiness score formula"
     );
     assert!(doc.contains("0.85"), "must define GO threshold (0.85)");
-    assert!(doc.contains("0.70"), "must define CONDITIONAL threshold (0.70)");
+    assert!(
+        doc.contains("0.70"),
+        "must define CONDITIONAL threshold (0.70)"
+    );
 
     test_complete!("t89_08_aggregation_formula_defined");
 }

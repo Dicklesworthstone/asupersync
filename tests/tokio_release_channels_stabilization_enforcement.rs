@@ -60,10 +60,7 @@ fn t95_02_policy_references_bead_and_program() {
     init_test("t95_02_policy_references_bead_and_program");
 
     let doc = load_policy();
-    assert!(
-        doc.contains("asupersync-2oh2u.11.5"),
-        "must reference bead"
-    );
+    assert!(doc.contains("asupersync-2oh2u.11.5"), "must reference bead");
     assert!(doc.contains("[T9.5]"), "must reference T9.5");
 
     test_complete!("t95_02_policy_references_bead_and_program");
@@ -118,14 +115,8 @@ fn t95_05_channels_have_api_guarantees() {
         doc.contains("breaking changes"),
         "Alpha must describe breaking change policy"
     );
-    assert!(
-        doc.contains("semver"),
-        "must define semver guarantees"
-    );
-    assert!(
-        doc.contains("LTS"),
-        "GA must describe LTS commitment"
-    );
+    assert!(doc.contains("semver"), "must define semver guarantees");
+    assert!(doc.contains("LTS"), "GA must describe LTS commitment");
 
     test_complete!("t95_05_channels_have_api_guarantees");
 }
@@ -140,14 +131,8 @@ fn t95_06_feature_flags_defined() {
         doc.contains("tokio-replace-"),
         "must define tokio-replace feature flags"
     );
-    assert!(
-        doc.contains("alpha"),
-        "must define alpha feature flags"
-    );
-    assert!(
-        doc.contains("beta"),
-        "must define beta feature flags"
-    );
+    assert!(doc.contains("alpha"), "must define alpha feature flags");
+    assert!(doc.contains("beta"), "must define beta feature flags");
 
     test_complete!("t95_06_feature_flags_defined");
 }
@@ -208,9 +193,7 @@ fn t95_10_ga_promotion_criteria_defined() {
 
     let doc = load_policy();
 
-    for gate in [
-        "PC-G01", "PC-G02", "PC-G03", "PC-G04", "PC-G05", "PC-G06",
-    ] {
+    for gate in ["PC-G01", "PC-G02", "PC-G03", "PC-G04", "PC-G05", "PC-G06"] {
         test_section!(gate);
         assert!(doc.contains(gate), "missing GA gate: {gate}");
     }
@@ -225,10 +208,19 @@ fn t95_11_promotion_criteria_have_thresholds() {
     let doc = load_policy();
 
     // Key quantitative thresholds
-    assert!(doc.contains("60%"), "alpha must have 60% coverage threshold");
+    assert!(
+        doc.contains("60%"),
+        "alpha must have 60% coverage threshold"
+    );
     assert!(doc.contains("80%"), "beta must have 80% coverage threshold");
-    assert!(doc.contains("0.70"), "beta must reference 0.70 readiness score");
-    assert!(doc.contains("0.85"), "RC must reference 0.85 readiness score");
+    assert!(
+        doc.contains("0.70"),
+        "beta must reference 0.70 readiness score"
+    );
+    assert!(
+        doc.contains("0.85"),
+        "RC must reference 0.85 readiness score"
+    );
     assert!(doc.contains("14-day"), "GA must require 14-day soak");
 
     test_complete!("t95_11_promotion_criteria_have_thresholds");
@@ -305,10 +297,7 @@ fn t95_15_per_track_timeline_present() {
 
     for track in ["T2", "T3", "T4", "T5", "T6", "T7"] {
         test_section!(track);
-        assert!(
-            doc.contains(track),
-            "timeline must include track: {track}"
-        );
+        assert!(doc.contains(track), "timeline must include track: {track}");
     }
 
     test_complete!("t95_15_per_track_timeline_present");
@@ -457,11 +446,26 @@ fn t95_22_promotion_gate_check_simulation() {
     }
 
     let alpha_gates = [
-        GateResult { gate_id: "PC-A01", passed: true },
-        GateResult { gate_id: "PC-A02", passed: true },
-        GateResult { gate_id: "PC-A03", passed: true },
-        GateResult { gate_id: "PC-A04", passed: true },
-        GateResult { gate_id: "PC-A05", passed: true },
+        GateResult {
+            gate_id: "PC-A01",
+            passed: true,
+        },
+        GateResult {
+            gate_id: "PC-A02",
+            passed: true,
+        },
+        GateResult {
+            gate_id: "PC-A03",
+            passed: true,
+        },
+        GateResult {
+            gate_id: "PC-A04",
+            passed: true,
+        },
+        GateResult {
+            gate_id: "PC-A05",
+            passed: true,
+        },
     ];
 
     let all_pass = alpha_gates.iter().all(|g| g.passed);
@@ -469,9 +473,18 @@ fn t95_22_promotion_gate_check_simulation() {
 
     // Simulate beta promotion with one failure
     let beta_gates = [
-        GateResult { gate_id: "PC-B01", passed: true },
-        GateResult { gate_id: "PC-B02", passed: false }, // coverage below 80%
-        GateResult { gate_id: "PC-B03", passed: true },
+        GateResult {
+            gate_id: "PC-B01",
+            passed: true,
+        },
+        GateResult {
+            gate_id: "PC-B02",
+            passed: false,
+        }, // coverage below 80%
+        GateResult {
+            gate_id: "PC-B03",
+            passed: true,
+        },
     ];
 
     let beta_pass = beta_gates.iter().all(|g| g.passed);

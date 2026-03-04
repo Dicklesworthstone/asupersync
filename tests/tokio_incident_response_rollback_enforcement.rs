@@ -32,8 +32,7 @@ fn init_test(name: &str) {
 }
 
 fn playbook_path() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("docs/tokio_incident_response_rollback_playbooks.md")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/tokio_incident_response_rollback_playbooks.md")
 }
 
 fn load_playbook() -> String {
@@ -121,8 +120,8 @@ fn t810_05_all_incident_classes_defined() {
     let doc = load_playbook();
 
     for ic in [
-        "IC-01", "IC-02", "IC-03", "IC-04", "IC-05", "IC-06", "IC-07", "IC-08",
-        "IC-09", "IC-10", "IC-11", "IC-12", "IC-13", "IC-14", "IC-15", "IC-16",
+        "IC-01", "IC-02", "IC-03", "IC-04", "IC-05", "IC-06", "IC-07", "IC-08", "IC-09", "IC-10",
+        "IC-11", "IC-12", "IC-13", "IC-14", "IC-15", "IC-16",
     ] {
         test_section!(ic);
         assert!(doc.contains(ic), "missing incident class: {ic}");
@@ -237,10 +236,7 @@ fn t810_11_track_specific_triage_present() {
     // Track-specific triage sections
     for label in ["I/O", "gRPC", "Database"] {
         test_section!(label);
-        assert!(
-            doc.contains(label),
-            "triage must cover track area: {label}"
-        );
+        assert!(doc.contains(label), "triage must cover track area: {label}");
     }
 
     test_complete!("t810_11_track_specific_triage_present");
@@ -409,12 +405,11 @@ fn t810_19_drill_protocol_defined() {
 
     let doc = load_playbook();
 
-    for phase in ["Announce", "Inject", "Detect", "Respond", "Verify", "Review"] {
+    for phase in [
+        "Announce", "Inject", "Detect", "Respond", "Verify", "Review",
+    ] {
         test_section!(phase);
-        assert!(
-            doc.contains(phase),
-            "drill protocol missing phase: {phase}"
-        );
+        assert!(doc.contains(phase), "drill protocol missing phase: {phase}");
     }
 
     test_complete!("t810_19_drill_protocol_defined");
