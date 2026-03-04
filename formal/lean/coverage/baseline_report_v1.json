@@ -16,7 +16,7 @@
   },
   "snapshot": {
     "theorem_surface": {
-      "theorem_count": 146,
+      "theorem_count": 170,
       "first_theorem": "removeObligationId_not_mem",
       "last_theorem": "obligation_leaked_canonical_form"
     },
