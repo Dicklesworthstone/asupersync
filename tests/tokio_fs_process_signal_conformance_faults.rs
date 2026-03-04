@@ -244,8 +244,8 @@ fn json_determinism_invariants_count() {
 fn cf_fs_01_unix_vfs_implements_trait() {
     // Type-system proof: UnixVfs is usable as a Vfs implementor.
     // This is a compile-time contract — if this test compiles, it passes.
-    fn _assert_vfs<V: asupersync::fs::Vfs>() {}
-    _assert_vfs::<asupersync::fs::UnixVfs>();
+    fn assert_vfs<V: asupersync::fs::Vfs>() {}
+    assert_vfs::<asupersync::fs::UnixVfs>();
 }
 
 #[test]
