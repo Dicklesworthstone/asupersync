@@ -103,7 +103,7 @@
       "id": "inv.cancel.protocol",
       "name": "Cancellation is a protocol: request -> drain -> finalize (idempotent)",
       "statement": "Cancellation transitions progress through the modeled states and terminate within bounded potential.",
-      "lean_status": "proven",
+      "lean_status": "fully_proven",
       "lean_theorems": [
         "cancel_masked_step",
         "cancel_ack_step",
@@ -140,7 +140,7 @@
       "id": "inv.race.losers_drained",
       "name": "Losers are drained after races",
       "statement": "In a race, non-winning branches must be cancelled and fully drained before completion is considered safe.",
-      "lean_status": "proven",
+      "lean_status": "fully_proven",
       "lean_theorems": [
         "cancel_propagation_bounded",
         "step_preserves_wellformed",
@@ -164,7 +164,7 @@
       "id": "inv.obligation.no_leaks",
       "name": "No obligation leaks",
       "statement": "Obligations are either committed/aborted/leaked with explicit state transitions and ledger updates; unresolved obligations block close.",
-      "lean_status": "proven",
+      "lean_status": "fully_proven",
       "lean_theorems": [
         "commit_resolves",
         "abort_resolves",

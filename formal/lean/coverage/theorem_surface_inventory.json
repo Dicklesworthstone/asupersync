@@ -3,7 +3,7 @@
   "inventory_id": "lean.theorem_surface.v1",
   "generated_by": "bd-3n3b2",
   "source_file": "formal/lean/Asupersync.lean",
-  "theorem_count": 170,
+  "theorem_count": 185,
   "theorems": [
     {
       "line": 188,
@@ -827,12 +827,8 @@
       },
       {
         "family_id": "cancel_request_idempotence",
-        "canonical_theorem": "cancel_request_requires_pre_cancel_state",
+        "canonical_theorem": "cancel_request_blocked_when_cancel_requested",
         "variants": [
-          {
-            "theorem": "cancel_request_blocked_when_cancel_requested",
-            "role": "per_state_idempotence"
-          },
           {
             "theorem": "cancel_request_blocked_when_cancelling",
             "role": "per_state_idempotence"
@@ -844,6 +840,10 @@
           {
             "theorem": "cancel_request_blocked_when_completed",
             "role": "per_state_idempotence"
+          },
+          {
+            "theorem": "cancel_request_requires_pre_cancel_state",
+            "role": "master_idempotence"
           },
           {
             "theorem": "cancel_child_blocked_when_cancel_protocol",
@@ -879,12 +879,8 @@
       },
       {
         "family_id": "obligation_no_leak",
-        "canonical_theorem": "execution_obligation_lifecycle_completeness",
+        "canonical_theorem": "ledger_implies_reserved",
         "variants": [
-          {
-            "theorem": "ledger_implies_reserved",
-            "role": "wf_projection"
-          },
           {
             "theorem": "non_reserved_excluded_from_ledger",
             "role": "contrapositive_exclusion"
@@ -902,6 +898,10 @@
             "role": "conditional_prevention"
           },
           {
+            "theorem": "execution_obligation_lifecycle_completeness",
+            "role": "lifecycle_completeness"
+          },
+          {
             "theorem": "leaked_tracked_and_non_blocking",
             "role": "tracking_and_stability"
           }
@@ -909,12 +909,8 @@
       },
       {
         "family_id": "race_loser_drain",
-        "canonical_theorem": "race_loser_drain_completeness",
+        "canonical_theorem": "closed_region_children_all_completed",
         "variants": [
-          {
-            "theorem": "closed_region_children_all_completed",
-            "role": "foundational_child_completion"
-          },
           {
             "theorem": "closed_region_child_completed",
             "role": "per_child_specialization"
@@ -928,6 +924,10 @@
             "role": "quiescence_decomposition"
           },
           {
+            "theorem": "race_loser_drain_completeness",
+            "role": "drain_completeness"
+          },
+          {
             "theorem": "cancelled_child_progress",
             "role": "liveness_guarantee"
           }
@@ -935,12 +935,8 @@
       },
       {
         "family_id": "no_ambient_authority",
-        "canonical_theorem": "no_ambient_effect_without_context",
+        "canonical_theorem": "cap_subset_refl",
         "variants": [
-          {
-            "theorem": "cap_subset_refl",
-            "role": "lattice_reflexivity"
-          },
           {
             "theorem": "cap_subset_trans",
             "role": "lattice_transitivity"
@@ -964,6 +960,10 @@
           {
             "theorem": "close_authority_gated",
             "role": "per_label_close"
+          },
+          {
+            "theorem": "no_ambient_effect_without_context",
+            "role": "composite_authority_gate"
           }
         ]
       }

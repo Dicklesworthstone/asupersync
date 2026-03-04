@@ -16,9 +16,9 @@
   },
   "snapshot": {
     "theorem_surface": {
-      "theorem_count": 170,
+      "theorem_count": 185,
       "first_theorem": "removeObligationId_not_mem",
-      "last_theorem": "obligation_leaked_canonical_form"
+      "last_theorem": "no_ambient_effect_without_context"
     },
     "step_constructor_coverage": {
       "step_constructor_count": 22,
@@ -28,20 +28,17 @@
       "partial_constructors": []
     },
     "invariant_status": {
-      "fully_proven": 1,
-      "partially_proven": 3,
-      "unproven": 2,
-      "unproven_invariant_ids": [
-        "inv.race.losers_drained",
-        "inv.authority.no_ambient"
-      ]
+      "fully_proven": 6,
+      "partially_proven": 0,
+      "unproven": 0,
+      "unproven_invariant_ids": []
     },
     "invariant_witness_link_map": {
       "invariants_total": 6,
-      "invariants_with_theorem_witnesses": 5,
+      "invariants_with_theorem_witnesses": 6,
       "invariants_with_executable_checks": 6,
-      "invariants_with_explicit_gaps": 5,
-      "invariants_covered_via_explicit_gap_only": 1
+      "invariants_with_explicit_gaps": 4,
+      "invariants_covered_via_explicit_gap_only": 0
     },
     "gap_priority": {
       "first_class_blockers": [
