@@ -679,6 +679,9 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
     }
 
     // Phase 1: Initialization
+    // We always run on_start, even if cancelled or pre-stopped, because
+    // it serves as the actor's initial setup and matches the expectation
+    // that lifecycle hooks are symmetrically executed.
     cx.trace("actor::on_start");
     actor.on_start(&cx).await;
 
@@ -747,12 +750,20 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
         }
     }
 
-    // Phase 4: Cleanup
+    // Phase 4: Cleanup — mask cancellation so on_stop runs to completion.
+    // Without masking, an aborted actor's on_stop could observe a stale
+    // cancel_requested=true and bail early via cx.checkpoint().
     cx.trace("actor::on_stop");
-    // Note: cx.masked() requires a sync closure; on_stop is async so we call it
-    // directly. The actor is already in Stopping state so cancellation is not
-    // re-entrantly requested.
+    {
+        let inner = cx.inner.clone();
+        inner.write().mask_depth += 1;
+    }
     actor.on_stop(&cx).await;
+    {
+        let inner = cx.inner.clone();
+        let mut guard = inner.write();
+        guard.mask_depth = guard.mask_depth.saturating_sub(1);
+    }
 
     actor
 }

@@ -191,10 +191,11 @@ impl Metadata {
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&MetadataValue> {
         // Return the most recently inserted value for the key.
+        // gRPC metadata keys are case-insensitive (HTTP/2 header semantics).
         self.entries
             .iter()
             .rev()
-            .find(|(k, _)| k == key)
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
             .map(|(_, v)| v)
     }
 

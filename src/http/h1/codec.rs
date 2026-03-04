@@ -245,11 +245,11 @@ fn parse_request_line_bytes(line: &[u8]) -> Result<(Method, String, Version), Ht
 
 fn parse_request_line_bytes_slow(line: &[u8]) -> Result<(Method, String, Version), HttpError> {
     fn next_token_bounds(bytes: &[u8], cursor: &mut usize) -> Option<(usize, usize)> {
-        while *cursor < bytes.len() && bytes[*cursor].is_ascii_whitespace() {
+        while *cursor < bytes.len() && bytes[*cursor] == b' ' {
             *cursor += 1;
         }
         let start = *cursor;
-        while *cursor < bytes.len() && !bytes[*cursor].is_ascii_whitespace() {
+        while *cursor < bytes.len() && bytes[*cursor] != b' ' {
             *cursor += 1;
         }
         (start < *cursor).then_some((start, *cursor))
@@ -322,7 +322,10 @@ fn parse_header_line_bounds(line_bytes: &[u8]) -> Result<(usize, usize, usize), 
         value_end -= 1;
     }
     for &b in &line_bytes[value_start..value_end] {
-        if b == b'\r' || b == b'\n' {
+        // Reject control characters per RFC 9110 Section 5.5.
+        // Only HTAB (0x09) and visible ASCII (0x20..=0x7E) plus
+        // obs-text (0x80..=0xFF) are allowed in field values.
+        if b == b'\r' || b == b'\n' || b == b'\0' || (b < 0x20 && b != b'\t') || b == 0x7F {
             return Err(HttpError::InvalidHeaderValue);
         }
     }
@@ -354,7 +357,10 @@ pub(super) fn validate_header_field(name: &str, value: &str) -> Result<(), HttpE
     if !is_valid_header_name(name) {
         return Err(HttpError::InvalidHeaderName);
     }
-    if value.contains('\r') || value.contains('\n') {
+    if value
+        .bytes()
+        .any(|b| b == b'\r' || b == b'\n' || b == b'\0' || (b < 0x20 && b != b'\t') || b == 0x7F)
+    {
         return Err(HttpError::InvalidHeaderValue);
     }
     Ok(())

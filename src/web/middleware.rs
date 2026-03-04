@@ -205,10 +205,9 @@ impl<H: Handler> Handler for CorsMiddleware<H> {
                     max_age.as_secs().to_string(),
                 );
             }
-            resp.headers.insert(
-                "vary".to_string(),
-                "origin, access-control-request-method, access-control-request-headers".to_string(),
-            );
+            append_vary_header(&mut resp, "origin");
+            append_vary_header(&mut resp, "access-control-request-method");
+            append_vary_header(&mut resp, "access-control-request-headers");
             return resp;
         }
 

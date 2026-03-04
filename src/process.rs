@@ -680,11 +680,16 @@ impl Child {
     /// Uses `try_wait()` + cooperative yielding to avoid blocking the runtime
     /// worker thread while waiting for process completion.
     pub async fn wait_async(&mut self) -> Result<ExitStatus, ProcessError> {
+        // Use exponential backoff to avoid busy-looping the executor.
+        // Starts at 1ms, doubles up to 50ms between checks.
+        let mut backoff_ms = 1u64;
         loop {
             if let Some(status) = self.try_wait()? {
                 return Ok(status);
             }
-            crate::runtime::yield_now().await;
+            let now = crate::time::wall_now();
+            crate::time::sleep(now, std::time::Duration::from_millis(backoff_ms)).await;
+            backoff_ms = (backoff_ms * 2).min(50);
         }
     }
 

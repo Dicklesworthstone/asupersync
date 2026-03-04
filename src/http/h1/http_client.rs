@@ -304,6 +304,15 @@ impl ParsedUrl {
             .find('/')
             .map_or((rest, "/"), |i| (&rest[..i], &rest[i..]));
 
+        // Reject userinfo (user:pass@host) per RFC 9110 Section 4.2.4.
+        // Forwarding credentials in the URL to the Host header can cause
+        // header injection or SSRF-like confusion in proxies.
+        if authority.contains('@') && !authority.starts_with('[') {
+            return Err(ClientError::InvalidUrl(
+                "URL must not contain userinfo (user@host)".into(),
+            ));
+        }
+
         let (host, port) = if authority.starts_with('[') {
             // IPv6: [::1]:port or [::1]
             let bracket_end = authority.find(']').ok_or_else(|| {
@@ -751,11 +760,18 @@ impl HttpClient {
                                 body
                             };
 
+                            // Strip sensitive headers on cross-origin redirect
+                            let next_headers = strip_sensitive_headers_on_redirect(
+                                &parsed,
+                                &next_parsed,
+                                extra_headers,
+                            );
+
                             return self
                                 .execute_with_redirects(
                                     next_method,
                                     next_parsed,
-                                    extra_headers,
+                                    next_headers,
                                     next_body,
                                     redirect_count + 1,
                                 )
@@ -818,11 +834,18 @@ impl HttpClient {
                                 body
                             };
 
+                            // Strip sensitive headers on cross-origin redirect
+                            let next_headers = strip_sensitive_headers_on_redirect(
+                                &parsed,
+                                &next_parsed,
+                                extra_headers,
+                            );
+
                             return self
                                 .execute_with_redirects_streaming(
                                     next_method,
                                     next_parsed,
-                                    extra_headers,
+                                    next_headers,
                                     next_body,
                                     redirect_count + 1,
                                 )
@@ -860,7 +883,7 @@ impl HttpClient {
             Ok((response, io)) => {
                 guard.defused = true;
                 self.store_response_cookies(&parsed.host, &response.headers);
-                if connection_can_be_reused(&response) {
+                if connection_can_be_reused(&response, method) {
                     self.release_connection(&key, acquired.pool_id, acquired.fresh, io);
                 } else {
                     self.drop_connection(&key, acquired.pool_id);
@@ -1194,6 +1217,19 @@ impl HttpClient {
         &self,
         parsed: &ParsedUrl,
     ) -> Result<AcquiredConnection, ClientError> {
+        struct ConnectGuard<'a> {
+            client: &'a HttpClient,
+            key: PoolKey,
+            id: Option<u64>,
+        }
+        impl Drop for ConnectGuard<'_> {
+            fn drop(&mut self) {
+                if let Some(id) = self.id {
+                    self.client.pool.lock().remove(&self.key, id);
+                }
+            }
+        }
+
         let key = parsed.pool_key();
         let now = pool_now();
 
@@ -1222,15 +1258,16 @@ impl HttpClient {
             }
         };
 
-        let io = match self.connect_io(parsed).await {
-            Ok(io) => io,
-            Err(err) => {
-                if let Some(id) = fresh_id {
-                    self.pool.lock().remove(&key, id);
-                }
-                return Err(err);
-            }
+        let mut guard = ConnectGuard {
+            client: self,
+            key: key.clone(),
+            id: fresh_id,
         };
+
+        let io = self.connect_io(parsed).await?;
+
+        guard.id = None; // defuse the guard upon success
+
         Ok(AcquiredConnection {
             pool_id: fresh_id,
             io,
@@ -1738,7 +1775,7 @@ fn socks5_reply_message(code: u8) -> &'static str {
     }
 }
 
-fn connection_can_be_reused(response: &Response) -> bool {
+fn connection_can_be_reused(response: &Response, req_method: &Method) -> bool {
     // RFC 9112 §6.3: when a response has no Content-Length and no
     // Transfer-Encoding, the body is delimited by connection close (EOF).
     // Such connections must not be reused.
@@ -1750,7 +1787,8 @@ fn connection_can_be_reused(response: &Response) -> bool {
         .headers
         .iter()
         .any(|(n, _)| n.eq_ignore_ascii_case("transfer-encoding"));
-    let is_bodyless = matches!(response.status, 100..=199 | 204 | 304);
+    let is_bodyless =
+        matches!(response.status, 100..=199 | 204 | 304) || matches!(req_method, Method::Head);
 
     if !has_content_length && !has_transfer_encoding && !is_bodyless {
         return false;
@@ -1805,10 +1843,10 @@ fn resolve_redirect(current: &ParsedUrl, location: &str) -> String {
     }
 
     // Relative path (append to current path's directory).
-    // Strip query string first — rfind('/') must only see the path component.
+    // Strip query string and fragment first — rfind('/') must only see the path component.
     let path_only = current
         .path
-        .split_once('?')
+        .split_once(&['?', '#'][..])
         .map_or(current.path.as_str(), |(p, _)| p);
     let base_path = path_only.rfind('/').map_or("/", |i| &path_only[..=i]);
     let scheme = match current.scheme {
@@ -1819,6 +1857,33 @@ fn resolve_redirect(current: &ParsedUrl, location: &str) -> String {
         "{scheme}://{}:{}{base_path}{location}",
         current.host, current.port
     )
+}
+
+/// Returns `true` if two parsed URLs share the same origin (scheme + host + port).
+fn same_origin(a: &ParsedUrl, b: &ParsedUrl) -> bool {
+    a.scheme == b.scheme && a.port == b.port && a.host.eq_ignore_ascii_case(&b.host)
+}
+
+/// Strip security-sensitive headers when redirecting to a different origin.
+///
+/// Per RFC 9110 and common HTTP client practice (curl, reqwest, browsers),
+/// `Authorization`, `Cookie`, and `Proxy-Authorization` headers must not be
+/// forwarded to a different origin to prevent credential leakage.
+fn strip_sensitive_headers_on_redirect(
+    from: &ParsedUrl,
+    to: &ParsedUrl,
+    headers: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    if same_origin(from, to) {
+        return headers;
+    }
+    headers
+        .into_iter()
+        .filter(|(name, _)| {
+            let lower = name.to_ascii_lowercase();
+            lower != "authorization" && lower != "cookie" && lower != "proxy-authorization"
+        })
+        .collect()
 }
 
 fn find_headers_end(buf: &[u8]) -> Option<usize> {
@@ -2750,7 +2815,7 @@ mod tests {
             body: Vec::new(),
             trailers: Vec::new(),
         };
-        assert!(connection_can_be_reused(&response));
+        assert!(connection_can_be_reused(&response, &Method::Get));
 
         let close_response = Response {
             headers: vec![
@@ -2759,7 +2824,7 @@ mod tests {
             ],
             ..response
         };
-        assert!(!connection_can_be_reused(&close_response));
+        assert!(!connection_can_be_reused(&close_response, &Method::Get));
     }
 
     #[test]
@@ -2775,13 +2840,13 @@ mod tests {
             body: Vec::new(),
             trailers: Vec::new(),
         };
-        assert!(connection_can_be_reused(&response));
+        assert!(connection_can_be_reused(&response, &Method::Get));
 
         let no_header = Response {
             headers: Vec::new(),
             ..response
         };
-        assert!(!connection_can_be_reused(&no_header));
+        assert!(!connection_can_be_reused(&no_header, &Method::Get));
     }
 
     #[test]
@@ -2796,7 +2861,7 @@ mod tests {
             body: Vec::new(),
             trailers: Vec::new(),
         };
-        assert!(!connection_can_be_reused(&response));
+        assert!(!connection_can_be_reused(&response, &Method::Get));
 
         // Bodyless status codes (204, 304) are exempt.
         let no_content = Response {
@@ -2804,13 +2869,13 @@ mod tests {
             reason: "No Content".into(),
             ..response.clone()
         };
-        assert!(connection_can_be_reused(&no_content));
+        assert!(connection_can_be_reused(&no_content, &Method::Get));
 
         // Transfer-Encoding present: body is chunk-framed, reuse is ok.
         let chunked = Response {
             headers: vec![("Transfer-Encoding".into(), "chunked".into())],
             ..response
         };
-        assert!(connection_can_be_reused(&chunked));
+        assert!(connection_can_be_reused(&chunked, &Method::Get));
     }
 }

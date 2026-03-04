@@ -49,6 +49,7 @@ impl Method {
             b"PATCH" => Some(Self::Patch),
             other => std::str::from_utf8(other)
                 .ok()
+                .filter(|s| is_valid_token(s))
                 .map(|s| Self::Extension(s.to_owned())),
         }
     }
@@ -473,9 +474,8 @@ impl MultipartForm {
                         )
                         .as_bytes(),
                     );
-                    body.extend_from_slice(
-                        format!("Content-Type: {content_type}\r\n\r\n").as_bytes(),
-                    );
+                    let safe_ct = sanitize_content_type(content_type);
+                    body.extend_from_slice(format!("Content-Type: {safe_ct}\r\n\r\n").as_bytes());
                     body.extend_from_slice(data);
                     body.extend_from_slice(b"\r\n");
                 }
@@ -518,7 +518,7 @@ fn escape_content_disposition_value(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {
-            '\r' | '\n' => {}
+            '\r' | '\n' | '\0' => {}
             '"' | '\\' => {
                 escaped.push('\\');
                 escaped.push(ch);
@@ -527,6 +527,42 @@ fn escape_content_disposition_value(value: &str) -> String {
         }
     }
     escaped
+}
+
+/// Returns `true` if the string is a valid HTTP `token` per RFC 9110 Section 5.6.2.
+fn is_valid_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes().all(|b| {
+            matches!(
+                b,
+                b'!' | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+                    | b'0'..=b'9'
+                    | b'A'..=b'Z'
+                    | b'a'..=b'z'
+            )
+        })
+}
+
+/// Sanitize a MIME content-type value by stripping CR, LF, and NUL characters
+/// that could be used for header injection in multipart bodies.
+fn sanitize_content_type(value: &str) -> String {
+    value
+        .chars()
+        .filter(|&ch| ch != '\r' && ch != '\n' && ch != '\0')
+        .collect()
 }
 
 /// Fluent builder for [`Request`].
@@ -1040,27 +1076,38 @@ fn base64_encode(input: &[u8]) -> String {
 pub fn default_reason(status: u16) -> &'static str {
     match status {
         100 => "Continue",
+        101 => "Switching Protocols",
         200 => "OK",
         201 => "Created",
+        202 => "Accepted",
         204 => "No Content",
         301 => "Moved Permanently",
         302 => "Found",
+        303 => "See Other",
         304 => "Not Modified",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         408 => "Request Timeout",
+        409 => "Conflict",
+        410 => "Gone",
         411 => "Length Required",
         413 => "Payload Too Large",
         414 => "URI Too Long",
+        415 => "Unsupported Media Type",
         417 => "Expectation Failed",
+        422 => "Unprocessable Entity",
+        429 => "Too Many Requests",
         431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
         501 => "Not Implemented",
         502 => "Bad Gateway",
         503 => "Service Unavailable",
+        504 => "Gateway Timeout",
         _ => "Unknown",
     }
 }

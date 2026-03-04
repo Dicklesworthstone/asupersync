@@ -1098,7 +1098,8 @@ impl MessageBuffer {
         // PostgreSQL protocol uses i32 for message length. Guard against
         // overflow for pathologically large messages (> 2 GiB payload).
         let payload_len = self.buf.len().saturating_add(4); // +4 for length field
-        let len: i32 = i32::try_from(payload_len).unwrap_or(i32::MAX);
+        let len: i32 =
+            i32::try_from(payload_len).expect("message payload exceeds PostgreSQL 2 GiB limit");
         let mut result = Vec::with_capacity(1 + 4 + self.buf.len());
         result.push(msg_type);
         result.extend_from_slice(&len.to_be_bytes());
@@ -1109,7 +1110,8 @@ impl MessageBuffer {
     /// Build a startup message (no type byte, includes protocol version).
     fn build_startup_message(&mut self) -> Vec<u8> {
         let payload_len = self.buf.len().saturating_add(4);
-        let len: i32 = i32::try_from(payload_len).unwrap_or(i32::MAX);
+        let len: i32 =
+            i32::try_from(payload_len).expect("message payload exceeds PostgreSQL 2 GiB limit");
         let mut result = Vec::with_capacity(4 + self.buf.len());
         result.extend_from_slice(&len.to_be_bytes());
         result.extend_from_slice(&self.buf);
@@ -1351,7 +1353,15 @@ impl ScramAuth {
         })?;
         let expected_sig = Self::hmac_sha256(&server_key, auth_message.as_bytes());
 
-        if server_sig != expected_sig {
+        // Use constant-time comparison to prevent timing side-channel
+        // attacks against SCRAM mutual authentication.
+        let sig_matches = server_sig.len() == expected_sig.len()
+            && server_sig
+                .iter()
+                .zip(expected_sig.iter())
+                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                == 0;
+        if !sig_matches {
             return Err(PgError::AuthenticationFailed(
                 "server signature mismatch".to_string(),
             ));
@@ -1434,7 +1444,7 @@ impl ScramAuth {
 // ============================================================================
 
 /// Parsed PostgreSQL connection URL.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PgConnectOptions {
     /// Host name or IP address.
     pub host: String,
@@ -1452,6 +1462,21 @@ pub struct PgConnectOptions {
     pub connect_timeout: Option<std::time::Duration>,
     /// SSL mode.
     pub ssl_mode: SslMode,
+}
+
+impl std::fmt::Debug for PgConnectOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PgConnectOptions")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("database", &self.database)
+            .field("user", &self.user)
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("application_name", &self.application_name)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("ssl_mode", &self.ssl_mode)
+            .finish()
+    }
 }
 
 /// SSL connection mode.
@@ -1547,6 +1572,8 @@ struct PgConnectionInner {
     transaction_status: u8,
     /// Whether the connection is closed.
     closed: bool,
+    /// Whether a rollback is needed before the next operation (orphaned transaction).
+    needs_rollback: bool,
     /// Counter for generating unique prepared statement names.
     next_stmt_id: u32,
 }
@@ -1629,6 +1656,7 @@ impl PgConnection {
                 parameters: BTreeMap::new(),
                 transaction_status: b'I', // Idle
                 closed: false,
+                needs_rollback: false,
                 next_stmt_id: 0,
             },
         };
@@ -1979,6 +2007,10 @@ impl PgConnection {
             return Outcome::Err(PgError::ConnectionClosed);
         }
 
+        if let Err(e) = self.clear_orphaned_transaction().await {
+            return Outcome::Err(e);
+        }
+
         // Send Query message
         let mut buf = MessageBuffer::new();
         buf.write_cstring(sql);
@@ -2099,6 +2131,10 @@ impl PgConnection {
 
         if self.inner.closed {
             return Outcome::Err(PgError::ConnectionClosed);
+        }
+
+        if let Err(e) = self.clear_orphaned_transaction().await {
+            return Outcome::Err(e);
         }
 
         // Send Query message
@@ -2598,6 +2634,25 @@ impl PgConnection {
     // Internal helpers
     // ========================================================================
 
+    /// Clear an orphaned transaction left by a dropped `PgTransaction`.
+    ///
+    /// If `needs_rollback` is set, sends a ROLLBACK command and drains
+    /// to `ReadyForQuery` before returning. This prevents the connection
+    /// from being stuck in an aborted-transaction state.
+    async fn clear_orphaned_transaction(&mut self) -> Result<(), PgError> {
+        if !self.inner.needs_rollback {
+            return Ok(());
+        }
+        self.inner.needs_rollback = false;
+
+        let mut buf = MessageBuffer::new();
+        buf.write_cstring("ROLLBACK");
+        let msg = buf.build_message(b'Q');
+        self.write_all(&msg).await?;
+        self.drain_to_ready().await;
+        Ok(())
+    }
+
     /// Write data to the stream using async I/O.
     async fn write_all(&mut self, data: &[u8]) -> Result<(), PgError> {
         let mut pos = 0;
@@ -3066,7 +3121,13 @@ fn build_bind_msg(
                 buf.write_i32(-1);
             }
             IsNull::No => {
-                buf.write_i32(val_buf.len() as i32);
+                let len = i32::try_from(val_buf.len()).map_err(|_| {
+                    PgError::Protocol(format!(
+                        "parameter value too large: {} bytes exceeds i32::MAX",
+                        val_buf.len()
+                    ))
+                })?;
+                buf.write_i32(len);
                 buf.write_bytes(&val_buf);
             }
         }
@@ -3196,10 +3257,11 @@ impl PgTransaction<'_> {
 impl Drop for PgTransaction<'_> {
     fn drop(&mut self) {
         if !self.finished {
-            // Best-effort rollback on drop
-            // We can't await here, so we'll just mark the connection as needing attention
-            // In practice, the server will auto-rollback when we send another command
-            // or close the connection
+            // Mark the connection so the next operation issues ROLLBACK first.
+            // We can't await here, but without this flag the connection stays
+            // in an aborted transaction state and all subsequent queries fail
+            // with "current transaction is aborted".
+            self.conn.inner.needs_rollback = true;
         }
     }
 }
@@ -3350,6 +3412,7 @@ mod tests {
                 parameters: BTreeMap::new(),
                 transaction_status: b'I',
                 closed: false,
+                needs_rollback: false,
                 next_stmt_id: 0,
             },
         }
