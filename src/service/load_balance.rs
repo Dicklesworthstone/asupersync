@@ -11,10 +11,10 @@
 //! Load balancers can be paired with a [`Discover`](super::Discover) instance
 //! to dynamically add and remove backends as the topology changes.
 
+use parking_lot::Mutex;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
@@ -334,12 +334,7 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
     /// Get per-backend in-flight counts.
     #[must_use]
     pub fn loads(&self) -> Vec<u64> {
-        self.backends
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|b| b.load.load())
-            .collect()
+        self.backends.lock().iter().map(|b| b.load.load()).collect()
     }
 
     /// Get the strategy reference.
