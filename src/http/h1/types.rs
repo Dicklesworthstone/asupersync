@@ -2,8 +2,8 @@
 //!
 //! Provides [`Method`], [`Version`], [`StatusCode`], and request/response types
 //! for HTTP/1.1 protocol handling. Includes ergonomic builder patterns for
-//! constructing requests with JSON, form, query, and auth helpers, plus
-//! response body reading utilities.
+//! constructing requests with JSON, form, multipart, query, and auth helpers,
+//! plus response body reading utilities.
 
 use std::fmt;
 use std::net::SocketAddr;
@@ -330,6 +330,205 @@ impl Request {
     }
 }
 
+const DEFAULT_MULTIPART_BOUNDARY: &str = "asupersync-boundary";
+
+/// Errors that can occur while constructing multipart form payloads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MultipartError {
+    /// Boundary is empty or contains invalid bytes for multipart/form-data.
+    InvalidBoundary,
+}
+
+impl fmt::Display for MultipartError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidBoundary => f.write_str("invalid multipart boundary"),
+        }
+    }
+}
+
+impl std::error::Error for MultipartError {}
+
+#[derive(Debug, Clone)]
+enum MultipartPart {
+    Text {
+        name: String,
+        value: String,
+    },
+    File {
+        name: String,
+        filename: String,
+        content_type: String,
+        data: Vec<u8>,
+    },
+}
+
+/// Multipart form-data payload builder for HTTP requests.
+#[derive(Debug, Clone)]
+pub struct MultipartForm {
+    boundary: String,
+    parts: Vec<MultipartPart>,
+}
+
+impl Default for MultipartForm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MultipartForm {
+    /// Create an empty multipart form with a deterministic default boundary.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            boundary: DEFAULT_MULTIPART_BOUNDARY.to_owned(),
+            parts: Vec::new(),
+        }
+    }
+
+    /// Create an empty multipart form with a caller-provided boundary.
+    ///
+    /// Returns an error when the boundary is empty or contains invalid bytes.
+    pub fn with_boundary(boundary: impl Into<String>) -> Result<Self, MultipartError> {
+        let boundary = boundary.into();
+        if !is_valid_multipart_boundary(&boundary) {
+            return Err(MultipartError::InvalidBoundary);
+        }
+        Ok(Self {
+            boundary,
+            parts: Vec::new(),
+        })
+    }
+
+    /// Return the active multipart boundary string.
+    #[must_use]
+    pub fn boundary(&self) -> &str {
+        &self.boundary
+    }
+
+    /// Add a text field part.
+    #[must_use]
+    pub fn text(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.parts.push(MultipartPart::Text {
+            name: name.into(),
+            value: value.into(),
+        });
+        self
+    }
+
+    /// Add a binary file part.
+    #[must_use]
+    pub fn file(
+        mut self,
+        name: impl Into<String>,
+        filename: impl Into<String>,
+        content_type: impl Into<String>,
+        data: impl Into<Vec<u8>>,
+    ) -> Self {
+        self.parts.push(MultipartPart::File {
+            name: name.into(),
+            filename: filename.into(),
+            content_type: content_type.into(),
+            data: data.into(),
+        });
+        self
+    }
+
+    /// Return `Content-Type` header value for this multipart body.
+    #[must_use]
+    pub fn content_type_header(&self) -> String {
+        format!("multipart/form-data; boundary={}", self.boundary)
+    }
+
+    /// Encode the multipart form body bytes.
+    #[must_use]
+    pub fn to_body(&self) -> Vec<u8> {
+        let mut body = Vec::new();
+        for part in &self.parts {
+            body.extend_from_slice(b"--");
+            body.extend_from_slice(self.boundary.as_bytes());
+            body.extend_from_slice(b"\r\n");
+
+            match part {
+                MultipartPart::Text { name, value } => {
+                    let escaped_name = escape_content_disposition_value(name);
+                    body.extend_from_slice(
+                        format!("Content-Disposition: form-data; name=\"{escaped_name}\"\r\n\r\n")
+                            .as_bytes(),
+                    );
+                    body.extend_from_slice(value.as_bytes());
+                    body.extend_from_slice(b"\r\n");
+                }
+                MultipartPart::File {
+                    name,
+                    filename,
+                    content_type,
+                    data,
+                } => {
+                    let escaped_name = escape_content_disposition_value(name);
+                    let escaped_filename = escape_content_disposition_value(filename);
+                    body.extend_from_slice(
+                        format!(
+                            "Content-Disposition: form-data; name=\"{escaped_name}\"; filename=\"{escaped_filename}\"\r\n"
+                        )
+                        .as_bytes(),
+                    );
+                    body.extend_from_slice(
+                        format!("Content-Type: {content_type}\r\n\r\n").as_bytes(),
+                    );
+                    body.extend_from_slice(data);
+                    body.extend_from_slice(b"\r\n");
+                }
+            }
+        }
+        body.extend_from_slice(b"--");
+        body.extend_from_slice(self.boundary.as_bytes());
+        body.extend_from_slice(b"--\r\n");
+        body
+    }
+}
+
+fn is_valid_multipart_boundary(boundary: &str) -> bool {
+    if boundary.is_empty() || boundary.len() > 70 {
+        return false;
+    }
+    boundary.bytes().all(|b| {
+        matches!(
+            b,
+            b'0'..=b'9'
+                | b'A'..=b'Z'
+                | b'a'..=b'z'
+                | b'\''
+                | b'('
+                | b')'
+                | b'+'
+                | b'_'
+                | b','
+                | b'-'
+                | b'.'
+                | b'/'
+                | b':'
+                | b'='
+                | b'?'
+        )
+    })
+}
+
+fn escape_content_disposition_value(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\r' | '\n' => {}
+            '"' | '\\' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 /// Fluent builder for [`Request`].
 #[derive(Debug, Clone)]
 pub struct RequestBuilder {
@@ -445,6 +644,17 @@ impl RequestBuilder {
             "Content-Type".to_owned(),
             "application/x-www-form-urlencoded".to_owned(),
         ));
+        self
+    }
+
+    /// Set the body to multipart form-data and add the appropriate
+    /// `Content-Type: multipart/form-data; boundary=...` header.
+    #[must_use]
+    pub fn multipart(mut self, form: &MultipartForm) -> Self {
+        self.request.body = form.to_body();
+        self.request
+            .headers
+            .push(("Content-Type".to_owned(), form.content_type_header()));
         self
     }
 
@@ -1294,6 +1504,46 @@ mod tests {
         let body = std::str::from_utf8(&req.body).unwrap();
         assert!(body.contains("q=hello%20world"));
         assert!(body.contains("tag=a%26b%3Dc"));
+    }
+
+    #[test]
+    fn multipart_with_boundary_validates_input() {
+        assert!(MultipartForm::with_boundary("safe-boundary_123").is_ok());
+        assert!(MultipartForm::with_boundary("").is_err());
+        assert!(MultipartForm::with_boundary("bad boundary").is_err());
+    }
+
+    #[test]
+    fn multipart_form_encodes_text_and_file_parts() {
+        let form = MultipartForm::with_boundary("test-boundary")
+            .unwrap()
+            .text("field", "value")
+            .file("upload", "hello.txt", "text/plain", b"hello".to_vec());
+
+        let body = String::from_utf8(form.to_body()).unwrap();
+        assert!(body.contains("--test-boundary\r\n"));
+        assert!(body.contains("Content-Disposition: form-data; name=\"field\"\r\n\r\nvalue\r\n"));
+        assert!(body.contains(
+            "Content-Disposition: form-data; name=\"upload\"; filename=\"hello.txt\"\r\n"
+        ));
+        assert!(body.contains("Content-Type: text/plain\r\n\r\nhello\r\n"));
+        assert!(body.ends_with("--test-boundary--\r\n"));
+    }
+
+    #[test]
+    fn request_multipart_body_sets_content_type_and_body() {
+        let form = MultipartForm::with_boundary("upload-boundary")
+            .unwrap()
+            .text("user", "alice");
+        let req = Request::post("/upload").multipart(&form).build();
+
+        assert_eq!(
+            req.content_type(),
+            Some("multipart/form-data; boundary=upload-boundary")
+        );
+        let body = String::from_utf8(req.body).unwrap();
+        assert!(body.contains("name=\"user\"\r\n\r\nalice\r\n"));
+        assert!(body.ends_with("--upload-boundary--\r\n"));
     }
 
     #[test]

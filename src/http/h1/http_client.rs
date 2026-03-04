@@ -13,24 +13,30 @@
 //! ```
 
 use crate::http::h1::client::{ClientStreamingResponse, Http1Client};
-use crate::http::h1::types::{Method, Request, Response, Version};
+use crate::http::h1::types::{Method, MultipartForm, Request, Response, Version};
 use crate::http::pool::{Pool, PoolConfig, PoolKey};
-use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
+use crate::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::net::tcp::stream::TcpStream;
 #[cfg(feature = "tls")]
 use crate::tls::{TlsConnectorBuilder, TlsStream};
 use crate::types::Time;
+use base64::Engine;
 use memchr::memmem;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::future::poll_fn;
 use std::io;
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const CONNECT_MAX_HEADERS_SIZE: usize = 64 * 1024;
+const SOCKS5_VERSION: u8 = 0x05;
+const SOCKS5_AUTH_NONE: u8 = 0x00;
+const SOCKS5_AUTH_USER_PASS: u8 = 0x02;
+const SOCKS5_AUTH_NO_ACCEPTABLE: u8 = 0xFF;
 
 /// Errors that can occur during HTTP client operations.
 #[derive(Debug)]
@@ -63,6 +69,8 @@ pub enum ClientError {
     },
     /// Invalid CONNECT target authority or header input.
     InvalidConnectInput(String),
+    /// Proxy negotiation failed.
+    ProxyError(String),
 }
 
 impl std::fmt::Display for ClientError {
@@ -84,6 +92,7 @@ impl std::fmt::Display for ClientError {
                 )
             }
             Self::InvalidConnectInput(msg) => write!(f, "invalid CONNECT input: {msg}"),
+            Self::ProxyError(msg) => write!(f, "proxy error: {msg}"),
         }
     }
 }
@@ -95,6 +104,7 @@ impl std::error::Error for ClientError {
             Self::HttpError(e) => Some(e),
             Self::ConnectTunnelRefused { .. }
             | Self::InvalidConnectInput(_)
+            | Self::ProxyError(_)
             | Self::TlsError(_)
             | Self::InvalidUrl(_)
             | Self::TooManyRedirects { .. } => None,
@@ -145,6 +155,9 @@ pub enum ClientIo {
     /// TLS-wrapped TCP stream.
     #[cfg(feature = "tls")]
     Tls(TlsStream<TcpStream>),
+    /// TLS over an HTTP CONNECT tunnel.
+    #[cfg(feature = "tls")]
+    TlsTunnel(Box<TlsStream<HttpConnectTunnel<ClientIo>>>),
 }
 
 impl AsyncRead for ClientIo {
@@ -157,6 +170,8 @@ impl AsyncRead for ClientIo {
             Self::Plain(s) => Pin::new(s).poll_read(cx, buf),
             #[cfg(feature = "tls")]
             Self::Tls(s) => Pin::new(s).poll_read(cx, buf),
+            #[cfg(feature = "tls")]
+            Self::TlsTunnel(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
         }
     }
 }
@@ -171,6 +186,8 @@ impl AsyncWrite for ClientIo {
             Self::Plain(s) => Pin::new(s).poll_write(cx, data),
             #[cfg(feature = "tls")]
             Self::Tls(s) => Pin::new(s).poll_write(cx, data),
+            #[cfg(feature = "tls")]
+            Self::TlsTunnel(s) => Pin::new(s.as_mut()).poll_write(cx, data),
         }
     }
 
@@ -179,6 +196,8 @@ impl AsyncWrite for ClientIo {
             Self::Plain(s) => Pin::new(s).poll_flush(cx),
             #[cfg(feature = "tls")]
             Self::Tls(s) => Pin::new(s).poll_flush(cx),
+            #[cfg(feature = "tls")]
+            Self::TlsTunnel(s) => Pin::new(s.as_mut()).poll_flush(cx),
         }
     }
 
@@ -187,6 +206,8 @@ impl AsyncWrite for ClientIo {
             Self::Plain(s) => Pin::new(s).poll_shutdown(cx),
             #[cfg(feature = "tls")]
             Self::Tls(s) => Pin::new(s).poll_shutdown(cx),
+            #[cfg(feature = "tls")]
+            Self::TlsTunnel(s) => Pin::new(s.as_mut()).poll_shutdown(cx),
         }
     }
 }
@@ -454,6 +475,36 @@ impl HttpClientBuilder {
         self
     }
 
+    /// Enables/disables automatic cookie persistence and attachment.
+    #[must_use]
+    pub fn cookie_store(mut self, enabled: bool) -> Self {
+        self.config.cookie_store = enabled;
+        self
+    }
+
+    /// Disables automatic cookie persistence and attachment.
+    #[must_use]
+    pub fn no_cookie_store(mut self) -> Self {
+        self.config.cookie_store = false;
+        self
+    }
+
+    /// Routes requests through a proxy endpoint.
+    ///
+    /// Supported URL schemes: `http://`, `https://`, and `socks5://`.
+    #[must_use]
+    pub fn proxy(mut self, proxy_url: impl Into<String>) -> Self {
+        self.config.proxy_url = Some(proxy_url.into());
+        self
+    }
+
+    /// Disables proxy routing.
+    #[must_use]
+    pub fn no_proxy(mut self) -> Self {
+        self.config.proxy_url = None;
+        self
+    }
+
     /// Builds the [`HttpClient`].
     #[must_use]
     pub fn build(self) -> HttpClient {
@@ -470,6 +521,10 @@ pub struct HttpClientConfig {
     pub redirect_policy: RedirectPolicy,
     /// Default User-Agent header value.
     pub user_agent: Option<String>,
+    /// Whether the client should automatically persist and attach cookies.
+    pub cookie_store: bool,
+    /// Optional proxy URL used for outbound requests.
+    pub proxy_url: Option<String>,
 }
 
 impl Default for HttpClientConfig {
@@ -478,6 +533,8 @@ impl Default for HttpClientConfig {
             pool_config: PoolConfig::default(),
             redirect_policy: RedirectPolicy::default(),
             user_agent: Some("asupersync/0.1".into()),
+            cookie_store: false,
+            proxy_url: None,
         }
     }
 }
@@ -500,6 +557,7 @@ pub struct HttpClient {
     config: HttpClientConfig,
     pool: Mutex<Pool>,
     idle_connections: Mutex<HashMap<PoolKey, Vec<(u64, ClientIo)>>>,
+    cookies: Mutex<HashMap<String, Vec<StoredCookie>>>,
 }
 
 impl HttpClient {
@@ -523,6 +581,7 @@ impl HttpClient {
             config,
             pool: Mutex::new(pool),
             idle_connections: Mutex::new(HashMap::new()),
+            cookies: Mutex::new(HashMap::new()),
         }
     }
 
@@ -536,6 +595,16 @@ impl HttpClient {
         self.request(Method::Post, url, Vec::new(), body).await
     }
 
+    /// Send a POST multipart form-data request.
+    pub async fn post_multipart(
+        &self,
+        url: &str,
+        form: &MultipartForm,
+    ) -> Result<Response, ClientError> {
+        self.request_multipart(Method::Post, url, Vec::new(), form)
+            .await
+    }
+
     /// Send a POST request and stream the response body.
     pub async fn post_streaming(
         &self,
@@ -543,6 +612,16 @@ impl HttpClient {
         body: Vec<u8>,
     ) -> Result<ClientStreamingResponse<ClientIo>, ClientError> {
         self.request_streaming(Method::Post, url, Vec::new(), body)
+            .await
+    }
+
+    /// Send a POST multipart form-data request and stream the response body.
+    pub async fn post_multipart_streaming(
+        &self,
+        url: &str,
+        form: &MultipartForm,
+    ) -> Result<ClientStreamingResponse<ClientIo>, ClientError> {
+        self.request_multipart_streaming(Method::Post, url, Vec::new(), form)
             .await
     }
 
@@ -570,6 +649,19 @@ impl HttpClient {
             .await
     }
 
+    /// Send a request with multipart form-data body.
+    pub async fn request_multipart(
+        &self,
+        method: Method,
+        url: &str,
+        mut extra_headers: Vec<(String, String)>,
+        form: &MultipartForm,
+    ) -> Result<Response, ClientError> {
+        ensure_multipart_content_type(&mut extra_headers, form);
+        self.request(method, url, extra_headers, form.to_body())
+            .await
+    }
+
     /// Send a request and stream the response body.
     pub async fn request_streaming(
         &self,
@@ -580,6 +672,19 @@ impl HttpClient {
     ) -> Result<ClientStreamingResponse<ClientIo>, ClientError> {
         let parsed = ParsedUrl::parse(url)?;
         self.execute_with_redirects_streaming(method, parsed, extra_headers, body, 0)
+            .await
+    }
+
+    /// Send a multipart request and stream the response body.
+    pub async fn request_multipart_streaming(
+        &self,
+        method: Method,
+        url: &str,
+        mut extra_headers: Vec<(String, String)>,
+        form: &MultipartForm,
+    ) -> Result<ClientStreamingResponse<ClientIo>, ClientError> {
+        ensure_multipart_content_type(&mut extra_headers, form);
+        self.request_streaming(method, url, extra_headers, form.to_body())
             .await
     }
 
@@ -739,36 +844,22 @@ impl HttpClient {
         extra_headers: &[(String, String)],
         body: &[u8],
     ) -> Result<Response, ClientError> {
-        let req = self.build_request(method, parsed, extra_headers, body);
+        if let Some(proxy_url) = self.config.proxy_url.as_deref() {
+            return self
+                .execute_single_with_proxy(method, parsed, extra_headers, body, proxy_url)
+                .await;
+        }
+
+        let req = self.build_request(method, parsed, extra_headers, body, None, None);
 
         let key = parsed.pool_key();
         let acquired = self.acquire_connection(parsed).await?;
-
-        struct ConnectionGuard<'a> {
-            client: &'a HttpClient,
-            key: PoolKey,
-            pool_id: Option<u64>,
-            defused: bool,
-        }
-
-        impl Drop for ConnectionGuard<'_> {
-            fn drop(&mut self) {
-                if !self.defused {
-                    self.client.drop_connection(&self.key, self.pool_id);
-                }
-            }
-        }
-
-        let mut guard = ConnectionGuard {
-            client: self,
-            key: key.clone(),
-            pool_id: acquired.pool_id,
-            defused: false,
-        };
+        let mut guard = ConnectionGuard::new(self, key.clone(), acquired.pool_id);
 
         match Http1Client::request_with_io(acquired.io, req).await {
             Ok((response, io)) => {
                 guard.defused = true;
+                self.store_response_cookies(&parsed.host, &response.headers);
                 if connection_can_be_reused(&response) {
                     self.release_connection(&key, acquired.pool_id, acquired.fresh, io);
                 } else {
@@ -791,11 +882,163 @@ impl HttpClient {
         extra_headers: &[(String, String)],
         body: &[u8],
     ) -> Result<ClientStreamingResponse<ClientIo>, ClientError> {
-        let req = self.build_request(method, parsed, extra_headers, body);
+        if let Some(proxy_url) = self.config.proxy_url.as_deref() {
+            return self
+                .execute_single_streaming_with_proxy(method, parsed, extra_headers, body, proxy_url)
+                .await;
+        }
+
+        let req = self.build_request(method, parsed, extra_headers, body, None, None);
 
         let stream = self.connect_io(parsed).await?;
         let resp = Http1Client::request_streaming(stream, req).await?;
+        self.store_response_cookies(&parsed.host, &resp.head.headers);
         Ok(resp)
+    }
+
+    async fn execute_single_with_proxy(
+        &self,
+        method: &Method,
+        parsed: &ParsedUrl,
+        extra_headers: &[(String, String)],
+        body: &[u8],
+        proxy_url: &str,
+    ) -> Result<Response, ClientError> {
+        let proxy = parse_proxy_endpoint(proxy_url)?;
+        let proxy_conn = self.connect_via_proxy(parsed, &proxy).await?;
+        let request_target = if proxy_conn.use_absolute_form {
+            Some(absolute_request_target(parsed))
+        } else {
+            None
+        };
+        let req = self.build_request(
+            method,
+            parsed,
+            extra_headers,
+            body,
+            request_target,
+            proxy_conn.proxy_authorization.as_deref(),
+        );
+        let (response, _io) = Http1Client::request_with_io(proxy_conn.io, req).await?;
+        self.store_response_cookies(&parsed.host, &response.headers);
+        Ok(response)
+    }
+
+    async fn execute_single_streaming_with_proxy(
+        &self,
+        method: &Method,
+        parsed: &ParsedUrl,
+        extra_headers: &[(String, String)],
+        body: &[u8],
+        proxy_url: &str,
+    ) -> Result<ClientStreamingResponse<ClientIo>, ClientError> {
+        let proxy = parse_proxy_endpoint(proxy_url)?;
+        let proxy_conn = self.connect_via_proxy(parsed, &proxy).await?;
+        let request_target = if proxy_conn.use_absolute_form {
+            Some(absolute_request_target(parsed))
+        } else {
+            None
+        };
+        let req = self.build_request(
+            method,
+            parsed,
+            extra_headers,
+            body,
+            request_target,
+            proxy_conn.proxy_authorization.as_deref(),
+        );
+        let resp = Http1Client::request_streaming(proxy_conn.io, req).await?;
+        self.store_response_cookies(&parsed.host, &resp.head.headers);
+        Ok(resp)
+    }
+
+    async fn connect_via_proxy(
+        &self,
+        parsed: &ParsedUrl,
+        proxy: &ProxyEndpoint,
+    ) -> Result<ProxyConnection, ClientError> {
+        match proxy.scheme {
+            ProxyScheme::Http | ProxyScheme::Https => {
+                let proxy_parsed = ParsedUrl {
+                    scheme: match proxy.scheme {
+                        ProxyScheme::Http => Scheme::Http,
+                        ProxyScheme::Https => Scheme::Https,
+                        ProxyScheme::Socks5 => unreachable!(),
+                    },
+                    host: proxy.host.clone(),
+                    port: proxy.port,
+                    path: "/".to_owned(),
+                };
+                let proxy_io = self.connect_io(&proxy_parsed).await?;
+
+                if parsed.scheme == Scheme::Http {
+                    return Ok(ProxyConnection {
+                        io: proxy_io,
+                        use_absolute_form: true,
+                        proxy_authorization: proxy
+                            .http_proxy_authorization()
+                            .map(std::borrow::ToOwned::to_owned),
+                    });
+                }
+
+                let mut connect_headers = Vec::new();
+                if let Some(auth) = proxy.http_proxy_authorization() {
+                    connect_headers.push(("Proxy-Authorization".to_owned(), auth.to_owned()));
+                }
+                let tunnel = establish_http_connect_tunnel(
+                    proxy_io,
+                    &parsed.authority(),
+                    self.config.user_agent.as_deref(),
+                    &connect_headers,
+                )
+                .await?;
+
+                #[cfg(feature = "tls")]
+                {
+                    let domain = parsed.host.trim_start_matches('[').trim_end_matches(']');
+                    let tls = self.tls_connect_stream(domain, tunnel).await?;
+                    return Ok(ProxyConnection {
+                        io: ClientIo::TlsTunnel(Box::new(tls)),
+                        use_absolute_form: false,
+                        proxy_authorization: None,
+                    });
+                }
+                #[cfg(not(feature = "tls"))]
+                {
+                    let _ = tunnel;
+                    Err(ClientError::TlsError(
+                        "TLS support is disabled (enable asupersync feature \"tls\")".into(),
+                    ))
+                }
+            }
+            ProxyScheme::Socks5 => {
+                let tcp = connect_via_socks5(proxy, parsed).await?;
+                if parsed.scheme == Scheme::Http {
+                    return Ok(ProxyConnection {
+                        io: ClientIo::Plain(tcp),
+                        use_absolute_form: false,
+                        proxy_authorization: None,
+                    });
+                }
+                #[cfg(feature = "tls")]
+                {
+                    let domain = parsed.host.trim_start_matches('[').trim_end_matches(']');
+                    let tls = self.tls_connect_stream(domain, tcp).await?;
+                    return Ok(ProxyConnection {
+                        io: ClientIo::Tls(tls),
+                        use_absolute_form: false,
+                        proxy_authorization: None,
+                    });
+                }
+                #[cfg(not(feature = "tls"))]
+                {
+                    let _ = tcp;
+                    Err(ClientError::TlsError(
+                        "TLS support is disabled (enable asupersync feature \"tls\")".into(),
+                    ))
+                }
+            }
+        }
     }
 
     fn build_request(
@@ -804,18 +1047,121 @@ impl HttpClient {
         parsed: &ParsedUrl,
         extra_headers: &[(String, String)],
         body: &[u8],
+        request_target: Option<String>,
+        proxy_authorization: Option<&str>,
     ) -> Request {
-        let mut builder = Request::builder(method.clone(), parsed.path.clone())
-            .header("Host", parsed.authority());
+        let has_cookie_header = extra_headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("cookie"));
+        let has_proxy_authorization = extra_headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("proxy-authorization"));
+        let request_target = request_target.unwrap_or_else(|| parsed.path.clone());
+        let mut builder =
+            Request::builder(method.clone(), request_target).header("Host", parsed.authority());
 
         if let Some(user_agent) = self.config.user_agent.as_deref() {
             builder = builder.header("User-Agent", user_agent);
+        }
+
+        if self.config.cookie_store
+            && !has_cookie_header
+            && let Some(cookie_header) = self.cookie_header_for_host(&parsed.host)
+        {
+            builder = builder.header("Cookie", cookie_header);
+        }
+        if !has_proxy_authorization && let Some(value) = proxy_authorization {
+            builder = builder.header("Proxy-Authorization", value);
         }
 
         builder
             .headers(extra_headers.iter().cloned())
             .body(body.to_vec())
             .build()
+    }
+
+    fn store_response_cookies(&self, host: &str, headers: &[(String, String)]) {
+        if !self.config.cookie_store {
+            return;
+        }
+
+        let host = canonical_cookie_host(host);
+        let mut cookies = self.cookies.lock();
+        let mut touched = false;
+        {
+            let entry = cookies.entry(host.clone()).or_default();
+            for (_, value) in headers
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
+            {
+                if let Some((name, value)) = parse_set_cookie_pair(value) {
+                    touched = true;
+                    if value.is_empty() {
+                        entry.retain(|cookie| !cookie.name.eq_ignore_ascii_case(&name));
+                        continue;
+                    }
+                    if let Some(existing) = entry
+                        .iter_mut()
+                        .find(|cookie| cookie.name.eq_ignore_ascii_case(&name))
+                    {
+                        existing.value = value;
+                    } else {
+                        entry.push(StoredCookie { name, value });
+                    }
+                }
+            }
+        }
+
+        if touched && cookies.get(&host).is_some_and(Vec::is_empty) {
+            cookies.remove(&host);
+        }
+    }
+
+    fn cookie_header_for_host(&self, host: &str) -> Option<String> {
+        let host = canonical_cookie_host(host);
+        let host_cookies = {
+            let cookies = self.cookies.lock();
+            cookies.get(&host)?.clone()
+        };
+        if host_cookies.is_empty() {
+            return None;
+        }
+        Some(
+            host_cookies
+                .into_iter()
+                .map(|cookie| format!("{}={}", cookie.name, cookie.value))
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    }
+
+    #[cfg(feature = "tls")]
+    async fn tls_connect_stream<T>(
+        &self,
+        domain: &str,
+        stream: T,
+    ) -> Result<TlsStream<T>, ClientError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
+        let builder = TlsConnectorBuilder::new().alpn_protocols(vec![b"http/1.1".to_vec()]);
+
+        #[cfg(feature = "tls-native-roots")]
+        let builder = builder
+            .with_native_roots()
+            .map_err(|e| ClientError::TlsError(e.to_string()))?;
+
+        #[cfg(all(not(feature = "tls-native-roots"), feature = "tls-webpki-roots"))]
+        let builder = builder.with_webpki_roots();
+
+        let connector = builder
+            .build()
+            .map_err(|e| ClientError::TlsError(e.to_string()))?;
+
+        connector
+            .connect(domain, stream)
+            .await
+            .map_err(|e| ClientError::TlsError(e.to_string()))
     }
 
     async fn connect_io(&self, parsed: &ParsedUrl) -> Result<ClientIo, ClientError> {
@@ -830,27 +1176,7 @@ impl HttpClient {
                 #[cfg(feature = "tls")]
                 {
                     let domain = parsed.host.trim_start_matches('[').trim_end_matches(']');
-
-                    let builder =
-                        TlsConnectorBuilder::new().alpn_protocols(vec![b"http/1.1".to_vec()]);
-
-                    #[cfg(feature = "tls-native-roots")]
-                    let builder = builder
-                        .with_native_roots()
-                        .map_err(|e| ClientError::TlsError(e.to_string()))?;
-
-                    #[cfg(all(not(feature = "tls-native-roots"), feature = "tls-webpki-roots"))]
-                    let builder = builder.with_webpki_roots();
-
-                    let connector = builder
-                        .build()
-                        .map_err(|e| ClientError::TlsError(e.to_string()))?;
-
-                    let tls = connector
-                        .connect(domain, stream)
-                        .await
-                        .map_err(|e| ClientError::TlsError(e.to_string()))?;
-
+                    let tls = self.tls_connect_stream(domain, stream).await?;
                     Ok(ClientIo::Tls(tls))
                 }
                 #[cfg(not(feature = "tls"))]
@@ -981,6 +1307,83 @@ struct AcquiredConnection {
     fresh: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProxyScheme {
+    Http,
+    Https,
+    Socks5,
+}
+
+#[derive(Debug, Clone)]
+enum ProxyCredentials {
+    HttpBasic(String),
+    Socks5 { username: String, password: String },
+}
+
+#[derive(Debug, Clone)]
+struct ProxyEndpoint {
+    scheme: ProxyScheme,
+    host: String,
+    port: u16,
+    credentials: Option<ProxyCredentials>,
+}
+
+impl ProxyEndpoint {
+    fn http_proxy_authorization(&self) -> Option<&str> {
+        match &self.credentials {
+            Some(ProxyCredentials::HttpBasic(value)) => Some(value.as_str()),
+            _ => None,
+        }
+    }
+
+    fn socks5_credentials(&self) -> Option<(&str, &str)> {
+        match &self.credentials {
+            Some(ProxyCredentials::Socks5 { username, password }) => {
+                Some((username.as_str(), password.as_str()))
+            }
+            _ => None,
+        }
+    }
+}
+
+struct ProxyConnection {
+    io: ClientIo,
+    use_absolute_form: bool,
+    proxy_authorization: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct StoredCookie {
+    name: String,
+    value: String,
+}
+
+struct ConnectionGuard<'a> {
+    client: &'a HttpClient,
+    key: PoolKey,
+    pool_id: Option<u64>,
+    defused: bool,
+}
+
+impl<'a> ConnectionGuard<'a> {
+    fn new(client: &'a HttpClient, key: PoolKey, pool_id: Option<u64>) -> Self {
+        Self {
+            client,
+            key,
+            pool_id,
+            defused: false,
+        }
+    }
+}
+
+impl Drop for ConnectionGuard<'_> {
+    fn drop(&mut self) {
+        if !self.defused {
+            self.client.drop_connection(&self.key, self.pool_id);
+        }
+    }
+}
+
 /// Returns true if the status code is a redirect.
 fn is_redirect(status: u16) -> bool {
     matches!(status, 301 | 302 | 303 | 307 | 308)
@@ -994,6 +1397,16 @@ fn get_header(headers: &[(String, String)], name: &str) -> Option<String> {
         .map(|(_, v)| v.clone())
 }
 
+fn ensure_multipart_content_type(headers: &mut Vec<(String, String)>, form: &MultipartForm) {
+    if headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+    {
+        return;
+    }
+    headers.push(("Content-Type".to_owned(), form.content_type_header()));
+}
+
 /// Determine the method for the redirected request.
 fn redirect_method(status: u16, original: &Method) -> Method {
     match status {
@@ -1003,6 +1416,325 @@ fn redirect_method(status: u16, original: &Method) -> Method {
         301 | 302 if *original == Method::Post => Method::Get,
         // 307/308 preserve method; all others preserve too
         _ => original.clone(),
+    }
+}
+
+fn canonical_cookie_host(host: &str) -> String {
+    host.trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase()
+}
+
+fn parse_set_cookie_pair(raw: &str) -> Option<(String, String)> {
+    let pair = raw.split(';').next()?.trim();
+    let (name, value) = pair.split_once('=')?;
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some((name.to_owned(), value.trim().to_owned()))
+}
+
+fn parse_proxy_endpoint(proxy_url: &str) -> Result<ProxyEndpoint, ClientError> {
+    let (scheme, rest) = if let Some(rest) = proxy_url.strip_prefix("http://") {
+        (ProxyScheme::Http, rest)
+    } else if let Some(rest) = proxy_url.strip_prefix("https://") {
+        (ProxyScheme::Https, rest)
+    } else if let Some(rest) = proxy_url.strip_prefix("socks5://") {
+        (ProxyScheme::Socks5, rest)
+    } else {
+        return Err(ClientError::InvalidUrl(format!(
+            "unsupported proxy scheme in: {proxy_url}"
+        )));
+    };
+
+    let authority = rest
+        .split_once('/')
+        .map_or(rest, |(authority, _)| authority)
+        .trim();
+    if authority.is_empty() {
+        return Err(ClientError::InvalidUrl(format!(
+            "proxy URL missing authority: {proxy_url}"
+        )));
+    }
+
+    let (userinfo, host_port) = authority
+        .rsplit_once('@')
+        .map_or((None, authority), |(userinfo, host_port)| {
+            (Some(userinfo), host_port)
+        });
+
+    let default_port = match scheme {
+        ProxyScheme::Http => 80,
+        ProxyScheme::Https => 443,
+        ProxyScheme::Socks5 => 1080,
+    };
+    let (host, port) = parse_host_port(host_port, default_port)?;
+
+    let credentials = match userinfo {
+        None => None,
+        Some(userinfo) => {
+            if userinfo.is_empty() {
+                return Err(ClientError::InvalidUrl(format!(
+                    "proxy URL has empty credentials: {proxy_url}"
+                )));
+            }
+            match scheme {
+                ProxyScheme::Http | ProxyScheme::Https => {
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(userinfo);
+                    Some(ProxyCredentials::HttpBasic(format!("Basic {encoded}")))
+                }
+                ProxyScheme::Socks5 => {
+                    let (username, password) = userinfo
+                        .split_once(':')
+                        .map_or((userinfo, ""), |(username, password)| (username, password));
+                    if username.is_empty() {
+                        return Err(ClientError::InvalidUrl(
+                            "SOCKS5 username cannot be empty".into(),
+                        ));
+                    }
+                    if username.len() > 255 || password.len() > 255 {
+                        return Err(ClientError::InvalidUrl(
+                            "SOCKS5 credentials must be <=255 bytes each".into(),
+                        ));
+                    }
+                    Some(ProxyCredentials::Socks5 {
+                        username: username.to_owned(),
+                        password: password.to_owned(),
+                    })
+                }
+            }
+        }
+    };
+
+    Ok(ProxyEndpoint {
+        scheme,
+        host,
+        port,
+        credentials,
+    })
+}
+
+fn parse_host_port(authority: &str, default_port: u16) -> Result<(String, u16), ClientError> {
+    if authority.is_empty() {
+        return Err(ClientError::InvalidUrl("empty authority".into()));
+    }
+
+    if authority.starts_with('[') {
+        let bracket_end = authority
+            .find(']')
+            .ok_or_else(|| ClientError::InvalidUrl("unclosed bracket in IPv6 address".into()))?;
+        let host = authority[..=bracket_end].to_owned();
+        let rest = &authority[bracket_end + 1..];
+        if rest.is_empty() {
+            return Ok((host, default_port));
+        }
+        if let Some(port_str) = rest.strip_prefix(':') {
+            let port = port_str
+                .parse::<u16>()
+                .map_err(|_| ClientError::InvalidUrl(format!("invalid port: {port_str}")))?;
+            return Ok((host, port));
+        }
+        return Err(ClientError::InvalidUrl(format!(
+            "unexpected characters after IPv6 host: {rest}"
+        )));
+    }
+
+    if let Some((host, port_str)) = authority.rsplit_once(':') {
+        let port = port_str
+            .parse::<u16>()
+            .map_err(|_| ClientError::InvalidUrl(format!("invalid port: {port_str}")))?;
+        if host.is_empty() {
+            return Err(ClientError::InvalidUrl("empty host".into()));
+        }
+        return Ok((host.to_owned(), port));
+    }
+
+    Ok((authority.to_owned(), default_port))
+}
+
+fn absolute_request_target(parsed: &ParsedUrl) -> String {
+    let scheme = match parsed.scheme {
+        Scheme::Http => "http",
+        Scheme::Https => "https",
+    };
+    format!("{scheme}://{}{}", parsed.authority(), parsed.path)
+}
+
+async fn connect_via_socks5(
+    proxy: &ProxyEndpoint,
+    target: &ParsedUrl,
+) -> Result<TcpStream, ClientError> {
+    let addr = format!("{}:{}", proxy.host, proxy.port);
+    let mut stream = TcpStream::connect(addr)
+        .await
+        .map_err(ClientError::ConnectError)?;
+
+    socks5_negotiate_auth(&mut stream, proxy.socks5_credentials()).await?;
+    let connect_req = build_socks5_connect_request(target)?;
+    stream.write_all(&connect_req).await?;
+    stream.flush().await?;
+    read_socks5_connect_reply(&mut stream).await?;
+
+    Ok(stream)
+}
+
+async fn socks5_negotiate_auth(
+    stream: &mut TcpStream,
+    socks_creds: Option<(&str, &str)>,
+) -> Result<(), ClientError> {
+    let mut methods = vec![SOCKS5_AUTH_NONE];
+    if socks_creds.is_some() {
+        methods.push(SOCKS5_AUTH_USER_PASS);
+    }
+
+    let mut greeting = Vec::with_capacity(2 + methods.len());
+    greeting.push(SOCKS5_VERSION);
+    greeting.push(
+        u8::try_from(methods.len()).map_err(|_| {
+            ClientError::ProxyError("too many SOCKS5 auth methods configured".into())
+        })?,
+    );
+    greeting.extend_from_slice(&methods);
+    stream.write_all(&greeting).await?;
+    stream.flush().await?;
+
+    let mut method_reply = [0u8; 2];
+    stream.read_exact(&mut method_reply).await?;
+    if method_reply[0] != SOCKS5_VERSION {
+        return Err(ClientError::ProxyError(format!(
+            "unexpected SOCKS5 version {}",
+            method_reply[0]
+        )));
+    }
+
+    match method_reply[1] {
+        SOCKS5_AUTH_NONE => Ok(()),
+        SOCKS5_AUTH_USER_PASS => socks5_authenticate_user_pass(stream, socks_creds).await,
+        SOCKS5_AUTH_NO_ACCEPTABLE => Err(ClientError::ProxyError(
+            "SOCKS5 proxy rejected all authentication methods".into(),
+        )),
+        method => Err(ClientError::ProxyError(format!(
+            "SOCKS5 proxy selected unsupported auth method: {method:#x}"
+        ))),
+    }
+}
+
+async fn socks5_authenticate_user_pass(
+    stream: &mut TcpStream,
+    socks_creds: Option<(&str, &str)>,
+) -> Result<(), ClientError> {
+    let Some((username, password)) = socks_creds else {
+        return Err(ClientError::ProxyError(
+            "SOCKS5 proxy requested username/password auth but credentials were not set".into(),
+        ));
+    };
+    let user_len = u8::try_from(username.len())
+        .map_err(|_| ClientError::ProxyError("SOCKS5 username exceeds 255 bytes".into()))?;
+    let pass_len = u8::try_from(password.len())
+        .map_err(|_| ClientError::ProxyError("SOCKS5 password exceeds 255 bytes".into()))?;
+
+    let mut auth = Vec::with_capacity(3 + username.len() + password.len());
+    auth.push(0x01);
+    auth.push(user_len);
+    auth.extend_from_slice(username.as_bytes());
+    auth.push(pass_len);
+    auth.extend_from_slice(password.as_bytes());
+    stream.write_all(&auth).await?;
+    stream.flush().await?;
+
+    let mut auth_reply = [0u8; 2];
+    stream.read_exact(&mut auth_reply).await?;
+    if auth_reply[0] != 0x01 || auth_reply[1] != 0x00 {
+        return Err(ClientError::ProxyError(
+            "SOCKS5 username/password authentication failed".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn build_socks5_connect_request(target: &ParsedUrl) -> Result<Vec<u8>, ClientError> {
+    let mut connect_req = Vec::with_capacity(300);
+    connect_req.extend_from_slice(&[SOCKS5_VERSION, 0x01, 0x00]); // CONNECT
+    let host = target.host.trim_start_matches('[').trim_end_matches(']');
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        match ip {
+            IpAddr::V4(addr) => {
+                connect_req.push(0x01);
+                connect_req.extend_from_slice(&addr.octets());
+            }
+            IpAddr::V6(addr) => {
+                connect_req.push(0x04);
+                connect_req.extend_from_slice(&addr.octets());
+            }
+        }
+    } else {
+        let host_bytes = host.as_bytes();
+        let host_len = u8::try_from(host_bytes.len())
+            .map_err(|_| ClientError::ProxyError("SOCKS5 domain name exceeds 255 bytes".into()))?;
+        connect_req.push(0x03);
+        connect_req.push(host_len);
+        connect_req.extend_from_slice(host_bytes);
+    }
+    connect_req.extend_from_slice(&target.port.to_be_bytes());
+
+    Ok(connect_req)
+}
+
+async fn read_socks5_connect_reply(stream: &mut TcpStream) -> Result<(), ClientError> {
+    let mut reply_head = [0u8; 4];
+    stream.read_exact(&mut reply_head).await?;
+    if reply_head[0] != SOCKS5_VERSION {
+        return Err(ClientError::ProxyError(format!(
+            "unexpected SOCKS5 connect reply version {}",
+            reply_head[0]
+        )));
+    }
+    if reply_head[1] != 0x00 {
+        return Err(ClientError::ProxyError(format!(
+            "SOCKS5 CONNECT failed: {}",
+            socks5_reply_message(reply_head[1])
+        )));
+    }
+
+    match reply_head[3] {
+        0x01 => {
+            let mut addr = [0u8; 4];
+            stream.read_exact(&mut addr).await?;
+        }
+        0x04 => {
+            let mut addr = [0u8; 16];
+            stream.read_exact(&mut addr).await?;
+        }
+        0x03 => {
+            let mut len = [0u8; 1];
+            stream.read_exact(&mut len).await?;
+            let mut addr = vec![0u8; usize::from(len[0])];
+            stream.read_exact(&mut addr).await?;
+        }
+        atyp => {
+            return Err(ClientError::ProxyError(format!(
+                "SOCKS5 CONNECT reply has unknown ATYP {atyp:#x}"
+            )));
+        }
+    }
+    let mut port = [0u8; 2];
+    stream.read_exact(&mut port).await?;
+    Ok(())
+}
+
+fn socks5_reply_message(code: u8) -> &'static str {
+    match code {
+        0x01 => "general SOCKS server failure",
+        0x02 => "connection not allowed by ruleset",
+        0x03 => "network unreachable",
+        0x04 => "host unreachable",
+        0x05 => "connection refused by destination host",
+        0x06 => "TTL expired",
+        0x07 => "command not supported",
+        0x08 => "address type not supported",
+        _ => "unknown SOCKS5 error",
     }
 }
 
@@ -1072,8 +1804,13 @@ fn resolve_redirect(current: &ParsedUrl, location: &str) -> String {
         return format!("{scheme}://{}:{}{location}", current.host, current.port);
     }
 
-    // Relative path (append to current path's directory)
-    let base_path = current.path.rfind('/').map_or("/", |i| &current.path[..=i]);
+    // Relative path (append to current path's directory).
+    // Strip query string first — rfind('/') must only see the path component.
+    let path_only = current
+        .path
+        .split_once('?')
+        .map_or(current.path.as_str(), |(p, _)| p);
+    let base_path = path_only.rfind('/').map_or("/", |i| &path_only[..=i]);
     let scheme = match current.scheme {
         Scheme::Http => "http",
         Scheme::Https => "https",
@@ -1306,6 +2043,38 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn parse_http_proxy_endpoint_with_basic_auth() {
+        let proxy = parse_proxy_endpoint("http://alice:secret@proxy.local:8080")
+            .expect("proxy should parse");
+        assert_eq!(proxy.scheme, ProxyScheme::Http);
+        assert_eq!(proxy.host, "proxy.local");
+        assert_eq!(proxy.port, 8080);
+        assert_eq!(
+            proxy.http_proxy_authorization(),
+            Some("Basic YWxpY2U6c2VjcmV0")
+        );
+    }
+
+    #[test]
+    fn parse_socks5_proxy_endpoint_with_credentials() {
+        let proxy =
+            parse_proxy_endpoint("socks5://agent:pw@127.0.0.1").expect("proxy should parse");
+        assert_eq!(proxy.scheme, ProxyScheme::Socks5);
+        assert_eq!(proxy.host, "127.0.0.1");
+        assert_eq!(proxy.port, 1080);
+        assert_eq!(proxy.socks5_credentials(), Some(("agent", "pw")));
+    }
+
+    #[test]
+    fn absolute_request_target_uses_full_uri() {
+        let parsed = ParsedUrl::parse("http://example.com:8080/path?q=1").unwrap();
+        assert_eq!(
+            absolute_request_target(&parsed),
+            "http://example.com:8080/path?q=1"
+        );
+    }
+
     // =========================================================================
     // Pool key
     // =========================================================================
@@ -1432,6 +2201,14 @@ mod tests {
         assert_eq!(result, "http://example.com:80/dir/new");
     }
 
+    #[test]
+    fn resolve_relative_path_redirect_ignores_query_slashes() {
+        // Regression: rfind('/') must only search the path, not the query.
+        let current = ParsedUrl::parse("http://example.com/dir/old?return=/home").unwrap();
+        let result = resolve_redirect(&current, "new");
+        assert_eq!(result, "http://example.com:80/dir/new");
+    }
+
     // =========================================================================
     // Header lookup
     // =========================================================================
@@ -1490,6 +2267,8 @@ mod tests {
             RedirectPolicy::Limited(10)
         ));
         assert_eq!(config.user_agent, Some("asupersync/0.1".into()));
+        assert!(!config.cookie_store);
+        assert!(config.proxy_url.is_none());
     }
 
     #[test]
@@ -1510,6 +2289,8 @@ mod tests {
             RedirectPolicy::Limited(10)
         ));
         assert_eq!(client.config.user_agent.as_deref(), Some("asupersync/0.1"));
+        assert!(!client.config.cookie_store);
+        assert!(client.config.proxy_url.is_none());
     }
 
     #[test]
@@ -1521,6 +2302,10 @@ mod tests {
             .cleanup_interval(std::time::Duration::from_secs(5))
             .no_redirects()
             .no_user_agent()
+            .cookie_store(true)
+            .no_cookie_store()
+            .proxy("http://proxy.internal:3128")
+            .no_proxy()
             .build();
 
         assert_eq!(client.config.pool_config.max_connections_per_host, 12);
@@ -1538,6 +2323,8 @@ mod tests {
             RedirectPolicy::None
         ));
         assert!(client.config.user_agent.is_none());
+        assert!(!client.config.cookie_store);
+        assert!(client.config.proxy_url.is_none());
     }
 
     #[test]
@@ -1553,6 +2340,8 @@ mod tests {
             .pool_config(pool_config)
             .max_redirects(2)
             .user_agent("asupersync-test/2.0")
+            .cookie_store(true)
+            .proxy("socks5://proxy.internal:1080")
             .build();
 
         assert_eq!(client.config.pool_config.max_connections_per_host, 3);
@@ -1573,6 +2362,11 @@ mod tests {
             client.config.user_agent.as_deref(),
             Some("asupersync-test/2.0")
         );
+        assert!(client.config.cookie_store);
+        assert_eq!(
+            client.config.proxy_url.as_deref(),
+            Some("socks5://proxy.internal:1080")
+        );
     }
 
     #[test]
@@ -1580,6 +2374,164 @@ mod tests {
         let client = HttpClient::new();
         let stats = client.pool_stats();
         assert_eq!(stats.total_connections, 0);
+    }
+
+    #[test]
+    fn parse_set_cookie_pair_extracts_first_pair() {
+        let parsed = parse_set_cookie_pair("session=abc123; Path=/; HttpOnly");
+        assert_eq!(parsed, Some(("session".to_string(), "abc123".to_string())));
+
+        assert_eq!(parse_set_cookie_pair(""), None);
+        assert_eq!(parse_set_cookie_pair("invalid"), None);
+        assert_eq!(parse_set_cookie_pair(" =value"), None);
+    }
+
+    #[test]
+    fn cookie_store_attaches_cookie_header_when_enabled() {
+        let client = HttpClient::builder().cookie_store(true).build();
+        client.store_response_cookies(
+            "Example.COM",
+            &[(
+                "Set-Cookie".to_string(),
+                "session=abc123; Path=/".to_string(),
+            )],
+        );
+
+        let parsed = ParsedUrl::parse("http://example.com/data").expect("valid URL");
+        let req = client.build_request(&Method::Get, &parsed, &[], &[], None, None);
+        assert_eq!(
+            get_header(&req.headers, "cookie"),
+            Some("session=abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn cookie_store_respects_explicit_cookie_header() {
+        let client = HttpClient::builder().cookie_store(true).build();
+        client.store_response_cookies(
+            "example.com",
+            &[("Set-Cookie".to_string(), "session=abc123".to_string())],
+        );
+
+        let parsed = ParsedUrl::parse("http://example.com/path").expect("valid URL");
+        let req = client.build_request(
+            &Method::Get,
+            &parsed,
+            &[("Cookie".to_string(), "manual=1".to_string())],
+            &[],
+            None,
+            None,
+        );
+        assert_eq!(
+            get_header(&req.headers, "cookie"),
+            Some("manual=1".to_string())
+        );
+    }
+
+    #[test]
+    fn build_request_adds_proxy_authorization_when_not_explicit() {
+        let client = HttpClient::builder().build();
+        let parsed = ParsedUrl::parse("http://example.com/path").expect("valid URL");
+        let req = client.build_request(
+            &Method::Get,
+            &parsed,
+            &[("Accept".to_string(), "application/json".to_string())],
+            &[],
+            Some(absolute_request_target(&parsed)),
+            Some("Basic Zm9vOmJhcg=="),
+        );
+        assert_eq!(
+            get_header(&req.headers, "proxy-authorization"),
+            Some("Basic Zm9vOmJhcg==".to_string())
+        );
+        assert_eq!(
+            req.uri, "http://example.com/path",
+            "forward proxy request must use absolute-form URI"
+        );
+    }
+
+    #[test]
+    fn build_request_preserves_explicit_proxy_authorization() {
+        let client = HttpClient::builder().build();
+        let parsed = ParsedUrl::parse("http://example.com/path").expect("valid URL");
+        let req = client.build_request(
+            &Method::Get,
+            &parsed,
+            &[(
+                "Proxy-Authorization".to_string(),
+                "Basic ZXhwbGljaXQ=".to_string(),
+            )],
+            &[],
+            Some(absolute_request_target(&parsed)),
+            Some("Basic aWdub3JlZA=="),
+        );
+        assert_eq!(
+            get_header(&req.headers, "proxy-authorization"),
+            Some("Basic ZXhwbGljaXQ=".to_string())
+        );
+    }
+
+    #[test]
+    fn ensure_multipart_content_type_adds_header_when_missing() {
+        let form = MultipartForm::with_boundary("upload-boundary")
+            .unwrap()
+            .text("user", "alice");
+        let mut headers = vec![("Accept".to_string(), "application/json".to_string())];
+        ensure_multipart_content_type(&mut headers, &form);
+        assert_eq!(
+            get_header(&headers, "content-type"),
+            Some("multipart/form-data; boundary=upload-boundary".to_string())
+        );
+    }
+
+    #[test]
+    fn ensure_multipart_content_type_respects_existing_header() {
+        let form = MultipartForm::with_boundary("upload-boundary")
+            .unwrap()
+            .text("user", "alice");
+        let mut headers = vec![(
+            "Content-Type".to_string(),
+            "multipart/form-data; boundary=manual".to_string(),
+        )];
+        ensure_multipart_content_type(&mut headers, &form);
+        assert_eq!(
+            get_header(&headers, "content-type"),
+            Some("multipart/form-data; boundary=manual".to_string())
+        );
+        assert_eq!(headers.len(), 1);
+    }
+
+    #[test]
+    fn cookie_store_updates_and_removes_existing_cookie() {
+        let client = HttpClient::builder().cookie_store(true).build();
+        client.store_response_cookies(
+            "example.com",
+            &[("Set-Cookie".to_string(), "session=abc123".to_string())],
+        );
+        client.store_response_cookies(
+            "example.com",
+            &[("Set-Cookie".to_string(), "theme=dark".to_string())],
+        );
+        client.store_response_cookies(
+            "example.com",
+            &[("Set-Cookie".to_string(), "session=updated".to_string())],
+        );
+
+        let cookie_header = client
+            .cookie_header_for_host("example.com")
+            .expect("cookie header");
+        assert!(cookie_header.contains("session=updated"));
+        assert!(cookie_header.contains("theme=dark"));
+
+        client.store_response_cookies(
+            "example.com",
+            &[("Set-Cookie".to_string(), "session=".to_string())],
+        );
+        let cookie_header = client
+            .cookie_header_for_host("example.com")
+            .expect("cookie header");
+        assert!(!cookie_header.contains("session="));
+        assert!(cookie_header.contains("theme=dark"));
     }
 
     #[derive(Debug)]

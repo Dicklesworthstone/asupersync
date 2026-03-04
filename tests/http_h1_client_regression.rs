@@ -131,6 +131,89 @@ fn read_until_headers_end(stream: &mut std::net::TcpStream) -> std::io::Result<V
     Ok(buf)
 }
 
+fn accept_with_timeout(
+    listener: &TcpListener,
+    timeout_duration: Duration,
+) -> std::io::Result<std::net::TcpStream> {
+    let deadline = Instant::now() + timeout_duration;
+    loop {
+        match listener.accept() {
+            Ok((conn, _peer)) => return Ok(conn),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() > deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "accept timed out",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn run_cookie_replay_scenario(cookie_store_enabled: bool) -> (String, String) {
+    let timeout_duration = Duration::from_secs(5);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    listener
+        .set_nonblocking(true)
+        .expect("set_nonblocking listener");
+    let addr = listener.local_addr().expect("listener local_addr");
+
+    let server = thread::spawn(move || -> std::io::Result<(Vec<u8>, Vec<u8>)> {
+        let mut first_conn = accept_with_timeout(&listener, timeout_duration)?;
+        first_conn.set_read_timeout(Some(timeout_duration))?;
+        first_conn.set_write_timeout(Some(timeout_duration))?;
+        let first_req = read_until_headers_end(&mut first_conn)?;
+        first_conn.write_all(
+            b"HTTP/1.1 200 OK\r\nSet-Cookie: session=abc123; Path=/\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK",
+        )?;
+        first_conn.flush()?;
+        drop(first_conn);
+
+        let mut second_conn = accept_with_timeout(&listener, timeout_duration)?;
+        second_conn.set_read_timeout(Some(timeout_duration))?;
+        second_conn.set_write_timeout(Some(timeout_duration))?;
+        let second_req = read_until_headers_end(&mut second_conn)?;
+        second_conn
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")?;
+        second_conn.flush()?;
+
+        Ok((first_req, second_req))
+    });
+
+    run_test(|| async move {
+        let client = HttpClient::builder()
+            .cookie_store(cookie_store_enabled)
+            .build();
+        let url = format!("http://{addr}/cookie");
+
+        let first = client
+            .get(&url)
+            .await
+            .expect("first request should succeed");
+        assert_eq!(first.status, 200);
+        assert_eq!(first.body, b"OK");
+
+        let second = client
+            .get(&url)
+            .await
+            .expect("second request should succeed");
+        assert_eq!(second.status, 200);
+        assert_eq!(second.body, b"OK");
+    });
+
+    let (first_req, second_req) = server
+        .join()
+        .expect("server thread panicked")
+        .expect("server io error");
+    (
+        String::from_utf8_lossy(&first_req).into_owned(),
+        String::from_utf8_lossy(&second_req).into_owned(),
+    )
+}
+
 #[test]
 fn http_client_connect_tunnel_end_to_end_roundtrip() {
     init_test_logging();
@@ -230,6 +313,130 @@ fn http_client_connect_tunnel_end_to_end_roundtrip() {
     );
 
     test_complete!("http_client_connect_tunnel_end_to_end_roundtrip");
+}
+
+#[test]
+fn http_client_cookie_store_replays_cookie_on_second_request() {
+    init_test_logging();
+    test_phase!("http_client_cookie_store_replays_cookie_on_second_request");
+
+    let (first_req, second_req) = run_cookie_replay_scenario(true);
+    assert!(
+        !first_req.contains("\r\nCookie: session=abc123\r\n"),
+        "first request should not include replay cookie: {first_req:?}"
+    );
+    assert!(
+        second_req.contains("\r\nCookie: session=abc123\r\n"),
+        "second request should include replay cookie: {second_req:?}"
+    );
+
+    test_complete!("http_client_cookie_store_replays_cookie_on_second_request");
+}
+
+#[test]
+fn http_client_without_cookie_store_does_not_replay_cookie() {
+    init_test_logging();
+    test_phase!("http_client_without_cookie_store_does_not_replay_cookie");
+
+    let (_first_req, second_req) = run_cookie_replay_scenario(false);
+    assert!(
+        !second_req.contains("\r\nCookie: session=abc123\r\n"),
+        "cookie store disabled should not attach cookie: {second_req:?}"
+    );
+
+    test_complete!("http_client_without_cookie_store_does_not_replay_cookie");
+}
+
+#[test]
+fn http_client_redirect_303_converts_post_to_get() {
+    init_test_logging();
+    test_phase!("http_client_redirect_303_converts_post_to_get");
+
+    let timeout_duration = Duration::from_secs(5);
+    let redirect_listener = TcpListener::bind("127.0.0.1:0").expect("bind redirect listener");
+    redirect_listener
+        .set_nonblocking(true)
+        .expect("set_nonblocking redirect listener");
+    let target_listener = TcpListener::bind("127.0.0.1:0").expect("bind target listener");
+    target_listener
+        .set_nonblocking(true)
+        .expect("set_nonblocking target listener");
+
+    let redirect_addr = redirect_listener
+        .local_addr()
+        .expect("redirect listener local_addr");
+    let target_addr = target_listener
+        .local_addr()
+        .expect("target listener local_addr");
+    let location = format!("http://{target_addr}/final");
+
+    let redirect_server = thread::spawn(move || -> std::io::Result<Vec<u8>> {
+        let mut conn = accept_with_timeout(&redirect_listener, timeout_duration)?;
+        conn.set_read_timeout(Some(timeout_duration))?;
+        conn.set_write_timeout(Some(timeout_duration))?;
+        let req = read_until_headers_end(&mut conn)?;
+        conn.write_all(
+            format!(
+                "HTTP/1.1 303 See Other\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )?;
+        conn.flush()?;
+        Ok(req)
+    });
+
+    let target_server = thread::spawn(move || -> std::io::Result<Vec<u8>> {
+        let mut conn = accept_with_timeout(&target_listener, timeout_duration)?;
+        conn.set_read_timeout(Some(timeout_duration))?;
+        conn.set_write_timeout(Some(timeout_duration))?;
+        let req = read_until_headers_end(&mut conn)?;
+        conn.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndone")?;
+        conn.flush()?;
+        Ok(req)
+    });
+
+    run_test(|| async move {
+        let client = HttpClient::new();
+        let response = client
+            .post(
+                &format!("http://{redirect_addr}/submit"),
+                b"payload".to_vec(),
+            )
+            .await
+            .expect("redirecting post should succeed");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"done");
+    });
+
+    let redirect_req = String::from_utf8_lossy(
+        &redirect_server
+            .join()
+            .expect("redirect server panicked")
+            .expect("redirect server io"),
+    )
+    .into_owned();
+    let target_req = String::from_utf8_lossy(
+        &target_server
+            .join()
+            .expect("target server panicked")
+            .expect("target server io"),
+    )
+    .into_owned();
+
+    assert!(
+        redirect_req.starts_with("POST /submit HTTP/1.1\r\n"),
+        "redirect hop should receive POST: {redirect_req:?}"
+    );
+    assert!(
+        target_req.starts_with("GET /final HTTP/1.1\r\n"),
+        "follow-up hop should convert to GET: {target_req:?}"
+    );
+    assert!(
+        !target_req.contains("\r\nContent-Length: 7\r\n"),
+        "follow-up GET must not keep original POST content length: {target_req:?}"
+    );
+
+    test_complete!("http_client_redirect_303_converts_post_to_get");
 }
 
 #[test]
