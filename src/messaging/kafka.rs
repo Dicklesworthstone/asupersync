@@ -756,7 +756,7 @@ impl KafkaProducer {
     ///
     /// Blocks until all messages in the queue are sent or the timeout expires.
     #[allow(unused_variables, clippy::unused_async)]
-    pub fn flush(&self, cx: &Cx, timeout: Duration) -> Result<(), KafkaError> {
+    pub async fn flush(&self, cx: &Cx, timeout: Duration) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
 
         #[cfg(feature = "kafka")]
@@ -901,7 +901,7 @@ impl Transaction<'_> {
     ///
     /// Atomically publishes all messages sent within this transaction.
     #[allow(unused_variables, clippy::unused_async)]
-    pub fn commit(mut self, cx: &Cx) -> Result<(), KafkaError> {
+    pub async fn commit(mut self, cx: &Cx) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
 
         // Phase 0: stub - mark as committed to prevent drop warning
@@ -916,7 +916,7 @@ impl Transaction<'_> {
     ///
     /// Discards all messages sent within this transaction.
     #[allow(unused_variables, clippy::unused_async)]
-    pub fn abort(mut self, cx: &Cx) -> Result<(), KafkaError> {
+    pub async fn abort(mut self, cx: &Cx) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
 
         // Phase 0: stub - mark as committed to prevent drop warning
