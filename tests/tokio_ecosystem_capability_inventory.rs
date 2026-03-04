@@ -13,6 +13,7 @@ const HTTP_MOD_PATH: &str = "src/http/mod.rs";
 const NET_QUIC_TEST_PATH: &str = "tests/net_quic.rs";
 const QUIC_NATIVE_CONNECTION_PATH: &str = "src/net/quic_native/connection.rs";
 const QUIC_NATIVE_TRANSPORT_PATH: &str = "src/net/quic_native/transport.rs";
+const QUIC_NATIVE_FORENSIC_LOG_PATH: &str = "src/net/quic_native/forensic_log.rs";
 const H3_NATIVE_PATH: &str = "src/http/h3_native.rs";
 const QUIC_H3_VIOLATIONS_TEST_PATH: &str = "tests/quic_h3_e2e_violations.rs";
 const QUIC_H3_LOSS_TEST_PATH: &str = "tests/quic_h3_e2e_loss.rs";
@@ -57,6 +58,10 @@ fn load_quic_native_connection() -> String {
 
 fn load_h3_native() -> String {
     load_doc(H3_NATIVE_PATH)
+}
+
+fn load_quic_native_forensic_log() -> String {
+    load_doc(QUIC_NATIVE_FORENSIC_LOG_PATH)
 }
 
 fn load_quic_h3_violations_test() -> String {
@@ -450,6 +455,7 @@ fn f15_docs_reflect_unparked_feature_surface_and_compat_boundary() {
 fn t4_transport_invariants_are_contract_enforced() {
     let connection = load_quic_native_connection();
     let h3_native = load_h3_native();
+    let forensic_log = load_quic_native_forensic_log();
     let transport = load_quic_native_transport();
     let violations = load_quic_h3_violations_test();
     let loss = load_quic_h3_loss_test();
@@ -476,6 +482,12 @@ fn t4_transport_invariants_are_contract_enforced() {
         h3_native.contains("qpack_decode_request_field_section")
             && h3_native.contains("qpack_decode_response_field_section"),
         "h3 native surface must expose QPACK field-section decode helpers for validated request/response heads"
+    );
+    assert!(
+        forensic_log.contains("CancelRequested")
+            && forensic_log.contains("RegionStateChanged")
+            && forensic_log.contains("cancel_region_summary"),
+        "forensic log surface must correlate cancellation and region-lifecycle observability signals"
     );
 
     assert!(

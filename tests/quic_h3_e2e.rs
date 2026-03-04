@@ -530,7 +530,7 @@ fn h3_request_response_lifecycle() {
     let response_field_block =
         qpack_encode_response_field_section(&response_head).expect("qpack response encode");
     // Encode response frames.
-    let resp_headers = H3Frame::Headers(response_field_block.clone());
+    let resp_headers = H3Frame::Headers(response_field_block);
     let resp_data = H3Frame::Data(b"Hello, world!".to_vec());
 
     let mut resp_wire = Vec::new();

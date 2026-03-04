@@ -141,6 +141,18 @@ pub enum QuicH3Event {
         new_phase: String,
         initiator: String,
     },
+    CancelRequested {
+        scope: String,
+        reason: String,
+        trigger: String,
+    },
+    RegionStateChanged {
+        region_id: u64,
+        from_state: String,
+        to_state: String,
+        live_children: u32,
+        outstanding_obligations: u32,
+    },
 
     // -- H3 control events (h3_control) -------------------------------------
     SettingsExchanged {
@@ -247,6 +259,8 @@ impl QuicH3Event {
             Self::HandshakeStep { .. } => "handshake_step",
             Self::CloseInitiated { .. } => "close_initiated",
             Self::KeyUpdate { .. } => "key_update",
+            Self::CancelRequested { .. } => "cancel_requested",
+            Self::RegionStateChanged { .. } => "region_state_changed",
             Self::SettingsExchanged { .. } => "settings_exchanged",
             Self::GoawayReceived { .. } => "goaway_received",
             Self::RequestStarted { .. } => "request_started",
@@ -273,6 +287,7 @@ impl QuicH3Event {
             | Self::StreamOpened { .. }
             | Self::FlowControlUpdated { .. }
             | Self::HandshakeStep { .. }
+            | Self::RegionStateChanged { .. }
             | Self::RequestHeadersSent { .. }
             | Self::RequestDataSent { .. }
             | Self::RequestStreamStateChanged { .. } => "DEBUG",
@@ -517,6 +532,7 @@ pub struct QuicH3ScenarioManifest {
     pub event_timeline: EventTimeline,
     pub transport_summary: TransportSummary,
     pub h3_summary: H3Summary,
+    pub cancel_region_summary: CancelRegionSummary,
     pub connection_lifecycle: Vec<LifecycleTransition>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_fingerprint: Option<FailureFingerprint>,
@@ -596,6 +612,20 @@ pub struct H3Summary {
     pub protocol_errors: u32,
 }
 
+/// Correlated cancellation and region-lifecycle signal summary.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CancelRegionSummary {
+    pub cancellation_requests: u32,
+    pub region_transitions: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_cancel_ts_us: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_close_initiated_ts_us: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancel_to_close_latency_us: Option<u64>,
+}
+
 /// An entry in the connection lifecycle state transition log.
 #[allow(missing_docs)]
 #[derive(Debug, Clone, Serialize)]
@@ -630,6 +660,7 @@ impl QuicH3ScenarioManifest {
         let (invariant_ids, invariant_verdicts) = Self::extract_invariants(&records);
         let transport = Self::extract_transport(&records);
         let h3 = Self::extract_h3(&records);
+        let cancel_region = Self::extract_cancel_region(&records);
         let lifecycle = Self::extract_lifecycle(&records);
         let trace_fingerprint = Self::compute_trace_fingerprint(&records);
 
@@ -664,6 +695,7 @@ impl QuicH3ScenarioManifest {
             },
             transport_summary: transport,
             h3_summary: h3,
+            cancel_region_summary: cancel_region,
             connection_lifecycle: lifecycle,
             failure_fingerprint: if passed {
                 None
@@ -773,6 +805,39 @@ impl QuicH3ScenarioManifest {
             }
         }
         h3
+    }
+
+    fn extract_cancel_region(records: &[ForensicRecord]) -> CancelRegionSummary {
+        let mut summary = CancelRegionSummary::default();
+        for r in records {
+            match &r.event {
+                QuicH3Event::CancelRequested { .. } => {
+                    summary.cancellation_requests += 1;
+                    if summary.first_cancel_ts_us.is_none() {
+                        summary.first_cancel_ts_us = Some(r.ts_us);
+                    }
+                }
+                QuicH3Event::RegionStateChanged { .. } => {
+                    summary.region_transitions += 1;
+                }
+                QuicH3Event::CloseInitiated { .. } => {
+                    if summary.first_close_initiated_ts_us.is_none() {
+                        summary.first_close_initiated_ts_us = Some(r.ts_us);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if let (Some(cancel_ts), Some(close_ts)) = (
+            summary.first_cancel_ts_us,
+            summary.first_close_initiated_ts_us,
+        ) && close_ts >= cancel_ts
+        {
+            summary.cancel_to_close_latency_us = Some(close_ts - cancel_ts);
+        }
+
+        summary
     }
 
     fn extract_lifecycle(records: &[ForensicRecord]) -> Vec<LifecycleTransition> {
@@ -1047,6 +1112,35 @@ mod tests {
                 trigger: "handshake_confirmed".into(),
             },
         );
+        logger.log(
+            550,
+            "cancel_region",
+            QuicH3Event::CancelRequested {
+                scope: "connection".into(),
+                reason: "test_shutdown".into(),
+                trigger: "user".into(),
+            },
+        );
+        logger.log(
+            560,
+            "cancel_region",
+            QuicH3Event::RegionStateChanged {
+                region_id: 1,
+                from_state: "open".into(),
+                to_state: "draining".into(),
+                live_children: 2,
+                outstanding_obligations: 1,
+            },
+        );
+        logger.log(
+            575,
+            "cancel_region",
+            QuicH3Event::CloseInitiated {
+                close_code: 0x100,
+                close_method: "graceful".into(),
+                drain_timeout_us: 2_000_000,
+            },
+        );
 
         // H3 events
         logger.log(
@@ -1139,6 +1233,19 @@ mod tests {
         assert_eq!(manifest.connection_lifecycle[0].to_state, "handshaking");
         assert_eq!(manifest.connection_lifecycle[1].to_state, "established");
 
+        // Verify cancel/region correlation summary
+        assert_eq!(manifest.cancel_region_summary.cancellation_requests, 1);
+        assert_eq!(manifest.cancel_region_summary.region_transitions, 1);
+        assert_eq!(manifest.cancel_region_summary.first_cancel_ts_us, Some(550));
+        assert_eq!(
+            manifest.cancel_region_summary.first_close_initiated_ts_us,
+            Some(575)
+        );
+        assert_eq!(
+            manifest.cancel_region_summary.cancel_to_close_latency_us,
+            Some(25)
+        );
+
         // Verify invariants
         assert_eq!(manifest.invariant_ids.len(), 2);
         assert!(
@@ -1155,10 +1262,14 @@ mod tests {
         assert_eq!(manifest.invariant_verdicts[0].verdict, "pass");
 
         // Verify event timeline
-        assert_eq!(manifest.event_timeline.total_events, 12);
+        assert_eq!(manifest.event_timeline.total_events, 15);
         assert_eq!(
             manifest.event_timeline.by_category.get("quic_transport"),
             Some(&4)
+        );
+        assert_eq!(
+            manifest.event_timeline.by_category.get("cancel_region"),
+            Some(&3)
         );
 
         // Verify replay command
@@ -1309,6 +1420,27 @@ mod tests {
     }
 
     #[test]
+    fn cancel_region_event_names_and_levels() {
+        let cancel = QuicH3Event::CancelRequested {
+            scope: "connection".into(),
+            reason: "manual".into(),
+            trigger: "user".into(),
+        };
+        assert_eq!(cancel.event_name(), "cancel_requested");
+        assert_eq!(cancel.default_level(), "INFO");
+
+        let region = QuicH3Event::RegionStateChanged {
+            region_id: 7,
+            from_state: "open".into(),
+            to_state: "draining".into(),
+            live_children: 1,
+            outstanding_obligations: 0,
+        };
+        assert_eq!(region.event_name(), "region_state_changed");
+        assert_eq!(region.default_level(), "DEBUG");
+    }
+
+    #[test]
     fn invariant_verdict_debug_clone() {
         let v = InvariantVerdict {
             invariant_id: "inv.test".into(),
@@ -1352,6 +1484,18 @@ mod tests {
         assert_eq!(h.requests_sent, 0);
         assert!(!h.settings_exchanged);
         let cloned = h;
+        assert_eq!(format!("{cloned:?}"), dbg);
+    }
+
+    #[test]
+    fn cancel_region_summary_debug_clone_default() {
+        let s = CancelRegionSummary::default();
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("CancelRegionSummary"), "{dbg}");
+        assert_eq!(s.cancellation_requests, 0);
+        assert_eq!(s.region_transitions, 0);
+        assert!(s.cancel_to_close_latency_us.is_none());
+        let cloned = s;
         assert_eq!(format!("{cloned:?}"), dbg);
     }
 
