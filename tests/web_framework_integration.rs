@@ -28,7 +28,8 @@ use asupersync::web::middleware::{
     RateLimitMiddleware, TimeoutMiddleware,
 };
 use asupersync::web::response::{Html, Json, Redirect, StatusCode};
-use asupersync::web::router::{Router, delete, get, patch, post, put};
+use asupersync::web::router::{Router, get, post};
+use asupersync::web::session::{MemoryStore, SessionLayer};
 use asupersync::web::sse::{Sse, SseEvent};
 
 // =========================================================================
@@ -75,8 +76,8 @@ fn html_page() -> Html<&'static str> {
 }
 
 
-fn echo_raw(RawBody(body): RawBody) -> Vec<u8> {
-    body.to_vec()
+fn echo_raw(RawBody(body): RawBody) -> Bytes {
+    body
 }
 
 fn echo_headers(headers: HashMap<String, String>) -> String {
@@ -237,12 +238,12 @@ fn integration_router_fallback_on_nested() {
 
 #[test]
 fn integration_router_wildcard_route() {
-    common::init_test_logging();
-    test_phase!("Router Wildcard Route");
-
     fn wildcard_handler(Path(params): Path<HashMap<String, String>>) -> String {
         params.get("*").cloned().unwrap_or_default()
     }
+
+    common::init_test_logging();
+    test_phase!("Router Wildcard Route");
 
     let router = Router::new().route(
         "/files/*",
@@ -321,12 +322,12 @@ fn integration_extractor_path_string() {
 
 #[test]
 fn integration_extractor_path_numeric() {
-    common::init_test_logging();
-    test_phase!("Extractor Path Numeric");
-
     fn handler(Path(id): Path<u64>) -> String {
         format!("id:{id}")
     }
+
+    common::init_test_logging();
+    test_phase!("Extractor Path Numeric");
 
     let router = Router::new().route(
         "/items/:id",
@@ -367,9 +368,6 @@ fn integration_extractor_query_hashmap() {
 
 #[test]
 fn integration_extractor_query_typed_struct() {
-    common::init_test_logging();
-    test_phase!("Extractor Query Typed Struct");
-
     #[derive(serde::Deserialize)]
     struct Pagination {
         page: u32,
@@ -379,6 +377,9 @@ fn integration_extractor_query_typed_struct() {
     fn handler(Query(p): Query<Pagination>) -> String {
         format!("page:{},per_page:{}", p.page, p.per_page)
     }
+
+    common::init_test_logging();
+    test_phase!("Extractor Query Typed Struct");
 
     let router = Router::new().route(
         "/items",
@@ -765,9 +766,7 @@ fn integration_response_tuple_status_body() {
 
 #[test]
 fn integration_response_result_ok_and_err() {
-    common::init_test_logging();
-    test_phase!("Response Result<T, E>");
-
+    #[allow(clippy::unnecessary_wraps)]
     fn ok_handler() -> Result<&'static str, StatusCode> {
         Ok("success")
     }
@@ -775,6 +774,9 @@ fn integration_response_result_ok_and_err() {
     fn err_handler() -> Result<&'static str, StatusCode> {
         Err(StatusCode::FORBIDDEN)
     }
+
+    common::init_test_logging();
+    test_phase!("Response Result<T, E>");
 
     let router = Router::new()
         .route("/ok", get(FnHandler::new(ok_handler)))
@@ -881,7 +883,7 @@ fn integration_middleware_cors_exact_origin() {
     let req = Request::new("GET", "/api").with_header("origin", "https://evil.com");
     let resp = cors.call(req);
     assert_eq!(resp.status, StatusCode::OK);
-    assert!(resp.headers.get("access-control-allow-origin").is_none());
+    assert!(!resp.headers.contains_key("access-control-allow-origin"));
 
     test_complete!("middleware_cors_exact_origin");
 }
@@ -898,7 +900,7 @@ fn integration_middleware_cors_no_origin_passthrough() {
     let req = Request::new("GET", "/api");
     let resp = cors.call(req);
     assert_eq!(resp.status, StatusCode::OK);
-    assert!(resp.headers.get("access-control-allow-origin").is_none());
+    assert!(!resp.headers.contains_key("access-control-allow-origin"));
 
     test_complete!("middleware_cors_no_origin");
 }
@@ -920,12 +922,12 @@ fn integration_middleware_timeout() {
 
 #[test]
 fn integration_middleware_catch_panic() {
-    common::init_test_logging();
-    test_phase!("Middleware Catch Panic");
-
     fn panicking_handler() -> &'static str {
         panic!("deliberate test panic");
     }
+
+    common::init_test_logging();
+    test_phase!("Middleware Catch Panic");
 
     let handler = FnHandler::new(panicking_handler);
     let catch = CatchPanicMiddleware::new(handler);
@@ -1032,15 +1034,15 @@ fn integration_middleware_in_router() {
 
 #[test]
 fn integration_sse_handler() {
-    common::init_test_logging();
-    test_phase!("SSE Handler");
-
     fn sse_handler() -> Sse {
         Sse::new(vec![
             SseEvent::default().event("message").data("hello"),
             SseEvent::default().event("message").data("world"),
         ])
     }
+
+    common::init_test_logging();
+    test_phase!("SSE Handler");
 
     let router = Router::new().route("/events", get(FnHandler::new(sse_handler)));
 
@@ -1061,9 +1063,6 @@ fn integration_sse_handler() {
 
 #[test]
 fn integration_sse_keep_alive_and_last_event_id() {
-    common::init_test_logging();
-    test_phase!("SSE Keep-Alive and Last-Event-ID");
-
     fn sse_handler() -> Sse {
         Sse::new(vec![
             SseEvent::default().event("update").data("{\"n\":1}"),
@@ -1072,6 +1071,9 @@ fn integration_sse_keep_alive_and_last_event_id() {
         .keep_alive()
         .last_event_id("42")
     }
+
+    common::init_test_logging();
+    test_phase!("SSE Keep-Alive and Last-Event-ID");
 
     let router = Router::new().route("/stream", get(FnHandler::new(sse_handler)));
 
@@ -1088,12 +1090,12 @@ fn integration_sse_keep_alive_and_last_event_id() {
 
 #[test]
 fn integration_sse_multiline_data() {
-    common::init_test_logging();
-    test_phase!("SSE Multiline Data");
-
     fn sse_handler() -> SseEvent {
         SseEvent::default().data("line1\nline2\nline3")
     }
+
+    common::init_test_logging();
+    test_phase!("SSE Multiline Data");
 
     let router = Router::new().route("/event", get(FnHandler::new(sse_handler)));
 
@@ -1185,8 +1187,6 @@ fn integration_health_degraded_and_unhealthy() {
 fn integration_session_basic() {
     common::init_test_logging();
     test_phase!("Session Basic");
-
-    use asupersync::web::session::{MemoryStore, SessionLayer};
 
     let store = MemoryStore::new();
     let inner = FnHandler::new(|| -> &'static str { "session-ok" });
