@@ -1,3 +1,4 @@
+#![allow(clippy::items_after_statements)]
 #![allow(missing_docs)]
 //! I/O and Codec Cancellation-Correctness Contract Tests
 //!
@@ -571,8 +572,7 @@ fn csr_04_split_cancel_one_half() {
     let split = SplitStream::new(stream);
 
     // Get both halves, then drop the write half (simulating cancel of write side)
-    let (mut read_half, write_half) = split.split();
-    drop(write_half);
+    let (mut read_half, _write_half) = split.split();
 
     // Read half should still work
     let waker = noop_waker();
