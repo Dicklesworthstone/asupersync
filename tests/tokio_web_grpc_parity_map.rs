@@ -1212,7 +1212,7 @@ fn parity_grpc_g1_g2_g11_ht_g1_closed_in_gap_summary() {
         ("HT-G1", "100-continue"),
     ] {
         assert!(
-            summary.contains(&format!("~~{gap}~~")) || summary.contains(&format!("{gap}")),
+            summary.contains(&format!("~~{gap}~~")) || summary.contains(gap),
             "gap summary must reference {gap} ({feature})"
         );
     }
