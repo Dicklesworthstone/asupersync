@@ -393,7 +393,7 @@ where
     pub async fn send(&mut self, cx: &Cx, msg: Message) -> Result<(), WsError> {
         // Check cancellation
         if cx.is_cancel_requested() {
-            self.initiate_close(CloseReason::going_away()).await?;
+            let _ = self.initiate_close(CloseReason::going_away()).await;
             return Err(WsError::Io(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "cancelled",
@@ -423,17 +423,16 @@ where
         loop {
             // Check cancellation
             if cx.is_cancel_requested() {
-                self.initiate_close(CloseReason::going_away()).await?;
                 return Err(WsError::Io(io::Error::new(
                     io::ErrorKind::Interrupted,
                     "cancelled",
                 )));
             }
 
-            // Send any pending pongs in FIFO order (cancel-safe: pop removes
-            // one at a time; reverse ensures oldest-first dispatch).
-            self.pending_pongs.reverse();
-            while let Some(payload) = self.pending_pongs.pop() {
+            // Send any pending pongs in FIFO order (cancel-safe: remove(0) takes
+            // one at a time from the front without reversing the whole queue).
+            while !self.pending_pongs.is_empty() {
+                let payload = self.pending_pongs.remove(0);
                 let pong = Frame::pong(payload);
                 self.send_frame(pong).await?;
             }
@@ -442,7 +441,12 @@ where
                 // Handle control frames
                 match frame.opcode {
                     Opcode::Ping => {
-                        // Queue pong for next send
+                        // Cap pending pongs to prevent memory DoS via
+                        // Ping flooding.  RFC 6455 allows responding with
+                        // just the latest payload.
+                        if self.pending_pongs.len() >= 16 {
+                            self.pending_pongs.clear();
+                        }
                         self.pending_pongs.push(frame.payload);
                     }
                     Opcode::Pong => {

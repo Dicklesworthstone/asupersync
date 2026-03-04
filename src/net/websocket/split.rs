@@ -261,7 +261,6 @@ where
         loop {
             // Check cancellation
             if cx.is_cancel_requested() {
-                self.initiate_close(CloseReason::going_away()).await?;
                 return Err(WsError::Io(io::Error::new(
                     io::ErrorKind::Interrupted,
                     "cancelled",
@@ -271,9 +270,9 @@ where
             // Send any pending pongs (under lock)
             {
                 let shared = &mut *self.shared.lock();
-                // cancel-safe: pop removes one at a time; reverse ensures FIFO order
-                shared.pending_pongs.reverse();
-                while let Some(payload) = shared.pending_pongs.pop() {
+                // cancel-safe: remove(0) takes one at a time from the front without reversing the whole queue
+                while !shared.pending_pongs.is_empty() {
+                    let payload = shared.pending_pongs.remove(0);
                     let pong = Frame::pong(payload);
                     let shared = &mut *shared;
                     shared.codec.encode(pong, &mut shared.write_buf)?;
@@ -294,8 +293,13 @@ where
                 // Handle control frames
                 match frame.opcode {
                     Opcode::Ping => {
-                        // Queue pong for next operation
-                        self.shared.lock().pending_pongs.push(frame.payload);
+                        // Cap pending pongs to prevent memory DoS via
+                        // Ping flooding.
+                        let mut shared = self.shared.lock();
+                        if shared.pending_pongs.len() >= 16 {
+                            shared.pending_pongs.clear();
+                        }
+                        shared.pending_pongs.push(frame.payload);
                     }
                     Opcode::Pong => {
                         // Pong received - keepalive confirmed
@@ -477,7 +481,6 @@ where
     pub async fn send(&mut self, cx: &Cx, msg: Message) -> Result<(), WsError> {
         // Check cancellation
         if cx.is_cancel_requested() {
-            self.initiate_close(CloseReason::going_away()).await?;
             return Err(WsError::Io(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "cancelled",
