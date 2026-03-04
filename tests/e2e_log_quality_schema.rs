@@ -311,3 +311,25 @@ fn run_all_orchestrator_keeps_log_quality_enforcement_hooks() {
         "run_all_e2e.sh must emit cross-suite manifest artifact"
     );
 }
+
+#[test]
+fn run_all_orchestrator_enforces_redaction_mode_and_quality_threshold_contract() {
+    let content =
+        fs::read_to_string("scripts/run_all_e2e.sh").expect("read run_all_e2e.sh contract");
+
+    for token in [
+        "ARTIFACT_REDACTION_MODE must be one of: metadata_only, none, strict",
+        "ARTIFACT_REDACTION_MODE=none is forbidden in CI",
+        "LOG_QUALITY_MIN_SCORE must be numeric (0-100)",
+        "LOG_QUALITY_MIN_SCORE must be within 0..100",
+        "--arg redaction_mode",
+        "\"log_quality_threshold\"",
+        "\"log_quality_gate_ok\"",
+        "\"summary_schema_reason\"",
+    ] {
+        assert!(
+            content.contains(token),
+            "run_all_e2e.sh missing redaction/quality contract token: {token}"
+        );
+    }
+}

@@ -91,6 +91,30 @@ asupersync doctor logging-contract
 4. `command_provenance`: single-line shell command
 5. `outcome_class`: `cancelled|failed|success`
 
+## E2E Redaction + Log-Quality Gate Contract
+
+The E2E orchestrator (`scripts/run_all_e2e.sh`) is part of the logging contract
+enforcement surface for CI and release gating.
+
+Required policy invariants:
+
+1. `ARTIFACT_REDACTION_MODE` must be one of `metadata_only|none|strict`.
+2. In CI, `ARTIFACT_REDACTION_MODE=none` is forbidden (fail closed).
+3. `LOG_QUALITY_MIN_SCORE` must be numeric and constrained to `0..100`.
+4. Per-suite manifest entries must include:
+   - `log_quality_score`
+   - `log_quality_threshold`
+   - `log_quality_gate_ok`
+   - `summary_schema_reason`
+5. Lifecycle artifacts must include `redaction_mode` so downstream policy
+   auditors can verify redaction posture without replaying the suite.
+
+Extension policy:
+
+- Redaction/quality gate fields may be extended additively in `doctor-logging-v1`.
+- Removing or renaming any required redaction/quality field requires a contract
+  version bump and migration guidance update.
+
 ## Core Flow Coverage
 
 `core_flows` include deterministic requirements for:
