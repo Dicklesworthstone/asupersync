@@ -162,9 +162,7 @@ pub fn decode_trailers(body: &[u8]) -> Result<TrailerFrame, GrpcError> {
             _ => {
                 if key.ends_with("-bin") {
                     use base64::Engine;
-                    if let Ok(decoded) =
-                        base64::engine::general_purpose::STANDARD.decode(value)
-                    {
+                    if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(value) {
                         metadata.insert_bin(&key, Bytes::from(decoded));
                     }
                 } else {
@@ -288,6 +286,7 @@ impl Default for WebFrameCodec {
 /// Encode raw gRPC-Web binary frames to base64 for text mode.
 ///
 /// This wraps the entire binary stream, not individual frames.
+#[must_use]
 pub fn base64_encode(binary: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(binary)
@@ -313,8 +312,7 @@ pub fn is_grpc_web_request(content_type: &str) -> bool {
 /// Determine if a gRPC-Web request uses text (base64) mode.
 #[must_use]
 pub fn is_text_mode(content_type: &str) -> bool {
-    ContentType::from_header_value(content_type)
-        .is_some_and(|ct| ct.is_text_mode())
+    ContentType::from_header_value(content_type).is_some_and(ContentType::is_text_mode)
 }
 
 #[cfg(test)]
@@ -380,7 +378,12 @@ mod tests {
         init_test("test_content_type_parse_standard_grpc");
         // Standard gRPC is NOT grpc-web.
         let ct = ContentType::from_header_value("application/grpc");
-        crate::assert_with_log!(ct.is_none(), "standard grpc is not grpc-web", true, ct.is_none());
+        crate::assert_with_log!(
+            ct.is_none(),
+            "standard grpc is not grpc-web",
+            true,
+            ct.is_none()
+        );
         crate::test_complete!("test_content_type_parse_standard_grpc");
     }
 
@@ -419,9 +422,8 @@ mod tests {
         // Decode.
         let frame_codec = WebFrameCodec::new();
         let frame = frame_codec.decode(&mut buf).unwrap().unwrap();
-        let trailers = match frame {
-            WebFrame::Trailers(t) => t,
-            _ => panic!("expected trailer frame"),
+        let WebFrame::Trailers(trailers) = frame else {
+            panic!("expected trailer frame")
         };
         crate::assert_with_log!(
             trailers.status.code() == Code::Ok,
@@ -443,9 +445,8 @@ mod tests {
 
         let frame_codec = WebFrameCodec::new();
         let frame = frame_codec.decode(&mut buf).unwrap().unwrap();
-        let trailers = match frame {
-            WebFrame::Trailers(t) => t,
-            _ => panic!("expected trailer frame"),
+        let WebFrame::Trailers(trailers) = frame else {
+            panic!("expected trailer frame")
         };
         crate::assert_with_log!(
             trailers.status.code() == Code::NotFound,
@@ -475,9 +476,8 @@ mod tests {
 
         let frame_codec = WebFrameCodec::new();
         let frame = frame_codec.decode(&mut buf).unwrap().unwrap();
-        let trailers = match frame {
-            WebFrame::Trailers(t) => t,
-            _ => panic!("expected trailer frame"),
+        let WebFrame::Trailers(trailers) = frame else {
+            panic!("expected trailer frame")
         };
 
         let request_id = trailers.metadata.get("x-request-id");
@@ -499,18 +499,16 @@ mod tests {
             .unwrap();
 
         let frame = codec.decode(&mut buf).unwrap().unwrap();
-        match frame {
-            WebFrame::Data { compressed, data } => {
-                crate::assert_with_log!(!compressed, "not compressed", false, compressed);
-                crate::assert_with_log!(
-                    data.as_ref() == b"hello grpc-web",
-                    "data matches",
-                    "hello grpc-web",
-                    std::str::from_utf8(data.as_ref()).unwrap_or("<binary>")
-                );
-            }
-            _ => panic!("expected data frame"),
-        }
+        let WebFrame::Data { compressed, data } = frame else {
+            panic!("expected data frame")
+        };
+        crate::assert_with_log!(!compressed, "not compressed", false, compressed);
+        crate::assert_with_log!(
+            data.as_ref() == b"hello grpc-web",
+            "data matches",
+            "hello grpc-web",
+            std::str::from_utf8(data.as_ref()).unwrap_or("<binary>")
+        );
         crate::test_complete!("test_data_frame_roundtrip");
     }
 
@@ -521,20 +519,13 @@ mod tests {
         let mut buf = BytesMut::new();
 
         codec.encode_data(b"compressed", true, &mut buf).unwrap();
-        crate::assert_with_log!(
-            buf[0] == 1,
-            "compressed flag byte",
-            1u8,
-            buf[0]
-        );
+        crate::assert_with_log!(buf[0] == 1, "compressed flag byte", 1u8, buf[0]);
 
         let frame = codec.decode(&mut buf).unwrap().unwrap();
-        match frame {
-            WebFrame::Data { compressed, .. } => {
-                crate::assert_with_log!(compressed, "compressed set", true, compressed);
-            }
-            _ => panic!("expected data frame"),
-        }
+        let WebFrame::Data { compressed, .. } = frame else {
+            panic!("expected data frame")
+        };
+        crate::assert_with_log!(compressed, "compressed set", true, compressed);
         crate::test_complete!("test_data_frame_compressed_flag");
     }
 
@@ -557,7 +548,12 @@ mod tests {
         let mut buf = BytesMut::from(&[0u8, 0, 0][..]);
 
         let result = codec.decode(&mut buf).unwrap();
-        crate::assert_with_log!(result.is_none(), "partial header returns None", true, result.is_none());
+        crate::assert_with_log!(
+            result.is_none(),
+            "partial header returns None",
+            true,
+            result.is_none()
+        );
         crate::test_complete!("test_decode_partial_header");
     }
 
@@ -571,7 +567,12 @@ mod tests {
         buf.extend_from_slice(&[1, 2, 3]); // only 3 of 10 bytes
 
         let result = codec.decode(&mut buf).unwrap();
-        crate::assert_with_log!(result.is_none(), "partial body returns None", true, result.is_none());
+        crate::assert_with_log!(
+            result.is_none(),
+            "partial body returns None",
+            true,
+            result.is_none()
+        );
         crate::test_complete!("test_decode_partial_body");
     }
 
@@ -658,7 +659,8 @@ mod tests {
 
         // Parse frames.
         let f1 = codec.decode(&mut decode_buf).unwrap().unwrap();
-        let is_data = matches!(&f1, WebFrame::Data { data, .. } if data.as_ref() == b"message-payload");
+        let is_data =
+            matches!(&f1, WebFrame::Data { data, .. } if data.as_ref() == b"message-payload");
         crate::assert_with_log!(is_data, "data frame decoded from text mode", true, is_data);
 
         let f2 = codec.decode(&mut decode_buf).unwrap().unwrap();
