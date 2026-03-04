@@ -743,8 +743,32 @@ impl HttpClient {
 
         let key = parsed.pool_key();
         let acquired = self.acquire_connection(parsed).await?;
+
+        struct ConnectionGuard<'a> {
+            client: &'a HttpClient,
+            key: PoolKey,
+            pool_id: Option<u64>,
+            defused: bool,
+        }
+
+        impl Drop for ConnectionGuard<'_> {
+            fn drop(&mut self) {
+                if !self.defused {
+                    self.client.drop_connection(&self.key, self.pool_id);
+                }
+            }
+        }
+
+        let mut guard = ConnectionGuard {
+            client: self,
+            key: key.clone(),
+            pool_id: acquired.pool_id,
+            defused: false,
+        };
+
         match Http1Client::request_with_io(acquired.io, req).await {
             Ok((response, io)) => {
+                guard.defused = true;
                 if connection_can_be_reused(&response) {
                     self.release_connection(&key, acquired.pool_id, acquired.fresh, io);
                 } else {
@@ -753,7 +777,7 @@ impl HttpClient {
                 Ok(response)
             }
             Err(err) => {
-                self.drop_connection(&key, acquired.pool_id);
+                // guard drops the connection on return
                 Err(ClientError::from(err))
             }
         }
