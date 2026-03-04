@@ -1349,7 +1349,7 @@ mod tests {
                 .unwrap();
             assert_eq!(third.offset, first.offset + 1);
 
-            producer.flush(&cx, Duration::from_millis(5)).unwrap();
+            producer.flush(&cx, Duration::from_millis(5)).await.unwrap();
         });
     }
 

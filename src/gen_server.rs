@@ -1363,7 +1363,18 @@ async fn run_gen_server_loop<S: GenServer>(
             break;
         }
 
-        match cell.mailbox.recv(&cx).await {
+        let recv_result = std::future::poll_fn(|task_cx| {
+            match cell.mailbox.poll_recv(&cx, task_cx) {
+                std::task::Poll::Pending if cell.state.load() == ActorState::Stopping => {
+                    // Graceful stop requested and mailbox is empty. Break the loop.
+                    std::task::Poll::Ready(Err(crate::channel::mpsc::RecvError::Disconnected))
+                }
+                other => other,
+            }
+        })
+        .await;
+
+        match recv_result {
             Ok(envelope) => {
                 dispatch_envelope(&mut server, &cx, envelope).await;
             }
@@ -1397,6 +1408,8 @@ async fn run_gen_server_loop<S: GenServer>(
     let drain_limit = cell.mailbox.capacity() as u64;
     let mut drained: u64 = 0;
     let is_aborted = cx.is_cancel_requested();
+
+    cell.mailbox.close();
 
     while let Ok(envelope) = cell.mailbox.try_recv() {
         match envelope {

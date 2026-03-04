@@ -31,11 +31,12 @@
 //! // Run concurrently
 //! futures::try_join!(reader, writer)?;
 //! ```
+#![allow(clippy::significant_drop_tightening)]
 
 use super::client::{Message, MessageAssembler, WebSocket, WebSocketConfig};
 use super::close::{CloseHandshake, CloseReason, CloseState};
 use super::frame::{Frame, FrameCodec, Opcode, WsError};
-use crate::bytes::{Buf, Bytes, BytesMut};
+use crate::bytes::{Bytes, BytesMut};
 use crate::codec::{Decoder, Encoder};
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -120,6 +121,45 @@ async fn acquire_write_permit<IO>(
     SplitWritePermit {
         shared: Arc::clone(shared),
     }
+}
+
+/// Flush the shared write buffer to the underlying I/O.
+async fn flush_write_buf<IO: AsyncWrite + Unpin>(
+    shared: &Arc<Mutex<WebSocketShared<IO>>>,
+) -> Result<(), WsError> {
+    use std::future::poll_fn;
+
+    let _permit = acquire_write_permit(shared).await;
+
+    while {
+        let guard = shared.lock();
+        !guard.write_buf.is_empty()
+    } {
+        let n = poll_fn(|poll_cx| {
+            let mut guard = shared.lock();
+            if guard.write_buf.is_empty() {
+                return Poll::Ready(Ok(0));
+            }
+            let WebSocketShared { io, write_buf, .. } = &mut *guard;
+            Pin::new(io).poll_write(poll_cx, &write_buf[..])
+        })
+        .await?;
+
+        if n == 0 {
+            let guard = shared.lock();
+            if !guard.write_buf.is_empty() {
+                return Err(WsError::Io(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "write returned 0",
+                )));
+            }
+            break;
+        }
+        let mut guard = shared.lock();
+        let _ = guard.write_buf.split_to(n);
+    }
+
+    Ok(())
 }
 
 /// The read half of a split WebSocket.
@@ -234,13 +274,13 @@ where
                 // cancel-safe: do not clear write_buf, pop pongs instead of draining
                 while let Some(payload) = shared.pending_pongs.pop() {
                     let pong = Frame::pong(payload);
-                    let (codec, write_buf) = (&mut shared.codec, &mut shared.write_buf);
-                    codec.encode(pong, write_buf)?;
+                    let shared = &mut *shared;
+                    shared.codec.encode(pong, &mut shared.write_buf)?;
                 }
             }
 
             // Flush pending pongs if any were queued
-            self.flush_write_buf().await?;
+            flush_write_buf(&self.shared).await?;
 
             // Try to decode a frame from the buffer
             let maybe_frame = {
@@ -373,48 +413,10 @@ where
     async fn send_frame_internal(&self, frame: Frame) -> Result<(), WsError> {
         {
             let mut shared = self.shared.lock();
-            let (codec, write_buf) = (&mut shared.codec, &mut shared.write_buf);
-            codec.encode(frame, write_buf)?;
+            let shared = &mut *shared;
+            shared.codec.encode(frame, &mut shared.write_buf)?;
         }
-        self.flush_write_buf().await
-    }
-
-    /// Internal: flush the write buffer.
-    async fn flush_write_buf(&self) -> Result<(), WsError> {
-        use crate::bytes::Buf;
-        use std::future::poll_fn;
-
-        let _permit = acquire_write_permit(&self.shared).await;
-
-        while {
-            let shared = self.shared.lock();
-            !shared.write_buf.is_empty()
-        } {
-            let n = poll_fn(|poll_cx| {
-                let mut shared = self.shared.lock();
-                if shared.write_buf.is_empty() {
-                    return Poll::Ready(Ok(0));
-                }
-                let chunk = shared.write_buf.chunk();
-                Pin::new(&mut shared.io).poll_write(poll_cx, chunk)
-            })
-            .await?;
-
-            if n == 0 {
-                let shared = self.shared.lock();
-                if !shared.write_buf.is_empty() {
-                    return Err(WsError::Io(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "write returned 0",
-                    )));
-                }
-                break;
-            }
-            let mut shared = self.shared.lock();
-            shared.write_buf.advance(n);
-        }
-
-        Ok(())
+        flush_write_buf(&self.shared).await
     }
 
     /// Internal: read more data into buffer.
@@ -534,10 +536,10 @@ where
     async fn send_frame(&self, frame: Frame) -> Result<(), WsError> {
         {
             let mut shared = self.shared.lock();
-            let (codec, write_buf) = (&mut shared.codec, &mut shared.write_buf);
-            codec.encode(frame, write_buf)?;
+            let shared = &mut *shared;
+            shared.codec.encode(frame, &mut shared.write_buf)?;
         }
-        self.flush_write_buf().await
+        flush_write_buf(&self.shared).await
     }
 }
 
@@ -736,7 +738,7 @@ mod tests {
             }
 
             // flush_write_buf should clear write_buf before writing
-            let result = read.flush_write_buf().await;
+            let result = flush_write_buf(&read.shared).await;
             assert!(result.is_ok());
 
             // write_buf must be empty after flush regardless of outcome
@@ -768,10 +770,10 @@ mod tests {
             {
                 let shared = &mut *read.shared.lock();
                 shared.write_buf.clear();
-                for payload in shared.pending_pongs.drain(..) {
+                let pongs: Vec<_> = shared.pending_pongs.drain(..).collect();
+                for payload in pongs {
                     let pong = Frame::pong(payload);
-                    let (codec, write_buf) = (&mut shared.codec, &mut shared.write_buf);
-                    codec.encode(pong, write_buf).unwrap();
+                    shared.codec.encode(pong, &mut shared.write_buf).unwrap();
                 }
             }
 

@@ -685,7 +685,18 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
             break;
         }
 
-        match cell.mailbox.recv(&cx).await {
+        let recv_result = std::future::poll_fn(|task_cx| {
+            match cell.mailbox.poll_recv(&cx, task_cx) {
+                std::task::Poll::Pending if cell.state.load() == ActorState::Stopping => {
+                    // Graceful stop requested and mailbox is empty. Break the loop.
+                    std::task::Poll::Ready(Err(crate::channel::mpsc::RecvError::Disconnected))
+                }
+                other => other,
+            }
+        })
+        .await;
+
+        match recv_result {
             Ok(msg) => {
                 actor.handle(&cx, msg).await;
             }
@@ -717,7 +728,9 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
     // empty the mailbox to drop the messages.
     cell.mailbox.close();
 
-    if !is_aborted {
+    if is_aborted {
+        while let Ok(_msg) = cell.mailbox.try_recv() {}
+    } else {
         let mut drained: u64 = 0;
         while let Ok(msg) = cell.mailbox.try_recv() {
             actor.handle(&cx, msg).await;
@@ -727,8 +740,6 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
             debug!(drained = drained, "actor::mailbox_drained");
             cx.trace("actor::mailbox_drained");
         }
-    } else {
-        while let Ok(_msg) = cell.mailbox.try_recv() {}
     }
 
     // Phase 4: Cleanup

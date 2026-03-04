@@ -25,7 +25,7 @@
 use super::close::{CloseConfig, CloseHandshake, CloseReason, CloseState};
 use super::frame::{Frame, FrameCodec, Opcode, WsError};
 use super::handshake::{ClientHandshake, HandshakeError, HttpResponse, WsUrl};
-use crate::bytes::{Buf, Bytes, BytesMut};
+use crate::bytes::{Bytes, BytesMut};
 use crate::codec::{Decoder, Encoder};
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};

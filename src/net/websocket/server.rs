@@ -204,10 +204,7 @@ impl WebSocketAcceptor {
         IO: AsyncWrite + Unpin,
     {
         let response = ServerHandshake::reject(status, reason);
-        stream.write_all(&response).await.map_err(|e| match e {
-            WsError::Io(e) => e,
-            _ => io::Error::other("unexpected error"),
-        })
+        stream.write_all(&response).await
     }
 }
 
@@ -466,21 +463,20 @@ where
 
     /// Internal: send a single frame.
     async fn send_frame(&mut self, frame: Frame) -> Result<(), WsError> {
-        use crate::bytes::Buf;
         use std::future::poll_fn;
 
         self.codec.encode(frame, &mut self.write_buf)?;
 
         while !self.write_buf.is_empty() {
             let n =
-                poll_fn(|cx| Pin::new(&mut self.io).poll_write(cx, self.write_buf.chunk())).await?;
+                poll_fn(|cx| Pin::new(&mut self.io).poll_write(cx, &self.write_buf[..])).await?;
             if n == 0 {
                 return Err(WsError::Io(io::Error::new(
                     io::ErrorKind::WriteZero,
                     "write returned 0",
                 )));
             }
-            self.write_buf.advance(n);
+            let _ = self.write_buf.split_to(n);
         }
 
         Ok(())
@@ -577,21 +573,6 @@ impl From<WsError> for WsAcceptError {
     fn from(err: WsError) -> Self {
         Self::Protocol(err)
     }
-}
-
-/// Write all bytes to an async writer.
-async fn write_all<IO: AsyncWrite + Unpin>(io: &mut IO, buf: &[u8]) -> io::Result<()> {
-    use std::future::poll_fn;
-
-    let mut written = 0;
-    while written < buf.len() {
-        let n = poll_fn(|cx| Pin::new(&mut *io).poll_write(cx, &buf[written..])).await?;
-        if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
-        }
-        written += n;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
