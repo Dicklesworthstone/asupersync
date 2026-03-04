@@ -36,9 +36,9 @@
           "authentication_failure",
           "connection_failure"
         ],
-        "backends_with_retry": ["postgresql"],
-        "backends_missing_retry": ["mysql", "sqlite"],
-        "status": "partial"
+        "backends_with_retry": ["postgresql", "mysql", "sqlite"],
+        "backends_missing_retry": [],
+        "status": "implemented"
       },
       {
         "id": "C-RTY-03",
@@ -333,7 +333,7 @@
   "summary": {
     "total_contracts": 19,
     "domains": {
-      "retry": {"count": 5, "implemented": 2, "partial": 1, "defined": 1, "not_implemented": 1},
+      "retry": {"count": 5, "implemented": 3, "partial": 0, "defined": 1, "not_implemented": 1},
       "error_classification": {"count": 3, "implemented": 1, "partial": 0, "defined": 0, "not_implemented": 2},
       "idempotency": {"count": 3, "implemented": 0, "partial": 1, "defined": 1, "not_implemented": 1},
       "delivery": {"count": 3, "implemented": 0, "partial": 0, "defined": 3, "not_implemented": 0},
@@ -342,7 +342,7 @@
     },
     "systems": ["postgresql", "mysql", "sqlite", "kafka", "jetstream", "nats_core", "redis_pubsub"],
     "blocking_gaps": [
-      {"id": "RTY-G1", "severity": "high", "description": "MySQL/SQLite transaction retry not implemented"},
+      {"id": "RTY-G1", "severity": "closed", "description": "MySQL/SQLite transaction retry — IMPLEMENTED"},
       {"id": "ERR-G1", "severity": "closed", "description": "MySQL/SQLite error classification methods — IMPLEMENTED"},
       {"id": "ERR-G2", "severity": "closed", "description": "PostgreSQL is_transient/is_connection_error — IMPLEMENTED"},
       {"id": "ERR-G3", "severity": "medium", "description": "Messaging error classification methods missing"},

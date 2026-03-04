@@ -275,8 +275,8 @@ Timeouts MUST act as backpressure release valves:
 |---------|--------|----------|
 | Generic retry combinator | Implemented | `src/combinator/retry.rs` |
 | PostgreSQL transaction retry | Implemented | `src/database/transaction.rs` |
-| MySQL transaction retry | NOT IMPLEMENTED | — |
-| SQLite transaction retry | NOT IMPLEMENTED | — |
+| MySQL transaction retry | Implemented | `src/database/transaction.rs` |
+| SQLite transaction retry | Implemented | `src/database/transaction.rs` |
 | Connection pool retry | NOT IMPLEMENTED | — |
 
 ### Error Classification Status

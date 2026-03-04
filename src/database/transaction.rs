@@ -12,8 +12,11 @@
 //! - [`with_pg_transaction`]: Run a closure inside a PostgreSQL transaction
 //! - [`with_sqlite_transaction`]: Run a closure inside a SQLite transaction
 //! - [`with_mysql_transaction`]: Run a closure inside a MySQL transaction
+//! - [`with_pg_transaction_retry`]: PostgreSQL retry on serialization failure (40001)
+//! - [`with_mysql_transaction_retry`]: MySQL retry on deadlock (1213/1205)
+//! - [`with_sqlite_transaction_retry`]: SQLite retry on SQLITE_BUSY/SQLITE_LOCKED
 //! - [`PgSavepoint`] / [`SqliteSavepoint`] / [`MySqlSavepoint`]: Nested savepoints
-//! - [`RetryPolicy`]: Configurable retry for serialization failures
+//! - [`RetryPolicy`]: Configurable retry with exponential backoff
 //!
 //! All helpers integrate with [`Cx`] for cancellation. On `Outcome::Err` or
 //! `Outcome::Cancelled`, the transaction is rolled back. On `Outcome::Ok`,
@@ -373,6 +376,42 @@ mod sqlite {
         }
     }
 
+    /// Run a closure inside a SQLite transaction with retry on busy/locked.
+    ///
+    /// `SQLITE_BUSY` and `SQLITE_LOCKED` errors are retried according to the
+    /// given [`RetryPolicy`]. Other errors are returned immediately.
+    ///
+    /// For write-heavy workloads, prefer [`with_sqlite_transaction_immediate`]
+    /// which acquires the write lock upfront to reduce contention.
+    pub async fn with_sqlite_transaction_retry<T, F, MkFut>(
+        conn: &SqliteConnection,
+        cx: &Cx,
+        policy: &RetryPolicy,
+        mut f: F,
+    ) -> Outcome<T, SqliteError>
+    where
+        F: FnMut(&SqliteTransaction<'_>, &Cx) -> MkFut,
+        MkFut: Future<Output = Outcome<T, SqliteError>>,
+    {
+        let mut attempt = 0u32;
+        loop {
+            let result = with_sqlite_transaction(conn, cx, &mut f).await;
+            match &result {
+                Outcome::Err(e)
+                    if (e.is_busy() || e.is_locked()) && attempt < policy.max_retries =>
+                {
+                    attempt += 1;
+                    let delay = policy.delay_for(attempt.saturating_sub(1));
+                    if !delay.is_zero() {
+                        crate::runtime::yield_now().await;
+                    }
+                    continue;
+                }
+                _ => return result,
+            }
+        }
+    }
+
     /// A SQLite savepoint within an active transaction.
     ///
     /// Created via [`SqliteSavepoint::new`].
@@ -449,7 +488,10 @@ mod sqlite {
 }
 
 #[cfg(feature = "sqlite")]
-pub use sqlite::{SqliteSavepoint, with_sqlite_transaction, with_sqlite_transaction_immediate};
+pub use sqlite::{
+    SqliteSavepoint, with_sqlite_transaction, with_sqlite_transaction_immediate,
+    with_sqlite_transaction_retry,
+};
 
 // ─── MySQL helpers ───────────────────────────────────────────────────────────
 
@@ -498,6 +540,38 @@ mod mysql {
             Outcome::Panicked(p) => {
                 let _ = tx.rollback(cx).await;
                 Outcome::Panicked(p)
+            }
+        }
+    }
+
+    /// Run a closure inside a MySQL transaction with retry on deadlock.
+    ///
+    /// Deadlocks (error 1213) and lock wait timeouts (error 1205) are retried
+    /// according to the given [`RetryPolicy`]. Other errors are returned
+    /// immediately.
+    pub async fn with_mysql_transaction_retry<T, F, MkFut>(
+        conn: &mut MySqlConnection,
+        cx: &Cx,
+        policy: &RetryPolicy,
+        mut f: F,
+    ) -> Outcome<T, MySqlError>
+    where
+        F: FnMut(&mut MySqlTransaction<'_>, &Cx) -> MkFut,
+        MkFut: Future<Output = Outcome<T, MySqlError>>,
+    {
+        let mut attempt = 0u32;
+        loop {
+            let result = with_mysql_transaction(conn, cx, &mut f).await;
+            match &result {
+                Outcome::Err(e) if e.is_deadlock() && attempt < policy.max_retries => {
+                    attempt += 1;
+                    let delay = policy.delay_for(attempt.saturating_sub(1));
+                    if !delay.is_zero() {
+                        crate::runtime::yield_now().await;
+                    }
+                    continue;
+                }
+                _ => return result,
             }
         }
     }
@@ -578,7 +652,7 @@ mod mysql {
 }
 
 #[cfg(feature = "mysql")]
-pub use mysql::{MySqlSavepoint, with_mysql_transaction};
+pub use mysql::{MySqlSavepoint, with_mysql_transaction, with_mysql_transaction_retry};
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 

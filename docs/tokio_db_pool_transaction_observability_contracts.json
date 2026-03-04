@@ -145,9 +145,9 @@
           "mysql": "Error 1213, Error 1205",
           "sqlite": "SQLITE_BUSY"
         },
-        "backends_with_retry": ["postgresql"],
-        "backends_missing_retry": ["mysql", "sqlite"],
-        "status": "partial"
+        "backends_with_retry": ["postgresql", "mysql", "sqlite"],
+        "backends_missing_retry": [],
+        "status": "implemented"
       },
       {
         "id": "C-TXN-05",
@@ -348,7 +348,7 @@
     "total_contracts": 22,
     "domains": {
       "pool": {"count": 7, "implemented": 0, "partial": 1, "defined": 6, "not_implemented": 0},
-      "transaction": {"count": 5, "implemented": 3, "partial": 1, "defined": 1, "not_implemented": 0},
+      "transaction": {"count": 5, "implemented": 4, "partial": 0, "defined": 1, "not_implemented": 0},
       "timeout": {"count": 4, "implemented": 0, "partial": 0, "defined": 3, "not_implemented": 1},
       "observability": {"count": 4, "implemented": 0, "partial": 1, "defined": 0, "not_implemented": 3},
       "error_normalization": {"count": 2, "implemented": 1, "partial": 0, "defined": 1, "not_implemented": 0}
