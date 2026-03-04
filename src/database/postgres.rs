@@ -1567,6 +1567,12 @@ impl fmt::Debug for PgConnection {
     }
 }
 
+#[inline]
+fn cancelled_reason(cx: &Cx) -> CancelReason {
+    cx.cancel_reason()
+        .unwrap_or_else(|| CancelReason::user("cancelled"))
+}
+
 impl PgConnection {
     /// Connect to a PostgreSQL database.
     ///
@@ -1575,10 +1581,7 @@ impl PgConnection {
     /// This operation checks for cancellation before starting.
     pub async fn connect(cx: &Cx, url: &str) -> Outcome<Self, PgError> {
         if cx.is_cancel_requested() {
-            return Outcome::Cancelled(
-                cx.cancel_reason()
-                    .unwrap_or_else(|| CancelReason::user("cancelled")),
-            );
+            return Outcome::Cancelled(cancelled_reason(cx));
         }
 
         let options = match PgConnectOptions::parse(url) {
@@ -1595,10 +1598,7 @@ impl PgConnection {
         options: PgConnectOptions,
     ) -> Outcome<Self, PgError> {
         if cx.is_cancel_requested() {
-            return Outcome::Cancelled(
-                cx.cancel_reason()
-                    .unwrap_or_else(|| CancelReason::user("cancelled")),
-            );
+            return Outcome::Cancelled(cancelled_reason(cx));
         }
 
         // Connect to the server
@@ -1626,14 +1626,24 @@ impl PgConnection {
             return Outcome::Err(e);
         }
 
+        if cx.is_cancel_requested() {
+            return Outcome::Cancelled(cancelled_reason(cx));
+        }
+
         // Handle authentication
         if let Err(e) = conn.authenticate(cx, &options).await {
-            return Outcome::Err(e);
+            return match e {
+                PgError::Cancelled(reason) => Outcome::Cancelled(reason),
+                other => Outcome::Err(other),
+            };
         }
 
         // Wait for ReadyForQuery
-        if let Err(e) = conn.wait_for_ready().await {
-            return Outcome::Err(e);
+        if let Err(e) = conn.wait_for_ready(cx).await {
+            return match e {
+                PgError::Cancelled(reason) => Outcome::Cancelled(reason),
+                other => Outcome::Err(other),
+            };
         }
 
         Outcome::Ok(conn)
@@ -1670,6 +1680,10 @@ impl PgConnection {
     /// Handle the authentication handshake.
     async fn authenticate(&mut self, cx: &Cx, options: &PgConnectOptions) -> Result<(), PgError> {
         loop {
+            if cx.is_cancel_requested() {
+                return Err(PgError::Cancelled(cancelled_reason(cx)));
+            }
+
             let (msg_type, data) = self.read_message().await?;
 
             match msg_type {
@@ -1771,6 +1785,10 @@ impl PgConnection {
         let msg = buf.build_message(b'p');
         self.write_all(&msg).await?;
 
+        if cx.is_cancel_requested() {
+            return Err(PgError::Cancelled(cancelled_reason(cx)));
+        }
+
         // Receive SASLContinue
         let (msg_type, data) = self.read_message().await?;
         if msg_type == b'E' {
@@ -1800,6 +1818,10 @@ impl PgConnection {
         let msg = buf.build_message(b'p');
         self.write_all(&msg).await?;
 
+        if cx.is_cancel_requested() {
+            return Err(PgError::Cancelled(cancelled_reason(cx)));
+        }
+
         // Receive SASLFinal
         let (msg_type, data) = self.read_message().await?;
         if msg_type == b'E' {
@@ -1824,6 +1846,10 @@ impl PgConnection {
 
         // Verify server signature
         scram.verify_server_final(server_final)?;
+
+        if cx.is_cancel_requested() {
+            return Err(PgError::Cancelled(cancelled_reason(cx)));
+        }
 
         // Wait for AuthenticationOk
         let (msg_type, data) = self.read_message().await?;
@@ -1874,8 +1900,12 @@ impl PgConnection {
     }
 
     /// Wait for ReadyForQuery message (handles ParameterStatus, BackendKeyData).
-    async fn wait_for_ready(&mut self) -> Result<(), PgError> {
+    async fn wait_for_ready(&mut self, cx: &Cx) -> Result<(), PgError> {
         loop {
+            if cx.is_cancel_requested() {
+                return Err(PgError::Cancelled(cancelled_reason(cx)));
+            }
+
             let (msg_type, data) = self.read_message().await?;
 
             match msg_type {
@@ -3189,6 +3219,27 @@ mod hex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Cx;
+    use crate::types::CancelKind;
+
+    fn run<F: std::future::Future>(future: F) -> F::Output {
+        futures_lite::future::block_on(future)
+    }
+
+    fn cancelled_cx() -> Cx {
+        let cx = Cx::for_testing();
+        cx.cancel_fast(CancelKind::User);
+        cx
+    }
+
+    fn assert_user_cancelled<T>(outcome: Outcome<T, PgError>) {
+        match outcome {
+            Outcome::Cancelled(reason) => assert_eq!(reason.kind, CancelKind::User),
+            Outcome::Err(err) => panic!("expected cancellation, got error: {err}"),
+            Outcome::Ok(_) => panic!("expected cancellation, got success"),
+            Outcome::Panicked(payload) => panic!("unexpected panic outcome: {payload:?}"),
+        }
+    }
 
     #[test]
     fn test_connect_options_parse() {
@@ -4718,5 +4769,44 @@ mod tests {
             String::from_sql(&bytes, oid::TEXT, Format::Text).unwrap(),
             "hello"
         );
+    }
+
+    #[test]
+    fn connect_paths_short_circuit_on_cancel() {
+        let cx = cancelled_cx();
+        let options =
+            PgConnectOptions::parse("postgres://localhost/testdb").expect("valid connection URL");
+
+        assert_user_cancelled(run(PgConnection::connect(
+            &cx,
+            "postgres://localhost/testdb",
+        )));
+        assert_user_cancelled(run(PgConnection::connect_with_options(&cx, options)));
+    }
+
+    #[test]
+    fn operation_paths_short_circuit_on_cancel() {
+        let mut conn = make_test_connection();
+        let cx = cancelled_cx();
+
+        let param_value: i32 = 42;
+        let params: [&dyn ToSql; 1] = [&param_value];
+        let stmt = PgStatement {
+            name: "s1".to_string(),
+            param_oids: vec![oid::INT4],
+            columns: vec![],
+        };
+
+        assert_user_cancelled(run(conn.query(&cx, "SELECT 1")));
+        assert_user_cancelled(run(conn.query_one(&cx, "SELECT 1")));
+        assert_user_cancelled(run(conn.execute(&cx, "SELECT 1")));
+        assert_user_cancelled(run(conn.query_params(&cx, "SELECT $1", &params)));
+        assert_user_cancelled(run(conn.query_one_params(&cx, "SELECT $1", &params)));
+        assert_user_cancelled(run(conn.execute_params(&cx, "SELECT $1", &params)));
+        assert_user_cancelled(run(conn.begin(&cx)));
+        assert_user_cancelled(run(conn.prepare(&cx, "SELECT $1")));
+        assert_user_cancelled(run(conn.query_prepared(&cx, &stmt, &params)));
+        assert_user_cancelled(run(conn.execute_prepared(&cx, &stmt, &params)));
+        assert_user_cancelled(run(conn.close_statement(&cx, &stmt)));
     }
 }

@@ -227,7 +227,35 @@ Recorded in `artifacts/raptorq_track_e_gf256_bench_v1.json` under `simd_policy_a
 - Large balanced addmul window candidate (`addmul_total=24576..32768`, `addmul_min_lane=12288`) showed no meaningful `addmul_slices2_auto` uplift (`+0.1438%`, `p=0.82`) and regressed `mul_slices2_auto` (`+2.1554%` median).
 - Mul-only window candidate (`mul_total=32768`) regressed `mul_slices2_auto` (`+0.6484%`, `p=0.02`) on the same scenario.
 
-Current decision: retain x86 profile-pack defaults (`mul` window disabled, `addmul` window `12288..16384`, `addmul_min_lane=2048`) until a broader SIMD corpus demonstrates material and repeatable p95/p99 improvement versus baseline.
+Updated decision after broader corpus (`simd_policy_ablation_2026_03_04`):
+
+- Keep `mul` auto window disabled by default on x86 (`mul_min_total > mul_max_total`).
+- Move x86 `addmul` auto window to `24576..32768` total bytes with `addmul_min_lane=8192`.
+- Rationale: same-target deterministic corpus over `RQ-E-GF256-DUAL-*` showed strongest repeatable uplift in balanced high-throughput lanes (`DUAL-004/005/006`), with targeted `addmul_slices2_auto` median deltas of `-6.1424%`, `-14.4411%`, and `-6.3938%` versus baseline (`avg -8.9924%`).
+
+Command bundle for the 2026-03-04 corpus:
+
+```bash
+rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-20260304-dual; \
+  ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto \
+  cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL \
+  --sample-size 20 --warm-up-time 0.1 --measurement-time 0.12'
+
+rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-20260304-dual; \
+  ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto \
+  ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL=24576 ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL=32768 \
+  ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE=8192 \
+  cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL \
+  --sample-size 20 --warm-up-time 0.1 --measurement-time 0.12'
+
+rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-20260304-dual; \
+  ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto \
+  ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL=24576 ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL=30720 \
+  ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL=24576 ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL=30720 \
+  ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE=8192 \
+  cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL \
+  --sample-size 20 --warm-up-time 0.1 --measurement-time 0.12'
+```
 
 ## Calibration Checklist for Closure
 

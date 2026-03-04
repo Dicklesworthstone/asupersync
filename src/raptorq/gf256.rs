@@ -747,12 +747,12 @@ const GF256_PROFILE_PACK_CATALOG: [Gf256ProfilePackMetadata; 3] = [
         // recent same-session Track-E evidence showed mixed/negative dual-mul deltas.
         mul_min_total: usize::MAX,
         mul_max_total: 0,
-        // Keep 4KiB+4KiB lanes on the sequential path; Track-E evidence
-        // showed fused addmul regressed at that footprint.
-        addmul_min_total: 12 * 1024,
-        addmul_max_total: 16 * 1024,
-        // Guard against asymmetric-lane overhead when one lane is too small.
-        addmul_min_lane: 2 * 1024,
+        // 2026-03-04 same-target Track-E corpus:
+        // prefer fused addmul in balanced 12KiB+12KiB through 16KiB+16KiB lanes.
+        addmul_min_total: 24 * 1024,
+        addmul_max_total: 32 * 1024,
+        // Guard against asymmetric-lane overhead and very small-lane regressions.
+        addmul_min_lane: 8 * 1024,
         max_lane_ratio: 8,
         replay_pointer: GF256_PROFILE_PACK_REPLAY_POINTER,
         command_bundle: GF256_PROFILE_PACK_COMMAND_BUNDLE,
@@ -3728,13 +3728,23 @@ mod tests {
     fn simd_profile_packs_raise_addmul_floor_for_small_lane_regression_guard() {
         let catalog = gf256_profile_pack_catalog();
         assert_eq!(catalog[0].addmul_min_lane, 0);
-        for metadata in &catalog[1..] {
-            assert_eq!(metadata.addmul_min_total, 12 * 1024);
-            assert!(metadata.addmul_min_total > (4096 + 4096));
-            assert!(metadata.addmul_max_total >= 16 * 1024);
-            assert_eq!(metadata.addmul_min_lane, 2 * 1024);
-            assert!(metadata.addmul_min_lane > 1536);
-        }
+        let x86 = catalog
+            .iter()
+            .find(|metadata| metadata.profile_pack == Gf256ProfilePackId::X86Avx2BalancedV1)
+            .expect("x86 profile pack must exist");
+        assert_eq!(x86.addmul_min_total, 24 * 1024);
+        assert_eq!(x86.addmul_max_total, 32 * 1024);
+        assert_eq!(x86.addmul_min_lane, 8 * 1024);
+        assert!(x86.addmul_min_total > (4096 + 4096));
+        assert!(x86.addmul_min_lane > 1536);
+
+        let neon = catalog
+            .iter()
+            .find(|metadata| metadata.profile_pack == Gf256ProfilePackId::Aarch64NeonBalancedV1)
+            .expect("aarch64 profile pack must exist");
+        assert_eq!(neon.addmul_min_total, 12 * 1024);
+        assert_eq!(neon.addmul_max_total, 16 * 1024);
+        assert_eq!(neon.addmul_min_lane, 2 * 1024);
     }
 
     #[test]
@@ -3755,8 +3765,9 @@ mod tests {
             x86.mul_min_total > x86.mul_max_total,
             "x86 dual-mul auto window should be disabled by default",
         );
-        assert_eq!(x86.addmul_min_total, 12 * 1024);
-        assert_eq!(x86.addmul_max_total, 16 * 1024);
+        assert_eq!(x86.addmul_min_total, 24 * 1024);
+        assert_eq!(x86.addmul_max_total, 32 * 1024);
+        assert_eq!(x86.addmul_min_lane, 8 * 1024);
     }
 
     #[test]

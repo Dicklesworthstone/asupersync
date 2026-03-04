@@ -1,7 +1,7 @@
 {
   "schema_version": "raptorq-track-e-gf256-bench-v1",
   "artifact_id": "raptorq_track_e_gf256_bench_v1",
-  "generated_at_utc": "2026-03-02T20:05:32Z",
+  "generated_at_utc": "2026-03-04T07:02:15Z",
   "track_bead_id": "asupersync-36m6p",
   "external_ref": "bd-7toum",
   "benchmark": {
@@ -227,6 +227,84 @@
       }
     }
   },
+  "simd_policy_ablation_2026_03_04": {
+    "scope": {
+      "scenario_family": "RQ-E-GF256-DUAL-*",
+      "scenarios": [
+        "RQ-E-GF256-DUAL-001",
+        "RQ-E-GF256-DUAL-002",
+        "RQ-E-GF256-DUAL-003",
+        "RQ-E-GF256-DUAL-004",
+        "RQ-E-GF256-DUAL-005",
+        "RQ-E-GF256-DUAL-006",
+        "RQ-E-GF256-DUAL-007"
+      ]
+    },
+    "methodology": {
+      "runner": "rch exec",
+      "bench_filter": "RQ-E-GF256-DUAL",
+      "criterion": {
+        "sample_size": 20,
+        "warm_up_time_seconds": 0.1,
+        "measurement_time_seconds": 0.12
+      },
+      "comparison_strategy": "same target dir comparator corpus; baseline then candidate overrides"
+    },
+    "command_bundles": [
+      {
+        "id": "baseline_auto_defaults",
+        "command": "rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-20260304-dual; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL --sample-size 20 --warm-up-time 0.1 --measurement-time 0.12'",
+        "log_path": "/tmp/e5_dual_baseline_20260304.log"
+      },
+      {
+        "id": "candidate_addmul_window_only",
+        "command": "rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-20260304-dual; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL=24576 ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL=32768 ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE=8192 cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL --sample-size 20 --warm-up-time 0.1 --measurement-time 0.12'",
+        "log_path": "/tmp/e5_dual_candidate1_20260304.log"
+      },
+      {
+        "id": "candidate_mul_and_addmul_windows",
+        "command": "rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-20260304-dual; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL=24576 ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL=30720 ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL=24576 ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL=30720 ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE=8192 cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL --sample-size 20 --warm-up-time 0.1 --measurement-time 0.12'",
+        "log_path": "/tmp/e5_dual_candidate2_20260304.log"
+      }
+    ],
+    "results": [
+      {
+        "id": "candidate_addmul_window_only",
+        "average_delta_vs_baseline_pct": {
+          "mul_slices2_auto": 0.3048,
+          "addmul_slices2_auto": -3.3759
+        },
+        "targeted_large_lane_deltas_pct": {
+          "addmul_slices2_auto_RQ-E-GF256-DUAL-004": -6.1424,
+          "addmul_slices2_auto_RQ-E-GF256-DUAL-005": -14.4411,
+          "addmul_slices2_auto_RQ-E-GF256-DUAL-006": -6.3938,
+          "targeted_addmul_auto_average": -8.9924
+        },
+        "summary": "Best candidate in this corpus: material addmul auto uplift on balanced large-lane scenarios, while mul auto remained near neutral."
+      },
+      {
+        "id": "candidate_mul_and_addmul_windows",
+        "average_delta_vs_baseline_pct": {
+          "mul_slices2_auto": 2.0837,
+          "addmul_slices2_auto": -4.6978
+        },
+        "targeted_large_lane_deltas_pct": {
+          "mul_slices2_auto_average_RQ-E-GF256-DUAL-004_to_006": 2.2087,
+          "targeted_addmul_auto_average_RQ-E-GF256-DUAL-004_to_006": -11.2318
+        },
+        "summary": "Addmul improved but mul auto regressed; rejected for default rollout."
+      }
+    ],
+    "decision": {
+      "selected_profile_defaults": "update x86 addmul auto window",
+      "changes": {
+        "mul_window": "unchanged: disabled (mul_min_total > mul_max_total)",
+        "addmul_window": "24576..32768 total bytes",
+        "addmul_min_lane": 8192
+      },
+      "rationale": "This candidate produced the strongest deterministic corpus uplift for addmul auto across DUAL-004/005/006 without enabling mul auto regressions."
+    }
+  },
   "rollback_rehearsal": {
     "result": "pass",
     "checks": [
@@ -250,6 +328,7 @@
   "notes": [
     "All three runs emitted Track-E policy/probe JSON with deterministic manifest/profile metadata fields.",
     "This comparator capture uses short Criterion windows for fast rehearsal and should be treated as directional evidence.",
-    "Observed throughput variance indicates a full p95/p99 corpus is still required for final E5 closure."
+    "Observed throughput variance indicates a full p95/p99 corpus is still required for final E5 closure.",
+    "2026-03-04 corpus added broad RQ-E-GF256-DUAL-* coverage and selected a new x86 addmul auto window default (24576..32768, min lane 8192)."
   ]
 }
