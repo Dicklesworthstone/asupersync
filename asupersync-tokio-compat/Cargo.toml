@@ -33,6 +33,9 @@ http-body-util = { version = "0.1", optional = true }
 # Tokio I/O traits for bidirectional adapter.
 tokio-util = { version = "0.7", optional = true, features = ["io"] }
 
+# tower Service trait for adapter bridge.
+tower = { version = "0.5.3", optional = true }
+
 # Pin projection for adapter futures.
 pin-project-lite = "0.2"
 
@@ -42,8 +45,10 @@ default = []
 hyper-bridge = ["dep:hyper", "dep:hyper-util", "dep:http", "dep:http-body", "dep:http-body-util"]
 # Tokio I/O trait adapters (AsyncRead/AsyncWrite bidirectional).
 tokio-io = ["dep:tokio-util", "tokio/io-util"]
+# tower Service bridge: bidirectional Service trait adapters.
+tower-bridge = ["dep:tower"]
 # Full compatibility (all adapters).
-full = ["hyper-bridge", "tokio-io"]
+full = ["hyper-bridge", "tokio-io", "tower-bridge"]
 
 [lints.rust]
 unsafe_code = "deny"

@@ -60,6 +60,9 @@ pub mod io;
 #[cfg(feature = "hyper-bridge")]
 pub mod hyper_bridge;
 
+#[cfg(feature = "tower-bridge")]
+pub mod tower_bridge;
+
 /// Cancellation mode for adapter-wrapped futures.
 ///
 /// Controls how Asupersync cancellation interacts with Tokio-originated futures
