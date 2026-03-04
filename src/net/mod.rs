@@ -75,6 +75,8 @@ pub use quic_native::{
     StreamTable, StreamTableError, TransportError,
 };
 pub use resolve::{lookup_all, lookup_one};
+#[cfg(target_os = "windows")]
+pub use sys::windows::{NamedPipeClient, NamedPipeClientOptions};
 pub use tcp::listener::{Incoming, TcpListener};
 pub use tcp::socket::TcpSocket;
 pub use tcp::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, ReuniteError, WriteHalf};

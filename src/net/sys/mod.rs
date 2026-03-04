@@ -13,4 +13,4 @@ pub mod macos {}
 
 /// Windows-specific networking primitives.
 #[cfg(target_os = "windows")]
-pub mod windows {}
+pub mod windows;

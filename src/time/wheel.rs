@@ -916,10 +916,42 @@ impl TimerWheel {
             .saturating_mul(window_ns);
         let coalesced_time = Time::from_nanos(window_end_ns);
 
-        let coalesced_count = self
+        let mut coalesced_count = self
             .ready
             .iter()
             .filter(|e| self.is_live(e) && e.deadline <= coalesced_time)
+            .count();
+
+        for (idx, level) in self.levels.iter().enumerate() {
+            let shift = idx * 8;
+            let level_tick_current = self.current_tick >> shift;
+            let level_tick_boundary = window_end_ns / level.resolution_ns;
+
+            if level_tick_boundary < level_tick_current {
+                continue;
+            }
+
+            let current_slot = (level_tick_current % (SLOTS_PER_LEVEL as u64)) as usize;
+            let mut diff = (level_tick_boundary - level_tick_current) as usize;
+            if diff >= SLOTS_PER_LEVEL {
+                diff = SLOTS_PER_LEVEL - 1;
+            }
+
+            for i in 0..=diff {
+                let slot_idx = (current_slot + i) % SLOTS_PER_LEVEL;
+                if level.is_occupied(slot_idx) {
+                    coalesced_count += level.slots[slot_idx]
+                        .iter()
+                        .filter(|e| self.is_live(e) && e.deadline <= coalesced_time)
+                        .count();
+                }
+            }
+        }
+
+        coalesced_count += self
+            .overflow
+            .iter()
+            .filter(|e| self.is_live(&e.entry) && e.deadline <= coalesced_time)
             .count();
 
         if coalesced_count >= self.coalescing.min_group_size.max(1) {
