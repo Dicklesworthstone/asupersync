@@ -1,0 +1,112 @@
+{
+  "bead_id": "asupersync-2oh2u.10.8",
+  "title": "[T8.8] Capability-Security and Authority-Flow Audit for TOKIO-REPLACE Surfaces",
+  "version": 1,
+  "generated_at": "2026-03-04",
+  "generated_by": "SapphireHill",
+  "source_markdown": "docs/tokio_capability_security_authority_audit.md",
+  "domains": ["capability-security", "authority-flow", "no-ambient-authority", "adapter-boundary"],
+  "tracks_audited": ["T2", "T3", "T4", "T5", "T6", "T7"],
+  "invariants_audited": [
+    {"id": "INV-1", "description": "No Ambient Authority: all capabilities explicitly passed", "verdict": "PASS"},
+    {"id": "INV-2", "description": "Structured Concurrency: all tasks region-owned", "verdict": "PASS"},
+    {"id": "INV-3", "description": "Cancellation is a Protocol: cancel propagates through adapters", "verdict": "PASS"},
+    {"id": "INV-4", "description": "No Obligation Leaks: resources tracked and released", "verdict": "PASS"},
+    {"id": "INV-5", "description": "Outcome Severity Lattice: results map to four-valued lattice", "verdict": "PASS"}
+  ],
+  "per_track_verdicts": [
+    {"track": "T2", "name": "Async I/O and Codecs", "modules_audited": 11, "verdict": "COMPLIANT", "findings": 0},
+    {"track": "T3", "name": "Filesystem, Process, Signal", "modules_audited": 3, "verdict": "COMPLIANT", "findings": 0},
+    {"track": "T4", "name": "QUIC and HTTP/3", "modules_audited": 1, "verdict": "COMPLIANT", "findings": 0},
+    {"track": "T5", "name": "Web Framework and gRPC", "modules_audited": 3, "verdict": "COMPLIANT", "findings": 0},
+    {"track": "T6", "name": "Database and Messaging", "modules_audited": 2, "verdict": "COMPLIANT", "findings": 0},
+    {"track": "T7", "name": "Tokio-Compat Adapter Crate", "modules_audited": 5, "verdict": "COMPLIANT", "findings": 0}
+  ],
+  "global_state_audit": {
+    "static_mut": 0,
+    "thread_local_production": 0,
+    "lazy_static": 0,
+    "once_cell_lazy": 0,
+    "cx_current_ambient": 0,
+    "tokio_spawn": 0,
+    "verdict": "CLEAN"
+  },
+  "crate_boundary": {
+    "main_crate_tokio_dep": false,
+    "adapter_tokio_dep": "1.x (sync feature only)",
+    "reverse_dependency": false,
+    "feature_flags": ["tokio-io", "hyper-bridge", "full"],
+    "verdict": "COMPLIANT"
+  },
+  "advisory_findings": [
+    {
+      "id": "ADV-1",
+      "title": "Timer non-determinism in adapter",
+      "location": "asupersync-tokio-compat/src/hyper_bridge.rs",
+      "severity": "ADVISORY",
+      "description": "AsupersyncTimer uses wall-clock Instant::now()",
+      "relaxation": "REL-3 in docs/tokio_adapter_boundary_architecture.md",
+      "action_required": false
+    },
+    {
+      "id": "ADV-2",
+      "title": "Blocking pool ambient spawn",
+      "location": "src/runtime/blocking_pool.rs",
+      "severity": "EXEMPT",
+      "description": "Blocking pool spawns real OS threads",
+      "relaxation": "Provider exemption in src/audit/ambient.rs",
+      "action_required": false
+    },
+    {
+      "id": "ADV-3",
+      "title": "WebSocket entropy (pre-existing)",
+      "location": "src/net/websocket/frame.rs:765",
+      "severity": "ADVISORY",
+      "description": "Direct getrandom::fill() for RFC 6455 masking key",
+      "relaxation": "Tracked via check_ambient_entropy()",
+      "action_required": false
+    }
+  ],
+  "prohibited_patterns": [
+    {"pattern": "static mut", "count": 0, "status": "clean"},
+    {"pattern": "thread_local! (production T2-T7)", "count": 0, "status": "clean"},
+    {"pattern": "lazy_static!", "count": 0, "status": "clean"},
+    {"pattern": "once_cell::sync::Lazy (T2-T7)", "count": 0, "status": "clean"},
+    {"pattern": "Cx::current() in adapter public API", "count": 0, "status": "clean"},
+    {"pattern": "tokio::spawn in main crate", "count": 0, "status": "clean"}
+  ],
+  "test_categories": [
+    {"prefix": "CSA", "name": "Contract validation", "count": 15},
+    {"prefix": "AF", "name": "Authority flow", "count": 6},
+    {"prefix": "BI", "name": "Boundary integrity", "count": 4},
+    {"prefix": "IC", "name": "Invariant coverage", "count": 5},
+    {"prefix": "DD", "name": "Drift detection", "count": 3}
+  ],
+  "invariants_tested": [
+    {"id": "INV-CSA-1", "description": "All adapter entry points require explicit Cx or configuration"},
+    {"id": "INV-CSA-2", "description": "No static global Cx variables in adapter code"},
+    {"id": "INV-CSA-3", "description": "Blocking Cx propagation is RAII-guarded"},
+    {"id": "INV-CSA-4", "description": "Crate boundary is one-way (compat -> main)"},
+    {"id": "INV-CSA-5", "description": "All 5 boundary invariants have test coverage"},
+    {"id": "INV-CSA-6", "description": "Pre-existing ambient authority tracked in audit registry"},
+    {"id": "INV-CSA-7", "description": "No new ambient authority introduced by T2-T7"}
+  ],
+  "drift_detection": [
+    {"id": "DRIFT-CSA1", "trigger": "New adapter module added", "action": "Verify explicit Cx/config in public API"},
+    {"id": "DRIFT-CSA2", "trigger": "New static/thread_local in T2-T7", "action": "Require exemption in audit registry"},
+    {"id": "DRIFT-CSA3", "trigger": "Reverse dependency main->tokio", "action": "HARD FAIL - block merge"},
+    {"id": "DRIFT-CSA4", "trigger": "Cx::current() in adapter public API", "action": "VIOLATION - must use explicit parameter"},
+    {"id": "DRIFT-CSA5", "trigger": "New OS resource API without builder", "action": "Review for ambient authority"}
+  ],
+  "summary": {
+    "total_tracks_audited": 6,
+    "total_modules_audited": 25,
+    "total_invariants_checked": 5,
+    "all_invariants_pass": true,
+    "violations": 0,
+    "advisory_findings": 3,
+    "exempt_findings": 1,
+    "total_tests": 33,
+    "overall_verdict": "COMPLIANT"
+  }
+}

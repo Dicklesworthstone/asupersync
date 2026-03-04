@@ -1344,7 +1344,7 @@ impl SymbolDispatcher {
 
         let _guard = route.endpoint.acquire_connection_guard();
 
-        let result = if let Some(sink) = sink {
+        if let Some(sink) = sink {
             let send_result = match OwnedMutexGuard::lock(sink, cx).await {
                 Ok(mut guard) => guard
                     .send(symbol)
@@ -1382,10 +1382,8 @@ impl SymbolDispatcher {
                 failed_endpoints: SmallVec::new(),
                 duration: Time::ZERO,
             })
-        };
-
-        // Guard drop releases connection
-        result
+        }
+        // _guard dropped here, releasing connection
     }
 
     /// Dispatches to multiple endpoints.
