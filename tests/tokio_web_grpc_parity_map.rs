@@ -376,7 +376,9 @@ fn parity_includes_t52_router_closure_scope() {
         doc.contains("1.2.0")
             || doc.contains("1.3.0")
             || doc.contains("1.4.0")
-            || doc.contains("1.5.0"),
+            || doc.contains("1.5.0")
+            || doc.contains("1.6.0")
+            || doc.contains("1.7.0"),
         "version must be >= 1.2.0"
     );
 }
@@ -470,7 +472,11 @@ fn parity_includes_t53_extractor_closure_scope() {
     }
     // Version must be at least 1.3.0 (may be bumped by subsequent beads)
     assert!(
-        doc.contains("1.3.0") || doc.contains("1.4.0") || doc.contains("1.5.0"),
+        doc.contains("1.3.0")
+            || doc.contains("1.4.0")
+            || doc.contains("1.5.0")
+            || doc.contains("1.6.0")
+            || doc.contains("1.7.0"),
         "version must be >= 1.3.0"
     );
 }
@@ -859,9 +865,16 @@ fn parity_t54_gap_closures_reflected_in_table() {
 #[test]
 fn parity_t54_gap_total_updated() {
     let doc = load_parity_doc();
+    // Originally 7 closed after T5.4; now >= 11 with GRPC-G1, GRPC-G2, GRPC-G11, HT-G1
     assert!(
-        doc.contains("7 closed"),
-        "gap total must reflect T5.4 closures (7 closed)"
+        doc.contains("7 closed")
+            || doc.contains("8 closed")
+            || doc.contains("9 closed")
+            || doc.contains("10 closed")
+            || doc.contains("11 closed")
+            || doc.contains("12 closed")
+            || doc.contains("13 closed"),
+        "gap total must reflect closures (>= 7 closed)"
     );
 }
 
@@ -876,10 +889,14 @@ fn parity_includes_t55_lifecycle_closure_scope() {
         "asupersync-2oh2u.5.5",
         "T5.5",
         "Server Lifecycle Closure Contract",
-        "1.5.0",
     ] {
         assert!(doc.contains(token), "missing T5.5 scope token: {token}");
     }
+    // Version must be at least 1.5.0 (may be bumped by subsequent beads)
+    assert!(
+        doc.contains("1.5.0") || doc.contains("1.6.0") || doc.contains("1.7.0"),
+        "version must be >= 1.5.0"
+    );
 }
 
 #[test]
@@ -1195,7 +1212,7 @@ fn parity_grpc_g1_g2_g11_ht_g1_closed_in_gap_summary() {
         ("HT-G1", "100-continue"),
     ] {
         assert!(
-            summary.contains(&format!("~~{gap}~~")) || summary.contains(&format!("{gap}") ),
+            summary.contains(&format!("~~{gap}~~")) || summary.contains(&format!("{gap}")),
             "gap summary must reference {gap} ({feature})"
         );
     }
@@ -1206,7 +1223,9 @@ fn parity_gap_count_updated_for_closures() {
     let doc = load_parity_doc();
     // Total should reflect 4 additional closures (GRPC-G1, GRPC-G2, GRPC-G11, HT-G1)
     assert!(
-        doc.contains("34 open gaps") || doc.contains("33 open gaps") || doc.contains("32 open gaps"),
+        doc.contains("34 open gaps")
+            || doc.contains("33 open gaps")
+            || doc.contains("32 open gaps"),
         "total gap count must be updated to reflect closures (34 or fewer)"
     );
     assert!(
