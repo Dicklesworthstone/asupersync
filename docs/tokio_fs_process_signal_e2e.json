@@ -1,0 +1,32 @@
+{
+  "bead_id": "asupersync-2oh2u.3.10",
+  "title": "[T3.10] End-to-End FS/Process/Signal Scripts with Forensic Logging",
+  "version": 1,
+  "generated_at": "2026-03-04",
+  "generated_by": "SapphireHill",
+  "source_markdown": "docs/tokio_fs_process_signal_e2e.md",
+  "domains": ["e2e", "fs", "process", "signal", "forensic-logging", "lifecycle"],
+  "scenarios": [
+    {"prefix": "EF", "name": "File lifecycle", "count": 4},
+    {"prefix": "EP", "name": "Process lifecycle", "count": 5},
+    {"prefix": "ES", "name": "Signal orchestration", "count": 3},
+    {"prefix": "EX", "name": "Cross-module E2E", "count": 4},
+    {"prefix": "EV", "name": "Validation", "count": 4}
+  ],
+  "logging_contract": {
+    "fields": ["scenario_id", "phase", "timestamp_ms", "resource", "action", "outcome", "detail"],
+    "phases": ["setup", "execute", "verify", "teardown"],
+    "outcomes": ["ok", "err", "skipped"]
+  },
+  "drift_detection": [
+    {"id": "DRIFT-E2E1", "trigger": "New T3 public API surface", "action": "Add E2E scenario"},
+    {"id": "DRIFT-E2E2", "trigger": "New failure mode discovered", "action": "Add fault-recovery scenario"},
+    {"id": "DRIFT-E2E3", "trigger": "Log schema change", "action": "Update forensic contract"}
+  ],
+  "summary": {
+    "total_scenarios": 20,
+    "total_tests": 20,
+    "logging_fields": 7,
+    "overall_verdict": "COMPLETE"
+  }
+}
