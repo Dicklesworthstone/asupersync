@@ -1,0 +1,81 @@
+{
+  "bead_id": "asupersync-2oh2u.2.5",
+  "title": "[T2.5] I/O and Codec Cancellation-Correctness Proofs",
+  "version": 1,
+  "generated_at": "2026-03-04",
+  "generated_by": "SapphireHill",
+  "source_markdown": "docs/tokio_io_codec_cancellation_correctness.md",
+  "domains": ["io", "codec", "cancellation", "race-loser", "drain", "obligation"],
+  "operator_families": [
+    {"id": "COPY", "name": "Copy operators", "count": 3, "cancel_model": "future_drop"},
+    {"id": "SPLIT", "name": "Split ownership", "count": 3, "cancel_model": "refcell_release"},
+    {"id": "LINES", "name": "Lines iterator", "count": 1, "cancel_model": "buffer_preserved"},
+    {"id": "BUF", "name": "Buffered I/O", "count": 2, "cancel_model": "buffer_preserved"},
+    {"id": "ADAPT", "name": "Stream adapters", "count": 2, "cancel_model": "offset_preserved"},
+    {"id": "FREAD", "name": "FramedRead", "count": 1, "cancel_model": "decode_buffer_preserved"},
+    {"id": "FWRITE", "name": "FramedWrite", "count": 1, "cancel_model": "encode_buffer_preserved"},
+    {"id": "FDUPLEX", "name": "Framed (duplex)", "count": 1, "cancel_model": "dual_buffer_preserved"},
+    {"id": "CODEC", "name": "Codecs (synchronous)", "count": 3, "cancel_model": "synchronous"}
+  ],
+  "total_operator_families": 9,
+  "invariants": [
+    {"id": "INV-CC-1", "description": "All operators are zero-task: no spawned work on drop"},
+    {"id": "INV-CC-2", "description": "All operators are zero-obligation: no IoOp leaked"},
+    {"id": "INV-CC-3", "description": "Cancel-safe operators preserve buffer state across Poll::Pending"},
+    {"id": "INV-CC-4", "description": "BufWriter/FramedWrite flush progress is monotonic"},
+    {"id": "INV-CC-5", "description": "Codec decode state preserved across cancel of wrapping FramedRead"},
+    {"id": "INV-CC-6", "description": "Race-loser drop does not panic or corrupt shared state"},
+    {"id": "INV-CC-7", "description": "SplitStream halves survive independent drop without corruption"},
+    {"id": "INV-CC-8", "description": "StreamReader defers error until buffered data consumed across cancel"}
+  ],
+  "cancel_safety_matrix": [
+    {"operator": "copy", "cancel_safe": true, "in_flight_loss": "up to 8192 bytes", "obligation_leak": false},
+    {"operator": "copy_buf", "cancel_safe": true, "in_flight_loss": "up to 1 fill", "obligation_leak": false},
+    {"operator": "copy_bidirectional", "cancel_safe": true, "in_flight_loss": "up to 8192 per direction", "obligation_leak": false},
+    {"operator": "SplitStream", "cancel_safe": true, "in_flight_loss": "none", "obligation_leak": false},
+    {"operator": "Lines", "cancel_safe": true, "in_flight_loss": "none (buf preserved)", "obligation_leak": false},
+    {"operator": "BufReader", "cancel_safe": true, "in_flight_loss": "up to 8192 on drop", "obligation_leak": false},
+    {"operator": "BufWriter", "cancel_safe": true, "in_flight_loss": "all unflushed on drop", "obligation_leak": false},
+    {"operator": "ReaderStream", "cancel_safe": true, "in_flight_loss": "none", "obligation_leak": false},
+    {"operator": "StreamReader", "cancel_safe": true, "in_flight_loss": "current chunk on drop", "obligation_leak": false},
+    {"operator": "FramedRead", "cancel_safe": true, "in_flight_loss": "stack tmp on mid-read drop", "obligation_leak": false},
+    {"operator": "FramedWrite", "cancel_safe": true, "in_flight_loss": "all encoded-unwritten on drop", "obligation_leak": false},
+    {"operator": "Framed", "cancel_safe": true, "in_flight_loss": "both buffers on drop", "obligation_leak": false},
+    {"operator": "LinesCodec", "cancel_safe": true, "in_flight_loss": "none (synchronous)", "obligation_leak": false},
+    {"operator": "LengthDelimitedCodec", "cancel_safe": true, "in_flight_loss": "none (synchronous)", "obligation_leak": false},
+    {"operator": "BytesCodec", "cancel_safe": true, "in_flight_loss": "none (synchronous)", "obligation_leak": false}
+  ],
+  "race_loser_data_loss": [
+    {"operator": "BufWriter", "severity": "HIGH", "data_at_risk": "unflushed write buffer", "mitigation": "flush before race"},
+    {"operator": "FramedWrite", "severity": "HIGH", "data_at_risk": "encoded-but-unwritten buffer", "mitigation": "flush before race"},
+    {"operator": "Framed", "severity": "HIGH", "data_at_risk": "both read and write buffers", "mitigation": "flush write side before race"},
+    {"operator": "BufReader", "severity": "MEDIUM", "data_at_risk": "internal read buffer", "mitigation": "accept or seek back"},
+    {"operator": "Copy", "severity": "LOW", "data_at_risk": "read-but-not-written buffer", "mitigation": "documented"},
+    {"operator": "StreamReader", "severity": "LOW", "data_at_risk": "current chunk remainder", "mitigation": "documented"}
+  ],
+  "test_categories": [
+    {"prefix": "CC", "name": "Contract validation", "count": 14},
+    {"prefix": "CSR", "name": "Cancel-safe resume", "count": 8},
+    {"prefix": "RLD", "name": "Race-loser drain", "count": 5},
+    {"prefix": "BA", "name": "Buffer accounting", "count": 4},
+    {"prefix": "OL", "name": "Obligation leak", "count": 3},
+    {"prefix": "CS", "name": "Codec state", "count": 3}
+  ],
+  "summary": {
+    "total_operator_families": 9,
+    "total_invariants": 8,
+    "all_cancel_safe": true,
+    "all_obligation_leak_free": true,
+    "high_severity_race_losers": 3,
+    "medium_severity_race_losers": 1,
+    "low_severity_race_losers": 2,
+    "total_tests": 37
+  },
+  "drift_detection": [
+    {"id": "DRIFT-CC1", "trigger": "New I/O operator added", "action": "Add cancel-correctness proof row and test"},
+    {"id": "DRIFT-CC2", "trigger": "New codec added", "action": "Add cancel-safety analysis"},
+    {"id": "DRIFT-CC3", "trigger": "BufWriter/FramedWrite gains auto-flush on drop", "action": "Downgrade race-loser severity"},
+    {"id": "DRIFT-CC4", "trigger": "into_split (IO-G9) implemented with Arc<Mutex>", "action": "Add cross-task cancel tests"},
+    {"id": "DRIFT-CC5", "trigger": "I/O operator starts using Cx::checkpoint()", "action": "Add cooperative cancel test"}
+  ]
+}
