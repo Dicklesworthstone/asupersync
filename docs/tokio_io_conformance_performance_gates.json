@@ -1,0 +1,243 @@
+{
+  "bead_id": "asupersync-2oh2u.2.8",
+  "title": "[T2.8] I/O Track Conformance and Performance Gates",
+  "version": 1,
+  "generated_at": "2026-03-04",
+  "generated_by": "SapphireHill",
+  "source_contracts": [
+    "docs/tokio_functional_parity_contracts.md (C06, C07)",
+    "docs/tokio_io_codec_cancellation_correctness.md (T2.5)",
+    "docs/tokio_io_utility_operators_parity.md (T2.3)",
+    "docs/tokio_executable_conformance_contracts.md (EC-T2-01, EC-T2-02)",
+    "docs/tokio_track_performance_regression_budgets.md (PB-01, PB-02)"
+  ],
+  "domains": ["io", "codec", "conformance", "performance", "gate"],
+  "conformance_contracts": [
+    {
+      "id": "EC-T2-IO-01",
+      "track": "T2",
+      "title": "Core AsyncRead trait semantics",
+      "source": "C06.1",
+      "requirement": "MUST",
+      "runner": "rch exec -- cargo test --test tokio_io_conformance_gates ec_t2_io_01 -- --nocapture",
+      "pass_criteria": "poll_read fills provided buffer from underlying source; returns Ready(Ok(n)) where n > 0 for non-empty source; returns Ready(Ok(0)) at EOF",
+      "failure_class": "semantic_drift",
+      "artifacts": ["event_log.txt"],
+      "gate": "Gate-A"
+    },
+    {
+      "id": "EC-T2-IO-02",
+      "track": "T2",
+      "title": "Core AsyncWrite trait semantics",
+      "source": "C06.2, C06.3, C06.4",
+      "requirement": "MUST",
+      "runner": "rch exec -- cargo test --test tokio_io_conformance_gates ec_t2_io_02 -- --nocapture",
+      "pass_criteria": "poll_write accepts buffer and returns Ready(Ok(n)) with n > 0; poll_flush drains internal buffers; poll_shutdown performs graceful close",
+      "failure_class": "semantic_drift",
+      "artifacts": ["event_log.txt"],
+      "gate": "Gate-A"
+    },
+    {
+      "id": "EC-T2-IO-03",
+      "track": "T2",
+      "title": "Copy operator transfer-to-EOF correctness",
+      "source": "C06.5",
+      "requirement": "MUST",
+      "runner": "rch exec -- cargo test --test tokio_io_conformance_gates ec_t2_io_03 -- --nocapture",
+      "pass_criteria": "copy() transfers all bytes from reader to writer until EOF; total bytes matches source length; writer receives all data in order",
+      "failure_class": "semantic_drift",
+      "artifacts": ["event_log.txt"],
+      "gate": "Gate-A"
+    },
+    {
+      "id": "EC-T2-IO-04",
+      "track": "T2",
+      "title": "Split stream independence",
+      "source": "C06.6",
+      "requirement": "MUST",
+      "runner": "rch exec -- cargo test --test tokio_io_conformance_gates ec_t2_io_04 -- --nocapture",
+      "pass_criteria": "split() produces independent ReadHalf/WriteHalf; concurrent read/write operations do not interfere; dropping one half does not corrupt the other",
+      "failure_class": "semantic_drift",
+      "artifacts": ["event_log.txt"],
+      "gate": "Gate-A"
+    },
+    {
+      "id": "EC-T2-IO-05",
+      "track": "T2",
+      "title": "Buffered I/O syscall reduction",
+      "source": "C06.7, C06.8",
+      "requirement": "SHOULD",
+      "runner": "rch exec -- cargo test --test tokio_io_conformance_gates ec_t2_io_05 -- --nocapture",
+      "pass_criteria": "BufReader/BufWriter reduce underlying read/write call count vs unbuffered; lines() yields newline-delimited strings correctly",
+      "failure_class": "semantic_drift",
+      "artifacts": ["event_log.txt"],
+      "gate": "Gate-A"
+    },
+    {
+      "id": "EC-T2-IO-06",
+      "track": "T2",
+      "title": "Codec decode/encode round-trip",
+      "source": "C07.1, C07.2",
+      "requirement": "MUST",
+      "runner": "rch exec -- cargo test --test tokio_io_conformance_gates ec_t2_io_06 -- --nocapture",
+      "pass_criteria": "Decoder::decode() extracts complete frames from byte buffer; Encoder::encode() serializes items into byte buffer; round-trip preserves data fidelity",
+      "failure_class": "semantic_drift",
+      "artifacts": ["event_log.txt"],
+      "gate": "Gate-A"
+    },
+    {
+      "id": "EC-T2-IO-07",
+      "track": "T2",
+      "title": "Framed duplex stream integration",
+      "source": "C07.3, C07.5",
+      "requirement": "MUST",
+      "runner": "rch exec -- cargo test --test tokio_io_conformance_gates ec_t2_io_07 -- --nocapture",
+      "pass_criteria": "Framed wraps I/O stream with codec pair; back-pressure propagates from slow consumer to producer; no data corruption under pressure",
+      "failure_class": "semantic_drift",
+      "artifacts": ["event_log.txt"],
+      "gate": "Gate-A"
+    },
+    {
+      "id": "EC-T2-IO-08",
+      "track": "T2",
+      "title": "Codec availability and compatibility",
+      "source": "C07.4",
+      "requirement": "SHOULD",
+      "runner": "rch exec -- cargo test --test tokio_io_conformance_gates ec_t2_io_08 -- --nocapture",
+      "pass_criteria": "LinesCodec, BytesCodec, and LengthDelimitedCodec are available and produce correct frames for representative inputs",
+      "failure_class": "semantic_drift",
+      "artifacts": ["event_log.txt"],
+      "gate": "Gate-A"
+    },
+    {
+      "id": "EC-T2-IO-09",
+      "track": "T2",
+      "title": "Cancel-safety under conformance (integration with T2.5)",
+      "source": "C06.9, T2.5 invariants INV-CC-1..INV-CC-8",
+      "requirement": "MUST",
+      "runner": "rch exec -- cargo test --test tokio_io_conformance_gates ec_t2_io_09 -- --nocapture",
+      "pass_criteria": "All I/O operators are zero-task and zero-obligation on drop; buffer state preserved across cancel; no obligation leaks",
+      "failure_class": "cancel_protocol_violation",
+      "artifacts": ["event_log.txt", "failed_assertions.json"],
+      "gate": "Gate-B"
+    },
+    {
+      "id": "EC-T2-IO-10",
+      "track": "T2",
+      "title": "Write-permit two-phase cancel-safe write",
+      "source": "C06.9",
+      "requirement": "Asupersync",
+      "runner": "rch exec -- cargo test --test tokio_io_conformance_gates ec_t2_io_10 -- --nocapture",
+      "pass_criteria": "write_permit provides reserve/commit semantics; dropping a permit aborts cleanly without data loss; committed writes are guaranteed delivered",
+      "failure_class": "obligation_leak",
+      "artifacts": ["event_log.txt"],
+      "gate": "Gate-B"
+    }
+  ],
+  "performance_budgets": [
+    {
+      "id": "PB-IO-01",
+      "track": "T2",
+      "metric_kind": "latency_p95_ms",
+      "scope": "AsyncRead/AsyncWrite poll_read/poll_write hot path",
+      "warning_threshold": "+8%",
+      "hard_fail_threshold": "+15%",
+      "baseline_source": "DS-T2 differential suite, 64KB transfer scenario"
+    },
+    {
+      "id": "PB-IO-02",
+      "track": "T2",
+      "metric_kind": "throughput_ops_per_sec",
+      "scope": "copy() large-file transfer (1MB+)",
+      "warning_threshold": "-8%",
+      "hard_fail_threshold": "-15%",
+      "baseline_source": "DS-T2 differential suite, copy scenario"
+    },
+    {
+      "id": "PB-IO-03",
+      "track": "T2",
+      "metric_kind": "cancel_drain_ms",
+      "scope": "I/O operator cancel-and-drain overhead",
+      "warning_threshold": "+10%",
+      "hard_fail_threshold": "+20%",
+      "baseline_source": "DS-T2 cancellation scenario suite"
+    },
+    {
+      "id": "PB-IO-04",
+      "track": "T2",
+      "metric_kind": "latency_p95_ms",
+      "scope": "Codec frame decode/encode round-trip",
+      "warning_threshold": "+8%",
+      "hard_fail_threshold": "+15%",
+      "baseline_source": "DS-T2 codec benchmark, LengthDelimited 1K frames"
+    },
+    {
+      "id": "PB-IO-05",
+      "track": "T2",
+      "metric_kind": "memory_peak_mb",
+      "scope": "BufReader/BufWriter peak allocation under load",
+      "warning_threshold": "+10%",
+      "hard_fail_threshold": "+20%",
+      "baseline_source": "DS-T2 buffered I/O scenario"
+    },
+    {
+      "id": "PB-IO-06",
+      "track": "T2",
+      "metric_kind": "throughput_ops_per_sec",
+      "scope": "Framed stream frames-per-second under back-pressure",
+      "warning_threshold": "-8%",
+      "hard_fail_threshold": "-15%",
+      "baseline_source": "DS-T2 Framed back-pressure scenario"
+    }
+  ],
+  "alarm_rules": [
+    {
+      "id": "AL-IO-01",
+      "trigger": "Any PB-IO-* decision = FAIL",
+      "severity": "high",
+      "gate_effect": "hard-fail promotion for T2 track"
+    },
+    {
+      "id": "AL-IO-02",
+      "trigger": "Any EC-T2-IO-* status = FAIL with failure_class in [cancel_protocol_violation, obligation_leak]",
+      "severity": "critical",
+      "gate_effect": "hard-fail promotion for T2 track; escalate to T8 cross-track gate"
+    },
+    {
+      "id": "AL-IO-03",
+      "trigger": "3+ PB-IO-* decisions = WARN in same evaluation",
+      "severity": "medium",
+      "gate_effect": "warning escalation; blocks release candidate promotion until reviewed"
+    },
+    {
+      "id": "AL-IO-04",
+      "trigger": "Any EC-T2-IO-* status = BLOCKED for >24h",
+      "severity": "medium",
+      "gate_effect": "incident escalation; rerun required before promotion"
+    }
+  ],
+  "gate_bindings": {
+    "Gate-A": "Functional parity and artifact schema validation",
+    "Gate-B": "Cancellation correctness and obligation lifecycle",
+    "Gate-C": "Performance regression and throughput budgets"
+  },
+  "drift_detection": [
+    {"id": "DRIFT-IO-01", "trigger": "New I/O operator added to src/io/", "action": "Add conformance contract row EC-T2-IO-* and update test suite"},
+    {"id": "DRIFT-IO-02", "trigger": "New codec added to src/codec/", "action": "Add codec contract row and round-trip test"},
+    {"id": "DRIFT-IO-03", "trigger": "Performance baseline aged >30 days", "action": "Re-run baseline sourcing from DS-T2 suite"},
+    {"id": "DRIFT-IO-04", "trigger": "Budget threshold change requested", "action": "Document rationale in alarm_rules and update PB-IO-* row"},
+    {"id": "DRIFT-IO-05", "trigger": "Cancellation model changes for any I/O operator", "action": "Re-run EC-T2-IO-09 and update T2.5 proofs"}
+  ],
+  "summary": {
+    "total_conformance_contracts": 10,
+    "must_contracts": 7,
+    "should_contracts": 2,
+    "asupersync_contracts": 1,
+    "total_performance_budgets": 6,
+    "total_alarm_rules": 4,
+    "total_drift_rules": 5,
+    "gate_tiers": ["Gate-A", "Gate-B", "Gate-C"],
+    "source_contract_domains": ["C06", "C07"],
+    "dependent_beads": ["asupersync-2oh2u.2.10", "asupersync-2oh2u.10.9", "asupersync-2oh2u.2.7"]
+  }
+}
