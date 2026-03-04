@@ -271,6 +271,7 @@ where
     /// Serve a single connection with an optional peer address.
     ///
     /// When provided, the peer address is attached to each request.
+    #[allow(clippy::too_many_lines)]
     pub async fn serve_with_peer_addr<T>(
         self,
         io: T,
@@ -297,6 +298,11 @@ where
                 .as_ref()
                 .is_some_and(ShutdownSignal::is_shutting_down)
             {
+                state.phase = ConnectionPhase::Closing;
+                break;
+            }
+
+            if Cx::current().is_some_and(|cx| cx.is_cancel_requested()) {
                 state.phase = ConnectionPhase::Closing;
                 break;
             }
@@ -486,14 +492,16 @@ fn should_close_connection(req: &Request, config: &Http1Config, state: &Connecti
         }
     }
 
-    // Check explicit Connection header from client
+    // Check explicit Connection header from client (RFC 9110 §7.6.1: comma-separated tokens)
     for (name, value) in &req.headers {
         if name.eq_ignore_ascii_case("connection") {
-            if value.eq_ignore_ascii_case("close") {
-                return true;
-            }
-            if value.eq_ignore_ascii_case("keep-alive") {
-                return false;
+            for token in value.split(',').map(str::trim) {
+                if token.eq_ignore_ascii_case("close") {
+                    return true;
+                }
+                if token.eq_ignore_ascii_case("keep-alive") {
+                    return false;
+                }
             }
         }
     }

@@ -137,8 +137,7 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
 
         // Identity means no compression needed.
         if encoding == ContentEncoding::Identity {
-            resp.headers
-                .insert("vary".to_string(), "accept-encoding".to_string());
+            append_vary_token(&mut resp, "accept-encoding");
             return resp;
         }
 
@@ -158,8 +157,7 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
 
         // Only use compressed version if it's actually smaller.
         if compressed.len() >= resp.body.len() {
-            resp.headers
-                .insert("vary".to_string(), "accept-encoding".to_string());
+            append_vary_token(&mut resp, "accept-encoding");
             return resp;
         }
 
@@ -174,6 +172,23 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
 
         resp
     }
+}
+
+/// Appends a token to the Vary header without clobbering existing values.
+fn append_vary_token(resp: &mut Response, token: &str) {
+    let existing = resp.headers.get("vary").cloned().unwrap_or_default();
+    if existing
+        .split(',')
+        .any(|v| v.trim().eq_ignore_ascii_case(token))
+    {
+        return;
+    }
+    let updated = if existing.is_empty() {
+        token.to_string()
+    } else {
+        format!("{existing}, {token}")
+    };
+    resp.headers.insert("vary".to_string(), updated);
 }
 
 #[cfg(test)]

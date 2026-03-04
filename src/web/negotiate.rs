@@ -173,11 +173,16 @@ fn format_error_body(
             (body, "application/json")
         }
         ErrorFormat::Html => {
+            let escaped = message
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('"', "&quot;");
             let body = format!(
                 "<html><head><title>Error {}</title></head><body><h1>{}</h1><p>{}</p></body></html>",
                 status.as_u16(),
                 status.as_u16(),
-                message,
+                escaped,
             );
             (body, "text/html; charset=utf-8")
         }

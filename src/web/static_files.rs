@@ -314,23 +314,26 @@ fn has_traversal(path: &str) -> bool {
 }
 
 /// Simple percent-decoding for URL paths.
+///
+/// Decodes `%XX` hex pairs into raw bytes, then converts the result to a
+/// UTF-8 string (lossy replacement for invalid sequences).
 fn percent_decode(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
+    let mut out = Vec::with_capacity(input.len());
     let mut bytes = input.bytes();
     while let Some(b) = bytes.next() {
         if b == b'%' {
             let hi = bytes.next().and_then(hex_val);
             let lo = bytes.next().and_then(hex_val);
             if let (Some(h), Some(l)) = (hi, lo) {
-                output.push((h << 4 | l) as char);
+                out.push(h << 4 | l);
             } else {
-                output.push('%');
+                out.push(b'%');
             }
         } else {
-            output.push(b as char);
+            out.push(b);
         }
     }
-    output
+    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 fn hex_val(b: u8) -> Option<u8> {

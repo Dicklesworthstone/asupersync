@@ -82,16 +82,26 @@ struct BufferedRequest<Request, Response, Error> {
 mod oneshot {
     use std::sync::{Arc, Mutex};
 
+    use std::task::Waker;
+
     pub struct Sender<T> {
-        shared: Arc<Mutex<Option<T>>>,
+        shared: Arc<Mutex<Inner<T>>>,
     }
 
     pub struct Receiver<T> {
-        shared: Arc<Mutex<Option<T>>>,
+        shared: Arc<Mutex<Inner<T>>>,
+    }
+
+    struct Inner<T> {
+        value: Option<T>,
+        waker: Option<Waker>,
     }
 
     pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
-        let shared = Arc::new(Mutex::new(None));
+        let shared = Arc::new(Mutex::new(Inner {
+            value: None,
+            waker: None,
+        }));
         (
             Sender {
                 shared: shared.clone(),
@@ -102,8 +112,14 @@ mod oneshot {
 
     impl<T> Sender<T> {
         pub fn send(self, value: T) {
-            let mut guard = self.shared.lock().unwrap();
-            *guard = Some(value);
+            let waker = {
+                let mut guard = self.shared.lock().unwrap();
+                guard.value = Some(value);
+                guard.waker.take()
+            };
+            if let Some(w) = waker {
+                w.wake();
+            }
         }
     }
 
@@ -111,7 +127,15 @@ mod oneshot {
         /// Try to take the value. Returns `Some` if available.
         pub fn try_recv(&self) -> Option<T> {
             let mut guard = self.shared.lock().unwrap();
-            guard.take()
+            guard.value.take()
+        }
+
+        /// Register a waker to be notified when a value is sent.
+        pub fn register_waker(&self, waker: &Waker) {
+            let mut guard = self.shared.lock().unwrap();
+            if guard.waker.as_ref().is_none_or(|w| !w.will_wake(waker)) {
+                guard.waker = Some(waker.clone());
+            }
         }
     }
 }
@@ -137,6 +161,8 @@ struct SharedBuffer<S> {
     pending: Mutex<usize>,
     /// Whether the buffer has been closed.
     closed: Mutex<bool>,
+    /// Wakers waiting for capacity to become available.
+    ready_wakers: Mutex<Vec<std::task::Waker>>,
 }
 
 impl<S> Buffer<S> {
@@ -154,6 +180,7 @@ impl<S> Buffer<S> {
                 capacity,
                 pending: Mutex::new(0),
                 closed: Mutex::new(false),
+                ready_wakers: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -283,7 +310,7 @@ where
 {
     type Output = Result<Response, BufferError<Error>>;
 
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
 
         match &mut this.state {
@@ -296,7 +323,10 @@ where
                     this.state = BufferFutureState::Done;
                     Poll::Ready(Err(BufferError::Inner(e)))
                 }
-                None => Poll::Pending,
+                None => {
+                    rx.register_waker(cx.waker());
+                    Poll::Pending
+                }
             },
             BufferFutureState::Error(err) => {
                 let err = err.take().expect("polled after completion");
@@ -337,12 +367,14 @@ where
     type Error = BufferError<S::Error>;
     type Future = BufferFuture<S::Response, S::Error>;
 
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         if *self.shared.closed.lock().unwrap() {
             return Poll::Ready(Err(BufferError::Closed));
         }
         let pending = *self.shared.pending.lock().unwrap();
         if pending >= self.shared.capacity {
+            let mut wakers = self.shared.ready_wakers.lock().unwrap();
+            wakers.push(cx.waker().clone());
             Poll::Pending
         } else {
             Poll::Ready(Ok(()))
@@ -390,10 +422,17 @@ where
             }
         };
 
-        // Decrement pending count.
+        // Decrement pending count and wake any callers blocked on poll_ready.
         {
             let mut pending = self.shared.pending.lock().unwrap();
             *pending = pending.saturating_sub(1);
+        }
+        let wakers: Vec<_> = {
+            let mut ready_wakers = self.shared.ready_wakers.lock().unwrap();
+            std::mem::take(&mut *ready_wakers)
+        };
+        for w in wakers {
+            w.wake();
         }
 
         if let Some(result) = result {

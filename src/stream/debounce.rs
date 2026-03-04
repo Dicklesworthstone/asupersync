@@ -4,7 +4,7 @@
 //! only the most recent item after a quiet period has elapsed.
 
 use super::Stream;
-use pin_project::pin_project;
+use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -26,20 +26,38 @@ use std::time::{Duration, Instant};
 /// requires the executor to re-poll after the quiet period expires.
 /// For proper async timer integration, consider pairing with a timeout
 /// or interval-driven polling loop.
-#[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
-#[pin_project]
-pub struct Debounce<S: Stream> {
-    #[pin]
+pub struct Debounce<S: Stream>
+where
+    S::Item: Unpin,
+{
     stream: S,
     period: Duration,
     /// The most recently received item and when it was received.
     pending: Option<(S::Item, Instant)>,
     /// Whether the underlying stream has ended.
     done: bool,
+    /// Timer future for delayed wakeup (avoids spin-loop).
+    timer: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
 }
 
-impl<S: Stream> Debounce<S> {
+impl<S: Stream + std::fmt::Debug> std::fmt::Debug for Debounce<S>
+where
+    S::Item: Unpin,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Debounce")
+            .field("stream", &self.stream)
+            .field("period", &self.period)
+            .field("done", &self.done)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<S: Stream> Debounce<S>
+where
+    S::Item: Unpin,
+{
     /// Creates a new `Debounce` stream.
     pub(crate) fn new(stream: S, period: Duration) -> Self {
         Self {
@@ -47,6 +65,7 @@ impl<S: Stream> Debounce<S> {
             period,
             pending: None,
             done: false,
+            timer: None,
         }
     }
 
@@ -66,21 +85,27 @@ impl<S: Stream> Debounce<S> {
     }
 }
 
-impl<S: Stream + Unpin> Stream for Debounce<S> {
+impl<S: Stream + Unpin> Stream for Debounce<S>
+where
+    S::Item: Unpin,
+{
     type Item = S::Item;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<S::Item>> {
-        let mut this = self.project();
+        let this = self.get_mut();
 
         // Drain all immediately available items from the underlying stream.
-        if !*this.done {
+        let had_pending_before = this.pending.is_some();
+        if !this.done {
             loop {
-                match this.stream.as_mut().poll_next(cx) {
+                match Pin::new(&mut this.stream).poll_next(cx) {
                     Poll::Ready(Some(item)) => {
-                        *this.pending = Some((item, Instant::now()));
+                        this.pending = Some((item, Instant::now()));
+                        // New item arrived, reset the timer.
+                        this.timer = None;
                     }
                     Poll::Ready(None) => {
-                        *this.done = true;
+                        this.done = true;
                         break;
                     }
                     Poll::Pending => break,
@@ -90,16 +115,25 @@ impl<S: Stream + Unpin> Stream for Debounce<S> {
 
         // Check if the buffered item's quiet period has elapsed.
         if let Some((_, received_at)) = this.pending.as_ref() {
-            if *this.done || received_at.elapsed() >= *this.period {
+            if this.done || received_at.elapsed() >= this.period {
+                this.timer = None;
                 let (item, _) = this.pending.take().unwrap();
                 return Poll::Ready(Some(item));
             }
-            // Not ready yet — register waker for future re-poll.
-            cx.waker().wake_by_ref();
+            // Set up a timer for the remaining quiet period.
+            let remaining = this.period.saturating_sub(received_at.elapsed());
+            if this.timer.is_none() || !had_pending_before {
+                let now = crate::time::wall_now();
+                this.timer = Some(Box::pin(crate::time::sleep(now, remaining)));
+            }
+            // Poll the timer to register the waker for delayed wakeup.
+            if let Some(ref mut timer) = this.timer {
+                let _ = Pin::new(timer).poll(cx);
+            }
             return Poll::Pending;
         }
 
-        if *this.done {
+        if this.done {
             Poll::Ready(None)
         } else {
             Poll::Pending

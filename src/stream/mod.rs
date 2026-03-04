@@ -439,6 +439,7 @@ pub trait StreamExt: Stream {
     fn debounce(self, period: Duration) -> Debounce<Self>
     where
         Self: Sized,
+        Self::Item: Unpin,
     {
         Debounce::new(self, period)
     }

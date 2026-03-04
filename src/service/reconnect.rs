@@ -212,9 +212,19 @@ where
             self.reconnect().map_err(ReconnectError::Connect)?;
         }
 
-        self.inner.as_mut().map_or(Poll::Pending, |svc| {
-            svc.poll_ready(cx).map_err(ReconnectError::Inner)
-        })
+        let svc = self
+            .inner
+            .as_mut()
+            .expect("inner must be Some after successful reconnect");
+        match svc.poll_ready(cx) {
+            Poll::Ready(Err(e)) => {
+                // Inner service is broken — drop it to trigger reconnection
+                // on the next poll_ready call.
+                self.inner = None;
+                Poll::Ready(Err(ReconnectError::Inner(e)))
+            }
+            other => other.map_err(ReconnectError::Inner),
+        }
     }
 
     fn call(&mut self, req: Request) -> Self::Future {

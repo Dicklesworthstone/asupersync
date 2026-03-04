@@ -845,18 +845,38 @@ impl RequestHead {
             .and_then(|(_, value)| value.parse().ok())
     }
 
-    /// Returns true if Transfer-Encoding: chunked is set.
+    /// Returns true if Transfer-Encoding: chunked is set (strict single-token check).
     #[must_use]
     pub fn is_chunked(&self) -> bool {
         self.headers.iter().any(|(name, value)| {
             name.eq_ignore_ascii_case("transfer-encoding")
-                && value.to_lowercase().contains("chunked")
+                && value.split(',').count() == 1
+                && value.trim().eq_ignore_ascii_case("chunked")
         })
     }
 
+    /// Returns true if any Transfer-Encoding header is present.
+    #[must_use]
+    fn has_transfer_encoding(&self) -> bool {
+        self.headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"))
+    }
+
     /// Determines the body kind from headers.
+    ///
+    /// Returns `BodyKind::Empty` if both Transfer-Encoding and Content-Length
+    /// are present (ambiguous body length per RFC 7230 §3.3.3).
     #[must_use]
     pub fn body_kind(&self) -> BodyKind {
+        let has_te = self.has_transfer_encoding();
+        let has_cl = self.content_length().is_some();
+
+        // Reject ambiguous body length (TE + CL both present).
+        if has_te && has_cl {
+            return BodyKind::Empty;
+        }
+
         if self.is_chunked() {
             BodyKind::Chunked
         } else if let Some(len) = self.content_length() {
@@ -941,6 +961,12 @@ impl ResponseHead {
         buf.extend_from_slice(b"\r\n");
 
         for (name, value) in &self.headers {
+            // Reject headers containing CRLF to prevent response splitting.
+            if name.as_bytes().iter().any(|&b| b == b'\r' || b == b'\n')
+                || value.as_bytes().iter().any(|&b| b == b'\r' || b == b'\n')
+            {
+                continue;
+            }
             buf.extend_from_slice(name.as_bytes());
             buf.extend_from_slice(b": ");
             buf.extend_from_slice(value.as_bytes());
