@@ -7,6 +7,7 @@
 //! Bead: asupersync-2oh2u.6.13
 //! Depends on: T6.12 (unit-test matrix)
 //! Unblocks: T8.12 (cross-track logging), T9.2 (migration cookbooks)
+#![cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 
 #[macro_use]
 mod common;

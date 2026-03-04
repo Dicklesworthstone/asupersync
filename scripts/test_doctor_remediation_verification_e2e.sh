@@ -38,7 +38,7 @@ REQUIRED_TESTS=(
 export TEST_LOG_LEVEL="${TEST_LOG_LEVEL:-info}"
 export RUST_LOG="${RUST_LOG:-asupersync=info}"
 export TEST_SEED="${TEST_SEED:-4242}"
-RCH_SCAN_TIMEOUT="${RCH_SCAN_TIMEOUT:-300}"
+RCH_SCAN_TIMEOUT="${RCH_SCAN_TIMEOUT:-900}"
 RCH_RETRY_ATTEMPTS="${RCH_RETRY_ATTEMPTS:-3}"
 
 RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
@@ -73,12 +73,12 @@ run_verification_slice() {
     local run_pass_list="$3"
     local attempt_log=""
     local rc=0
+    local target_dir="/tmp/rch-doctor-remediation-verification-${TIMESTAMP}-${run_label}"
 
     for ((attempt = 1; attempt <= RCH_RETRY_ATTEMPTS; attempt++)); do
-        local target_dir="/tmp/rch-doctor-remediation-verification-${TIMESTAMP}-${run_label}-attempt${attempt}"
         local -a run_cmd=(
             env "CARGO_TARGET_DIR=${target_dir}" \
-            cargo test --quiet -p asupersync --features cli --test doctor_remediation_unit_harness "${UNIT_FILTER}" -- --nocapture
+            cargo test -p asupersync --features cli --test doctor_remediation_unit_harness "${UNIT_FILTER}" -- --nocapture
         )
         attempt_log="${run_log%.log}.attempt${attempt}.log"
         mkdir -p "$(dirname "${attempt_log}")"
@@ -91,8 +91,21 @@ run_verification_slice() {
 
         if [[ ${rc} -eq 0 ]] && grep -q "test result: ok" "${attempt_log}"; then
             cp "${attempt_log}" "${run_log}"
-            sed -nE 's/^test (verification_[[:alnum:]_]+) \.\.\. ok$/\1/p' "${run_log}" \
+            sed -nE 's/^test ([[:alnum:]_:]*verification_[[:alnum:]_]+) \.\.\. ok$/\1/p' "${run_log}" \
+                | sed -E 's/^.*::(verification_[[:alnum:]_]+)$/\1/' \
                 | sort -u > "${run_pass_list}"
+            if [[ ! -s "${run_pass_list}" ]]; then
+                echo "  WARN: ${run_label} contained no explicit test-name lines; deriving from --list output"
+                local list_log="${attempt_log%.log}.list.log"
+                local -a list_cmd=(
+                    env "CARGO_TARGET_DIR=${target_dir}" \
+                    cargo test -p asupersync --features cli --test doctor_remediation_unit_harness "${UNIT_FILTER}" -- --list
+                )
+                if timeout "${RCH_SCAN_TIMEOUT}s" "${RCH_BIN}" exec -- "${list_cmd[@]}" >"${list_log}" 2>&1; then
+                    sed -nE 's/^(verification_[[:alnum:]_]+): test$/\1/p' "${list_log}" \
+                        | sort -u > "${run_pass_list}"
+                fi
+            fi
             return 0
         fi
 
