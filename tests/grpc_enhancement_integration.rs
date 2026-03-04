@@ -9,27 +9,23 @@
 
 use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::grpc::codec::{
-    Codec, FramedCodec, GrpcCodec, GrpcMessage, IdentityCodec, MESSAGE_HEADER_SIZE,
+    Codec, FramedCodec, GrpcCodec, GrpcMessage, IdentityCodec,
 };
 use asupersync::grpc::status::{Code, GrpcError, Status};
 use asupersync::grpc::streaming::{Metadata, MetadataValue};
 use asupersync::grpc::web::{
-    ContentType as WebContentType, TrailerFrame, WebFrame, WebFrameCodec, base64_decode,
-    base64_encode, decode_trailers, encode_trailers, is_grpc_web_request, is_text_mode,
+    ContentType as WebContentType, WebFrame, WebFrameCodec, base64_decode, base64_encode,
+    encode_trailers, is_grpc_web_request, is_text_mode,
 };
 
 // ── F.1: Reflection Integration Tests ────────────────────────────────
 
 mod reflection {
+    use asupersync::bytes::Bytes;
     use asupersync::grpc::reflection::ReflectionService;
     use asupersync::grpc::service::{
         MethodDescriptor, NamedService, ServiceDescriptor, ServiceHandler,
     };
-    use asupersync::grpc::streaming::{Metadata, Request, Response};
-    use asupersync::grpc::status::Status;
-    use asupersync::bytes::Bytes;
-    use std::future::Future;
-    use std::pin::Pin;
 
     /// Mock service for testing reflection.
     struct MockEchoService;
@@ -39,19 +35,15 @@ mod reflection {
     }
 
     impl ServiceHandler for MockEchoService {
-        fn call(
-            &self,
-            _method: &str,
-            _request: Request<Bytes>,
-        ) -> Pin<Box<dyn Future<Output = Result<Response<Bytes>, Status>> + Send>> {
-            Box::pin(async { Ok(Response::new(Bytes::from_static(b"echo"))) })
+        fn descriptor(&self) -> &ServiceDescriptor {
+            static METHODS: &[MethodDescriptor] =
+                &[MethodDescriptor::unary("Echo", "/test.Echo/Echo")];
+            static DESC: ServiceDescriptor = ServiceDescriptor::new("Echo", "test", METHODS);
+            &DESC
         }
 
-        fn descriptor(&self) -> ServiceDescriptor {
-            ServiceDescriptor::new(
-                "test.Echo",
-                vec![MethodDescriptor::unary("Echo", "/test.Echo/Echo")],
-            )
+        fn method_names(&self) -> Vec<&str> {
+            vec!["Echo"]
         }
     }
 
@@ -76,7 +68,7 @@ mod reflection {
         reflection.register_handler(&svc);
 
         let desc = reflection.describe_service("test.Echo");
-        assert!(desc.is_some(), "describe returns Some");
+        assert!(desc.is_ok(), "describe returns Some");
         let info = desc.unwrap();
         assert!(!info.methods.is_empty(), "has methods");
         assert_eq!(info.methods[0].name, "Echo");
@@ -86,7 +78,7 @@ mod reflection {
     fn test_reflection_describe_unknown_returns_none() {
         let reflection = ReflectionService::default();
         let desc = reflection.describe_service("nonexistent.Service");
-        assert!(desc.is_none(), "unknown service returns None");
+        assert!(desc.is_err(), "unknown service returns error");
     }
 }
 
@@ -197,7 +189,8 @@ mod compression {
         buf.put_u32(3);
         buf.extend_from_slice(b"abc");
 
-        let result = codec_no_decompress.decode_message(&mut buf.clone());
+        let mut decode_buf = BytesMut::from(buf.as_ref());
+        let result = codec_no_decompress.decode_message(&mut decode_buf);
         assert!(
             matches!(result, Err(GrpcError::Compression(_))),
             "compressed frame without decompressor is an error"
@@ -395,7 +388,7 @@ mod grpc_web {
             .encode_trailers(&Status::ok(), &Metadata::new(), &mut binary_buf)
             .unwrap();
 
-        let binary_copy = binary_buf.clone();
+        let binary_copy = BytesMut::from(binary_buf.as_ref());
 
         // Text mode: base64 encode → decode → should yield identical frames.
         let text = base64_encode(&binary_buf);
@@ -457,6 +450,7 @@ mod grpc_web {
 
 mod cross_feature {
     use super::*;
+    use asupersync::codec::{Decoder, Encoder};
 
     #[cfg(feature = "compression")]
     #[test]
