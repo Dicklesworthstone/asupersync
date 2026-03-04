@@ -96,9 +96,7 @@ impl std::fmt::Debug for TimerNode {
 
 impl Drop for TimerNode {
     fn drop(&mut self) {
-        if self.is_linked() {
-            panic!("TimerNode dropped while still linked in TimerWheel! This is a severe safety violation and use-after-free bug.");
-        }
+        assert!(!self.is_linked(), "TimerNode dropped while still linked in TimerWheel! This is a severe safety violation and use-after-free bug.");
     }
 }
 

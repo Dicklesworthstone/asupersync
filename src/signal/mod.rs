@@ -7,7 +7,7 @@
 //!
 //! - [`SignalKind`]: Enumeration of Unix signal types
 //! - [`Signal`]: Async stream for receiving Unix signals
-//! - [`ctrl_c`]: Cross-platform Ctrl+C handling (Unix-backed in this build)
+//! - [`ctrl_c`]: Cross-platform Ctrl+C handling
 //! - [`ShutdownController`]: Coordinated graceful shutdown
 //! - [`ShutdownReceiver`]: Handle for receiving shutdown notifications
 //! - [`with_graceful_shutdown`]: Run tasks with shutdown support
@@ -17,8 +17,9 @@
 //! Unix signal streams (`signal(...)`) and `ctrl_c()` are supported through a
 //! global signal dispatcher.
 //!
-//! Non-Unix builds expose the same API surface but return unsupported errors
-//! for signal stream creation.
+//! Windows builds support a subset of process signals (`SIGINT`, `SIGTERM`,
+//! and `SIGBREAK` via `SignalKind::quit()`). Other non-Unix builds expose the
+//! same API surface but return unsupported errors for signal stream creation.
 //!
 //! The [`ShutdownController`] and graceful shutdown helpers are fully
 //! functional using our sync primitives.

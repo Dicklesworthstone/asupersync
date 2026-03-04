@@ -1,7 +1,7 @@
 //! Cross-platform Ctrl+C handling.
 //!
-//! Provides a simple async function to wait for Ctrl+C (SIGINT on Unix).
-//! Non-Unix builds return an unsupported error.
+//! Provides a simple async function to wait for Ctrl+C.
+//! On platforms without signal support in this build, returns an unsupported error.
 
 use std::io;
 
@@ -84,12 +84,12 @@ pub async fn ctrl_c() -> io::Result<()> {
 /// Returns `true` if `ctrl_c()` can successfully register a handler.
 #[must_use]
 pub fn is_available() -> bool {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         signal(SignalKind::interrupt()).is_ok()
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         false
     }
@@ -108,10 +108,10 @@ mod tests {
     fn ctrl_c_not_available() {
         init_test("ctrl_c_not_available");
         let available = is_available();
-        #[cfg(unix)]
-        crate::assert_with_log!(available, "available on unix", true, available);
-        #[cfg(not(unix))]
-        crate::assert_with_log!(!available, "not available off-unix", false, available);
+        #[cfg(any(unix, windows))]
+        crate::assert_with_log!(available, "available", true, available);
+        #[cfg(not(any(unix, windows)))]
+        crate::assert_with_log!(!available, "not available", false, available);
         crate::test_complete!("ctrl_c_not_available");
     }
 
