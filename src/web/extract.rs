@@ -21,6 +21,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::bytes::Bytes;
+use serde::de::{DeserializeOwned, IntoDeserializer, value::MapDeserializer};
 
 // ─── Request Type ────────────────────────────────────────────────────────────
 
@@ -243,8 +244,9 @@ impl<T: FromRequestParts> FromRequest for T {
 
 /// Extract path parameters.
 ///
-/// For a single parameter, `Path<String>` extracts the first path param.
-/// For named parameters, use `Path<HashMap<String, String>>`.
+/// For a single parameter, primitive/owned types can be extracted directly
+/// (for example `Path<u64>` or `Path<String>`). For named parameters, extract
+/// into a `Deserialize` type (for example a struct or `HashMap<String, String>`).
 ///
 /// ```ignore
 /// async fn get_user(Path(id): Path<String>) -> String {
@@ -254,21 +256,34 @@ impl<T: FromRequestParts> FromRequest for T {
 #[derive(Debug, Clone)]
 pub struct Path<T>(pub T);
 
-impl FromRequestParts for Path<String> {
+impl<T> FromRequestParts for Path<T>
+where
+    T: DeserializeOwned,
+{
     fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
-        req.path_params
-            .values()
-            .next()
-            .cloned()
-            .map(Path)
-            .ok_or_else(|| ExtractionError::bad_request("no path parameters found"))
-    }
-}
+        if req.path_params.is_empty() {
+            return Err(ExtractionError::bad_request("no path parameters found"));
+        }
 
-#[allow(clippy::implicit_hasher)]
-impl FromRequestParts for Path<HashMap<String, String>> {
-    fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
-        Ok(Self(req.path_params.clone()))
+        if let Some(first) = req.path_params.values().next() {
+            let de: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
+                first.as_str().into_deserializer();
+            if let Ok(value) = T::deserialize(de) {
+                return Ok(Self(value));
+            }
+        }
+
+        let map = req.path_params.iter().map(|(key, value)| {
+            let k: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
+                key.as_str().into_deserializer();
+            let v: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
+                value.as_str().into_deserializer();
+            (k, v)
+        });
+
+        T::deserialize(MapDeserializer::<_, serde::de::value::Error>::new(map))
+            .map(Self)
+            .map_err(|e| ExtractionError::bad_request(format!("invalid path parameters: {e}")))
     }
 }
 
@@ -289,11 +304,35 @@ impl FromRequestParts for Path<HashMap<String, String>> {
 #[derive(Debug, Clone)]
 pub struct Query<T>(pub T);
 
-#[allow(clippy::implicit_hasher)]
-impl FromRequestParts for Query<HashMap<String, String>> {
+impl<T> FromRequestParts for Query<T>
+where
+    T: DeserializeOwned,
+{
     fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
         let qs = req.query.as_deref().unwrap_or("");
-        Ok(Self(parse_urlencoded(qs)))
+        let parsed = parse_urlencoded(qs);
+
+        if parsed.len() == 1 {
+            if let Some(first) = parsed.values().next() {
+                let de: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
+                    first.as_str().into_deserializer();
+                if let Ok(value) = T::deserialize(de) {
+                    return Ok(Self(value));
+                }
+            }
+        }
+
+        let map = parsed.iter().map(|(key, value)| {
+            let k: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
+                key.as_str().into_deserializer();
+            let v: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
+                value.as_str().into_deserializer();
+            (k, v)
+        });
+
+        T::deserialize(MapDeserializer::<_, serde::de::value::Error>::new(map))
+            .map(Self)
+            .map_err(|e| ExtractionError::bad_request(format!("invalid query parameters: {e}")))
     }
 }
 
@@ -633,6 +672,50 @@ mod tests {
     }
 
     #[test]
+    fn path_typed_numeric_extraction() {
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), "42".to_string());
+        let req = Request::new("GET", "/users/42").with_path_params(params);
+
+        let Path(id) = Path::<u64>::from_request_parts(&req).unwrap();
+        assert_eq!(id, 42);
+    }
+
+    #[test]
+    fn path_typed_struct_extraction() {
+        #[derive(Debug, serde::Deserialize, PartialEq, Eq)]
+        struct Params {
+            user_id: u64,
+            post_id: u32,
+        }
+
+        let mut params = HashMap::new();
+        params.insert("user_id".to_string(), "7".to_string());
+        params.insert("post_id".to_string(), "11".to_string());
+        let req = Request::new("GET", "/users/7/posts/11").with_path_params(params);
+
+        let Path(extracted) = Path::<Params>::from_request_parts(&req).unwrap();
+        assert_eq!(
+            extracted,
+            Params {
+                user_id: 7,
+                post_id: 11
+            }
+        );
+    }
+
+    #[test]
+    fn path_typed_deserialization_error() {
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), "not-a-number".to_string());
+        let req = Request::new("GET", "/users/not-a-number").with_path_params(params);
+
+        let err = Path::<u64>::from_request_parts(&req).unwrap_err();
+        assert_eq!(err.status, crate::web::response::StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("invalid path parameters"));
+    }
+
+    #[test]
     fn json_extraction() {
         #[derive(Debug, serde::Deserialize, PartialEq)]
         struct Input {
@@ -851,6 +934,42 @@ mod tests {
         let Query(params) = Query::<HashMap<String, String>>::from_request_parts(&req).unwrap();
         assert_eq!(params.get("q").unwrap(), "hello world");
         assert_eq!(params.get("tag").unwrap(), "#rust");
+    }
+
+    #[test]
+    fn query_typed_struct_extraction() {
+        #[derive(Debug, serde::Deserialize, PartialEq, Eq)]
+        struct Pagination {
+            page: u32,
+            per_page: u16,
+            active: bool,
+        }
+
+        let req = Request::new("GET", "/items").with_query("page=3&per_page=25&active=true");
+        let Query(pagination) = Query::<Pagination>::from_request_parts(&req).unwrap();
+        assert_eq!(
+            pagination,
+            Pagination {
+                page: 3,
+                per_page: 25,
+                active: true
+            }
+        );
+    }
+
+    #[test]
+    fn query_typed_scalar_extraction() {
+        let req = Request::new("GET", "/items").with_query("value=17");
+        let Query(value) = Query::<u32>::from_request_parts(&req).unwrap();
+        assert_eq!(value, 17);
+    }
+
+    #[test]
+    fn query_typed_deserialization_error() {
+        let req = Request::new("GET", "/items").with_query("page=abc");
+        let err = Query::<u32>::from_request_parts(&req).unwrap_err();
+        assert_eq!(err.status, crate::web::response::StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("invalid query parameters"));
     }
 
     #[test]
