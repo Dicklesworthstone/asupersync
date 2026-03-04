@@ -361,7 +361,213 @@ reregistration correctness, and wake-path dedup/unknown-token handling.
 3. Backend-specific error normalization MUST continue mapping stale/closed
    registrations to deterministic `NotFound`/cleanup behavior.
 
-## 12. Revision History
+## 12. T2.9 Exhaustive Unit-Test Matrix (T2.2-T2.6)
+
+This section closes `asupersync-2oh2u.2.9` by making unit-coverage traceability
+explicit for every completed T2 implementation bead (`2.2`, `2.3`, `2.4`,
+`2.5`, `2.6`). The matrix intentionally links feature-bead scope to concrete
+unit/integration anchors, deterministic scenario IDs, structured log fields,
+and direct replay commands.
+
+| Feature bead | Coverage focus | Unit/integration anchors | Deterministic scenario IDs | Structured log contract | Replay command (rch-offloaded) |
+|--------------|----------------|--------------------------|-----------------------------|-------------------------|----------------------------------|
+| `asupersync-2oh2u.2.2` | AsyncRead/AsyncWrite core trait semantics, typed read/write ext methods, split baseline | `tests/io_e2e.rs::{io_e2e_copy_stream, io_e2e_copy_bidirectional, io_e2e_split_read_write}` + `tests/tokio_io_utility_operators_parity.rs::{split_invariant_1_read_half_produces_same_bytes, buf_invariant_2_bufwriter_flushed_matches}` | `T29-T22-READWRITE`, `T29-T22-TYPED-EXT` | `scenario_id`, `correlation_id`, `bead_id`, `seed`, `artifact_path`, `expected_invariant`, `actual_invariant` | `rch exec -- cargo test --test io_e2e io_e2e_copy_stream -- --nocapture` |
+| `asupersync-2oh2u.2.3` | Utility operators parity (`copy`, `split`, `lines`, buffered adapters, stream bridges) | `tests/tokio_io_utility_operators_parity.rs::{lines_invariant_1_crlf_stripped_correctly, adapt_invariant_2_stream_reader_round_trip, adapt_invariant_3_stream_reader_defers_error}` | `T29-T23-OPERATORS`, `T29-T23-STREAM-BRIDGE` | `scenario_id`, `correlation_id`, `operator_family`, `cancel_safe`, `artifact_path`, `invariant_status` | `rch exec -- cargo test --test tokio_io_utility_operators_parity adapt_invariant_2_stream_reader_round_trip -- --nocapture` |
+| `asupersync-2oh2u.2.4` | Codec/framing correctness (`LinesCodec`, `LengthDelimitedCodec`, framed decode/encode edge paths) | `tests/codec_e2e.rs::{e2e_codec_001_lines_multi_decode, e2e_codec_011_length_delimited_partial, e2e_codec_016_length_delimited_multi_frame, e2e_codec_023_buffer_state_preservation}` | `T29-T24-CODEC-LINES`, `T29-T24-CODEC-LENGTH`, `T29-T24-CODEC-RECOVERY` | `scenario_id`, `correlation_id`, `codec_family`, `frame_len`, `expected_frame_count`, `actual_frame_count`, `artifact_path` | `rch exec -- cargo test --test codec_e2e e2e_codec_011_length_delimited_partial -- --nocapture` |
+| `asupersync-2oh2u.2.5` | Cancellation-correctness and loser-drain behavior for I/O + codec surfaces | `tests/tokio_io_codec_cancellation_correctness.rs::{csr_01_bufreader_cancel_preserves_buffer, rld_03_framed_write_drop_loses_encoded, ba_03_framed_write_split_to_monotonic, ol_03_framed_read_into_parts_complete, cs_02_length_delimited_partial_decode_state}` | `T29-T25-CANCEL-RESUME`, `T29-T25-RACE-DRAIN`, `T29-T25-BUFFER-ACCOUNTING` | `scenario_id`, `correlation_id`, `cancel_phase`, `obligation_leak`, `buffer_delta`, `artifact_path`, `verdict` | `rch exec -- cargo test --test tokio_io_codec_cancellation_correctness csr_01_bufreader_cancel_preserves_buffer -- --nocapture` |
+| `asupersync-2oh2u.2.6` | Reactor backend parity and readiness consistency (registration lifecycle, stale-token safety, cancel cleanup) | `tests/io_cancellation.rs::{io_cancel_005_registration_cleanup_on_drop, io_cancel_registration_count_tracking, io_cancel_010_region_close_waits_for_io_obligations}` + `tests/io_uring_reactor.rs::deregister_cancels_in_flight_poll` + `tests/io_driver_concurrency.rs::test_io_driver_handle_split_lock` | `T29-T26-REACTOR-REGISTER`, `T29-T26-STALE-TOKEN`, `T29-T26-CANCEL-CLEANUP` | `scenario_id`, `correlation_id`, `backend`, `token`, `interest`, `cleanup_result`, `artifact_path`, `invariant_status` | `rch exec -- cargo test --test io_cancellation io_cancel_registration_count_tracking -- --nocapture` |
+
+### T2.9 Matrix Gate
+
+Any PR touching `src/io/**` or `src/codec/**` must keep this matrix current and
+run at least one deterministic coverage anchor from each row above. Evidence
+logs must preserve the required structured fields so failures stay replayable.
+
+### T2.9 Replay Bundle (minimum)
+
+```bash
+rch exec -- cargo test --test io_e2e io_e2e_copy_stream -- --nocapture
+rch exec -- cargo test --test tokio_io_utility_operators_parity adapt_invariant_2_stream_reader_round_trip -- --nocapture
+rch exec -- cargo test --test codec_e2e e2e_codec_011_length_delimited_partial -- --nocapture
+rch exec -- cargo test --test tokio_io_codec_cancellation_correctness csr_01_bufreader_cancel_preserves_buffer -- --nocapture
+rch exec -- cargo test --test io_cancellation io_cancel_registration_count_tracking -- --nocapture
+```
+
+## 13. T2.10 End-to-End Protocol Scripts and Structured Detailed Logging (T2.10)
+
+This section closes `asupersync-2oh2u.2.10` by defining an executable E2E
+protocol-script contract with schema-validated structured logs, adversarial and
+recovery path coverage, deterministic replay linkage, and migration-cookbook
+evidence bindings.
+
+### 13.1 E2E Scenario Matrix (major T2 capabilities)
+
+| Scenario ID | Capability Coverage | Script/Test Anchor | Path Class | Expected Outcome |
+|-------------|---------------------|--------------------|------------|------------------|
+| `T210-E2E-CORE-RW` | Async I/O core (read/write/copy/copy_bidirectional) | `tests/io_e2e.rs::io_e2e_copy_bidirectional` | happy-path | bidirectional bytes preserved; no protocol drift |
+| `T210-E2E-UTIL-LINES` | Utilities (`lines`, buffered adapters, stream bridges) | `tests/tokio_io_utility_operators_parity.rs::lines_invariant_1_crlf_stripped_correctly` | happy-path | line framing and adapter invariants preserved |
+| `T210-E2E-CODEC-FRAME` | Codec/framing (`FramedRead`, `FramedWrite`, length-delimited) | `tests/codec_e2e.rs::e2e_codec_016_length_delimited_multi_frame` | happy-path | deterministic multi-frame decode/encode parity |
+| `T210-E2E-CANCEL-RACE` | Cancellation/drain and race-loser semantics | `tests/tokio_io_codec_cancellation_correctness.rs::rld_03_framed_write_drop_loses_encoded` | adversarial | loser drained, no obligation leak, expected buffer-loss semantics only |
+| `T210-E2E-REACTOR-READY` | Reactor readiness and backend anomaly handling | `tests/io_uring_reactor.rs::deregister_cancels_in_flight_poll` | adversarial | stale-token/cleanup invariants preserved under deregister pressure |
+| `T210-E2E-CONFORMANCE-GATE` | T2 conformance+performance gate enforcement | `tests/t2_track_conformance_and_performance_gates.rs::doc_has_required_conformance_gate_ids` | recovery | gate artifacts and IDs remain contract-valid after failure injection reruns |
+
+### 13.2 Structured Detailed Log Schema (normative)
+
+Each T2.10 scenario run must emit structured events containing at least:
+
+- `event_ts`
+- `scenario_id`
+- `correlation_id`
+- `trace_id`
+- `track_id`
+- `backend`
+- `path_class`
+- `fault_injection`
+- `cancel_phase`
+- `expected_outcome`
+- `actual_outcome`
+- `assertion_status`
+- `redaction_level`
+- `payload_digest`
+- `replay_artifact`
+- `migration_cookbook_ref`
+
+`payload` fields must be redaction-safe: raw sensitive bytes are forbidden in
+normal logs and must be represented via deterministic digest/token fields.
+
+### 13.3 Adversarial and Recovery Path Requirements
+
+| Path Type | Required Injection | Required Logged Fields | Expected Outcome Contract |
+|-----------|--------------------|------------------------|---------------------------|
+| Timeout path | induced read/write timeout | `fault_injection`, `backend`, `expected_outcome`, `actual_outcome` | timeout reported deterministically with reproducible replay command |
+| Partial-write path | truncated/interrupted write progression | `payload_digest`, `cancel_phase`, `assertion_status` | partial-write behavior matches operator contract without data corruption |
+| Cancellation-race path | race loser cancellation during in-flight framed write/read | `cancel_phase`, `assertion_status`, `replay_artifact` | loser drained; no leaked obligations/tasks |
+| Backend-readiness anomaly path | stale token/deregister during readiness transitions | `backend`, `fault_injection`, `assertion_status` | no panic; deterministic cleanup semantics preserved |
+| Recovery rerun path | rerun after adversarial failure with same scenario seed | `scenario_id`, `correlation_id`, `replay_artifact` | repeatable pass/fail class with matching diagnostics route |
+
+### 13.4 Reproducible CI Output Bundle
+
+Every T2.10 run must produce:
+
+- `tokio_t2_e2e_protocol_scenarios.json`
+- `tokio_t2_e2e_protocol_log_schema.json`
+- `tokio_t2_e2e_protocol_events.jsonl`
+- `tokio_t2_e2e_protocol_replay_manifest.json`
+- `tokio_t2_e2e_protocol_summary.md`
+
+Missing bundle artifacts fail T2.10 contract validation.
+
+### 13.5 Replay Bundle (rch-offloaded, minimum)
+
+```bash
+rch exec -- cargo test --test io_e2e io_e2e_copy_bidirectional -- --nocapture
+rch exec -- cargo test --test tokio_io_utility_operators_parity lines_invariant_1_crlf_stripped_correctly -- --nocapture
+rch exec -- cargo test --test codec_e2e e2e_codec_016_length_delimited_multi_frame -- --nocapture
+rch exec -- cargo test --test tokio_io_codec_cancellation_correctness rld_03_framed_write_drop_loses_encoded -- --nocapture
+rch exec -- cargo test --test io_uring_reactor deregister_cancels_in_flight_poll -- --nocapture
+rch exec -- cargo test --test t2_track_conformance_and_performance_gates -- --nocapture
+```
+
+### 13.6 Migration-Cookbook Evidence Linkage
+
+T2.10 outputs are an explicit upstream input for migration documentation:
+
+- `asupersync-2oh2u.2.7` (direct migration patterns for I/O and codec APIs)
+- `asupersync-2oh2u.11.2` (domain-specific migration cookbooks)
+
+Each scenario artifact must include `migration_cookbook_ref` for deterministic
+traceability from runtime behavior evidence to migration guidance.
+
+## 14. T2.7 Direct Migration Patterns for I/O + Codec APIs (T2.7)
+
+This section closes `asupersync-2oh2u.2.7` by publishing direct migration
+patterns from `tokio::io` / `tokio-util` I/O+codec APIs to asupersync-native
+surfaces with no compatibility shims.
+
+### 14.1 Before/After Migration Pattern Matrix
+
+| Pattern ID | Before (Tokio/tokio-util) | After (asupersync-native) | Executable evidence anchor | Edge/cancellation notes |
+|------------|----------------------------|----------------------------|----------------------------|-------------------------|
+| `T27-MIG-CORE-COPY` | `tokio::io::copy` / `copy_bidirectional` pipelines | `asupersync::io::copy` / `copy_bidirectional` with explicit invariant checks | `tests/io_e2e.rs::{io_e2e_copy_stream, io_e2e_copy_bidirectional}` | Treat partial progress as first-class outcome; maintain deterministic replay metadata |
+| `T27-MIG-UTIL-BUF-LINES` | `tokio::io::BufReader`, `BufWriter`, `AsyncBufReadExt::lines` | `asupersync::io::{BufReader, BufWriter, Lines}` | `tests/tokio_io_utility_operators_parity.rs::{lines_invariant_1_crlf_stripped_correctly, buf_invariant_2_bufwriter_flushed_matches}` | `read_exact`/`write_all` remain non-cancel-safe across ecosystems; avoid assuming atomic completion |
+| `T27-MIG-CODEC-FRAMED` | `tokio_util::codec::{Framed, FramedRead, FramedWrite, LengthDelimitedCodec}` | `asupersync::codec::{Framed, FramedRead, FramedWrite, LengthDelimitedCodec}` | `tests/codec_e2e.rs::{e2e_codec_011_length_delimited_partial, e2e_codec_016_length_delimited_multi_frame}` | Preserve decoder state across partial frames; verify bounded-size failure semantics |
+| `T27-MIG-CANCEL-LOSER-DRAIN` | ad hoc cancellation around framed read/write race paths | explicit loser-drain/cancel-correctness assertions on I/O+codec paths | `tests/tokio_io_codec_cancellation_correctness.rs::{csr_01_bufreader_cancel_preserves_buffer, rld_03_framed_write_drop_loses_encoded}` | Losers must drain to quiescence; no task/obligation leak on cancel |
+| `T27-MIG-REACTOR-READINESS` | backend-specific assumptions hidden behind Tokio runtime internals | explicit backend parity contract in `epoll/kqueue/IOCP/io_uring` readiness paths | `tests/io_cancellation.rs::io_cancel_registration_count_tracking` + `tests/io_uring_reactor.rs::deregister_cancels_in_flight_poll` | Stale token and already-gone cleanup must remain deterministic/non-panicking |
+| `T27-MIG-STREAM-BRIDGE` | `tokio_util::io::{ReaderStream, StreamReader}` bridge patterns | `asupersync::io::{ReaderStream, StreamReader}` (direct usage) | `tests/tokio_io_utility_operators_parity.rs::{adapt_invariant_2_stream_reader_round_trip, adapt_invariant_3_stream_reader_defers_error}` | Keep bridge boundaries explicit; no ambient runtime coupling |
+
+### 14.2 Anti-Patterns (Forbidden for T2.7)
+
+- **No compatibility shims**: do not wrap Tokio APIs with adapter layers to
+  "look" compatible; migrate call sites directly to asupersync surfaces.
+- **No implicit `into_split` assumptions**: do not port code assuming Tokio
+  `into_split()` ownership semantics without revalidating asupersync split
+  contracts and constraints.
+- **No cancellation hand-waving**: do not treat `read_exact`/`write_all` as
+  cancel-safe; always model partial-progress outcomes explicitly.
+- **No evidence-free migrations**: any claimed migration path without
+  deterministic test + replay command evidence is invalid.
+
+### 14.3 Cancellation-Safe Call-Graph Guidance
+
+#### Playbook A: Core I/O Stream Pump
+`source AsyncRead -> BufReader -> copy/copy_bidirectional -> BufWriter -> sink AsyncWrite`
+
+- Validate with `T27-MIG-CORE-COPY` anchors.
+- Log `scenario_id`, `correlation_id`, `cancel_phase`, `assertion_status`.
+
+#### Playbook B: Framed Protocol Pipeline
+`transport AsyncRead/Write -> FramedRead/FramedWrite -> Decoder/Encoder -> application handler`
+
+- Validate with `T27-MIG-CODEC-FRAMED` and `T27-MIG-CANCEL-LOSER-DRAIN`.
+- On cancellation, enforce loser-drain and verify no obligation leaks.
+
+#### Playbook C: Reactor-Backed Readiness Path
+`register interest -> poll readiness -> consume event -> deregister/cleanup`
+
+- Validate with `T27-MIG-REACTOR-READINESS` anchors.
+- Require deterministic stale-token handling and cleanup semantics.
+
+### 14.4 Executable Migration Evidence (Normative)
+
+The following command set is the minimum reproducible T2.7 evidence bundle:
+
+```bash
+rch exec -- cargo test --test io_e2e io_e2e_copy_bidirectional -- --nocapture
+rch exec -- cargo test --test tokio_io_utility_operators_parity lines_invariant_1_crlf_stripped_correctly -- --nocapture
+rch exec -- cargo test --test codec_e2e e2e_codec_016_length_delimited_multi_frame -- --nocapture
+rch exec -- cargo test --test tokio_io_codec_cancellation_correctness csr_01_bufreader_cancel_preserves_buffer -- --nocapture
+rch exec -- cargo test --test io_cancellation io_cancel_registration_count_tracking -- --nocapture
+rch exec -- cargo test --test io_uring_reactor deregister_cancels_in_flight_poll -- --nocapture
+rch exec -- cargo test --test t2_track_conformance_and_performance_gates -- --nocapture
+rch exec -- cargo test --test tokio_io_parity_audit -- --nocapture
+```
+
+### 14.5 Structured Log and Replay Linkage for Migration Scenarios
+
+Every T2.7 migration scenario artifact must include:
+
+- `migration_cookbook_ref`
+- `scenario_id`
+- `correlation_id`
+- `replay_artifact`
+- `artifact_path`
+
+These fields tie migration guidance to T2.10 runtime evidence so diagnosis and
+replay remain deterministic.
+
+### 14.6 Operational Caveats, Rollback Paths, and Decision Gates
+
+| Migration Decision Gate | Trigger | Rollback Path | Required Evidence Link |
+|-------------------------|---------|---------------|------------------------|
+| `T27-GATE-COPY-PARITY` | byte-count or EOF semantics drift in copy paths | revert call site to prior stable asupersync I/O composition and re-run T2.7 bundle | `tokio_t2_e2e_protocol_replay_manifest.json` + `tokio_t2_e2e_protocol_events.jsonl` |
+| `T27-GATE-CODEC-FRAME` | frame boundary or max-size regression in codec migration | rollback codec migration slice and replay `codec_e2e` anchors before reapplying | `tokio_t2_e2e_protocol_summary.md` + scenario-specific replay command |
+| `T27-GATE-CANCEL-DRAIN` | loser-drain/obligation leak violation under cancellation | stop rollout, revert to last passing migration commit, and rerun cancellation correctness anchors | `migration_cookbook_ref` + `assertion_status` trail |
+| `T27-GATE-REACTOR-READY` | stale-token or cleanup nondeterminism on backend transitions | rollback backend-touching migration patch and verify R09 contracts before retry | `backend`, `fault_injection`, `replay_artifact` fields |
+
+`asupersync-2oh2u.11.2` must consume this section and its artifact contracts
+when assembling cross-domain migration cookbooks.
+
+## 15. Revision History
 
 | Date | Author | Change |
 |------|--------|--------|
@@ -369,3 +575,6 @@ reregistration correctness, and wake-path dedup/unknown-token handling.
 | 2026-03-03 | SapphireHill | T2.2 closure: IO-G1, IO-G3, IO-G4, IO-G6 confirmed implemented, doc updated (v1.1) |
 | 2026-03-03 | IndigoHawk | T2.3 closure slice: ReaderStream + StreamReader implemented, IO-G12 narrowed to SinkWriter (v1.2) |
 | 2026-03-03 | CloudyHawk | T2.6 closure: added explicit reactor backend readiness/reregister/wake-dedup parity contract matrix and drift rules (v1.3). |
+| 2026-03-03 | AmberMill | T2.9 closure: added explicit cross-bead unit-test matrix (T2.2-T2.6), deterministic scenario IDs, structured log contract, and rch replay command bundle (v1.4). |
+| 2026-03-04 | BrightPrairie | T2.10 closure: added E2E protocol-script matrix, structured detailed log schema, adversarial/recovery path contract, deterministic replay bundle, and migration-cookbook linkage (v1.5). |
+| 2026-03-04 | TopazSparrow | T2.7 closure: added direct tokio/tokio-util -> asupersync migration pattern matrix, anti-patterns, cancellation-safe call-graph playbooks, executable evidence bundle, and rollback decision gates (v1.6). |

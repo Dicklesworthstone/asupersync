@@ -641,3 +641,350 @@ fn reactor_contract_includes_drift_rules() {
         );
     }
 }
+
+#[test]
+fn audit_includes_t2_9_unit_test_matrix_section() {
+    let doc = load_audit_doc();
+    assert!(
+        doc.contains("T2.9 Exhaustive Unit-Test Matrix (T2.2-T2.6)"),
+        "document must include explicit T2.9 unit-test matrix section"
+    );
+    assert!(
+        doc.contains("T2.9 Matrix Gate"),
+        "document must include T2.9 matrix gate policy"
+    );
+}
+
+#[test]
+fn t2_9_matrix_covers_t2_feature_beads() {
+    let doc = load_audit_doc();
+    for bead in [
+        "asupersync-2oh2u.2.2",
+        "asupersync-2oh2u.2.3",
+        "asupersync-2oh2u.2.4",
+        "asupersync-2oh2u.2.5",
+        "asupersync-2oh2u.2.6",
+    ] {
+        assert!(
+            doc.contains(bead),
+            "T2.9 matrix must include feature bead row: {bead}"
+        );
+    }
+}
+
+#[test]
+fn t2_9_matrix_includes_deterministic_scenario_ids() {
+    let doc = load_audit_doc();
+    for scenario in [
+        "T29-T22-READWRITE",
+        "T29-T23-OPERATORS",
+        "T29-T24-CODEC-LENGTH",
+        "T29-T25-CANCEL-RESUME",
+        "T29-T26-REACTOR-REGISTER",
+    ] {
+        assert!(
+            doc.contains(scenario),
+            "T2.9 matrix must include deterministic scenario id: {scenario}"
+        );
+    }
+}
+
+#[test]
+fn t2_9_matrix_requires_structured_log_fields() {
+    let doc = load_audit_doc();
+    for field in [
+        "scenario_id",
+        "correlation_id",
+        "artifact_path",
+        "expected_invariant",
+        "actual_invariant",
+        "invariant_status",
+    ] {
+        assert!(
+            doc.contains(field),
+            "T2.9 matrix must define structured log field: {field}"
+        );
+    }
+}
+
+#[test]
+fn t2_9_replay_bundle_uses_rch_for_all_commands() {
+    let doc = load_audit_doc();
+    let required_cmds = [
+        "rch exec -- cargo test --test io_e2e io_e2e_copy_stream -- --nocapture",
+        "rch exec -- cargo test --test tokio_io_utility_operators_parity adapt_invariant_2_stream_reader_round_trip -- --nocapture",
+        "rch exec -- cargo test --test codec_e2e e2e_codec_011_length_delimited_partial -- --nocapture",
+        "rch exec -- cargo test --test tokio_io_codec_cancellation_correctness csr_01_bufreader_cancel_preserves_buffer -- --nocapture",
+        "rch exec -- cargo test --test io_cancellation io_cancel_registration_count_tracking -- --nocapture",
+    ];
+
+    for cmd in &required_cmds {
+        assert!(
+            doc.contains(cmd),
+            "T2.9 replay bundle must include command: {cmd}"
+        );
+    }
+}
+
+#[test]
+fn t2_9_matrix_test_anchors_exist_in_repo() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let anchors = [
+        (
+            "tests/io_e2e.rs",
+            "fn io_e2e_copy_stream()",
+            "T2.2 unit anchor",
+        ),
+        (
+            "tests/tokio_io_utility_operators_parity.rs",
+            "fn adapt_invariant_2_stream_reader_round_trip()",
+            "T2.3 unit anchor",
+        ),
+        (
+            "tests/codec_e2e.rs",
+            "fn e2e_codec_011_length_delimited_partial()",
+            "T2.4 unit anchor",
+        ),
+        (
+            "tests/tokio_io_codec_cancellation_correctness.rs",
+            "fn csr_01_bufreader_cancel_preserves_buffer()",
+            "T2.5 unit anchor",
+        ),
+        (
+            "tests/io_cancellation.rs",
+            "fn io_cancel_registration_count_tracking()",
+            "T2.6 unit anchor",
+        ),
+    ];
+
+    for (path, needle, label) in &anchors {
+        let abs = manifest_dir.join(path);
+        assert!(abs.exists(), "{label}: missing file {path}");
+        let content = std::fs::read_to_string(&abs)
+            .unwrap_or_else(|_| panic!("{label}: unable to read file {path}"));
+        assert!(
+            content.contains(needle),
+            "{label}: expected anchor `{needle}` in {path}"
+        );
+    }
+}
+
+#[test]
+fn audit_includes_t2_10_e2e_protocol_section() {
+    let doc = load_audit_doc();
+    assert!(
+        doc.contains("T2.10 End-to-End Protocol Scripts and Structured Detailed Logging (T2.10)"),
+        "document must include explicit T2.10 E2E logging section"
+    );
+    assert!(
+        doc.contains("E2E Scenario Matrix"),
+        "T2.10 section must include an E2E scenario matrix"
+    );
+}
+
+#[test]
+fn t2_10_matrix_covers_major_t2_capabilities() {
+    let doc = load_audit_doc();
+    for token in [
+        "Async I/O core",
+        "Utilities",
+        "Codec/framing",
+        "Cancellation/drain",
+        "Reactor readiness",
+        "conformance+performance gate",
+    ] {
+        assert!(
+            doc.contains(token),
+            "T2.10 matrix must include capability token: {token}"
+        );
+    }
+
+    for scenario in [
+        "T210-E2E-CORE-RW",
+        "T210-E2E-UTIL-LINES",
+        "T210-E2E-CODEC-FRAME",
+        "T210-E2E-CANCEL-RACE",
+        "T210-E2E-REACTOR-READY",
+        "T210-E2E-CONFORMANCE-GATE",
+    ] {
+        assert!(
+            doc.contains(scenario),
+            "T2.10 matrix must include scenario id: {scenario}"
+        );
+    }
+}
+
+#[test]
+fn t2_10_log_schema_has_required_fields() {
+    let doc = load_audit_doc();
+    for field in [
+        "event_ts",
+        "scenario_id",
+        "correlation_id",
+        "trace_id",
+        "track_id",
+        "backend",
+        "path_class",
+        "fault_injection",
+        "cancel_phase",
+        "expected_outcome",
+        "actual_outcome",
+        "assertion_status",
+        "redaction_level",
+        "payload_digest",
+        "replay_artifact",
+        "migration_cookbook_ref",
+    ] {
+        assert!(
+            doc.contains(field),
+            "T2.10 structured log schema must include field: {field}"
+        );
+    }
+    assert!(
+        doc.contains("redaction-safe"),
+        "T2.10 schema must require redaction-safe payload handling"
+    );
+}
+
+#[test]
+fn t2_10_declares_adversarial_and_recovery_paths() {
+    let doc = load_audit_doc();
+    for token in [
+        "Timeout path",
+        "Partial-write path",
+        "Cancellation-race path",
+        "Backend-readiness anomaly path",
+        "Recovery rerun path",
+    ] {
+        assert!(
+            doc.contains(token),
+            "T2.10 must define required path class: {token}"
+        );
+    }
+}
+
+#[test]
+fn t2_10_replay_bundle_uses_rch_for_all_commands() {
+    let doc = load_audit_doc();
+    let required_cmds = [
+        "rch exec -- cargo test --test io_e2e io_e2e_copy_bidirectional -- --nocapture",
+        "rch exec -- cargo test --test tokio_io_utility_operators_parity lines_invariant_1_crlf_stripped_correctly -- --nocapture",
+        "rch exec -- cargo test --test codec_e2e e2e_codec_016_length_delimited_multi_frame -- --nocapture",
+        "rch exec -- cargo test --test tokio_io_codec_cancellation_correctness rld_03_framed_write_drop_loses_encoded -- --nocapture",
+        "rch exec -- cargo test --test io_uring_reactor deregister_cancels_in_flight_poll -- --nocapture",
+        "rch exec -- cargo test --test t2_track_conformance_and_performance_gates -- --nocapture",
+    ];
+
+    for cmd in &required_cmds {
+        assert!(
+            doc.contains(cmd),
+            "T2.10 replay bundle must include command: {cmd}"
+        );
+    }
+}
+
+#[test]
+fn t2_10_links_migration_cookbook_evidence() {
+    let doc = load_audit_doc();
+    for token in [
+        "asupersync-2oh2u.2.7",
+        "asupersync-2oh2u.11.2",
+        "migration_cookbook_ref",
+    ] {
+        assert!(
+            doc.contains(token),
+            "T2.10 must link migration-cookbook evidence token: {token}"
+        );
+    }
+}
+
+#[test]
+fn audit_includes_t2_7_direct_migration_section() {
+    let doc = load_audit_doc();
+    assert!(
+        doc.contains("T2.7 Direct Migration Patterns for I/O + Codec APIs (T2.7)"),
+        "document must include explicit T2.7 migration section"
+    );
+    assert!(
+        doc.contains("Before/After Migration Pattern Matrix"),
+        "T2.7 must include before/after migration matrix"
+    );
+}
+
+#[test]
+fn t2_7_matrix_covers_required_migration_journeys() {
+    let doc = load_audit_doc();
+    for token in [
+        "T27-MIG-CORE-COPY",
+        "T27-MIG-UTIL-BUF-LINES",
+        "T27-MIG-CODEC-FRAMED",
+        "T27-MIG-CANCEL-LOSER-DRAIN",
+        "T27-MIG-REACTOR-READINESS",
+        "T27-MIG-STREAM-BRIDGE",
+    ] {
+        assert!(
+            doc.contains(token),
+            "T2.7 migration matrix must include pattern: {token}"
+        );
+    }
+}
+
+#[test]
+fn t2_7_defines_forbidden_antipatterns_and_call_graph_playbooks() {
+    let doc = load_audit_doc();
+    for token in [
+        "Anti-Patterns (Forbidden for T2.7)",
+        "No compatibility shims",
+        "No implicit `into_split` assumptions",
+        "Cancellation-Safe Call-Graph Guidance",
+        "Playbook A: Core I/O Stream Pump",
+        "Playbook B: Framed Protocol Pipeline",
+        "Playbook C: Reactor-Backed Readiness Path",
+    ] {
+        assert!(
+            doc.contains(token),
+            "T2.7 must include anti-pattern/call-graph token: {token}"
+        );
+    }
+}
+
+#[test]
+fn t2_7_has_executable_rch_evidence_bundle() {
+    let doc = load_audit_doc();
+    let required_cmds = [
+        "rch exec -- cargo test --test io_e2e io_e2e_copy_bidirectional -- --nocapture",
+        "rch exec -- cargo test --test tokio_io_utility_operators_parity lines_invariant_1_crlf_stripped_correctly -- --nocapture",
+        "rch exec -- cargo test --test codec_e2e e2e_codec_016_length_delimited_multi_frame -- --nocapture",
+        "rch exec -- cargo test --test tokio_io_codec_cancellation_correctness csr_01_bufreader_cancel_preserves_buffer -- --nocapture",
+        "rch exec -- cargo test --test io_cancellation io_cancel_registration_count_tracking -- --nocapture",
+        "rch exec -- cargo test --test io_uring_reactor deregister_cancels_in_flight_poll -- --nocapture",
+        "rch exec -- cargo test --test t2_track_conformance_and_performance_gates -- --nocapture",
+        "rch exec -- cargo test --test tokio_io_parity_audit -- --nocapture",
+    ];
+
+    for cmd in &required_cmds {
+        assert!(
+            doc.contains(cmd),
+            "T2.7 evidence bundle must include command: {cmd}"
+        );
+    }
+}
+
+#[test]
+fn t2_7_declares_rollback_paths_and_decision_gates() {
+    let doc = load_audit_doc();
+    for token in [
+        "Operational Caveats, Rollback Paths, and Decision Gates",
+        "T27-GATE-COPY-PARITY",
+        "T27-GATE-CODEC-FRAME",
+        "T27-GATE-CANCEL-DRAIN",
+        "T27-GATE-REACTOR-READY",
+        "migration_cookbook_ref",
+        "tokio_t2_e2e_protocol_replay_manifest.json",
+    ] {
+        assert!(
+            doc.contains(token),
+            "T2.7 rollback/decision contract missing token: {token}"
+        );
+    }
+}
