@@ -2,8 +2,7 @@
     "status": "pass",
     "exit_code": 0,
     "distinct_states": "13686",
-    "violations": 0
-0,
+    "violations": 0,
     "spec": "formal/tla/Asupersync.tla",
     "config": "formal/tla/Asupersync_MC.cfg",
     "log": "tlc_20260302_131347.log",
