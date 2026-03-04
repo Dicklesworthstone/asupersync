@@ -681,7 +681,11 @@ impl<T> Receiver<T> {
     #[inline]
     #[must_use]
     pub fn recv<'a>(&'a mut self, cx: &'a Cx) -> Recv<'a, T> {
-        Recv { receiver: self, cx }
+        Recv {
+            receiver: self,
+            cx,
+            polled: false,
+        }
     }
 
     /// Polls the receive operation directly without constructing a temporary future.
@@ -785,6 +789,7 @@ impl<T> Receiver<T> {
 pub struct Recv<'a, T> {
     receiver: &'a mut Receiver<T>,
     cx: &'a Cx,
+    polled: bool,
 }
 
 impl<T> Future for Recv<'_, T> {
@@ -792,6 +797,7 @@ impl<T> Future for Recv<'_, T> {
 
     fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        this.polled = true;
         this.receiver.poll_recv(this.cx, ctx)
     }
 }
@@ -800,8 +806,12 @@ impl<T> Drop for Recv<'_, T> {
     fn drop(&mut self) {
         // Clear the registered waker to avoid retaining stale executor state
         // if this future is dropped (e.g., cancelled by select!).
-        let mut inner = self.receiver.shared.inner.lock();
-        inner.recv_waker = None;
+        // Only clear if this future was actually polled, so we don't clobber
+        // wakers registered by previous direct `poll_recv` calls.
+        if self.polled {
+            let mut inner = self.receiver.shared.inner.lock();
+            inner.recv_waker = None;
+        }
     }
 }
 

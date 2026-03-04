@@ -148,6 +148,15 @@ pub enum ProcessError {
     Signaled(i32),
 }
 
+impl From<ProcessError> for io::Error {
+    fn from(err: ProcessError) -> Self {
+        match err {
+            ProcessError::Io(inner) => inner,
+            other => io::Error::other(other.to_string()),
+        }
+    }
+}
+
 /// Standard I/O configuration for child processes.
 ///
 /// Configures how the child's stdin, stdout, and stderr are handled.
@@ -1075,6 +1084,7 @@ pub struct ChildStdout {
 }
 
 impl ChildStdout {
+    #[cfg(unix)]
     fn from_std(stdout: std_process::ChildStdout) -> io::Result<Self> {
         set_nonblocking(stdout.as_raw_fd())?;
         Ok(Self {
@@ -1083,10 +1093,27 @@ impl ChildStdout {
         })
     }
 
+    #[cfg(not(unix))]
+    fn from_std(stdout: std_process::ChildStdout) -> io::Result<Self> {
+        set_nonblocking()?;
+        Ok(Self {
+            inner: stdout,
+            registration: None,
+        })
+    }
+
     /// Returns the raw file descriptor.
+    #[cfg(unix)]
     #[must_use]
     pub fn as_raw_fd(&self) -> RawFd {
         self.inner.as_raw_fd()
+    }
+
+    /// Returns the raw handle on Windows.
+    #[cfg(windows)]
+    #[must_use]
+    pub fn as_raw_handle(&self) -> RawHandle {
+        self.inner.as_raw_handle()
     }
 }
 
@@ -1097,21 +1124,32 @@ impl AsyncRead for ChildStdout {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        let unfilled = buf.unfilled();
-        match this.inner.read(unfilled) {
-            Ok(n) => {
-                buf.advance(n);
-                Poll::Ready(Ok(()))
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(err) =
-                    register_interest(&mut this.registration, &this.inner, cx, Interest::READABLE)
-                {
-                    return Poll::Ready(Err(err));
+        #[cfg(unix)]
+        {
+            let unfilled = buf.unfilled();
+            match this.inner.read(unfilled) {
+                Ok(n) => {
+                    buf.advance(n);
+                    Poll::Ready(Ok(()))
                 }
-                Poll::Pending
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if let Err(err) =
+                        register_interest(&mut this.registration, &this.inner, cx, Interest::READABLE)
+                    {
+                        return Poll::Ready(Err(err));
+                    }
+                    Poll::Pending
+                }
+                Err(e) => Poll::Ready(Err(e)),
             }
-            Err(e) => Poll::Ready(Err(e)),
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (this, cx, buf);
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "async child stdout is only supported on Unix in this build",
+            )))
         }
     }
 }
@@ -1142,6 +1180,7 @@ pub struct ChildStderr {
 }
 
 impl ChildStderr {
+    #[cfg(unix)]
     fn from_std(stderr: std_process::ChildStderr) -> io::Result<Self> {
         set_nonblocking(stderr.as_raw_fd())?;
         Ok(Self {
@@ -1150,10 +1189,27 @@ impl ChildStderr {
         })
     }
 
+    #[cfg(not(unix))]
+    fn from_std(stderr: std_process::ChildStderr) -> io::Result<Self> {
+        set_nonblocking()?;
+        Ok(Self {
+            inner: stderr,
+            registration: None,
+        })
+    }
+
     /// Returns the raw file descriptor.
+    #[cfg(unix)]
     #[must_use]
     pub fn as_raw_fd(&self) -> RawFd {
         self.inner.as_raw_fd()
+    }
+
+    /// Returns the raw handle on Windows.
+    #[cfg(windows)]
+    #[must_use]
+    pub fn as_raw_handle(&self) -> RawHandle {
+        self.inner.as_raw_handle()
     }
 }
 
@@ -1164,21 +1220,32 @@ impl AsyncRead for ChildStderr {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        let unfilled = buf.unfilled();
-        match this.inner.read(unfilled) {
-            Ok(n) => {
-                buf.advance(n);
-                Poll::Ready(Ok(()))
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(err) =
-                    register_interest(&mut this.registration, &this.inner, cx, Interest::READABLE)
-                {
-                    return Poll::Ready(Err(err));
+        #[cfg(unix)]
+        {
+            let unfilled = buf.unfilled();
+            match this.inner.read(unfilled) {
+                Ok(n) => {
+                    buf.advance(n);
+                    Poll::Ready(Ok(()))
                 }
-                Poll::Pending
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if let Err(err) =
+                        register_interest(&mut this.registration, &this.inner, cx, Interest::READABLE)
+                    {
+                        return Poll::Ready(Err(err));
+                    }
+                    Poll::Pending
+                }
+                Err(e) => Poll::Ready(Err(e)),
             }
-            Err(e) => Poll::Ready(Err(e)),
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (this, cx, buf);
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "async child stderr is only supported on Unix in this build",
+            )))
         }
     }
 }
