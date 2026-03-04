@@ -209,6 +209,137 @@ jobs:
             artifacts/wasm_bundler_compatibility_test.log
           retention-days: 30
 
+      - name: WASM rollback and incident playbook certification
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture | tee artifacts/wasm_release_rollback_playbook_test.log
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          summary = {
+              "schema_version": "wasm-release-rollback-playbook-certification-v1",
+              "workflow": ".github/workflows/ci.yml",
+              "step_name": "WASM rollback and incident playbook certification",
+              "test_target": "wasm_release_rollback_incident_playbook",
+              "playbook_doc": "docs/wasm_release_rollback_incident_playbook.md",
+              "release_strategy_doc": "docs/wasm_release_channel_strategy.md",
+              "publish_workflow": ".github/workflows/publish.yml",
+              "log_artifact": "artifacts/wasm_release_rollback_playbook_test.log",
+              "repro_command": "rch exec -- cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture",
+              "required_release_artifacts": [
+                  "artifacts/security_release_gate_report.json",
+                  "artifacts/wasm_dependency_audit_summary.json",
+                  "artifacts/wasm_optimization_pipeline_summary.json",
+                  "artifacts/npm/publish_outcome.json",
+                  "artifacts/npm/rollback_outcome.json"
+              ]
+          }
+          Path("artifacts/wasm_release_rollback_playbook_summary.json").write_text(
+              json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+          )
+          PY
+
+      - name: Upload WASM rollback playbook certification artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-release-rollback-playbook-certification
+          path: |
+            artifacts/wasm_release_rollback_playbook_summary.json
+            artifacts/wasm_release_rollback_playbook_test.log
+          retention-days: 30
+
+      - name: WASM GA readiness review board certification
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture | tee artifacts/wasm_ga_readiness_review_board_test.log
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          summary = {
+              "schema_version": "wasm-ga-readiness-review-board-certification-v1",
+              "workflow": ".github/workflows/ci.yml",
+              "step_name": "WASM GA readiness review board certification",
+              "test_target": "wasm_ga_readiness_review_board_checklist",
+              "checklist_doc": "docs/wasm_ga_readiness_review_board_checklist.md",
+              "decision_packet_artifact": "artifacts/wasm_ga_readiness_decision_packet.json",
+              "log_artifact": "artifacts/wasm_ga_readiness_review_board_test.log",
+              "repro_command": "rch exec -- cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture",
+              "blocker_beads": [
+                  "asupersync-umelq.17.2",
+                  "asupersync-umelq.15.5",
+                  "asupersync-umelq.14.5",
+                  "asupersync-umelq.13.5",
+                  "asupersync-umelq.16.5",
+                  "asupersync-umelq.12.5",
+                  "asupersync-umelq.18.10"
+              ],
+              "fail_closed_rule": "NO_GO on missing evidence, blocker failure, quorum failure, or unresolved critical risk"
+          }
+          Path("artifacts/wasm_ga_readiness_review_board_summary.json").write_text(
+              json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+          )
+          PY
+
+      - name: Upload WASM GA readiness review board certification artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-ga-readiness-review-board-certification
+          path: |
+            artifacts/wasm_ga_readiness_review_board_summary.json
+            artifacts/wasm_ga_readiness_review_board_test.log
+          retention-days: 30
+
+      - name: WASM launch rollout and support stabilization certification
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cargo test -p asupersync --test wasm_launch_rollout_support_stabilization -- --nocapture | tee artifacts/wasm_launch_rollout_support_stabilization_test.log
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          summary = {
+              "schema_version": "wasm-launch-rollout-support-stabilization-certification-v1",
+              "workflow": ".github/workflows/ci.yml",
+              "step_name": "WASM launch rollout and support stabilization certification",
+              "test_target": "wasm_launch_rollout_support_stabilization",
+              "contract_doc": "docs/wasm_launch_rollout_support_stabilization.md",
+              "log_artifact": "artifacts/wasm_launch_rollout_support_stabilization_test.log",
+              "summary_artifact": "artifacts/wasm_launch_rollout_support_stabilization_summary.json",
+              "repro_command": "rch exec -- cargo test -p asupersync --test wasm_launch_rollout_support_stabilization -- --nocapture",
+              "upstream_contracts": [
+                  "asupersync-umelq.17.4",
+                  "asupersync-umelq.15.5",
+                  "asupersync-umelq.17.3",
+                  "asupersync-umelq.16.5"
+              ],
+              "stabilization_exit_requirements": [
+                  "30-day severe-incident-free window",
+                  "replay-backed closure for severe incidents",
+                  "support SLA >= 99%"
+              ]
+          }
+          Path("artifacts/wasm_launch_rollout_support_stabilization_summary.json").write_text(
+              json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+          )
+          PY
+
+      - name: Upload WASM launch rollout/support stabilization certification artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-launch-rollout-support-stabilization-certification
+          path: |
+            artifacts/wasm_launch_rollout_support_stabilization_summary.json
+            artifacts/wasm_launch_rollout_support_stabilization_test.log
+          retention-days: 30
+
       - name: Clippy lints
         run: cargo clippy --all-targets --all-features -- -D warnings
 

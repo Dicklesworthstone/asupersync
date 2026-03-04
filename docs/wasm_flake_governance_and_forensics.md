@@ -97,6 +97,34 @@ Required forensic linkage per flaky suite:
 - incident severity and owner
 - resolution or reactivation decision notes
 
+## Release Incident Response Integration (WASM-14 / asupersync-umelq.15.5)
+
+When release-gate failures happen in `.github/workflows/publish.yml`, operators
+must capture rollback-safety and incident-response artifacts before rerunning
+promotion:
+
+- `artifacts/wasm/release/rollback_safety_report.json`
+- `artifacts/wasm/release/incident_response_packet.json`
+- `artifacts/wasm/release/release_traceability.json`
+- `artifacts/wasm/release/rollback_instructions.md`
+- `artifacts/npm/rollback_outcome.json` (when npm rollback mode is used)
+
+These artifacts provide:
+
+1. deterministic reproduction commands for the incident-forensics suite,
+2. rollback safety-check status and missing gate reports,
+3. communication protocol expectations (`sev_1`, `sev_2`),
+4. artifact-revocation strategy for npm dist-tag rollback,
+5. postmortem-required fields for closure review and audit.
+
+Deterministic repro bundle (must be preserved in incident notes):
+
+```bash
+bash ./scripts/run_all_e2e.sh --suite wasm-incident-forensics
+TEST_SEED=4242 bash ./scripts/test_wasm_incident_forensics_e2e.sh
+python3 ./scripts/check_incident_forensics_playbook.py
+```
+
 ## Reactivation Criteria
 
 A quarantined suite can be reactivated only when all conditions hold:

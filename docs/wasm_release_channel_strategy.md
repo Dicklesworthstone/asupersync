@@ -157,6 +157,7 @@ Promotion or demotion decisions must capture:
 The canonical automation entrypoint for this contract is:
 
 - `.github/workflows/publish.yml`
+- `docs/wasm_release_rollback_incident_playbook.md` (operational rollback + incident procedure)
 
 Release automation for this workflow is tied to:
 
@@ -182,6 +183,15 @@ Policy wiring expectations:
    (artifactized) rather than an implicit silent bypass.
 5. Rollback mode requires both target version and operator reason; the executed
    dist-tag commands must be captured in release artifacts.
+
+Incident response and rollback operational requirements are defined in:
+
+- `docs/wasm_release_rollback_incident_playbook.md`
+
+That playbook is enforced by CI certification artifacts:
+
+- `artifacts/wasm_release_rollback_playbook_summary.json`
+- `artifacts/wasm_release_rollback_playbook_test.log`
 
 ## Non-Negotiable Constraints
 

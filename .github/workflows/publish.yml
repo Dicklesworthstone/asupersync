@@ -360,6 +360,95 @@ jobs:
           4. Open remediation bead and attach this artifact set before re-promotion.
           EOF
 
+      - name: Emit rollback safety report and incident response packet
+        if: ${{ always() }}
+        run: |
+          mkdir -p artifacts/wasm/release
+          python3 - <<'PY'
+          import datetime as dt
+          import json
+          from pathlib import Path
+
+          gate_reports = [
+              "artifacts/wasm_optimization_pipeline_summary.json",
+              "artifacts/wasm_dependency_audit_summary.json",
+              "artifacts/security_release_gate_report.json",
+          ]
+          missing = [path for path in gate_reports if not Path(path).exists()]
+          generated_at = dt.datetime.now(dt.timezone.utc).isoformat()
+
+          rollback_safety_report = {
+              "schema_version": "wasm-rollback-safety-v1",
+              "generated_at_utc": generated_at,
+              "contract_id": "${{ env.WASM_RELEASE_CONTRACT_ID }}",
+              "bead_id": "${{ env.WASM_RELEASE_BEAD_ID }}",
+              "tag": "${{ needs.plan.outputs.tag }}",
+              "version": "${{ needs.plan.outputs.version }}",
+              "gate_status": "pass" if not missing else "fail",
+              "required_gate_reports": gate_reports,
+              "missing_gate_reports": missing,
+              "rollback_safety_checks": [
+                  "rollback_reason_required_when_rollback_version_set",
+                  "npm_rollback_actions_artifactized",
+                  "wasm_gate_reports_captured_for_triage",
+                  "deterministic_replay_commands_published",
+              ],
+              "deterministic_repro_commands": [
+                  "bash ./scripts/run_all_e2e.sh --suite wasm-incident-forensics",
+                  "TEST_SEED=4242 bash ./scripts/test_wasm_incident_forensics_e2e.sh",
+                  "python3 ./scripts/check_incident_forensics_playbook.py",
+              ],
+              "artifact_pointers": {
+                  "traceability": "artifacts/wasm/release/release_traceability.json",
+                  "rollback_guidance": "artifacts/wasm/release/rollback_instructions.md",
+                  "npm_rollback_outcome": "artifacts/npm/rollback_outcome.json",
+              },
+          }
+
+          incident_response_packet = {
+              "schema_version": "wasm-release-incident-response-v1",
+              "generated_at_utc": generated_at,
+              "contract_id": "${{ env.WASM_RELEASE_CONTRACT_ID }}",
+              "bead_id": "asupersync-umelq.15.5",
+              "communication_protocol": {
+                  "sev_1": {
+                      "initial_ack_sla_minutes": 5,
+                      "update_interval_minutes": 15,
+                      "required_roles": ["release-captain", "security-oncall", "runtime-owner"],
+                  },
+                  "sev_2": {
+                      "initial_ack_sla_minutes": 15,
+                      "update_interval_minutes": 30,
+                      "required_roles": ["release-captain", "runtime-owner"],
+                  },
+              },
+              "artifact_revocation_strategy": {
+                  "npm_dist_tag_rollback_command_template": "npm dist-tag add <package>@<known-good-version> <tag>",
+                  "required_artifacts": [
+                      "artifacts/npm/rollback_actions.txt",
+                      "artifacts/npm/rollback_outcome.json",
+                  ],
+                  "stable_channel_action": "demote stable->canary and freeze promotion until remediation bead is active",
+              },
+              "postmortem_requirements": [
+                  "incident_timeline_utc",
+                  "triggering_gate_and_evidence_links",
+                  "exact_repro_commands",
+                  "rollback_actions_and_verification_results",
+                  "owner_assigned_follow_up_bead",
+              ],
+          }
+
+          Path("artifacts/wasm/release/rollback_safety_report.json").write_text(
+              json.dumps(rollback_safety_report, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          Path("artifacts/wasm/release/incident_response_packet.json").write_text(
+              json.dumps(incident_response_packet, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
   npm_publish:
     name: Publish Browser Edition npm packages
     needs: [plan, wasm_release]

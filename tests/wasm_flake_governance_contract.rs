@@ -72,6 +72,11 @@ fn wasm_flake_playbook_documents_detection_quarantine_and_forensics_commands() {
         "bash ./scripts/run_all_e2e.sh --suite wasm-incident-forensics",
         "TEST_SEED=4242 bash ./scripts/test_wasm_incident_forensics_e2e.sh",
         "python3 ./scripts/check_incident_forensics_playbook.py",
+        "artifacts/wasm/release/rollback_safety_report.json",
+        "artifacts/wasm/release/incident_response_packet.json",
+        "artifacts/npm/rollback_outcome.json",
+        "artifact-revocation strategy",
+        "postmortem-required fields",
         "trace_pointer",
         "reactivation_criteria",
     ] {
