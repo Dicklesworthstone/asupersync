@@ -759,7 +759,7 @@ fn t68_kafka_section_mentions_deterministic_fallback() {
     let kafka_section = doc
         .split("### 2.6 Kafka")
         .nth(1)
-        .and_then(|s| s.split("---").next())
+        .and_then(|s| s.split("\n---\n").next())
         .unwrap_or("");
 
     assert!(
@@ -774,7 +774,7 @@ fn t68_kafka_feature_rows_capture_producer_and_consumer_lifecycle_progress() {
     let kafka_section = doc
         .split("### 2.6 Kafka")
         .nth(1)
-        .and_then(|s| s.split("---").next())
+        .and_then(|s| s.split("\n---\n").next())
         .unwrap_or("");
 
     assert!(
@@ -793,7 +793,7 @@ fn t68_kafka_cancel_correctness_mentions_checkpointed_paths() {
     let kafka_section = doc
         .split("### 2.6 Kafka")
         .nth(1)
-        .and_then(|s| s.split("---").next())
+        .and_then(|s| s.split("\n---\n").next())
         .unwrap_or("");
 
     assert!(
