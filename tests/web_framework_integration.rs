@@ -80,6 +80,7 @@ fn echo_raw(RawBody(body): RawBody) -> Bytes {
     body
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn echo_headers(headers: HashMap<String, String>) -> String {
     let mut pairs: Vec<_> = headers.iter().collect();
     pairs.sort_by_key(|(k, _)| (*k).clone());
@@ -94,6 +95,7 @@ fn echo_cookie(Cookie(raw): Cookie) -> String {
     format!("raw:{raw}")
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn echo_cookie_jar(jar: CookieJar) -> String {
     let session = jar.get("session").unwrap_or("none");
     let theme = jar.get("theme").unwrap_or("none");
