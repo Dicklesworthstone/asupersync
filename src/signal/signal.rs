@@ -530,4 +530,32 @@ mod tests {
         );
         crate::test_complete!("unix_raw_signal_mapping_covers_pipe_and_alarm");
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_raw_signal_mapping_subset() {
+        init_test("windows_raw_signal_mapping_subset");
+        let interrupt = signal_kind_from_raw(libc::SIGINT);
+        crate::assert_with_log!(
+            interrupt == Some(SignalKind::Interrupt),
+            "SIGINT mapped",
+            Some(SignalKind::Interrupt),
+            interrupt
+        );
+        let terminate = signal_kind_from_raw(libc::SIGTERM);
+        crate::assert_with_log!(
+            terminate == Some(SignalKind::Terminate),
+            "SIGTERM mapped",
+            Some(SignalKind::Terminate),
+            terminate
+        );
+        let quit = signal_kind_from_raw(libc::SIGBREAK);
+        crate::assert_with_log!(
+            quit == Some(SignalKind::Quit),
+            "SIGBREAK mapped",
+            Some(SignalKind::Quit),
+            quit
+        );
+        crate::test_complete!("windows_raw_signal_mapping_subset");
+    }
 }
