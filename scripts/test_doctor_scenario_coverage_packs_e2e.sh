@@ -32,8 +32,8 @@ UNIT_LOG="${ARTIFACT_DIR}/unit.log"
 UNIT_JSON="${ARTIFACT_DIR}/unit_summary.json"
 SUITE_ID="doctor_scenario_coverage_packs_e2e"
 SCENARIO_ID="E2E-SUITE-DOCTOR-SCENARIO-COVERAGE-PACKS"
-UNIT_FILTER="doctor_scenario_coverage_pack_"
-EXPECTED_MIN_TESTS=5
+UNIT_FILTER="doctor_scenario_coverage"
+EXPECTED_MIN_TESTS=6
 SELECTION_MODE="all"
 SMOKE_SEED="${SMOKE_SEED:-seed-4242}"
 
@@ -196,7 +196,7 @@ run_unit_slice() {
         local target_dir="/tmp/rch-doctor-scenario-packs-unit-${TIMESTAMP}-attempt${attempt}"
         local -a unit_cmd=(
             env "CARGO_TARGET_DIR=${target_dir}" \
-            cargo test --quiet --features cli --lib "${UNIT_FILTER}" -- --nocapture
+            cargo test --features cli --lib "${UNIT_FILTER}" -- --nocapture
         )
 
         attempt_log="${run_log%.log}.attempt${attempt}.log"
