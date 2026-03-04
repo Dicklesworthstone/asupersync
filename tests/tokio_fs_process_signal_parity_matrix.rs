@@ -711,9 +711,7 @@ fn json_conformance_contracts_map_to_known_gaps() {
 
     let gap_ids = extract_json_gap_ids(&json);
     for contract in contracts {
-        let id = contract["id"]
-            .as_str()
-            .expect("contract must have id");
+        let id = contract["id"].as_str().expect("contract must have id");
         let gap = contract["mapped_gap"]
             .as_str()
             .expect("conformance contract must include mapped_gap");
@@ -812,7 +810,13 @@ fn t37c_01_vfs_deterministic_seam() {
         );
     }
     // VFS methods that enable fault injection (all return io::Result)
-    for method in ["fn open", "fn metadata", "fn create_dir", "fn remove_file", "fn rename"] {
+    for method in [
+        "fn open",
+        "fn metadata",
+        "fn create_dir",
+        "fn remove_file",
+        "fn rename",
+    ] {
         assert!(
             vfs_src.contains(method),
             "[T37C-01/FS-G3] VFS trait missing method: {method}"
@@ -826,7 +830,13 @@ fn t37c_02_fs_cancel_safety_protocol() {
     let mod_src = load_source("src/fs/mod.rs");
 
     // File type with core async operations
-    for token in ["pub struct File", "fn open", "fn create", "sync_all", "sync_data"] {
+    for token in [
+        "pub struct File",
+        "fn open",
+        "fn create",
+        "sync_all",
+        "sync_data",
+    ] {
         assert!(
             file_src.contains(token),
             "[T37C-02/FS-G2] FS cancel-safety: src/fs/file.rs missing token: {token}"
@@ -867,7 +877,7 @@ fn t37c_04_process_lifecycle_protocol() {
     // Command builder API surface
     for token in [
         "pub struct Command",
-        "fn new(",
+        "fn new<",
         "fn arg(",
         "fn args(",
         "fn env(",
@@ -1049,7 +1059,9 @@ fn matrix_t37_has_evidence_commands() {
     );
     // Deterministic replay command for full suite
     assert!(
-        doc.contains("rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix -- --nocapture"),
+        doc.contains(
+            "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix -- --nocapture"
+        ),
         "T3.7 section must include full suite replay command"
     );
 }
