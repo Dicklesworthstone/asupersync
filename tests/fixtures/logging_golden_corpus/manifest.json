@@ -1,0 +1,108 @@
+{
+  "schema_version": "logging-golden-manifest-v1",
+  "description": "Golden log corpus for cross-track e2e/unit logging schema evolution (T8.13)",
+  "bead_id": "asupersync-2oh2u.10.13",
+  "owner": "SapphireHill",
+  "created": "2026-03-04",
+  "update_policy": {
+    "review_required": true,
+    "drift_justification_required": true,
+    "reviewers": ["tokio-replacement"],
+    "checklist": [
+      "Confirm the schema change is intentional, not a regression",
+      "Verify all track-level log entries still parse under the updated schema",
+      "Update the change_log with drift justification",
+      "Run `cargo test --test tokio_golden_log_corpus_enforcement` locally"
+    ]
+  },
+  "schema_versions": {
+    "e2e_suite_summary": "e2e-suite-summary-v3",
+    "raptorq_e2e": "raptorq-e2e-log-v1",
+    "unit_log": "raptorq-unit-log-v1",
+    "service_scripts": "1.0",
+    "quic_h3_forensic": "quic-h3-forensic-manifest.v1"
+  },
+  "fixtures": [
+    {
+      "id": "golden-t2-io-e2e-success",
+      "track_id": "T2",
+      "description": "Representative success trace for async I/O e2e audit",
+      "file": "t2_io_e2e_success.json",
+      "schema_version": "e2e-suite-summary-v3",
+      "last_updated": "2026-03-04",
+      "update_reason": "Initial creation"
+    },
+    {
+      "id": "golden-t3-fs-e2e-success",
+      "track_id": "T3",
+      "description": "Representative success trace for fs/process/signal e2e",
+      "file": "t3_fs_e2e_success.json",
+      "schema_version": "e2e-suite-summary-v3",
+      "last_updated": "2026-03-04",
+      "update_reason": "Initial creation"
+    },
+    {
+      "id": "golden-t4-quic-e2e-success",
+      "track_id": "T4",
+      "description": "Representative success trace for QUIC/H3 e2e scenario",
+      "file": "t4_quic_e2e_success.json",
+      "schema_version": "e2e-suite-summary-v3",
+      "last_updated": "2026-03-04",
+      "update_reason": "Initial creation"
+    },
+    {
+      "id": "golden-t5-web-e2e-success",
+      "track_id": "T5",
+      "description": "Representative success trace for web/gRPC e2e service",
+      "file": "t5_web_e2e_success.json",
+      "schema_version": "1.0",
+      "last_updated": "2026-03-04",
+      "update_reason": "Initial creation"
+    },
+    {
+      "id": "golden-t6-db-e2e-success",
+      "track_id": "T6",
+      "description": "Representative success trace for database/messaging e2e",
+      "file": "t6_db_e2e_success.json",
+      "schema_version": "e2e-suite-summary-v3",
+      "last_updated": "2026-03-04",
+      "update_reason": "Initial creation"
+    },
+    {
+      "id": "golden-t7-interop-e2e-success",
+      "track_id": "T7",
+      "description": "Representative success trace for interoperability e2e",
+      "file": "t7_interop_e2e_success.json",
+      "schema_version": "e2e-suite-summary-v3",
+      "last_updated": "2026-03-04",
+      "update_reason": "Initial creation"
+    },
+    {
+      "id": "golden-failure-schema-violation",
+      "track_id": "cross-track",
+      "description": "Expected failure entry when schema field is missing",
+      "file": "failure_schema_violation.json",
+      "schema_version": "e2e-suite-summary-v3",
+      "last_updated": "2026-03-04",
+      "update_reason": "Initial creation"
+    },
+    {
+      "id": "golden-redaction-compliant",
+      "track_id": "cross-track",
+      "description": "Redaction-compliant log entry with no PII leaks",
+      "file": "redaction_compliant.json",
+      "schema_version": "e2e-suite-summary-v3",
+      "last_updated": "2026-03-04",
+      "update_reason": "Initial creation"
+    }
+  ],
+  "change_log": [
+    {
+      "date": "2026-03-04",
+      "author": "SapphireHill",
+      "action": "create",
+      "fixtures_affected": ["all"],
+      "justification": "Initial golden log corpus creation for T8.13"
+    }
+  ]
+}

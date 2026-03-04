@@ -1,0 +1,29 @@
+{
+  "fixture_id": "golden-redaction-compliant",
+  "schema_version": "e2e-suite-summary-v3",
+  "track_id": "cross-track",
+  "description": "Redaction-compliant log entry with no PII or credential leaks",
+  "entry": {
+    "schema_version": "e2e-suite-summary-v3",
+    "scenario_id": "redaction_compliance_check",
+    "correlation_id": "redact-001",
+    "phase": "verify",
+    "outcome": "pass",
+    "detail": "Log output verified free of credentials, auth tokens, passwords, secrets, PII",
+    "replay_pointer": "cargo test --test tokio_cross_track_e2e_logging_enforcement -- t812_10 --nocapture"
+  },
+  "redaction_mode": "strict",
+  "forbidden_patterns": [
+    "Bearer ",
+    "password=",
+    "secret=",
+    "Authorization:",
+    "api_key=",
+    "token=sk-"
+  ],
+  "invariants": [
+    "No forbidden pattern appears in entry fields",
+    "redaction_mode must be strict or metadata_only, never none",
+    "detail field must not contain raw credentials or PII"
+  ]
+}

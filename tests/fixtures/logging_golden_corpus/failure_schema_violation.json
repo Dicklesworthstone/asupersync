@@ -1,0 +1,21 @@
+{
+  "fixture_id": "golden-failure-schema-violation",
+  "schema_version": "e2e-suite-summary-v3",
+  "track_id": "cross-track",
+  "description": "Expected failure entry when a schema field is missing or malformed",
+  "entry": {
+    "schema_version": "e2e-suite-summary-v3",
+    "scenario_id": "schema_violation_missing_correlation",
+    "phase": "verify",
+    "outcome": "fail",
+    "detail": "Missing correlation_id field violates LQ-02 gate",
+    "replay_pointer": "cargo test --test tokio_cross_track_e2e_logging_enforcement -- t812_08 --nocapture"
+  },
+  "missing_fields": ["correlation_id"],
+  "expected_gate_failures": ["LQ-02"],
+  "invariants": [
+    "Entry must be missing at least one required field",
+    "Gate failure list must reference the correct LQ gate",
+    "Remaining present fields must still conform to schema"
+  ]
+}

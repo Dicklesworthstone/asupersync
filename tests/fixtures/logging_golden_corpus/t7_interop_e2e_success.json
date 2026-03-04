@@ -1,0 +1,22 @@
+{
+  "fixture_id": "golden-t7-interop-e2e-success",
+  "schema_version": "e2e-suite-summary-v3",
+  "track_id": "T7",
+  "description": "Representative success trace for interoperability e2e scenario",
+  "entry": {
+    "schema_version": "e2e-suite-summary-v3",
+    "scenario_id": "t7_adapter_bridge_roundtrip",
+    "correlation_id": "t7-interop-001",
+    "phase": "verify",
+    "outcome": "pass",
+    "detail": "Tokio-compat adapter bridge round-trip verified for hyper/reqwest/axum",
+    "replay_pointer": "cargo test --test tokio_interop_e2e_scenarios -- t7_adapter_bridge_roundtrip --nocapture"
+  },
+  "invariants": [
+    "All 7 schema fields present",
+    "correlation_id matches slug format [a-zA-Z0-9._:-]+",
+    "phase is one of: setup, execute, verify, teardown",
+    "outcome is one of: pass, fail, skip, error",
+    "replay_pointer contains cargo test"
+  ]
+}
