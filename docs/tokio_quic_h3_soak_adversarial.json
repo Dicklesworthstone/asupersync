@@ -1,0 +1,44 @@
+{
+  "bead_id": "asupersync-2oh2u.4.7",
+  "title": "[T4.7] QUIC/H3 Long-Haul Soak and Adversarial Network Simulations",
+  "version": 1,
+  "generated_at": "2026-03-03",
+  "generated_by": "SapphireHill",
+  "source_markdown": "docs/tokio_quic_h3_soak_adversarial.md",
+  "domains": ["quic", "http3", "soak", "adversarial"],
+  "scenario_categories": [
+    {"id_prefix": "SOAK", "name": "Sustained load (soak)", "count": 5},
+    {"id_prefix": "LOSS", "name": "Packet loss", "count": 4},
+    {"id_prefix": "JITTER", "name": "Jitter/reorder", "count": 3},
+    {"id_prefix": "PART", "name": "Partition/heal", "count": 3},
+    {"id_prefix": "ADV", "name": "Adversarial input", "count": 5},
+    {"id_prefix": "CANCEL", "name": "Cancellation stress", "count": 4}
+  ],
+  "total_scenarios": 24,
+  "invariants": [
+    {"id": "INV-1", "name": "Connection stability", "description": "Connection remains Established through transient faults"},
+    {"id": "INV-2", "name": "Stream cleanup", "description": "All opened streams reach terminal state"},
+    {"id": "INV-3", "name": "Flow control consistency", "description": "bytes_in_flight decreases monotonically as ACKs arrive"},
+    {"id": "INV-4", "name": "Memory bounds", "description": "Active stream count never exceeds MAX_STREAMS"},
+    {"id": "INV-5", "name": "Drain completeness", "description": "After close, connection reaches Closed within drain_timeout"},
+    {"id": "INV-6", "name": "Cancellation safety", "description": "Cx cancellation does not corrupt connection state"},
+    {"id": "INV-7", "name": "ACK convergence", "description": "All sent packets eventually ACKed or declared lost"},
+    {"id": "INV-8", "name": "Transport metrics", "description": "Counters are self-consistent"}
+  ],
+  "pass_fail_criteria": [
+    {"criterion": "connection_survival", "threshold": "100% rounds without error"},
+    {"criterion": "stream_cleanup", "threshold": "opened == closed + reset"},
+    {"criterion": "flow_control_invariant", "threshold": "monotonic decrease on ACK"},
+    {"criterion": "ack_convergence", "threshold": "sent == acked + lost at end"},
+    {"criterion": "cancel_safety", "threshold": "no state corruption post-cancel"},
+    {"criterion": "adversarial_rejection", "threshold": "specific error codes matched"},
+    {"criterion": "partition_recovery", "threshold": "Established after short partition heal"},
+    {"criterion": "drain_completion", "threshold": "Closed before deadline"}
+  ],
+  "drift_detection": [
+    {"id": "DRIFT-S1", "trigger": "New loss/CC mechanism added", "action": "Add soak scenario"},
+    {"id": "DRIFT-S2", "trigger": "Stream limit changed", "action": "Update stream counts"},
+    {"id": "DRIFT-S3", "trigger": "Drain timeout logic changed", "action": "Update partition duration"},
+    {"id": "DRIFT-S4", "trigger": "New H3 frame type supported", "action": "Add ADV scenario"}
+  ]
+}
