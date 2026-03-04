@@ -345,15 +345,40 @@ pub fn format_grpc_timeout(duration: Duration) -> String {
     if ns == 0 {
         return "0n".to_string();
     }
+    // Prefer the largest lossless unit that fits within the 8-digit limit.
+    // This matches gRPC convention (Go/Java prefer coarser units).
+    let secs = u128::from(duration.as_secs());
+    if duration.subsec_nanos() == 0 {
+        let hours = secs / 3600;
+        if hours <= MAX_VALUE && secs % 3600 == 0 {
+            return format!("{hours}H");
+        }
+        let mins = secs / 60;
+        if mins <= MAX_VALUE && secs % 60 == 0 {
+            return format!("{mins}M");
+        }
+        if secs <= MAX_VALUE {
+            return format!("{secs}S");
+        }
+    }
+    let ms = duration.as_millis();
+    if ms <= MAX_VALUE && ns.is_multiple_of(1_000_000) {
+        return format!("{ms}m");
+    }
     let us = duration.as_micros();
+    if us <= MAX_VALUE && ns.is_multiple_of(1_000) {
+        return format!("{us}u");
+    }
+    if ns <= MAX_VALUE {
+        return format!("{ns}n");
+    }
+    // Fallback: truncate to the largest unit that fits.
     if us <= MAX_VALUE {
         return format!("{us}u");
     }
-    let ms = duration.as_millis();
     if ms <= MAX_VALUE {
         return format!("{ms}m");
     }
-    let secs = u128::from(duration.as_secs());
     if secs <= MAX_VALUE {
         return format!("{secs}S");
     }
@@ -361,8 +386,7 @@ pub fn format_grpc_timeout(duration: Duration) -> String {
     if mins <= MAX_VALUE {
         return format!("{mins}M");
     }
-    let hours = mins / 60;
-    let hours = hours.min(MAX_VALUE);
+    let hours = (mins / 60).min(MAX_VALUE);
     format!("{hours}H")
 }
 
