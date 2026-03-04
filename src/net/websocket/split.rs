@@ -271,7 +271,8 @@ where
             // Send any pending pongs (under lock)
             {
                 let shared = &mut *self.shared.lock();
-                // cancel-safe: do not clear write_buf, pop pongs instead of draining
+                // cancel-safe: pop removes one at a time; reverse ensures FIFO order
+                shared.pending_pongs.reverse();
                 while let Some(payload) = shared.pending_pongs.pop() {
                     let pong = Frame::pong(payload);
                     let shared = &mut *shared;
@@ -306,6 +307,7 @@ where
 
                         if let Some(response_frame) = response {
                             self.send_frame_internal(response_frame).await?;
+                            self.shared.lock().close_handshake.mark_response_sent();
                         }
 
                         let reason = CloseReason::parse(&frame.payload).ok();

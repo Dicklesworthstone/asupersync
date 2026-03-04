@@ -316,6 +316,11 @@ pub fn parse_grpc_timeout(header: &str) -> Option<Duration> {
     if header.is_empty() {
         return None;
     }
+    // Prevent panic on non-ASCII characters by checking if it's purely ASCII.
+    // The gRPC spec requires digits followed by an ASCII unit character.
+    if !header.is_ascii() {
+        return None;
+    }
     let (digits, unit) = header.split_at(header.len() - 1);
     let value: u64 = digits.parse().ok()?;
     match unit {
@@ -331,11 +336,34 @@ pub fn parse_grpc_timeout(header: &str) -> Option<Duration> {
 
 /// Format a [`Duration`] as a gRPC timeout header value.
 ///
-/// Uses milliseconds as the unit for practical precision.
+/// Selects the most appropriate unit to preserve precision while
+/// staying within the gRPC 8-digit limit.
 #[must_use]
 pub fn format_grpc_timeout(duration: Duration) -> String {
+    const MAX_VALUE: u128 = 99_999_999;
+    let ns = duration.as_nanos();
+    if ns == 0 {
+        return "0n".to_string();
+    }
+    let us = duration.as_micros();
+    if us <= MAX_VALUE {
+        return format!("{us}u");
+    }
     let ms = duration.as_millis();
-    format!("{ms}m")
+    if ms <= MAX_VALUE {
+        return format!("{ms}m");
+    }
+    let secs = u128::from(duration.as_secs());
+    if secs <= MAX_VALUE {
+        return format!("{secs}S");
+    }
+    let mins = secs / 60;
+    if mins <= MAX_VALUE {
+        return format!("{mins}M");
+    }
+    let hours = mins / 60;
+    let hours = hours.min(MAX_VALUE);
+    format!("{hours}H")
 }
 
 /// A gRPC call context.
@@ -390,7 +418,7 @@ impl CallContext {
                 super::streaming::MetadataValue::Binary(_) => None,
             })
             .or(default_timeout);
-        let deadline = timeout.map(|t| now + t);
+        let deadline = timeout.and_then(|t| now.checked_add(t));
         Self {
             metadata,
             deadline,

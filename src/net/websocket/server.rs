@@ -329,7 +329,9 @@ where
                 )));
             }
 
-            // Send any pending pongs (cancel-safe)
+            // Send any pending pongs in FIFO order (cancel-safe: pop removes
+            // one at a time; reverse ensures oldest-first dispatch).
+            self.pending_pongs.reverse();
             while let Some(payload) = self.pending_pongs.pop() {
                 let pong = Frame::pong(payload);
                 self.send_frame(pong).await?;

@@ -1007,6 +1007,23 @@ fn redirect_method(status: u16, original: &Method) -> Method {
 }
 
 fn connection_can_be_reused(response: &Response) -> bool {
+    // RFC 9112 §6.3: when a response has no Content-Length and no
+    // Transfer-Encoding, the body is delimited by connection close (EOF).
+    // Such connections must not be reused.
+    let has_content_length = response
+        .headers
+        .iter()
+        .any(|(n, _)| n.eq_ignore_ascii_case("content-length"));
+    let has_transfer_encoding = response
+        .headers
+        .iter()
+        .any(|(n, _)| n.eq_ignore_ascii_case("transfer-encoding"));
+    let is_bodyless = matches!(response.status, 100..=199 | 204 | 304);
+
+    if !has_content_length && !has_transfer_encoding && !is_bodyless {
+        return false;
+    }
+
     match response.version {
         Version::Http11 => !header_has_token(&response.headers, "connection", "close"),
         Version::Http10 => header_has_token(&response.headers, "connection", "keep-alive"),
@@ -1774,14 +1791,20 @@ mod tests {
             version: Version::Http11,
             status: 200,
             reason: "OK".into(),
-            headers: vec![("Connection".into(), "keep-alive".into())],
+            headers: vec![
+                ("Content-Length".into(), "0".into()),
+                ("Connection".into(), "keep-alive".into()),
+            ],
             body: Vec::new(),
             trailers: Vec::new(),
         };
         assert!(connection_can_be_reused(&response));
 
         let close_response = Response {
-            headers: vec![("Connection".into(), "close".into())],
+            headers: vec![
+                ("Content-Length".into(), "0".into()),
+                ("Connection".into(), "close".into()),
+            ],
             ..response
         };
         assert!(!connection_can_be_reused(&close_response));
@@ -1793,7 +1816,10 @@ mod tests {
             version: Version::Http10,
             status: 200,
             reason: "OK".into(),
-            headers: vec![("Connection".into(), "keep-alive".into())],
+            headers: vec![
+                ("Content-Length".into(), "0".into()),
+                ("Connection".into(), "keep-alive".into()),
+            ],
             body: Vec::new(),
             trailers: Vec::new(),
         };
@@ -1804,5 +1830,35 @@ mod tests {
             ..response
         };
         assert!(!connection_can_be_reused(&no_header));
+    }
+
+    #[test]
+    fn connection_not_reused_for_eof_delimited_body() {
+        // RFC 9112 §6.3: no Content-Length and no Transfer-Encoding means
+        // the body is delimited by connection close (EOF-framed).
+        let response = Response {
+            version: Version::Http11,
+            status: 200,
+            reason: "OK".into(),
+            headers: vec![],
+            body: Vec::new(),
+            trailers: Vec::new(),
+        };
+        assert!(!connection_can_be_reused(&response));
+
+        // Bodyless status codes (204, 304) are exempt.
+        let no_content = Response {
+            status: 204,
+            reason: "No Content".into(),
+            ..response.clone()
+        };
+        assert!(connection_can_be_reused(&no_content));
+
+        // Transfer-Encoding present: body is chunk-framed, reuse is ok.
+        let chunked = Response {
+            headers: vec![("Transfer-Encoding".into(), "chunked".into())],
+            ..response
+        };
+        assert!(connection_can_be_reused(&chunked));
     }
 }
