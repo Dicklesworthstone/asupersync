@@ -1,0 +1,191 @@
+{
+  "bead_id": "asupersync-2oh2u.3.4",
+  "title": "[T3.4] Harden process lifecycle parity (spawn, stdio, wait, kill, exit status)",
+  "version": 1,
+  "generated_at": "2026-03-04",
+  "generated_by": "SapphireHill",
+  "source_gaps": ["PR-G1", "PR-G2", "PR-G3"],
+  "source_matrix": "docs/tokio_fs_process_signal_parity_matrix.md",
+  "domains": ["process", "spawn", "stdio", "kill", "exit-status", "parity"],
+  "gap_closures": [
+    {
+      "gap_id": "PR-G1",
+      "severity": "high",
+      "title": "Async wait/output parity",
+      "status": "closed",
+      "closure_evidence": [
+        "PL-G1-01: wait_async non-blocking",
+        "PL-G1-02: output_async captures stdio",
+        "PL-G1-03: status_async exit code",
+        "PL-G1-04: try_wait before exit",
+        "PL-G1-05: try_wait after exit"
+      ],
+      "notes": "wait_async() uses cooperative yield_now() polling; functionally non-blocking"
+    },
+    {
+      "gap_id": "PR-G2",
+      "severity": "medium",
+      "title": "PTY/terminal session gap",
+      "status": "accepted_gap",
+      "closure_evidence": [],
+      "notes": "Tokio also lacks PTY support; users delegate to external crates. No migration friction."
+    },
+    {
+      "gap_id": "PR-G3",
+      "severity": "medium",
+      "title": "Cross-platform process behavior drift",
+      "status": "closed",
+      "closure_evidence": [
+        "Platform behavior table documented",
+        "Known divergences enumerated (Windows signal, reactor, WASM)",
+        "CI evidence plan defined"
+      ],
+      "notes": "Primary implementation is Unix; Windows has known limitations documented"
+    }
+  ],
+  "contract_tests": [
+    {
+      "id": "PL-G1-01",
+      "category": "async_wait_parity",
+      "title": "wait_async does not block calling thread",
+      "gap": "PR-G1"
+    },
+    {
+      "id": "PL-G1-02",
+      "category": "async_wait_parity",
+      "title": "output_async captures stdout/stderr without blocking",
+      "gap": "PR-G1"
+    },
+    {
+      "id": "PL-G1-03",
+      "category": "async_wait_parity",
+      "title": "status_async returns correct exit code",
+      "gap": "PR-G1"
+    },
+    {
+      "id": "PL-G1-04",
+      "category": "async_wait_parity",
+      "title": "try_wait returns None before child exit",
+      "gap": "PR-G1"
+    },
+    {
+      "id": "PL-G1-05",
+      "category": "async_wait_parity",
+      "title": "try_wait returns Some after child exit",
+      "gap": "PR-G1"
+    },
+    {
+      "id": "PL-SP-01",
+      "category": "spawn",
+      "title": "Valid program spawn succeeds",
+      "gap": "PR-G1"
+    },
+    {
+      "id": "PL-SP-02",
+      "category": "spawn",
+      "title": "Invalid program returns NotFound error",
+      "gap": "PR-G1"
+    },
+    {
+      "id": "PL-SP-03",
+      "category": "spawn",
+      "title": "Arguments passed correctly to child",
+      "gap": "PR-G1"
+    },
+    {
+      "id": "PL-SP-04",
+      "category": "spawn",
+      "title": "Environment variables set for child",
+      "gap": "PR-G1"
+    },
+    {
+      "id": "PL-SP-05",
+      "category": "spawn",
+      "title": "Working directory set for child",
+      "gap": "PR-G1"
+    },
+    {
+      "id": "PL-IO-01",
+      "category": "stdio",
+      "title": "Piped stdout captures child output",
+      "gap": "PR-G1"
+    },
+    {
+      "id": "PL-IO-02",
+      "category": "stdio",
+      "title": "Piped stderr captures child errors",
+      "gap": "PR-G1"
+    },
+    {
+      "id": "PL-IO-03",
+      "category": "stdio",
+      "title": "Piped stdin delivers data to child",
+      "gap": "PR-G1"
+    },
+    {
+      "id": "PL-IO-04",
+      "category": "stdio",
+      "title": "Stdio::null discards output",
+      "gap": "PR-G1"
+    },
+    {
+      "id": "PL-KL-01",
+      "category": "kill",
+      "title": "kill() terminates running child",
+      "gap": "PR-G1"
+    },
+    {
+      "id": "PL-KL-02",
+      "category": "kill",
+      "title": "kill_on_drop terminates on Drop",
+      "gap": "PR-G1"
+    },
+    {
+      "id": "PL-EX-01",
+      "category": "exit_status",
+      "title": "success() true for exit code 0",
+      "gap": "PR-G1"
+    },
+    {
+      "id": "PL-EX-02",
+      "category": "exit_status",
+      "title": "success() false for non-zero exit",
+      "gap": "PR-G1"
+    },
+    {
+      "id": "PL-EX-03",
+      "category": "exit_status",
+      "title": "code() returns correct exit code",
+      "gap": "PR-G1"
+    },
+    {
+      "id": "PL-EX-04",
+      "category": "exit_status",
+      "title": "Signal termination detected (Unix)",
+      "gap": "PR-G1"
+    }
+  ],
+  "platform_matrix": {
+    "linux": {"spawn": true, "kill": "SIGKILL", "signal": true, "reactor_stdio": true, "pty": false},
+    "macos": {"spawn": true, "kill": "SIGKILL", "signal": true, "reactor_stdio": true, "pty": false},
+    "windows": {"spawn": true, "kill": "TerminateProcess", "signal": false, "reactor_stdio": false, "pty": false},
+    "wasm": {"spawn": false, "kill": false, "signal": false, "reactor_stdio": false, "pty": false}
+  },
+  "determinism_invariants": [
+    "Spawn determinism: same command+args+env produces same child behavior",
+    "Exit code determinism: same exit path produces same ExitStatus",
+    "Kill determinism: kill() always sends SIGKILL (Unix) / TerminateProcess (Windows)",
+    "Stdio determinism: piped I/O delivers bytes in order without loss",
+    "try_wait determinism: None before exit, Some(status) after",
+    "kill_on_drop determinism: Drop always attempts kill+reap if enabled",
+    "Error determinism: same failure produces same ProcessError variant",
+    "Async parity: wait_async/output_async produce same results as sync equivalents"
+  ],
+  "summary": {
+    "total_contract_tests": 20,
+    "gaps_closed": 2,
+    "gaps_accepted": 1,
+    "categories": ["async_wait_parity", "spawn", "stdio", "kill", "exit_status"],
+    "dependent_beads": ["asupersync-2oh2u.3.6"]
+  }
+}
