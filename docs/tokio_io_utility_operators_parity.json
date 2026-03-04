@@ -1,0 +1,72 @@
+{
+  "bead_id": "asupersync-2oh2u.2.3",
+  "title": "[T2.3] I/O Utility Operators Parity Contracts",
+  "version": 1,
+  "generated_at": "2026-03-03",
+  "generated_by": "SapphireHill",
+  "source_markdown": "docs/tokio_io_utility_operators_parity.md",
+  "domains": ["io", "copy", "split", "lines", "buffering", "stream-adapters"],
+  "operator_categories": [
+    {"id": "COPY", "name": "Copy operators", "count": 4, "module": "io/copy.rs"},
+    {"id": "SPLIT", "name": "Split ownership", "count": 3, "module": "io/split.rs"},
+    {"id": "LINES", "name": "Lines iterator", "count": 1, "module": "io/lines.rs"},
+    {"id": "BUF", "name": "Buffered I/O", "count": 2, "module": "io/buf_reader.rs, io/buf_writer.rs"},
+    {"id": "ADAPT", "name": "Stream adapters", "count": 2, "module": "io/stream_adapters.rs"},
+    {"id": "PERMIT", "name": "Write permit", "count": 1, "module": "io/write_permit.rs"}
+  ],
+  "total_operators": 13,
+  "invariants": [
+    {"id": "SPLIT-1", "category": "split", "description": "ReadHalf produces same bytes as underlying reader"},
+    {"id": "SPLIT-2", "category": "split", "description": "WriteHalf commits same bytes as underlying writer"},
+    {"id": "SPLIT-3", "category": "split", "description": "into_inner returns stream with preserved state"},
+    {"id": "SPLIT-4", "category": "split", "description": "Dropping one half does not corrupt the other"},
+    {"id": "LINES-1", "category": "lines", "description": "CRLF stripped to empty, not CR"},
+    {"id": "LINES-2", "category": "lines", "description": "EOF without newline emits final line"},
+    {"id": "LINES-3", "category": "lines", "description": "Empty reader yields None"},
+    {"id": "LINES-4", "category": "lines", "description": "Invalid UTF-8 produces error, not panic"},
+    {"id": "BUF-1", "category": "buffering", "description": "BufReader filled buffer matches underlying read"},
+    {"id": "BUF-2", "category": "buffering", "description": "BufWriter flushed bytes match cumulative writes"},
+    {"id": "BUF-3", "category": "buffering", "description": "BufWriter drop without flush loses buffered data"},
+    {"id": "BUF-4", "category": "buffering", "description": "BufReader multiple fills accumulate correctly"},
+    {"id": "ADAPT-1", "category": "stream-adapters", "description": "ReaderStream round-trip: concatenated chunks == original data"},
+    {"id": "ADAPT-2", "category": "stream-adapters", "description": "StreamReader round-trip: read output == concatenated stream chunks"},
+    {"id": "ADAPT-3", "category": "stream-adapters", "description": "StreamReader defers error until buffered data consumed"},
+    {"id": "ADAPT-4", "category": "stream-adapters", "description": "ReaderStream handles zero-byte reads correctly"}
+  ],
+  "cancel_safety": [
+    {"operator": "copy", "cancel_safe": true, "behavior": "Committed bytes remain in writer"},
+    {"operator": "copy_buf", "cancel_safe": true, "behavior": "Committed bytes remain in writer"},
+    {"operator": "copy_bidirectional", "cancel_safe": true, "behavior": "Each direction independent"},
+    {"operator": "SplitStream::split", "cancel_safe": true, "behavior": "Structural only"},
+    {"operator": "Lines::poll_next", "cancel_safe": true, "behavior": "Buffer preserved"},
+    {"operator": "BufReader::poll_fill_buf", "cancel_safe": true, "behavior": "Buffer preserved"},
+    {"operator": "BufWriter::poll_flush", "cancel_safe": true, "behavior": "Can retry"},
+    {"operator": "ReaderStream::poll_next", "cancel_safe": true, "behavior": "Partial read discarded"},
+    {"operator": "StreamReader::poll_read", "cancel_safe": true, "behavior": "Offset preserved"},
+    {"operator": "WritePermit::commit", "cancel_safe": true, "behavior": "Uncommitted data discarded"}
+  ],
+  "obligation_leak_free": true,
+  "gaps": [
+    {"id": "IO-G9", "description": "into_split() — Arc-based owned split halves", "severity": "HIGH", "effort_days": "3-5"},
+    {"id": "IO-G11", "description": "DuplexStream / SimplexStream", "severity": "HIGH", "effort_days": "2-3"},
+    {"id": "IO-G7", "description": "read_until, read_line, split(byte)", "severity": "MEDIUM", "effort_days": "1-2"},
+    {"id": "IO-G8", "description": "BufStream combinator", "severity": "LOW", "effort_days": "<1"},
+    {"id": "IO-G10", "description": "Empty, Repeat, Sink trivial adapters", "severity": "LOW", "effort_days": "<1"}
+  ],
+  "summary": {
+    "total_operators": 13,
+    "total_invariants": 16,
+    "cancel_safe_count": 10,
+    "obligation_leak_free": true,
+    "high_severity_gaps": 2,
+    "medium_severity_gaps": 1,
+    "low_severity_gaps": 2
+  },
+  "drift_detection": [
+    {"id": "DRIFT-U1", "trigger": "New utility operator added to io/", "action": "Add contract row and invariant test"},
+    {"id": "DRIFT-U2", "trigger": "Cancel-safety annotation changed", "action": "Update cancel-safety matrix"},
+    {"id": "DRIFT-U3", "trigger": "into_split (IO-G9) implemented", "action": "Add owned-split invariant tests"},
+    {"id": "DRIFT-U4", "trigger": "DuplexStream (IO-G11) implemented", "action": "Add round-trip tests"},
+    {"id": "DRIFT-U5", "trigger": "Buffer default changed", "action": "Update BUF-* invariant thresholds"}
+  ]
+}
