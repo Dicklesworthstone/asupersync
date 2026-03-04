@@ -149,7 +149,7 @@ impl WebSocketAcceptor {
 
         // Send HTTP 101 response
         let response_bytes = accept_response.response_bytes();
-        write_all_io(&mut stream, &response_bytes).await?;
+        stream.write_all(&response_bytes).await?;
 
         // Create server WebSocket
         let ws = ServerWebSocket::from_upgraded(stream, self.config.clone(), accept_response);
@@ -184,7 +184,7 @@ impl WebSocketAcceptor {
 
         // Send HTTP 101 response
         let response_bytes = accept_response.response_bytes();
-        write_all_io(&mut stream, &response_bytes).await?;
+        stream.write_all(&response_bytes).await?;
 
         // Create server WebSocket
         let ws = ServerWebSocket::from_upgraded(stream, self.config.clone(), accept_response);
@@ -204,7 +204,7 @@ impl WebSocketAcceptor {
         IO: AsyncWrite + Unpin,
     {
         let response = ServerHandshake::reject(status, reason);
-        write_all_io(stream, &response).await.map_err(|e| match e {
+        stream.write_all(&response).await.map_err(|e| match e {
             WsError::Io(e) => e,
             _ => io::Error::other("unexpected error"),
         })
@@ -577,6 +577,21 @@ impl From<WsError> for WsAcceptError {
     fn from(err: WsError) -> Self {
         Self::Protocol(err)
     }
+}
+
+/// Write all bytes to an async writer.
+async fn write_all<IO: AsyncWrite + Unpin>(io: &mut IO, buf: &[u8]) -> io::Result<()> {
+    use std::future::poll_fn;
+
+    let mut written = 0;
+    while written < buf.len() {
+        let n = poll_fn(|cx| Pin::new(&mut *io).poll_write(cx, &buf[written..])).await?;
+        if n == 0 {
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
+        }
+        written += n;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
