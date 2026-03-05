@@ -753,7 +753,9 @@ impl RecoveryOrchestrator {
 
         // Collect contributing replicas (O(R) clones where R = unique replicas).
         let mut seen_replicas = HashSet::new();
-        let contributing: Vec<String> = symbols
+        let contributing: Vec<String> = self
+            .collector
+            .symbols()
             .iter()
             .filter(|s| seen_replicas.insert(s.source_replica.as_str()))
             .map(|s| s.source_replica.clone())
