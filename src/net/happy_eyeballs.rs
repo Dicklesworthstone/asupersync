@@ -25,13 +25,12 @@ use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
-use std::sync::OnceLock;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use crate::cx::Cx;
 use crate::net::TcpStream;
-use crate::time::{TimeSource, WallClock, sleep, timeout};
+use crate::time::{sleep, timeout};
 use crate::types::Time;
 
 /// Configuration for Happy Eyeballs connection racing.
@@ -375,13 +374,15 @@ async fn connect_one(addr: SocketAddr, connect_timeout: Duration) -> io::Result<
 
 /// Gets the current time, preferring the runtime timer driver over wall clock.
 fn timeout_now() -> Time {
-    static CLOCK: OnceLock<WallClock> = OnceLock::new();
     if let Some(current) = Cx::current() {
         if let Some(driver) = current.timer_driver() {
             return driver.now();
         }
     }
-    CLOCK.get_or_init(WallClock::new).now()
+    // Use wall_now() to match the time base that Sleep::poll() uses when
+    // no Cx/timer_driver is available. A separate WallClock would have a
+    // different epoch, causing deadline mismatches with sleep().
+    crate::time::wall_now()
 }
 
 // ============================================================================
