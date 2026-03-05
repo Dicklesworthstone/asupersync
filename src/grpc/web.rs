@@ -1,6 +1,6 @@
 //! gRPC-Web protocol support.
 //!
-//! Implements the [gRPC-Web protocol](https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-WEB.md)
+//! Implements the [gRPC-Web protocol](https://github.com/grpc/grpc/blob/main/doc/PROTOCOL-WEB.md)
 //! which enables gRPC services to be consumed from browser clients via HTTP/1.1.
 //!
 //! # Protocol Differences from Standard gRPC

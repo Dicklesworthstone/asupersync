@@ -747,13 +747,12 @@ impl RegionRecord {
     ///
     /// Returns true if the transition succeeded.
     pub fn begin_finalize(&self) -> bool {
-        let transitioned = if self.state.load() == RegionState::Closing {
-            self.state
-                .transition(RegionState::Closing, RegionState::Finalizing)
-        } else {
-            self.state
-                .transition(RegionState::Draining, RegionState::Finalizing)
-        };
+        let transitioned = self
+            .state
+            .transition(RegionState::Closing, RegionState::Finalizing)
+            || self
+                .state
+                .transition(RegionState::Draining, RegionState::Finalizing);
 
         if transitioned {
             self.trace_state_change(RegionState::Finalizing);
