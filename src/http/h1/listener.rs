@@ -602,12 +602,7 @@ mod tests {
             let began = shutdown.begin_drain(Duration::from_millis(0));
             assert!(began);
 
-            loop {
-                if shutdown.phase() == ShutdownPhase::ForceClosing {
-                    break;
-                }
-                shutdown.phase_changed().await;
-            }
+            shutdown.wait_for_phase(ShutdownPhase::ForceClosing).await;
 
             finished.notify_one();
             let stats = run_handle.await.expect("run");

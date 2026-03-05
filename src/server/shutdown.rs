@@ -231,12 +231,18 @@ impl ShutdownSignal {
         self.state.phase_notify.notify_waiters();
     }
 
-    /// Waits until the shutdown phase changes.
+    /// Waits until the shutdown phase reaches or passes the target phase.
     ///
-    /// Returns the new phase after the change.
-    pub async fn phase_changed(&self) -> ShutdownPhase {
-        self.state.phase_notify.notified().await;
-        self.phase()
+    /// This method is race-free: it guarantees that it will not miss a phase
+    /// transition that occurs concurrently.
+    pub async fn wait_for_phase(&self, target: ShutdownPhase) {
+        loop {
+            let notified = self.state.phase_notify.notified();
+            if self.phase() as u8 >= target as u8 {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// Returns the time when drain began, if applicable.
@@ -526,7 +532,8 @@ mod tests {
             });
 
             // Wait for the phase change
-            let new_phase = signal.phase_changed().await;
+            signal.wait_for_phase(ShutdownPhase::Draining).await;
+            let new_phase = signal.phase();
             crate::assert_with_log!(
                 new_phase == ShutdownPhase::Draining,
                 "phase after drain",
@@ -554,7 +561,8 @@ mod tests {
                 assert!(forced, "force close should succeed");
             });
 
-            let new_phase = signal.phase_changed().await;
+            signal.wait_for_phase(ShutdownPhase::ForceClosing).await;
+            let new_phase = signal.phase();
             crate::assert_with_log!(
                 new_phase == ShutdownPhase::ForceClosing,
                 "phase after force close",
@@ -583,7 +591,8 @@ mod tests {
                 signal2.mark_stopped();
             });
 
-            let new_phase = signal.phase_changed().await;
+            signal.wait_for_phase(ShutdownPhase::ForceClosing).await;
+            let new_phase = signal.phase();
             crate::assert_with_log!(
                 new_phase == ShutdownPhase::Stopped,
                 "phase after stopped",
@@ -608,7 +617,8 @@ mod tests {
                 signal2.trigger_immediate();
             });
 
-            let new_phase = signal.phase_changed().await;
+            signal.wait_for_phase(ShutdownPhase::ForceClosing).await;
+            let new_phase = signal.phase();
             crate::assert_with_log!(
                 new_phase == ShutdownPhase::Stopped,
                 "phase after immediate",
@@ -643,7 +653,8 @@ mod tests {
                     let began = sig.begin_drain(Duration::from_secs(1));
                     assert!(began, "begin drain should succeed");
                 });
-                let p = signal.phase_changed().await;
+                signal.wait_for_phase(ShutdownPhase::Draining).await;
+                let p = signal.phase();
                 crate::assert_with_log!(
                     p == ShutdownPhase::Draining,
                     "draining",
@@ -661,7 +672,8 @@ mod tests {
                     let forced = sig.begin_force_close();
                     assert!(forced, "force close should succeed");
                 });
-                let p = signal.phase_changed().await;
+                signal.wait_for_phase(ShutdownPhase::ForceClosing).await;
+                let p = signal.phase();
                 crate::assert_with_log!(
                     p == ShutdownPhase::ForceClosing,
                     "force closing",
@@ -678,7 +690,8 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(10));
                     sig.mark_stopped();
                 });
-                let p = signal.phase_changed().await;
+                signal.wait_for_phase(ShutdownPhase::Stopped).await;
+                let p = signal.phase();
                 crate::assert_with_log!(
                     p == ShutdownPhase::Stopped,
                     "stopped",

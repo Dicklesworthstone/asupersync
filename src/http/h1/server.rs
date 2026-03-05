@@ -227,7 +227,9 @@ where
                 }
 
                 let mut read_fut = std::pin::pin!(framed.poll_next_ready());
-                let mut shutdown_fut = std::pin::pin!(signal.phase_changed());
+                let mut shutdown_fut = std::pin::pin!(
+                    signal.wait_for_phase(crate::server::shutdown::ShutdownPhase::Draining)
+                );
 
                 poll_fn(|cx| {
                     if signal.is_shutting_down() {

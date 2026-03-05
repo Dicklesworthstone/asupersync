@@ -376,12 +376,13 @@ impl Signal {
         #[cfg(any(unix, windows))]
         {
             loop {
+                let notified = self.slot.notify.notified();
                 let current = self.slot.deliveries.load(Ordering::Acquire);
                 if current > self.seen_deliveries {
                     self.seen_deliveries = current;
                     return Some(());
                 }
-                self.slot.notify.notified().await;
+                notified.await;
             }
         }
 
