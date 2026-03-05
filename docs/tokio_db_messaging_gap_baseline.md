@@ -172,9 +172,11 @@ Cross-cutting concerns: connection pooling (`sync/pool.rs`), blocking pool (`run
 
 **Implementation Status**: Partial, feature-gated `rdkafka` integration with deterministic fallback mode for non-`kafka` builds.
 
+**Cancel-Correctness**: Producer send/flush paths and consumer subscribe/poll/commit/seek/close are integrated with Cx.
+
 | Feature | Status | Gap | Severity |
 |---------|--------|-----|----------|
-| Producer (send, flush, acks) | Partial (deterministic ack metadata + close lifecycle implemented) | KA-G1 | High |
+| Producer (send, flush, acks) | Partial (deterministic ack metadata fallback + close lifecycle implemented) | KA-G1 | High |
 | Consumer (subscribe, poll, commit) | Partial (deterministic subscription/offset lifecycle + assignment validation implemented) | KA-G2 | High |
 | Consumer groups | Partial (deterministic assignment + rebalance lifecycle model) | KA-G3 | High |
 | Transactional producer | Stub | KA-G4 | Medium |
