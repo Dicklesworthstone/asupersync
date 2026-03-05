@@ -51,8 +51,8 @@ pub use first_ok::{
     first_ok_to_result,
 };
 pub use hedge::{
-    Hedge, HedgeConfig, HedgeError, HedgeFuture, HedgeResult, HedgeWinner, hedge, hedge_outcomes,
-    hedge_to_result,
+    AdaptiveHedgePolicy, Hedge, HedgeConfig, HedgeError, HedgeFuture, HedgeResult, HedgeWinner,
+    hedge, hedge_outcomes, hedge_to_result,
 };
 pub use join::{
     Join, Join2Result, JoinAll, JoinAllError, JoinAllResult, JoinError, aggregate_outcomes,

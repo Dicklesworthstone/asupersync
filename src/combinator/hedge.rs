@@ -162,6 +162,20 @@ impl AdaptiveHedgePolicy {
     pub fn config(&self) -> HedgeConfig {
         HedgeConfig::new(self.next_hedge_delay())
     }
+
+    /// Returns the configured history window capacity.
+    #[must_use]
+    pub fn window_size(&self) -> usize {
+        self.history.len()
+    }
+
+    /// Returns the number of samples currently contributing to calibration.
+    ///
+    /// This value saturates at `window_size()`.
+    #[must_use]
+    pub fn sample_count(&self) -> usize {
+        self.count.min(self.history.len())
+    }
 }
 
 /// Configuration for a hedge operation.
@@ -1239,5 +1253,35 @@ mod tests {
         }
         // Should clamp to max_delay
         assert_eq!(policy.next_hedge_delay(), max_delay);
+    }
+
+    #[test]
+    fn test_adaptive_hedge_policy_uses_sliding_window_latest_samples() {
+        let min_delay = Duration::from_millis(1);
+        let max_delay = Duration::from_secs(1);
+        let mut policy = AdaptiveHedgePolicy::new(5, 0.5, min_delay, max_delay);
+
+        for millis in 1..=10 {
+            policy.record(Duration::from_millis(millis));
+        }
+
+        // Window retains only the latest 5 samples: [6,7,8,9,10]
+        assert_eq!(policy.window_size(), 5);
+        assert_eq!(policy.sample_count(), 5);
+
+        // Rank = ceil((5 + 1) * (1 - 0.5)) = 3, zero-indexed -> 2, value -> 8ms.
+        assert_eq!(policy.next_hedge_delay(), Duration::from_millis(8));
+    }
+
+    #[test]
+    fn test_adaptive_hedge_policy_config_matches_next_delay() {
+        let min_delay = Duration::from_millis(5);
+        let max_delay = Duration::from_millis(500);
+        let mut policy = AdaptiveHedgePolicy::new(16, 0.1, min_delay, max_delay);
+        for millis in 10..=30 {
+            policy.record(Duration::from_millis(millis));
+        }
+
+        assert_eq!(policy.config().hedge_delay, policy.next_hedge_delay());
     }
 }

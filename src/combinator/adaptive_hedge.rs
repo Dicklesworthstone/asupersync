@@ -8,6 +8,27 @@ use crate::combinator::hedge::HedgeConfig;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+fn duration_nanos_saturating_u64(duration: Duration) -> u64 {
+    let nanos = duration.as_nanos();
+    if nanos > u128::from(u64::MAX) {
+        u64::MAX
+    } else {
+        nanos as u64
+    }
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn decay_nanos(current: u64, decay_factor: f64) -> u64 {
+    let decayed = (current as f64) * decay_factor;
+    if !decayed.is_finite() || decayed <= 0.0 {
+        0
+    } else if decayed >= (u64::MAX as f64) {
+        u64::MAX
+    } else {
+        decayed as u64
+    }
+}
+
 /// Adaptive latency hedge controller based on Peak-EWMA.
 ///
 /// Uses an asymmetric update rule to rapidly track latency spikes (peaks)
@@ -41,10 +62,21 @@ impl PeakEwmaHedgeController {
         max_delay: Duration,
         decay_factor: f64,
     ) -> Self {
+        assert!(
+            decay_factor.is_finite() && decay_factor > 0.0 && decay_factor <= 1.0,
+            "decay_factor must be finite and in (0, 1]"
+        );
+        let min_nanos = duration_nanos_saturating_u64(min_delay);
+        let max_nanos = duration_nanos_saturating_u64(max_delay);
+        assert!(
+            min_nanos <= max_nanos,
+            "min_delay must be <= max_delay"
+        );
+        let initial_nanos = duration_nanos_saturating_u64(initial).clamp(min_nanos, max_nanos);
         Self {
-            estimate_nanos: AtomicU64::new(initial.as_nanos() as u64),
-            min_delay: min_delay.as_nanos() as u64,
-            max_delay: max_delay.as_nanos() as u64,
+            estimate_nanos: AtomicU64::new(initial_nanos),
+            min_delay: min_nanos,
+            max_delay: max_nanos,
             decay_factor,
         }
     }
@@ -61,27 +93,13 @@ impl PeakEwmaHedgeController {
     }
 
     /// Observe the completion time of a primary request to adjust the threshold.
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
     pub fn observe(&self, rtt: Duration) {
-        let sample = rtt.as_nanos() as u64;
+        let sample = duration_nanos_saturating_u64(rtt);
         let mut current = self.estimate_nanos.load(Ordering::Acquire);
         loop {
-            let next = if sample > current {
-                sample // Rapid spike tracking (Peak)
-            } else {
-                let decayed = (current as f64) * self.decay_factor;
-                if !decayed.is_finite() || decayed <= 0.0 {
-                    0
-                } else if decayed >= (u64::MAX as f64) {
-                    u64::MAX
-                } else {
-                    decayed as u64
-                }
-            };
+            // Exact Peak-EWMA update: H(t+1) = max(sample, α * H(t))
+            let decayed = decay_nanos(current, self.decay_factor);
+            let next = sample.max(decayed);
 
             match self.estimate_nanos.compare_exchange_weak(
                 current,
@@ -147,6 +165,75 @@ mod tests {
         let controller = PeakEwmaHedgeController::default_rpc(); // max 500ms
 
         controller.observe(Duration::from_secs(1)); // Way over max
+        assert_eq!(
+            controller.current_config().hedge_delay,
+            Duration::from_millis(500)
+        );
+    }
+
+    #[test]
+    fn adaptive_hedge_uses_peak_ewma_max_equation() {
+        let controller = PeakEwmaHedgeController::new(
+            Duration::from_millis(200),
+            Duration::from_millis(1),
+            Duration::from_secs(1),
+            0.99,
+        );
+
+        // 0.99 * 200ms = 198ms; sample=199ms should win via max(sample, decayed).
+        controller.observe(Duration::from_millis(199));
+        assert_eq!(
+            controller.current_config().hedge_delay,
+            Duration::from_millis(199)
+        );
+    }
+
+    #[test]
+    fn adaptive_hedge_clamps_initial_delay() {
+        let controller = PeakEwmaHedgeController::new(
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            Duration::from_millis(50),
+            0.99,
+        );
+        assert_eq!(
+            controller.current_config().hedge_delay,
+            Duration::from_millis(50)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "min_delay must be <= max_delay")]
+    fn adaptive_hedge_rejects_inverted_bounds() {
+        let _ = PeakEwmaHedgeController::new(
+            Duration::from_millis(20),
+            Duration::from_millis(50),
+            Duration::from_millis(10),
+            0.99,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "decay_factor must be finite and in (0, 1]")]
+    fn adaptive_hedge_rejects_invalid_decay_factor() {
+        let _ = PeakEwmaHedgeController::new(
+            Duration::from_millis(20),
+            Duration::from_millis(10),
+            Duration::from_millis(50),
+            1.5,
+        );
+    }
+
+    #[test]
+    fn adaptive_hedge_saturates_huge_duration_samples() {
+        let controller = PeakEwmaHedgeController::new(
+            Duration::from_millis(20),
+            Duration::from_millis(10),
+            Duration::from_millis(500),
+            0.99,
+        );
+        controller.observe(Duration::from_secs(u64::MAX));
+        // Hard clamp still applies at config projection.
         assert_eq!(
             controller.current_config().hedge_delay,
             Duration::from_millis(500)
