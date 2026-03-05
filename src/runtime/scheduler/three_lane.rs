@@ -3623,7 +3623,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn classify_backoff_timeout_decision_handles_due_short_and_long_waits() {
         let now = Time::from_nanos(1_000);
