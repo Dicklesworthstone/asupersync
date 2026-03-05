@@ -491,7 +491,7 @@ impl CertificatePin {
     /// Compute the certificate SHA-256 pin for a certificate.
     #[cfg(feature = "tls")]
     pub fn compute_cert_sha256(cert: &Certificate) -> Result<Self, TlsError> {
-        use ring::digest::{SHA256, digest};
+        use ring::digest::{digest, SHA256};
         let hash = digest(&SHA256, cert.as_der());
         Ok(Self::CertSha256(hash.as_ref().to_vec()))
     }
@@ -600,28 +600,32 @@ impl CertificatePinSet {
             return Ok(true);
         }
 
-        // Compute both types of pins for the certificate
-        let spki_pin = CertificatePin::compute_spki_sha256(cert)?;
-        let cert_pin = CertificatePin::compute_cert_sha256(cert)?;
+        // Compute pin types on demand — only compute what the pin set
+        // actually contains to avoid failing on unimplemented pin types.
+        let spki_pin = CertificatePin::compute_spki_sha256(cert).ok();
+        let cert_pin = CertificatePin::compute_cert_sha256(cert).ok();
 
         // Check if any pin matches
-        if self.pins.contains(&spki_pin) || self.pins.contains(&cert_pin) {
+        if spki_pin.as_ref().is_some_and(|p| self.pins.contains(p))
+            || cert_pin.as_ref().is_some_and(|p| self.pins.contains(p))
+        {
             return Ok(true);
         }
 
         // No match
         if self.enforce {
             let expected: Vec<String> = self.pins.iter().map(CertificatePin::to_base64).collect();
-            Err(TlsError::PinMismatch {
-                expected,
-                actual: spki_pin.to_base64(),
-            })
+            let actual = spki_pin
+                .as_ref()
+                .or(cert_pin.as_ref())
+                .map_or_else(|| "<unavailable>".to_string(), CertificatePin::to_base64);
+            Err(TlsError::PinMismatch { expected, actual })
         } else {
             #[cfg(feature = "tracing-integration")]
             tracing::warn!(
                 expected = ?self.pins.iter().map(CertificatePin::to_base64).collect::<Vec<_>>(),
-                actual_spki = %spki_pin.to_base64(),
-                actual_cert = %cert_pin.to_base64(),
+                actual_spki = %spki_pin.as_ref().map_or_else(|| "<unavailable>".to_string(), CertificatePin::to_base64),
+                actual_cert = %cert_pin.as_ref().map_or_else(|| "<unavailable>".to_string(), CertificatePin::to_base64),
                 "Certificate pin mismatch (report-only mode)"
             );
             Ok(false)
