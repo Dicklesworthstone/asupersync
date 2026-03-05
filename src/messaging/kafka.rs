@@ -773,11 +773,15 @@ impl KafkaProducer {
     /// close return `Ok(())`.
     pub async fn close(&self, cx: &Cx, timeout: Duration) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
-        if self.closed.load(Ordering::Acquire) {
+        // Atomically claim the close transition to prevent concurrent double-flush.
+        if self
+            .closed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             return Ok(());
         }
         self.flush_inner(cx, timeout, true).await?;
-        self.closed.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -1370,14 +1374,17 @@ mod tests {
         run_test_with_cx(|cx| async move {
             let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
 
+            // Use unique topic name to avoid cross-test contamination via the
+            // global STUB_DELIVERY_OFFSETS static.
+            let topic = "deterministic-delivery-metadata-test";
             let first = producer
-                .send(&cx, "orders", None, b"first", Some(2))
+                .send(&cx, topic, None, b"first", Some(2))
                 .await
                 .unwrap();
             let second = producer
                 .send_with_headers(
                     &cx,
-                    "orders",
+                    topic,
                     Some(b"key"),
                     b"second",
                     &[("trace-id", b"abc-123")],
@@ -1385,14 +1392,14 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(first.topic, "orders");
+            assert_eq!(first.topic, topic);
             assert_eq!(first.partition, 2);
             assert_eq!(first.offset, 0);
             assert_eq!(second.partition, 0);
             assert_eq!(second.offset, 0);
 
             let third = producer
-                .send(&cx, "orders", None, b"third", Some(2))
+                .send(&cx, topic, None, b"third", Some(2))
                 .await
                 .unwrap();
             assert_eq!(third.offset, first.offset + 1);

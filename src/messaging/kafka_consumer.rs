@@ -336,21 +336,21 @@ impl KafkaConsumer {
         self.ensure_open()?;
 
         let mut normalized = BTreeMap::new();
-        let subscribed_topics = {
-            let state = self.state.lock();
-            if state.subscribed_topics.is_empty() {
-                return Err(KafkaError::Config(
-                    "consumer has no active topic subscription".to_string(),
-                ));
-            }
-            state.subscribed_topics.clone()
-        };
+        // Hold the lock across validation and mutation to prevent TOCTOU
+        // races where subscribed_topics could change between validation
+        // and the state update below.
+        let mut state = self.state.lock();
+        if state.subscribed_topics.is_empty() {
+            return Err(KafkaError::Config(
+                "consumer has no active topic subscription".to_string(),
+            ));
+        }
 
         for tpo in assignments {
             if tpo.topic.trim().is_empty() {
                 return Err(KafkaError::Config("topic cannot be empty".to_string()));
             }
-            if !subscribed_topics.contains(&tpo.topic) {
+            if !state.subscribed_topics.contains(&tpo.topic) {
                 return Err(KafkaError::InvalidTopic(tpo.topic.clone()));
             }
             if tpo.offset < 0 {
@@ -360,8 +360,6 @@ impl KafkaConsumer {
             }
             normalized.insert((tpo.topic.clone(), tpo.partition), tpo.offset);
         }
-
-        let mut state = self.state.lock();
         let previous_assignments = state.assigned_partitions.clone();
         let next_assignments: BTreeSet<(String, i32)> = normalized.keys().cloned().collect();
         let revoked: Vec<(String, i32)> = previous_assignments
@@ -430,19 +428,17 @@ impl KafkaConsumer {
             return Err(KafkaError::Config("offsets cannot be empty".to_string()));
         }
 
-        let (subscribed_topics, assigned_partitions, committed_offsets) = {
-            let state = self.state.lock();
-            (
-                state.subscribed_topics.clone(),
-                state.assigned_partitions.clone(),
-                state.committed_offsets.clone(),
-            )
-        };
+        // Hold the lock across validation and mutation to prevent TOCTOU
+        // races between concurrent commit_offsets calls.
+        let mut state = self.state.lock();
         for tpo in offsets {
-            if !subscribed_topics.contains(&tpo.topic) {
+            if !state.subscribed_topics.contains(&tpo.topic) {
                 return Err(KafkaError::InvalidTopic(tpo.topic.clone()));
             }
-            if !assigned_partitions.contains(&(tpo.topic.clone(), tpo.partition)) {
+            if !state
+                .assigned_partitions
+                .contains(&(tpo.topic.clone(), tpo.partition))
+            {
                 return Err(KafkaError::Config(
                     "partition is not assigned to this consumer".to_string(),
                 ));
@@ -452,7 +448,8 @@ impl KafkaConsumer {
                     "offsets must be non-negative".to_string(),
                 ));
             }
-            if let Some(previous) = committed_offsets.get(&(tpo.topic.clone(), tpo.partition))
+            if let Some(previous) =
+                state.committed_offsets.get(&(tpo.topic.clone(), tpo.partition))
                 && tpo.offset < *previous
             {
                 return Err(KafkaError::Config(
@@ -460,8 +457,6 @@ impl KafkaConsumer {
                 ));
             }
         }
-
-        let mut state = self.state.lock();
         for tpo in offsets {
             state
                 .committed_offsets
