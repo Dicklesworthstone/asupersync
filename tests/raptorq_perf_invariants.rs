@@ -24,6 +24,9 @@ const G1_BUDGET_SCHEMA_VERSION: &str = "raptorq-g1-budget-draft-v1";
 const G3_DECISION_RECORDS_SCHEMA_VERSION: &str = "raptorq-optimization-decision-records-v1";
 const G4_ROLLOUT_POLICY_SCHEMA_VERSION: &str = "raptorq-controlled-rollout-policy-v1";
 const G7_EXPECTED_LOSS_CONTRACT_SCHEMA_VERSION: &str = "raptorq-g7-expected-loss-contract-v1";
+const E3_TRACK_E_GF256_P95P99_SCHEMA_VERSION: &str = "raptorq-track-e-gf256-p95p99-v1";
+const E3_TRACK_E_GF256_P95P99_HIGHCONF_SCHEMA_VERSION: &str =
+    "raptorq-track-e-gf256-p95p99-highconf-v1";
 const H3_POST_CLOSURE_BACKLOG_SCHEMA_VERSION: &str =
     "raptorq-h3-post-closure-opportunity-backlog-v1";
 const H2_PROGRAM_CLOSURE_PACKET_SCHEMA_VERSION: &str =
@@ -1398,6 +1401,328 @@ fn g1_budget_unit_matrix_markdown_status_snapshot_matches_artifact_subset() {
     assert_eq!(
         seen, expected_subset,
         "unit matrix markdown must track canonical D5/D6/D7/D9 status subset"
+    );
+}
+
+fn assert_percentiles_monotonic(block: &serde_json::Value, label: &str) {
+    let p50 = block["p50"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("{label} missing p50"));
+    let p95 = block["p95"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("{label} missing p95"));
+    let p99 = block["p99"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("{label} missing p99"));
+    assert!(
+        p50 <= p95 && p95 <= p99,
+        "{label} must satisfy p50 <= p95 <= p99 (got p50={p50}, p95={p95}, p99={p99})"
+    );
+}
+
+/// Validate Track-E p95/p99 artifact schema, mode/op coverage, and percentile ordering.
+#[test]
+fn e3_track_e_gf256_p95p99_artifact_schema_and_coverage() {
+    let artifact_json = include_str!("../artifacts/raptorq_track_e_gf256_p95p99_v1.json");
+    let artifact: serde_json::Value =
+        serde_json::from_str(artifact_json).expect("Track-E p95/p99 artifact must be valid JSON");
+
+    assert_eq!(
+        artifact["schema_version"].as_str(),
+        Some(E3_TRACK_E_GF256_P95P99_SCHEMA_VERSION),
+        "unexpected Track-E p95/p99 schema version"
+    );
+    assert_eq!(
+        artifact["track_bead_id"].as_str(),
+        Some("asupersync-36m6p"),
+        "Track-E p95/p99 artifact must remain anchored to asupersync-36m6p"
+    );
+    assert_eq!(
+        artifact["source_artifacts"].as_array().map(Vec::len),
+        Some(1),
+        "Track-E p95/p99 artifact must cite exactly one source artifact"
+    );
+    assert_eq!(
+        artifact["source_artifacts"][0].as_str(),
+        Some("artifacts/raptorq_track_e_gf256_bench_v1.json"),
+        "Track-E p95/p99 source artifact path mismatch"
+    );
+
+    let expected_modes = BTreeSet::from([
+        "auto".to_string(),
+        "baseline".to_string(),
+        "rollback".to_string(),
+    ]);
+    let expected_ops = BTreeSet::from([
+        "addmul_slices2_fused".to_string(),
+        "addmul_slices2_sequential".to_string(),
+        "mul_slices2_fused".to_string(),
+        "mul_slices2_sequential".to_string(),
+    ]);
+
+    let op_scope = artifact["methodology"]["operation_scope"]
+        .as_array()
+        .expect("methodology.operation_scope must be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("operation_scope entries must be strings")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        op_scope, expected_ops,
+        "operation scope must cover the canonical four dual-slice operations"
+    );
+
+    let overall = artifact["per_mode_overall_percentiles"]
+        .as_array()
+        .expect("per_mode_overall_percentiles must be an array");
+    assert_eq!(
+        overall.len(),
+        expected_modes.len(),
+        "overall percentiles must provide one entry per mode"
+    );
+
+    let mut observed_modes = BTreeSet::new();
+    for entry in overall {
+        let mode = entry["mode"]
+            .as_str()
+            .expect("overall percentile entry missing mode")
+            .to_string();
+        assert!(
+            expected_modes.contains(&mode),
+            "unexpected mode in overall percentiles: {mode}"
+        );
+        observed_modes.insert(mode.clone());
+        assert!(
+            entry["samples"].as_u64().unwrap_or(0) > 0,
+            "overall percentile entry must have positive sample count for mode {mode}"
+        );
+        assert_percentiles_monotonic(&entry["time_us"], &format!("{mode} overall time_us"));
+        assert_percentiles_monotonic(
+            &entry["throughput_gib_s"],
+            &format!("{mode} overall throughput_gib_s"),
+        );
+    }
+    assert_eq!(
+        observed_modes, expected_modes,
+        "overall percentiles must cover baseline/auto/rollback exactly"
+    );
+
+    let op_percentiles = artifact["per_mode_operation_percentiles"]
+        .as_array()
+        .expect("per_mode_operation_percentiles must be an array");
+    assert_eq!(
+        op_percentiles.len(),
+        expected_modes.len() * expected_ops.len(),
+        "operation percentiles must cover every mode/operation pair exactly once"
+    );
+
+    let mut observed_pairs = BTreeSet::new();
+    for entry in op_percentiles {
+        let mode = entry["mode"]
+            .as_str()
+            .expect("operation percentile entry missing mode")
+            .to_string();
+        let op = entry["operation"]
+            .as_str()
+            .expect("operation percentile entry missing operation")
+            .to_string();
+        assert!(
+            expected_modes.contains(&mode),
+            "unexpected mode in operation percentiles: {mode}"
+        );
+        assert!(
+            expected_ops.contains(&op),
+            "unexpected operation in operation percentiles: {op}"
+        );
+        observed_pairs.insert((mode.clone(), op.clone()));
+        assert!(
+            entry["samples"].as_u64().unwrap_or(0) > 0,
+            "operation percentile entry must have positive sample count for {mode}/{op}"
+        );
+        assert_percentiles_monotonic(&entry["time_us"], &format!("{mode}/{op} time_us"));
+        assert_percentiles_monotonic(
+            &entry["throughput_gib_s"],
+            &format!("{mode}/{op} throughput_gib_s"),
+        );
+    }
+    assert_eq!(
+        observed_pairs.len(),
+        expected_modes.len() * expected_ops.len(),
+        "mode/operation percentile pair coverage must be unique"
+    );
+
+    let commands = artifact["methodology"]["commands"]
+        .as_array()
+        .expect("methodology.commands must be an array");
+    assert!(
+        !commands.is_empty(),
+        "methodology.commands must include reproducible benchmark commands"
+    );
+    for command in commands {
+        let command = command
+            .as_str()
+            .expect("methodology.commands entries must be strings");
+        assert!(
+            command.contains("rch exec --"),
+            "Track-E p95/p99 command must be rch-offloaded: {command}"
+        );
+        assert!(
+            command.contains("cargo bench --bench raptorq_benchmark"),
+            "Track-E p95/p99 command must run raptorq_benchmark: {command}"
+        );
+    }
+}
+
+/// Validate high-confidence Track-E artifact linkage, sampling contract, and
+/// mode/op comparability against the base p95/p99 artifact.
+#[test]
+fn e3_track_e_gf256_p95p99_highconf_contract_and_linkage() {
+    let highconf_json = include_str!("../artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json");
+    let highconf: serde_json::Value = serde_json::from_str(highconf_json)
+        .expect("Track-E high-confidence p95/p99 artifact must be valid JSON");
+    let base_json = include_str!("../artifacts/raptorq_track_e_gf256_p95p99_v1.json");
+    let base: serde_json::Value = serde_json::from_str(base_json)
+        .expect("Track-E base p95/p99 artifact must be valid JSON");
+
+    assert_eq!(
+        highconf["schema_version"].as_str(),
+        Some(E3_TRACK_E_GF256_P95P99_HIGHCONF_SCHEMA_VERSION),
+        "unexpected Track-E high-confidence schema version"
+    );
+    assert_eq!(
+        highconf["track_bead_id"].as_str(),
+        Some("asupersync-36m6p"),
+        "Track-E high-confidence artifact must remain anchored to asupersync-36m6p"
+    );
+    assert_eq!(
+        highconf["source_artifacts"].as_array().map(Vec::len),
+        Some(1),
+        "Track-E high-confidence artifact must cite exactly one source artifact"
+    );
+    assert_eq!(
+        highconf["source_artifacts"][0].as_str(),
+        Some("artifacts/raptorq_track_e_gf256_p95p99_v1.json"),
+        "high-confidence artifact must point to the base p95/p99 artifact"
+    );
+
+    let criterion = &highconf["methodology"]["criterion_settings"];
+    let sample_size = criterion["sample_size"]
+        .as_u64()
+        .expect("criterion_settings.sample_size must be present");
+    assert!(
+        sample_size >= 30,
+        "high-confidence artifact must use larger sample_size (>=30)"
+    );
+    assert_eq!(
+        highconf["methodology"]["scenario_scope"].as_array().map(Vec::len),
+        Some(1),
+        "high-confidence artifact should scope to one closure-critical scenario"
+    );
+    assert_eq!(
+        highconf["methodology"]["filter"].as_str(),
+        highconf["methodology"]["scenario_scope"][0].as_str(),
+        "high-confidence methodology.filter must match the single scenario scope entry"
+    );
+
+    let base_pairs = base["per_mode_operation_percentiles"]
+        .as_array()
+        .expect("base per_mode_operation_percentiles must be an array")
+        .iter()
+        .map(|entry| {
+            (
+                entry["mode"]
+                    .as_str()
+                    .expect("base mode missing")
+                    .to_string(),
+                entry["operation"]
+                    .as_str()
+                    .expect("base operation missing")
+                    .to_string(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let highconf_pairs = highconf["per_mode_operation_percentiles"]
+        .as_array()
+        .expect("highconf per_mode_operation_percentiles must be an array")
+        .iter()
+        .map(|entry| {
+            (
+                entry["mode"]
+                    .as_str()
+                    .expect("highconf mode missing")
+                    .to_string(),
+                entry["operation"]
+                    .as_str()
+                    .expect("highconf operation missing")
+                    .to_string(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        highconf_pairs, base_pairs,
+        "high-confidence artifact must preserve mode/operation coverage from base artifact"
+    );
+
+    for entry in highconf["per_mode_operation_percentiles"]
+        .as_array()
+        .expect("highconf per_mode_operation_percentiles must be an array")
+    {
+        let mode = entry["mode"].as_str().expect("highconf op entry missing mode");
+        let operation = entry["operation"]
+            .as_str()
+            .expect("highconf op entry missing operation");
+        assert_eq!(
+            entry["samples"].as_u64(),
+            Some(sample_size),
+            "high-confidence operation sample count must equal criterion sample_size for {mode}/{operation}"
+        );
+        assert_percentiles_monotonic(
+            &entry["time_us"],
+            &format!("highconf {mode}/{operation} time_us"),
+        );
+        assert_percentiles_monotonic(
+            &entry["throughput_gib_s"],
+            &format!("highconf {mode}/{operation} throughput_gib_s"),
+        );
+    }
+
+    let commands = highconf["methodology"]["commands"]
+        .as_array()
+        .expect("highconf methodology.commands must be an array");
+    assert_eq!(
+        commands.len(),
+        3,
+        "high-confidence methodology should include baseline/auto/rollback command trio"
+    );
+    for command in commands {
+        let command = command
+            .as_str()
+            .expect("highconf methodology.commands entries must be strings");
+        assert!(
+            command.contains("rch exec --"),
+            "high-confidence command must be rch-offloaded: {command}"
+        );
+        assert!(
+            command.contains("--sample-size 60"),
+            "high-confidence command must preserve sample-size 60 contract: {command}"
+        );
+    }
+
+    assert!(
+        highconf["findings"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()),
+        "high-confidence artifact must include non-empty findings"
+    );
+    assert!(
+        highconf["limitations"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()),
+        "high-confidence artifact must include non-empty limitations"
     );
 }
 
