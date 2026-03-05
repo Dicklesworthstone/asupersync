@@ -5,12 +5,9 @@ edition = "2024"
 description = "Conformance test suite for async runtime specifications"
 license-file = "../LICENSE"
 repository = "https://github.com/Dicklesworthstone/asupersync"
-<<<<<<< Updated upstream
 readme = "README.md"
 keywords = ["async", "conformance", "runtime", "testing"]
 categories = ["asynchronous", "development-tools::testing"]
-=======
->>>>>>> Stashed changes
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
