@@ -152,23 +152,46 @@ impl BrowserMonotonicClock {
         // Clamp regressions by tracking the max host sample seen.
         let previous_host = self.last_host_sample.fetch_max(host_ns, Ordering::AcqRel);
         let host_delta = host_ns.saturating_sub(previous_host);
-        let combined_delta =
-            host_delta.saturating_add(self.pending_catch_up_ns.load(Ordering::Acquire));
 
-        if combined_delta < self.jitter_floor_ns {
-            self.pending_catch_up_ns
-                .store(combined_delta, Ordering::Release);
-            return self.now();
+        let mut current_pending = self.pending_catch_up_ns.load(Ordering::Acquire);
+        loop {
+            let combined_delta = host_delta.saturating_add(current_pending);
+
+            if combined_delta < self.jitter_floor_ns {
+                match self.pending_catch_up_ns.compare_exchange_weak(
+                    current_pending,
+                    combined_delta,
+                    Ordering::Release,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return self.now(),
+                    Err(actual) => {
+                        current_pending = actual;
+                        continue;
+                    }
+                }
+            }
+
+            let applied = if self.max_forward_step_ns == 0 {
+                combined_delta
+            } else {
+                combined_delta.min(self.max_forward_step_ns)
+            };
+            let new_pending = combined_delta.saturating_sub(applied);
+
+            match self.pending_catch_up_ns.compare_exchange_weak(
+                current_pending,
+                new_pending,
+                Ordering::Release,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return self.advance_now(applied),
+                Err(actual) => {
+                    current_pending = actual;
+                    // continue loop to retry with new pending value
+                }
+            }
         }
-
-        let applied = if self.max_forward_step_ns == 0 {
-            combined_delta
-        } else {
-            combined_delta.min(self.max_forward_step_ns)
-        };
-        self.pending_catch_up_ns
-            .store(combined_delta.saturating_sub(applied), Ordering::Release);
-        self.advance_now(applied)
     }
 
     /// Freezes clock advancement while hidden/throttled.
