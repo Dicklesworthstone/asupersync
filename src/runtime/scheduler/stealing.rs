@@ -247,6 +247,58 @@ mod tests {
     }
 
     #[test]
+    fn test_power_of_two_prefers_heavier_queue() {
+        let heavy = LocalQueue::new_for_test(20);
+        let light = LocalQueue::new_for_test(20);
+
+        heavy.push(task(10));
+        heavy.push(task(11));
+        light.push(task(19));
+
+        let stealers = vec![heavy.stealer(), light.stealer()];
+        let mut rng = DetRng::new(7);
+
+        let stolen = steal_task(&stealers, &mut rng);
+        assert!(
+            matches!(stolen, Some(t) if t == task(10) || t == task(11)),
+            "power-of-two choice should prefer the heavier queue"
+        );
+    }
+
+    #[test]
+    fn test_power_of_two_falls_back_when_primary_is_local_only() {
+        let state = LocalQueue::test_state(10);
+        let local_only = LocalQueue::new(Arc::clone(&state));
+        let remote = LocalQueue::new(Arc::clone(&state));
+
+        {
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let first = guard.task_mut(task(0)).expect("task record missing");
+            first.mark_local();
+            let second = guard.task_mut(task(1)).expect("task record missing");
+            second.mark_local();
+            drop(guard);
+        }
+
+        // The local-only queue has more queued items, so two-choice will pick it first.
+        local_only.push(task(0));
+        local_only.push(task(1));
+        remote.push(task(2));
+
+        let stealers = vec![local_only.stealer(), remote.stealer()];
+        let mut rng = DetRng::new(99);
+
+        let stolen = steal_task(&stealers, &mut rng);
+        assert_eq!(
+            stolen,
+            Some(task(2)),
+            "steal should fall back to the secondary queue when primary has only local tasks"
+        );
+    }
+
+    #[test]
     fn test_circular_index_math_correct() {
         let len = 5;
         let start = 3;
