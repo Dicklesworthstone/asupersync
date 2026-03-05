@@ -255,7 +255,7 @@ where
     type Output = io::Result<usize>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        const CHUNK: usize = 1024;
+        const CHUNK: usize = 8192;
         let this = self.get_mut();
 
         loop {
@@ -336,7 +336,7 @@ where
     type Output = io::Result<usize>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        const CHUNK: usize = 1024;
+        const CHUNK: usize = 8192;
         let this = self.get_mut();
 
         loop {

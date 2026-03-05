@@ -12,7 +12,6 @@ use std::task::{Context, Poll};
 pub struct Lines<R> {
     reader: R,
     buf: Vec<u8>,
-    bytes_read: usize,
 }
 
 impl<R> Lines<R> {
@@ -21,7 +20,6 @@ impl<R> Lines<R> {
         Self {
             reader,
             buf: Vec::new(),
-            bytes_read: 0,
         }
     }
 }
@@ -47,11 +45,8 @@ impl<R: AsyncBufRead + Unpin> Stream for Lines<R> {
                 let s = String::from_utf8(mem::take(&mut this.buf))
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
 
-                this.bytes_read = 0;
-
                 return Poll::Ready(Some(s));
             }
-            this.bytes_read = this.buf.len();
 
             // 2. Poll the reader
             let available = match Pin::new(&mut this.reader).poll_fill_buf(cx) {
@@ -67,7 +62,6 @@ impl<R: AsyncBufRead + Unpin> Stream for Lines<R> {
                 }
                 let s = String::from_utf8(mem::take(&mut this.buf))
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
-                this.bytes_read = 0;
                 return Poll::Ready(Some(s));
             }
 
