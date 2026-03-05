@@ -44,6 +44,14 @@ PROFILE_MODE="${PROFILE_MODE:-all}"
 BASE_SEED="${TEST_SEED:-4242}"
 PROFILE_TIMEOUT="${PROFILE_TIMEOUT:-1200}"
 RUN_RETRIES="${RUN_RETRIES:-2}"
+MAX_DIAGNOSIS_TIME_DELTA_PCT="${MAX_DIAGNOSIS_TIME_DELTA_PCT:-25}"
+MAX_FALSE_POSITIVE_RATE_PCT="${MAX_FALSE_POSITIVE_RATE_PCT:-5}"
+MAX_FALSE_NEGATIVE_RATE_PCT="${MAX_FALSE_NEGATIVE_RATE_PCT:-5}"
+MIN_REMEDIATION_SUCCESS_RATE_PCT="${MIN_REMEDIATION_SUCCESS_RATE_PCT:-95}"
+MIN_OPERATOR_CONFIDENCE_SCORE="${MIN_OPERATOR_CONFIDENCE_SCORE:-80}"
+QUALITY_GATE_2B4JJ_6_6_STATUS="${QUALITY_GATE_2B4JJ_6_6_STATUS:-external}"
+QUALITY_GATE_2B4JJ_6_7_STATUS="${QUALITY_GATE_2B4JJ_6_7_STATUS:-external}"
+QUALITY_GATE_2B4JJ_6_8_STATUS="${QUALITY_GATE_2B4JJ_6_8_STATUS:-external}"
 
 SUITE_ID="doctor_full_stack_reference_projects_e2e"
 SCENARIO_ID="E2E-SUITE-DOCTOR-FULLSTACK-REFERENCE-PROJECTS"
@@ -58,6 +66,24 @@ if ! command -v jq >/dev/null 2>&1; then
     echo "FATAL: jq is required for report synthesis" >&2
     exit 1
 fi
+
+normalize_quality_gate_status() {
+    local value
+    value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    case "${value}" in
+        green | yellow | red | unknown | external)
+            printf '%s\n' "${value}"
+            ;;
+        *)
+            echo "FATAL: invalid quality-gate status '${1}' (allowed: green|yellow|red|unknown|external)" >&2
+            exit 1
+            ;;
+    esac
+}
+
+QUALITY_GATE_2B4JJ_6_6_STATUS="$(normalize_quality_gate_status "${QUALITY_GATE_2B4JJ_6_6_STATUS}")"
+QUALITY_GATE_2B4JJ_6_7_STATUS="$(normalize_quality_gate_status "${QUALITY_GATE_2B4JJ_6_7_STATUS}")"
+QUALITY_GATE_2B4JJ_6_8_STATUS="$(normalize_quality_gate_status "${QUALITY_GATE_2B4JJ_6_8_STATUS}")"
 
 mkdir -p "${ARTIFACT_DIR}" "${PUBLISHED_ARTIFACT_DIR}"
 
@@ -340,6 +366,14 @@ echo "  PROFILE_MODE:      ${PROFILE_MODE}"
 echo "  TEST_SEED(base):   ${BASE_SEED}"
 echo "  PROFILE_TIMEOUT:   ${PROFILE_TIMEOUT}"
 echo "  RUN_RETRIES:       ${RUN_RETRIES}"
+echo "  MAX_DIAG_DELTA%:   ${MAX_DIAGNOSIS_TIME_DELTA_PCT}"
+echo "  MAX_FALSE_POS%:    ${MAX_FALSE_POSITIVE_RATE_PCT}"
+echo "  MAX_FALSE_NEG%:    ${MAX_FALSE_NEGATIVE_RATE_PCT}"
+echo "  MIN_REMEDIATION%:  ${MIN_REMEDIATION_SUCCESS_RATE_PCT}"
+echo "  MIN_CONFIDENCE:    ${MIN_OPERATOR_CONFIDENCE_SCORE}"
+echo "  QG 2b4jj.6.6:      ${QUALITY_GATE_2B4JJ_6_6_STATUS}"
+echo "  QG 2b4jj.6.7:      ${QUALITY_GATE_2B4JJ_6_7_STATUS}"
+echo "  QG 2b4jj.6.8:      ${QUALITY_GATE_2B4JJ_6_8_STATUS}"
 echo "  Artifact staging:  ${ARTIFACT_DIR}"
 echo "  Artifact output:   ${PUBLISHED_ARTIFACT_DIR}"
 echo "  Profiles:          ${SELECTED_PROFILES[*]}"
@@ -348,6 +382,11 @@ echo ""
 EXIT_CODE=0
 CHECK_FAILURES=0
 CHECKS_PASSED=0
+METRIC_GATE_FAILURES=0
+QUALITY_GATE_FAILURES=0
+DETERMINISM_FAILURES=0
+ROLLOUT_GATE_STATUS="green"
+ROLLOUT_DECISION="continue"
 
 echo ">>> [1/4] Running full-stack profile matrix (run1)..."
 run_suite_iteration "run1" "${RUN1_REPORT}"
@@ -355,7 +394,7 @@ run_suite_iteration "run1" "${RUN1_REPORT}"
 echo ">>> [2/4] Running full-stack profile matrix (run2)..."
 run_suite_iteration "run2" "${RUN2_REPORT}"
 
-echo ">>> [3/4] Verifying deterministic cross-run profile outcomes..."
+echo ">>> [3/5] Verifying deterministic cross-run profile outcomes..."
 jq -S '[.profiles[] | {profile_id, status, failed_stage_ids}] | sort_by(.profile_id)' "${RUN1_REPORT}" >"${RUN1_NORM}"
 jq -S '[.profiles[] | {profile_id, status, failed_stage_ids}] | sort_by(.profile_id)' "${RUN2_REPORT}" >"${RUN2_NORM}"
 if diff -u "${RUN1_NORM}" "${RUN2_NORM}" >"${RUN_DIFF}"; then
@@ -364,9 +403,10 @@ if diff -u "${RUN1_NORM}" "${RUN2_NORM}" >"${RUN_DIFF}"; then
 else
     echo "  ERROR: run1/run2 profile outcomes diverged (see ${RUN_DIFF})"
     CHECK_FAILURES=$((CHECK_FAILURES + 1))
+    DETERMINISM_FAILURES=1
 fi
 
-echo ">>> [4/4] Building final profile report summary..."
+echo ">>> [4/5] Building final profile report summary..."
 FINAL_REPORT_JSON="${ARTIFACT_DIR}/profiles.final.json"
 jq -n \
     --slurpfile run2 "${RUN2_REPORT}" \
@@ -382,12 +422,170 @@ if [[ "${FAILED_PROFILE_COUNT}" -gt 0 ]]; then
     CHECK_FAILURES=$((CHECK_FAILURES + FAILED_PROFILE_COUNT))
 fi
 
+echo ">>> [5/5] Computing dogfood rollout adoption metrics..."
+ADOPTION_METRICS_FILE="${ARTIFACT_DIR}/adoption_metrics.json"
+jq -n \
+    --slurpfile run1 "${RUN1_REPORT}" \
+    --slurpfile run2 "${RUN2_REPORT}" \
+    '
+    def round3: ((. * 1000) | round) / 1000;
+    def absval: if . < 0 then -. else . end;
+    def stage_pairs($run):
+        [
+            $run.profiles[]? as $profile
+            | $profile.stages[]?
+            | {
+                key: ($profile.profile_id + "::" + .stage_id),
+                profile_id: $profile.profile_id,
+                stage_id: .stage_id,
+                status: .status,
+                duration_seconds: (((.ended_ts | fromdateiso8601) - (.started_ts | fromdateiso8601)) | if . < 0 then 0 else . end)
+            }
+        ];
+    def stage_map($pairs):
+        reduce $pairs[] as $item ({}; .[$item.key] = $item);
+    def diagnosis_seconds($run):
+        ([ $run.profiles[]? | select(.profile_id == "small") | .stages[]?
+           | (((.ended_ts | fromdateiso8601) - (.started_ts | fromdateiso8601)) | if . < 0 then 0 else . end)
+         ] | add) // 0;
+    def remediation_stats($run):
+        ([ $run.profiles[]?
+           | select(.profile_id == "large")
+           | .stages[]?
+           | select(.stage_id | test("remediation|report_export"))
+         ]) as $stages
+        | {
+            total: ($stages | length),
+            passed: ($stages | map(select(.status == "passed")) | length)
+          };
+
+    $run1[0] as $r1
+    | $run2[0] as $r2
+    | stage_pairs($r1) as $pairs1
+    | stage_pairs($r2) as $pairs2
+    | stage_map($pairs1) as $map1
+    | stage_map($pairs2) as $map2
+    | ([ $pairs1[].key, $pairs2[].key ] | unique) as $keys
+    | ($keys | length) as $total_pairs
+    | ([ $keys[]
+         | select((($map1[.]?.status) // "missing") != "passed" and (($map2[.]?.status) // "missing") == "passed")
+       ] | length) as $false_positive_pairs
+    | ([ $keys[]
+         | select((($map1[.]?.status) // "missing") == "passed" and (($map2[.]?.status) // "missing") != "passed")
+       ] | length) as $false_negative_pairs
+    | ([ $keys[]
+         | select((($map1[.]?.status) // "missing") == (($map2[.]?.status) // "missing"))
+       ] | length) as $deterministic_pairs
+    | diagnosis_seconds($r1) as $diagnosis_run1_seconds
+    | diagnosis_seconds($r2) as $diagnosis_run2_seconds
+    | (if $diagnosis_run1_seconds <= 0
+       then 0
+       else (($diagnosis_run2_seconds - $diagnosis_run1_seconds) / $diagnosis_run1_seconds) * 100
+       end) as $diagnosis_time_delta_pct
+    | remediation_stats($r2) as $remediation
+    | (if $total_pairs == 0 then 0 else ($false_positive_pairs / $total_pairs) * 100 end) as $false_positive_rate_pct
+    | (if $total_pairs == 0 then 0 else ($false_negative_pairs / $total_pairs) * 100 end) as $false_negative_rate_pct
+    | (if $remediation.total == 0 then 0 else ($remediation.passed / $remediation.total) * 100 end) as $remediation_success_rate_pct
+    | (if $total_pairs == 0 then 0 else ($deterministic_pairs / $total_pairs) * 100 end) as $deterministic_pair_rate_pct
+    | (
+        100
+        - (($diagnosis_time_delta_pct | absval) * 1.5)
+        - ($false_positive_rate_pct * 3.0)
+        - ($false_negative_rate_pct * 3.0)
+        - ((100 - $remediation_success_rate_pct) * 0.5)
+        - ((100 - $deterministic_pair_rate_pct) * 0.5)
+      ) as $raw_confidence
+    | ($raw_confidence | if . < 0 then 0 elif . > 100 then 100 else . end) as $operator_confidence_score
+    | {
+        diagnosis_run1_seconds: ($diagnosis_run1_seconds | round3),
+        diagnosis_run2_seconds: ($diagnosis_run2_seconds | round3),
+        diagnosis_time_delta_pct: ($diagnosis_time_delta_pct | round3),
+        false_positive_pairs: $false_positive_pairs,
+        false_negative_pairs: $false_negative_pairs,
+        total_stage_pairs: $total_pairs,
+        false_positive_rate_pct: ($false_positive_rate_pct | round3),
+        false_negative_rate_pct: ($false_negative_rate_pct | round3),
+        remediation_stage_count: $remediation.total,
+        remediation_passed_count: $remediation.passed,
+        remediation_success_rate_pct: ($remediation_success_rate_pct | round3),
+        deterministic_pair_rate_pct: ($deterministic_pair_rate_pct | round3),
+        operator_confidence_score: ($operator_confidence_score | round3),
+        confidence_formula: "100 - |diagnosis_delta_pct|*1.5 - fp_rate*3 - fn_rate*3 - (100-remediation_success_rate)*0.5 - (100-deterministic_pair_rate)*0.5",
+        metric_sources: {
+            diagnosis_profile: "small",
+            remediation_profile: "large",
+            pairing_key: "profile_id::stage_id"
+        }
+      }' >"${ADOPTION_METRICS_FILE}"
+
+if ! jq -e --argjson max "${MAX_DIAGNOSIS_TIME_DELTA_PCT}" \
+    '((.diagnosis_time_delta_pct | if . < 0 then -. else . end) <= $max)' \
+    "${ADOPTION_METRICS_FILE}" >/dev/null; then
+    CHECK_FAILURES=$((CHECK_FAILURES + 1))
+    METRIC_GATE_FAILURES=$((METRIC_GATE_FAILURES + 1))
+fi
+
+if ! jq -e --argjson max "${MAX_FALSE_POSITIVE_RATE_PCT}" \
+    '(.false_positive_rate_pct <= $max)' \
+    "${ADOPTION_METRICS_FILE}" >/dev/null; then
+    CHECK_FAILURES=$((CHECK_FAILURES + 1))
+    METRIC_GATE_FAILURES=$((METRIC_GATE_FAILURES + 1))
+fi
+
+if ! jq -e --argjson max "${MAX_FALSE_NEGATIVE_RATE_PCT}" \
+    '(.false_negative_rate_pct <= $max)' \
+    "${ADOPTION_METRICS_FILE}" >/dev/null; then
+    CHECK_FAILURES=$((CHECK_FAILURES + 1))
+    METRIC_GATE_FAILURES=$((METRIC_GATE_FAILURES + 1))
+fi
+
+if ! jq -e --argjson min "${MIN_REMEDIATION_SUCCESS_RATE_PCT}" \
+    '(.remediation_success_rate_pct >= $min)' \
+    "${ADOPTION_METRICS_FILE}" >/dev/null; then
+    CHECK_FAILURES=$((CHECK_FAILURES + 1))
+    METRIC_GATE_FAILURES=$((METRIC_GATE_FAILURES + 1))
+fi
+
+if ! jq -e --argjson min "${MIN_OPERATOR_CONFIDENCE_SCORE}" \
+    '(.operator_confidence_score >= $min)' \
+    "${ADOPTION_METRICS_FILE}" >/dev/null; then
+    CHECK_FAILURES=$((CHECK_FAILURES + 1))
+    METRIC_GATE_FAILURES=$((METRIC_GATE_FAILURES + 1))
+fi
+
+if [[ "${METRIC_GATE_FAILURES}" -gt 0 ]]; then
+    ROLLOUT_GATE_STATUS="blocked"
+    ROLLOUT_DECISION="hold"
+fi
+
+QUALITY_GATES_FILE="${ARTIFACT_DIR}/quality_gate_dependencies.json"
+jq -n \
+    --arg s66 "${QUALITY_GATE_2B4JJ_6_6_STATUS}" \
+    --arg s67 "${QUALITY_GATE_2B4JJ_6_7_STATUS}" \
+    --arg s68 "${QUALITY_GATE_2B4JJ_6_8_STATUS}" \
+    '[
+        {id: "asupersync-2b4jj.6.6", status: $s66},
+        {id: "asupersync-2b4jj.6.7", status: $s67},
+        {id: "asupersync-2b4jj.6.8", status: $s68}
+    ]' >"${QUALITY_GATES_FILE}"
+
+QUALITY_GATE_FAILURES="$(jq '[.[] | select(.status != "green")] | length' "${QUALITY_GATES_FILE}")"
+if [[ "${QUALITY_GATE_FAILURES}" -gt 0 ]]; then
+    CHECK_FAILURES=$((CHECK_FAILURES + QUALITY_GATE_FAILURES))
+    ROLLOUT_GATE_STATUS="blocked"
+    ROLLOUT_DECISION="hold"
+fi
+
 RUN_ENDED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SUITE_STATUS="failed"
 FAILURE_CLASS="profile_or_determinism_failure"
 if [[ "${CHECK_FAILURES}" -eq 0 ]]; then
     SUITE_STATUS="passed"
     FAILURE_CLASS="none"
+elif [[ "${QUALITY_GATE_FAILURES}" -gt 0 && "${FAILED_PROFILE_COUNT}" -eq 0 && "${DETERMINISM_FAILURES}" -eq 0 && "${METRIC_GATE_FAILURES}" -eq 0 ]]; then
+    FAILURE_CLASS="quality_gate_dependency_failure"
+elif [[ "${METRIC_GATE_FAILURES}" -gt 0 && "${FAILED_PROFILE_COUNT}" -eq 0 && "${DETERMINISM_FAILURES}" -eq 0 ]]; then
+    FAILURE_CLASS="rollout_gate_failure"
 fi
 
 jq -n \
@@ -408,9 +606,20 @@ jq -n \
     --arg run2_report "${PUBLISHED_ARTIFACT_DIR}/run2.json" \
     --arg final_report "${PUBLISHED_ARTIFACT_DIR}/profiles.final.json" \
     --arg artifact_dir "${PUBLISHED_ARTIFACT_DIR}" \
+    --arg rollout_gate_status "${ROLLOUT_GATE_STATUS}" \
+    --arg rollout_decision "${ROLLOUT_DECISION}" \
+    --argjson max_diagnosis_time_delta_pct "${MAX_DIAGNOSIS_TIME_DELTA_PCT}" \
+    --argjson max_false_positive_rate_pct "${MAX_FALSE_POSITIVE_RATE_PCT}" \
+    --argjson max_false_negative_rate_pct "${MAX_FALSE_NEGATIVE_RATE_PCT}" \
+    --argjson min_remediation_success_rate_pct "${MIN_REMEDIATION_SUCCESS_RATE_PCT}" \
+    --argjson min_operator_confidence_score "${MIN_OPERATOR_CONFIDENCE_SCORE}" \
     --argjson checks_passed "${CHECKS_PASSED}" \
     --argjson pattern_failures "${CHECK_FAILURES}" \
+    --argjson metric_gate_failures "${METRIC_GATE_FAILURES}" \
+    --argjson quality_gate_failures "${QUALITY_GATE_FAILURES}" \
     --slurpfile final "${FINAL_REPORT_JSON}" \
+    --slurpfile metrics "${ADOPTION_METRICS_FILE}" \
+    --slurpfile quality_gates "${QUALITY_GATES_FILE}" \
     '{
         schema_version: $schema_version,
         suite_id: $suite_id,
@@ -429,6 +638,8 @@ jq -n \
         run2_report: $run2_report,
         final_report: $final_report,
         checks_passed: $checks_passed,
+        metric_gate_failures: $metric_gate_failures,
+        quality_gate_failures: $quality_gate_failures,
         pattern_failures: $pattern_failures,
         profiles_passed: ($final[0].pass_count // 0),
         profiles_failed: ($final[0].fail_count // 0),
@@ -438,12 +649,53 @@ jq -n \
             failed_stage_ids,
             repro_command
         })),
+        rollout_gate_status: $rollout_gate_status,
+        rollout_decision: $rollout_decision,
+        adoption_metrics: ($metrics[0] // {}),
+        adoption_metric_thresholds: {
+            max_diagnosis_time_delta_pct: $max_diagnosis_time_delta_pct,
+            max_false_positive_rate_pct: $max_false_positive_rate_pct,
+            max_false_negative_rate_pct: $max_false_negative_rate_pct,
+            min_remediation_success_rate_pct: $min_remediation_success_rate_pct,
+            min_operator_confidence_score: $min_operator_confidence_score
+        },
+        operator_confidence_signals: {
+            deterministic_pair_rate_pct: (($metrics[0].deterministic_pair_rate_pct) // 0),
+            remediation_success_rate_pct: (($metrics[0].remediation_success_rate_pct) // 0),
+            false_positive_rate_pct: (($metrics[0].false_positive_rate_pct) // 0),
+            false_negative_rate_pct: (($metrics[0].false_negative_rate_pct) // 0),
+            diagnosis_time_delta_pct: (($metrics[0].diagnosis_time_delta_pct) // 0)
+        },
+        quality_gate_dependencies: ($quality_gates[0] // []),
+        followup_actions: (
+            [
+                (if $quality_gate_failures > 0
+                    then "Resolve prerequisite quality gate statuses (2b4jj.6.6/6.7/6.8) to green before rollout decision can advance"
+                    else empty
+                 end),
+                (if $metric_gate_failures > 0
+                    then "Resolve metric threshold breaches before rollout decision can advance"
+                    else empty
+                 end),
+                (if ($quality_gate_failures > 0 or $metric_gate_failures > 0)
+                    then "Rerun full-stack profile matrix after remediation with the same seed for replayability"
+                    else empty
+                 end)
+            ] | map(select(type == "string" and length > 0))
+        ),
+        artifact_links: {
+            run1_report: $run1_report,
+            run2_report: $run2_report,
+            final_report: $final_report,
+            quality_gate_dependencies: ($artifact_dir + "/quality_gate_dependencies.json")
+        },
         artifact_dir: $artifact_dir
     }' >"${ARTIFACT_DIR}/summary.json"
 
 cp "${RUN1_REPORT}" "${PUBLISHED_ARTIFACT_DIR}/run1.json"
 cp "${RUN2_REPORT}" "${PUBLISHED_ARTIFACT_DIR}/run2.json"
 cp "${FINAL_REPORT_JSON}" "${PUBLISHED_ARTIFACT_DIR}/profiles.final.json"
+cp "${QUALITY_GATES_FILE}" "${PUBLISHED_ARTIFACT_DIR}/quality_gate_dependencies.json"
 cp "${ARTIFACT_DIR}/summary.json" "${SUMMARY_FILE}"
 
 echo ""

@@ -331,6 +331,7 @@ declare -A SUITES=(
     [doctor-replay-launcher]="test_doctor_replay_launcher_e2e.sh"
     [doctor-orchestration-state-machine]="test_doctor_orchestration_state_machine_e2e.sh"
     [doctor-scenario-coverage-packs]="test_doctor_scenario_coverage_packs_e2e.sh"
+    [doctor-stress-soak]="test_doctor_stress_soak_e2e.sh"
     [doctor-frankensuite-export]="test_doctor_frankensuite_export_e2e.sh"
     [phase6]="run_phase6_e2e.sh"
 )
@@ -355,6 +356,7 @@ declare -A SUITE_ARTIFACT_ROOTS=(
     [doctor-replay-launcher]="target/e2e-results/doctor_replay_launcher"
     [doctor-orchestration-state-machine]="target/e2e-results/doctor_orchestration_state_machine"
     [doctor-scenario-coverage-packs]="target/e2e-results/doctor_scenario_coverage_packs"
+    [doctor-stress-soak]="target/e2e-results/doctor_stress_soak"
     [doctor-frankensuite-export]="target/e2e-results/doctor_frankensuite_export"
     [phase6]="target/phase6-e2e"
 )
@@ -379,6 +381,7 @@ declare -A SUITE_SUMMARY_GLOBS=(
     [doctor-replay-launcher]="summary.json"
     [doctor-orchestration-state-machine]="summary.json"
     [doctor-scenario-coverage-packs]="summary.json"
+    [doctor-stress-soak]="summary.json"
     [doctor-frankensuite-export]="summary.json"
     [phase6]="summary_*.json"
 )
@@ -403,6 +406,7 @@ declare -A SUITE_ARTIFACT_DIR_GLOBS=(
     [doctor-replay-launcher]="artifacts_*"
     [doctor-orchestration-state-machine]="artifacts_*"
     [doctor-scenario-coverage-packs]="artifacts_*"
+    [doctor-stress-soak]="artifacts_*"
     [doctor-frankensuite-export]="artifacts_*"
     [phase6]=""
 )
@@ -427,6 +431,7 @@ declare -A SUITE_CANONICAL_SCENARIO_ID=(
     [doctor-replay-launcher]="E2E-SUITE-DOCTOR-REPLAY-LAUNCHER"
     [doctor-orchestration-state-machine]="E2E-SUITE-DOCTOR-ORCHESTRATION-STATE-MACHINE"
     [doctor-scenario-coverage-packs]="E2E-SUITE-DOCTOR-SCENARIO-COVERAGE-PACKS"
+    [doctor-stress-soak]="E2E-SUITE-DOCTOR-STRESS-SOAK"
     [doctor-frankensuite-export]="E2E-SUITE-DOCTOR-FRANKENSUITE-EXPORT"
     [phase6]="E2E-SUITE-PHASE6"
 )
@@ -448,7 +453,7 @@ SUITE_ORDER=(
     websocket http messaging transport database distributed
     h2-security net-hardening redis
     combinators cancel-attribution scheduler wasm-cross-framework wasm-incident-forensics doctor-workspace-scan
-    doctor-replay-launcher doctor-orchestration-state-machine doctor-scenario-coverage-packs
+    doctor-replay-launcher doctor-orchestration-state-machine doctor-scenario-coverage-packs doctor-stress-soak
     doctor-frankensuite-export
     phase6
 )

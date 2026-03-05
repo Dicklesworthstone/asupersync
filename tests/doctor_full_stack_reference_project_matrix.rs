@@ -30,6 +30,11 @@ fn load_doc() -> String {
         .expect("failed to load doctor full-stack reference-project contract doc")
 }
 
+fn load_script() -> String {
+    std::fs::read_to_string(repo_root().join(SCRIPT_PATH))
+        .expect("failed to load doctor full-stack reference-project e2e script")
+}
+
 fn reference_profile_matrix() -> Vec<ProfileSpec> {
     vec![
         ProfileSpec {
@@ -93,6 +98,64 @@ fn classify_failure(stage_id: &str, exit_code: i32) -> &'static str {
     }
 }
 
+fn diagnosis_time_delta_pct(run1_seconds: f64, run2_seconds: f64) -> f64 {
+    if run1_seconds <= 0.0 {
+        0.0
+    } else {
+        ((run2_seconds - run1_seconds) / run1_seconds) * 100.0
+    }
+}
+
+fn false_transition_rates(run1_statuses: &[&str], run2_statuses: &[&str]) -> (f64, f64) {
+    let total = run1_statuses.len().max(run2_statuses.len());
+    if total == 0 {
+        return (0.0, 0.0);
+    }
+
+    let mut false_positive_pairs = 0usize;
+    let mut false_negative_pairs = 0usize;
+
+    for idx in 0..total {
+        let left = run1_statuses.get(idx).copied().unwrap_or("missing");
+        let right = run2_statuses.get(idx).copied().unwrap_or("missing");
+        if left != "passed" && right == "passed" {
+            false_positive_pairs += 1;
+        }
+        if left == "passed" && right != "passed" {
+            false_negative_pairs += 1;
+        }
+    }
+
+    (
+        (false_positive_pairs as f64 / total as f64) * 100.0,
+        (false_negative_pairs as f64 / total as f64) * 100.0,
+    )
+}
+
+fn remediation_success_rate_pct(passed: usize, total: usize) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        (passed as f64 / total as f64) * 100.0
+    }
+}
+
+fn operator_confidence_score(
+    diagnosis_delta_pct: f64,
+    false_positive_rate_pct: f64,
+    false_negative_rate_pct: f64,
+    remediation_success_rate_pct: f64,
+    deterministic_pair_rate_pct: f64,
+) -> f64 {
+    let raw = 100.0
+        - (diagnosis_delta_pct.abs() * 1.5)
+        - (false_positive_rate_pct * 3.0)
+        - (false_negative_rate_pct * 3.0)
+        - ((100.0 - remediation_success_rate_pct) * 0.5)
+        - ((100.0 - deterministic_pair_rate_pct) * 0.5);
+    raw.clamp(0.0, 100.0)
+}
+
 #[test]
 fn doc_exists() {
     assert!(
@@ -116,6 +179,10 @@ fn doc_references_bead() {
         doc.contains("asupersync-2b4jj.6.5"),
         "doc must reference bead id"
     );
+    assert!(
+        doc.contains("asupersync-2b4jj.6.4"),
+        "doc must include rollout adoption metrics addendum bead id"
+    );
 }
 
 #[test]
@@ -130,6 +197,10 @@ fn doc_has_required_sections() {
         "Failure Classification",
         "Structured Logging and Transcript Requirements",
         "Final Report Contract",
+        "Dogfood Rollout Addendum (`asupersync-2b4jj.6.4`)",
+        "Required Adoption Metrics",
+        "Metric Definitions (Deterministic Form)",
+        "Rollout Decision Gate",
         "CI Validation",
         "Cross-References",
     ];
@@ -161,6 +232,68 @@ fn doc_references_script_and_test_file() {
         doc.contains("doctor_full_stack_reference_project_matrix.rs"),
         "doc must reference test file"
     );
+}
+
+#[test]
+fn script_declares_adoption_metric_env_contract() {
+    let script = load_script();
+    let required_tokens = [
+        "MAX_DIAGNOSIS_TIME_DELTA_PCT",
+        "MAX_FALSE_POSITIVE_RATE_PCT",
+        "MAX_FALSE_NEGATIVE_RATE_PCT",
+        "MIN_REMEDIATION_SUCCESS_RATE_PCT",
+        "MIN_OPERATOR_CONFIDENCE_SCORE",
+        "QUALITY_GATE_2B4JJ_6_6_STATUS",
+        "QUALITY_GATE_2B4JJ_6_7_STATUS",
+        "QUALITY_GATE_2B4JJ_6_8_STATUS",
+    ];
+    for token in required_tokens {
+        assert!(
+            script.contains(token),
+            "script must declare adoption metric env token {token}"
+        );
+    }
+}
+
+#[test]
+fn script_enforces_quality_gate_dependency_blocking() {
+    let script = load_script();
+    let required_tokens = [
+        "quality_gate_dependencies",
+        "quality_gate_failures",
+        "select(.status != \"green\")",
+        "QUALITY_GATES_FILE",
+        "quality_gate_dependency_failure",
+        "Resolve prerequisite quality gate statuses (2b4jj.6.6/6.7/6.8) to green before rollout decision can advance",
+    ];
+    for token in required_tokens {
+        assert!(
+            script.contains(token),
+            "script quality-gate enforcement missing token {token}"
+        );
+    }
+}
+
+#[test]
+fn script_summary_includes_rollout_and_adoption_fields() {
+    let script = load_script();
+    let required_tokens = [
+        "rollout_gate_status",
+        "rollout_decision",
+        "adoption_metrics",
+        "adoption_metric_thresholds",
+        "operator_confidence_signals",
+        "quality_gate_dependencies",
+        "quality_gate_failures",
+        "followup_actions",
+        "artifact_links",
+    ];
+    for token in required_tokens {
+        assert!(
+            script.contains(token),
+            "script summary contract missing token {token}"
+        );
+    }
 }
 
 #[test]
@@ -253,4 +386,42 @@ fn failure_classification_maps_stage_and_timeout() {
     );
     assert_eq!(classify_failure("unknown-stage", 2), "unknown_failure");
     assert_eq!(classify_failure("any-stage", 124), "timeout");
+}
+
+#[test]
+fn diagnosis_time_delta_handles_zero_baseline() {
+    assert_eq!(diagnosis_time_delta_pct(0.0, 12.0), 0.0);
+    assert_eq!(diagnosis_time_delta_pct(10.0, 12.5), 25.0);
+}
+
+#[test]
+fn false_transition_rates_capture_fp_and_fn_pairs() {
+    let run1 = ["failed", "passed", "passed", "failed"];
+    let run2 = ["passed", "failed", "passed", "failed"];
+    let (fp, fn_rate) = false_transition_rates(&run1, &run2);
+
+    assert!(
+        (fp - 25.0).abs() < f64::EPSILON,
+        "expected one false-positive pair out of four"
+    );
+    assert!(
+        (fn_rate - 25.0).abs() < f64::EPSILON,
+        "expected one false-negative pair out of four"
+    );
+}
+
+#[test]
+fn remediation_success_rate_is_bounded() {
+    assert_eq!(remediation_success_rate_pct(0, 0), 0.0);
+    assert_eq!(remediation_success_rate_pct(3, 4), 75.0);
+}
+
+#[test]
+fn operator_confidence_score_clamps_to_range() {
+    let high = operator_confidence_score(0.0, 0.0, 0.0, 100.0, 100.0);
+    assert!((high - 100.0).abs() < f64::EPSILON);
+
+    let low = operator_confidence_score(90.0, 20.0, 20.0, 10.0, 10.0);
+    assert!((0.0..=100.0).contains(&low));
+    assert_eq!(low, 0.0);
 }
