@@ -28,6 +28,7 @@
 //! - SVC-VERIFY-012: ConcurrencyLimit permit acquisition
 //! - SVC-VERIFY-013: ConcurrencyLimit enforces limit
 //! - SVC-VERIFY-014: ConcurrencyLimit shared semaphore
+//! - SVC-VERIFY-014A: ConcurrencyLimit wakes waiters without thread-local Cx
 //!
 //! ## Load Shed Middleware
 //! - SVC-VERIFY-015: LoadShed passes through ready service
@@ -86,6 +87,28 @@ struct NoopWaker;
 impl Wake for NoopWaker {
     fn wake(self: Arc<Self>) {}
     fn wake_by_ref(self: &Arc<Self>) {}
+}
+
+struct CountingWaker(AtomicUsize);
+
+impl CountingWaker {
+    fn new() -> Arc<Self> {
+        Arc::new(Self(AtomicUsize::new(0)))
+    }
+
+    fn count(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+impl Wake for CountingWaker {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 fn noop_waker() -> Waker {
@@ -571,6 +594,51 @@ fn svc_verify_014_concurrency_limit_shared() {
     assert!(matches!(r, Poll::Ready(Ok(()))));
 
     test_complete!("svc_verify_014_concurrency_limit_shared");
+}
+
+/// SVC-VERIFY-014A: ConcurrencyLimit wakes queued waiters without thread-local Cx
+///
+/// Verifies that the middleware still registers a real semaphore waiter when
+/// `poll_ready` is driven outside an ambient `Cx`, so permit release wakes the
+/// blocked caller instead of leaving it asleep forever.
+#[test]
+fn svc_verify_014a_concurrency_limit_wakes_without_thread_local_cx() {
+    init_test("svc_verify_014a_concurrency_limit_wakes_without_thread_local_cx");
+
+    let semaphore = Arc::new(asupersync::sync::Semaphore::new(1));
+    let layer = ConcurrencyLimitLayer::with_semaphore(semaphore);
+
+    let mut holder = layer.layer(NeverCompleteService);
+    let mut waiter = layer.layer(NeverCompleteService);
+    let holder_waker = noop_waker();
+    let mut holder_cx = Context::from_waker(&holder_waker);
+
+    let first = holder.poll_ready(&mut holder_cx);
+    assert!(matches!(first, Poll::Ready(Ok(()))));
+    let held = holder.call(());
+
+    let waiter_waker = CountingWaker::new();
+    let waiter_waker_handle = waiter_waker.clone();
+    let waiter_std_waker: Waker = waiter_waker.into();
+    let mut waiter_cx = Context::from_waker(&waiter_std_waker);
+
+    let blocked = waiter.poll_ready(&mut waiter_cx);
+    assert!(
+        blocked.is_pending(),
+        "expected waiter to block behind held permit"
+    );
+
+    drop(held);
+
+    assert!(
+        waiter_waker_handle.count() > 0,
+        "permit release should wake the queued waiter even without thread-local Cx"
+    );
+
+    let ready = waiter.poll_ready(&mut waiter_cx);
+    assert!(matches!(ready, Poll::Ready(Ok(()))));
+
+    test_complete!("svc_verify_014a_concurrency_limit_wakes_without_thread_local_cx");
 }
 
 // =============================================================================

@@ -224,13 +224,13 @@ fn mr_fs_01_file_open_create_roundtrip() {
 
     futures_lite::future::block_on(async {
         // Create and write (documented pattern)
-        let mut file = fs::File::create(&path).await.expect("create");
+        let mut file: fs::File = fs::File::create(&path).await.expect("create");
         file.write_all(data).await.expect("write");
         file.sync_all().await.expect("sync");
         drop(file);
 
         // Open and read (documented pattern)
-        let mut file = fs::File::open(&path).await.expect("open");
+        let mut file: fs::File = fs::File::open(&path).await.expect("open");
         let mut buf = Vec::new();
         file.read_to_end(&mut buf).await.expect("read");
         assert_eq!(buf, data, "Roundtrip must produce identical bytes");
@@ -274,13 +274,13 @@ fn mr_fs_05_async_traits_available() {
     let path = dir.join("traits.txt");
 
     futures_lite::future::block_on(async {
-        let mut file = fs::File::create(&path).await.expect("create");
+        let mut file: fs::File = fs::File::create(&path).await.expect("create");
         // write_all from AsyncWriteExt
         file.write_all(b"trait test").await.expect("write_all");
         file.sync_all().await.expect("sync");
         drop(file);
 
-        let mut file = fs::File::open(&path).await.expect("open");
+        let mut file: fs::File = fs::File::open(&path).await.expect("open");
         let mut s = String::new();
         // read_to_string from AsyncReadExt
         file.read_to_string(&mut s).await.expect("read_to_string");
@@ -494,7 +494,7 @@ fn cross_domain_fs_with_shutdown() {
         let path_clone = path.clone();
         let outcome = with_graceful_shutdown(
             std::pin::pin!(async move {
-                let mut file = fs::File::create(&path_clone).await.expect("create");
+                let mut file: fs::File = fs::File::create(&path_clone).await.expect("create");
                 file.write_all(b"flush data").await.expect("write");
                 file.sync_all().await.expect("sync");
                 true

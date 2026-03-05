@@ -109,7 +109,7 @@ fn single_owner_invariant_theorem_list_complete() {
         .and_then(Value::as_array)
         .expect("lean_theorems array")
         .iter()
-        .filter_map(|v| v.as_str().map(String::from))
+        .filter_map(|v: &Value| v.as_str().map(String::from))
         .collect();
 
     let required = [

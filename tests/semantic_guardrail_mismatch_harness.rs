@@ -96,7 +96,7 @@ fn fixture_cases_require_nonzero_exit_and_actionable_diagnostics() {
         assert!(
             case["command"]
                 .as_str()
-                .is_some_and(|s| !s.trim().is_empty()),
+                .is_some_and(|s: &str| !s.trim().is_empty()),
             "fixture {fixture_id} must include a command"
         );
     }

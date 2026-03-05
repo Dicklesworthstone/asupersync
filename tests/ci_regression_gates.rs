@@ -16,7 +16,7 @@
 
 mod common;
 
-use asupersync::raptorq::decoder::{DecodeStats, InactivationDecoder, ReceivedSymbol};
+use asupersync::raptorq::decoder::{DecodeError, DecodeStats, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::regression::{
     G8_REPLAY_REF, G8_SCHEMA_VERSION, RegressionMonitor, RegressionReport, RegressionVerdict,
     emit_regression_log,
@@ -126,7 +126,7 @@ fn decode_scenario(
                 return result.stats;
             }
             Err(err) => {
-                if err.is_recoverable() && attempt < MAX_RECOVERABLE_RETRIES {
+                if DecodeError::is_recoverable(&err) && attempt < MAX_RECOVERABLE_RETRIES {
                     eprintln!(
                         "G2 recoverable decode retry scenario={scenario_id} seed={seed} \
                          attempt={} error={err:?} extra_repair={retry_extra}",
@@ -833,7 +833,9 @@ fn g2_f7_burst_cache_p95p99_report() {
                     build_decode_received(&source, &encoder, decoder, &drop, extra_repair);
                 match decoder.decode(&received) {
                     Ok(result) => return result,
-                    Err(err) if err.is_recoverable() && attempt < MAX_RECOVERABLE_RETRIES => {}
+                    Err(err)
+                        if DecodeError::is_recoverable(&err)
+                            && attempt < MAX_RECOVERABLE_RETRIES => {}
                     Err(err) => panic!(
                         "F7 comparator decode failed for seed={seed} sample={i} attempt={attempt}: {err:?}"
                     ),
@@ -1043,7 +1045,9 @@ fn g2_f7_burst_cache_p95p99_multiscenario_report() {
                         build_decode_received(&source, &encoder, decoder, &drop, extra_repair);
                     match decoder.decode(&received) {
                         Ok(result) => return result,
-                        Err(err) if err.is_recoverable() && attempt < MAX_RECOVERABLE_RETRIES => {}
+                        Err(err)
+                            if DecodeError::is_recoverable(&err)
+                                && attempt < MAX_RECOVERABLE_RETRIES => {}
                         Err(err) => panic!(
                             "F7 multi-scenario decode failed \
                              scenario={} seed={seed} sample={i} attempt={attempt}: {err:?}",
@@ -1405,7 +1409,9 @@ fn g2_f7_burst_cache_closure_evidence_v3() {
                         build_decode_received(&source, &encoder, decoder, &drop, extra_repair);
                     match decoder.decode(&received) {
                         Ok(result) => return result,
-                        Err(err) if err.is_recoverable() && attempt < MAX_RECOVERABLE_RETRIES => {}
+                        Err(err)
+                            if DecodeError::is_recoverable(&err)
+                                && attempt < MAX_RECOVERABLE_RETRIES => {}
                         Err(err) => panic!(
                             "F7-v3 decode failed scenario={} seed={seed} sample={i} attempt={attempt}: {err:?}",
                             scenario.id

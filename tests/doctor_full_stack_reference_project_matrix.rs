@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 const DOC_PATH: &str = "docs/doctor_full_stack_reference_projects_contract.md";
 const SCRIPT_PATH: &str = "scripts/test_doctor_full_stack_reference_projects_e2e.sh";
+const ORCHESTRATION_SCRIPT_PATH: &str = "scripts/test_doctor_orchestration_state_machine_e2e.sh";
 
 #[derive(Debug, Clone)]
 struct ProfileSpec {
@@ -33,6 +34,11 @@ fn load_doc() -> String {
 fn load_script() -> String {
     std::fs::read_to_string(repo_root().join(SCRIPT_PATH))
         .expect("failed to load doctor full-stack reference-project e2e script")
+}
+
+fn load_orchestration_script() -> String {
+    std::fs::read_to_string(repo_root().join(ORCHESTRATION_SCRIPT_PATH))
+        .expect("failed to load doctor orchestration state-machine e2e script")
 }
 
 fn reference_profile_matrix() -> Vec<ProfileSpec> {
@@ -292,6 +298,31 @@ fn script_summary_includes_rollout_and_adoption_fields() {
         assert!(
             script.contains(token),
             "script summary contract missing token {token}"
+        );
+    }
+}
+
+#[test]
+fn orchestration_stage_script_uses_staging_before_publish() {
+    let script = load_orchestration_script();
+    let required_tokens = [
+        "STAGING_ROOT=",
+        "PUBLISHED_ARTIFACT_DIR=",
+        "ensure_artifact_dirs()",
+        "publish_artifacts()",
+        "write_summary()",
+        "mark_publish_failure()",
+        "summary.publish.tmp",
+        "artifact_publish_failure",
+        "cp \"${SUMMARY_FILE}\" \"${PUBLISHED_ARTIFACT_DIR}/summary.json\"",
+        "\"${PUBLISHED_ARTIFACT_DIR}/summary.json\"",
+        "\"${PUBLISHED_ARTIFACT_DIR}/run1.log\"",
+        "\"${PUBLISHED_ARTIFACT_DIR}\"",
+    ];
+    for token in required_tokens {
+        assert!(
+            script.contains(token),
+            "orchestration stage script missing staging/publish token {token}"
         );
     }
 }

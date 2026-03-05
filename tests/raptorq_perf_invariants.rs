@@ -1752,6 +1752,165 @@ fn e3_track_e_gf256_p95p99_highconf_contract_and_linkage() {
             .is_some_and(|items| !items.is_empty()),
         "high-confidence artifact must include non-empty limitations"
     );
+    let closure = &highconf["closure_assessment"];
+    assert_eq!(
+        closure["ready_for_e5_closure"].as_bool(),
+        Some(false),
+        "high-confidence artifact must explicitly encode the current not-ready E5 closure state"
+    );
+    assert_eq!(
+        closure["acceptance_criterion_4_status"].as_str(),
+        Some("not_met"),
+        "high-confidence artifact must keep AC#4 marked not_met until uplift is demonstrated"
+    );
+    assert_eq!(
+        closure["material_uplift_demonstrated"].as_bool(),
+        Some(false),
+        "high-confidence artifact must not claim material uplift yet"
+    );
+    assert!(
+        closure["blocking_requirements"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()),
+        "high-confidence artifact must keep non-empty blocking requirements while closure remains open"
+    );
+}
+
+/// Validate the high-confidence Track-E packet keeps E5 closure blocked for a
+/// data-backed reason rather than narrative drift.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn e3_track_e_highconf_closure_assessment_matches_recorded_tails() {
+    let highconf: serde_json::Value = serde_json::from_str(include_str!(
+        "../artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json"
+    ))
+    .expect("Track-E high-confidence p95/p99 artifact must be valid JSON");
+    let closure = &highconf["closure_assessment"];
+
+    assert_eq!(
+        closure["ready_for_e5_closure"].as_bool(),
+        Some(false),
+        "E5 closure must stay blocked in the high-confidence packet"
+    );
+    assert_eq!(
+        closure["acceptance_criterion_4_status"].as_str(),
+        Some("not_met"),
+        "AC#4 must remain not_met in the high-confidence packet"
+    );
+    assert_eq!(
+        closure["material_uplift_demonstrated"].as_bool(),
+        Some(false),
+        "high-confidence packet must not claim material uplift"
+    );
+    assert_eq!(
+        closure["overall_tail_direction_vs_baseline"].as_str(),
+        Some("regressed"),
+        "high-confidence packet must record that overall auto tails still regress versus baseline"
+    );
+    assert_eq!(
+        closure["operation_tail_pattern_vs_baseline"].as_str(),
+        Some("mixed"),
+        "high-confidence packet must record that operation-level auto tails are mixed"
+    );
+    assert_eq!(
+        closure["scope_sufficiency"].as_str(),
+        Some("insufficient"),
+        "high-confidence packet must record that the narrowed corpus is not closure-sufficient"
+    );
+
+    let overall_by_mode = highconf["per_mode_overall_percentiles"]
+        .as_array()
+        .expect("per_mode_overall_percentiles must be an array")
+        .iter()
+        .map(|entry| {
+            (
+                entry["mode"]
+                    .as_str()
+                    .expect("overall percentile entry must include mode"),
+                entry,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let baseline_overall = overall_by_mode
+        .get("baseline")
+        .expect("overall percentile set must include baseline");
+    let auto_overall = overall_by_mode
+        .get("auto")
+        .expect("overall percentile set must include auto");
+    for percentile in ["p95", "p99"] {
+        let baseline_tail = baseline_overall["time_us"][percentile]
+            .as_f64()
+            .unwrap_or_else(|| panic!("baseline overall {percentile} tail must be numeric"));
+        let auto_tail = auto_overall["time_us"][percentile]
+            .as_f64()
+            .unwrap_or_else(|| panic!("auto overall {percentile} tail must be numeric"));
+        assert!(
+            auto_tail > baseline_tail,
+            "auto overall {percentile} tail must stay above baseline while closure_assessment remains blocked"
+        );
+    }
+
+    let operation_percentiles = highconf["per_mode_operation_percentiles"]
+        .as_array()
+        .expect("per_mode_operation_percentiles must be an array");
+    for (operation, expect_regression) in [
+        ("mul_slices2_fused", true),
+        ("mul_slices2_sequential", true),
+        ("addmul_slices2_fused", false),
+        ("addmul_slices2_sequential", true),
+    ] {
+        let baseline_entry = operation_percentiles
+            .iter()
+            .find(|entry| {
+                entry["mode"].as_str() == Some("baseline")
+                    && entry["operation"].as_str() == Some(operation)
+            })
+            .unwrap_or_else(|| panic!("baseline entry missing for {operation}"));
+        let auto_entry = operation_percentiles
+            .iter()
+            .find(|entry| {
+                entry["mode"].as_str() == Some("auto")
+                    && entry["operation"].as_str() == Some(operation)
+            })
+            .unwrap_or_else(|| panic!("auto entry missing for {operation}"));
+        for percentile in ["p95", "p99"] {
+            let baseline_tail = baseline_entry["time_us"][percentile]
+                .as_f64()
+                .unwrap_or_else(|| {
+                    panic!("{operation} baseline {percentile} tail must be numeric")
+                });
+            let auto_tail = auto_entry["time_us"][percentile]
+                .as_f64()
+                .unwrap_or_else(|| panic!("{operation} auto {percentile} tail must be numeric"));
+            if expect_regression {
+                assert!(
+                    auto_tail > baseline_tail,
+                    "{operation} auto {percentile} tail must stay above baseline while the high-confidence packet marks this operation as regressed"
+                );
+            } else {
+                assert!(
+                    auto_tail < baseline_tail,
+                    "{operation} auto {percentile} tail must stay below baseline while the high-confidence packet marks operation tails as mixed"
+                );
+            }
+        }
+    }
+
+    for required in [
+        "closure_assessment",
+        "ready_for_e5_closure",
+        "acceptance_criterion_4_status",
+        "material_uplift_demonstrated",
+        "overall_tail_direction_vs_baseline",
+        "operation_tail_pattern_vs_baseline",
+        "scope_sufficiency",
+        "not-ready state",
+    ] {
+        assert!(
+            RAPTORQ_BASELINE_PROFILE_MD.contains(required),
+            "baseline profile doc must mention high-confidence closure token {required}"
+        );
+    }
 }
 
 /// Validate the E5 SIMD ablation artifact pins the current x86 default-window
@@ -2126,6 +2285,44 @@ fn g3_decision_record_docs_are_cross_linked() {
     }
 }
 
+/// Validate the E5 decision records keep manifest comparator and probe repro
+/// commands on distinct, explicit surfaces.
+#[test]
+fn g3_e5_decision_record_command_surface_split_is_explicit() {
+    let artifact: serde_json::Value = serde_json::from_str(RAPTORQ_OPT_DECISIONS_JSON)
+        .expect("decision artifact must be valid JSON");
+    let cards = artifact["decision_cards"]
+        .as_array()
+        .expect("decision_cards must be an array");
+    let e5 = cards
+        .iter()
+        .find(|card| card["lever_code"].as_str() == Some("E5"))
+        .expect("decision cards must include E5");
+    let split = &e5["measured_comparator_evidence"]["command_surface_split"];
+    assert_eq!(
+        split["manifest_command_bundle"].as_str(),
+        Some("rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives"),
+        "E5 manifest command bundle must stay anchored to gf256_primitives"
+    );
+    assert_eq!(
+        split["probe_repro_command"].as_str(),
+        Some("rch exec -- cargo bench --bench raptorq_benchmark -- gf256_dual_policy"),
+        "E5 probe repro command must stay anchored to gf256_dual_policy"
+    );
+    for required in [
+        "command_surface_split",
+        "`command_bundle`",
+        "`repro_command`",
+        "gf256_primitives",
+        "gf256_dual_policy",
+    ] {
+        assert!(
+            RAPTORQ_OPT_DECISIONS_MD.contains(required),
+            "decision-record doc must explain the E5 command split token {required}"
+        );
+    }
+}
+
 /// Validate the baseline/profile doc stays aligned with the current E5
 /// artifact-backed x86 default-window contract.
 #[test]
@@ -2143,6 +2340,25 @@ fn e5_profile_pack_doc_mentions_current_x86_default_contract() {
         assert!(
             RAPTORQ_BASELINE_PROFILE_MD.contains(required),
             "baseline profile doc must mention {required}"
+        );
+    }
+}
+
+/// Validate the doc keeps the manifest `command_bundle` and probe
+/// `repro_command` surfaces distinct for E5 profile-pack forensics.
+#[test]
+fn e5_profile_pack_doc_explains_command_bundle_split() {
+    for required in [
+        "`command_bundle`",
+        "`repro_command`",
+        "gf256_primitives",
+        "gf256_dual_policy",
+        "Comparator/rollback bundle",
+        "Probe-specific bundle",
+    ] {
+        assert!(
+            RAPTORQ_BASELINE_PROFILE_MD.contains(required),
+            "baseline profile doc must explain E5 command split token {required}"
         );
     }
 }

@@ -12,7 +12,7 @@ fn bead_ids() -> BTreeSet<String> {
     BEADS_JSONL
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .fold(BTreeSet::new(), |mut ids, entry| {
+        .fold(BTreeSet::new(), |mut ids, entry: Value| {
             if let Some(id) = entry.get("id").and_then(Value::as_str) {
                 ids.insert(id.to_string());
             }
@@ -386,7 +386,7 @@ fn assert_performance_workloads(framework: &serde_json::Map<String, Value>) {
             assert!(
                 obj.get(artifact_field)
                     .and_then(Value::as_str)
-                    .is_some_and(|value| !value.trim().is_empty()),
+                    .is_some_and(|value: &str| !value.trim().is_empty()),
                 "{artifact_field} must be non-empty for {workload_id}"
             );
         }
@@ -466,7 +466,7 @@ fn assert_snapshot_metrics(
             attribution
                 .get("source_field_path")
                 .and_then(Value::as_str)
-                .is_some_and(|path| !path.trim().is_empty()),
+                .is_some_and(|path: &str| !path.trim().is_empty()),
             "source_field_path must be non-empty"
         );
 
@@ -543,7 +543,7 @@ fn assert_performance_delta_evidence(
             assert!(
                 obj.get(text_field)
                     .and_then(Value::as_str)
-                    .is_some_and(|value| !value.trim().is_empty()),
+                    .is_some_and(|value: &str| !value.trim().is_empty()),
                 "{text_field} must be non-empty for {workload_id}"
             );
         }
@@ -599,7 +599,7 @@ fn assert_reliability_delta_evidence(
         assert!(
             obj.get("coverage_artifact")
                 .and_then(Value::as_str)
-                .is_some_and(|value| !value.trim().is_empty()),
+                .is_some_and(|value: &str| !value.trim().is_empty()),
             "coverage_artifact must be non-empty for {milestone_id}"
         );
         let coverage_ratio = as_f64(
@@ -740,7 +740,7 @@ fn assert_reliability_attribution_and_caveats(evidence: &serde_json::Map<String,
             attribution_method
                 .get(field)
                 .and_then(Value::as_str)
-                .is_some_and(|value| !value.trim().is_empty()),
+                .is_some_and(|value: &str| !value.trim().is_empty()),
             "attribution_method field must be non-empty: {field}"
         );
     }
@@ -818,7 +818,7 @@ fn assert_correctness_delta_evidence(
         assert!(
             obj.get("conformance_gate_mode")
                 .and_then(Value::as_str)
-                .is_some_and(|value| !value.trim().is_empty()),
+                .is_some_and(|value: &str| !value.trim().is_empty()),
             "conformance_gate_mode must be non-empty for {milestone_id}"
         );
         let gate_ratio = as_f64(
@@ -934,7 +934,7 @@ fn assert_correctness_deltas(
         correctness_delta_summary
             .get("confidence_note")
             .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty()),
+            .is_some_and(|value: &str| !value.trim().is_empty()),
         "correctness delta summary must include confidence_note"
     );
 
@@ -969,7 +969,7 @@ fn assert_correctness_deltas(
             assert!(
                 obj.get(field)
                     .and_then(Value::as_str)
-                    .is_some_and(|value| !value.trim().is_empty()),
+                    .is_some_and(|value: &str| !value.trim().is_empty()),
                 "governance_adjustment field must be non-empty: {field}"
             );
         }
@@ -1081,7 +1081,7 @@ fn assert_case_studies(handoff: &serde_json::Map<String, Value>, bead_ids: &BTre
             assert!(
                 case.get(field)
                     .and_then(Value::as_str)
-                    .is_some_and(|value| !value.trim().is_empty()),
+                    .is_some_and(|value: &str| !value.trim().is_empty()),
                 "case study field must be non-empty: {field}"
             );
         }
@@ -1218,7 +1218,7 @@ fn snapshot_metrics_include_deltas_confidence_and_attribution() {
         "measurement_framework.performance_workloads",
     )
     .iter()
-    .map(|workload| {
+    .map(|workload: &Value| {
         as_str(
             workload
                 .get("workload_id")
