@@ -262,38 +262,47 @@ where
         loop {
             let this = self.as_mut().get_mut();
 
-            match &mut this.state {
-                BufferFutureState::WaitingForReady { request, shared } => {
-                    let mut inner = shared.inner.lock();
-                    match inner.poll_ready(cx) {
-                        Poll::Ready(Ok(())) => {
-                            let req = request.take().unwrap();
-                            let future = inner.call(req);
-                            drop(inner);
+            let is_waiting = matches!(this.state, BufferFutureState::WaitingForReady { .. });
+            if is_waiting {
+                let (shared, mut req) = match &mut this.state {
+                    BufferFutureState::WaitingForReady { request, shared } => (shared.clone(), request.take().unwrap()),
+                    _ => unreachable!(),
+                };
+                
+                let mut inner = shared.inner.lock();
+                match inner.poll_ready(cx) {
+                    Poll::Ready(Ok(())) => {
+                        let future = inner.call(req);
+                        drop(inner);
 
-                            let wakers = std::mem::take(&mut *shared.inner_wakers.lock());
-                            for w in wakers {
-                                w.wake();
-                            }
+                        let wakers = std::mem::take(&mut *shared.inner_wakers.lock());
+                        for w in wakers {
+                            w.wake();
+                        }
 
-                            let shared = shared.clone();
-                            this.state = BufferFutureState::Active { future, shared };
-                            // Loop around to poll Active
+                        this.state = BufferFutureState::Active { future, shared };
+                        continue;
+                    }
+                    Poll::Ready(Err(e)) => {
+                        drop(inner);
+                        this.state = BufferFutureState::Error(Some(BufferError::Inner(e)));
+                        continue;
+                    }
+                    Poll::Pending => {
+                        drop(inner);
+                        let mut wakers = shared.inner_wakers.lock();
+                        if wakers.last().is_none_or(|w| !w.will_wake(cx.waker())) {
+                            wakers.push(cx.waker().clone());
                         }
-                        Poll::Ready(Err(e)) => {
-                            drop(inner);
-                            this.state = BufferFutureState::Error(Some(BufferError::Inner(e)));
-                            // Loop around to poll Error
-                        }
-                        Poll::Pending => {
-                            let mut wakers = shared.inner_wakers.lock();
-                            if wakers.last().is_none_or(|w| !w.will_wake(cx.waker())) {
-                                wakers.push(cx.waker().clone());
-                            }
-                            return Poll::Pending;
-                        }
+                        drop(wakers);
+                        this.state = BufferFutureState::WaitingForReady { request: Some(req), shared };
+                        return Poll::Pending;
                     }
                 }
+            }
+            
+            match &mut this.state {
+                BufferFutureState::WaitingForReady { .. } => unreachable!(),
                 BufferFutureState::Active { future, shared } => {
                     match Pin::new(future).poll(cx) {
                         Poll::Ready(result) => {
