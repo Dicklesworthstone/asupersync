@@ -159,9 +159,6 @@ impl<T> Mutex<T> {
         if state.locked {
             return Err(TryLockError::Locked);
         }
-        if !state.waiters.is_empty() {
-            return Err(TryLockError::Locked);
-        }
 
         state.locked = true;
         drop(state);
@@ -485,9 +482,6 @@ impl<T> OwnedMutexGuard<T> {
                 return Err(TryLockError::Poisoned);
             }
             if state.locked {
-                return Err(TryLockError::Locked);
-            }
-            if !state.waiters.is_empty() {
                 return Err(TryLockError::Locked);
             }
             state.locked = true;
