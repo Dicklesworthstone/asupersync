@@ -73,75 +73,6 @@ impl<S> Layer<S> for BufferLayer {
 
 // ─── Shared state ───────────────────────────────────────────────────────────
 
-/// A buffered request waiting to be processed.
-struct BufferedRequest<Request, Response, Error> {
-    request: Request,
-    tx: oneshot::Sender<Result<Response, Error>>,
-}
-
-/// Simple oneshot channel for response delivery.
-mod oneshot {
-    use parking_lot::Mutex;
-    use std::sync::Arc;
-
-    use std::task::Waker;
-
-    pub struct Sender<T> {
-        shared: Arc<Mutex<Inner<T>>>,
-    }
-
-    pub struct Receiver<T> {
-        shared: Arc<Mutex<Inner<T>>>,
-    }
-
-    struct Inner<T> {
-        value: Option<T>,
-        waker: Option<Waker>,
-    }
-
-    pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
-        let shared = Arc::new(Mutex::new(Inner {
-            value: None,
-            waker: None,
-        }));
-        (
-            Sender {
-                shared: shared.clone(),
-            },
-            Receiver { shared },
-        )
-    }
-
-    impl<T> Sender<T> {
-        pub fn send(self, value: T) {
-            let waker = {
-                let mut guard = self.shared.lock();
-                guard.value = Some(value);
-                guard.waker.take()
-            };
-            if let Some(w) = waker {
-                w.wake();
-            }
-        }
-    }
-
-    impl<T> Receiver<T> {
-        /// Try to take the value. Returns `Some` if available.
-        pub fn try_recv(&self) -> Option<T> {
-            let mut guard = self.shared.lock();
-            guard.value.take()
-        }
-
-        /// Register a waker to be notified when a value is sent.
-        pub fn register_waker(&self, waker: &Waker) {
-            let mut guard = self.shared.lock();
-            if guard.waker.as_ref().is_none_or(|w| !w.will_wake(waker)) {
-                guard.waker = Some(waker.clone());
-            }
-        }
-    }
-}
-
 // ─── Buffer service ─────────────────────────────────────────────────────────
 
 /// A service that buffers requests via a bounded channel.
@@ -276,38 +207,40 @@ impl<E: std::error::Error + 'static> std::error::Error for BufferError<E> {
 
 /// Future returned by the [`Buffer`] service.
 ///
-/// Resolves to the inner service's response once the buffered request
-/// has been processed.
-pub struct BufferFuture<Response, Error> {
-    state: BufferFutureState<Response, Error>,
+/// Resolves to the inner service's response.
+pub struct BufferFuture<F, E, S> {
+    state: BufferFutureState<F, E, S>,
 }
 
-enum BufferFutureState<Response, Error> {
-    /// Waiting for the response from the worker.
-    Waiting(oneshot::Receiver<Result<Response, Error>>),
+enum BufferFutureState<F, E, S> {
+    /// Waiting for the inner future.
+    Active {
+        future: F,
+        shared: Arc<SharedBuffer<S>>,
+    },
     /// Immediate error (buffer full or closed).
-    Error(Option<BufferError<Error>>),
+    Error(Option<BufferError<E>>),
     /// Completed.
     Done,
 }
 
-impl<Response, Error> BufferFuture<Response, Error> {
-    fn waiting(rx: oneshot::Receiver<Result<Response, Error>>) -> Self {
+impl<F, E, S> BufferFuture<F, E, S> {
+    fn active(future: F, shared: Arc<SharedBuffer<S>>) -> Self {
         Self {
-            state: BufferFutureState::Waiting(rx),
+            state: BufferFutureState::Active { future, shared },
         }
     }
 
-    fn error(err: BufferError<Error>) -> Self {
+    fn error(err: BufferError<E>) -> Self {
         Self {
             state: BufferFutureState::Error(Some(err)),
         }
     }
 }
 
-impl<Response, Error> Future for BufferFuture<Response, Error>
+impl<F, Response, Error, S> Future for BufferFuture<F, Error, S>
 where
-    Response: Unpin,
+    F: Future<Output = Result<Response, Error>> + Unpin,
     Error: Unpin,
 {
     type Output = Result<Response, BufferError<Error>>;
@@ -316,19 +249,25 @@ where
         let this = self.get_mut();
 
         match &mut this.state {
-            BufferFutureState::Waiting(rx) => match rx.try_recv() {
-                Some(Ok(response)) => {
+            BufferFutureState::Active { future, shared } => match Pin::new(future).poll(cx) {
+                Poll::Ready(result) => {
+                    let shared = shared.clone();
                     this.state = BufferFutureState::Done;
-                    Poll::Ready(Ok(response))
+
+                    let mut pending = shared.pending.lock();
+                    *pending = pending.saturating_sub(1);
+                    let wakers = std::mem::take(&mut *shared.ready_wakers.lock());
+                    drop(pending);
+                    for w in wakers {
+                        w.wake();
+                    }
+
+                    match result {
+                        Ok(v) => Poll::Ready(Ok(v)),
+                        Err(e) => Poll::Ready(Err(BufferError::Inner(e))),
+                    }
                 }
-                Some(Err(e)) => {
-                    this.state = BufferFutureState::Done;
-                    Poll::Ready(Err(BufferError::Inner(e)))
-                }
-                None => {
-                    rx.register_waker(cx.waker());
-                    Poll::Pending
-                }
+                Poll::Pending => Poll::Pending,
             },
             BufferFutureState::Error(err) => {
                 let err = err.take().expect("polled after completion");
@@ -342,10 +281,24 @@ where
     }
 }
 
-impl<Response, Error> fmt::Debug for BufferFuture<Response, Error> {
+impl<F, E, S> Drop for BufferFuture<F, E, S> {
+    fn drop(&mut self) {
+        if let BufferFutureState::Active { shared, .. } = &mut self.state {
+            let mut pending = shared.pending.lock();
+            *pending = pending.saturating_sub(1);
+            let wakers = std::mem::take(&mut *shared.ready_wakers.lock());
+            drop(pending);
+            for w in wakers {
+                w.wake();
+            }
+        }
+    }
+}
+
+impl<F, E, S> fmt::Debug for BufferFuture<F, E, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = match &self.state {
-            BufferFutureState::Waiting(_) => "Waiting",
+            BufferFutureState::Active { .. } => "Active",
             BufferFutureState::Error(_) => "Error",
             BufferFutureState::Done => "Done",
         };
@@ -367,16 +320,20 @@ where
 {
     type Response = S::Response;
     type Error = BufferError<S::Error>;
-    type Future = BufferFuture<S::Response, S::Error>;
+    type Future = BufferFuture<S::Future, S::Error, S>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         if *self.shared.closed.lock() {
             return Poll::Ready(Err(BufferError::Closed));
         }
-        let pending = *self.shared.pending.lock();
-        if pending >= self.shared.capacity {
+        // Lock ordering is pending -> ready_wakers everywhere to avoid inversion
+        // with completion/drop paths that decrement pending then wake waiters.
+        let pending = self.shared.pending.lock();
+        if *pending >= self.shared.capacity {
             let mut wakers = self.shared.ready_wakers.lock();
-            wakers.push(cx.waker().clone());
+            if wakers.last().is_none_or(|w| !w.will_wake(cx.waker())) {
+                wakers.push(cx.waker().clone());
+            }
             Poll::Pending
         } else {
             Poll::Ready(Ok(()))
@@ -385,70 +342,24 @@ where
 
     fn call(&mut self, req: Request) -> Self::Future {
         if *self.shared.closed.lock() {
-            return BufferFuture::<S::Response, S::Error>::error(BufferError::Closed);
+            return BufferFuture::error(BufferError::Closed);
         }
 
         {
             let mut pending = self.shared.pending.lock();
             if *pending >= self.shared.capacity {
-                return BufferFuture::<S::Response, S::Error>::error(BufferError::Full);
+                return BufferFuture::error(BufferError::Full);
             }
             *pending += 1;
         }
 
-        // Process the request synchronously through the inner service.
-        // In a fully async runtime, this would be done by a background worker.
-        // For Phase 0 (synchronous Handler pattern), we process inline and
-        // use the buffer for capacity management.
-        let (tx, rx) = oneshot::channel();
-
-        let result = {
+        let future = {
             let mut inner = self.shared.inner.lock();
-            // Poll the inner service's future to completion.
-            let noop_waker = std::task::Waker::from(Arc::new(NoopWaker));
-            let mut cx = Context::from_waker(&noop_waker);
-
-            // Check readiness.
-            match inner.poll_ready(&mut cx) {
-                Poll::Ready(Ok(())) => {
-                    let mut future = inner.call(req);
-                    drop(inner);
-                    // Poll the future to completion.
-                    match Pin::new(&mut future).poll(&mut cx) {
-                        Poll::Ready(result) => Some(result),
-                        Poll::Pending => None,
-                    }
-                }
-                Poll::Ready(Err(e)) => Some(Err(e)),
-                Poll::Pending => None,
-            }
+            inner.call(req)
         };
 
-        // Decrement pending count and wake any callers blocked on poll_ready.
-        {
-            let mut pending = self.shared.pending.lock();
-            *pending = pending.saturating_sub(1);
-        }
-        let wakers: Vec<_> = {
-            let mut ready_wakers = self.shared.ready_wakers.lock();
-            std::mem::take(&mut *ready_wakers)
-        };
-        for w in wakers {
-            w.wake();
-        }
-
-        if let Some(result) = result {
-            tx.send(result);
-        }
-
-        BufferFuture::waiting(rx)
+        BufferFuture::active(future, self.shared.clone())
     }
-}
-
-struct NoopWaker;
-
-impl std::task::Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -456,13 +367,19 @@ impl std::task::Wake for NoopWaker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::task::Waker;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    struct NoopWaker;
+
+    impl std::task::Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
     }
 
     fn noop_waker() -> Waker {
@@ -824,17 +741,19 @@ mod tests {
 
     #[test]
     fn buffer_future_debug() {
-        let (tx, rx) = oneshot::channel::<Result<i32, &str>>();
-        let future = BufferFuture::<i32, &str>::waiting(rx);
-        let dbg = format!("{future:?}");
+        let err = BufferFuture::<std::future::Ready<Result<i32, &str>>, &str, i32>::error(
+            BufferError::Full,
+        );
+        let dbg = format!("{err:?}");
         assert!(dbg.contains("BufferFuture"));
-        assert!(dbg.contains("Waiting"));
-        drop(tx);
+        assert!(dbg.contains("Error"));
     }
 
     #[test]
     fn buffer_future_error_debug() {
-        let future = BufferFuture::<i32, &str>::error(BufferError::Full);
+        let future = BufferFuture::<std::future::Ready<Result<i32, &str>>, &str, i32>::error(
+            BufferError::Full,
+        );
         let dbg = format!("{future:?}");
         assert!(dbg.contains("Error"));
     }
@@ -842,26 +761,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "polled after completion")]
     fn buffer_future_panics_when_polled_after_completion() {
-        let future = BufferFuture::<i32, &str>::error(BufferError::Full);
+        let future = BufferFuture::<std::future::Ready<Result<i32, &str>>, &str, i32>::error(
+            BufferError::Full,
+        );
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
         let mut future = future;
         let _ = Pin::new(&mut future).poll(&mut cx);
         let _ = Pin::new(&mut future).poll(&mut cx); // should panic
-    }
-
-    // ================================================================
-    // Oneshot channel
-    // ================================================================
-
-    #[test]
-    fn oneshot_send_recv() {
-        let (tx, rx) = oneshot::channel::<i32>();
-        assert!(rx.try_recv().is_none());
-        tx.send(42);
-        assert_eq!(rx.try_recv(), Some(42));
-        // Second recv returns None.
-        assert!(rx.try_recv().is_none());
     }
 
     // ================================================================
@@ -895,5 +802,22 @@ mod tests {
         assert_eq!(svc.pending(), 0);
         assert!(svc.is_empty());
         crate::test_complete!("pending_count_tracks_requests");
+    }
+
+    #[test]
+    fn poll_ready_deduplicates_waker_when_full() {
+        init_test("poll_ready_deduplicates_waker_when_full");
+        let mut svc = Buffer::new(EchoService, 1);
+        *svc.shared.pending.lock() = 1;
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(svc.poll_ready(&mut cx).is_pending());
+        assert_eq!(svc.shared.ready_wakers.lock().len(), 1);
+
+        assert!(svc.poll_ready(&mut cx).is_pending());
+        assert_eq!(svc.shared.ready_wakers.lock().len(), 1);
+        crate::test_complete!("poll_ready_deduplicates_waker_when_full");
     }
 }
