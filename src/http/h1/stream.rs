@@ -855,28 +855,14 @@ impl RequestHead {
         })
     }
 
-    /// Returns true if any Transfer-Encoding header is present.
-    #[must_use]
-    fn has_transfer_encoding(&self) -> bool {
-        self.headers
-            .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"))
-    }
-
     /// Determines the body kind from headers.
     ///
-    /// Returns `BodyKind::Empty` if both Transfer-Encoding and Content-Length
-    /// are present (ambiguous body length per RFC 7230 §3.3.3).
+    /// When both Transfer-Encoding and Content-Length are present,
+    /// Content-Length is ignored per RFC 7230 §3.3.3: the Transfer-Encoding
+    /// takes precedence.
     #[must_use]
     pub fn body_kind(&self) -> BodyKind {
-        let has_te = self.has_transfer_encoding();
-        let has_cl = self.content_length().is_some();
-
-        // Reject ambiguous body length (TE + CL both present).
-        if has_te && has_cl {
-            return BodyKind::Empty;
-        }
-
+        // RFC 7230 §3.3.3: If TE is present, ignore Content-Length.
         if self.is_chunked() {
             BodyKind::Chunked
         } else if let Some(len) = self.content_length() {
@@ -957,7 +943,13 @@ impl ResponseHead {
             buf.extend_from_slice(&tmp[..n]);
         }
         buf.extend_from_slice(b" ");
-        buf.extend_from_slice(reason.as_bytes());
+        // Sanitize reason phrase: strip CR/LF to prevent response splitting.
+        // RFC 7230 reason-phrase = *( HTAB / SP / VCHAR / obs-text ).
+        for &b in reason.as_bytes() {
+            if b != b'\r' && b != b'\n' {
+                buf.extend_from_slice(&[b]);
+            }
+        }
         buf.extend_from_slice(b"\r\n");
 
         for (name, value) in &self.headers {
@@ -1504,5 +1496,36 @@ mod tests {
         assert_eq!(cloned.reason, "OK");
         let dbg = format!("{head:?}");
         assert!(dbg.contains("ResponseHead"));
+    }
+
+    #[test]
+    fn response_head_serialize_strips_crlf_from_reason() {
+        let head = ResponseHead::new(200, "OK\r\nX-Injected: evil");
+        let serialized = head.serialize();
+        let text = String::from_utf8_lossy(&serialized);
+        // The reason must not contain CRLF — injection attempt is neutralized.
+        assert!(
+            !text.contains("X-Injected"),
+            "CRLF injection must be stripped from reason phrase: {text}"
+        );
+        assert!(text.starts_with("HTTP/1.1 200 OKX-Injected: evil\r\n"));
+    }
+
+    #[test]
+    fn body_kind_te_plus_cl_uses_chunked() {
+        let head = RequestHead {
+            method: super::super::types::Method::Post,
+            uri: "/upload".to_string(),
+            version: super::super::types::Version::Http11,
+            headers: vec![
+                ("transfer-encoding".to_string(), "chunked".to_string()),
+                ("content-length".to_string(), "42".to_string()),
+            ],
+        };
+        // RFC 7230 §3.3.3: when both TE and CL are present, TE takes precedence.
+        assert!(
+            matches!(head.body_kind(), BodyKind::Chunked),
+            "TE+CL should resolve to Chunked, not Empty"
+        );
     }
 }
