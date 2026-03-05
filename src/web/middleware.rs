@@ -1985,13 +1985,14 @@ mod tests {
     #[test]
     fn rate_limit_metrics_accessible() {
         let policy = RateLimitPolicy::default();
+        let burst = policy.burst;
         let mw = RateLimitMiddleware::new(FnHandler::new(ok_handler), policy);
 
         let _ = mw.call(make_request());
         let metrics = mw.limiter().metrics();
-        assert!(metrics.total_allowed > 0 || metrics.available_tokens >= 0.0);
+        assert!(metrics.total_allowed > 0);
+        assert!(metrics.available_tokens <= burst);
     }
-
     #[test]
     fn bulkhead_metrics_accessible() {
         let policy = BulkheadPolicy {

@@ -152,7 +152,7 @@ impl RateLimitPolicy {
 #[derive(Clone, Debug, Default)]
 pub struct RateLimitMetrics {
     /// Current available tokens.
-    pub available_tokens: f64,
+    pub available_tokens: u32,
 
     /// Total operations allowed.
     pub total_allowed: u64,
@@ -173,7 +173,7 @@ pub struct RateLimitMetrics {
     pub max_wait_time: Duration,
 
     /// Operations per second (recent).
-    pub current_rate: f64,
+    pub current_rate: u32,
 
     /// Time until next token available.
     pub next_token_available: Option<Duration>,
@@ -215,7 +215,10 @@ fn duration_to_millis_saturating(duration: Duration) -> u64 {
 /// Internal state of the token bucket.
 struct BucketState {
     /// Token bucket state.
-    tokens: f64,
+    tokens: u32,
+
+    /// Fractional tokens accumulated (0 to period_ms - 1).
+    fractional: u64,
 
     /// Last refill time (as millis since epoch).
     last_refill: u64,
@@ -224,10 +227,6 @@ struct BucketState {
 /// Thread-safe rate limiter using token bucket algorithm.
 pub struct RateLimiter {
     policy: RateLimitPolicy,
-
-    /// Pre-computed tokens per millisecond.
-    /// Avoids division on every `refill_inner` call.
-    tokens_per_ms: f64,
 
     /// Protected bucket state.
     state: Mutex<BucketState>,
@@ -256,19 +255,12 @@ impl RateLimiter {
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn new(policy: RateLimitPolicy) -> Self {
-        let initial_tokens = f64::from(policy.burst);
-        let period_ms = duration_to_millis_saturating(policy.period) as f64;
-        let tokens_per_ms = if period_ms > 0.0 {
-            f64::from(policy.rate) / period_ms
-        } else {
-            0.0
-        };
-
+        let burst = policy.burst;
         Self {
             policy,
-            tokens_per_ms,
             state: Mutex::new(BucketState {
-                tokens: initial_tokens,
+                tokens: burst,
+                fractional: 0,
                 last_refill: 0,
             }),
             wait_queue: RwLock::new(VecDeque::with_capacity(16)),
@@ -320,7 +312,7 @@ impl RateLimiter {
             total_wait_time: Duration::from_millis(total_wait_time_ms),
             avg_wait_time,
             max_wait_time: Duration::from_millis(max_wait_time_ms),
-            current_rate: 0.0,
+            current_rate: 0,
             next_token_available: None,
         }
     }
@@ -335,12 +327,22 @@ impl RateLimiter {
         }
 
         let elapsed_ms = now_millis - state.last_refill;
+        let period_ms = duration_to_millis_saturating(self.policy.period);
 
-        if self.tokens_per_ms > 0.0 {
-            let tokens_to_add = elapsed_ms as f64 * self.tokens_per_ms;
-            let max_tokens = f64::from(self.policy.burst);
+        if period_ms > 0 && self.policy.rate > 0 {
+            let added_fractional = u128::from(elapsed_ms) * u128::from(self.policy.rate);
+            let total_fractional = u128::from(state.fractional) + added_fractional;
 
-            state.tokens = (state.tokens + tokens_to_add).min(max_tokens);
+            let new_tokens = (total_fractional / u128::from(period_ms)) as u64;
+            let new_fractional = (total_fractional % u128::from(period_ms)) as u64;
+
+            state.tokens =
+                (u64::from(state.tokens) + new_tokens).min(u64::from(self.policy.burst)) as u32;
+            state.fractional = new_fractional;
+
+            if state.tokens == self.policy.burst {
+                state.fractional = 0;
+            }
         }
 
         state.last_refill = now_millis;
@@ -368,10 +370,8 @@ impl RateLimiter {
 
         self.refill_inner(&mut state, now_millis);
 
-        let cost_f = f64::from(cost);
-
-        if state.tokens >= cost_f {
-            state.tokens -= cost_f;
+        if state.tokens >= cost {
+            state.tokens -= cost;
             drop(state); // Release bucket lock immediately
 
             self.total_allowed.fetch_add(1, Ordering::Relaxed);
@@ -427,29 +427,34 @@ impl RateLimiter {
         clippy::cast_sign_loss
     )]
     pub fn time_until_available(&self, cost: u32, now: Time) -> Duration {
-        let cost_f = f64::from(cost);
-        if cost_f > f64::from(self.policy.burst) {
+        if cost > self.policy.burst {
             return Duration::MAX;
         }
 
-        let current_tokens = {
+        let (current_tokens, current_fractional) = {
             let mut state = self.state.lock();
             self.refill_inner(&mut state, now.as_millis());
-            state.tokens
+            (state.tokens, state.fractional)
         };
 
-        if current_tokens >= cost_f {
+        if current_tokens >= cost {
             return Duration::ZERO;
         }
 
-        let tokens_needed = cost_f - current_tokens;
-        let tokens_per_ms = self.tokens_per_ms;
-
-        if tokens_per_ms <= 0.0 {
+        if self.policy.rate == 0 || self.policy.period.as_millis() == 0 {
             return Duration::MAX; // No refill rate
         }
 
-        let ms_needed = (tokens_needed / tokens_per_ms).ceil() as u64;
+        let period_ms = duration_to_millis_saturating(self.policy.period);
+
+        let tokens_needed = cost - current_tokens;
+        let fractional_needed = u128::from(tokens_needed) * u128::from(period_ms);
+        let additional_fractional =
+            fractional_needed.saturating_sub(u128::from(current_fractional));
+
+        let rate = u128::from(self.policy.rate);
+        let ms_needed = additional_fractional.div_ceil(rate) as u64;
+
         Duration::from_millis(ms_needed)
     }
 
@@ -470,7 +475,7 @@ impl RateLimiter {
     /// Get available tokens (for metrics/debugging).
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
-    pub fn available_tokens(&self) -> f64 {
+    pub fn available_tokens(&self) -> u32 {
         let state = self.state.lock();
         state.tokens
     }
@@ -490,7 +495,7 @@ impl RateLimiter {
             return Ok(u64::MAX); // Special sentinel meaning "already acquired"
         }
 
-        if f64::from(cost) > f64::from(self.policy.burst) {
+        if cost > self.policy.burst {
             self.total_rejected.fetch_add(1, Ordering::Relaxed);
             return Err(RateLimitError::RateLimitExceeded);
         }
@@ -572,10 +577,8 @@ impl RateLimiter {
                 continue;
             }
 
-            let cost_f = f64::from(entry.cost);
-
-            if state.tokens >= cost_f {
-                state.tokens -= cost_f;
+            if state.tokens >= entry.cost {
+                state.tokens -= entry.cost;
                 entry.result = Some(Ok(()));
                 self.pending_queue_count.fetch_sub(1, Ordering::Relaxed);
 
@@ -669,8 +672,7 @@ impl RateLimiter {
             if entry.result == Some(Ok(())) {
                 // Refund tokens if already granted but not consumed by the caller
                 let mut state = self.state.lock();
-                state.tokens =
-                    (state.tokens + f64::from(entry.cost)).min(f64::from(self.policy.burst));
+                state.tokens = (state.tokens + entry.cost).min(self.policy.burst);
                 // We could decrement total_allowed here, but the operation was technically
                 // allowed from the rate limiter's perspective, just not consumed.
                 drop(state);
@@ -683,7 +685,7 @@ impl RateLimiter {
 
     /// Reset the rate limiter to full capacity.
     pub fn reset(&self) {
-        let initial_tokens = f64::from(self.policy.burst);
+        let initial_tokens = self.policy.burst;
 
         {
             let mut state = self.state.lock();
@@ -1082,7 +1084,7 @@ mod tests {
         });
 
         let tokens = rl.available_tokens();
-        assert!((tokens - 5.0).abs() < f64::EPSILON);
+        assert_eq!(tokens, 5);
     }
 
     #[test]
@@ -1097,7 +1099,7 @@ mod tests {
         assert!(rl.try_acquire(3, now));
 
         let tokens = rl.available_tokens();
-        assert!((tokens - 7.0).abs() < f64::EPSILON);
+        assert_eq!(tokens, 7);
     }
 
     #[test]
@@ -1137,9 +1139,9 @@ mod tests {
         rl.refill(later);
 
         let tokens = rl.available_tokens();
-        assert!(
-            (0.9..=1.1).contains(&tokens),
-            "Expected ~1 token, got {tokens}"
+        assert_eq!(
+            tokens, 1,
+            "Expected 1 token after 100ms refill, got {tokens}"
         );
     }
 
@@ -1160,7 +1162,7 @@ mod tests {
         rl.refill(later);
 
         // Should still only have burst tokens
-        assert!((rl.available_tokens() - 10.0).abs() < f64::EPSILON);
+        assert_eq!(rl.available_tokens(), 10);
     }
 
     #[test]
@@ -1211,7 +1213,7 @@ mod tests {
             "reset must clear wait queue"
         );
         assert!(
-            (rl.available_tokens() - 1.0).abs() < f64::EPSILON,
+            rl.available_tokens() == 1,
             "reset must restore full burst capacity"
         );
     }
@@ -1273,11 +1275,11 @@ mod tests {
 
         // Heavy operation costs 5 tokens
         assert!(rl.try_acquire(5, now));
-        assert!((rl.available_tokens() - 5.0).abs() < f64::EPSILON);
+        assert_eq!(rl.available_tokens(), 5);
 
         // Another heavy operation
         assert!(rl.try_acquire(5, now));
-        assert!(rl.available_tokens() < 0.1);
+        assert_eq!(rl.available_tokens(), 0);
 
         // Cannot do even light operation
         assert!(!rl.try_acquire(1, now));
@@ -1640,7 +1642,7 @@ mod tests {
             },
         );
 
-        assert!((l.available_tokens() - 500.0).abs() < f64::EPSILON);
+        assert_eq!(l.available_tokens(), 500);
     }
 
     #[test]
