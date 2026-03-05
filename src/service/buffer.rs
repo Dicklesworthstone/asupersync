@@ -146,8 +146,19 @@ impl<S> Buffer<S> {
     }
 
     /// Close the buffer, rejecting new requests.
+    ///
+    /// Wakes all tasks waiting for capacity or inner-service readiness so they
+    /// can observe the closed state and return `BufferError::Closed`.
     pub fn close(&self) {
         *self.shared.closed.lock() = true;
+        let ready_wakers = std::mem::take(&mut *self.shared.ready_wakers.lock());
+        let inner_wakers = std::mem::take(&mut *self.shared.inner_wakers.lock());
+        for w in ready_wakers {
+            w.wake();
+        }
+        for w in inner_wakers {
+            w.wake();
+        }
     }
 
     /// Returns `true` if the buffer has been closed.
@@ -269,6 +280,17 @@ where
                     mut request,
                     shared,
                 } => {
+                    if *shared.closed.lock() {
+                        let mut pending = shared.pending.lock();
+                        *pending = pending.saturating_sub(1);
+                        let wakers = std::mem::take(&mut *shared.ready_wakers.lock());
+                        drop(pending);
+                        for w in wakers {
+                            w.wake();
+                        }
+                        return Poll::Ready(Err(BufferError::Closed));
+                    }
+
                     let mut inner = shared.inner.lock();
                     match inner.poll_ready(cx) {
                         Poll::Ready(Ok(())) => {
@@ -306,7 +328,7 @@ where
                             drop(inner);
                             {
                                 let mut wakers = shared.inner_wakers.lock();
-                                if wakers.last().is_none_or(|w| !w.will_wake(cx.waker())) {
+                                if !wakers.iter().any(|w| w.will_wake(cx.waker())) {
                                     wakers.push(cx.waker().clone());
                                 }
                             }
@@ -416,7 +438,7 @@ where
         let pending = self.shared.pending.lock();
         if *pending >= self.shared.capacity {
             let mut wakers = self.shared.ready_wakers.lock();
-            if wakers.last().is_none_or(|w| !w.will_wake(cx.waker())) {
+            if !wakers.iter().any(|w| w.will_wake(cx.waker())) {
                 wakers.push(cx.waker().clone());
             }
             Poll::Pending
@@ -908,5 +930,108 @@ mod tests {
         assert!(svc.poll_ready(&mut cx).is_pending());
         assert_eq!(svc.shared.ready_wakers.lock().len(), 1);
         crate::test_complete!("poll_ready_deduplicates_waker_when_full");
+    }
+
+    // ================================================================
+    // Waker accumulation regression (Bug: last-only dedup)
+    // ================================================================
+
+    struct FlagWaker {
+        flag: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl std::task::Wake for FlagWaker {
+        fn wake(self: Arc<Self>) {
+            self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn flag_waker() -> (Waker, Arc<std::sync::atomic::AtomicBool>) {
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(FlagWaker { flag: flag.clone() }));
+        (waker, flag)
+    }
+
+    #[test]
+    fn poll_ready_dedup_with_alternating_tasks() {
+        init_test("poll_ready_dedup_with_alternating_tasks");
+        let mut svc = Buffer::new(EchoService, 1);
+        *svc.shared.pending.lock() = 1;
+
+        let (waker_a, _flag_a) = flag_waker();
+        let (waker_b, _flag_b) = flag_waker();
+        let mut cx_a = Context::from_waker(&waker_a);
+        let mut cx_b = Context::from_waker(&waker_b);
+
+        // Two different tasks alternate polling. Waker list should stay at
+        // most 2 entries (one per distinct waker), never grow unboundedly.
+        for _ in 0..10 {
+            assert!(svc.poll_ready(&mut cx_a).is_pending());
+            assert!(svc.poll_ready(&mut cx_b).is_pending());
+        }
+        let waker_count = svc.shared.ready_wakers.lock().len();
+        assert!(
+            waker_count <= 2,
+            "waker list grew to {waker_count}, expected at most 2"
+        );
+        crate::test_complete!("poll_ready_dedup_with_alternating_tasks");
+    }
+
+    // ================================================================
+    // Close wakes waiting tasks (Bug: close without wake)
+    // ================================================================
+
+    #[test]
+    fn close_wakes_tasks_waiting_for_capacity() {
+        init_test("close_wakes_tasks_waiting_for_capacity");
+        let mut svc = Buffer::new(EchoService, 1);
+        *svc.shared.pending.lock() = 1;
+
+        let (waker, flag) = flag_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Task parks waiting for capacity
+        assert!(svc.poll_ready(&mut cx).is_pending());
+        assert!(!flag.load(std::sync::atomic::Ordering::SeqCst));
+
+        // Close should wake the parked task
+        svc.close();
+        assert!(
+            flag.load(std::sync::atomic::Ordering::SeqCst),
+            "close() must wake tasks waiting for capacity"
+        );
+
+        // Re-poll should get Closed error
+        let result = svc.poll_ready(&mut cx);
+        assert!(matches!(result, Poll::Ready(Err(BufferError::Closed))));
+        crate::test_complete!("close_wakes_tasks_waiting_for_capacity");
+    }
+
+    #[test]
+    fn close_wakes_tasks_waiting_for_inner_ready() {
+        init_test("close_wakes_tasks_waiting_for_inner_ready");
+        let mut svc = Buffer::new(NeverReadyService, 4);
+
+        let (waker, flag) = flag_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Submit a request and poll the future, causing it to park in
+        // WaitingForReady because NeverReadyService returns Pending.
+        let _ = svc.poll_ready(&mut cx);
+        let mut future = svc.call(1);
+        assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
+        assert!(!flag.load(std::sync::atomic::Ordering::SeqCst));
+
+        // Close should wake the future
+        svc.close();
+        assert!(
+            flag.load(std::sync::atomic::Ordering::SeqCst),
+            "close() must wake tasks waiting for inner readiness"
+        );
+
+        // Re-poll should get Closed error
+        let result = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(result, Poll::Ready(Err(BufferError::Closed))));
+        crate::test_complete!("close_wakes_tasks_waiting_for_inner_ready");
     }
 }
