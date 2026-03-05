@@ -2661,7 +2661,7 @@ impl PgConnection {
         let mut buf = MessageBuffer::new();
         buf.write_cstring("ROLLBACK");
         let msg = buf.build_message(b'Q');
-        
+
         if let Err(e) = self.write_all(&msg).await {
             let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
             return Err(e);

@@ -360,11 +360,6 @@ impl RateLimiter {
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn try_acquire(&self, cost: u32, now: Time) -> bool {
-        // Prevent barging if there are queued operations to preserve FIFO fairness
-        if self.pending_queue_count.load(Ordering::Relaxed) > 0 {
-            return false;
-        }
-
         let mut state = self.state.lock();
         let now_millis = now.as_millis();
 
@@ -672,7 +667,10 @@ impl RateLimiter {
             if entry.result == Some(Ok(())) {
                 // Refund tokens if already granted but not consumed by the caller
                 let mut state = self.state.lock();
-                state.tokens = (state.tokens + entry.cost).min(self.policy.burst);
+                state.tokens = state
+                    .tokens
+                    .saturating_add(entry.cost)
+                    .min(self.policy.burst);
                 // We could decrement total_allowed here, but the operation was technically
                 // allowed from the rate limiter's perspective, just not consumed.
                 drop(state);

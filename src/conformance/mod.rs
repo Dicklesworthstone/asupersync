@@ -440,7 +440,8 @@ impl ConformanceTarget for LabRuntimeTarget {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        use std::sync::{Arc, Mutex};
+        use parking_lot::Mutex;
+        use std::sync::Arc;
 
         // Create root region
         let root_region = runtime.state.create_root_region(Budget::INFINITE);
@@ -452,7 +453,7 @@ impl ConformanceTarget for LabRuntimeTarget {
         // Box the future with result capture
         let wrapped = async move {
             let output = f.await;
-            *result_clone.lock().unwrap() = Some(output);
+            *result_clone.lock() = Some(output);
         };
 
         // Create and schedule the task
@@ -467,7 +468,7 @@ impl ConformanceTarget for LabRuntimeTarget {
         runtime.run_until_quiescent();
 
         // Extract result
-        let mut guard = result.lock().unwrap();
+        let mut guard = result.lock();
         guard.take().expect("task did not complete")
     }
 

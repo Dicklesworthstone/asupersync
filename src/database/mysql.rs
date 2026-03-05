@@ -1875,7 +1875,7 @@ impl MySqlConnection {
         buf.write_byte(command::COM_QUERY);
         buf.write_bytes(b"ROLLBACK");
         let packet = buf.build_packet();
-        
+
         if let Err(e) = self.write_all(&packet).await {
             let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
             return Err(e);

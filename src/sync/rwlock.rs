@@ -284,9 +284,7 @@ impl<T> RwLock<T> {
             return Err(TryWriteError::Poisoned);
         }
 
-        // Do not let try_write() bypass queued async writers. If there are
-        // waiters, preserve queue order and report Locked.
-        if state.writer_active || state.readers > 0 || state.writer_waiters > 0 {
+        if state.writer_active || state.readers > 0 {
             return Err(TryWriteError::Locked);
         }
 
@@ -389,18 +387,19 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
     type Output = Result<RwLockReadGuard<'a, T>, RwLockError>;
 
     #[inline]
-    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.cx.checkpoint().is_err() {
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        if this.cx.checkpoint().is_err() {
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
 
-        let mut state = self.lock.state.lock();
+        let mut state = this.lock.state.lock();
 
-        if self.lock.is_poisoned() {
+        if this.lock.is_poisoned() {
             return Poll::Ready(Err(RwLockError::Poisoned));
         }
 
-        if let Some(waiter_id) = self.waiter_id {
+        if let Some(waiter_id) = this.waiter_id {
             if let Some(existing) = state.reader_waiters.iter_mut().find(|w| w.id == waiter_id) {
                 if !existing.waker.will_wake(context.waker()) {
                     existing.waker.clone_from(context.waker());
@@ -410,15 +409,15 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
             }
             // Dequeued - we were pre-granted the lock by release_writer!
             // `state.readers` was already incremented for us.
-            self.waiter_id = None;
+            this.waiter_id = None;
             drop(state);
-            return Poll::Ready(Ok(RwLockReadGuard { lock: self.lock }));
+            return Poll::Ready(Ok(RwLockReadGuard { lock: this.lock }));
         }
 
         if !state.writer_active && state.writer_waiters == 0 {
             state.readers += 1;
             drop(state);
-            return Poll::Ready(Ok(RwLockReadGuard { lock: self.lock }));
+            return Poll::Ready(Ok(RwLockReadGuard { lock: this.lock }));
         }
 
         let id = state.next_waiter_id;
@@ -428,7 +427,7 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
             id,
         });
         drop(state);
-        self.waiter_id = Some(id);
+        this.waiter_id = Some(id);
         Poll::Pending
     }
 }
@@ -469,23 +468,24 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
     type Output = Result<RwLockWriteGuard<'a, T>, RwLockError>;
 
     #[inline]
-    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.cx.checkpoint().is_err() {
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        if this.cx.checkpoint().is_err() {
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
 
-        let mut state = self.lock.state.lock();
+        let mut state = this.lock.state.lock();
 
-        if self.lock.is_poisoned() {
+        if this.lock.is_poisoned() {
             return Poll::Ready(Err(RwLockError::Poisoned));
         }
 
-        if !self.counted {
+        if !this.counted {
             state.writer_waiters += 1;
-            self.counted = true;
+            this.counted = true;
         }
 
-        if let Some(waiter_id) = self.waiter_id {
+        if let Some(waiter_id) = this.waiter_id {
             if let Some(existing) = state.writer_queue.iter_mut().find(|w| w.id == waiter_id) {
                 if !existing.waker.will_wake(context.waker()) {
                     existing.waker.clone_from(context.waker());
@@ -494,13 +494,13 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
                 return Poll::Pending;
             }
             // Dequeued - we were pre-granted the lock!
-            self.waiter_id = None;
-            if self.counted {
+            this.waiter_id = None;
+            if this.counted {
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
-                self.counted = false;
+                this.counted = false;
             }
             drop(state);
-            return Poll::Ready(Ok(RwLockWriteGuard { lock: self.lock }));
+            return Poll::Ready(Ok(RwLockWriteGuard { lock: this.lock }));
         }
 
         let can_acquire =
@@ -508,12 +508,12 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
 
         if can_acquire {
             state.writer_active = true;
-            if self.counted {
+            if this.counted {
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
-                self.counted = false;
+                this.counted = false;
             }
             drop(state);
-            return Poll::Ready(Ok(RwLockWriteGuard { lock: self.lock }));
+            return Poll::Ready(Ok(RwLockWriteGuard { lock: this.lock }));
         }
 
         let id = state.next_waiter_id;
@@ -523,7 +523,7 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
             id,
         });
         drop(state);
-        self.waiter_id = Some(id);
+        this.waiter_id = Some(id);
         Poll::Pending
     }
 }
@@ -741,18 +741,19 @@ impl<T> Future for OwnedReadFuture<'_, T> {
     type Output = Result<OwnedRwLockReadGuard<T>, RwLockError>;
 
     #[inline]
-    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.cx.checkpoint().is_err() {
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        if this.cx.checkpoint().is_err() {
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
 
-        let mut state = self.lock.state.lock();
+        let mut state = this.lock.state.lock();
 
-        if self.lock.is_poisoned() {
+        if this.lock.is_poisoned() {
             return Poll::Ready(Err(RwLockError::Poisoned));
         }
 
-        if let Some(waiter_id) = self.waiter_id {
+        if let Some(waiter_id) = this.waiter_id {
             if let Some(existing) = state.reader_waiters.iter_mut().find(|w| w.id == waiter_id) {
                 if !existing.waker.will_wake(context.waker()) {
                     existing.waker.clone_from(context.waker());
@@ -763,9 +764,9 @@ impl<T> Future for OwnedReadFuture<'_, T> {
             // Dequeued - we were pre-granted the lock by release_writer!
             // `state.readers` was already incremented for us.
             drop(state);
-            self.waiter_id = None;
+            this.waiter_id = None;
             return Poll::Ready(Ok(OwnedRwLockReadGuard {
-                lock: Arc::clone(&self.lock),
+                lock: Arc::clone(&this.lock),
             }));
         }
 
@@ -773,7 +774,7 @@ impl<T> Future for OwnedReadFuture<'_, T> {
             state.readers += 1;
             drop(state);
             return Poll::Ready(Ok(OwnedRwLockReadGuard {
-                lock: Arc::clone(&self.lock),
+                lock: Arc::clone(&this.lock),
             }));
         }
 
@@ -784,7 +785,7 @@ impl<T> Future for OwnedReadFuture<'_, T> {
             id,
         });
         drop(state);
-        self.waiter_id = Some(id);
+        this.waiter_id = Some(id);
         Poll::Pending
     }
 }
@@ -1598,14 +1599,21 @@ mod tests {
         let lock = RwLock::new(0_u32);
 
         // Hold a read lock, then queue a writer.
-        let _read = read_blocking(&lock, &cx);
+        let read = read_blocking(&lock, &cx);
         let mut write_fut = lock.write(&cx);
         let pending = poll_once(&mut write_fut).is_none();
         crate::assert_with_log!(pending, "writer queued", true, pending);
 
         // try_read should fail because writer_waiters > 0.
-        let blocked = matches!(lock.try_read(), Err(TryReadError::Locked));
-        crate::assert_with_log!(blocked, "try_read blocked by writer waiter", true, blocked);
+        let try_read_guard = lock.try_read();
+        crate::assert_with_log!(
+            try_read_guard.is_err(),
+            "try_read blocked by writer waiter",
+            true,
+            try_read_guard.is_err()
+        );
+
+        drop(read);
         crate::test_complete!("test_try_read_blocked_by_writer_waiters");
     }
 

@@ -409,21 +409,22 @@ impl ProgressReporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
     use std::io::{self, Cursor, Write};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     #[derive(Clone, Default)]
     struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
 
     impl SharedBuffer {
         fn snapshot(&self) -> Vec<u8> {
-            self.0.lock().unwrap().clone()
+            self.0.lock().clone()
         }
     }
 
     impl Write for SharedBuffer {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
+            self.0.lock().extend_from_slice(buf);
             Ok(buf.len())
         }
 
