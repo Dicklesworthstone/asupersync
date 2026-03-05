@@ -47,6 +47,18 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Poll, Waker};
 
+const MAX_PENDING_PONGS: usize = 16;
+
+fn enqueue_pending_pong(
+    pending_pongs: &mut std::collections::VecDeque<Bytes>,
+    payload: Bytes,
+) {
+    if pending_pongs.len() >= MAX_PENDING_PONGS {
+        let _ = pending_pongs.pop_front();
+    }
+    pending_pongs.push_back(payload);
+}
+
 /// Shared state between read and write halves.
 struct WebSocketShared<IO> {
     /// Underlying I/O stream.
@@ -292,13 +304,10 @@ where
                 // Handle control frames
                 match frame.opcode {
                     Opcode::Ping => {
-                        // Cap pending pongs to prevent memory DoS via
-                        // Ping flooding.
+                        // Cap pending pongs to prevent memory DoS via ping
+                        // flooding while preserving FIFO order of newest items.
                         let mut shared = self.shared.lock();
-                        if shared.pending_pongs.len() >= 16 {
-                            shared.pending_pongs.clear();
-                        }
-                        shared.pending_pongs.push_back(frame.payload);
+                        enqueue_pending_pong(&mut shared.pending_pongs, frame.payload);
                     }
                     Opcode::Pong => {
                         // Pong received - keepalive confirmed
@@ -813,6 +822,21 @@ mod tests {
                 "pending pong payloads must be emitted in receive order"
             );
         });
+    }
+
+    #[test]
+    fn pending_pong_queue_keeps_most_recent_payloads() {
+        let mut pending = std::collections::VecDeque::new();
+        for n in 0u8..20 {
+            enqueue_pending_pong(&mut pending, Bytes::from(vec![n]));
+        }
+
+        assert_eq!(pending.len(), MAX_PENDING_PONGS);
+        let kept: Vec<u8> = pending
+            .into_iter()
+            .map(|payload| *payload.first().expect("single-byte payload"))
+            .collect();
+        assert_eq!(kept, (4u8..20).collect::<Vec<_>>());
     }
 
     #[test]

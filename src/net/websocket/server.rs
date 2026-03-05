@@ -38,6 +38,18 @@ use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
 
+const MAX_PENDING_PONGS: usize = 16;
+
+fn enqueue_pending_pong(
+    pending_pongs: &mut std::collections::VecDeque<crate::bytes::Bytes>,
+    payload: crate::bytes::Bytes,
+) {
+    if pending_pongs.len() >= MAX_PENDING_PONGS {
+        let _ = pending_pongs.pop_front();
+    }
+    pending_pongs.push_back(payload);
+}
+
 /// WebSocket server acceptor.
 ///
 /// Validates and accepts WebSocket upgrade requests, producing connected
@@ -339,12 +351,9 @@ where
                 // Handle control frames
                 match frame.opcode {
                     Opcode::Ping => {
-                        // Cap pending pongs to prevent memory DoS via
-                        // Ping flooding.
-                        if self.pending_pongs.len() >= 16 {
-                            self.pending_pongs.clear();
-                        }
-                        self.pending_pongs.push_back(frame.payload);
+                        // Cap pending pongs to prevent memory DoS via ping
+                        // flooding while preserving FIFO order of newest items.
+                        enqueue_pending_pong(&mut self.pending_pongs, frame.payload);
                     }
                     Opcode::Pong => {
                         // Pong received - keepalive confirmed
@@ -731,5 +740,20 @@ mod tests {
         let ws_err = WsError::ProtocolViolation("bad frame");
         let accept_err = WsAcceptError::from(ws_err);
         assert!(matches!(accept_err, WsAcceptError::Protocol(_)));
+    }
+
+    #[test]
+    fn pending_pong_queue_keeps_most_recent_payloads() {
+        let mut pending = std::collections::VecDeque::new();
+        for n in 0u8..20 {
+            enqueue_pending_pong(&mut pending, crate::bytes::Bytes::from(vec![n]));
+        }
+
+        assert_eq!(pending.len(), MAX_PENDING_PONGS);
+        let kept: Vec<u8> = pending
+            .into_iter()
+            .map(|payload| *payload.first().expect("single-byte payload"))
+            .collect();
+        assert_eq!(kept, (4u8..20).collect::<Vec<_>>());
     }
 }
