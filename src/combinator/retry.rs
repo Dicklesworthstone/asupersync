@@ -674,7 +674,7 @@ where
                                 Outcome::Err(e) => {
                                     let attempt = this.state.attempt;
                                     // Check predicate
-                                    if this.predicate.should_retry(&e, *attempt)
+                                    if this.predicate.should_retry(&e, attempt)
                                         && this.state.has_attempts_remaining()
                                     {
                                         // Retry
