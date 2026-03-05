@@ -338,10 +338,10 @@ impl<T> SendPermit<T> {
             // Take waker under lock, wake outside.
             inner.take_waker()
         };
+        self.sent = true; // Prevent drop from double-aborting
         if let Some(waker) = waker {
             waker.wake();
         }
-        self.sent = true; // Prevent drop from double-aborting
     }
 
     /// Returns `true` if the receiver has been dropped.

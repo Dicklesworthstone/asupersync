@@ -128,7 +128,11 @@ where
             }
             // Poll the timer to register the waker for delayed wakeup.
             if let Some(ref mut timer) = this.timer {
-                let _ = Pin::new(timer).poll(cx);
+                if Pin::new(timer).poll(cx).is_ready() {
+                    this.timer = None;
+                    let (item, _) = this.pending.take().unwrap();
+                    return Poll::Ready(Some(item));
+                }
             }
             return Poll::Pending;
         }
@@ -145,8 +149,9 @@ where
 mod tests {
     use super::*;
     use crate::stream::iter;
+    use std::pin::Pin;
     use std::sync::Arc;
-    use std::task::{Wake, Waker};
+    use std::task::{Poll, Wake, Waker};
 
     struct NoopWaker;
 
@@ -262,5 +267,34 @@ mod tests {
         let stream = Debounce::new(iter(vec![1, 2, 3]), Duration::from_millis(100));
         let dbg = format!("{stream:?}");
         assert!(dbg.contains("Debounce"));
+    }
+
+    #[derive(Debug)]
+    struct PendingStream;
+
+    impl Stream for PendingStream {
+        type Item = i32;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Pending
+        }
+    }
+
+    #[test]
+    fn debounce_emits_immediately_when_timer_future_is_ready() {
+        init_test("debounce_emits_immediately_when_timer_future_is_ready");
+        let mut stream = Debounce::new(PendingStream, Duration::from_mins(1));
+        stream.pending = Some((7, Instant::now()));
+        stream.timer = Some(Box::pin(std::future::ready(())));
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert_eq!(
+            Pin::new(&mut stream).poll_next(&mut cx),
+            Poll::Ready(Some(7))
+        );
+        assert!(stream.pending.is_none(), "pending item should be drained");
+        assert!(stream.timer.is_none(), "timer should be cleared after emit");
+        crate::test_complete!("debounce_emits_immediately_when_timer_future_is_ready");
     }
 }
