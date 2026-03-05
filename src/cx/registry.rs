@@ -447,7 +447,7 @@ pub struct NameRegistry {
     /// Pending permits keyed by name (reserved but not yet committed).
     pending: DetHashMap<String, NameEntry>,
     /// Budgeted waiters keyed by name (FIFO order per name).
-    waiters: DetHashMap<String, Vec<WaiterEntry>>,
+    waiters: DetHashMap<String, std::collections::VecDeque<WaiterEntry>>,
     /// Leases granted to waiters, pending retrieval by the waiter's task.
     /// Use [`take_granted`](Self::take_granted) to drain.
     granted: Vec<GrantedLease>,
@@ -882,7 +882,7 @@ impl NameRegistry {
                     }
                     NameCollisionPolicy::Wait { deadline } => {
                         // Enqueue a budgeted waiter.
-                        self.waiters.entry(name).or_default().push(WaiterEntry {
+                        self.waiters.entry(name).or_default().push_back(WaiterEntry {
                             holder,
                             region,
                             enqueued_at: now,
@@ -965,7 +965,8 @@ impl NameRegistry {
             return;
         }
         // Grant to first waiter (FIFO, deterministic).
-        let waiter = queue.remove(0);
+        // unwrap is safe because we checked is_empty() above.
+        let waiter = queue.pop_front().unwrap();
         if queue.is_empty() {
             self.waiters.remove(name);
         }
@@ -1016,7 +1017,7 @@ impl NameRegistry {
     /// Returns the number of active waiters across all names.
     #[must_use]
     pub fn waiter_count(&self) -> usize {
-        self.waiters.values().map(Vec::len).sum()
+        self.waiters.values().map(std::collections::VecDeque::len).sum()
     }
 
     /// Look up which task holds a given name.
