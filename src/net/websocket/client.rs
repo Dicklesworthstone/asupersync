@@ -408,6 +408,12 @@ where
             )));
         }
 
+        if let Message::Close(reason) = msg {
+            return self
+                .initiate_close(reason.unwrap_or_else(CloseReason::normal))
+                .await;
+        }
+
         let frame = Frame::from(msg);
         self.send_frame(frame).await
     }
@@ -840,6 +846,57 @@ impl From<WsError> for WsConnectError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+    use futures_lite::future;
+    use std::pin::Pin;
+    use std::task::Poll;
+
+    struct TestIo {
+        written: Vec<u8>,
+    }
+
+    impl TestIo {
+        fn new() -> Self {
+            Self {
+                written: Vec::new(),
+            }
+        }
+    }
+
+    impl AsyncRead for TestIo {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for TestIo {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.written.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     #[test]
     fn test_message_from_frame() {
@@ -1119,5 +1176,31 @@ mod tests {
         };
         let msg = assembler.push_frame(frame).unwrap().unwrap();
         assert!(matches!(msg, Message::Binary(b) if b.as_ref() == [0xDE, 0xAD, 0xBE, 0xEF]));
+    }
+
+    #[test]
+    fn send_close_message_initiates_close_handshake() {
+        future::block_on(async {
+            let mut ws = WebSocket::from_upgraded(TestIo::new(), WebSocketConfig::default());
+            let cx = Cx::for_testing();
+
+            assert!(ws.is_open(), "connection should start open");
+            ws.send(&cx, Message::Close(None))
+                .await
+                .expect("sending close should succeed");
+            assert!(
+                !ws.is_open(),
+                "sending Message::Close must transition handshake out of open state"
+            );
+
+            let err = ws
+                .send(&cx, Message::text("late payload"))
+                .await
+                .expect_err("data frames must be rejected after close initiation");
+            assert!(
+                matches!(err, WsError::Io(ref e) if e.kind() == io::ErrorKind::NotConnected),
+                "expected NotConnected after close initiation, got {err:?}"
+            );
+        });
     }
 }

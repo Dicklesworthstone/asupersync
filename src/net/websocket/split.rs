@@ -503,6 +503,12 @@ where
             }
         }
 
+        if let Message::Close(reason) = msg {
+            return self
+                .initiate_close(reason.unwrap_or_else(CloseReason::normal))
+                .await;
+        }
+
         let frame = Frame::from(msg);
         self.send_frame(frame).await
     }
@@ -952,6 +958,34 @@ mod tests {
             assert!(
                 counter_b.count() > 0,
                 "second waiter must be woken when permit is released"
+            );
+        });
+    }
+
+    #[test]
+    fn split_send_close_message_initiates_close_handshake() {
+        future::block_on(async {
+            let ws = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
+            let (_read, mut write) = ws.split();
+            let cx = Cx::for_testing();
+
+            assert!(write.is_open(), "connection should start open");
+            write
+                .send(&cx, Message::Close(None))
+                .await
+                .expect("sending close should succeed");
+            assert!(
+                !write.is_open(),
+                "sending Message::Close must transition handshake out of open state"
+            );
+
+            let err = write
+                .send(&cx, Message::text("late payload"))
+                .await
+                .expect_err("data frames must be rejected after close initiation");
+            assert!(
+                matches!(err, WsError::Io(ref e) if e.kind() == io::ErrorKind::NotConnected),
+                "expected NotConnected after close initiation, got {err:?}"
             );
         });
     }
