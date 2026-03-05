@@ -296,9 +296,8 @@ impl Sleep {
             )
         };
 
-        for handle in fallback_handles {
-            let _ = handle.join();
-        }
+        // Intentionally detach threads to avoid blocking the executor
+        drop(fallback_handles);
 
         // Cancel any existing timer - will be re-registered on next poll
         if let (Some(handle), Some(driver)) = (handle, driver) {
@@ -333,9 +332,8 @@ impl Sleep {
             )
         };
 
-        for handle in fallback_handles {
-            let _ = handle.join();
-        }
+        // Intentionally detach threads to avoid blocking the executor
+        drop(fallback_handles);
 
         // Cancel any existing timer - will be re-registered on next poll
         if let (Some(handle), Some(driver)) = (handle, driver) {
@@ -515,8 +513,9 @@ impl Future for Sleep {
                     if state.fallback.is_none() {
                         // Fallback: spawn background thread for timing.
                         //
-                        // IMPORTANT: We retain the JoinHandle and `join()` it on Drop/reset,
-                        // so we don't leak OS threads and UBS doesn't flag this as critical.
+                        // IMPORTANT: We intentionally drop the JoinHandle (detaching the thread)
+                        // rather than joining it, so we don't block the executor. OS threads
+                        // naturally clean themselves up upon exit.
                         let duration = self.remaining(now);
                         let state_clone = Arc::clone(&self.state);
 
@@ -558,9 +557,8 @@ impl Future for Sleep {
                 }
 
                 drop(state);
-                for handle in finished_handles {
-                    let _ = handle.join();
-                }
+                // Intentionally detach threads to avoid blocking the executor
+                drop(finished_handles);
 
                 Poll::Pending
             }
@@ -587,9 +585,8 @@ impl Drop for Sleep {
             )
         };
 
-        for handle in fallback_handles {
-            let _ = handle.join();
-        }
+        // Intentionally detach threads to avoid blocking the executor
+        drop(fallback_handles);
 
         if let (Some(handle), Some(driver)) = (handle, driver) {
             let trace = Cx::current().and_then(|current| current.trace_buffer());
