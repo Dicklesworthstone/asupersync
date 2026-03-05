@@ -30,7 +30,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fmt::Write as _;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use super::handler::FnHandler;
 use super::response::{IntoResponse, Response, StatusCode};
@@ -193,10 +194,10 @@ struct HealthCheckInner {
 impl fmt::Debug for HealthCheck {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let names: Vec<String> = {
-            let checks = self.inner.checks.lock().unwrap();
+            let checks = self.inner.checks.lock();
             checks.iter().map(|(name, _)| name.clone()).collect()
         };
-        let ready = *self.inner.ready.lock().unwrap();
+        let ready = *self.inner.ready.lock();
         f.debug_struct("HealthCheck")
             .field("checks", &names)
             .field("ready", &ready)
@@ -226,7 +227,6 @@ impl HealthCheck {
         self.inner
             .checks
             .lock()
-            .unwrap()
             .push((name.into(), Box::new(f)));
         self
     }
@@ -236,20 +236,20 @@ impl HealthCheck {
     /// When `false`, the readiness endpoint returns 503 Service Unavailable.
     /// Use this during startup/shutdown to drain traffic.
     pub fn set_ready(&self, ready: bool) {
-        *self.inner.ready.lock().unwrap() = ready;
+        *self.inner.ready.lock() = ready;
     }
 
     /// Get the current readiness state.
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        *self.inner.ready.lock().unwrap()
+        *self.inner.ready.lock()
     }
 
     /// Run all health checks and return the aggregated response.
     #[must_use]
     pub fn run_checks(&self) -> HealthResponse {
         let (overall, results) = {
-            let checks = self.inner.checks.lock().unwrap();
+            let checks = self.inner.checks.lock();
             let mut results = BTreeMap::new();
             let mut overall = HealthStatus::Healthy;
 
@@ -321,7 +321,7 @@ impl HealthCheck {
     pub fn startup_handler(&self) -> FnHandler<impl Fn() -> Response + Send + Sync + 'static> {
         let ready = Arc::clone(&self.inner.ready);
         FnHandler::new(move || {
-            let is_ready = *ready.lock().unwrap();
+            let is_ready = *ready.lock();
             if is_ready {
                 Response::new(StatusCode::OK, b"{\"status\":\"started\"}".to_vec())
                     .header("content-type", "application/json")

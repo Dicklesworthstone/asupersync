@@ -19,7 +19,8 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Write as _;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use super::extract::Request;
 use super::handler::Handler;
@@ -134,13 +135,13 @@ impl MemoryStore {
     /// Number of active sessions.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.sessions.lock().unwrap().len()
+        self.sessions.lock().len()
     }
 
     /// Returns `true` if there are no sessions.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.sessions.lock().unwrap().is_empty()
+        self.sessions.lock().is_empty()
     }
 }
 
@@ -152,7 +153,7 @@ impl Default for MemoryStore {
 
 impl fmt::Debug for MemoryStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let count = self.sessions.lock().unwrap().len();
+        let count = self.sessions.lock().len();
         f.debug_struct("MemoryStore")
             .field("sessions", &count)
             .finish()
@@ -161,18 +162,17 @@ impl fmt::Debug for MemoryStore {
 
 impl SessionStore for MemoryStore {
     fn load(&self, id: &str) -> Option<SessionData> {
-        self.sessions.lock().unwrap().get(id).cloned()
+        self.sessions.lock().get(id).cloned()
     }
 
     fn save(&self, id: &str, data: &SessionData) {
         self.sessions
             .lock()
-            .unwrap()
             .insert(id.to_string(), data.clone());
     }
 
     fn delete(&self, id: &str) {
-        self.sessions.lock().unwrap().remove(id);
+        self.sessions.lock().remove(id);
     }
 }
 
@@ -401,7 +401,7 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
 
         // 5. Extract (possibly modified) session data.
         session_data = {
-            let guard = session_handle.lock().unwrap();
+            let guard = session_handle.lock();
             guard.clone()
         };
 
@@ -447,35 +447,35 @@ impl Session {
     /// Get a value from the session.
     #[must_use]
     pub fn get(&self, key: &str) -> Option<String> {
-        self.0.lock().unwrap().get(key).map(ToString::to_string)
+        self.0.lock().get(key).map(ToString::to_string)
     }
 
     /// Insert a value into the session.
     pub fn insert(&self, key: impl Into<String>, value: impl Into<String>) {
-        self.0.lock().unwrap().insert(key, value);
+        self.0.lock().insert(key, value);
     }
 
     /// Remove a value from the session.
     #[must_use]
     pub fn remove(&self, key: &str) -> Option<String> {
-        self.0.lock().unwrap().remove(key)
+        self.0.lock().remove(key)
     }
 
     /// Clear all session data.
     pub fn clear(&self) {
-        self.0.lock().unwrap().clear();
+        self.0.lock().clear();
     }
 
     /// Check if a key exists.
     #[must_use]
     pub fn contains(&self, key: &str) -> bool {
-        self.0.lock().unwrap().get(key).is_some()
+        self.0.lock().get(key).is_some()
     }
 }
 
 impl fmt::Debug for Session {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let data = self.0.lock().unwrap();
+        let data = self.0.lock();
         f.debug_struct("Session")
             .field("len", &data.len())
             .field("modified", &data.is_modified())

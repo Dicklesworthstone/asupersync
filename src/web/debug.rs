@@ -19,13 +19,14 @@
 //! ```ignore
 //! use asupersync::web::debug::{DebugServer, DebugServerConfig};
 //! use asupersync::runtime::RuntimeSnapshot;
-//! use std::sync::{Arc, Mutex};
+//! use parking_lot::Mutex;
+//! use std::sync::Arc;
 //!
 //! let state = Arc::new(Mutex::new(runtime_state));
 //! let st = Arc::clone(&state);
 //! let server = DebugServer::new(
 //!     9999,
-//!     Arc::new(move || st.lock().unwrap().snapshot()),
+//!     Arc::new(move || st.lock().snapshot()),
 //! );
 //! server.start().expect("failed to start debug server");
 //! println!("Dashboard: {}", server.url());
