@@ -3269,6 +3269,8 @@ fn d7_e2e_runner_script_schema_contract_surface() {
         "\"run_id\":\"%s\"",
         "\"seed\":%s",
         "\"parameter_set\":\"%s\"",
+        "\"policy_snapshot_id\":\"%s\"",
+        "\"selected_path\":\"%s\"",
         "\"phase_markers\":[\"encode\",\"loss\",\"decode\",\"proof\",\"report\"]",
         "\"artifact_path\":\"%s\"",
         "\"repro_command\":\"%s\"",
@@ -3280,8 +3282,20 @@ fn d7_e2e_runner_script_schema_contract_surface() {
     }
 
     assert!(
+        script.contains("(.policy_snapshot_id | type == \"string\" and length > 0)"),
+        "scenario contract validator must require policy_snapshot_id"
+    );
+    assert!(
+        script.contains("(.selected_path | type == \"string\" and length > 0)"),
+        "scenario contract validator must require selected_path"
+    );
+    assert!(
         script.contains("validate_scenario_contract"),
         "run_raptorq_e2e.sh must include explicit schema contract validation"
+    );
+    assert!(
+        script.contains("selected_path=\"rch::cargo-test::raptorq_conformance::${test_filter}\""),
+        "scenario formatter must include deterministic selected_path for rch execution mode"
     );
     assert!(
         script.contains("FAIL (D7 schema contract)"),

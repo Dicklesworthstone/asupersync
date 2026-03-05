@@ -221,6 +221,8 @@ validate_scenario_contract() {
         (.assertion_id | type == "string" and length > 0) and
         (.run_id | type == "string" and length > 0) and
         (.parameter_set | type == "string" and length > 0) and
+        (.policy_snapshot_id | type == "string" and length > 0) and
+        (.selected_path | type == "string" and length > 0) and
         (.artifact_path | type == "string" and length > 0) and
         (.log_path | type == "string" and length > 0) and
         (.artifact_path == .log_path) and
@@ -241,7 +243,8 @@ Forensic log contract violation (D3 gate).
 Required scenario fields:
   - schema_version=raptorq-e2e-scenario-log-v2
   - non-empty: scenario_id, category, profile, profile_set, test_filter, replay_ref,
-    unit_sentinel, assertion_id, run_id, parameter_set, artifact_path, log_path, repro_command
+    unit_sentinel, assertion_id, run_id, parameter_set, policy_snapshot_id, selected_path,
+    artifact_path, log_path, repro_command
   - phase_markers exactly: ["encode","loss","decode","proof","report"]
   - status in {pass, fail}; integer seed/exit_code/duration_ms/tests_passed/tests_failed
   - repro_command starts with "cargo test --test raptorq_conformance ..." (optionally prefixed by "rch exec -- ")
@@ -285,6 +288,8 @@ validate_suite_contract() {
             (.scenario_id | type == "string" and length > 0) and
             (.profile | type == "string" and (. == "fast" or . == "full" or . == "forensics")) and
             (.status == "pass" or .status == "fail") and
+            (.policy_snapshot_id | type == "string" and length > 0) and
+            (.selected_path | type == "string" and length > 0) and
             (.artifact_path | type == "string" and length > 0) and
             (.log_path | type == "string" and length > 0) and
             (.repro_command | type == "string" and test("^((rch exec -- )?cargo test --test raptorq_conformance )"))
@@ -711,6 +716,12 @@ for scenario_id in "${SCENARIO_IDS[@]}"; do
     scenario_log_file="${RUN_DIR}/${scenario_id}.log"
     run_id="${scenario_id}-${PROFILE}"
     repro_cmd="${REPRO_PREFIX}cargo test --test raptorq_conformance ${test_filter} -- --nocapture --test-threads=${TEST_THREADS}"
+    policy_snapshot_id="raptorq-e3-validation-policy-v1"
+    if [[ "$RUN_WITH_RCH" -eq 1 ]]; then
+        selected_path="rch::cargo-test::raptorq_conformance::${test_filter}"
+    else
+        selected_path="local::cargo-test::raptorq_conformance::${test_filter}"
+    fi
 
     echo ">>> [${selected_count}] ${scenario_id} (${category})"
     start_s="$(date +%s)"
@@ -745,7 +756,7 @@ for scenario_id in "${SCENARIO_IDS[@]}"; do
         echo "    PASS (${tests_passed} tests)"
     fi
 
-    printf -v scenario_json '{"schema_version":"raptorq-e2e-scenario-log-v2","scenario_id":"%s","category":"%s","profile":"%s","profile_set":"%s","test_filter":"%s","replay_ref":"%s","replay_ref_extra":"%s","unit_sentinel":"%s","assertion_id":"%s","run_id":"%s","seed":%s,"parameter_set":"%s","phase_markers":["encode","loss","decode","proof","report"],"status":"%s","exit_code":%d,"duration_ms":%d,"tests_passed":%d,"tests_failed":%d,"artifact_path":"%s","log_path":"%s","repro_command":"%s"}' \
+    printf -v scenario_json '{"schema_version":"raptorq-e2e-scenario-log-v2","scenario_id":"%s","category":"%s","profile":"%s","profile_set":"%s","test_filter":"%s","replay_ref":"%s","replay_ref_extra":"%s","unit_sentinel":"%s","assertion_id":"%s","run_id":"%s","seed":%s,"parameter_set":"%s","policy_snapshot_id":"%s","selected_path":"%s","phase_markers":["encode","loss","decode","proof","report"],"status":"%s","exit_code":%d,"duration_ms":%d,"tests_passed":%d,"tests_failed":%d,"artifact_path":"%s","log_path":"%s","repro_command":"%s"}' \
         "$(json_escape "$scenario_id")" \
         "$(json_escape "$category")" \
         "$(json_escape "$PROFILE")" \
@@ -758,6 +769,8 @@ for scenario_id in "${SCENARIO_IDS[@]}"; do
         "$(json_escape "$run_id")" \
         "$scenario_seed" \
         "$(json_escape "$parameter_set")" \
+        "$(json_escape "$policy_snapshot_id")" \
+        "$(json_escape "$selected_path")" \
         "$(json_escape "$status")" \
         "$rc" \
         "$duration_ms" \
@@ -775,7 +788,7 @@ for scenario_id in "${SCENARIO_IDS[@]}"; do
         fi
         status="fail"
         rc=70
-        printf -v scenario_json '{"schema_version":"raptorq-e2e-scenario-log-v2","scenario_id":"%s","category":"%s","profile":"%s","profile_set":"%s","test_filter":"%s","replay_ref":"%s","replay_ref_extra":"%s","unit_sentinel":"%s","assertion_id":"%s","run_id":"%s","seed":%s,"parameter_set":"%s","phase_markers":["encode","loss","decode","proof","report"],"status":"%s","exit_code":%d,"duration_ms":%d,"tests_passed":%d,"tests_failed":%d,"artifact_path":"%s","log_path":"%s","repro_command":"%s"}' \
+        printf -v scenario_json '{"schema_version":"raptorq-e2e-scenario-log-v2","scenario_id":"%s","category":"%s","profile":"%s","profile_set":"%s","test_filter":"%s","replay_ref":"%s","replay_ref_extra":"%s","unit_sentinel":"%s","assertion_id":"%s","run_id":"%s","seed":%s,"parameter_set":"%s","policy_snapshot_id":"%s","selected_path":"%s","phase_markers":["encode","loss","decode","proof","report"],"status":"%s","exit_code":%d,"duration_ms":%d,"tests_passed":%d,"tests_failed":%d,"artifact_path":"%s","log_path":"%s","repro_command":"%s"}' \
             "$(json_escape "$scenario_id")" \
             "$(json_escape "$category")" \
             "$(json_escape "$PROFILE")" \
@@ -788,6 +801,8 @@ for scenario_id in "${SCENARIO_IDS[@]}"; do
             "$(json_escape "$run_id")" \
             "$scenario_seed" \
             "$(json_escape "$parameter_set")" \
+            "$(json_escape "$policy_snapshot_id")" \
+            "$(json_escape "$selected_path")" \
             "fail" \
             "$rc" \
             "$duration_ms" \
