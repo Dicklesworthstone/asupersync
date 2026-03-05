@@ -484,7 +484,14 @@ impl<const SLOTS: usize> TimerWheel<SLOTS> {
         let elapsed = now.saturating_duration_since(self.base_time);
         let target_tick = elapsed.as_nanos() / self.resolution.as_nanos().max(1);
         let target_tick_u64 = target_tick.min(u128::from(u64::MAX)) as u64;
-        let ticks_to_advance = target_tick_u64.saturating_sub(self.current_tick);
+        
+        if target_tick_u64 <= self.current_tick {
+            let wakers = self.slots[self.current].collect_expired(now);
+            self.count = self.count.saturating_sub(wakers.len());
+            return wakers;
+        }
+
+        let ticks_to_advance = target_tick_u64 - self.current_tick;
 
         // If advancing more than SLOTS ticks, we need to scan all slots
         if ticks_to_advance as usize >= SLOTS {
