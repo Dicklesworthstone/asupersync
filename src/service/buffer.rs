@@ -283,6 +283,19 @@ where
                         }
                         Poll::Ready(Err(e)) => {
                             drop(inner);
+                            
+                            let mut pending = shared.pending.lock();
+                            *pending = pending.saturating_sub(1);
+                            let wakers = std::mem::take(&mut *shared.ready_wakers.lock());
+                            drop(pending);
+                            for w in wakers {
+                                w.wake();
+                            }
+                            let inner_wakers = std::mem::take(&mut *shared.inner_wakers.lock());
+                            for w in inner_wakers {
+                                w.wake();
+                            }
+
                             this.state = BufferFutureState::Error(Some(BufferError::Inner(e)));
                             // Loop around to poll Error
                         }
@@ -306,6 +319,11 @@ where
                         let wakers = std::mem::take(&mut *shared.ready_wakers.lock());
                         drop(pending);
                         for w in wakers {
+                            w.wake();
+                        }
+                        
+                        let inner_wakers = std::mem::take(&mut *shared.inner_wakers.lock());
+                        for w in inner_wakers {
                             w.wake();
                         }
 

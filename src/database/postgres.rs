@@ -2653,24 +2653,34 @@ impl PgConnection {
             return Ok(());
         }
 
-        self.inner.needs_rollback = false;
+        // Mark the connection closed while we perform the rollback.
+        // If this future is dropped mid-flight (e.g. by timeout), the connection
+        // will remain closed, preventing protocol desynchronization.
+        self.inner.closed = true;
 
         let mut buf = MessageBuffer::new();
         buf.write_cstring("ROLLBACK");
         let msg = buf.build_message(b'Q');
-        self.write_all(&msg).await?;
+        
+        if let Err(e) = self.write_all(&msg).await {
+            let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
+            return Err(e);
+        }
 
         if let Err(e) = self.drain_to_ready().await {
             // Drain errors during rollback are suppressed since the rollback
             // itself is the priority operation and a drain failure at that
             // point is non-fatal.
             let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
-            self.inner.closed = true;
             if let Some(cx) = crate::cx::Cx::current() {
                 cx.trace(&format!("Failed to drain after ROLLBACK: {e}"));
             }
             return Err(e);
         }
+
+        // Successfully rolled back, restore connection state.
+        self.inner.needs_rollback = false;
+        self.inner.closed = false;
 
         Ok(())
     }

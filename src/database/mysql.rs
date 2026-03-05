@@ -1864,25 +1864,49 @@ impl MySqlConnection {
         if !self.inner.needs_rollback {
             return Ok(());
         }
-        self.inner.needs_rollback = false;
+
+        // Mark the connection closed while we perform the rollback.
+        // If this future is dropped mid-flight (e.g. by timeout), the connection
+        // will remain closed, preventing protocol desynchronization.
+        self.inner.closed = true;
 
         let mut buf = PacketBuffer::new();
         buf.set_sequence(0);
         buf.write_byte(command::COM_QUERY);
         buf.write_bytes(b"ROLLBACK");
         let packet = buf.build_packet();
-        self.write_all(&packet).await?;
+        
+        if let Err(e) = self.write_all(&packet).await {
+            let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
+            return Err(e);
+        }
         self.inner.sequence = 1;
 
-        let (data, seq) = self.read_packet().await?;
+        let (data, seq) = match self.read_packet().await {
+            Ok(res) => res,
+            Err(e) => {
+                let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
+                return Err(e);
+            }
+        };
         self.inner.sequence = seq.wrapping_add(1);
 
         match data.first() {
-            Some(0x00) => Ok(()),
-            Some(0xFF) => Err(Self::parse_error(&data)),
-            _ => Err(MySqlError::Protocol(
-                "unexpected response to implicit ROLLBACK".to_string(),
-            )),
+            Some(0x00) => {
+                self.inner.needs_rollback = false;
+                self.inner.closed = false;
+                Ok(())
+            }
+            Some(0xFF) => {
+                let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
+                Err(Self::parse_error(&data))
+            }
+            _ => {
+                let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
+                Err(MySqlError::Protocol(
+                    "unexpected response to implicit ROLLBACK".to_string(),
+                ))
+            }
         }
     }
 
