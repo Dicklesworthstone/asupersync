@@ -225,12 +225,16 @@ where
                         }
                     }
 
-                    // Fallback to async acquisition
-                    let Some(runtime_cx) = Cx::current() else {
-                        return Poll::Pending;
+                    // Fallback to queued acquisition. When a task-local Cx is
+                    // available we keep cancellation-aware waiting; otherwise we
+                    // still need to register a real semaphore waiter so permit
+                    // release wakes this service instead of leaving it asleep
+                    // forever until some caller manually polls again.
+                    let future = if let Some(runtime_cx) = Cx::current() {
+                        OwnedAcquireFuture::new(self.semaphore.clone(), runtime_cx.clone(), 1)
+                    } else {
+                        OwnedAcquireFuture::new_uncancelable(self.semaphore.clone(), 1)
                     };
-                    let future =
-                        OwnedAcquireFuture::new(self.semaphore.clone(), runtime_cx.clone(), 1);
                     self.state = State::Acquiring(Box::pin(future));
                 }
                 State::Acquiring(future) => match future.as_mut().poll(cx) {
@@ -375,6 +379,28 @@ mod tests {
         fn wake_by_ref(self: &Arc<Self>) {}
     }
 
+    struct CountingWaker(AtomicUsize);
+
+    impl CountingWaker {
+        fn new() -> Arc<Self> {
+            Arc::new(Self(AtomicUsize::new(0)))
+        }
+
+        fn count(&self) -> usize {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
     fn noop_waker() -> Waker {
         Arc::new(NoopWaker).into()
     }
@@ -499,6 +525,22 @@ mod tests {
 
         fn call(&mut self, _req: ()) -> Self::Future {
             ready(Ok(()))
+        }
+    }
+
+    struct NeverCompleteService;
+
+    impl Service<()> for NeverCompleteService {
+        type Response = ();
+        type Error = std::convert::Infallible;
+        type Future = std::future::Pending<Result<(), std::convert::Infallible>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: ()) -> Self::Future {
+            std::future::pending()
         }
     }
 
@@ -728,6 +770,40 @@ mod tests {
         let available = svc.available();
         crate::assert_with_log!(available == 1, "available", 1, available);
         crate::test_complete!("inner_error_after_reserved_permit_releases_state");
+    }
+
+    #[test]
+    fn pending_without_current_cx_registers_waiter_and_wakes_on_release() {
+        init_test("pending_without_current_cx_registers_waiter_and_wakes_on_release");
+        let layer = ConcurrencyLimitLayer::new(1);
+        let mut holder = layer.layer(NeverCompleteService);
+        let mut waiter = layer.layer(EchoService);
+        let holder_waker = noop_waker();
+        let mut holder_cx = Context::from_waker(&holder_waker);
+
+        let holder_ready = holder.poll_ready(&mut holder_cx);
+        let holder_ok = matches!(holder_ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(holder_ok, "holder ready", true, holder_ok);
+        let held = holder.call(());
+
+        let waiter_waker = CountingWaker::new();
+        let waiter_waker_handle = waiter_waker.clone();
+        let waiter_std_waker: Waker = waiter_waker.into();
+        let mut waiter_cx = Context::from_waker(&waiter_std_waker);
+
+        let pending = waiter.poll_ready(&mut waiter_cx);
+        let is_pending = pending.is_pending();
+        crate::assert_with_log!(is_pending, "waiter pending", true, is_pending);
+
+        drop(held);
+
+        let wake_count = waiter_waker_handle.count();
+        crate::assert_with_log!(wake_count > 0, "wake_count > 0", true, wake_count > 0);
+
+        let ready = waiter.poll_ready(&mut waiter_cx);
+        let ready_ok = matches!(ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready_ok, "waiter ready", true, ready_ok);
+        crate::test_complete!("pending_without_current_cx_registers_waiter_and_wakes_on_release");
     }
 
     // =========================================================================
