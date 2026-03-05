@@ -96,6 +96,8 @@ struct SharedBuffer<S> {
     closed: Mutex<bool>,
     /// Wakers waiting for capacity to become available.
     ready_wakers: Mutex<Vec<std::task::Waker>>,
+    /// Wakers waiting for the inner service to become ready.
+    inner_wakers: Mutex<Vec<std::task::Waker>>,
 }
 
 impl<S> Buffer<S> {
@@ -114,6 +116,7 @@ impl<S> Buffer<S> {
                 pending: Mutex::new(0),
                 closed: Mutex::new(false),
                 ready_wakers: Mutex::new(Vec::new()),
+                inner_wakers: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -208,11 +211,16 @@ impl<E: std::error::Error + 'static> std::error::Error for BufferError<E> {
 /// Future returned by the [`Buffer`] service.
 ///
 /// Resolves to the inner service's response.
-pub struct BufferFuture<F, E, S> {
-    state: BufferFutureState<F, E, S>,
+pub struct BufferFuture<F, E, S, R> {
+    state: BufferFutureState<F, E, S, R>,
 }
 
-enum BufferFutureState<F, E, S> {
+enum BufferFutureState<F, E, S, R> {
+    /// Waiting for the inner service to be ready.
+    WaitingForReady {
+        request: Option<R>,
+        shared: Arc<SharedBuffer<S>>,
+    },
     /// Waiting for the inner future.
     Active {
         future: F,
@@ -224,10 +232,13 @@ enum BufferFutureState<F, E, S> {
     Done,
 }
 
-impl<F, E, S> BufferFuture<F, E, S> {
-    fn active(future: F, shared: Arc<SharedBuffer<S>>) -> Self {
+impl<F, E, S, R> BufferFuture<F, E, S, R> {
+    fn waiting(request: R, shared: Arc<SharedBuffer<S>>) -> Self {
         Self {
-            state: BufferFutureState::Active { future, shared },
+            state: BufferFutureState::WaitingForReady {
+                request: Some(request),
+                shared,
+            },
         }
     }
 
@@ -238,66 +249,114 @@ impl<F, E, S> BufferFuture<F, E, S> {
     }
 }
 
-impl<F, Response, Error, S> Future for BufferFuture<F, Error, S>
+impl<F, Response, Error, S, R> Future for BufferFuture<F, Error, S, R>
 where
     F: Future<Output = Result<Response, Error>> + Unpin,
+    S: Service<R, Response = Response, Error = Error, Future = F>,
     Error: Unpin,
+    R: Unpin,
 {
     type Output = Result<Response, BufferError<Error>>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        loop {
+            let this = self.as_mut().get_mut();
 
-        match &mut this.state {
-            BufferFutureState::Active { future, shared } => match Pin::new(future).poll(cx) {
-                Poll::Ready(result) => {
-                    let shared = shared.clone();
-                    this.state = BufferFutureState::Done;
+            match &mut this.state {
+                BufferFutureState::WaitingForReady { request, shared } => {
+                    let mut inner = shared.inner.lock();
+                    match inner.poll_ready(cx) {
+                        Poll::Ready(Ok(())) => {
+                            let req = request.take().unwrap();
+                            let future = inner.call(req);
+                            drop(inner);
 
-                    let mut pending = shared.pending.lock();
-                    *pending = pending.saturating_sub(1);
-                    let wakers = std::mem::take(&mut *shared.ready_wakers.lock());
-                    drop(pending);
-                    for w in wakers {
-                        w.wake();
-                    }
+                            let wakers = std::mem::take(&mut *shared.inner_wakers.lock());
+                            for w in wakers {
+                                w.wake();
+                            }
 
-                    match result {
-                        Ok(v) => Poll::Ready(Ok(v)),
-                        Err(e) => Poll::Ready(Err(BufferError::Inner(e))),
+                            let shared = shared.clone();
+                            this.state = BufferFutureState::Active { future, shared };
+                            // Loop around to poll Active
+                        }
+                        Poll::Ready(Err(e)) => {
+                            this.state = BufferFutureState::Error(Some(BufferError::Inner(e)));
+                            // Loop around to poll Error
+                        }
+                        Poll::Pending => {
+                            let mut wakers = shared.inner_wakers.lock();
+                            if wakers.last().is_none_or(|w| !w.will_wake(cx.waker())) {
+                                wakers.push(cx.waker().clone());
+                            }
+                            return Poll::Pending;
+                        }
                     }
                 }
-                Poll::Pending => Poll::Pending,
-            },
-            BufferFutureState::Error(err) => {
-                let err = err.take().expect("polled after completion");
-                this.state = BufferFutureState::Done;
-                Poll::Ready(Err(err))
-            }
-            BufferFutureState::Done => {
-                panic!("BufferFuture polled after completion")
+                BufferFutureState::Active { future, shared } => {
+                    match Pin::new(future).poll(cx) {
+                        Poll::Ready(result) => {
+                            let shared = shared.clone();
+                            this.state = BufferFutureState::Done;
+
+                            let mut pending = shared.pending.lock();
+                            *pending = pending.saturating_sub(1);
+                            let wakers = std::mem::take(&mut *shared.ready_wakers.lock());
+                            drop(pending);
+                            for w in wakers {
+                                w.wake();
+                            }
+
+                            match result {
+                                Ok(v) => return Poll::Ready(Ok(v)),
+                                Err(e) => return Poll::Ready(Err(BufferError::Inner(e))),
+                            }
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                BufferFutureState::Error(err) => {
+                    let err = err.take().expect("polled after completion");
+                    this.state = BufferFutureState::Done;
+                    return Poll::Ready(Err(err));
+                }
+                BufferFutureState::Done => {
+                    panic!("BufferFuture polled after completion")
+                }
             }
         }
     }
 }
 
-impl<F, E, S> Drop for BufferFuture<F, E, S> {
+impl<F, E, S, R> Drop for BufferFuture<F, E, S, R> {
     fn drop(&mut self) {
-        if let BufferFutureState::Active { shared, .. } = &mut self.state {
-            let mut pending = shared.pending.lock();
-            *pending = pending.saturating_sub(1);
-            let wakers = std::mem::take(&mut *shared.ready_wakers.lock());
-            drop(pending);
-            for w in wakers {
-                w.wake();
+        match &mut self.state {
+            BufferFutureState::WaitingForReady { shared, .. }
+            | BufferFutureState::Active { shared, .. } => {
+                let mut pending = shared.pending.lock();
+                *pending = pending.saturating_sub(1);
+                let wakers = std::mem::take(&mut *shared.ready_wakers.lock());
+                drop(pending);
+                for w in wakers {
+                    w.wake();
+                }
+
+                // Also wake any other tasks waiting for inner_ready, since we
+                // might have been holding the spot, or we just freed a slot.
+                let inner_wakers = std::mem::take(&mut *shared.inner_wakers.lock());
+                for w in inner_wakers {
+                    w.wake();
+                }
             }
+            _ => {}
         }
     }
 }
 
-impl<F, E, S> fmt::Debug for BufferFuture<F, E, S> {
+impl<F, E, S, R> fmt::Debug for BufferFuture<F, E, S, R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = match &self.state {
+            BufferFutureState::WaitingForReady { .. } => "WaitingForReady",
             BufferFutureState::Active { .. } => "Active",
             BufferFutureState::Error(_) => "Error",
             BufferFutureState::Done => "Done",
@@ -320,7 +379,7 @@ where
 {
     type Response = S::Response;
     type Error = BufferError<S::Error>;
-    type Future = BufferFuture<S::Future, S::Error, S>;
+    type Future = BufferFuture<S::Future, S::Error, S, Request>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         if *self.shared.closed.lock() {
@@ -353,12 +412,7 @@ where
             *pending += 1;
         }
 
-        let future = {
-            let mut inner = self.shared.inner.lock();
-            inner.call(req)
-        };
-
-        BufferFuture::active(future, self.shared.clone())
+        BufferFuture::waiting(req, self.shared.clone())
     }
 }
 
@@ -367,8 +421,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::task::Waker;
 
     fn init_test(name: &str) {
@@ -741,7 +795,7 @@ mod tests {
 
     #[test]
     fn buffer_future_debug() {
-        let err = BufferFuture::<std::future::Ready<Result<i32, &str>>, &str, i32>::error(
+        let err = BufferFuture::<std::future::Ready<Result<i32, &str>>, &str, i32, i32>::error(
             BufferError::Full,
         );
         let dbg = format!("{err:?}");
@@ -751,7 +805,7 @@ mod tests {
 
     #[test]
     fn buffer_future_error_debug() {
-        let future = BufferFuture::<std::future::Ready<Result<i32, &str>>, &str, i32>::error(
+        let future = BufferFuture::<std::future::Ready<Result<i32, &str>>, &str, i32, i32>::error(
             BufferError::Full,
         );
         let dbg = format!("{future:?}");
@@ -761,7 +815,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "polled after completion")]
     fn buffer_future_panics_when_polled_after_completion() {
-        let future = BufferFuture::<std::future::Ready<Result<i32, &str>>, &str, i32>::error(
+        let future = BufferFuture::<std::future::Ready<Result<i32, &str>>, &str, i32, i32>::error(
             BufferError::Full,
         );
         let waker = noop_waker();
