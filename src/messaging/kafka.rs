@@ -770,17 +770,17 @@ impl KafkaProducer {
     /// Flush pending messages and close producer for new sends.
     ///
     /// This method is idempotent; repeated calls after the first successful
-    /// close return `Ok(())`.
+    /// close return `Ok(())`. If the close operation is cancelled while flushing,
+    /// subsequent calls will retry the flush.
     pub async fn close(&self, cx: &Cx, timeout: Duration) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
-        // Atomically claim the close transition to prevent concurrent double-flush.
-        if self
-            .closed
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Ok(());
-        }
+        
+        // Mark as closed to block new sends. We use swap to ensure it's
+        // always closed before we start flushing.
+        self.closed.store(true, Ordering::Release);
+        
+        // Always flush. If a previous close was cancelled, this ensures
+        // the remaining messages are still flushed upon retry.
         self.flush_inner(cx, timeout, true).await?;
         Ok(())
     }
