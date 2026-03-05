@@ -396,6 +396,9 @@ impl Interval {
                 if now >= self.deadline {
                     let elapsed = now.as_nanos() - self.deadline.as_nanos();
                     let periods_to_skip = elapsed / period_nanos;
+                    // Only add 1 to periods_to_skip. We want the next deadline to be strictly > now.
+                    // Since elapsed = now - deadline, deadline + periods_to_skip * period_nanos <= now.
+                    // By adding 1, the new deadline is > now.
                     let periods_to_skip = periods_to_skip.saturating_add(1);
                     let skipped_nanos = periods_to_skip.saturating_mul(period_nanos);
                     self.deadline = self.deadline.saturating_add_nanos(skipped_nanos);

@@ -258,6 +258,8 @@ static DUAL_POLICY: std::sync::OnceLock<DualKernelPolicy> = std::sync::OnceLock:
 const GF256_PROFILE_PACK_SCHEMA_VERSION: &str = "raptorq-gf256-profile-pack-v3";
 const GF256_PROFILE_PACK_MANIFEST_SCHEMA_VERSION: &str = "raptorq-gf256-profile-pack-manifest-v3";
 const GF256_PROFILE_PACK_REPLAY_POINTER: &str = "replay:rq-e-gf256-profile-pack-v3";
+// Keep manifest-level profile-pack command bundles on the broader comparator
+// surface; dual-policy probe logs emit their own narrower repro command.
 const GF256_PROFILE_PACK_COMMAND_BUNDLE: &str =
     "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives";
 const GF256_PROFILE_TUNING_CORPUS_ID: &str = "raptorq-gf256-profile-corpus-v1";
@@ -419,7 +421,11 @@ pub struct DualKernelPolicySnapshot {
     pub rejected_candidates: &'static [Gf256ProfilePackId],
     /// Stable replay pointer for policy-tuning provenance and forensics.
     pub replay_pointer: &'static str,
-    /// Repro command bundle for profile-pack validation and rollback rehearsal.
+    /// Comparator/rollback bench command bundle for profile-pack validation.
+    ///
+    /// This intentionally stays anchored to the broader `gf256_primitives`
+    /// benchmark surface. Probe-specific validation logs use a separate
+    /// `gf256_dual_policy` repro command emitted by the Criterion harness.
     pub command_bundle: &'static str,
     /// Effective policy mode.
     pub mode: DualKernelMode,
@@ -3905,6 +3911,8 @@ mod tests {
         assert_eq!(snapshot.tuning_corpus_id, GF256_PROFILE_TUNING_CORPUS_ID);
         assert!(!snapshot.selected_tuning_candidate_id.is_empty());
         assert!(!snapshot.command_bundle.is_empty());
+        assert!(snapshot.command_bundle.contains("gf256_primitives"));
+        assert!(!snapshot.command_bundle.contains("gf256_dual_policy"));
         assert_eq!(snapshot.replay_pointer, GF256_PROFILE_PACK_REPLAY_POINTER);
         assert!(!snapshot.profile_pack.as_str().is_empty());
         for rejected_id in snapshot.rejected_tuning_candidate_ids {
