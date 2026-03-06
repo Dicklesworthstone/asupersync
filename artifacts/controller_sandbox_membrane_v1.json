@@ -1,0 +1,198 @@
+{
+  "contract_version": "controller-sandbox-membrane-v1",
+  "bead_id": "asupersync-1508v.7.5",
+  "description": "AA-07.2 controller sandbox membrane and delegated-authority execution path.",
+  "runner_script": "scripts/run_controller_sandbox_smoke.sh",
+  "runner_bundle_schema_version": "controller-sandbox-smoke-bundle-v1",
+  "runner_report_schema_version": "controller-sandbox-smoke-run-report-v1",
+  "sandbox_model": {
+    "description": "Controllers execute inside a membrane that enforces capability, resource, and temporal boundaries.",
+    "membrane_invariants": [
+      {
+        "invariant_id": "MEM-CAP-CLOSED",
+        "description": "A sandboxed controller can only exercise capabilities explicitly granted in its token. No ambient authority."
+      },
+      {
+        "invariant_id": "MEM-RESOURCE-CAPPED",
+        "description": "Memory, CPU time, and decision count are capped per execution. Exceeding any cap aborts the execution."
+      },
+      {
+        "invariant_id": "MEM-TEMPORAL-BOUNDED",
+        "description": "Each controller invocation has a wall-clock deadline. Exceeding it produces a timeout verdict."
+      },
+      {
+        "invariant_id": "MEM-OUTPUT-DETERMINISTIC",
+        "description": "Given identical snapshot and capability token, controller output is deterministic."
+      },
+      {
+        "invariant_id": "MEM-NO-SIDE-EFFECTS",
+        "description": "Controllers cannot mutate runtime state directly. All effects are via returned decisions."
+      },
+      {
+        "invariant_id": "MEM-VERDICT-REQUIRED",
+        "description": "Every sandbox execution produces a verdict (allow, deny, timeout, error) that is logged."
+      }
+    ]
+  },
+  "resource_caps": {
+    "description": "Per-invocation resource limits for sandboxed controller execution.",
+    "caps": [
+      {
+        "cap_id": "RC-MEMORY",
+        "description": "Maximum heap allocation during controller execution.",
+        "unit": "bytes",
+        "default_limit": 1048576,
+        "enforcement": "abort_with_verdict"
+      },
+      {
+        "cap_id": "RC-CPU-TIME",
+        "description": "Maximum CPU time for a single controller invocation.",
+        "unit": "microseconds",
+        "default_limit": 100000,
+        "enforcement": "timeout_verdict"
+      },
+      {
+        "cap_id": "RC-DECISIONS-PER-EPOCH",
+        "description": "Maximum number of decisions a controller may emit per epoch.",
+        "unit": "count",
+        "default_limit": 10,
+        "enforcement": "drop_excess"
+      },
+      {
+        "cap_id": "RC-OUTPUT-SIZE",
+        "description": "Maximum size of the decision payload returned by a controller.",
+        "unit": "bytes",
+        "default_limit": 65536,
+        "enforcement": "truncate_with_verdict"
+      }
+    ]
+  },
+  "action_surface": {
+    "description": "The minimal action surface available to sandboxed controllers.",
+    "allowed_actions": [
+      {
+        "action_id": "ACT-READ-SNAPSHOT",
+        "description": "Read the current RuntimeKernelSnapshot.",
+        "required_capability": "CAP-OBSERVE"
+      },
+      {
+        "action_id": "ACT-EMIT-DECISION",
+        "description": "Emit a decision with a label, payload, and confidence score.",
+        "required_capability": "CAP-DECIDE"
+      },
+      {
+        "action_id": "ACT-REQUEST-PROMOTION",
+        "description": "Request promotion to a higher controller mode.",
+        "required_capability": "CAP-PROMOTE"
+      },
+      {
+        "action_id": "ACT-REQUEST-ROLLBACK",
+        "description": "Request rollback of a controller.",
+        "required_capability": "CAP-ROLLBACK"
+      },
+      {
+        "action_id": "ACT-REGISTER-CONTROLLER",
+        "description": "Register or deregister a controller in the registry.",
+        "required_capability": "CAP-ADMIN"
+      },
+      {
+        "action_id": "ACT-READ-EVIDENCE",
+        "description": "Read the evidence ledger for auditing.",
+        "required_capability": "CAP-OBSERVE"
+      }
+    ]
+  },
+  "verdict_types": [
+    {
+      "verdict_id": "VRD-ALLOW",
+      "description": "Execution completed within all caps, decision accepted."
+    },
+    {
+      "verdict_id": "VRD-DENY-CAPABILITY",
+      "description": "Controller attempted an action beyond its granted capabilities."
+    },
+    {
+      "verdict_id": "VRD-DENY-RESOURCE",
+      "description": "Controller exceeded a resource cap (memory, CPU, output size)."
+    },
+    {
+      "verdict_id": "VRD-TIMEOUT",
+      "description": "Controller exceeded its wall-clock deadline."
+    },
+    {
+      "verdict_id": "VRD-ERROR",
+      "description": "Controller produced an error (panic, invalid output)."
+    },
+    {
+      "verdict_id": "VRD-BUDGET-EXHAUSTED",
+      "description": "Controller has exhausted its per-epoch decision budget."
+    }
+  ],
+  "adversarial_scenarios": [
+    {
+      "scenario_id": "ADV-CAP-ESCALATION",
+      "description": "Controller attempts to exercise a capability not in its token.",
+      "expected_verdict": "VRD-DENY-CAPABILITY",
+      "mitigation": "MEM-CAP-CLOSED enforced at action dispatch."
+    },
+    {
+      "scenario_id": "ADV-RESOURCE-BOMB",
+      "description": "Controller allocates excessive memory or runs an infinite loop.",
+      "expected_verdict": "VRD-DENY-RESOURCE or VRD-TIMEOUT",
+      "mitigation": "MEM-RESOURCE-CAPPED and MEM-TEMPORAL-BOUNDED enforce abort."
+    },
+    {
+      "scenario_id": "ADV-STATE-MUTATION",
+      "description": "Controller attempts to mutate runtime state directly.",
+      "expected_verdict": "VRD-DENY-CAPABILITY",
+      "mitigation": "MEM-NO-SIDE-EFFECTS: sandbox receives read-only snapshot."
+    },
+    {
+      "scenario_id": "ADV-DECISION-FLOOD",
+      "description": "Controller emits more decisions than its budget allows.",
+      "expected_verdict": "VRD-BUDGET-EXHAUSTED",
+      "mitigation": "RC-DECISIONS-PER-EPOCH drops excess decisions."
+    },
+    {
+      "scenario_id": "ADV-OUTPUT-OVERFLOW",
+      "description": "Controller returns an oversized decision payload.",
+      "expected_verdict": "VRD-DENY-RESOURCE",
+      "mitigation": "RC-OUTPUT-SIZE truncates with verdict."
+    }
+  ],
+  "structured_log_fields_required": [
+    "controller_id",
+    "sandbox_invocation_id",
+    "granted_capabilities",
+    "action_id",
+    "verdict_id",
+    "resource_cap_id",
+    "resource_used",
+    "resource_limit",
+    "wall_clock_us",
+    "decision_count",
+    "epoch",
+    "snapshot_id",
+    "error_message"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "CSM-SMOKE-MEMBRANE",
+      "description": "Validate membrane invariants and sandbox model",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa072 cargo test --test controller_sandbox_contract membrane -- --nocapture"
+    },
+    {
+      "scenario_id": "CSM-SMOKE-RESOURCE",
+      "description": "Validate resource caps and enforcement",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa072 cargo test --test controller_sandbox_contract resource -- --nocapture"
+    },
+    {
+      "scenario_id": "CSM-SMOKE-ADVERSARIAL",
+      "description": "Validate adversarial scenarios and expected verdicts",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa072 cargo test --test controller_sandbox_contract adversarial -- --nocapture"
+    }
+  ],
+  "downstream_beads": [
+    "asupersync-1508v.7.6"
+  ]
+}
