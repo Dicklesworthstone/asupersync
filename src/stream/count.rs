@@ -3,6 +3,7 @@
 //! The `Count` future consumes a stream and counts the number of items.
 
 use super::Stream;
+use pin_project::pin_project;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -10,9 +11,11 @@ use std::task::{Context, Poll};
 /// A future that counts the items in a stream.
 ///
 /// Created by [`StreamExt::count`](super::StreamExt::count).
+#[pin_project]
 #[derive(Debug)]
 #[must_use = "futures do nothing unless polled"]
 pub struct Count<S> {
+    #[pin]
     stream: S,
     count: usize,
 }
@@ -24,21 +27,20 @@ impl<S> Count<S> {
     }
 }
 
-impl<S: Unpin> Unpin for Count<S> {}
-
 impl<S> Future for Count<S>
 where
-    S: Stream + Unpin,
+    S: Stream,
 {
     type Output = usize;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<usize> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<usize> {
+        let mut this = self.project();
         loop {
-            match Pin::new(&mut self.stream).poll_next(cx) {
+            match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(_)) => {
-                    self.count += 1;
+                    *this.count += 1;
                 }
-                Poll::Ready(None) => return Poll::Ready(self.count),
+                Poll::Ready(None) => return Poll::Ready(*this.count),
                 Poll::Pending => return Poll::Pending,
             }
         }

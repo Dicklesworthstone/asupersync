@@ -5,6 +5,7 @@
 //! are dropped.
 
 use super::Stream;
+use pin_project::pin_project;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -16,9 +17,11 @@ use std::time::{Duration, Instant};
 /// The first item from the underlying stream passes through immediately.
 /// Subsequent items are suppressed until `period` has elapsed since
 /// the last yielded item.
+#[pin_project]
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
 pub struct Throttle<S> {
+    #[pin]
     stream: S,
     period: Duration,
     last_yield: Option<Instant>,
@@ -50,20 +53,21 @@ impl<S> Throttle<S> {
     }
 }
 
-impl<S: Stream + Unpin> Stream for Throttle<S> {
+impl<S: Stream> Stream for Throttle<S> {
     type Item = S::Item;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<S::Item>> {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<S::Item>> {
+        let mut this = self.project();
         loop {
-            match Pin::new(&mut self.stream).poll_next(cx) {
+            match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
                     let now = Instant::now();
-                    let should_yield = match self.last_yield {
+                    let should_yield = match this.last_yield {
                         None => true,
-                        Some(last) => now.duration_since(last) >= self.period,
+                        Some(last) => now.duration_since(*last) >= *this.period,
                     };
                     if should_yield {
-                        self.last_yield = Some(now);
+                        *this.last_yield = Some(now);
                         return Poll::Ready(Some(item));
                     }
                     // Drop the item and poll the next one.

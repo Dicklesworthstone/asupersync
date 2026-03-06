@@ -1,13 +1,16 @@
 //! Enumerate combinator.
 
 use super::Stream;
+use pin_project::pin_project;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 /// Stream for the [`enumerate`](super::StreamExt::enumerate) method.
+#[pin_project]
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
 pub struct Enumerate<S> {
+    #[pin]
     stream: S,
     count: usize,
 }
@@ -18,14 +21,15 @@ impl<S> Enumerate<S> {
     }
 }
 
-impl<S: Stream + Unpin> Stream for Enumerate<S> {
+impl<S: Stream> Stream for Enumerate<S> {
     type Item = (usize, S::Item);
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match Pin::new(&mut self.stream).poll_next(cx) {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
+        match this.stream.as_mut().poll_next(cx) {
             Poll::Ready(Some(item)) => {
-                let index = self.count;
-                self.count += 1;
+                let index = *this.count;
+                *this.count += 1;
                 Poll::Ready(Some((index, item)))
             }
             Poll::Ready(None) => Poll::Ready(None),

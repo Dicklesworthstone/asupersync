@@ -27,7 +27,7 @@ enum PeekSlot<T> {
     Exhausted,
 }
 
-impl<S: Stream + Unpin> Peekable<S> {
+impl<S: Stream> Peekable<S> {
     /// Creates a new `Peekable` stream.
     pub(crate) fn new(stream: S) -> Self {
         Self {
@@ -58,15 +58,16 @@ impl<S: Stream + Unpin> Peekable<S> {
     /// Returns `Poll::Ready(Some(&item))` if the next item is available,
     /// `Poll::Ready(None)` if the stream is exhausted, or `Poll::Pending`
     /// if the next item is not yet ready.
-    pub fn poll_peek(&mut self, cx: &mut Context<'_>) -> Poll<Option<&S::Item>> {
-        if matches!(self.peeked, PeekSlot::Empty) {
-            match Pin::new(&mut self.stream).poll_next(cx) {
-                Poll::Ready(Some(item)) => self.peeked = PeekSlot::Item(item),
-                Poll::Ready(None) => self.peeked = PeekSlot::Exhausted,
+    pub fn poll_peek(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<&S::Item>> {
+        let mut this = self.project();
+        if matches!(this.peeked, PeekSlot::Empty) {
+            match this.stream.as_mut().poll_next(cx) {
+                Poll::Ready(Some(item)) => *this.peeked = PeekSlot::Item(item),
+                Poll::Ready(None) => *this.peeked = PeekSlot::Exhausted,
                 Poll::Pending => return Poll::Pending,
             }
         }
-        match &self.peeked {
+        match &*this.peeked {
             PeekSlot::Item(item) => Poll::Ready(Some(item)),
             PeekSlot::Exhausted => Poll::Ready(None),
             PeekSlot::Empty => Poll::Pending,
@@ -85,7 +86,7 @@ impl<S: Stream + Unpin> Peekable<S> {
     }
 }
 
-impl<S: Stream + Unpin> Stream for Peekable<S> {
+impl<S: Stream> Stream for Peekable<S> {
     type Item = S::Item;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<S::Item>> {
@@ -137,11 +138,11 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         // Peek at the first item.
-        let peeked = stream.poll_peek(&mut cx);
+        let peeked = Pin::new(&mut stream).poll_peek(&mut cx);
         assert_eq!(peeked, Poll::Ready(Some(&1)));
 
         // Peek again — still the same item.
-        let peeked = stream.poll_peek(&mut cx);
+        let peeked = Pin::new(&mut stream).poll_peek(&mut cx);
         assert_eq!(peeked, Poll::Ready(Some(&1)));
 
         // Consume: returns the peeked item.
@@ -167,7 +168,7 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        let peeked = stream.poll_peek(&mut cx);
+        let peeked = Pin::new(&mut stream).poll_peek(&mut cx);
         assert_eq!(peeked, Poll::Ready(None));
 
         let poll = Pin::new(&mut stream).poll_next(&mut cx);
@@ -202,7 +203,7 @@ mod tests {
         assert!(stream.peek_cached().is_none());
 
         // Peek populates the cache.
-        let _ = stream.poll_peek(&mut cx);
+        let _ = Pin::new(&mut stream).poll_peek(&mut cx);
         assert_eq!(stream.peek_cached(), Some(&42));
 
         // Consuming clears the cache.
@@ -221,7 +222,7 @@ mod tests {
         assert_eq!(stream.size_hint(), (3, Some(3)));
 
         // Peek consumes from underlying but caches.
-        let _ = stream.poll_peek(&mut cx);
+        let _ = Pin::new(&mut stream).poll_peek(&mut cx);
         // Underlying now has (2, Some(2)) but we have 1 peeked → (3, Some(3))
         assert_eq!(stream.size_hint(), (3, Some(3)));
 
@@ -239,7 +240,10 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         // Peek 1.
-        assert_eq!(stream.poll_peek(&mut cx), Poll::Ready(Some(&1)));
+        assert_eq!(
+            Pin::new(&mut stream).poll_peek(&mut cx),
+            Poll::Ready(Some(&1))
+        );
         // Consume 1.
         assert_eq!(
             Pin::new(&mut stream).poll_next(&mut cx),
@@ -251,9 +255,15 @@ mod tests {
             Poll::Ready(Some(2))
         );
         // Peek 3.
-        assert_eq!(stream.poll_peek(&mut cx), Poll::Ready(Some(&3)));
+        assert_eq!(
+            Pin::new(&mut stream).poll_peek(&mut cx),
+            Poll::Ready(Some(&3))
+        );
         // Peek 3 again.
-        assert_eq!(stream.poll_peek(&mut cx), Poll::Ready(Some(&3)));
+        assert_eq!(
+            Pin::new(&mut stream).poll_peek(&mut cx),
+            Poll::Ready(Some(&3))
+        );
         // Consume 3.
         assert_eq!(
             Pin::new(&mut stream).poll_next(&mut cx),

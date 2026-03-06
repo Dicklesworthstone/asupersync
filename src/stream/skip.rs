@@ -1,13 +1,16 @@
 //! Skip combinator.
 
 use super::Stream;
+use pin_project::pin_project;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 /// Stream for the [`skip`](super::StreamExt::skip) method.
+#[pin_project]
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
 pub struct Skip<S> {
+    #[pin]
     stream: S,
     remaining: usize,
 }
@@ -18,19 +21,20 @@ impl<S> Skip<S> {
     }
 }
 
-impl<S: Stream + Unpin> Stream for Skip<S> {
+impl<S: Stream> Stream for Skip<S> {
     type Item = S::Item;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        while self.remaining > 0 {
-            match Pin::new(&mut self.stream).poll_next(cx) {
-                Poll::Ready(Some(_)) => self.remaining -= 1,
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
+        while *this.remaining > 0 {
+            match this.stream.as_mut().poll_next(cx) {
+                Poll::Ready(Some(_)) => *this.remaining -= 1,
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Pending => return Poll::Pending,
             }
         }
 
-        Pin::new(&mut self.stream).poll_next(cx)
+        this.stream.poll_next(cx)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -42,9 +46,11 @@ impl<S: Stream + Unpin> Stream for Skip<S> {
 }
 
 /// Stream for the [`skip_while`](super::StreamExt::skip_while) method.
+#[pin_project]
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
 pub struct SkipWhile<S, F> {
+    #[pin]
     stream: S,
     predicate: F,
     done: bool,
@@ -62,21 +68,22 @@ impl<S, F> SkipWhile<S, F> {
 
 impl<S, F> Stream for SkipWhile<S, F>
 where
-    S: Stream + Unpin,
-    F: FnMut(&S::Item) -> bool + Unpin,
+    S: Stream,
+    F: FnMut(&S::Item) -> bool,
 {
     type Item = S::Item;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.done {
-            return Pin::new(&mut self.stream).poll_next(cx);
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
+        if *this.done {
+            return this.stream.poll_next(cx);
         }
 
         loop {
-            match Pin::new(&mut self.stream).poll_next(cx) {
+            match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
-                    if !(self.predicate)(&item) {
-                        self.done = true;
+                    if !(this.predicate)(&item) {
+                        *this.done = true;
                         return Poll::Ready(Some(item));
                     }
                 }

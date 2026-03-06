@@ -1,13 +1,16 @@
 //! Fuse combinator.
 
 use super::Stream;
+use pin_project::pin_project;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 /// Stream for the [`fuse`](super::StreamExt::fuse) method.
+#[pin_project]
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
 pub struct Fuse<S> {
+    #[pin]
     stream: Option<S>,
 }
 
@@ -19,17 +22,18 @@ impl<S> Fuse<S> {
     }
 }
 
-impl<S: Stream + Unpin> Stream for Fuse<S> {
+impl<S: Stream> Stream for Fuse<S> {
     type Item = S::Item;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let Some(stream) = self.stream.as_mut() else {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
+        let Some(stream) = this.stream.as_mut().as_pin_mut() else {
             return Poll::Ready(None);
         };
 
-        match Pin::new(stream).poll_next(cx) {
+        match stream.poll_next(cx) {
             Poll::Ready(None) => {
-                self.stream = None;
+                this.stream.set(None);
                 Poll::Ready(None)
             }
             other => other,

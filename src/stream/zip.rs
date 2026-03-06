@@ -3,16 +3,20 @@
 //! The `Zip` combinator yields pairs from two streams until either stream ends.
 
 use super::Stream;
+use pin_project::pin_project;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 /// A stream that zips two streams into pairs.
 ///
 /// Created by [`StreamExt::zip`](super::StreamExt::zip).
+#[pin_project]
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
 pub struct Zip<S1: Stream, S2: Stream> {
+    #[pin]
     stream1: S1,
+    #[pin]
     stream2: S2,
     queued1: Option<S1::Item>,
     queued2: Option<S2::Item>,
@@ -50,36 +54,38 @@ impl<S1: Stream, S2: Stream> Zip<S1, S2> {
     }
 }
 
-impl<S1: Stream + Unpin, S2: Stream + Unpin> Unpin for Zip<S1, S2> {}
-
 impl<S1, S2> Stream for Zip<S1, S2>
 where
-    S1: Stream + Unpin,
-    S2: Stream + Unpin,
+    S1: Stream,
+    S2: Stream,
 {
     type Item = (S1::Item, S2::Item);
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.queued1.is_none() {
-            match Pin::new(&mut self.stream1).poll_next(cx) {
-                Poll::Ready(Some(item)) => self.queued1 = Some(item),
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
+
+        if this.queued1.is_none() {
+            match this.stream1.as_mut().poll_next(cx) {
+                Poll::Ready(Some(item)) => *this.queued1 = Some(item),
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Pending => {}
             }
         }
 
-        if self.queued2.is_none() {
-            match Pin::new(&mut self.stream2).poll_next(cx) {
-                Poll::Ready(Some(item)) => self.queued2 = Some(item),
+        if this.queued2.is_none() {
+            match this.stream2.as_mut().poll_next(cx) {
+                Poll::Ready(Some(item)) => *this.queued2 = Some(item),
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Pending => {}
             }
         }
 
-        if self.queued1.is_some() && self.queued2.is_some() {
-            let item1 = self.queued1.take().expect("queued1 must be set");
-            let item2 = self.queued2.take().expect("queued2 must be set");
-            Poll::Ready(Some((item1, item2)))
+        if this.queued1.is_some() && this.queued2.is_some() {
+            if let (Some(item1), Some(item2)) = (this.queued1.take(), this.queued2.take()) {
+                Poll::Ready(Some((item1, item2)))
+            } else {
+                unreachable!()
+            }
         } else {
             Poll::Pending
         }
@@ -88,9 +94,16 @@ where
     fn size_hint(&self) -> (usize, Option<usize>) {
         let (lower1, upper1) = self.stream1.size_hint();
         let (lower2, upper2) = self.stream2.size_hint();
+        let queued1 = usize::from(self.queued1.is_some());
+        let queued2 = usize::from(self.queued2.is_some());
 
-        let lower = lower1.min(lower2);
-        let upper = match (upper1, upper2) {
+        let lower = lower1
+            .saturating_add(queued1)
+            .min(lower2.saturating_add(queued2));
+        let upper = match (
+            upper1.map(|upper| upper.saturating_add(queued1)),
+            upper2.map(|upper| upper.saturating_add(queued2)),
+        ) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (Some(a), None) => Some(a),
             (None, Some(b)) => Some(b),
@@ -105,6 +118,7 @@ where
 mod tests {
     use super::*;
     use crate::stream::iter;
+    use std::collections::VecDeque;
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
@@ -169,6 +183,67 @@ mod tests {
         let ok = hint == (2, Some(2));
         crate::assert_with_log!(ok, "size hint", (2, Some(2)), hint);
         crate::test_complete!("zip_size_hint_min");
+    }
+
+    #[derive(Debug)]
+    struct PendingOnceThenIter<T> {
+        items: VecDeque<T>,
+        first_poll_pending: bool,
+    }
+
+    impl<T> PendingOnceThenIter<T> {
+        fn new(items: Vec<T>) -> Self {
+            Self {
+                items: VecDeque::from(items),
+                first_poll_pending: true,
+            }
+        }
+    }
+
+    impl<T: Unpin> Stream for PendingOnceThenIter<T> {
+        type Item = T;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if self.first_poll_pending {
+                self.first_poll_pending = false;
+                Poll::Pending
+            } else {
+                Poll::Ready(self.items.pop_front())
+            }
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            let len = self.items.len();
+            (len, Some(len))
+        }
+    }
+
+    #[test]
+    fn zip_size_hint_counts_buffered_items() {
+        init_test("zip_size_hint_counts_buffered_items");
+        let mut stream = Zip::new(
+            iter(vec![1, 2, 3]),
+            PendingOnceThenIter::new(vec![10, 20, 30]),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(stream.size_hint(), (3, Some(3)));
+
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        assert!(
+            poll.is_pending(),
+            "second stream should delay the first pair"
+        );
+
+        // One item is buffered from stream1, so the remaining pair count is still exact.
+        assert_eq!(stream.size_hint(), (3, Some(3)));
+
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        let ok = matches!(poll, Poll::Ready(Some((1, 10))));
+        crate::assert_with_log!(ok, "buffered pair yielded", true, ok);
+
+        crate::test_complete!("zip_size_hint_counts_buffered_items");
     }
 
     /// Invariant: zipping two empty streams immediately yields None.

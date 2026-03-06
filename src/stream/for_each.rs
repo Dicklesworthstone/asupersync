@@ -3,6 +3,7 @@
 //! The `ForEach` future consumes a stream and executes a closure for each item.
 
 use super::Stream;
+use pin_project::pin_project;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -10,9 +11,11 @@ use std::task::{Context, Poll};
 /// A future that executes a closure for each item in a stream.
 ///
 /// Created by [`StreamExt::for_each`](super::StreamExt::for_each).
+#[pin_project]
 #[derive(Debug)]
 #[must_use = "futures do nothing unless polled"]
 pub struct ForEach<S, F> {
+    #[pin]
     stream: S,
     f: F,
 }
@@ -24,20 +27,19 @@ impl<S, F> ForEach<S, F> {
     }
 }
 
-impl<S: Unpin, F> Unpin for ForEach<S, F> {}
-
 impl<S, F> Future for ForEach<S, F>
 where
-    S: Stream + Unpin,
+    S: Stream,
     F: FnMut(S::Item),
 {
     type Output = ();
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let mut this = self.project();
         loop {
-            match Pin::new(&mut self.stream).poll_next(cx) {
+            match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
-                    (self.f)(item);
+                    (this.f)(item);
                 }
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Pending => return Poll::Pending,
@@ -49,11 +51,14 @@ where
 /// A future that executes an async closure for each item in a stream.
 ///
 /// Created by [`StreamExt::for_each_async`](super::StreamExt::for_each_async).
+#[pin_project]
 #[derive(Debug)]
 #[must_use = "futures do nothing unless polled"]
 pub struct ForEachAsync<S, F, Fut> {
+    #[pin]
     stream: S,
     f: F,
+    #[pin]
     pending: Option<Fut>,
 }
 
@@ -67,32 +72,31 @@ impl<S, F, Fut> ForEachAsync<S, F, Fut> {
     }
 }
 
-impl<S: Unpin, F, Fut: Unpin> Unpin for ForEachAsync<S, F, Fut> {}
-
 impl<S, F, Fut> Future for ForEachAsync<S, F, Fut>
 where
-    S: Stream + Unpin,
+    S: Stream,
     F: FnMut(S::Item) -> Fut,
-    Fut: Future<Output = ()> + Unpin,
+    Fut: Future<Output = ()>,
 {
     type Output = ();
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let mut this = self.project();
         loop {
             // Complete pending future first
-            if let Some(fut) = &mut self.pending {
-                match Pin::new(fut).poll(cx) {
+            if let Some(fut) = this.pending.as_mut().as_pin_mut() {
+                match fut.poll(cx) {
                     Poll::Ready(()) => {
-                        self.pending = None;
+                        this.pending.set(None);
                     }
                     Poll::Pending => return Poll::Pending,
                 }
             }
 
             // Get next item
-            match Pin::new(&mut self.stream).poll_next(cx) {
+            match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
-                    self.pending = Some((self.f)(item));
+                    this.pending.set(Some((this.f)(item)));
                 }
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Pending => return Poll::Pending,

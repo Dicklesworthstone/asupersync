@@ -297,7 +297,7 @@ fn peekable_consume_all_to_forward() {
     let mut task_cx = Context::from_waker(&waker);
 
     // Peek at the first item without consuming it.
-    let peeked = stream.poll_peek(&mut task_cx);
+    let peeked = Pin::new(&mut stream).poll_peek(&mut task_cx);
     let ok = matches!(peeked, Poll::Ready(Some(&10)));
     assert_with_log!(ok, "peek first", "Some(&10)", peeked);
 
