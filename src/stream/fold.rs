@@ -3,6 +3,7 @@
 //! The `Fold` future consumes a stream and folds all items into a single value.
 
 use super::Stream;
+use pin_project::pin_project;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -10,9 +11,11 @@ use std::task::{Context, Poll};
 /// A future that folds all items from a stream into a single value.
 ///
 /// Created by [`StreamExt::fold`](super::StreamExt::fold).
+#[pin_project]
 #[derive(Debug)]
 #[must_use = "futures do nothing unless polled"]
 pub struct Fold<S, F, Acc> {
+    #[pin]
     stream: S,
     f: F,
     acc: Option<Acc>,
@@ -29,24 +32,23 @@ impl<S, F, Acc> Fold<S, F, Acc> {
     }
 }
 
-impl<S: Unpin, F, Acc> Unpin for Fold<S, F, Acc> {}
-
 impl<S, F, Acc> Future for Fold<S, F, Acc>
 where
-    S: Stream + Unpin,
+    S: Stream,
     F: FnMut(Acc, S::Item) -> Acc,
 {
     type Output = Acc;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Acc> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Acc> {
+        let mut this = self.project();
         loop {
-            match Pin::new(&mut self.stream).poll_next(cx) {
+            match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
-                    let acc = self.acc.take().expect("Fold polled after completion");
-                    self.acc = Some((self.f)(acc, item));
+                    let acc = this.acc.take().expect("Fold polled after completion");
+                    *this.acc = Some((this.f)(acc, item));
                 }
                 Poll::Ready(None) => {
-                    return Poll::Ready(self.acc.take().expect("Fold polled after completion"));
+                    return Poll::Ready(this.acc.take().expect("Fold polled after completion"));
                 }
                 Poll::Pending => return Poll::Pending,
             }

@@ -4,15 +4,18 @@
 //! immediately available without waiting for a full batch.
 
 use super::Stream;
+use pin_project::pin_project;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 /// A stream that yields items in fixed-size chunks.
 ///
 /// Created by [`StreamExt::chunks`](super::StreamExt::chunks).
+#[pin_project]
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
 pub struct Chunks<S: Stream> {
+    #[pin]
     stream: S,
     items: Vec<S::Item>,
     cap: usize,
@@ -45,28 +48,27 @@ impl<S: Stream> Chunks<S> {
     }
 }
 
-impl<S: Stream + Unpin> Unpin for Chunks<S> {}
-
 impl<S> Stream for Chunks<S>
 where
-    S: Stream + Unpin,
+    S: Stream,
 {
     type Item = Vec<S::Item>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
         loop {
-            match Pin::new(&mut self.stream).poll_next(cx) {
+            match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
-                    self.items.push(item);
-                    if self.items.len() >= self.cap {
-                        return Poll::Ready(Some(std::mem::take(&mut self.items)));
+                    this.items.push(item);
+                    if this.items.len() >= *this.cap {
+                        return Poll::Ready(Some(std::mem::take(this.items)));
                     }
                 }
                 Poll::Ready(None) => {
-                    if self.items.is_empty() {
+                    if this.items.is_empty() {
                         return Poll::Ready(None);
                     }
-                    return Poll::Ready(Some(std::mem::take(&mut self.items)));
+                    return Poll::Ready(Some(std::mem::take(this.items)));
                 }
                 Poll::Pending => return Poll::Pending,
             }
@@ -86,9 +88,11 @@ where
 /// A stream that yields chunks of immediately available items.
 ///
 /// Created by [`StreamExt::ready_chunks`](super::StreamExt::ready_chunks).
+#[pin_project]
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
 pub struct ReadyChunks<S: Stream> {
+    #[pin]
     stream: S,
     cap: usize,
     items: Vec<S::Item>,
@@ -121,41 +125,40 @@ impl<S: Stream> ReadyChunks<S> {
     }
 }
 
-impl<S: Stream + Unpin> Unpin for ReadyChunks<S> {}
-
 impl<S> Stream for ReadyChunks<S>
 where
-    S: Stream + Unpin,
+    S: Stream,
 {
     type Item = Vec<S::Item>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
         // Reuse the buffer across polls; ensure capacity after a previous take.
-        let cap = self.cap;
-        let need = cap.saturating_sub(self.items.capacity());
+        let cap = *this.cap;
+        let need = cap.saturating_sub(this.items.capacity());
         if need > 0 {
-            self.items.reserve(need);
+            this.items.reserve(need);
         }
 
         loop {
-            match Pin::new(&mut self.stream).poll_next(cx) {
+            match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
-                    self.items.push(item);
-                    if self.items.len() >= cap {
-                        return Poll::Ready(Some(std::mem::take(&mut self.items)));
+                    this.items.push(item);
+                    if this.items.len() >= cap {
+                        return Poll::Ready(Some(std::mem::take(this.items)));
                     }
                 }
                 Poll::Ready(None) => {
-                    if self.items.is_empty() {
+                    if this.items.is_empty() {
                         return Poll::Ready(None);
                     }
-                    return Poll::Ready(Some(std::mem::take(&mut self.items)));
+                    return Poll::Ready(Some(std::mem::take(this.items)));
                 }
                 Poll::Pending => {
-                    if self.items.is_empty() {
+                    if this.items.is_empty() {
                         return Poll::Pending;
                     }
-                    return Poll::Ready(Some(std::mem::take(&mut self.items)));
+                    return Poll::Ready(Some(std::mem::take(this.items)));
                 }
             }
         }
@@ -184,6 +187,16 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    fn collect_chunks<S: Stream + Unpin>(stream: &mut S) -> Vec<S::Item> {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut items = Vec::new();
+        while let Poll::Ready(Some(item)) = Pin::new(&mut *stream).poll_next(&mut cx) {
+            items.push(item);
+        }
+        items
     }
 
     fn init_test(name: &str) {

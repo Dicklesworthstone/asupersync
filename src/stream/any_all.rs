@@ -4,6 +4,7 @@
 //! The `All` future checks if all items match a predicate.
 
 use super::Stream;
+use pin_project::pin_project;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -11,9 +12,11 @@ use std::task::{Context, Poll};
 /// A future that checks if any item in a stream matches a predicate.
 ///
 /// Created by [`StreamExt::any`](super::StreamExt::any).
+#[pin_project]
 #[derive(Debug)]
 #[must_use = "futures do nothing unless polled"]
 pub struct Any<S, P> {
+    #[pin]
     stream: S,
     predicate: P,
 }
@@ -25,20 +28,19 @@ impl<S, P> Any<S, P> {
     }
 }
 
-impl<S: Unpin, P> Unpin for Any<S, P> {}
-
 impl<S, P> Future for Any<S, P>
 where
-    S: Stream + Unpin,
+    S: Stream,
     P: FnMut(&S::Item) -> bool,
 {
     type Output = bool;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<bool> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<bool> {
+        let mut this = self.project();
         loop {
-            match Pin::new(&mut self.stream).poll_next(cx) {
+            match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
-                    if (self.predicate)(&item) {
+                    if (this.predicate)(&item) {
                         return Poll::Ready(true);
                     }
                 }
@@ -52,9 +54,11 @@ where
 /// A future that checks if all items in a stream match a predicate.
 ///
 /// Created by [`StreamExt::all`](super::StreamExt::all).
+#[pin_project]
 #[derive(Debug)]
 #[must_use = "futures do nothing unless polled"]
 pub struct All<S, P> {
+    #[pin]
     stream: S,
     predicate: P,
 }
@@ -66,20 +70,19 @@ impl<S, P> All<S, P> {
     }
 }
 
-impl<S: Unpin, P> Unpin for All<S, P> {}
-
 impl<S, P> Future for All<S, P>
 where
-    S: Stream + Unpin,
+    S: Stream,
     P: FnMut(&S::Item) -> bool,
 {
     type Output = bool;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<bool> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<bool> {
+        let mut this = self.project();
         loop {
-            match Pin::new(&mut self.stream).poll_next(cx) {
+            match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
-                    if !(self.predicate)(&item) {
+                    if !(this.predicate)(&item) {
                         return Poll::Ready(false);
                     }
                 }
