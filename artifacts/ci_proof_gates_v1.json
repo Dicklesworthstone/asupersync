@@ -1,0 +1,150 @@
+{
+  "contract_version": "ci-proof-gates-v1",
+  "bead_id": "asupersync-1508v.10.5",
+  "description": "AA-10.2 CI gates for proof artifacts, calibration drift, and tail regressions.",
+  "runner_script": "scripts/run_ci_proof_gates_smoke.sh",
+  "runner_bundle_schema_version": "ci-proof-gates-smoke-bundle-v1",
+  "runner_report_schema_version": "ci-proof-gates-smoke-run-report-v1",
+  "gate_definitions": [
+    {
+      "gate_id": "CG-ARTIFACT-BUNDLE",
+      "description": "Validate that all contract artifacts exist, parse as valid JSON, and match their declared contract_version.",
+      "severity": "blocking",
+      "failure_action": "Emit artifact path, expected version, and exact diff."
+    },
+    {
+      "gate_id": "CG-CLAIM-EVIDENCE-COVERAGE",
+      "description": "Every CLAIM node in the claim/evidence graph must have at least one EVIDENCE edge.",
+      "severity": "blocking",
+      "failure_action": "Emit unsupported claim IDs and required evidence types."
+    },
+    {
+      "gate_id": "CG-CALIBRATION-DRIFT",
+      "description": "Controller calibration score must not drift below threshold between CI runs.",
+      "severity": "blocking",
+      "failure_action": "Emit controller_id, current score, baseline score, and drift delta."
+    },
+    {
+      "gate_id": "CG-TAIL-REGRESSION",
+      "description": "Tail latency (p99/p999) must not regress beyond configured budget per surface.",
+      "severity": "blocking",
+      "failure_action": "Emit surface, metric, baseline, current, and delta."
+    },
+    {
+      "gate_id": "CG-OBLIGATION-LEAK",
+      "description": "No obligation leaks detected across test suite execution.",
+      "severity": "blocking",
+      "failure_action": "Emit leaked obligation IDs, region IDs, and stack context."
+    },
+    {
+      "gate_id": "CG-REVOCATION-INTEGRITY",
+      "description": "Revoked tokens must remain denied across all test scenarios.",
+      "severity": "blocking",
+      "failure_action": "Emit token_id that was allowed after revocation."
+    },
+    {
+      "gate_id": "CG-VALIDATION-PACK-COVERAGE",
+      "description": "Every track must have its validation pack runner pass in CI.",
+      "severity": "warning",
+      "failure_action": "Emit track ID and missing/failing validation pack."
+    },
+    {
+      "gate_id": "CG-COMPOSITION-ELIGIBILITY",
+      "description": "Cross-track composition must not introduce incompatible assumptions.",
+      "severity": "warning",
+      "failure_action": "Emit conflicting track pair and assumption mismatch."
+    },
+    {
+      "gate_id": "CG-STRUCTURED-LOG-SCHEMA",
+      "description": "All structured log events must include the required fields for their event type.",
+      "severity": "warning",
+      "failure_action": "Emit event type, missing fields, and source location."
+    },
+    {
+      "gate_id": "CG-REPRODUCIBILITY",
+      "description": "All test failures must be reproducible from their crash pack or replay trace.",
+      "severity": "blocking",
+      "failure_action": "Emit crash_id, replay command, and reproduction result."
+    }
+  ],
+  "readiness_computation": {
+    "description": "Progressive-delivery readiness is computed from explicit evidence, not human memory.",
+    "dimensions": [
+      {
+        "dimension_id": "RD-PROOF-COVERAGE",
+        "description": "Fraction of claims backed by evidence.",
+        "weight": 0.25
+      },
+      {
+        "dimension_id": "RD-CALIBRATION-STABILITY",
+        "description": "Average controller calibration score across tracks.",
+        "weight": 0.20
+      },
+      {
+        "dimension_id": "RD-TAIL-BUDGET",
+        "description": "Fraction of surfaces within tail latency budget.",
+        "weight": 0.20
+      },
+      {
+        "dimension_id": "RD-VALIDATION-PACK",
+        "description": "Fraction of track validation packs passing.",
+        "weight": 0.15
+      },
+      {
+        "dimension_id": "RD-OBLIGATION-SAFETY",
+        "description": "Whether any obligation leaks were detected.",
+        "weight": 0.10
+      },
+      {
+        "dimension_id": "RD-REPRODUCIBILITY",
+        "description": "Fraction of failures that are reproducible.",
+        "weight": 0.10
+      }
+    ],
+    "thresholds": {
+      "go": 0.90,
+      "conditional_go": 0.75,
+      "no_go": 0.0
+    }
+  },
+  "rerun_commands": {
+    "description": "Every gate failure must emit an exact rerun command.",
+    "template_fields": ["gate_id", "test_filter", "cargo_target_dir", "rch_prefix"],
+    "example": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-rerun cargo test --test <test_file> <test_filter> -- --nocapture"
+  },
+  "structured_log_fields_required": [
+    "gate_id",
+    "gate_severity",
+    "gate_result",
+    "failure_detail",
+    "rerun_command",
+    "readiness_dimension",
+    "readiness_score",
+    "readiness_verdict",
+    "track_id",
+    "artifact_path",
+    "baseline_value",
+    "current_value",
+    "delta"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "CPG-SMOKE-GATES",
+      "description": "Validate gate definitions, severity levels, and failure actions",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa102 cargo test --test ci_proof_gates_contract gate -- --nocapture"
+    },
+    {
+      "scenario_id": "CPG-SMOKE-READINESS",
+      "description": "Validate readiness computation model and thresholds",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa102 cargo test --test ci_proof_gates_contract readiness -- --nocapture"
+    },
+    {
+      "scenario_id": "CPG-SMOKE-RERUN",
+      "description": "Validate rerun command template and gate actionability",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa102 cargo test --test ci_proof_gates_contract rerun -- --nocapture"
+    }
+  ],
+  "downstream_beads": [
+    "asupersync-1508v.10.7"
+  ]
+}
