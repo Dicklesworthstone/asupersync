@@ -1,0 +1,153 @@
+{
+  "contract_version": "transport-frontier-benchmark-v1",
+  "bead_id": "asupersync-1508v.8.4",
+  "runner_bundle_schema_version": "transport-frontier-benchmark-smoke-bundle-v1",
+  "runner_report_schema_version": "transport-frontier-benchmark-smoke-run-report-v1",
+  "runner_script": "scripts/run_transport_frontier_benchmark_smoke.sh",
+  "transport_components": [
+    {
+      "component_id": "symbol-sink-stream",
+      "description": "Async send/recv traits for transport",
+      "owner_files": ["src/transport/sink.rs", "src/transport/stream.rs"]
+    },
+    {
+      "component_id": "multipath-aggregator",
+      "description": "Path selection, deduplication, and reordering",
+      "owner_files": ["src/transport/aggregator.rs"]
+    },
+    {
+      "component_id": "routing-dispatch",
+      "description": "Routing table, load balancing, and dispatch",
+      "owner_files": ["src/transport/router.rs"]
+    },
+    {
+      "component_id": "sim-network",
+      "description": "Deterministic network simulation for reproducible testing",
+      "owner_files": ["src/transport/mock.rs"]
+    }
+  ],
+  "benchmark_dimensions": [
+    {
+      "dimension_id": "rtt-tail-latency",
+      "metrics": ["p50_us", "p95_us", "p99_us", "p999_us"],
+      "description": "Round-trip latency under varying load"
+    },
+    {
+      "dimension_id": "goodput-under-loss",
+      "metrics": ["throughput_msgs_sec", "recovery_overhead_pct"],
+      "description": "Effective throughput as a function of loss rate"
+    },
+    {
+      "dimension_id": "fairness",
+      "metrics": ["fairness_index", "min_flow_share_pct"],
+      "description": "Jain's fairness and starvation detection"
+    },
+    {
+      "dimension_id": "cpu-per-packet",
+      "metrics": ["cpu_cycles_per_msg", "cache_miss_rate"],
+      "description": "Per-message CPU cost"
+    },
+    {
+      "dimension_id": "failure-handling",
+      "metrics": ["recovery_time_ms", "handoff_latency_ms"],
+      "description": "Recovery and migration latency"
+    },
+    {
+      "dimension_id": "operator-visibility",
+      "metrics": ["log_field_count", "metric_granularity"],
+      "description": "Structured observability completeness"
+    }
+  ],
+  "workload_vocabulary": [
+    {
+      "workload_id": "TW-BURST",
+      "description": "Burst loss recovery",
+      "pattern": "1000 msgs, 5% burst loss"
+    },
+    {
+      "workload_id": "TW-REORDER",
+      "description": "Packet reordering",
+      "pattern": "1000 msgs, 10% reorder probability"
+    },
+    {
+      "workload_id": "TW-HANDOFF",
+      "description": "Path migration during active flow",
+      "pattern": "Active flow, primary path fails at 50%"
+    },
+    {
+      "workload_id": "TW-OVERLOAD",
+      "description": "Backpressure under overload",
+      "pattern": "Sender rate 2x receiver capacity"
+    },
+    {
+      "workload_id": "TW-MULTIPATH",
+      "description": "Multi-path aggregation",
+      "pattern": "3 paths, varying quality (10ms/50ms/200ms)"
+    },
+    {
+      "workload_id": "TW-FAIRNESS",
+      "description": "Concurrent flow fairness",
+      "pattern": "10 flows sharing bottleneck"
+    }
+  ],
+  "experiments": [
+    {
+      "experiment_id": "receiver-driven-rpc",
+      "description": "Grant-based flow control for low-latency RPC",
+      "hypothesis": "Reduces tail latency by eliminating sender-side congestion control delay",
+      "key_dimensions": ["rtt-tail-latency", "fairness", "cpu-per-packet"]
+    },
+    {
+      "experiment_id": "multipath-transport",
+      "description": "Simultaneous use of multiple network paths",
+      "hypothesis": "Improves goodput under partial failures",
+      "key_dimensions": ["goodput-under-loss", "failure-handling"]
+    },
+    {
+      "experiment_id": "coded-transport",
+      "description": "FEC/RLNC for loss recovery without retransmission",
+      "hypothesis": "Trades bandwidth for latency (eliminates retransmission RTTs)",
+      "key_dimensions": ["rtt-tail-latency", "goodput-under-loss", "cpu-per-packet"]
+    }
+  ],
+  "structured_log_fields_required": [
+    "experiment_id",
+    "workload_id",
+    "path_count",
+    "loss_rate_pct",
+    "throughput_msgs_sec",
+    "p50_us",
+    "p95_us",
+    "p99_us",
+    "p999_us",
+    "cpu_cycles_per_msg",
+    "fairness_index",
+    "recovery_time_ms",
+    "verdict"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA08-SMOKE-WORKLOAD-VOCAB",
+      "description": "Verify workload vocabulary completeness and fields",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa081 cargo test --test transport_frontier_benchmark_contract workload -- --nocapture"
+    },
+    {
+      "scenario_id": "AA08-SMOKE-BENCHMARK-DIMS",
+      "description": "Verify benchmark dimension catalog and metrics",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa081 cargo test --test transport_frontier_benchmark_contract dimension -- --nocapture"
+    },
+    {
+      "scenario_id": "AA08-SMOKE-EXPERIMENTS",
+      "description": "Verify experiment catalog and hypothesis fields",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa081 cargo test --test transport_frontier_benchmark_contract experiment -- --nocapture"
+    },
+    {
+      "scenario_id": "AA08-SMOKE-SIM-NETWORK",
+      "description": "Verify SimNetwork deterministic simulation works",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa081 cargo test --test transport_frontier_benchmark_contract sim_network -- --nocapture"
+    }
+  ],
+  "downstream_beads": [
+    "asupersync-1508v.8.5"
+  ]
+}
