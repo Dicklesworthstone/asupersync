@@ -660,7 +660,7 @@ impl LeakChecker {
             }
 
             Instruction::Branch { arms } => {
-                self.check_branch(arms, &instruction_path, &branch_arms);
+                self.check_branch(arms, instruction_path, branch_arms);
             }
         }
     }
