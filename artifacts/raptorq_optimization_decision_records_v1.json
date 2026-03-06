@@ -221,6 +221,15 @@
             "Dual-policy probe forensics stay anchored to the narrower gf256_dual_policy surface."
           ]
         },
+        "decision_chronology_contract": {
+          "historical_same_session_packet": "simd_policy_ablation_2026_03_02",
+          "canonical_default_contract_packet": "simd_policy_ablation_2026_03_04",
+          "supersession_status": "historical_same_session_result_superseded_by_broader_corpus",
+          "notes": [
+            "The 2026-03-02 packet remains historical comparator evidence from a single-scenario same-session run.",
+            "The 2026-03-04 broader RQ-E-GF256-DUAL-* corpus owns the canonical current x86 default-selection contract."
+          ]
+        },
         "notes": [
           "Profile-pack and tuning-candidate provenance fields are now emitted in Track-E policy logs.",
           "Manifest snapshot metadata (schema/version/catalog counts/selected candidate details) is now emitted and covered by deterministic tests.",

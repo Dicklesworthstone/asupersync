@@ -164,3 +164,18 @@ Recent evidence alignment updates (2026-03-05):
   - F8 card promoted from `proposed` to `approved_guarded` in both JSON artifact and this doc.
   - F8 removed from `closure_blocker_levers`; **all G3 closure blockers are now resolved**.
   - Closure rationale: wavefront pipeline is functionally correct, deterministic, safe, and produces identical results to sequential. At k<=64 wall-time benefit is marginal, but the pipeline enables scaling benefit at larger block counts.
+
+Recent evidence alignment updates (2026-03-06):
+
+- Added an explicit E5 `decision_chronology_contract` record so the canonical
+  Track-E governance surface now mirrors the bench artifact chronology:
+  - `historical_same_session_packet = simd_policy_ablation_2026_03_02`
+  - `canonical_default_contract_packet = simd_policy_ablation_2026_03_04`
+  - `supersession_status = historical_same_session_result_superseded_by_broader_corpus`
+- This keeps the decision record aligned with
+  `artifacts/raptorq_track_e_gf256_bench_v1.json`: the 2026-03-02 packet is
+  preserved as historical comparator evidence from the narrow same-session run,
+  while the 2026-03-04 broader corpus remains the canonical current x86 default contract.
+- Captured the targeted chronology-alignment support slice: the new governance
+  invariant and doc-token checks for this chronology contract pass via focused
+  `tests/raptorq_perf_invariants.rs` coverage.

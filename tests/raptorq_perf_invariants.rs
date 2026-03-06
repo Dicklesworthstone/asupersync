@@ -2376,6 +2376,38 @@ fn g3_e5_decision_record_command_surface_split_is_explicit() {
     }
 }
 
+/// Validate the E5 decision record keeps the 2026-03-02 same-session packet as
+/// historical evidence and the 2026-03-04 corpus as the canonical default
+/// contract.
+#[test]
+fn g3_e5_decision_record_chronology_contract_is_explicit() {
+    let artifact: serde_json::Value = serde_json::from_str(RAPTORQ_OPT_DECISIONS_JSON)
+        .expect("decision artifact must be valid JSON");
+    let cards = artifact["decision_cards"]
+        .as_array()
+        .expect("decision_cards must be an array");
+    let e5 = cards
+        .iter()
+        .find(|card| card["lever_code"].as_str() == Some("E5"))
+        .expect("decision cards must include E5");
+    let chronology = &e5["measured_comparator_evidence"]["decision_chronology_contract"];
+    assert_eq!(
+        chronology["historical_same_session_packet"].as_str(),
+        Some("simd_policy_ablation_2026_03_02"),
+        "E5 decision record must keep the narrow same-session packet explicit"
+    );
+    assert_eq!(
+        chronology["canonical_default_contract_packet"].as_str(),
+        Some("simd_policy_ablation_2026_03_04"),
+        "E5 decision record must pin the broader corpus as the canonical default contract"
+    );
+    assert_eq!(
+        chronology["supersession_status"].as_str(),
+        Some("historical_same_session_result_superseded_by_broader_corpus"),
+        "E5 decision record must spell out the supersession contract"
+    );
+}
+
 /// Validate the baseline/profile doc stays aligned with the current E5
 /// artifact-backed x86 default-window contract.
 #[test]
@@ -2393,6 +2425,25 @@ fn e5_profile_pack_doc_mentions_current_x86_default_contract() {
         assert!(
             RAPTORQ_BASELINE_PROFILE_MD.contains(required),
             "baseline profile doc must mention {required}"
+        );
+    }
+}
+
+/// Validate the decision-record doc explains the E5 chronology contract
+/// explicitly instead of relying on date ordering alone.
+#[test]
+fn g3_e5_decision_record_doc_explains_chronology_contract() {
+    for required in [
+        "decision_chronology_contract",
+        "historical_same_session_packet = simd_policy_ablation_2026_03_02",
+        "canonical_default_contract_packet = simd_policy_ablation_2026_03_04",
+        "supersession_status = historical_same_session_result_superseded_by_broader_corpus",
+        "historical comparator evidence",
+        "canonical current x86 default contract",
+    ] {
+        assert!(
+            RAPTORQ_OPT_DECISIONS_MD.contains(required),
+            "decision-record doc must explain chronology contract token {required}"
         );
     }
 }
