@@ -81,21 +81,32 @@ fn repro_race_leak() {
 
         // Flag to check if the loser task actually ran its cleanup (simulate drain)
         let loser_flag = Flag::new();
-        let loser_flag_clone = loser_flag.clone();
 
         // Spawn a loser task that never finishes but has a drop guard
         let (loser_handle, mut stored_loser) = scope
             .spawn(&mut state, &cx, move |_| async move {
                 // This task runs forever. If it's cancelled, it should be dropped.
-                let fut = DroppableFuture::new(loser_flag_clone);
+                let fut = DroppableFuture::new(loser_flag);
                 fut.await;
                 "loser"
             })
             .expect("spawn failed");
 
-        // Spawn a winner task that finishes immediately
+        // Spawn a winner task that finishes after yielding once
         let (winner_handle, mut stored_winner) = scope
-            .spawn(&mut state, &cx, |_| async { "winner" })
+            .spawn(&mut state, &cx, |_| async {
+                let mut yielded = false;
+                std::future::poll_fn(move |cx| {
+                    if yielded {
+                        Poll::Ready("winner")
+                    } else {
+                        yielded = true;
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                })
+                .await
+            })
             .expect("spawn failed");
 
         // Manually drive tasks (since we don't have a real reactor/executor loop in this test setup)
@@ -108,29 +119,38 @@ fn repro_race_leak() {
         let mut ctx = Context::from_waker(&waker);
 
         // Poll tasks once to get them started
-        assert!(stored_winner.poll(&mut ctx).is_ready()); // Winner finishes
+        assert!(stored_winner.poll(&mut ctx).is_pending()); // Winner yields once
         assert!(stored_loser.poll(&mut ctx).is_pending()); // Loser is pending
 
         let loser_task_id = loser_handle.task_id();
 
-        // Now race the handles using Cx::race (simulating what race! macro does)
-        let result = {
-            let race_future = cx.race(vec![
-                {
-                    let cx = cx.clone();
-                    let mut handle = winner_handle;
-                    Box::pin(async move { handle.join(&cx).await })
-                },
-                {
-                    let cx = cx.clone();
-                    let mut handle = loser_handle;
-                    Box::pin(async move { handle.join(&cx).await })
-                },
-            ]);
+        // Now race the handles using Cx::race
+        let mut race_future = Box::pin(cx.race(vec![
+            {
+                let cx = cx.clone();
+                let mut handle = winner_handle;
+                Box::pin(async move { handle.join(&cx).await })
+            },
+            {
+                let cx = cx.clone();
+                let mut handle = loser_handle;
+                Box::pin(async move { handle.join(&cx).await })
+            },
+        ]));
 
-            // Await the race and drop the combinator before inspecting cancellation.
-            race_future.await
+        // Poll race_future once so both async blocks are polled, creating the JoinFutures
+        assert!(race_future.as_mut().poll(&mut ctx).is_pending());
+
+        // Now winner task can finish
+        assert!(stored_winner.poll(&mut ctx).is_ready());
+
+        // Poll race_future again to get the result
+        let result = match race_future.as_mut().poll(&mut ctx) {
+            Poll::Ready(r) => r,
+            Poll::Pending => panic!("expected race_future to be ready"),
         };
+        // Drop the combinator
+        drop(race_future);
 
         // Race should finish with "winner"
         assert_eq!(result.unwrap(), Ok("winner"));
