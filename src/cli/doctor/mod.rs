@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_lines)]
 //! Doctor-oriented CLI primitives.
 //!
 //! This module provides deterministic workspace scanning utilities used by
@@ -7517,7 +7518,7 @@ pub fn validate_remediation_recipe_contract(
         .iter()
         .map(|band| (band.min_score_inclusive, band.max_score_inclusive))
         .collect::<Vec<_>>();
-    ordered_ranges.sort();
+    ordered_ranges.sort_unstable();
     let mut cursor = 0u8;
     for (min_score, max_score) in ordered_ranges {
         if min_score > max_score {
@@ -7768,7 +7769,7 @@ pub fn compute_remediation_confidence_score(
             confidence_score >= candidate.min_score_inclusive
                 && confidence_score <= candidate.max_score_inclusive
         })
-        .ok_or_else(|| format!("no risk band covers confidence score {}", confidence_score))?;
+        .ok_or_else(|| format!("no risk band covers confidence score {confidence_score}"))?;
 
     Ok(RemediationConfidenceScore {
         recipe_id: recipe.recipe_id.clone(),
@@ -8919,8 +8920,7 @@ pub fn compute_remediation_verification_scorecard(
     summary_fields.insert(
         "decision_rationale".to_string(),
         format!(
-            "scorecard_summary accepted={} escalated={} rollback={} unresolved_findings={}",
-            accepted, escalated, rollback, unresolved_total
+            "scorecard_summary accepted={accepted} escalated={escalated} rollback={rollback} unresolved_findings={unresolved_total}"
         ),
     );
     summary_fields.insert(
@@ -11107,8 +11107,7 @@ pub fn build_doctor_scenario_coverage_pack_smoke_report(
             status: "passed".to_string(),
             failure_cluster: pack.failure_cluster.clone(),
             repro_command: format!(
-                "asupersync doctor scenario-coverage-pack-smoke --selection-mode {} --seed {}",
-                mode, normalized_seed
+                "asupersync doctor scenario-coverage-pack-smoke --selection-mode {mode} --seed {normalized_seed}"
             ),
             transcript,
             artifact_index,
@@ -11744,8 +11743,7 @@ pub fn build_doctor_stress_soak_smoke_report(
         )?;
         let sustained_budget_pass = sustained_budget_conformance(&checkpoint_metrics, warmup_count);
         let repro_command = format!(
-            "asupersync doctor stress-soak-smoke --profile-mode {} --seed {}",
-            normalized_profile_mode, normalized_seed
+            "asupersync doctor stress-soak-smoke --profile-mode {normalized_profile_mode} --seed {normalized_seed}"
         );
         let failure_output = if sustained_budget_pass {
             None
@@ -15353,7 +15351,7 @@ pub fn advanced_diagnostics_report_fixtures() -> Vec<AdvancedDiagnosticsFixture>
             description:
                 "Healthy-path extension fixture with trust improvement and closure guidance."
                     .to_string(),
-            core_report: happy.clone(),
+            core_report: happy,
             extension: AdvancedDiagnosticsReportExtension {
                 schema_version: ADVANCED_DIAGNOSTICS_REPORT_VERSION.to_string(),
                 base_report_id: "doctor-report-happy-v1".to_string(),
@@ -18467,12 +18465,12 @@ impl RuntimeState {
         assert!(
             first
                 .iter()
-                .any(|event| event.fields.get("risk_score").is_some())
+                .any(|event| event.fields.contains_key("risk_score"))
         );
         assert!(
             first
                 .iter()
-                .any(|event| event.fields.get("threshold_explanation").is_some())
+                .any(|event| event.fields.contains_key("threshold_explanation"))
         );
     }
 
@@ -19681,7 +19679,7 @@ impl RuntimeState {
                 scenario_id: "test-idempotent-noop".to_string(),
                 approved_checkpoints: approvals,
                 simulate_apply_failure: false,
-                previous_idempotency_key: Some(plan.idempotency_key.clone()),
+                previous_idempotency_key: Some(plan.idempotency_key),
             },
         )
         .expect("session");
@@ -19709,7 +19707,7 @@ impl RuntimeState {
             &logging_contract,
             &recipe,
             &GuidedRemediationSessionRequest {
-                run_id: "".to_string(),
+                run_id: String::new(),
                 scenario_id: "test-empty-run-id".to_string(),
                 approved_checkpoints: vec![],
                 simulate_apply_failure: false,

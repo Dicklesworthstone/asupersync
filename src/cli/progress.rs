@@ -754,13 +754,13 @@ mod tests {
             output.contains("half\r"),
             "update line terminated with carriage return",
             "contains `half\\r`",
-            output.clone()
+            output
         );
         crate::assert_with_log!(
             !output.contains("half✓"),
             "terminal line not concatenated to update line",
             "does not contain `half✓`",
-            output.clone()
+            output
         );
         crate::test_complete!("progress_reporter_human_terminal_event_replaces_update_line");
     }
