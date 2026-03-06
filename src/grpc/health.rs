@@ -161,10 +161,13 @@ impl HealthService {
     ///
     /// Use an empty string for the overall server status.
     pub fn set_status(&self, service: impl Into<String>, status: ServingStatus) {
+        let service = service.into();
         let mut statuses = self.statuses.write();
-        statuses.insert(service.into(), status);
+        let changed = statuses.insert(service, status) != Some(status);
         drop(statuses);
-        self.version.fetch_add(1, Ordering::Release);
+        if changed {
+            self.version.fetch_add(1, Ordering::Release);
+        }
     }
 
     /// Set the status of the overall server.
@@ -190,17 +193,24 @@ impl HealthService {
     /// Clear all service statuses.
     pub fn clear(&self) {
         let mut statuses = self.statuses.write();
-        statuses.clear();
+        let changed = !statuses.is_empty();
+        if changed {
+            statuses.clear();
+        }
         drop(statuses);
-        self.version.fetch_add(1, Ordering::Release);
+        if changed {
+            self.version.fetch_add(1, Ordering::Release);
+        }
     }
 
     /// Remove a service from health tracking.
     pub fn clear_status(&self, service: &str) {
         let mut statuses = self.statuses.write();
-        statuses.remove(service);
+        let changed = statuses.remove(service).is_some();
         drop(statuses);
-        self.version.fetch_add(1, Ordering::Release);
+        if changed {
+            self.version.fetch_add(1, Ordering::Release);
+        }
     }
 
     /// Get all registered services.
@@ -208,6 +218,16 @@ impl HealthService {
     pub fn services(&self) -> Vec<String> {
         let statuses = self.statuses.read();
         statuses.keys().cloned().collect()
+    }
+
+    fn watched_status(&self, service: &str) -> Option<ServingStatus> {
+        if service.is_empty() {
+            self.check(&HealthCheckRequest::server())
+                .ok()
+                .map(|response| response.status)
+        } else {
+            self.get_status(service)
+        }
     }
 
     /// Handle a health check request.
@@ -253,15 +273,16 @@ impl HealthService {
 
     /// Create a watcher that can poll for status changes on a specific service.
     ///
-    /// The watcher captures the current version; subsequent calls to
-    /// [`HealthWatcher::changed`] will return `true` when the health
-    /// service version has been bumped since the last check.
+    /// The watcher captures the current status snapshot for that service;
+    /// subsequent calls to [`HealthWatcher::changed`] return `true` only when
+    /// the watched service's effective status changes.
     #[must_use]
     pub fn watch(&self, service: impl Into<String>) -> HealthWatcher {
+        let service_name = service.into();
         HealthWatcher {
             service: self.clone(),
-            service_name: service.into(),
-            last_version: self.version.load(Ordering::Acquire),
+            last_status: self.watched_status(&service_name),
+            service_name,
         }
     }
 }
@@ -282,26 +303,24 @@ impl Default for HealthService {
 pub struct HealthWatcher {
     service: HealthService,
     service_name: String,
-    last_version: u64,
+    last_status: Option<ServingStatus>,
 }
 
 impl HealthWatcher {
     /// Returns `true` if the health service has been modified since the
-    /// last call to `changed` (or since construction).
+    /// last call to `changed` (or since construction) in a way that affects
+    /// this watcher's service.
     pub fn changed(&mut self) -> bool {
-        let current = self.service.version.load(Ordering::Acquire);
-        if current == self.last_version {
-            false
-        } else {
-            self.last_version = current;
-            true
-        }
+        let current_status = self.service.watched_status(&self.service_name);
+        let changed = current_status != self.last_status;
+        self.last_status = current_status;
+        changed
     }
 
     /// Returns the current status for the watched service.
     #[must_use]
     pub fn status(&self) -> Option<ServingStatus> {
-        self.service.get_status(&self.service_name)
+        self.service.watched_status(&self.service_name)
     }
 
     /// Returns a snapshot: `(changed, current_status)`.
@@ -632,6 +651,80 @@ mod tests {
         let b_none = service.get_status("b").is_none();
         crate::assert_with_log!(b_none, "b cleared", true, b_none);
         crate::test_complete!("health_service_clear");
+    }
+
+    #[test]
+    fn health_version_only_tracks_real_changes() {
+        init_test("health_version_only_tracks_real_changes");
+        let service = HealthService::new();
+
+        let v0 = service.version();
+        service.clear();
+        crate::assert_with_log!(
+            service.version() == v0,
+            "clear empty is no-op",
+            v0,
+            service.version()
+        );
+        service.clear_status("missing");
+        crate::assert_with_log!(
+            service.version() == v0,
+            "clear missing is no-op",
+            v0,
+            service.version()
+        );
+
+        service.set_status("svc", ServingStatus::Serving);
+        let v1 = service.version();
+        crate::assert_with_log!(v1 > v0, "initial set increments", true, v1 > v0);
+
+        service.set_status("svc", ServingStatus::Serving);
+        crate::assert_with_log!(
+            service.version() == v1,
+            "idempotent set does not increment",
+            v1,
+            service.version()
+        );
+
+        service.set_status("svc", ServingStatus::NotServing);
+        crate::assert_with_log!(
+            service.version() > v1,
+            "real status transition increments",
+            true,
+            service.version() > v1
+        );
+        crate::test_complete!("health_version_only_tracks_real_changes");
+    }
+
+    #[test]
+    fn health_watcher_ignores_unrelated_service_changes() {
+        init_test("health_watcher_ignores_unrelated_service_changes");
+        let service = HealthService::new();
+        service.set_status("a", ServingStatus::Serving);
+        service.set_status("b", ServingStatus::Serving);
+
+        let mut watcher_a = service.watch("a");
+        let mut watcher_b = service.watch("b");
+
+        service.set_status("a", ServingStatus::NotServing);
+
+        let changed_a = watcher_a.changed();
+        crate::assert_with_log!(changed_a, "watcher a sees change", true, changed_a);
+
+        let changed_b = watcher_b.changed();
+        crate::assert_with_log!(
+            !changed_b,
+            "watcher b ignores unrelated change",
+            false,
+            changed_b
+        );
+        crate::assert_with_log!(
+            watcher_b.status() == Some(ServingStatus::Serving),
+            "watcher b status unchanged",
+            Some(ServingStatus::Serving),
+            watcher_b.status()
+        );
+        crate::test_complete!("health_watcher_ignores_unrelated_service_changes");
     }
 
     #[test]

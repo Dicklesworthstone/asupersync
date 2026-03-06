@@ -397,9 +397,9 @@ fn health_watcher_multiple_watchers_independent() {
 
     health.set_status("a", ServingStatus::NotServing);
 
-    // Both see a change (version-based, not service-specific)
+    // Only the watcher for the changed service should observe a transition.
     assert!(watcher_a.changed());
-    assert!(watcher_b.changed());
+    assert!(!watcher_b.changed());
 
     // But status differs
     assert_eq!(watcher_a.status(), Some(ServingStatus::NotServing));
