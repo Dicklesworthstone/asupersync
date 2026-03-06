@@ -1,0 +1,129 @@
+{
+  "contract_version": "kernel-fast-path-substrate-comparison-v1",
+  "bead_id": "asupersync-1508v.4.4",
+  "runner_bundle_schema_version": "kernel-fast-path-substrate-smoke-bundle-v1",
+  "runner_report_schema_version": "kernel-fast-path-substrate-smoke-run-report-v1",
+  "runner_script": "scripts/run_kernel_fast_path_substrate_smoke.sh",
+  "current_substrate": [
+    {
+      "component_id": "local-queue",
+      "description": "Mutex-protected intrusive stack with LIFO owner / FIFO steal",
+      "owner_file": "src/runtime/scheduler/local_queue.rs",
+      "locking": "ContendedMutex (dual-lock for steal)",
+      "allocation": "zero (arena-backed)"
+    },
+    {
+      "component_id": "work-stealing",
+      "description": "Power of Two Choices with deterministic RNG",
+      "owner_file": "src/runtime/scheduler/stealing.rs",
+      "locking": "none (reads stealer lengths)",
+      "allocation": "zero"
+    },
+    {
+      "component_id": "global-injector",
+      "description": "Lane-aware SegQueue (ready/cancel) + Mutex<BinaryHeap> (timed)",
+      "owner_file": "src/runtime/scheduler/global_injector.rs",
+      "locking": "lock-free ready/cancel, Mutex timed",
+      "allocation": "SegQueue nodes, heap nodes"
+    },
+    {
+      "component_id": "waker-dedup",
+      "description": "Mutex<HashSet<TaskId>> with O(1) dedup",
+      "owner_file": "src/runtime/waker.rs",
+      "locking": "Mutex",
+      "allocation": "HashSet rehash"
+    }
+  ],
+  "candidates": [
+    {
+      "candidate_id": "spsc-ring-local-queue",
+      "description": "Wait-free SPSC ring buffer for owner push/pop path",
+      "target_component": "local-queue",
+      "expected_improvement": "+10-20% owner throughput, eliminates lock contention tail",
+      "determinism_impact": "none",
+      "unsafe_required": true,
+      "reference_implementations": ["tokio::loom::queue", "crossbeam-queue::ArrayQueue"]
+    },
+    {
+      "candidate_id": "chase-lev-deque",
+      "description": "Chase-Lev work-stealing deque replacing intrusive stack + dual-lock",
+      "target_component": "local-queue",
+      "expected_improvement": "+15-30% steal throughput, lock-free steal",
+      "determinism_impact": "shim_required",
+      "unsafe_required": true,
+      "reference_implementations": ["crossbeam-deque", "tokio work-stealing queue"]
+    },
+    {
+      "candidate_id": "sharded-waker-bitmap",
+      "description": "Fixed-size atomic bitmap replacing Mutex<HashSet> for waker dedup",
+      "target_component": "waker-dedup",
+      "expected_improvement": "+50-100% wake throughput, zero contention",
+      "determinism_impact": "none",
+      "unsafe_required": false,
+      "reference_implementations": []
+    },
+    {
+      "candidate_id": "timing-wheel-timed-lane",
+      "description": "Timing wheel or calendar queue replacing Mutex<BinaryHeap>",
+      "target_component": "global-injector",
+      "expected_improvement": "+20-40% for deadline-heavy workloads, O(1) insert",
+      "determinism_impact": "none",
+      "unsafe_required": false,
+      "reference_implementations": ["tokio::time::wheel", "hashed-wheel-timer"]
+    }
+  ],
+  "evaluation_dimensions": [
+    "throughput_ops_sec",
+    "p50_ns",
+    "p95_ns",
+    "p99_ns",
+    "p999_ns",
+    "memory_bytes",
+    "determinism_impact",
+    "unsafe_surface_size",
+    "implementation_complexity"
+  ],
+  "decision_rules": [
+    "Candidate MUST beat baseline by >10% on at least one key metric",
+    "Candidate MUST NOT regress any metric by >5%",
+    "Unsafe candidates MUST include proof sketch or reference",
+    "Winner MUST be gated behind fallback seam (AA-04.2)"
+  ],
+  "structured_log_fields_required": [
+    "candidate_id",
+    "benchmark_id",
+    "throughput_ops_sec",
+    "p50_ns",
+    "p95_ns",
+    "p99_ns",
+    "p999_ns",
+    "memory_bytes",
+    "determinism_impact",
+    "verdict"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA04-SMOKE-CANDIDATE-CATALOG",
+      "description": "Verify candidate catalog completeness and required fields",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa041 cargo test --test kernel_fast_path_substrate_comparison_contract candidate -- --nocapture"
+    },
+    {
+      "scenario_id": "AA04-SMOKE-CURRENT-SUBSTRATE",
+      "description": "Verify current substrate component inventory",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa041 cargo test --test kernel_fast_path_substrate_comparison_contract current_substrate -- --nocapture"
+    },
+    {
+      "scenario_id": "AA04-SMOKE-EVALUATION-DIMS",
+      "description": "Verify evaluation dimensions and decision rules",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa041 cargo test --test kernel_fast_path_substrate_comparison_contract evaluation -- --nocapture"
+    },
+    {
+      "scenario_id": "AA04-SMOKE-LOCAL-QUEUE",
+      "description": "Verify local queue functional invariants",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa041 cargo test --test kernel_fast_path_substrate_comparison_contract local_queue -- --nocapture"
+    }
+  ],
+  "downstream_beads": [
+    "asupersync-1508v.4.5"
+  ]
+}
