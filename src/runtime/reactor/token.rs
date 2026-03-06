@@ -350,8 +350,16 @@ impl TokenSlab {
 
     /// Clears all entries from the slab.
     pub fn clear(&mut self) {
-        self.entries.clear();
         self.free_head = FREE_LIST_END;
+        for index in (0..self.entries.len()).rev() {
+            let generation =
+                self.entries[index].generation().wrapping_add(1) & SlabToken::MAX_GENERATION;
+            self.entries[index] = Entry::Vacant {
+                next_free: self.free_head,
+                generation,
+            };
+            self.free_head = index as u32;
+        }
         self.len = 0;
     }
 
@@ -802,6 +810,44 @@ mod tests {
         let has_mut_after = slab.get_mut(token).is_none();
         crate::assert_with_log!(has_mut_after, "get_mut after remove", true, has_mut_after);
         crate::test_complete!("slab_get_mut");
+    }
+
+    #[test]
+    fn slab_clear_invalidates_stale_tokens() {
+        init_test("slab_clear_invalidates_stale_tokens");
+        let mut slab = TokenSlab::new();
+
+        let stale = slab.insert(test_waker());
+        slab.clear();
+
+        let contains_stale = slab.contains(stale);
+        crate::assert_with_log!(
+            !contains_stale,
+            "stale token invalid after clear",
+            false,
+            contains_stale
+        );
+
+        let fresh = slab.insert(test_waker());
+        crate::assert_with_log!(
+            fresh.index() == stale.index(),
+            "slot reused after clear",
+            stale.index(),
+            fresh.index()
+        );
+        crate::assert_with_log!(
+            fresh.generation() != stale.generation(),
+            "generation advanced across clear",
+            true,
+            fresh.generation() != stale.generation()
+        );
+        crate::assert_with_log!(
+            slab.get(stale).is_none(),
+            "old token still rejected after reuse",
+            true,
+            slab.get(stale).is_none()
+        );
+        crate::test_complete!("slab_clear_invalidates_stale_tokens");
     }
 
     #[test]
