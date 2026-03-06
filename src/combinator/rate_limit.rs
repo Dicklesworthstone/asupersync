@@ -187,6 +187,8 @@ pub struct RateLimitMetrics {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RejectionReason {
     Timeout,
+    /// Tombstone for entries that have been fully processed and removed by the caller.
+    Consumed,
 }
 
 /// Result of a queue entry: None = waiting, Some(Ok(())) = granted, Some(Err(reason)) = rejected.
@@ -552,6 +554,15 @@ impl RateLimiter {
 
         let mut queue = self.wait_queue.write();
 
+        // Garbage collect tombstones from the front
+        while let Some(front) = queue.front() {
+            if front.result == Some(Err(RejectionReason::Consumed)) {
+                queue.pop_front();
+            } else {
+                break;
+            }
+        }
+
         // First, timeout expired entries
         let mut timeout_count = 0u32;
         for entry in queue.iter_mut() {
@@ -641,24 +652,29 @@ impl RateLimiter {
         let entry_idx = queue.iter().position(|e| e.id == entry_id);
 
         if let Some(idx) = entry_idx {
-            let entry = &queue[idx];
+            let entry = &mut queue[idx];
             match entry.result {
                 Some(Ok(())) => {
-                    // Remove the granted entry
-                    queue.remove(idx);
+                    // Mark as consumed to avoid O(N) removal
+                    entry.result = Some(Err(RejectionReason::Consumed));
                     Ok(true)
                 }
                 Some(Err(RejectionReason::Timeout)) => {
                     let wait_ms = now.as_millis().saturating_sub(entry.enqueued_at_millis);
-                    queue.remove(idx);
+                    entry.result = Some(Err(RejectionReason::Consumed));
                     Err(RateLimitError::Timeout {
                         waited: Duration::from_millis(wait_ms),
                     })
                 }
+                Some(Err(RejectionReason::Consumed)) => {
+                    // Already consumed (shouldn't happen if caller only checks once after completion,
+                    // but safe to return Cancelled if they double-poll a finished entry)
+                    Err(RateLimitError::Cancelled)
+                }
                 None => Ok(false),
             }
         } else {
-            // Entry not found - likely already processed
+            // Entry not found - likely already processed and garbage collected
             Err(RateLimitError::Cancelled)
         }
     }
@@ -671,20 +687,24 @@ impl RateLimiter {
 
         let mut queue = self.wait_queue.write();
         if let Some(idx) = queue.iter().position(|e| e.id == entry_id) {
-            let entry = queue.remove(idx).unwrap();
+            let entry = &mut queue[idx];
+            let previous_result = entry.result;
+            let cost = entry.cost;
+            entry.result = Some(Err(RejectionReason::Consumed));
             drop(queue);
-            if entry.result == Some(Ok(())) {
+
+            if previous_result == Some(Ok(())) {
                 // Refund tokens if already granted but not consumed by the caller
                 let mut state = self.state.lock();
                 state.tokens = state
                     .tokens
-                    .saturating_add(entry.cost)
+                    .saturating_add(cost)
                     .min(self.policy.burst);
                 // We could decrement total_allowed here, but the operation was technically
                 // allowed from the rate limiter's perspective, just not consumed.
                 drop(state);
                 let _ = self.process_queue(now);
-            } else if entry.result.is_none() {
+            } else if previous_result.is_none() {
                 self.pending_queue_count.fetch_sub(1, Ordering::Relaxed);
             }
         }
