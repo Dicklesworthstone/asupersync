@@ -1,0 +1,150 @@
+{
+  "contract_version": "cost-capped-exploration-contract-v1",
+  "bead_id": "asupersync-1508v.6.5",
+  "runner_bundle_schema_version": "cost-capped-exploration-smoke-bundle-v1",
+  "runner_report_schema_version": "cost-capped-exploration-smoke-run-report-v1",
+  "runner_script": "scripts/run_cost_capped_exploration_smoke.sh",
+  "algorithms": [
+    {
+      "algorithm_id": "geodesic-normalization",
+      "description": "Minimize owner switches in trace linearizations",
+      "owner_file": "src/trace/geodesic.rs",
+      "complexity": "O(n^2 * beam_width) for beam search, exponential for exact",
+      "budget_parameters": [
+        {
+          "name": "exact_threshold",
+          "default_value": 30,
+          "unit": "events",
+          "description": "Maximum trace size for exact A* search"
+        },
+        {
+          "name": "beam_threshold",
+          "default_value": 100,
+          "unit": "events",
+          "description": "Maximum trace size for beam search"
+        },
+        {
+          "name": "beam_width",
+          "default_value": 8,
+          "unit": "candidates",
+          "description": "Number of candidate paths explored in parallel"
+        },
+        {
+          "name": "step_budget",
+          "default_value": 100000,
+          "unit": "work_units",
+          "description": "Absolute cap on search work before fallback"
+        }
+      ],
+      "fallback_chain": ["ExactAStar", "BeamSearch", "Greedy", "TopoSort"],
+      "fallback_reasons": ["budget_exhausted", "threshold_exceeded"]
+    },
+    {
+      "algorithm_id": "dpor-race-detection",
+      "description": "Identify scheduling races for backtracking exploration",
+      "owner_file": "src/trace/dpor.rs",
+      "complexity": "O(n^2) pairwise independence checks",
+      "budget_parameters": [
+        {
+          "name": "trace_length",
+          "default_value": null,
+          "unit": "events",
+          "description": "Bounded by input trace length"
+        }
+      ],
+      "fallback_chain": [],
+      "fallback_reasons": []
+    },
+    {
+      "algorithm_id": "foata-canonicalization",
+      "description": "Produce canonical Foata normal form for trace equivalence",
+      "owner_file": "src/trace/canonicalize.rs",
+      "complexity": "O(n^2) pairwise independence checks",
+      "budget_parameters": [
+        {
+          "name": "trace_length",
+          "default_value": null,
+          "unit": "events",
+          "description": "Bounded by input trace length"
+        }
+      ],
+      "fallback_chain": [],
+      "fallback_reasons": []
+    },
+    {
+      "algorithm_id": "topological-scoring",
+      "description": "Prioritize exploration nodes by persistence homology novelty",
+      "owner_file": "src/trace/scoring.rs",
+      "complexity": "O(k) per node where k = number of persistence classes",
+      "budget_parameters": [],
+      "fallback_chain": [],
+      "fallback_reasons": []
+    }
+  ],
+  "exploration_manifest_schema": "cost-capped-exploration-manifest-v1",
+  "exploration_manifest_required_fields": [
+    "schema",
+    "trace_length",
+    "algorithm_chosen",
+    "algorithm_fallback_chain",
+    "fallback_reason",
+    "canonical_fingerprint",
+    "switch_count",
+    "race_count",
+    "step_budget",
+    "steps_consumed",
+    "heuristic_path_explanation"
+  ],
+  "structured_log_fields_required": [
+    "algorithm",
+    "fallback_reason",
+    "step_budget",
+    "steps_consumed",
+    "trace_length",
+    "switch_count",
+    "race_count",
+    "canonical_fingerprint",
+    "exploration_time_us",
+    "fallback_chain"
+  ],
+  "exhaustion_contract": {
+    "steps": [
+      "Stop expensive algorithm immediately",
+      "Record partial result if available",
+      "Switch to next fallback tier",
+      "Emit structured log with algorithm, budget consumed, reason, fallback",
+      "Fallback result MUST be valid (correct linearization / sound analysis)"
+    ]
+  },
+  "geodesic_config_defaults": {
+    "exact_threshold": 30,
+    "beam_threshold": 100,
+    "beam_width": 8,
+    "step_budget": 100000
+  },
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA06-SMOKE-GEODESIC-BUDGET",
+      "description": "Verify geodesic normalization respects step budget and falls back",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa062 cargo test --test cost_capped_exploration_contract geodesic -- --nocapture"
+    },
+    {
+      "scenario_id": "AA06-SMOKE-DPOR-ANALYSIS",
+      "description": "Verify DPOR race detection produces sound analysis",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa062 cargo test --test cost_capped_exploration_contract dpor -- --nocapture"
+    },
+    {
+      "scenario_id": "AA06-SMOKE-CANONICALIZATION",
+      "description": "Verify Foata canonicalization stability and fingerprinting",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa062 cargo test --test cost_capped_exploration_contract canonical -- --nocapture"
+    },
+    {
+      "scenario_id": "AA06-SMOKE-FALLBACK-CHAIN",
+      "description": "Verify fallback chain ordering and algorithm catalog",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa062 cargo test --test cost_capped_exploration_contract fallback -- --nocapture"
+    }
+  ],
+  "downstream_beads": [
+    "asupersync-1508v.6.6"
+  ]
+}
