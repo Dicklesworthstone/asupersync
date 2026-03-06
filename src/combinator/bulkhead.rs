@@ -30,7 +30,7 @@
 //! ```
 
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -149,6 +149,7 @@ pub struct BulkheadMetrics {
 enum RejectionReason {
     Timeout,
     Cancelled,
+    Consumed,
 }
 
 /// Result of a queue entry: None = waiting, Some(Ok(())) = granted, Some(Err(reason)) = rejected.
@@ -177,7 +178,7 @@ pub struct Bulkhead {
     available_permits: AtomicU32,
 
     /// Queue of waiting operations.
-    queue: RwLock<Vec<QueueEntry>>,
+    queue: RwLock<VecDeque<QueueEntry>>,
 
     /// Number of pending (result == None) entries. Maintained atomically
     /// so `metrics()` can read queue depth without locking the queue.
@@ -217,7 +218,7 @@ impl Bulkhead {
         Self {
             policy,
             available_permits: AtomicU32::new(available),
-            queue: RwLock::new(Vec::with_capacity(max_queue)),
+            queue: RwLock::new(VecDeque::with_capacity(max_queue)),
             pending_queue_count: AtomicU32::new(0),
             next_id: AtomicU64::new(0),
             total_wait_time_ms: AtomicU64::new(0),
@@ -335,8 +336,17 @@ impl Bulkhead {
     }
 
     /// Inner queue processing logic that operates on an already-locked queue.
-    fn process_queue_inner(&self, queue: &mut [QueueEntry], now: Time) -> Option<u64> {
+    fn process_queue_inner(&self, queue: &mut VecDeque<QueueEntry>, now: Time) -> Option<u64> {
         let now_millis = now.as_millis();
+
+        // Garbage collect tombstones from the front
+        while let Some(front) = queue.front() {
+            if front.result == Some(Err(RejectionReason::Consumed)) {
+                queue.pop_front();
+            } else {
+                break;
+            }
+        }
 
         // First, timeout expired entries — count timeouts locally and batch-update
         // the metrics lock once, instead of acquiring it per timed-out entry.
@@ -431,6 +441,15 @@ impl Bulkhead {
 
         let mut queue = self.queue.write();
 
+        // Garbage collect tombstones from the front to free up capacity
+        while let Some(front) = queue.front() {
+            if front.result == Some(Err(RejectionReason::Consumed)) {
+                queue.pop_front();
+            } else {
+                break;
+            }
+        }
+
         // Check queue capacity
         // We check total length (including completed-but-unclaimed entries) to
         // prevent unbounded memory growth if the user abandons request IDs.
@@ -447,7 +466,7 @@ impl Bulkhead {
 
         let entry_id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
-        queue.push(QueueEntry {
+        queue.push_back(QueueEntry {
             id: entry_id,
             weight,
             enqueued_at_millis: now_millis,
@@ -481,12 +500,12 @@ impl Bulkhead {
         let entry_idx = queue.iter().position(|e| e.id == entry_id);
 
         if let Some(idx) = entry_idx {
-            let entry = &queue[idx];
+            let entry = &mut queue[idx];
             match entry.result {
                 Some(Ok(())) => {
                     let weight = entry.weight;
-                    // Remove the granted entry
-                    queue.remove(idx);
+                    // Mark as consumed
+                    entry.result = Some(Err(RejectionReason::Consumed));
                     Ok(Some(BulkheadPermit {
                         bulkhead: self,
                         weight,
@@ -494,15 +513,19 @@ impl Bulkhead {
                 }
                 Some(Err(RejectionReason::Timeout)) => {
                     let wait_ms = now.as_millis().saturating_sub(entry.enqueued_at_millis);
-                    // Remove the timed-out entry
-                    queue.remove(idx);
+                    // Mark as consumed
+                    entry.result = Some(Err(RejectionReason::Consumed));
                     Err(BulkheadError::QueueTimeout {
                         waited: Duration::from_millis(wait_ms),
                     })
                 }
                 Some(Err(RejectionReason::Cancelled)) => {
-                    // Remove the cancelled entry
-                    queue.remove(idx);
+                    // Mark as consumed
+                    entry.result = Some(Err(RejectionReason::Consumed));
+                    Err(BulkheadError::Cancelled)
+                }
+                Some(Err(RejectionReason::Consumed)) => {
+                    // Already consumed, likely caller double-polled
                     Err(BulkheadError::Cancelled)
                 }
                 None => Ok(None),
@@ -517,17 +540,22 @@ impl Bulkhead {
     pub fn cancel_entry(&self, entry_id: u64, now: Time) {
         let mut queue = self.queue.write();
         if let Some(idx) = queue.iter().position(|e| e.id == entry_id) {
-            let entry = queue.remove(idx);
+            let entry = &mut queue[idx];
+            let previous_result = entry.result;
+            let weight = entry.weight;
+            let enqueued_at_millis = entry.enqueued_at_millis;
+            
+            entry.result = Some(Err(RejectionReason::Consumed));
             drop(queue);
 
-            if matches!(entry.result, Some(Ok(()))) {
+            if matches!(previous_result, Some(Ok(()))) {
                 // Permit was granted but not claimed. Release it.
-                self.release_permit(entry.weight);
+                self.release_permit(weight);
                 self.total_cancelled_atomic.fetch_add(1, Ordering::Relaxed);
                 let _ = self.process_queue(now);
-            } else if entry.result.is_none() {
+            } else if previous_result.is_none() {
                 // Still waiting. Mark as cancelled.
-                let wait_ms = now.as_millis().saturating_sub(entry.enqueued_at_millis);
+                let wait_ms = now.as_millis().saturating_sub(enqueued_at_millis);
                 self.total_wait_time_ms
                     .fetch_add(wait_ms, Ordering::Relaxed);
                 self.max_queue_wait_ms_atomic
@@ -537,7 +565,7 @@ impl Bulkhead {
                 self.total_cancelled_atomic.fetch_add(1, Ordering::Relaxed);
             }
             // If entry.result was Some(Err(_)), it was already counted (e.g. as Timeout)
-            // and pending_queue_count was decremented. We just removed it to prevent leaks.
+            // and pending_queue_count was decremented. We just tombstoned it.
         }
     }
 
