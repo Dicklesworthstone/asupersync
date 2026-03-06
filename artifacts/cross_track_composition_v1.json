@@ -1,0 +1,160 @@
+{
+  "contract_version": "cross-track-composition-v1",
+  "bead_id": "asupersync-1508v.10.7",
+  "description": "AA-10.4 cross-track composition gauntlet, compatibility matrix, and incident drill pack.",
+  "runner_script": "scripts/run_cross_track_composition_smoke.sh",
+  "runner_bundle_schema_version": "cross-track-composition-smoke-bundle-v1",
+  "runner_report_schema_version": "cross-track-composition-smoke-run-report-v1",
+  "compatibility_matrix": {
+    "description": "Explicit classification of track combinations: supported, experimental, or forbidden.",
+    "tracks": [
+      {"track_id": "AA-01", "name": "Scheduling Substrate"},
+      {"track_id": "AA-02", "name": "Decision Plane"},
+      {"track_id": "AA-03", "name": "Controller Interference"},
+      {"track_id": "AA-04", "name": "Bounded Latency"},
+      {"track_id": "AA-05", "name": "Session-Typed Safety"},
+      {"track_id": "AA-06", "name": "Trace Intelligence"},
+      {"track_id": "AA-07", "name": "Authority Sandboxing"},
+      {"track_id": "AA-08", "name": "Transport Experiments"},
+      {"track_id": "AA-09", "name": "Crash-Only Recovery"}
+    ],
+    "combinations": [
+      {
+        "combo_id": "CX-DECIDE-SCHED",
+        "tracks": ["AA-01", "AA-02"],
+        "status": "supported",
+        "description": "Controllers observe and influence scheduling via snapshots and decisions."
+      },
+      {
+        "combo_id": "CX-DECIDE-INTERFERE",
+        "tracks": ["AA-02", "AA-03"],
+        "status": "supported",
+        "description": "Interference detection operates on controller decisions."
+      },
+      {
+        "combo_id": "CX-DECIDE-LATENCY",
+        "tracks": ["AA-02", "AA-04"],
+        "status": "supported",
+        "description": "Controllers respect tail-latency budgets; rollback on regression."
+      },
+      {
+        "combo_id": "CX-DECIDE-SAFETY",
+        "tracks": ["AA-02", "AA-05"],
+        "status": "supported",
+        "description": "Controller decisions are obligation-aware; cannot leak obligations."
+      },
+      {
+        "combo_id": "CX-DECIDE-AUTHORITY",
+        "tracks": ["AA-02", "AA-07"],
+        "status": "supported",
+        "description": "Controllers execute inside sandbox membrane with attenuated tokens."
+      },
+      {
+        "combo_id": "CX-DECIDE-RECOVERY",
+        "tracks": ["AA-02", "AA-09"],
+        "status": "supported",
+        "description": "Controllers are rolled back and authority narrowed during crash recovery."
+      },
+      {
+        "combo_id": "CX-AUTHORITY-RECOVERY",
+        "tracks": ["AA-07", "AA-09"],
+        "status": "supported",
+        "description": "Recovery narrows authority; tokens revoked on crash, restored gradually."
+      },
+      {
+        "combo_id": "CX-TRACE-RECOVERY",
+        "tracks": ["AA-06", "AA-09"],
+        "status": "supported",
+        "description": "Crash packs and journals integrate with trace intelligence for replay."
+      },
+      {
+        "combo_id": "CX-TRANSPORT-LATENCY",
+        "tracks": ["AA-08", "AA-04"],
+        "status": "experimental",
+        "description": "Transport experiments may affect tail latency budgets."
+      },
+      {
+        "combo_id": "CX-TRANSPORT-RECOVERY",
+        "tracks": ["AA-08", "AA-09"],
+        "status": "experimental",
+        "description": "Transport failover interacts with crash-only recovery; not fully validated."
+      },
+      {
+        "combo_id": "CX-FULL-STACK",
+        "tracks": ["AA-01", "AA-02", "AA-03", "AA-04", "AA-05", "AA-06", "AA-07", "AA-09"],
+        "status": "supported",
+        "description": "All core tracks composed. Transport (AA-08) remains experimental."
+      }
+    ],
+    "status_definitions": {
+      "supported": "Composition validated and regression-tested. Default-ready.",
+      "experimental": "Per-track valid but composition has known gaps. Opt-in only.",
+      "forbidden": "Composition known to be unsafe or semantically inconsistent."
+    }
+  },
+  "incident_drills": [
+    {
+      "drill_id": "ID-CONTROLLER-CRASH-RECOVERY",
+      "description": "Controller in Active mode triggers region crash. Verify: rollback, authority narrowing, journal, microreboot, re-promotion.",
+      "tracks_exercised": ["AA-02", "AA-07", "AA-09"],
+      "steps": ["Active controller makes bad decision", "Region crashes", "Journal written", "Authority narrowed to OBSERVE", "Microreboot succeeds", "Controller re-enters Shadow", "Gradual authority restore"]
+    },
+    {
+      "drill_id": "ID-TAIL-REGRESSION-ROLLBACK",
+      "description": "Tail latency budget exceeded triggers automatic controller rollback.",
+      "tracks_exercised": ["AA-02", "AA-04"],
+      "steps": ["Controller promotes to Active", "Tail p99 exceeds budget", "Automatic rollback fires", "Fallback engaged", "Tail budget restored"]
+    },
+    {
+      "drill_id": "ID-OBLIGATION-LEAK-DETECTION",
+      "description": "Obligation enters region, region crashes before settlement. Verify leak is detected and reported.",
+      "tracks_exercised": ["AA-05", "AA-09"],
+      "steps": ["Obligation entered", "Region crashes", "Journal checkpoint includes obligation", "Recovery abandons unsettleable obligations", "Leak detector confirms zero leaks"]
+    },
+    {
+      "drill_id": "ID-AUTHORITY-REVOCATION-CASCADE",
+      "description": "Root capability token revoked. Verify cascade to all descendants across domains.",
+      "tracks_exercised": ["AA-07"],
+      "steps": ["Root token issued", "Child tokens delegated", "Root revoked", "Cascade revokes all descendants", "All actions denied"]
+    },
+    {
+      "drill_id": "ID-FULL-STACK-DOWNGRADE",
+      "description": "Full-stack composition encounters multiple simultaneous failures. Verify graceful degradation.",
+      "tracks_exercised": ["AA-01", "AA-02", "AA-04", "AA-07", "AA-09"],
+      "steps": ["Full stack running", "Controller interference detected", "Tail regression occurs", "Recovery cascade fires", "System degrades to fallback", "All invariants hold"]
+    }
+  ],
+  "structured_log_fields_required": [
+    "composition_id",
+    "combo_id",
+    "tracks_exercised",
+    "drill_id",
+    "drill_step",
+    "invariant_checked",
+    "invariant_result",
+    "regression_detected",
+    "fallback_engaged",
+    "rerun_command",
+    "incident_packet_id"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "CTC-SMOKE-MATRIX",
+      "description": "Validate compatibility matrix structure and combination coverage",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa104 cargo test --test cross_track_composition_contract matrix -- --nocapture"
+    },
+    {
+      "scenario_id": "CTC-SMOKE-DRILLS",
+      "description": "Validate incident drill definitions and track coverage",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa104 cargo test --test cross_track_composition_contract drill -- --nocapture"
+    },
+    {
+      "scenario_id": "CTC-SMOKE-COMPOSITION",
+      "description": "Validate cross-track composition functional invariants",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa104 cargo test --test cross_track_composition_contract composition -- --nocapture"
+    }
+  ],
+  "downstream_beads": [
+    "asupersync-1508v.10.6"
+  ]
+}
