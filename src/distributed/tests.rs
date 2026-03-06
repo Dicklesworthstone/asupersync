@@ -576,6 +576,30 @@ fn assignment_strategies_provide_minimum_coverage() {
             a.symbol_indices.len()
         );
     }
+
+    // Weighted: with equal replica loads, symbols should still be assigned
+    // exactly once and remain roughly balanced.
+    let weighted = SymbolAssigner::new(AssignmentStrategy::Weighted);
+    let weighted_assignments = weighted.assign(&encoded.symbols, &replicas, k);
+    let total_weighted: usize = weighted_assignments
+        .iter()
+        .map(|a| a.symbol_indices.len())
+        .sum();
+    assert_eq!(total_weighted, encoded.symbols.len());
+    let min_weighted = weighted_assignments
+        .iter()
+        .map(|a| a.symbol_indices.len())
+        .min()
+        .unwrap_or(0);
+    let max_weighted = weighted_assignments
+        .iter()
+        .map(|a| a.symbol_indices.len())
+        .max()
+        .unwrap_or(0);
+    assert!(
+        max_weighted - min_weighted <= 1,
+        "weighted assignment should stay balanced for equal loads"
+    );
 }
 
 // =========================================================================

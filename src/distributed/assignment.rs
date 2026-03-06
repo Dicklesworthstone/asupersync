@@ -19,7 +19,8 @@ pub enum AssignmentStrategy {
     Striped,
     /// Each replica gets at least K symbols (minimum for decode).
     MinimumK,
-    /// Custom assignment based on replica capacity.
+    /// Symbols are distributed once, biased toward replicas with lower current
+    /// `symbol_count`.
     Weighted,
 }
 
@@ -65,11 +66,10 @@ impl SymbolAssigner {
         }
 
         match self.strategy {
-            AssignmentStrategy::Full | AssignmentStrategy::Weighted => {
-                Self::assign_full(symbols, replicas, k)
-            }
+            AssignmentStrategy::Full => Self::assign_full(symbols, replicas, k),
             AssignmentStrategy::Striped => Self::assign_striped(symbols, replicas, k),
             AssignmentStrategy::MinimumK => Self::assign_minimum_k(symbols, replicas, k),
+            AssignmentStrategy::Weighted => Self::assign_weighted(symbols, replicas, k),
         }
     }
 
@@ -152,6 +152,53 @@ impl SymbolAssigner {
             })
             .collect()
     }
+
+    /// Weighted: assign each symbol exactly once, preferring replicas that
+    /// currently hold fewer symbols.
+    fn assign_weighted(
+        symbols: &[Symbol],
+        replicas: &[ReplicaInfo],
+        k: u16,
+    ) -> Vec<ReplicaAssignment> {
+        let mut assignments: Vec<Vec<usize>> = vec![Vec::new(); replicas.len()];
+        let mut assigned_counts = vec![0_u64; replicas.len()];
+
+        for (symbol_idx, _) in symbols.iter().enumerate() {
+            let mut best_idx = 0usize;
+            let mut best_projected_total =
+                u64::from(replicas[best_idx].symbol_count) + assigned_counts[best_idx];
+            for candidate_idx in 1..replicas.len() {
+                let candidate_projected_total = u64::from(replicas[candidate_idx].symbol_count)
+                    + assigned_counts[candidate_idx];
+
+                if candidate_projected_total < best_projected_total
+                    || (candidate_projected_total == best_projected_total
+                        && (assigned_counts[candidate_idx] < assigned_counts[best_idx]
+                            || (assigned_counts[candidate_idx] == assigned_counts[best_idx]
+                                && candidate_idx < best_idx)))
+                {
+                    best_idx = candidate_idx;
+                    best_projected_total = candidate_projected_total;
+                }
+            }
+
+            assignments[best_idx].push(symbol_idx);
+            assigned_counts[best_idx] += 1;
+        }
+
+        replicas
+            .iter()
+            .enumerate()
+            .map(|(replica_idx, replica)| {
+                let indices = &assignments[replica_idx];
+                ReplicaAssignment {
+                    replica_id: replica.id.clone(),
+                    symbol_indices: indices.clone(),
+                    can_decode: indices.len() >= k as usize,
+                }
+            })
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +227,18 @@ mod tests {
     fn create_test_replicas(count: usize) -> Vec<ReplicaInfo> {
         (0..count)
             .map(|i| ReplicaInfo::new(&format!("r{i}"), &format!("addr{i}")))
+            .collect()
+    }
+
+    fn create_test_replicas_with_symbol_counts(symbol_counts: &[u32]) -> Vec<ReplicaInfo> {
+        symbol_counts
+            .iter()
+            .enumerate()
+            .map(|(i, &symbol_count)| {
+                let mut replica = ReplicaInfo::new(&format!("r{i}"), &format!("addr{i}"));
+                replica.symbol_count = symbol_count;
+                replica
+            })
             .collect()
     }
 
@@ -277,17 +336,74 @@ mod tests {
     }
 
     #[test]
-    fn weighted_defaults_to_full() {
+    fn weighted_prefers_less_loaded_replicas() {
         let assigner = SymbolAssigner::new(AssignmentStrategy::Weighted);
-        let symbols = create_test_symbols(5);
-        let replicas = create_test_replicas(2);
+        let symbols = create_test_symbols(18);
+        let replicas = create_test_replicas_with_symbol_counts(&[0, 4, 9]);
 
         let assignments = assigner.assign(&symbols, &replicas, 3);
 
-        assert_eq!(assignments.len(), 2);
-        for assignment in &assignments {
-            assert_eq!(assignment.symbol_indices.len(), 5);
-        }
+        let counts: Vec<_> = assignments
+            .iter()
+            .map(|assignment| assignment.symbol_indices.len())
+            .collect();
+        assert_eq!(counts.iter().sum::<usize>(), symbols.len());
+        assert!(
+            counts[0] > counts[1],
+            "lighter replica should get more symbols"
+        );
+        assert!(
+            counts[1] > counts[2],
+            "heaviest replica should get the fewest symbols"
+        );
+
+        let mut all_indices: Vec<_> = assignments
+            .iter()
+            .flat_map(|assignment| assignment.symbol_indices.iter().copied())
+            .collect();
+        all_indices.sort_unstable();
+        all_indices.dedup();
+        assert_eq!(
+            all_indices.len(),
+            symbols.len(),
+            "weighted assignment must not duplicate symbols"
+        );
+    }
+
+    #[test]
+    fn weighted_equal_loads_balance_like_striping() {
+        let assigner = SymbolAssigner::new(AssignmentStrategy::Weighted);
+        let symbols = create_test_symbols(10);
+        let replicas = create_test_replicas_with_symbol_counts(&[2, 2, 2]);
+
+        let assignments = assigner.assign(&symbols, &replicas, 3);
+
+        let counts: Vec<_> = assignments
+            .iter()
+            .map(|assignment| assignment.symbol_indices.len())
+            .collect();
+        let min = counts.iter().copied().min().unwrap_or(0);
+        let max = counts.iter().copied().max().unwrap_or(0);
+        assert_eq!(counts.iter().sum::<usize>(), symbols.len());
+        assert!(
+            max - min <= 1,
+            "equal loads should distribute nearly evenly, got {counts:?}"
+        );
+    }
+
+    #[test]
+    fn weighted_avoids_heavier_replica_until_projected_loads_match() {
+        let assigner = SymbolAssigner::new(AssignmentStrategy::Weighted);
+        let symbols = create_test_symbols(2);
+        let replicas = create_test_replicas_with_symbol_counts(&[0, 100]);
+
+        let assignments = assigner.assign(&symbols, &replicas, 1);
+        let counts: Vec<_> = assignments
+            .iter()
+            .map(|assignment| assignment.symbol_indices.len())
+            .collect();
+
+        assert_eq!(counts, vec![2, 0]);
     }
 
     // ========== Edge case tests (bd-3k9o) ==========

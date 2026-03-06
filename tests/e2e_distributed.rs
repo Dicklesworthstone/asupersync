@@ -282,6 +282,7 @@ fn e2e_full_encode_distribute_recover_pipeline() {
         AssignmentStrategy::Full,
         AssignmentStrategy::Striped,
         AssignmentStrategy::MinimumK,
+        AssignmentStrategy::Weighted,
     ] {
         test_section!(&format!("Strategy: {strategy:?}"));
         let assigner = SymbolAssigner::new(strategy);
@@ -322,7 +323,10 @@ fn e2e_full_encode_distribute_recover_pipeline() {
                     );
                 }
             }
-            AssignmentStrategy::Weighted => {}
+            AssignmentStrategy::Weighted => {
+                let total: usize = assignments.iter().map(|a| a.symbol_indices.len()).sum();
+                assert_eq!(total, encoded_state.symbols.len());
+            }
         }
     }
 
