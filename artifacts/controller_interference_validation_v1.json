@@ -1,0 +1,146 @@
+{
+  "contract_version": "controller-interference-validation-v1",
+  "bead_id": "asupersync-1508v.3.6",
+  "description": "AA-03.3 interference, timescale separation, and tail-SLO fallback gate validation for multi-controller runtime.",
+  "runner_script": "scripts/run_controller_interference_validation_smoke.sh",
+  "runner_bundle_schema_version": "controller-interference-validation-smoke-bundle-v1",
+  "runner_report_schema_version": "controller-interference-validation-smoke-run-report-v1",
+  "interference_model": {
+    "description": "Controllers targeting overlapping seams may create feedback loops. Interference is detected by monitoring decision oscillation across paired controllers.",
+    "overlap_pairs": [
+      {
+        "pair_id": "SCHED-ADMIT",
+        "controller_a": "SCHED-GOVERNOR",
+        "controller_b": "ADMISSION-GATE",
+        "shared_observable": "ready_queue_len",
+        "feedback_risk": "SCHED parks worker -> capacity drop -> ADMISSION tightens -> throughput drop -> SCHED wakes worker",
+        "detection_method": "decision_oscillation_count",
+        "oscillation_threshold": 4,
+        "window_epochs": 8
+      },
+      {
+        "pair_id": "SCHED-RETRY",
+        "controller_a": "SCHED-GOVERNOR",
+        "controller_b": "RETRY-BACKOFF",
+        "shared_observable": "active_timers",
+        "feedback_risk": "RETRY steepens backoff -> timer count drops -> SCHED parks idle worker -> retry completes -> burst of ready tasks",
+        "detection_method": "decision_oscillation_count",
+        "oscillation_threshold": 4,
+        "window_epochs": 8
+      },
+      {
+        "pair_id": "ADMIT-RETRY",
+        "controller_a": "ADMISSION-GATE",
+        "controller_b": "RETRY-BACKOFF",
+        "shared_observable": "outstanding_obligations",
+        "feedback_risk": "ADMISSION tightens -> retries queue up -> RETRY flattens backoff -> burst of tasks -> ADMISSION tightens further",
+        "detection_method": "decision_oscillation_count",
+        "oscillation_threshold": 4,
+        "window_epochs": 8
+      }
+    ]
+  },
+  "timescale_separation": {
+    "description": "Controllers must operate at distinct timescales to prevent oscillation. Faster controllers must have strictly shorter epoch intervals than slower ones.",
+    "tiers": [
+      {
+        "tier_id": "FAST",
+        "epoch_multiplier": 1,
+        "controllers": ["SCHED-GOVERNOR"],
+        "rationale": "Scheduler decisions must respond within a single epoch for latency control."
+      },
+      {
+        "tier_id": "MEDIUM",
+        "epoch_multiplier": 4,
+        "controllers": ["ADMISSION-GATE"],
+        "rationale": "Admission changes need multiple epochs to observe steady-state impact."
+      },
+      {
+        "tier_id": "SLOW",
+        "epoch_multiplier": 8,
+        "controllers": ["RETRY-BACKOFF"],
+        "rationale": "Retry tuning must observe full retry cycles before adjusting."
+      }
+    ],
+    "separation_invariant": "For tiers i < j, tier_j.epoch_multiplier > tier_i.epoch_multiplier",
+    "minimum_ratio": 2
+  },
+  "tail_slo_fallback": {
+    "description": "When tail latency exceeds the SLO threshold, all non-conservative controllers must fall back within the fallback_deadline_epochs.",
+    "slo_fields": [
+      {
+        "field_id": "P99-TASK-LATENCY",
+        "snapshot_field": "ready_queue_len",
+        "threshold_description": "p99 task scheduling latency above target",
+        "breach_action": "fallback_all_non_shadow"
+      },
+      {
+        "field_id": "OBLIGATION-LEAK",
+        "snapshot_field": "obligation_leak_count",
+        "threshold_description": "cumulative obligation leaks exceed zero",
+        "breach_action": "fallback_all_non_shadow"
+      }
+    ],
+    "fallback_deadline_epochs": 2,
+    "recovery_protocol": [
+      "1. All non-Shadow controllers rolled back to Shadow",
+      "2. Fallback flag set on each rolled-back controller",
+      "3. Conservative comparator values take effect immediately",
+      "4. Recovery requires re-calibration and fresh promotion pipeline",
+      "5. Fallback flag cleared only after calibration score exceeds threshold"
+    ]
+  },
+  "sequential_validity": {
+    "description": "Multi-controller decisions within one epoch must be applied sequentially, not concurrently. Each controller sees the state after the previous controller's decision.",
+    "ordering_rule": "Controllers are applied in registration order (by ControllerId). A controller's decision is recorded before the next controller observes.",
+    "drift_alarm": {
+      "description": "If a controller's decision would be different under the pre-decision snapshot vs post-decision snapshot of the previous controller, a drift alarm is raised.",
+      "max_drift_events_per_epoch": 2,
+      "alarm_action": "log_structured_warning"
+    }
+  },
+  "structured_log_fields_required": [
+    "interference_pair_id",
+    "oscillation_count",
+    "oscillation_detected",
+    "timescale_tier",
+    "epoch_multiplier",
+    "slo_field_id",
+    "slo_breached",
+    "fallback_deadline_remaining",
+    "sequential_order",
+    "drift_detected",
+    "controller_a_id",
+    "controller_b_id",
+    "window_start_epoch",
+    "window_end_epoch"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "CIV-SMOKE-INTERFERENCE",
+      "description": "Validate interference detection across controller pairs",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa033 cargo test --test controller_interference_validation_contract interference -- --nocapture"
+    },
+    {
+      "scenario_id": "CIV-SMOKE-TIMESCALE",
+      "description": "Validate timescale separation invariants",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa033 cargo test --test controller_interference_validation_contract timescale -- --nocapture"
+    },
+    {
+      "scenario_id": "CIV-SMOKE-FALLBACK",
+      "description": "Validate tail-SLO fallback gates and recovery",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa033 cargo test --test controller_interference_validation_contract fallback -- --nocapture"
+    },
+    {
+      "scenario_id": "CIV-SMOKE-SEQUENTIAL",
+      "description": "Validate sequential decision ordering and drift alarms",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa033 cargo test --test controller_interference_validation_contract sequential -- --nocapture"
+    }
+  ],
+  "downstream_beads": [
+    "asupersync-1508v.10.7",
+    "asupersync-1508v.10.5",
+    "asupersync-1508v.4.6",
+    "asupersync-1508v.8.6"
+  ]
+}
