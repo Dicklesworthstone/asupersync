@@ -1181,6 +1181,77 @@ What to verify in lab tests:
 - restart policy behavior is deterministic for same seed
 - monitor/down ordering is replay-stable
 
+### Session-Typed Obligations
+
+The opt-in session-typed obligation surface lives in
+`src/obligation/session_types.rs`. The code now publishes a rollout contract via
+`session_protocol_adoption_specs()` so the typed API and the legacy
+runtime-checked API stay unambiguous during adoption.
+
+First-wave protocol families:
+
+- `send_permit`: adopt first on explicit reserve/send-or-abort paths that
+  already resolve a `SendPermit` through the obligation ledger.
+- `lease`: adopt first on lease-backed naming/resource lifecycles with a single
+  obvious holder and an explicit release path.
+- `two_phase`: adopt first on reserve/commit-or-abort effect APIs where the
+  fallback remains `ObligationLedger::{commit, abort}`.
+
+Each adoption spec documents:
+
+1. Canonical states and transitions for migration review.
+2. Compile-time guarantees from typestate linearity.
+3. Runtime oracle complements that remain authoritative during rollout.
+4. Existing plus planned migration/compile-fail test surfaces.
+5. Stable diagnostics fields required to debug typed-protocol adoption.
+
+Current runtime-oracle complements:
+
+- `src/obligation/ledger.rs`
+- `src/obligation/marking.rs`
+- `src/obligation/no_leak_proof.rs`
+- `src/obligation/no_aliasing_proof.rs`
+- `src/obligation/dialectica.rs`
+- `src/obligation/separation_logic.rs`
+- `src/cx/registry.rs`
+
+Adoption rule:
+
+- Use the typed surface where the protocol boundary is already explicit.
+- Keep the legacy dynamic surface as the fallback and audit/reference oracle.
+- Do not start with open-ended adapter layers or flows that rely on implicit
+  cleanup by `Drop`.
+
+### Restricted Static Leak Checker Pilot
+
+The restricted AA-05.2 static-analysis pilot lives in
+`src/obligation/leak_check.rs`. It does not attempt whole-Rust analysis.
+Instead, it makes the structured-IR boundary explicit with
+`static_leak_check_contract()` and returns a conservative graded-budget summary
+through `CheckResult::graded_budget`.
+
+What the pilot now guarantees on its covered surface:
+
+- deterministic machine-readable diagnostic codes for CI/logging
+- stable structured-IR locations for instruction and scope-exit findings
+- remediation hints paired with each diagnostic class
+- conservative peak outstanding-obligation counts on the same `Body` IR
+
+What remains intentionally out of scope:
+
+- loops/recursion without explicit IR unrolling
+- interprocedural aliasing or ownership transfer not represented in `Body`
+- ambient `Drop` cleanup or runtime side effects outside the IR
+- Rust-source parsing, macro expansion, and dynamic dispatch analysis
+
+Interpretation rule:
+
+- A clean result means the supplied structured IR is balanced.
+- It does not replace runtime enforcement for uncovered patterns.
+- `src/obligation/ledger.rs`, `src/obligation/marking.rs`,
+  `src/obligation/no_leak_proof.rs`, and `src/obligation/graded.rs`
+  remain the authoritative runtime/oracle surfaces.
+
 Primary references:
 - `docs/spork_glossary_invariants.md`
 - `docs/spork_deterministic_ordering.md`

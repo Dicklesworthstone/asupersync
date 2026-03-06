@@ -25,6 +25,44 @@ asupersync doctor logging-contract
 - Additive field extensions are allowed inside `v1`.
 - Semantic changes to required fields, formatting rules, or outcome semantics require a version bump.
 
+## Tail-Latency Taxonomy Companion Contract
+
+AA-01.1 adds a code-backed companion contract on the runtime observability
+surface in `src/observability/diagnostics.rs`:
+
+- `contract_version`: `runtime-tail-latency-taxonomy-v1`
+- canonical equation:
+  `tail_latency_ns = queueing_ns + service_ns + io_or_network_ns + retries_ns + synchronization_ns + allocator_or_cache_ns + unknown_ns`
+- direct-duration fields use `ns`
+- always-on proxy fields stay under the `tail.*` namespace
+- `tail.unknown.unmeasured_ns` is mandatory whenever attribution is incomplete
+
+This contract standardizes both direct-duration buckets and the compact
+always-on proxy vocabulary that runtime/test emitters can produce before
+full replay/forensics enrichment is available. Any producer that cannot yet be
+isolated must remain visible in the explicit unknown bucket instead of
+silently disappearing.
+
+Current producer anchors:
+
+| Term | Unit | Current anchors |
+|------|------|-----------------|
+| `queueing` | `count` proxy + `ns` direct duration | `src/obligation/lyapunov.rs::StateSnapshot.ready_queue_depth`; `src/obligation/lyapunov.rs::StateSnapshot.draining_regions`; `src/combinator/bulkhead.rs::BulkheadMetrics::queue_depth`; `src/sync/pool.rs::PoolStats::waiters` |
+| `service` | `count`/quota proxies + `ns` direct duration | `src/runtime/state.rs::TaskSnapshot::poll_count`; `src/observability/resource_accounting.rs::ResourceAccountingSnapshot::poll_quota_consumed`; `src/observability/resource_accounting.rs::ResourceAccountingSnapshot::cost_quota_consumed` |
+| `io_or_network` | `count` proxy + `ns` direct duration | `src/runtime/io_driver.rs::IoStats::events_received`; `src/runtime/io_driver.rs::IoStats::polls`; `src/runtime/io_driver.rs::IoStats::wakers_dispatched` |
+| `retries` | `ns` direct duration + count proxy | `src/combinator/retry.rs::RetryState::total_delay`; `src/combinator/rate_limit.rs::RateLimitMetrics::total_wait_time`; `src/combinator/circuit_breaker.rs::CircuitBreakerMetrics::total_rejected` |
+| `synchronization` | `ns` direct duration + count proxy | `src/sync/contended_mutex.rs::LockMetricsSnapshot::wait_ns`; `src/sync/contended_mutex.rs::LockMetricsSnapshot::hold_ns`; `src/sync/pool.rs::PoolStats::total_wait_time`; `src/observability/resource_accounting.rs::ResourceAccountingSnapshot::obligations_pending` |
+| `allocator_or_cache` | `count`/bytes proxies + `ns` direct duration | `src/runtime/region_heap.rs::HeapStats::live`; `src/runtime/region_heap.rs::HeapStats::bytes_live`; `src/observability/resource_accounting.rs::ResourceAccountingSnapshot::heap_bytes_peak` |
+| `unknown` | `ns` | contract-level residual in `src/observability/diagnostics.rs::tail_latency_taxonomy_contract` via `tail.unknown.unmeasured_ns` |
+
+Validation expectations:
+
+1. `required_log_fields` stay unique and under the `tail.*` namespace.
+2. `terms` stay in canonical equation order and preserve the `unknown` bucket.
+3. Every non-unknown term defines at least one concrete producer signal.
+4. Every signal points at an existing producer file in the repository.
+5. Unknown contribution stays explicit instead of collapsing to zero-by-omission.
+
 ## Output Schema
 
 ```json
