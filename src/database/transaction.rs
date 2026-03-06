@@ -42,6 +42,7 @@
 //! [`MySqlTransaction`]: super::MySqlTransaction
 
 use crate::cx::Cx;
+use crate::time::{sleep, wall_now};
 use crate::types::Outcome;
 use std::future::Future;
 use std::time::Duration;
@@ -193,11 +194,9 @@ mod pg {
                     attempt += 1;
                     let delay = policy.delay_for(attempt.saturating_sub(1));
                     if !delay.is_zero() {
+                        sleep(wall_now(), delay).await;
+                    } else {
                         crate::runtime::yield_now().await;
-                        // Note: we yield rather than sleep since we don't have
-                        // a timer wheel dependency here. The delay_for value
-                        // is advisory for callers who want to add their own
-                        // backoff logic on top.
                     }
                     continue;
                 }
@@ -416,6 +415,8 @@ mod sqlite {
                     attempt += 1;
                     let delay = policy.delay_for(attempt.saturating_sub(1));
                     if !delay.is_zero() {
+                        sleep(wall_now(), delay).await;
+                    } else {
                         crate::runtime::yield_now().await;
                     }
                     continue;
@@ -587,6 +588,8 @@ mod mysql {
                     attempt += 1;
                     let delay = policy.delay_for(attempt.saturating_sub(1));
                     if !delay.is_zero() {
+                        sleep(wall_now(), delay).await;
+                    } else {
                         crate::runtime::yield_now().await;
                     }
                     continue;
