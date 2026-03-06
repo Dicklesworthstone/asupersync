@@ -251,6 +251,8 @@ pub enum DbPoolError<E: std::error::Error> {
     Full,
     /// Connection timed out.
     Timeout,
+    /// The operation was cancelled via `Cx`.
+    Cancelled,
     /// Connection creation failed.
     Connect(E),
     /// Connection validation failed.
@@ -263,6 +265,7 @@ impl<E: std::error::Error> fmt::Display for DbPoolError<E> {
             Self::Closed => write!(f, "pool closed"),
             Self::Full => write!(f, "pool at capacity"),
             Self::Timeout => write!(f, "connection acquisition timed out"),
+            Self::Cancelled => write!(f, "operation cancelled"),
             Self::Connect(e) => write!(f, "connection failed: {e}"),
             Self::ValidationFailed => write!(f, "connection validation failed"),
         }
@@ -819,7 +822,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
     ) -> Result<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
         loop {
             if cx.is_cancel_requested() {
-                return Err(DbPoolError::Timeout);
+                return Err(DbPoolError::Cancelled);
             }
 
             let candidate = {
@@ -886,7 +889,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 Outcome::Cancelled(_) | Outcome::Panicked(_) => {
                     let mut inner = self.inner.lock();
                     inner.total = inner.total.saturating_sub(1);
-                    return Err(DbPoolError::Timeout);
+                    return Err(DbPoolError::Cancelled);
                 }
             }
         }
@@ -898,11 +901,10 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         created_at: Instant,
     ) -> Result<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
         {
-            let inner = self.inner.lock();
+            let mut inner = self.inner.lock();
             if inner.closed {
+                inner.total = inner.total.saturating_sub(1);
                 drop(inner);
-                let mut inner2 = self.inner.lock();
-                inner2.total = inner2.total.saturating_sub(1);
                 self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
                 self.manager.disconnect(conn);
                 return Err(DbPoolError::Closed);
