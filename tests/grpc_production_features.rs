@@ -323,12 +323,12 @@ fn health_watcher_detects_status_change() {
 
     // No change yet since construction
     assert!(!watcher.changed());
-    assert_eq!(watcher.status(), Some(ServingStatus::Serving));
+    assert_eq!(watcher.status(), ServingStatus::Serving);
 
     // Trigger a change
     health.set_status("svc", ServingStatus::NotServing);
     assert!(watcher.changed());
-    assert_eq!(watcher.status(), Some(ServingStatus::NotServing));
+    assert_eq!(watcher.status(), ServingStatus::NotServing);
 
     // No further change
     assert!(!watcher.changed());
@@ -342,7 +342,7 @@ fn health_watcher_detects_clear() {
 
     health.clear_status("svc");
     assert!(watcher.changed());
-    assert_eq!(watcher.status(), None);
+    assert_eq!(watcher.status(), ServingStatus::ServiceUnknown);
 }
 
 #[test]
@@ -354,7 +354,7 @@ fn health_watcher_detects_clear_all() {
 
     health.clear();
     assert!(watcher.changed());
-    assert_eq!(watcher.status(), None);
+    assert_eq!(watcher.status(), ServingStatus::ServiceUnknown);
 }
 
 #[test]
@@ -364,12 +364,12 @@ fn health_watcher_poll_status() {
 
     let (changed, status) = watcher.poll_status();
     assert!(!changed);
-    assert_eq!(status, None);
+    assert_eq!(status, ServingStatus::ServiceUnknown);
 
     health.set_status("svc", ServingStatus::Serving);
     let (changed, status) = watcher.poll_status();
     assert!(changed);
-    assert_eq!(status, Some(ServingStatus::Serving));
+    assert_eq!(status, ServingStatus::Serving);
 }
 
 #[test]
@@ -402,8 +402,8 @@ fn health_watcher_multiple_watchers_independent() {
     assert!(!watcher_b.changed());
 
     // But status differs
-    assert_eq!(watcher_a.status(), Some(ServingStatus::NotServing));
-    assert_eq!(watcher_b.status(), Some(ServingStatus::Serving));
+    assert_eq!(watcher_a.status(), ServingStatus::NotServing);
+    assert_eq!(watcher_b.status(), ServingStatus::Serving);
 }
 
 // ===========================================================================

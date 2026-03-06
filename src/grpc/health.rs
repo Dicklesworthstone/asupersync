@@ -220,13 +220,13 @@ impl HealthService {
         statuses.keys().cloned().collect()
     }
 
-    fn watched_status(&self, service: &str) -> Option<ServingStatus> {
+    fn watched_status(&self, service: &str) -> ServingStatus {
         if service.is_empty() {
             self.check(&HealthCheckRequest::server())
-                .ok()
-                .map(|response| response.status)
+                .map_or(ServingStatus::ServiceUnknown, |response| response.status)
         } else {
             self.get_status(service)
+                .unwrap_or(ServingStatus::ServiceUnknown)
         }
     }
 
@@ -303,7 +303,7 @@ impl Default for HealthService {
 pub struct HealthWatcher {
     service: HealthService,
     service_name: String,
-    last_status: Option<ServingStatus>,
+    last_status: ServingStatus,
 }
 
 impl HealthWatcher {
@@ -318,16 +318,20 @@ impl HealthWatcher {
     }
 
     /// Returns the current status for the watched service.
+    ///
+    /// Unregistered named services report [`ServingStatus::ServiceUnknown`],
+    /// matching the gRPC health `Watch` contract.
     #[must_use]
-    pub fn status(&self) -> Option<ServingStatus> {
+    pub fn status(&self) -> ServingStatus {
         self.service.watched_status(&self.service_name)
     }
 
-    /// Returns a snapshot: `(changed, current_status)`.
-    pub fn poll_status(&mut self) -> (bool, Option<ServingStatus>) {
-        let changed = self.changed();
-        let status = self.status();
-        (changed, status)
+    /// Returns a single-read snapshot: `(changed, current_status)`.
+    pub fn poll_status(&mut self) -> (bool, ServingStatus) {
+        let current_status = self.service.watched_status(&self.service_name);
+        let changed = current_status != self.last_status;
+        self.last_status = current_status;
+        (changed, current_status)
     }
 }
 
@@ -719,12 +723,45 @@ mod tests {
             changed_b
         );
         crate::assert_with_log!(
-            watcher_b.status() == Some(ServingStatus::Serving),
+            watcher_b.status() == ServingStatus::Serving,
             "watcher b status unchanged",
-            Some(ServingStatus::Serving),
+            ServingStatus::Serving,
             watcher_b.status()
         );
         crate::test_complete!("health_watcher_ignores_unrelated_service_changes");
+    }
+
+    #[test]
+    fn health_watcher_unknown_service_reports_service_unknown() {
+        init_test("health_watcher_unknown_service_reports_service_unknown");
+        let service = HealthService::new();
+        let mut watcher = service.watch("missing");
+
+        crate::assert_with_log!(
+            watcher.status() == ServingStatus::ServiceUnknown,
+            "unknown service reports watch sentinel",
+            ServingStatus::ServiceUnknown,
+            watcher.status()
+        );
+        let (changed, status) = watcher.poll_status();
+        crate::assert_with_log!(!changed, "initial unknown poll is stable", false, changed);
+        crate::assert_with_log!(
+            status == ServingStatus::ServiceUnknown,
+            "poll_status reports service unknown",
+            ServingStatus::ServiceUnknown,
+            status
+        );
+
+        service.set_status("missing", ServingStatus::Serving);
+        let (changed, status) = watcher.poll_status();
+        crate::assert_with_log!(changed, "registration is observed", true, changed);
+        crate::assert_with_log!(
+            status == ServingStatus::Serving,
+            "watcher sees serving after registration",
+            ServingStatus::Serving,
+            status
+        );
+        crate::test_complete!("health_watcher_unknown_service_reports_service_unknown");
     }
 
     #[test]

@@ -581,14 +581,14 @@ fn t59_ref_17_health_watcher_detects_transitions() {
     test_section!("initial_poll_no_change");
     // First poll after creation should reflect current state
     let status = watcher.status();
-    assert_eq!(status, Some(ServingStatus::Serving));
+    assert_eq!(status, ServingStatus::Serving);
 
     test_section!("detect_transition_to_not_serving");
     health.set_status("svc", ServingStatus::NotServing);
     // poll_status calls changed() internally and returns (changed, status)
     let (changed, status) = watcher.poll_status();
     assert!(changed, "watcher detects status change");
-    assert_eq!(status, Some(ServingStatus::NotServing));
+    assert_eq!(status, ServingStatus::NotServing);
 
     test_section!("no_change_on_repeat_poll");
     let (changed, _) = watcher.poll_status();
