@@ -146,7 +146,7 @@ use crate::runtime::deadline_monitor::{
 };
 use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::reactor::Reactor;
-use crate::runtime::scheduler::ThreeLaneScheduler;
+use crate::runtime::scheduler::{ThreeLaneScheduler, ThreeLaneWorker};
 use crate::time::TimerDriverHandle;
 use crate::trace::distributed::LogicalClockMode;
 use crate::types::{Budget, CancelAttributionConfig};
@@ -937,15 +937,18 @@ impl Runtime {
         entropy_source: Option<Arc<dyn EntropySource>>,
     ) -> Result<Self, Error> {
         config.normalize();
-        Ok(Self {
-            inner: Arc::new(
-                RuntimeInner::new(config, reactor, io_driver, timer_driver, entropy_source)
-                    .map_err(|e| {
-                        Error::new(crate::error::ErrorKind::Internal)
-                            .with_message(format!("runtime init: {e}"))
-                    })?,
-            ),
-        })
+        let (inner, workers) =
+            RuntimeInner::new(config, reactor, io_driver, timer_driver, entropy_source).map_err(
+                |e| {
+                    Error::new(crate::error::ErrorKind::Internal)
+                        .with_message(format!("runtime init: {e}"))
+                },
+            )?;
+        let inner = Arc::new(inner);
+        RuntimeInner::spawn_worker_threads(&inner, workers).map_err(|e| {
+            Error::new(crate::error::ErrorKind::Internal).with_message(format!("runtime init: {e}"))
+        })?;
+        Ok(Self { inner })
     }
 
     /// Returns a handle that can spawn tasks from outside the runtime.
@@ -963,15 +966,8 @@ impl Runtime {
     /// `block_on` to spawn tasks onto the real scheduler without having to
     /// thread the handle through every layer.
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
-        if let Some(callback) = self.inner.config.on_thread_start.as_ref() {
-            callback();
-        }
         let _guard = ScopedRuntimeHandle::new(self.handle());
-        let output = run_future_with_budget(future, self.inner.config.poll_budget);
-        if let Some(callback) = self.inner.config.on_thread_stop.as_ref() {
-            callback();
-        }
-        output
+        run_future_with_budget(future, self.inner.config.poll_budget)
     }
 
     /// Returns a handle to the current runtime, if called from within
@@ -1224,29 +1220,29 @@ impl RuntimeInner {
         root
     }
 
-    fn spawn_worker_threads(
-        config: &RuntimeConfig,
-        scheduler: &mut ThreeLaneScheduler,
-    ) -> io::Result<Vec<std::thread::JoinHandle<()>>> {
-        let mut worker_threads = Vec::new();
-        if config.worker_threads == 0 {
-            return Ok(worker_threads);
+    fn spawn_worker_threads(runtime: &Arc<Self>, workers: Vec<ThreeLaneWorker>) -> io::Result<()> {
+        let mut worker_threads: Vec<std::thread::JoinHandle<()>> = Vec::new();
+        if runtime.config.worker_threads == 0 {
+            return Ok(());
         }
 
-        let workers = scheduler.take_workers();
         for worker in workers {
             let name = {
                 let id = worker.id;
-                format!("{}-{id}", config.thread_name_prefix)
+                format!("{}-{id}", runtime.config.thread_name_prefix)
             };
-            let on_start = config.on_thread_start.clone();
-            let on_stop = config.on_thread_stop.clone();
+            let runtime_handle = RuntimeHandle {
+                inner: Arc::clone(runtime),
+            };
+            let on_start = runtime.config.on_thread_start.clone();
+            let on_stop = runtime.config.on_thread_stop.clone();
             let mut builder = std::thread::Builder::new().name(name);
-            if config.thread_stack_size > 0 {
-                builder = builder.stack_size(config.thread_stack_size);
+            if runtime.config.thread_stack_size > 0 {
+                builder = builder.stack_size(runtime.config.thread_stack_size);
             }
             let handle = builder
                 .spawn(move || {
+                    let _guard = ScopedRuntimeHandle::new(runtime_handle);
                     if let Some(callback) = on_start.as_ref() {
                         callback();
                     }
@@ -1259,7 +1255,7 @@ impl RuntimeInner {
                 .map_err(|e| {
                     // Signal already-running workers to exit their run loops,
                     // then join them so they don't leak.
-                    scheduler.shutdown();
+                    runtime.scheduler.shutdown();
                     while let Some(handle) = worker_threads.pop() {
                         let _ = handle.join();
                     }
@@ -1268,7 +1264,8 @@ impl RuntimeInner {
             worker_threads.push(handle);
         }
 
-        Ok(worker_threads)
+        *lock_state(&runtime.worker_threads) = worker_threads;
+        Ok(())
     }
 
     fn new(
@@ -1277,7 +1274,7 @@ impl RuntimeInner {
         io_driver: Option<IoDriverHandle>,
         timer_driver: Option<TimerDriverHandle>,
         entropy_source: Option<Arc<dyn EntropySource>>,
-    ) -> io::Result<Self> {
+    ) -> io::Result<(Self, Vec<ThreeLaneWorker>)> {
         // Runtime currently instantiates the unified RuntimeState path.
         // ShardedState exists behind migration work, but there is not yet a
         // RuntimeConfig layout switch wired here (see bd-2f7uj runbook).
@@ -1309,8 +1306,7 @@ impl RuntimeInner {
             config.enable_adaptive_cancel_streak,
             config.adaptive_cancel_streak_epoch_steps,
         );
-
-        let worker_threads = Self::spawn_worker_threads(&config, &mut scheduler)?;
+        let workers = scheduler.take_workers();
 
         let (deadline_monitor_shutdown, deadline_monitor_thread) =
             Self::start_deadline_monitor(&config, &state);
@@ -1323,16 +1319,19 @@ impl RuntimeInner {
             guard.set_blocking_pool(pool.handle());
         }
 
-        Ok(Self {
-            config,
-            state,
-            scheduler,
-            worker_threads: Mutex::new(worker_threads),
-            root_region,
-            blocking_pool,
-            deadline_monitor_shutdown,
-            deadline_monitor_thread,
-        })
+        Ok((
+            Self {
+                config,
+                state,
+                scheduler,
+                worker_threads: Mutex::new(Vec::new()),
+                root_region,
+                blocking_pool,
+                deadline_monitor_shutdown,
+                deadline_monitor_thread,
+            },
+            workers,
+        ))
     }
 
     /// Creates the blocking pool if configured with non-zero max threads.
@@ -1590,7 +1589,7 @@ mod tests {
     use crate::trace::{TraceEvent, TraceEventKind};
     use crate::types::{Budget, CancelReason, Time};
     use std::collections::HashSet;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     #[test]
@@ -2331,6 +2330,22 @@ worker_threads = 16
     }
 
     #[test]
+    fn current_handle_available_inside_spawned_task() {
+        init_test_logging();
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(2)
+            .build()
+            .expect("runtime build");
+
+        let outer = runtime.handle().spawn(async {
+            let handle = Runtime::current_handle().expect("spawned task should see runtime handle");
+            handle.spawn(async { 42u32 }).await
+        });
+
+        assert_eq!(runtime.block_on(outer), 42);
+    }
+
+    #[test]
     fn current_handle_restored_after_block_on() {
         init_test_logging();
         // Before block_on: None.
@@ -2347,5 +2362,41 @@ worker_threads = 16
 
         // After block_on: restored to None.
         assert!(Runtime::current_handle().is_none());
+    }
+
+    #[test]
+    fn thread_callbacks_do_not_fire_for_block_on_caller() {
+        init_test_logging();
+        let started = Arc::new(AtomicUsize::new(0));
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let started_for_callback = Arc::clone(&started);
+        let stopped_for_callback = Arc::clone(&stopped);
+
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .on_thread_start(move || {
+                started_for_callback.fetch_add(1, Ordering::SeqCst);
+            })
+            .on_thread_stop(move || {
+                stopped_for_callback.fetch_add(1, Ordering::SeqCst);
+            })
+            .build()
+            .expect("runtime build");
+
+        let join = runtime.handle().spawn(async { 7u8 });
+        assert_eq!(runtime.block_on(join), 7);
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            1,
+            "only the worker thread should trigger on_thread_start"
+        );
+
+        drop(runtime);
+
+        assert_eq!(
+            stopped.load(Ordering::SeqCst),
+            1,
+            "only the worker thread should trigger on_thread_stop"
+        );
     }
 }
