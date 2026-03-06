@@ -451,7 +451,7 @@ pub enum IsNull {
 ///     fn type_oid(&self) -> u32 { 0 } // let server infer
 /// }
 /// ```
-pub trait ToSql {
+pub trait ToSql: Sync {
     /// Encode this value into `buf`. Return [`IsNull::Yes`] for NULL
     /// (leaving `buf` unmodified).
     fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError>;
@@ -2289,10 +2289,6 @@ impl PgConnection {
             return Outcome::Err(PgError::ConnectionClosed);
         }
 
-        if let Err(e) = self.clear_orphaned_transaction().await {
-            return Outcome::Err(e);
-        }
-
         let param_oids: Vec<u32> = params.iter().map(|p| p.type_oid()).collect();
         let parse = match build_parse_msg("", sql, &param_oids) {
             Ok(p) => p,
@@ -2314,6 +2310,10 @@ impl PgConnection {
         combined.extend_from_slice(&describe);
         combined.extend_from_slice(&execute);
         combined.extend_from_slice(&sync);
+
+        if let Err(e) = self.clear_orphaned_transaction().await {
+            return Outcome::Err(e);
+        }
 
         if let Err(e) = self.write_all(&combined).await {
             return Outcome::Err(e);
@@ -2368,10 +2368,6 @@ impl PgConnection {
             return Outcome::Err(PgError::ConnectionClosed);
         }
 
-        if let Err(e) = self.clear_orphaned_transaction().await {
-            return Outcome::Err(e);
-        }
-
         let param_oids: Vec<u32> = params.iter().map(|p| p.type_oid()).collect();
         let parse = match build_parse_msg("", sql, &param_oids) {
             Ok(p) => p,
@@ -2390,6 +2386,10 @@ impl PgConnection {
         combined.extend_from_slice(&bind);
         combined.extend_from_slice(&execute);
         combined.extend_from_slice(&sync);
+
+        if let Err(e) = self.clear_orphaned_transaction().await {
+            return Outcome::Err(e);
+        }
 
         if let Err(e) = self.write_all(&combined).await {
             return Outcome::Err(e);
@@ -2517,10 +2517,6 @@ impl PgConnection {
             return Outcome::Err(PgError::ConnectionClosed);
         }
 
-        if let Err(e) = self.clear_orphaned_transaction().await {
-            return Outcome::Err(e);
-        }
-
         let bind = match build_bind_msg("", &stmt.name, params, Format::Text) {
             Ok(b) => b,
             Err(e) => return Outcome::Err(e),
@@ -2535,6 +2531,10 @@ impl PgConnection {
         combined.extend_from_slice(&describe);
         combined.extend_from_slice(&execute);
         combined.extend_from_slice(&sync);
+
+        if let Err(e) = self.clear_orphaned_transaction().await {
+            return Outcome::Err(e);
+        }
 
         if let Err(e) = self.write_all(&combined).await {
             return Outcome::Err(e);
@@ -2560,10 +2560,6 @@ impl PgConnection {
             return Outcome::Err(PgError::ConnectionClosed);
         }
 
-        if let Err(e) = self.clear_orphaned_transaction().await {
-            return Outcome::Err(e);
-        }
-
         let bind = match build_bind_msg("", &stmt.name, params, Format::Text) {
             Ok(b) => b,
             Err(e) => return Outcome::Err(e),
@@ -2576,6 +2572,10 @@ impl PgConnection {
         combined.extend_from_slice(&bind);
         combined.extend_from_slice(&execute);
         combined.extend_from_slice(&sync);
+
+        if let Err(e) = self.clear_orphaned_transaction().await {
+            return Outcome::Err(e);
+        }
 
         if let Err(e) = self.write_all(&combined).await {
             return Outcome::Err(e);

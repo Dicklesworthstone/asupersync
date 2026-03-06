@@ -13,7 +13,6 @@ mod common;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 mod tests {
     use super::*;
-    use crate::common::*;
 
     use asupersync::database::pool::{ConnectionManager, DbPool, DbPoolConfig, DbPoolError};
     use std::fmt;
@@ -358,7 +357,6 @@ mod tests {
     #[cfg(feature = "postgres")]
     mod pg_error_tests {
         use super::*;
-        use crate::common::*;
         use asupersync::database::PgError;
 
         fn init_test(name: &str) {

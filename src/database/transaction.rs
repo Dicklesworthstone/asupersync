@@ -42,7 +42,7 @@
 //! [`MySqlTransaction`]: super::MySqlTransaction
 
 use crate::cx::Cx;
-use crate::types::{CancelReason, Outcome};
+use crate::types::Outcome;
 use std::future::Future;
 use std::time::Duration;
 

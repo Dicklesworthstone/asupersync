@@ -487,22 +487,22 @@ impl<M: ConnectionManager> DbPool<M> {
 
     /// Return a connection to the pool, preserving its original creation time.
     fn return_connection(&self, conn: M::Connection, created_at: Instant) {
-        let is_closed = {
+        let conn_to_disconnect = {
             let mut inner = self.inner.lock();
             if inner.closed {
                 inner.total = inner.total.saturating_sub(1);
-                true
+                Some(conn)
             } else {
                 inner.idle.push_back(IdleConnection {
                     conn,
                     created_at,
                     last_used: Instant::now(),
                 });
-                false
+                None
             }
         };
 
-        if is_closed {
+        if let Some(conn) = conn_to_disconnect {
             self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
             self.manager.disconnect(conn);
         }
