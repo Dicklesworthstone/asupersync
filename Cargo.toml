@@ -2,6 +2,7 @@
 members = [
     ".",
     "asupersync-macros",
+    "asupersync-browser-core",
     "asupersync-tokio-compat",
     "conformance",
     "franken_kernel",
