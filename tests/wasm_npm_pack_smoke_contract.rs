@@ -446,6 +446,173 @@ fn validate_script_exists() {
     );
 }
 
+#[test]
+fn vite_vanilla_consumer_fixture_exists() {
+    let fixture = repo_root().join("tests/fixtures/vite-vanilla-consumer");
+    assert!(
+        fixture.exists(),
+        "Vite consumer fixture directory must exist"
+    );
+
+    for rel in [
+        "package.json",
+        "index.html",
+        "vite.config.ts",
+        "src/main.ts",
+        "scripts/check-bundle.mjs",
+    ] {
+        let path = fixture.join(rel);
+        assert!(path.exists(), "missing fixture file: {}", path.display());
+    }
+}
+
+#[test]
+fn vite_vanilla_fixture_depends_on_browser_package() {
+    let path = repo_root().join("tests/fixtures/vite-vanilla-consumer/package.json");
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
+    let v: serde_json::Value = serde_json::from_str(&content).expect("invalid fixture package");
+    let dep = v["dependencies"]["@asupersync/browser"]
+        .as_str()
+        .expect("fixture must depend on @asupersync/browser");
+    assert!(
+        dep.starts_with("file:"),
+        "fixture dependency should use local file path, got {dep}"
+    );
+}
+
+#[test]
+fn vite_vanilla_validation_script_exists_and_references_bundle_steps() {
+    let path = repo_root().join("scripts/validate_vite_vanilla_consumer.sh");
+    assert!(
+        path.exists(),
+        "validate_vite_vanilla_consumer.sh must exist"
+    );
+    let content = std::fs::read_to_string(&path).expect("failed to read validation script");
+    for needle in [
+        "tests/fixtures/vite-vanilla-consumer",
+        "npm install",
+        "npm run build",
+        "npm run check:bundle",
+        "asupersync-3qv04.6.1",
+    ] {
+        assert!(
+            content.contains(needle),
+            "validation script missing expected marker: {needle}"
+        );
+    }
+}
+
+#[test]
+fn webpack_consumer_fixture_exists() {
+    let fixture = repo_root().join("tests/fixtures/webpack-consumer");
+    assert!(
+        fixture.exists(),
+        "Webpack consumer fixture directory must exist"
+    );
+
+    for rel in [
+        "package.json",
+        "webpack.config.mjs",
+        "src/index.js",
+        "scripts/check-bundle.mjs",
+    ] {
+        let path = fixture.join(rel);
+        assert!(path.exists(), "missing fixture file: {}", path.display());
+    }
+}
+
+#[test]
+fn webpack_fixture_depends_on_browser_package() {
+    let path = repo_root().join("tests/fixtures/webpack-consumer/package.json");
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
+    let v: serde_json::Value = serde_json::from_str(&content).expect("invalid fixture package");
+    let dep = v["dependencies"]["@asupersync/browser"]
+        .as_str()
+        .expect("fixture must depend on @asupersync/browser");
+    assert!(
+        dep.starts_with("file:"),
+        "fixture dependency should use local file path, got {dep}"
+    );
+}
+
+#[test]
+fn webpack_validation_script_exists_and_references_bundle_steps() {
+    let path = repo_root().join("scripts/validate_webpack_consumer.sh");
+    assert!(path.exists(), "validate_webpack_consumer.sh must exist");
+    let content = std::fs::read_to_string(&path).expect("failed to read validation script");
+    for needle in [
+        "tests/fixtures/webpack-consumer",
+        "npm install",
+        "npm run build",
+        "npm run check:bundle",
+        "asupersync-3qv04.6.2",
+    ] {
+        assert!(
+            content.contains(needle),
+            "validation script missing expected marker: {needle}"
+        );
+    }
+}
+
+#[test]
+fn next_turbopack_consumer_fixture_exists() {
+    let fixture = repo_root().join("tests/fixtures/next-turbopack-consumer");
+    assert!(
+        fixture.exists(),
+        "Next/Turbopack consumer fixture directory must exist"
+    );
+
+    for rel in [
+        "package.json",
+        "next.config.mjs",
+        "app/layout.jsx",
+        "app/page.jsx",
+        "scripts/check-bundle.mjs",
+    ] {
+        let path = fixture.join(rel);
+        assert!(path.exists(), "missing fixture file: {}", path.display());
+    }
+}
+
+#[test]
+fn next_turbopack_fixture_depends_on_next_package() {
+    let path = repo_root().join("tests/fixtures/next-turbopack-consumer/package.json");
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
+    let v: serde_json::Value = serde_json::from_str(&content).expect("invalid fixture package");
+    let dep = v["dependencies"]["@asupersync/next"]
+        .as_str()
+        .expect("fixture must depend on @asupersync/next");
+    assert!(
+        dep.starts_with("file:"),
+        "fixture dependency should use local file path, got {dep}"
+    );
+}
+
+#[test]
+fn next_turbopack_validation_script_exists_and_references_bundle_steps() {
+    let path = repo_root().join("scripts/validate_next_turbopack_consumer.sh");
+    assert!(
+        path.exists(),
+        "validate_next_turbopack_consumer.sh must exist"
+    );
+    let content = std::fs::read_to_string(&path).expect("failed to read validation script");
+    for needle in [
+        "tests/fixtures/next-turbopack-consumer",
+        "npm install",
+        "npm run build",
+        "npm run check:bundle",
+        "asupersync-3qv04.6.3",
+    ] {
+        assert!(
+            content.contains(needle),
+            "validation script missing expected marker: {needle}"
+        );
+    }
+}
+
 // ── Version Consistency (consumer-facing) ────────────────────────────
 
 #[test]

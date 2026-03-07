@@ -132,6 +132,24 @@ fn validate_suite_summary_v3(summary: &Value) -> Vec<String> {
     errors
 }
 
+fn has_summary_schema_contract(script: &str) -> bool {
+    script.contains("\"schema_version\": \"e2e-suite-summary-v3\"")
+        || (script.contains("--arg schema_version \"e2e-suite-summary-v3\"")
+            && (script.contains("schema_version: $schema_version")
+                || script.contains("\"schema_version\": $schema_version")))
+}
+
+fn has_summary_field_contract(script: &str, field: &str) -> bool {
+    let quoted = format!("\"{field}\":");
+    let unquoted = format!("{field}: ${field}");
+    let arg = format!("--arg {field} ");
+    let argjson = format!("--argjson {field} ");
+    script.contains(&quoted)
+        || script.contains(&unquoted)
+        || script.contains(&arg)
+        || script.contains(&argjson)
+}
+
 #[test]
 fn suite_summary_v3_accepts_valid_payload() {
     let payload: Value = serde_json::from_str(
@@ -249,6 +267,7 @@ fn e2e_runner_scripts_emit_required_summary_contract_fields() {
         "scripts/test_combinators.sh",
         "scripts/test_cancel_attribution.sh",
         "scripts/test_scheduler_wakeup_e2e.sh",
+        "scripts/test_wasm_packaged_bootstrap_e2e.sh",
         "scripts/test_wasm_cross_framework_e2e.sh",
         "scripts/test_wasm_incident_forensics_e2e.sh",
         "scripts/test_doctor_remediation_verification_e2e.sh",
@@ -257,26 +276,33 @@ fn e2e_runner_scripts_emit_required_summary_contract_fields() {
         "scripts/run_phase6_e2e.sh",
     ];
 
-    let required_fragments = [
-        "\"schema_version\": \"e2e-suite-summary-v3\"",
-        "\"suite_id\":",
-        "\"scenario_id\":",
-        "\"seed\":",
-        "\"started_ts\":",
-        "\"ended_ts\":",
-        "\"status\":",
-        "\"repro_command\":",
-        "\"artifact_path\":",
+    let required_fields = [
+        "suite_id",
+        "scenario_id",
+        "seed",
+        "started_ts",
+        "ended_ts",
+        "status",
+        "repro_command",
     ];
 
     for script in scripts {
         let content = fs::read_to_string(script).expect("read e2e runner script");
-        for fragment in required_fragments {
+        assert!(
+            has_summary_schema_contract(&content),
+            "script '{script}' missing required summary schema contract for e2e-suite-summary-v3"
+        );
+        for field in required_fields {
             assert!(
-                content.contains(fragment),
-                "script '{script}' missing required summary fragment: {fragment}"
+                has_summary_field_contract(&content, field),
+                "script '{script}' missing required summary field contract: {field}"
             );
         }
+        assert!(
+            has_summary_field_contract(&content, "artifact_path")
+                || has_summary_field_contract(&content, "artifact_dir"),
+            "script '{script}' missing required artifact pointer contract (artifact_path or artifact_dir)"
+        );
     }
 }
 
@@ -296,6 +322,31 @@ fn wasm_cross_framework_runner_keeps_replay_corpus_and_delta_steps() {
         assert!(
             content.contains(token),
             "wasm cross-framework runner missing replay-delta contract token: {token}"
+        );
+    }
+}
+
+#[test]
+fn wasm_packaged_bootstrap_runner_emits_required_bundle_contract_tokens() {
+    let content = fs::read_to_string("scripts/test_wasm_packaged_bootstrap_e2e.sh")
+        .expect("read wasm packaged bootstrap e2e runner script");
+
+    for token in [
+        "e2e-wasm-packaged-bootstrap-load-reload",
+        "E2E-SUITE-WASM-PACKAGED-BOOTSTRAP",
+        "run-metadata.json",
+        "log.jsonl",
+        "steps.ndjson",
+        "wasm-e2e-run-metadata-v1",
+        "\"schema_version\": \"e2e-suite-summary-v3\"",
+        "packaged_module_load",
+        "bootstrap_to_runtime_ready",
+        "reload_remount_cycle",
+        "clean_shutdown",
+    ] {
+        assert!(
+            content.contains(token),
+            "wasm packaged bootstrap runner missing contract token: {token}"
         );
     }
 }

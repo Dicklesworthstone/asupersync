@@ -185,6 +185,38 @@ fn react_depends_on_browser() {
 }
 
 #[test]
+fn react_declares_peer_react_dependency() {
+    let v = read_pkg_json("react");
+    let dep = v["peerDependencies"]["react"]
+        .as_str()
+        .expect("react package must declare peer dependency on react");
+    assert!(
+        dep.starts_with(">="),
+        "react peer dependency should be a minimum semver range"
+    );
+}
+
+#[test]
+fn react_adapter_source_exposes_provider_and_hooks() {
+    let path = repo_root().join("packages/react/src/index.ts");
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
+    for marker in [
+        "export function ReactRuntimeProvider",
+        "export function useReactRuntimeContext",
+        "export function useReactRuntime",
+        "export function useReactRuntimeDiagnostics",
+        "export function useReactScope",
+        "StrictMode-safe init: stale bootstrap completions are ignored/closed.",
+    ] {
+        assert!(
+            content.contains(marker),
+            "react adapter source missing marker: {marker}"
+        );
+    }
+}
+
+#[test]
 fn next_depends_on_browser() {
     let v = read_pkg_json("next");
     let dep = v["dependencies"]["@asupersync/browser"]
@@ -525,7 +557,7 @@ fn policy_required_packages_match_actual_packages() {
 
     // Every required package must have a real package.json
     for pkg_name in &required {
-        let dir_name = pkg_name.split('/').last().unwrap();
+        let dir_name = pkg_name.split('/').next_back().unwrap();
         let pkg_path = repo_root()
             .join("packages")
             .join(dir_name)
@@ -559,7 +591,7 @@ fn no_undiscovered_packages_in_workspace() {
         .unwrap()
         .iter()
         .filter_map(|p| p.as_str())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
 
     let packages_dir = repo_root().join("packages");

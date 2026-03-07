@@ -413,6 +413,119 @@ fn next_src_index_pins_client_server_and_edge_runtime_guidance() {
     }
 }
 
+#[test]
+fn next_src_index_defines_client_bootstrap_adapter_surface() {
+    let content = read_source("packages/next/src/index.ts");
+    for marker in [
+        "export type NextBootstrapPhase",
+        "export type NextRenderEnvironment",
+        "export type NextNavigationType",
+        "export type NextBootstrapRecoveryAction",
+        "export interface NextBootstrapSnapshot",
+        "export interface NextBootstrapLogEvent",
+        "export interface NextClientBootstrapOptions",
+        "export function createNextBootstrapLogFields",
+        "export class NextClientBootstrapAdapter",
+        "async initializeRuntime()",
+        "async ensureRuntimeReady()",
+        "async hydrateAndInitialize()",
+        "export function createNextBootstrapAdapter",
+    ] {
+        assert!(
+            content.contains(marker),
+            "next src/index.ts must define bootstrap-adapter marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn next_src_index_pins_bootstrap_lifecycle_and_invalidation_markers() {
+    let content = read_source("packages/next/src/index.ts");
+    for marker in [
+        "\"server_rendered\"",
+        "\"hydrating\"",
+        "\"hydrated\"",
+        "\"runtime_ready\"",
+        "\"runtime_failed\"",
+        "\"soft_navigation\"",
+        "\"hard_navigation\"",
+        "\"popstate\"",
+        "\"reset_to_hydrating\"",
+        "\"retry_runtime_init\"",
+        "cache_revalidation_scope_reset",
+        "hard_navigation_scope_reset",
+        "hot_reload_scope_reset",
+        "scopeInvalidationCount",
+        "runtimeReinitRequiredCount",
+        "activeScopeGeneration",
+        "lastInvalidatedScopeGeneration",
+        "boundary_mode: \"client\"",
+        "cache_revalidation_count",
+        "scope_invalidation_count",
+        "runtime_reinit_required_count",
+        "active_scope_generation",
+        "last_invalidated_scope_generation",
+        "navigation_count",
+        "wasm_module_loaded",
+    ] {
+        assert!(
+            content.contains(marker),
+            "next src/index.ts must preserve lifecycle/invalidation marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn next_src_index_defines_server_bridge_adapter_surface() {
+    let content = read_source("packages/next/src/index.ts");
+    for marker in [
+        "export type NextBoundaryMode",
+        "export type NextRuntimeFallback",
+        "export type NextServerBridgeEnvironment",
+        "export type NextBridgeValue",
+        "export interface NextServerBridgeDiagnostics",
+        "export interface NextServerBridgeRequest",
+        "export interface NextServerBridgeResponse",
+        "export interface NextServerBridgeAdapterOptions",
+        "export function nextBoundaryModeForEnvironment",
+        "export function nextRuntimeFallbackForEnvironment",
+        "export function nextRuntimeFallbackReason",
+        "export function createNextServerBridgeDiagnostics",
+        "export function createNextBridgeLogFields",
+        "export class NextServerBridgeAdapter",
+        "export function createNextServerBridgeAdapter",
+    ] {
+        assert!(
+            content.contains(marker),
+            "next src/index.ts must define server-bridge marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn next_src_index_pins_server_bridge_policy_and_diagnostics_markers() {
+    let content = read_source("packages/next/src/index.ts");
+    for marker in [
+        "\"server_component\"",
+        "\"node_server\"",
+        "\"use_server_bridge\"",
+        "\"use_edge_bridge\"",
+        "\"explicit_status\"",
+        "runtime unavailable in server boundary: route through serialized node/server bridge",
+        "boundary_mode: diagnostics.boundaryMode",
+        "render_environment: diagnostics.renderEnvironment",
+        "runtime_fallback: diagnostics.runtimeFallback",
+        "repro_command: diagnostics.reproCommand",
+        "createNextUnsupportedRuntimeError(",
+        "bridgeDiagnostics",
+    ] {
+        assert!(
+            content.contains(marker),
+            "next src/index.ts must preserve server-bridge marker: {marker}"
+        );
+    }
+}
+
 // ── TypeScript Config for Resolution ─────────────────────────────────
 
 #[test]

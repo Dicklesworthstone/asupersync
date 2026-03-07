@@ -406,10 +406,16 @@ fn canonical_examples_doc_lists_scenarios_and_repro_commands() {
 
     for expected in [
         "asupersync-umelq.16.3",
+        "asupersync-3qv04.9.3.1",
         "vanilla.behavior_loser_drain_replay",
+        "L6-BUNDLER-VITE",
         "TS-TYPE-VANILLA",
         "react_ref.task_group_cancel",
         "next_ref.template_deploy",
+        "tests/fixtures/vite-vanilla-consumer",
+        "scripts/validate_vite_vanilla_consumer.sh",
+        "target/e2e-results/vite_vanilla_consumer/",
+        "PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh",
         "python3 scripts/run_browser_onboarding_checks.py --scenario vanilla",
         "python3 scripts/run_browser_onboarding_checks.py --scenario react",
         "python3 scripts/run_browser_onboarding_checks.py --scenario next",

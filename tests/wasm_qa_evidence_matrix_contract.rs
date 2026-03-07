@@ -423,7 +423,12 @@ fn smoke_scenarios_cover_cfg_compile_execution() {
                 .expect("scenario_id must be string")
         })
         .collect();
-    for expected in ["WASM-QA-SMOKE-CFG-MATRIX", "WASM-QA-SMOKE-NATIVE-BACKSTOP"] {
+    for expected in [
+        "WASM-QA-SMOKE-CFG-MATRIX",
+        "WASM-QA-SMOKE-NATIVE-BACKSTOP",
+        "WASM-QA-SMOKE-PACKAGED-BOOTSTRAP",
+        "WASM-QA-SMOKE-HOST-BRIDGE",
+    ] {
         assert!(
             ids.contains(expected),
             "smoke scenarios must include {expected}"
@@ -446,6 +451,52 @@ fn smoke_scenarios_cover_cfg_compile_execution() {
                 "scenario {id} must execute ignored compile harness tests"
             );
         }
+    }
+}
+
+#[test]
+fn packaged_bootstrap_smoke_scenario_routes_through_harness_profile() {
+    let artifact = load_artifact();
+    let scenarios = artifact["smoke_scenarios"].as_array().expect("array");
+    let scenario = scenarios
+        .iter()
+        .find(|entry| entry["scenario_id"] == "WASM-QA-SMOKE-PACKAGED-BOOTSTRAP")
+        .expect("missing packaged bootstrap smoke scenario");
+    let command = scenario["command"]
+        .as_str()
+        .expect("packaged bootstrap command must be string");
+    for token in [
+        "HARNESS_PROFILE=packaged_bootstrap",
+        "HARNESS_DRY_RUN=1",
+        "scripts/test_wasm_cross_framework_e2e.sh",
+    ] {
+        assert!(
+            command.contains(token),
+            "packaged bootstrap smoke scenario missing token: {token}"
+        );
+    }
+}
+
+#[test]
+fn host_bridge_smoke_scenario_routes_through_harness_profile() {
+    let artifact = load_artifact();
+    let scenarios = artifact["smoke_scenarios"].as_array().expect("array");
+    let scenario = scenarios
+        .iter()
+        .find(|entry| entry["scenario_id"] == "WASM-QA-SMOKE-HOST-BRIDGE")
+        .expect("missing host bridge smoke scenario");
+    let command = scenario["command"]
+        .as_str()
+        .expect("host bridge command must be string");
+    for token in [
+        "HARNESS_PROFILE=host_bridge",
+        "HARNESS_DRY_RUN=1",
+        "scripts/test_wasm_cross_framework_e2e.sh",
+    ] {
+        assert!(
+            command.contains(token),
+            "host bridge smoke scenario missing token: {token}"
+        );
     }
 }
 
