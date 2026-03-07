@@ -117,8 +117,8 @@ impl Stream for ReadDir {
                         self.state = ReadDirState::Idle(inner);
                         return Poll::Ready(Some(Err(err)));
                     }
-                    Poll::Ready(Ok((None, inner))) => {
-                        self.state = ReadDirState::Idle(inner);
+                    Poll::Ready(Ok((None, _inner))) => {
+                        self.state = ReadDirState::Done;
                         return Poll::Ready(None);
                     }
                     Poll::Ready(Err(err)) => {
