@@ -365,8 +365,7 @@ fn higher_level_packages_only_export_safe_subpaths() {
             if key != "." {
                 let segments_count = key.trim_start_matches("./").split('/').count();
                 assert_eq!(
-                    segments_count,
-                    1,
+                    segments_count, 1,
                     "{pkg} export {key} is too deep — only single-segment subpaths allowed"
                 );
             }
@@ -527,7 +526,10 @@ fn policy_required_packages_match_actual_packages() {
     // Every required package must have a real package.json
     for pkg_name in &required {
         let dir_name = pkg_name.split('/').last().unwrap();
-        let pkg_path = repo_root().join("packages").join(dir_name).join("package.json");
+        let pkg_path = repo_root()
+            .join("packages")
+            .join(dir_name)
+            .join("package.json");
         assert!(
             pkg_path.exists(),
             "required package {pkg_name} has no manifest at {}",

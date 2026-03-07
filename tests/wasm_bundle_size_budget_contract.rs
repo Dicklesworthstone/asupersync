@@ -438,10 +438,10 @@ fn wasm_binary_budget_is_under_one_megabyte() {
 #[test]
 fn js_facade_budget_is_under_64kb() {
     let budget = read_budget();
-    let js_ceil = budget["packages"]["@asupersync/browser-core"]["artifacts"]["index.js"]
-        ["ceiling_bytes"]
-        .as_u64()
-        .unwrap();
+    let js_ceil =
+        budget["packages"]["@asupersync/browser-core"]["artifacts"]["index.js"]["ceiling_bytes"]
+            .as_u64()
+            .unwrap();
     assert!(
         js_ceil <= 65536,
         "JS facade ceiling ({js_ceil}) should be <= 64 KB"
@@ -451,10 +451,10 @@ fn js_facade_budget_is_under_64kb() {
 #[test]
 fn higher_level_dist_budgets_smaller_than_browser_core() {
     let budget = read_budget();
-    let bc_total = budget["packages"]["@asupersync/browser-core"]["total_publishable"]
-        ["ceiling_bytes"]
-        .as_u64()
-        .unwrap();
+    let bc_total =
+        budget["packages"]["@asupersync/browser-core"]["total_publishable"]["ceiling_bytes"]
+            .as_u64()
+            .unwrap();
 
     for (scope_name, _) in &PACKAGES[1..] {
         let dist_ceil = budget["packages"][*scope_name]["dist_total"]["ceiling_bytes"]

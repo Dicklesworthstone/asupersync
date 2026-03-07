@@ -52,10 +52,7 @@ fn log_entry_has_required_fields() {
         .as_array()
         .expect("required_fields must be array");
 
-    let names: Vec<&str> = required
-        .iter()
-        .filter_map(|f| f["name"].as_str())
-        .collect();
+    let names: Vec<&str> = required.iter().filter_map(|f| f["name"].as_str()).collect();
 
     for expected in &["ts", "level", "scenario_id", "run_id", "event", "msg"] {
         assert!(
@@ -72,10 +69,7 @@ fn log_entry_has_optional_fields() {
         .as_array()
         .expect("optional_fields must be array");
 
-    let names: Vec<&str> = optional
-        .iter()
-        .filter_map(|f| f["name"].as_str())
-        .collect();
+    let names: Vec<&str> = optional.iter().filter_map(|f| f["name"].as_str()).collect();
 
     for expected in &[
         "abi_version",
@@ -115,10 +109,7 @@ fn log_levels_are_complete() {
         .collect();
 
     for expected in &["trace", "debug", "info", "warn", "error", "fatal"] {
-        assert!(
-            levels.contains(expected),
-            "missing log level: {expected}"
-        );
+        assert!(levels.contains(expected), "missing log level: {expected}");
     }
 }
 
@@ -133,7 +124,10 @@ fn log_levels_are_ordered_by_severity() {
         .collect();
 
     let expected_order = ["trace", "debug", "info", "warn", "error", "fatal"];
-    assert_eq!(levels, expected_order, "log levels must be ordered by severity");
+    assert_eq!(
+        levels, expected_order,
+        "log levels must be ordered by severity"
+    );
 }
 
 // ── Verdicts ─────────────────────────────────────────────────────────
@@ -149,10 +143,7 @@ fn verdicts_are_complete() {
         .collect();
 
     for expected in &["pass", "fail", "error", "timeout", "skip"] {
-        assert!(
-            verdicts.contains(expected),
-            "missing verdict: {expected}"
-        );
+        assert!(verdicts.contains(expected), "missing verdict: {expected}");
     }
 }
 
@@ -207,7 +198,13 @@ fn error_codes_cover_key_categories() {
         .filter_map(|c| c["category"].as_str())
         .collect();
 
-    for expected in &["compatibility", "bridge", "lifecycle", "test", "infrastructure"] {
+    for expected in &[
+        "compatibility",
+        "bridge",
+        "lifecycle",
+        "test",
+        "infrastructure",
+    ] {
         assert!(
             categories.contains(expected),
             "missing error category: {expected}"
@@ -346,10 +343,7 @@ fn retention_policy_has_three_classes() {
 
     assert_eq!(classes.len(), 3, "must have exactly 3 retention classes");
 
-    let names: Vec<&str> = classes
-        .iter()
-        .filter_map(|c| c["class"].as_str())
-        .collect();
+    let names: Vec<&str> = classes.iter().filter_map(|c| c["class"].as_str()).collect();
     assert!(names.contains(&"hot"));
     assert!(names.contains(&"warm"));
     assert!(names.contains(&"cold"));
@@ -372,22 +366,13 @@ fn retention_hot_longer_than_warm_longer_than_cold() {
     let schema = load_schema();
     let classes = schema["retention_policy"]["classes"].as_array().unwrap();
 
-    let hot_days = classes
-        .iter()
-        .find(|c| c["class"] == "hot")
-        .unwrap()["min_days"]
+    let hot_days = classes.iter().find(|c| c["class"] == "hot").unwrap()["min_days"]
         .as_u64()
         .unwrap();
-    let warm_days = classes
-        .iter()
-        .find(|c| c["class"] == "warm")
-        .unwrap()["min_days"]
+    let warm_days = classes.iter().find(|c| c["class"] == "warm").unwrap()["min_days"]
         .as_u64()
         .unwrap();
-    let cold_days = classes
-        .iter()
-        .find(|c| c["class"] == "cold")
-        .unwrap()["min_days"]
+    let cold_days = classes.iter().find(|c| c["class"] == "cold").unwrap()["min_days"]
         .as_u64()
         .unwrap();
 

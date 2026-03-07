@@ -26,7 +26,10 @@ fn browser_core_exports_have_conditional_root_with_three_conditions() {
     let root = v["exports"]["."].as_object().expect("root must be object");
     assert!(root.contains_key("types"), "root export missing 'types'");
     assert!(root.contains_key("import"), "root export missing 'import'");
-    assert!(root.contains_key("default"), "root export missing 'default'");
+    assert!(
+        root.contains_key("default"),
+        "root export missing 'default'"
+    );
 }
 
 #[test]
@@ -38,7 +41,10 @@ fn browser_core_types_export_is_separate_subpath() {
         "browser-core must export ./types subpath for type-only imports"
     );
     let types_export = exports["./types"].as_object().unwrap();
-    assert!(types_export.contains_key("types"), "./types export must have types condition");
+    assert!(
+        types_export.contains_key("types"),
+        "./types export must have types condition"
+    );
 }
 
 #[test]
@@ -162,10 +168,9 @@ fn higher_level_main_points_to_dist_index() {
 
 #[test]
 fn browser_src_index_exports_from_browser_core() {
-    let path = repo_root()
-        .join("packages/browser/src/index.ts");
-    let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("missing {}", path.display()));
+    let path = repo_root().join("packages/browser/src/index.ts");
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
     assert!(
         content.contains("@asupersync/browser-core"),
         "browser src/index.ts must import from @asupersync/browser-core"
@@ -174,10 +179,9 @@ fn browser_src_index_exports_from_browser_core() {
 
 #[test]
 fn react_src_index_exports_from_browser() {
-    let path = repo_root()
-        .join("packages/react/src/index.ts");
-    let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("missing {}", path.display()));
+    let path = repo_root().join("packages/react/src/index.ts");
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
     assert!(
         content.contains("@asupersync/browser"),
         "react src/index.ts must import from @asupersync/browser"
@@ -186,10 +190,9 @@ fn react_src_index_exports_from_browser() {
 
 #[test]
 fn next_src_index_exports_from_browser() {
-    let path = repo_root()
-        .join("packages/next/src/index.ts");
-    let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("missing {}", path.display()));
+    let path = repo_root().join("packages/next/src/index.ts");
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
     assert!(
         content.contains("@asupersync/browser"),
         "next src/index.ts must import from @asupersync/browser"
@@ -214,11 +217,10 @@ fn higher_level_tsconfigs_reference_dependencies() {
     let browser_ts = repo_root().join("packages/browser/tsconfig.json");
     let content = std::fs::read_to_string(&browser_ts).unwrap();
     let v: serde_json::Value = serde_json::from_str(&content).unwrap();
-    let refs = v["references"].as_array().expect("browser must have references");
-    let ref_paths: Vec<&str> = refs
-        .iter()
-        .filter_map(|r| r["path"].as_str())
-        .collect();
+    let refs = v["references"]
+        .as_array()
+        .expect("browser must have references");
+    let ref_paths: Vec<&str> = refs.iter().filter_map(|r| r["path"].as_str()).collect();
     assert!(
         ref_paths.iter().any(|p| p.contains("browser-core")),
         "browser tsconfig must reference browser-core"

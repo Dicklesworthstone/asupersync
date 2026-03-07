@@ -24,7 +24,9 @@ const ALL_PKGS: &[&str] = &["browser-core", "browser", "react", "next"];
 
 #[test]
 fn all_packages_have_pack_required_fields() {
-    let required_fields = ["name", "version", "type", "main", "types", "exports", "files"];
+    let required_fields = [
+        "name", "version", "type", "main", "types", "exports", "files",
+    ];
 
     for pkg in ALL_PKGS {
         let v = read_pkg(pkg);
@@ -45,10 +47,7 @@ fn all_packages_have_repository_and_homepage() {
             v["repository"]["url"].as_str().is_some(),
             "{pkg} missing repository.url"
         );
-        assert!(
-            v["homepage"].as_str().is_some(),
-            "{pkg} missing homepage"
-        );
+        assert!(v["homepage"].as_str().is_some(), "{pkg} missing homepage");
     }
 }
 
@@ -77,7 +76,10 @@ fn all_exports_root_has_types_import_default() {
             "{pkg} exports[\".\"] must be a conditional export object"
         );
         let obj = root.as_object().unwrap();
-        assert!(obj.contains_key("types"), "{pkg} exports[\".\"] missing 'types' condition");
+        assert!(
+            obj.contains_key("types"),
+            "{pkg} exports[\".\"] missing 'types' condition"
+        );
         assert!(
             obj.contains_key("import") || obj.contains_key("default"),
             "{pkg} exports[\".\"] missing 'import' or 'default' condition"
@@ -173,10 +175,7 @@ fn browser_core_files_include_wasm_and_js() {
 
     let required = ["asupersync_bg.wasm", "abi-metadata.json"];
     for r in &required {
-        assert!(
-            files.contains(r),
-            "browser-core files must include {r}"
-        );
+        assert!(files.contains(r), "browser-core files must include {r}");
     }
 
     // Must have at least one .js and one .d.ts
@@ -204,14 +203,18 @@ fn dependency_versions_use_workspace_protocol() {
     );
 
     let react = read_pkg("react");
-    let br_dep = react["dependencies"]["@asupersync/browser"].as_str().unwrap();
+    let br_dep = react["dependencies"]["@asupersync/browser"]
+        .as_str()
+        .unwrap();
     assert!(
         br_dep.starts_with("workspace:"),
         "react -> browser must use workspace protocol, got {br_dep}"
     );
 
     let next = read_pkg("next");
-    let br_dep = next["dependencies"]["@asupersync/browser"].as_str().unwrap();
+    let br_dep = next["dependencies"]["@asupersync/browser"]
+        .as_str()
+        .unwrap();
     assert!(
         br_dep.starts_with("workspace:"),
         "next -> browser must use workspace protocol, got {br_dep}"
@@ -224,10 +227,7 @@ fn no_package_depends_on_itself() {
         let v = read_pkg(pkg);
         let name = v["name"].as_str().unwrap();
         if let Some(deps) = v["dependencies"].as_object() {
-            assert!(
-                !deps.contains_key(name),
-                "{pkg} must not depend on itself"
-            );
+            assert!(!deps.contains_key(name), "{pkg} must not depend on itself");
         }
     }
 }
@@ -294,17 +294,13 @@ fn dependency_graph_is_acyclic() {
 fn all_packages_have_keywords() {
     for pkg in ALL_PKGS {
         let v = read_pkg(pkg);
-        let keywords = v["keywords"]
-            .as_array()
-            .expect("keywords must be array");
+        let keywords = v["keywords"].as_array().expect("keywords must be array");
         assert!(
             keywords.len() >= 3,
             "{pkg} should have at least 3 keywords for npm discoverability"
         );
         // All must include "asupersync"
-        let has_asupersync = keywords
-            .iter()
-            .any(|k| k.as_str() == Some("asupersync"));
+        let has_asupersync = keywords.iter().any(|k| k.as_str() == Some("asupersync"));
         assert!(has_asupersync, "{pkg} keywords must include 'asupersync'");
     }
 }
@@ -335,12 +331,7 @@ fn all_versions_are_valid_semver() {
         );
         for (i, label) in ["major", "minor", "patch"].iter().enumerate() {
             assert!(
-                parts[i]
-                    .split('-')
-                    .next()
-                    .unwrap()
-                    .parse::<u32>()
-                    .is_ok(),
+                parts[i].split('-').next().unwrap().parse::<u32>().is_ok(),
                 "{pkg} version {version} has non-numeric {label} component"
             );
         }
