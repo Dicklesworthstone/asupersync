@@ -354,7 +354,9 @@ impl PathSet {
     /// Returns all usable paths based on the selection policy.
     #[must_use]
     pub fn select_paths(&self) -> Vec<Arc<TransportPath>> {
-        let usable: Vec<_> = {
+        // Keep transport path selection replayable by normalizing the base
+        // ordering before policy-specific filtering or rotation.
+        let mut usable: Vec<_> = {
             let paths = self.paths.read();
             paths
                 .values()
@@ -362,6 +364,7 @@ impl PathSet {
                 .cloned()
                 .collect()
         };
+        usable.sort_by_key(|path| path.id);
 
         match self.policy {
             PathSelectionPolicy::UseAll => usable,
@@ -372,20 +375,19 @@ impl PathSet {
                 .collect(),
 
             PathSelectionPolicy::BestQuality { count } => {
-                let mut sorted = usable;
-                sorted.sort_by(|a, b| {
+                usable.sort_by(|a, b| {
                     b.characteristics
                         .quality_score()
                         .partial_cmp(&a.characteristics.quality_score())
                         .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.id.cmp(&b.id))
                 });
-                sorted.into_iter().take(count).collect()
+                usable.into_iter().take(count).collect()
             }
 
             PathSelectionPolicy::ByPriority { count } => {
-                let mut sorted = usable;
-                sorted.sort_by_key(|p| p.characteristics.priority);
-                sorted.into_iter().take(count).collect()
+                usable.sort_by_key(|path| (path.characteristics.priority, path.id));
+                usable.into_iter().take(count).collect()
             }
 
             PathSelectionPolicy::RoundRobin => {
@@ -1275,13 +1277,20 @@ mod tests {
         init_test("test_path_set_use_all");
         let set = PathSet::new(PathSelectionPolicy::UseAll);
 
+        set.register(test_path(3));
         set.register(test_path(1));
         set.register(test_path(2));
-        set.register(test_path(3));
 
         let selected = set.select_paths();
         let len = selected.len();
         crate::assert_with_log!(len == 3, "selected len", 3, len);
+        let ids: Vec<PathId> = selected.iter().map(|path| path.id).collect();
+        crate::assert_with_log!(
+            ids == vec![PathId(1), PathId(2), PathId(3)],
+            "use_all returns stable PathId order",
+            vec![PathId(1), PathId(2), PathId(3)],
+            ids
+        );
         crate::test_complete!("test_path_set_use_all");
     }
 
@@ -1328,6 +1337,35 @@ mod tests {
         crate::test_complete!("test_path_set_best_quality");
     }
 
+    #[test]
+    fn test_path_set_best_quality_tie_breaks_by_path_id() {
+        init_test("test_path_set_best_quality_tie_breaks_by_path_id");
+        let set = PathSet::new(PathSelectionPolicy::BestQuality { count: 2 });
+
+        let tied = PathCharacteristics {
+            latency_ms: 25,
+            bandwidth_bps: 2_000_000,
+            loss_rate: 0.01,
+            jitter_ms: 4,
+            is_primary: false,
+            priority: 100,
+        };
+        set.register(test_path(9).with_characteristics(tied.clone()));
+        set.register(test_path(2).with_characteristics(tied));
+        set.register(test_path(5).with_characteristics(PathCharacteristics::backup()));
+
+        let selected = set.select_paths();
+        let ids: Vec<PathId> = selected.iter().map(|path| path.id).collect();
+        crate::assert_with_log!(
+            ids == vec![PathId(2), PathId(9)],
+            "best-quality ties prefer lower PathId",
+            vec![PathId(2), PathId(9)],
+            ids
+        );
+
+        crate::test_complete!("test_path_set_best_quality_tie_breaks_by_path_id");
+    }
+
     // Test 5.1: PathSet selection - ByPriority
     #[test]
     fn test_path_set_by_priority() {
@@ -1360,6 +1398,36 @@ mod tests {
             priorities
         );
         crate::test_complete!("test_path_set_by_priority");
+    }
+
+    #[test]
+    fn test_path_set_by_priority_tie_breaks_by_path_id() {
+        init_test("test_path_set_by_priority_tie_breaks_by_path_id");
+        let set = PathSet::new(PathSelectionPolicy::ByPriority { count: 2 });
+
+        set.register(test_path(8).with_characteristics(PathCharacteristics {
+            priority: 10,
+            ..Default::default()
+        }));
+        set.register(test_path(3).with_characteristics(PathCharacteristics {
+            priority: 10,
+            ..Default::default()
+        }));
+        set.register(test_path(5).with_characteristics(PathCharacteristics {
+            priority: 20,
+            ..Default::default()
+        }));
+
+        let selected = set.select_paths();
+        let ids: Vec<PathId> = selected.iter().map(|path| path.id).collect();
+        crate::assert_with_log!(
+            ids == vec![PathId(3), PathId(8)],
+            "priority ties prefer lower PathId",
+            vec![PathId(3), PathId(8)],
+            ids
+        );
+
+        crate::test_complete!("test_path_set_by_priority_tie_breaks_by_path_id");
     }
 
     // Test 6: Deduplicator basic operation
@@ -1924,8 +1992,8 @@ mod tests {
         init_test("path_set_round_robin_cycles");
         let set = PathSet::new(PathSelectionPolicy::RoundRobin);
 
-        set.register(test_path(1));
         set.register(test_path(2));
+        set.register(test_path(1));
 
         // RoundRobin should select one path per call, cycling through
         let mut ids = Vec::new();
@@ -1940,13 +2008,11 @@ mod tests {
             ids.push(selected[0].id);
         }
 
-        // Should see both paths represented (2 paths, 4 calls)
-        let unique_ids: HashSet<PathId> = ids.iter().copied().collect();
         crate::assert_with_log!(
-            unique_ids.len() == 2,
-            "round robin covers both paths",
-            2,
-            unique_ids.len()
+            ids == vec![PathId(1), PathId(2), PathId(1), PathId(2)],
+            "round robin follows stable PathId order",
+            vec![PathId(1), PathId(2), PathId(1), PathId(2)],
+            ids
         );
 
         crate::test_complete!("path_set_round_robin_cycles");

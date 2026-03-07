@@ -177,10 +177,7 @@ fn gzip_ceilings_are_within_ratio_of_raw_ceilings() {
         for (name, entry) in artifacts {
             if let Some(gzip_ceil) = entry["gzip_ceiling_bytes"].as_u64() {
                 let raw_ceil = entry["ceiling_bytes"].as_u64().unwrap();
-                #[allow(
-                    clippy::cast_precision_loss,
-                    clippy::cast_sign_loss
-                )]
+                #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
                 let expected_max = (raw_ceil as f64 * ratio).ceil() as u64;
                 assert!(
                     gzip_ceil <= expected_max + 1,
