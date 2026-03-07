@@ -1,0 +1,351 @@
+{
+  "contract_version": "runtime-workload-corpus-v1",
+  "bundle_schema_version": "runtime-workload-bundle-v1",
+  "runner_schema_version": "runtime-workload-run-report-v1",
+  "bead_id": "asupersync-1508v.1.5",
+  "description": "Canonical replayable workload corpus and reproducibility bundle for runtime ascension baseline tracks.",
+  "runner_script": "scripts/run_runtime_workload_corpus.sh",
+  "structured_log_fields_required": [
+    "workload_id",
+    "scenario_id",
+    "seed",
+    "runtime_profile",
+    "workload_config_ref",
+    "artifact_path",
+    "replay_command"
+  ],
+  "runtime_profiles": [
+    {
+      "profile_id": "bench-release",
+      "description": "Release-mode benchmark runners with criterion output and perf gate artifacts."
+    },
+    {
+      "profile_id": "native-e2e",
+      "description": "Host integration suites that exercise runtime, protocol, and cancellation surfaces."
+    },
+    {
+      "profile_id": "lab-deterministic",
+      "description": "Pure deterministic lab or oracle-driven replay anchors."
+    },
+    {
+      "profile_id": "distributed-shadow",
+      "description": "Deterministic distributed harness and fault-script preview runs."
+    }
+  ],
+  "default_core_set": [
+    "AA01-WL-CPU-001",
+    "AA01-WL-CANCEL-001",
+    "AA01-WL-IO-001",
+    "AA01-WL-BURST-001",
+    "AA01-WL-TIMER-001",
+    "AA01-WL-FANIO-001",
+    "AA01-WL-DIST-001"
+  ],
+  "expansion_packs": [
+    {
+      "pack_id": "http-application-io",
+      "description": "Optional HTTP application-layer workload that extends the core I/O surface without changing the baseline denominator.",
+      "workload_ids": [
+        "AA01-WL-IO-HTTP-EX1"
+      ]
+    }
+  ],
+  "workloads": [
+    {
+      "workload_id": "AA01-WL-CPU-001",
+      "family": "cpu-heavy",
+      "scenario_id": "cpu-heavy.scheduler-capacity-baseline",
+      "regime": "happy_path_throughput",
+      "runtime_profile": "bench-release",
+      "seed": "0xAA010201",
+      "config_ref": "scripts/run_perf_e2e.sh::phase0_baseline,scheduler_benchmark",
+      "entrypoint_kind": "script",
+      "entrypoint_path": "scripts/run_perf_e2e.sh",
+      "entry_command": "WORKLOAD_ID=AA01-WL-CPU-001 RUNTIME_PROFILE=bench-release WORKLOAD_CONFIG_REF='scripts/run_perf_e2e.sh::phase0_baseline,scheduler_benchmark' ASUPERSYNC_SEED=0xAA010201 RCH_BIN=rch bash ./scripts/run_perf_e2e.sh --bench phase0_baseline --bench scheduler_benchmark --no-compare",
+      "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-CPU-001",
+      "expected_artifacts": [
+        {
+          "artifact_id": "bundle_manifest",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-CPU-001/bundle_manifest.json",
+          "required": true
+        },
+        {
+          "artifact_id": "bundle_log",
+          "kind": "text",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-CPU-001/run.log",
+          "required": true
+        },
+        {
+          "artifact_id": "perf_report",
+          "kind": "json",
+          "path_glob": "target/perf-results/perf_*/report.json",
+          "required": true
+        },
+        {
+          "artifact_id": "perf_gate_events",
+          "kind": "ndjson",
+          "path_glob": "target/perf-results/perf_*/artifacts/gate_events.ndjson",
+          "required": true
+        }
+      ],
+      "expected_evidence": [
+        "criterion perf report",
+        "gate event log",
+        "bundle manifest"
+      ]
+    },
+    {
+      "workload_id": "AA01-WL-CANCEL-001",
+      "family": "cancellation-heavy",
+      "scenario_id": "cancel-heavy.single-region-storm",
+      "regime": "pathological_tail_or_failure",
+      "runtime_profile": "lab-deterministic",
+      "seed": "0xAA010202",
+      "config_ref": "tests/cancellation_stress_e2e.rs::cancel_storm_single_region",
+      "entrypoint_kind": "cargo-test",
+      "entrypoint_path": "tests/cancellation_stress_e2e.rs",
+      "entry_command": "WORKLOAD_ID=AA01-WL-CANCEL-001 RUNTIME_PROFILE=lab-deterministic WORKLOAD_CONFIG_REF='tests/cancellation_stress_e2e.rs::cancel_storm_single_region' TEST_SEED=0xAA010202 ASUPERSYNC_SEED=0xAA010202 rch exec -- cargo test --test cancellation_stress_e2e cancel_storm_single_region -- --nocapture",
+      "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-CANCEL-001",
+      "expected_artifacts": [
+        {
+          "artifact_id": "bundle_manifest",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-CANCEL-001/bundle_manifest.json",
+          "required": true
+        },
+        {
+          "artifact_id": "bundle_log",
+          "kind": "text",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-CANCEL-001/run.log",
+          "required": true
+        }
+      ],
+      "expected_evidence": [
+        "deterministic cancel-storm test log",
+        "bundle manifest"
+      ]
+    },
+    {
+      "workload_id": "AA01-WL-IO-001",
+      "family": "io-heavy",
+      "scenario_id": "io-heavy.transport-suite",
+      "regime": "happy_path_throughput",
+      "runtime_profile": "native-e2e",
+      "seed": "0xAA010203",
+      "config_ref": "scripts/test_transport_e2e.sh::e2e_transport/all_features",
+      "entrypoint_kind": "script",
+      "entrypoint_path": "scripts/test_transport_e2e.sh",
+      "entry_command": "WORKLOAD_ID=AA01-WL-IO-001 RUNTIME_PROFILE=native-e2e WORKLOAD_CONFIG_REF='scripts/test_transport_e2e.sh::e2e_transport/all_features' TEST_SEED=0xAA010203 RCH_BIN=rch bash ./scripts/test_transport_e2e.sh",
+      "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-IO-001",
+      "expected_artifacts": [
+        {
+          "artifact_id": "bundle_manifest",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-IO-001/bundle_manifest.json",
+          "required": true
+        },
+        {
+          "artifact_id": "bundle_log",
+          "kind": "text",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-IO-001/run.log",
+          "required": true
+        },
+        {
+          "artifact_id": "transport_summary",
+          "kind": "json",
+          "path_glob": "target/e2e-results/transport/artifacts_*/summary.json",
+          "required": true
+        }
+      ],
+      "expected_evidence": [
+        "transport suite summary",
+        "transport suite log",
+        "bundle manifest"
+      ]
+    },
+    {
+      "workload_id": "AA01-WL-BURST-001",
+      "family": "bursty",
+      "scenario_id": "bursty.scheduler-wakeup-stress",
+      "regime": "pathological_tail_or_failure",
+      "runtime_profile": "native-e2e",
+      "seed": "0xAA010204",
+      "config_ref": "scripts/test_scheduler_wakeup_e2e.sh::scheduler_backoff+scheduler_lane_fairness+stress_tests",
+      "entrypoint_kind": "script",
+      "entrypoint_path": "scripts/test_scheduler_wakeup_e2e.sh",
+      "entry_command": "WORKLOAD_ID=AA01-WL-BURST-001 RUNTIME_PROFILE=native-e2e WORKLOAD_CONFIG_REF='scripts/test_scheduler_wakeup_e2e.sh::scheduler_backoff+scheduler_lane_fairness+stress_tests' TEST_SEED=0xAA010204 SKIP_LOOM=1 RCH_BIN=rch bash ./scripts/test_scheduler_wakeup_e2e.sh",
+      "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-BURST-001",
+      "expected_artifacts": [
+        {
+          "artifact_id": "bundle_manifest",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-BURST-001/bundle_manifest.json",
+          "required": true
+        },
+        {
+          "artifact_id": "bundle_log",
+          "kind": "text",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-BURST-001/run.log",
+          "required": true
+        },
+        {
+          "artifact_id": "scheduler_summary",
+          "kind": "json",
+          "path_glob": "target/e2e-results/scheduler/*/summary.json",
+          "required": true
+        }
+      ],
+      "expected_evidence": [
+        "scheduler burst summary",
+        "stress log set",
+        "bundle manifest"
+      ]
+    },
+    {
+      "workload_id": "AA01-WL-TIMER-001",
+      "family": "timer-heavy",
+      "scenario_id": "timer-heavy.timer-wheel-anchor",
+      "regime": "pathological_tail_or_failure",
+      "runtime_profile": "lab-deterministic",
+      "seed": "0xAA010205",
+      "config_ref": "tests/time_e2e.rs::test_timer_wheel_basic_operations",
+      "entrypoint_kind": "cargo-test",
+      "entrypoint_path": "tests/time_e2e.rs",
+      "entry_command": "WORKLOAD_ID=AA01-WL-TIMER-001 RUNTIME_PROFILE=lab-deterministic WORKLOAD_CONFIG_REF='tests/time_e2e.rs::test_timer_wheel_basic_operations' TEST_SEED=0xAA010205 ASUPERSYNC_SEED=0xAA010205 rch exec -- cargo test --test time_e2e test_timer_wheel_basic_operations -- --nocapture",
+      "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-TIMER-001",
+      "expected_artifacts": [
+        {
+          "artifact_id": "bundle_manifest",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-TIMER-001/bundle_manifest.json",
+          "required": true
+        },
+        {
+          "artifact_id": "bundle_log",
+          "kind": "text",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-TIMER-001/run.log",
+          "required": true
+        }
+      ],
+      "expected_evidence": [
+        "timer wheel replay log",
+        "bundle manifest"
+      ]
+    },
+    {
+      "workload_id": "AA01-WL-FANIO-001",
+      "family": "fan-out/fan-in",
+      "scenario_id": "fanio.messaging-suite",
+      "regime": "happy_path_throughput",
+      "runtime_profile": "native-e2e",
+      "seed": "0xAA010206",
+      "config_ref": "scripts/test_messaging_e2e.sh::e2e_messaging/all_features",
+      "entrypoint_kind": "script",
+      "entrypoint_path": "scripts/test_messaging_e2e.sh",
+      "entry_command": "WORKLOAD_ID=AA01-WL-FANIO-001 RUNTIME_PROFILE=native-e2e WORKLOAD_CONFIG_REF='scripts/test_messaging_e2e.sh::e2e_messaging/all_features' TEST_SEED=0xAA010206 RCH_BIN=rch bash ./scripts/test_messaging_e2e.sh",
+      "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-FANIO-001",
+      "expected_artifacts": [
+        {
+          "artifact_id": "bundle_manifest",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-FANIO-001/bundle_manifest.json",
+          "required": true
+        },
+        {
+          "artifact_id": "bundle_log",
+          "kind": "text",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-FANIO-001/run.log",
+          "required": true
+        },
+        {
+          "artifact_id": "messaging_summary",
+          "kind": "json",
+          "path_glob": "target/e2e-results/messaging/artifacts_*/summary.json",
+          "required": true
+        }
+      ],
+      "expected_evidence": [
+        "messaging suite summary",
+        "messaging suite log",
+        "bundle manifest"
+      ]
+    },
+    {
+      "workload_id": "AA01-WL-DIST-001",
+      "family": "distributed-preview",
+      "scenario_id": "distributed-preview.remote-trace-invariants",
+      "regime": "pathological_tail_or_failure",
+      "runtime_profile": "distributed-shadow",
+      "seed": "0xAA010207",
+      "config_ref": "scripts/test_distributed_e2e.sh::e2e_distributed+distributed_trace_remote_invariants",
+      "entrypoint_kind": "script",
+      "entrypoint_path": "scripts/test_distributed_e2e.sh",
+      "entry_command": "WORKLOAD_ID=AA01-WL-DIST-001 RUNTIME_PROFILE=distributed-shadow WORKLOAD_CONFIG_REF='scripts/test_distributed_e2e.sh::e2e_distributed+distributed_trace_remote_invariants' TEST_SEED=0xAA010207 RCH_BIN=rch bash ./scripts/test_distributed_e2e.sh",
+      "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-DIST-001",
+      "expected_artifacts": [
+        {
+          "artifact_id": "bundle_manifest",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-DIST-001/bundle_manifest.json",
+          "required": true
+        },
+        {
+          "artifact_id": "bundle_log",
+          "kind": "text",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-DIST-001/run.log",
+          "required": true
+        },
+        {
+          "artifact_id": "distributed_summary",
+          "kind": "json",
+          "path_glob": "target/e2e-results/distributed/artifacts_*/summary.json",
+          "required": true
+        }
+      ],
+      "expected_evidence": [
+        "distributed suite summary",
+        "distributed invariant log",
+        "bundle manifest"
+      ]
+    },
+    {
+      "workload_id": "AA01-WL-IO-HTTP-EX1",
+      "family": "io-heavy",
+      "scenario_id": "io-heavy.http-suite",
+      "regime": "happy_path_throughput",
+      "runtime_profile": "native-e2e",
+      "seed": "0xAA010208",
+      "config_ref": "scripts/test_http_e2e.sh::http_e2e/all_features",
+      "entrypoint_kind": "script",
+      "entrypoint_path": "scripts/test_http_e2e.sh",
+      "entry_command": "WORKLOAD_ID=AA01-WL-IO-HTTP-EX1 RUNTIME_PROFILE=native-e2e WORKLOAD_CONFIG_REF='scripts/test_http_e2e.sh::http_e2e/all_features' TEST_SEED=0xAA010208 RCH_BIN=rch bash ./scripts/test_http_e2e.sh",
+      "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-IO-HTTP-EX1",
+      "expected_artifacts": [
+        {
+          "artifact_id": "bundle_manifest",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-IO-HTTP-EX1/bundle_manifest.json",
+          "required": true
+        },
+        {
+          "artifact_id": "bundle_log",
+          "kind": "text",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-IO-HTTP-EX1/run.log",
+          "required": true
+        },
+        {
+          "artifact_id": "http_summary",
+          "kind": "json",
+          "path_glob": "target/e2e-results/http/artifacts_*/summary.json",
+          "required": true
+        }
+      ],
+      "expected_evidence": [
+        "http suite summary",
+        "http suite log",
+        "bundle manifest"
+      ]
+    }
+  ]
+}
