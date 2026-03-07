@@ -119,6 +119,16 @@ artifacts/*
 # UBS (Ultimate Bug Scanner) output
 ubs_*.txt
 ubs-output*.txt
+*_ubs.txt
+/ubs.txt
+/ubs.json
+/rust-bug-scan.txt
+/rwlock_issues.txt
+
+# Clippy output
+/clippy_*.txt
+/clippy_*.json
+/clippy_output.*
 
 # Generic scratch output
 output.txt
@@ -144,6 +154,16 @@ output.txt
 /test_script
 /test_results.txt
 /test_tokio_oncecell/
+/test_azuma
+/test_borrow
+/test_duration
+/test_duration_hex
+/test_fire
+/test_precedence
+/test_output.txt
+
+# Root-level compiled test binaries (bare names, no extension)
+/test
 
 # One-off test runner scripts
 /run_test.sh
@@ -152,17 +172,44 @@ output.txt
 # Standalone bug reproduction / debugging harnesses
 src/channel/deadlock_test.rs
 **/*_test_bug.rs
+tests/buffer_lost_wakeup.rs
+
+# TypeScript build artifacts
+packages/*/dist/
+*.tsbuildinfo
 
 # Python bytecode cache
 __pycache__/
 
-# Clippy output
+# Clippy output (legacy single-file pattern)
 /clippy.txt
 
 # Root-level scratch scripts and one-off harnesses
 /find_*.rs
 /gen_*.rs
 /fix_*.py
+/parse_*.py
+/patch_*.py
+/patch_*.sh
+/fix_*.sh
+/fix_*.patch
+/*.patch
+/create_hedge_beads.sh
+/update_hedge_beads.sh
+
+# Root-level old/new file snapshots (debugging comparisons)
+/buffer_old.rs
+/buffer_new.rs
+/mutex_old.rs
+
+# Temporary scratch JSON at root
+/t[0-9].json
+/t[0-9][0-9].json
+/closed_beads.json
+/epic.json
+
+# Root-level scratch shell scripts
+/test.sh
 
 # Temporary TLS/X.509 test artifacts at root
 /*.pem
