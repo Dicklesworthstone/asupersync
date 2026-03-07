@@ -1,4 +1,4 @@
-//! Browser reactor stub for wasm32 targets.
+//! Browser reactor for browser-like event loop targets.
 //!
 //! This module provides a [`BrowserReactor`] that implements the [`Reactor`]
 //! trait for browser environments. In production browser builds, the reactor
@@ -7,11 +7,15 @@
 //!
 //! # Current Status
 //!
-//! This is a **scaffold implementation** (asupersync-umelq.4.4). Registration
-//! bookkeeping and token semantics are implemented, while browser host event
-//! integration (`queueMicrotask`, fetch/WebSocket wiring) remains stubbed.
-//! The actual wasm-bindgen bridge will be added by subsequent beads once the
-//! ABI contract (umelq.8.x) is finalized.
+//! This backend maintains deterministic registration bookkeeping plus a
+//! wake-driven pending-event queue:
+//!
+//! - `wake()` snapshots registered interests into a pending queue
+//! - `poll()` drains pending events in bounded batches
+//! - repeated wake calls are coalesced when configured
+//!
+//! Browser host-source wiring (fetch/WebSocket/stream callbacks) still lands
+//! in follow-on beads, but the reactor no longer hardcodes `poll() -> 0`.
 //!
 //! # Browser Event Model
 //!
@@ -60,9 +64,10 @@ impl Default for BrowserReactorConfig {
 
 /// Browser-based reactor for wasm32 targets.
 ///
-/// Stub implementation providing the [`Reactor`] trait contract for browser
-/// environments. Methods return appropriate stub responses (empty polls,
-/// no-op registrations) until wasm-bindgen integration is completed.
+/// Browser reactor implementation preserving the [`Reactor`] trait contract
+/// for browser environments. It maintains deterministic registration
+/// bookkeeping and wake-driven pending-event draining while host callback
+/// wiring lands in follow-on integration work.
 ///
 /// # Usage
 ///
@@ -76,6 +81,7 @@ impl Default for BrowserReactorConfig {
 pub struct BrowserReactor {
     config: BrowserReactorConfig,
     registrations: Mutex<BTreeMap<Token, Interest>>,
+    pending_events: Mutex<Vec<super::Event>>,
     wake_pending: AtomicBool,
 }
 
@@ -86,6 +92,7 @@ impl BrowserReactor {
         Self {
             config,
             registrations: Mutex::new(BTreeMap::new()),
+            pending_events: Mutex::new(Vec::new()),
             wake_pending: AtomicBool::new(false),
         }
     }
@@ -94,6 +101,30 @@ impl BrowserReactor {
         self.registrations
             .lock()
             .map_err(|_| io::Error::other("browser reactor registry lock poisoned"))
+    }
+
+    fn pending_events_mut(&self) -> io::Result<MutexGuard<'_, Vec<super::Event>>> {
+        self.pending_events
+            .lock()
+            .map_err(|_| io::Error::other("browser reactor pending queue lock poisoned"))
+    }
+
+    fn snapshot_readiness_events(&self) -> io::Result<Vec<super::Event>> {
+        let registrations = self.registrations_mut()?;
+        let mut events = Vec::with_capacity(registrations.len());
+        for (token, interest) in registrations.iter() {
+            let ready = *interest
+                & (Interest::READABLE
+                    | Interest::WRITABLE
+                    | Interest::ERROR
+                    | Interest::HUP
+                    | Interest::PRIORITY);
+            if !ready.is_empty() {
+                events.push(super::Event::new(*token, ready));
+            }
+        }
+        drop(registrations);
+        Ok(events)
     }
 }
 
@@ -143,31 +174,62 @@ impl Reactor for BrowserReactor {
                 format!("token {token:?} not registered"),
             ));
         }
+
+        let mut pending = self.pending_events_mut()?;
+        pending.retain(|event| event.token != token);
+        let queue_empty = pending.is_empty();
+        drop(pending);
+        if queue_empty {
+            self.wake_pending.store(false, Ordering::Release);
+        }
         Ok(())
     }
 
-    fn poll(&self, _events: &mut Events, _timeout: Option<Duration>) -> io::Result<usize> {
-        // TODO(umelq.5.x): Drain pending browser events from microtask queue.
-        //
-        // Browser poll semantics differ from native:
-        // - Never blocks (timeout is advisory only)
-        // - Returns events from completed fetch/WS/timer callbacks
-        // - Must yield back to browser event loop promptly
-        //
-        // For now, return 0 events (no I/O ready).
-        self.wake_pending.store(false, Ordering::Release);
-        Ok(0)
+    fn poll(&self, events: &mut Events, _timeout: Option<Duration>) -> io::Result<usize> {
+        // Browser poll is always non-blocking and drains any events that were
+        // queued by wake() and future host callback integrations.
+        events.clear();
+
+        let mut pending = self.pending_events_mut()?;
+        if pending.is_empty() {
+            self.wake_pending.store(false, Ordering::Release);
+            return Ok(0);
+        }
+
+        let batch_limit = if self.config.max_events_per_poll == 0 {
+            usize::MAX
+        } else {
+            self.config.max_events_per_poll
+        };
+        let n = pending.len().min(batch_limit);
+        for event in pending.drain(..n) {
+            events.push(event);
+        }
+
+        let still_pending = !pending.is_empty();
+        drop(pending);
+        self.wake_pending.store(still_pending, Ordering::Release);
+        Ok(n)
     }
 
     fn wake(&self) -> io::Result<()> {
-        // TODO(umelq.5.x): Schedule microtask via queueMicrotask() or
-        // Promise.resolve().then() to trigger re-poll.
-        //
-        // Coalescing: multiple wake() calls before the next poll produce
-        // only one microtask dispatch.
-        if self.config.coalesce_wakes {
-            self.wake_pending.store(true, Ordering::Release);
+        // Coalescing: multiple wake() calls before the next poll produce only
+        // one queued dispatch batch.
+        if self.config.coalesce_wakes
+            && self
+                .wake_pending
+                .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return Ok(());
         }
+
+        self.wake_pending.store(true, Ordering::Release);
+        let snapshot = self.snapshot_readiness_events()?;
+        if snapshot.is_empty() {
+            return Ok(());
+        }
+
+        self.pending_events_mut()?.extend(snapshot);
         Ok(())
     }
 
@@ -198,17 +260,21 @@ mod tests {
     }
 
     #[test]
-    fn browser_reactor_poll_returns_zero_events() {
+    fn browser_reactor_poll_returns_zero_events_when_no_pending_work() {
         let reactor = BrowserReactor::default();
         let mut events = Events::with_capacity(64);
         let n = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
-        assert_eq!(n, 0, "stub poll returns no events");
+        assert_eq!(n, 0);
+        assert!(events.is_empty());
     }
 
     #[test]
-    fn browser_reactor_wake_is_noop() {
+    fn browser_reactor_wake_without_registrations_keeps_poll_empty() {
         let reactor = BrowserReactor::default();
-        assert!(reactor.wake().is_ok());
+        reactor.wake().unwrap();
+        let mut events = Events::with_capacity(8);
+        assert_eq!(reactor.poll(&mut events, Some(Duration::ZERO)).unwrap(), 0);
+        assert!(events.is_empty());
     }
 
     #[test]
@@ -323,5 +389,70 @@ mod tests {
             .modify(Token::new(404), Interest::READABLE)
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn browser_reactor_wake_enqueues_events_for_registered_tokens() {
+        let reactor = BrowserReactor::default();
+        let source = TestFdSource;
+        let read_token = Token::new(1);
+        let write_token = Token::new(2);
+
+        reactor
+            .register(&source, read_token, Interest::READABLE)
+            .unwrap();
+        reactor
+            .register(&source, write_token, Interest::WRITABLE)
+            .unwrap();
+
+        reactor.wake().unwrap();
+        let mut events = Events::with_capacity(8);
+        let n = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(events.len(), 2);
+        let mut saw_read = false;
+        let mut saw_write = false;
+        for event in &events {
+            if event.token == read_token {
+                saw_read = event.is_readable();
+            }
+            if event.token == write_token {
+                saw_write = event.is_writable();
+            }
+        }
+        assert!(saw_read);
+        assert!(saw_write);
+    }
+
+    #[test]
+    fn browser_reactor_poll_respects_max_events_per_poll() {
+        let reactor = BrowserReactor::new(BrowserReactorConfig {
+            max_events_per_poll: 1,
+            coalesce_wakes: true,
+        });
+        let source = TestFdSource;
+
+        reactor
+            .register(&source, Token::new(1), Interest::READABLE)
+            .unwrap();
+        reactor
+            .register(&source, Token::new(2), Interest::READABLE)
+            .unwrap();
+
+        reactor.wake().unwrap();
+        let mut events = Events::with_capacity(4);
+        let first = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+        assert_eq!(first, 1);
+        assert_eq!(events.len(), 1);
+
+        events.clear();
+        let second = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+        assert_eq!(second, 1);
+        assert_eq!(events.len(), 1);
+
+        events.clear();
+        let third = reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+        assert_eq!(third, 0);
+        assert!(events.is_empty());
     }
 }
