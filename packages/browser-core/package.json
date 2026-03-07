@@ -12,14 +12,14 @@
     "directory": "packages/browser-core"
   },
   "type": "module",
-  "main": "./index.js",
-  "module": "./index.js",
-  "types": "./index.d.ts",
+  "main": "./asupersync.js",
+  "module": "./asupersync.js",
+  "types": "./asupersync.d.ts",
   "exports": {
     ".": {
-      "types": "./index.d.ts",
-      "import": "./index.js",
-      "default": "./index.js"
+      "types": "./asupersync.d.ts",
+      "import": "./asupersync.js",
+      "default": "./asupersync.js"
     },
     "./types": {
       "types": "./types.d.ts",
