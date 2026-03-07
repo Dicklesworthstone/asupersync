@@ -1,0 +1,85 @@
+{
+  "schema_version": "wasm-e2e-log-schema-v1",
+  "bead_id": "asupersync-3qv04.8.4.4",
+  "log_entry": {
+    "required_fields": [
+      { "name": "ts", "type": "string", "format": "ISO-8601", "description": "Timestamp with millisecond precision" },
+      { "name": "level", "type": "string", "enum": ["trace", "debug", "info", "warn", "error", "fatal"], "description": "Log severity level" },
+      { "name": "scenario_id", "type": "string", "pattern": "^e2e-[a-z0-9-]+$", "description": "Test scenario identifier" },
+      { "name": "run_id", "type": "string", "format": "uuid", "description": "Unique run identifier" },
+      { "name": "event", "type": "string", "description": "Machine-readable event name" },
+      { "name": "msg", "type": "string", "description": "Human-readable message" }
+    ],
+    "optional_fields": [
+      { "name": "abi_version", "type": "object", "fields": ["major", "minor"], "description": "ABI version at time of event" },
+      { "name": "abi_fingerprint", "type": "u64", "description": "WASM_ABI_SIGNATURE_FINGERPRINT_V1 value" },
+      { "name": "browser", "type": "object", "fields": ["name", "version", "os"], "description": "Browser environment" },
+      { "name": "build", "type": "object", "fields": ["profile", "commit", "wasm_size_bytes"], "description": "Build metadata" },
+      { "name": "module_url", "type": "string", "description": "URL or path of loaded WASM module" },
+      { "name": "handle_ref", "type": "u64", "description": "Handle reference for lifecycle tracking" },
+      { "name": "duration_ms", "type": "f64", "description": "Duration of timed operation" },
+      { "name": "stack_trace", "type": "string", "description": "Stack trace (symbolized if source maps available)" },
+      { "name": "error_code", "type": "string", "description": "Structured error code" },
+      { "name": "evidence_ids", "type": "array[string]", "description": "Evidence matrix IDs this entry satisfies" },
+      { "name": "screenshot_path", "type": "string", "description": "Relative path within artifact bundle" },
+      { "name": "extra", "type": "object", "description": "Free-form key-value pairs" }
+    ]
+  },
+  "log_levels": ["trace", "debug", "info", "warn", "error", "fatal"],
+  "verdicts": ["pass", "fail", "error", "timeout", "skip"],
+  "error_codes": [
+    { "code": "ABI_MISMATCH", "category": "compatibility", "description": "WASM module ABI version does not match host expectation" },
+    { "code": "BRIDGE_TIMEOUT", "category": "bridge", "description": "Host bridge call exceeded deadline" },
+    { "code": "BRIDGE_ERROR", "category": "bridge", "description": "Host bridge call returned an error" },
+    { "code": "HANDLE_LEAK", "category": "lifecycle", "description": "Handle was not closed before scope exit" },
+    { "code": "HANDLE_DOUBLE_FREE", "category": "lifecycle", "description": "Handle closed more than once" },
+    { "code": "ASSERTION_FAIL", "category": "test", "description": "Test assertion did not hold" },
+    { "code": "MODULE_LOAD_FAIL", "category": "infrastructure", "description": "WASM module could not be loaded" },
+    { "code": "WASM_TRAP", "category": "infrastructure", "description": "WASM execution trap (unreachable, OOM)" },
+    { "code": "BROWSER_CRASH", "category": "infrastructure", "description": "Browser process terminated unexpectedly" },
+    { "code": "SCREENSHOT_FAIL", "category": "capture", "description": "Screenshot capture failed" }
+  ],
+  "artifact_bundle": {
+    "schema_version": "wasm-e2e-artifact-bundle-v1",
+    "directory_layout": {
+      "root": "e2e-runs/{scenario_id}/{run_id}/",
+      "files": [
+        { "path": "run-metadata.json", "required": true, "description": "Run metadata, browser, build, verdict" },
+        { "path": "log.jsonl", "required": true, "description": "JSONL log entries" },
+        { "path": "screenshots/{step_name}.png", "required": false, "description": "Failure screenshots" },
+        { "path": "traces/{step_name}.json", "required": false, "description": "Browser performance traces" },
+        { "path": "wasm-artifacts/asupersync_bg.wasm", "required": false, "description": "WASM binary used" },
+        { "path": "wasm-artifacts/asupersync.js.map", "required": false, "description": "JS source map" },
+        { "path": "wasm-artifacts/asupersync_bg.wasm.map", "required": false, "description": "WASM source map" }
+      ]
+    },
+    "naming": {
+      "scenario_id_pattern": "^e2e-[a-z0-9-]+$",
+      "run_id_format": "uuid-v4",
+      "screenshot_naming": "{step_name}.png",
+      "trace_naming": "{step_name}.json"
+    }
+  },
+  "run_metadata": {
+    "schema_version": "wasm-e2e-run-metadata-v1",
+    "required_fields": [
+      "schema_version", "scenario_id", "run_id",
+      "started_at", "finished_at", "duration_ms",
+      "verdict", "browser", "build",
+      "abi_version", "abi_fingerprint",
+      "evidence_ids_covered", "log_line_count"
+    ],
+    "optional_fields": [
+      "failure_summary", "screenshot_count"
+    ]
+  },
+  "retention_policy": {
+    "schema_version": "wasm-e2e-retention-v1",
+    "classes": [
+      { "class": "hot", "min_days": 30, "criteria": "verdict in [fail, error]" },
+      { "class": "warm", "min_days": 14, "criteria": "verdict=pass in execute mode" },
+      { "class": "cold", "min_days": 7, "criteria": "verdict in [skip, timeout] or dry-run" }
+    ],
+    "exemption": "Bundles linked to open incident investigations are exempt from pruning"
+  }
+}
