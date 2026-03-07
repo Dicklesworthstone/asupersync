@@ -1,0 +1,22 @@
+{
+  "private": true,
+  "name": "asupersync-monorepo",
+  "version": "0.2.7",
+  "description": "Asupersync Browser Edition workspace root",
+  "scripts": {
+    "build:wasm": "bash scripts/build_browser_core_artifacts.sh prod",
+    "build:wasm:dev": "bash scripts/build_browser_core_artifacts.sh dev",
+    "build:wasm:minimal": "bash scripts/build_browser_core_artifacts.sh minimal",
+    "build:packages": "pnpm -r --filter '!@asupersync/browser-core' run build",
+    "build": "pnpm run build:wasm && pnpm run build:packages",
+    "build:dev": "pnpm run build:wasm:dev && pnpm run build:packages",
+    "clean": "bash scripts/clean_packages.sh",
+    "typecheck": "pnpm -r run typecheck",
+    "validate": "bash scripts/validate_package_build.sh"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.0.0"
+  },
+  "packageManager": "pnpm@9.15.4"
+}

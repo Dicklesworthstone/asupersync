@@ -1,0 +1,58 @@
+{
+  "name": "@asupersync/next",
+  "version": "0.2.7",
+  "description": "Next.js adapter layer for the Asupersync Browser Edition.",
+  "homepage": "https://github.com/Dicklesworthstone/asupersync#readme",
+  "bugs": {
+    "url": "https://github.com/Dicklesworthstone/asupersync/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Dicklesworthstone/asupersync.git",
+    "directory": "packages/next"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "sideEffects": false,
+  "dependencies": {
+    "@asupersync/browser": "workspace:*"
+  },
+  "peerDependencies": {
+    "next": ">=13.0.0"
+  },
+  "peerDependenciesMeta": {
+    "next": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  },
+  "keywords": [
+    "asupersync",
+    "browser",
+    "nextjs",
+    "structured-concurrency",
+    "wasm"
+  ]
+}
