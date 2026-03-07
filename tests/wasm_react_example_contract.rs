@@ -12,7 +12,10 @@ fn repo_root() -> PathBuf {
 #[test]
 fn react_consumer_fixture_exists_with_required_files() {
     let fixture = repo_root().join("tests/fixtures/react-consumer");
-    assert!(fixture.exists(), "React consumer fixture directory must exist");
+    assert!(
+        fixture.exists(),
+        "React consumer fixture directory must exist"
+    );
 
     for rel in [
         "README.md",
