@@ -218,7 +218,7 @@ fn set_cookie_header(name: &str, value: &str, config: &SessionConfig) -> String 
     if config.http_only {
         cookie.push_str("; HttpOnly");
     }
-    if config.secure {
+    if config.secure || matches!(config.same_site, SameSite::None) {
         cookie.push_str("; Secure");
     }
     match config.same_site {
@@ -911,5 +911,9 @@ mod tests {
         };
         let header = set_cookie_header("s", "v", &config_none);
         assert!(header.contains("SameSite=None"));
+        assert!(
+            header.contains("Secure"),
+            "SameSite=None cookies must include Secure"
+        );
     }
 }
