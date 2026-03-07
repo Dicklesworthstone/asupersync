@@ -325,9 +325,11 @@ mod tests {
     fn browser_reactor_wake_coalesce_flag() {
         let reactor = BrowserReactor::default();
         let source = TestFdSource;
-        assert!(!reactor
-            .wake_pending
-            .load(std::sync::atomic::Ordering::Acquire));
+        assert!(
+            !reactor
+                .wake_pending
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
 
         // Wake with no registrations should NOT leave wake_pending set
         // (empty snapshot clears it to avoid coalescing away future wakes).
