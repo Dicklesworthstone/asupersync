@@ -99,6 +99,106 @@ fn test_cancellation_is_bounded() {
 
 ---
 
+## Coming from tokio?
+
+If you already know tokio, this section maps the primitives you use daily to their asupersync equivalents. The APIs are intentionally different -- asupersync trades implicit convenience for explicit cancel-correctness -- but the concepts map cleanly.
+
+### Concept Mapping
+
+| tokio | asupersync | Key difference |
+|-------|-----------|----------------|
+| `tokio::spawn(fut)` | `scope.spawn(&mut state, &cx, \|cx\| fut)` | Task is owned by a region; cannot orphan. Factory receives its own `Cx`. |
+| `JoinHandle<T>` | `TaskHandle<T>` | `.join(&cx).await` returns `Result<T, JoinError>`. JoinError is Cancelled or Panicked. |
+| `tokio::spawn_blocking(f)` | `spawn_blocking(f)` | Same idea. Runs closure on a blocking pool thread. |
+| `tokio::select!` | `Select::new(a, b).await` | Returns `Either::Left(a)` / `Either::Right(b)`. Futures must be `Unpin`. Use `Scope::race` for auto-drain of losers. |
+| `tokio::join!` | `scope.join_all(cx, futs).await` | All branches always complete (no abandonment). Outcomes aggregate via severity lattice. |
+| `tokio::time::sleep(dur)` | `sleep(now, dur)` | Takes current `Time` instead of reading the clock implicitly. Works with virtual time in lab runtime. |
+| `tokio::time::timeout(dur, fut)` | `timeout(now, dur, fut)` | Returns `Result<T, Elapsed>`. Also see the `Timeout` combinator type for richer outcome handling. |
+| `tokio::time::interval(dur)` | `interval(now, dur)` | Same `MissedTickBehavior` options (Burst, Delay, Skip). |
+| `tokio::sync::mpsc::channel(n)` | `mpsc::channel::<T>(n)` | Two-phase send: `tx.reserve(&cx).await?.send(val)`. Reserve is cancel-safe; commit cannot fail. |
+| `tokio::sync::oneshot::channel()` | `oneshot::channel::<T>()` | Two-phase: `tx.reserve(&cx)` then `permit.send(val)`. |
+| `tokio::sync::broadcast::channel(n)` | `broadcast::channel::<T>(n)` | Two-phase send. Lagging receivers get `RecvError::Lagged`. |
+| `tokio::sync::watch::channel(init)` | `watch::channel(init)` | `rx.changed(&cx).await?` then `rx.borrow_and_clone()`. |
+| `tokio::sync::Mutex` | `sync::Mutex` | `mutex.lock(&cx).await?` -- takes `&Cx`, returns `Result` (can be cancelled). |
+| `tokio::sync::RwLock` | `sync::RwLock` | `.read(&cx).await?` / `.write(&cx).await?`. Writer-preference fairness. |
+| `tokio::sync::Semaphore` | `sync::Semaphore` | `sem.acquire(&cx, n).await?`. Permit is an obligation released on drop. |
+| `tokio::sync::Barrier` | `sync::Barrier` | `barrier.wait(&cx).await?`. Leader election built in (`is_leader`). |
+| `tokio::sync::Notify` | `sync::Notify` | `notify.notified().await` / `notify.notify_one()` / `notify.notify_waiters()`. |
+| `tokio::sync::OnceCell` | `sync::OnceCell` | `cell.get_or_init(async { ... }).await`. Cancel-safe: failed init lets next caller retry. |
+| `tokio::task::yield_now()` | `yield_now()` | Identical concept -- yields to the scheduler. |
+
+### Three things that will surprise you
+
+**1. Every async operation takes `&Cx`.**
+Where tokio reads ambient runtime state from thread-locals, asupersync passes an explicit capability context. This means cancellation and budgets compose structurally -- you can see exactly what a function can do from its signature.
+
+```rust
+// tokio
+let permit = tx.reserve().await?;
+
+// asupersync
+let permit = tx.reserve(&cx).await?;
+```
+
+**2. No orphan tasks. Scopes close to quiescence.**
+In tokio, `tokio::spawn` returns a detached task. In asupersync, every task lives in a region. When a scope exits, it waits for all children to finish. No fire-and-forget, no zombie tasks.
+
+**3. `Outcome` instead of just `Result`.**
+Tokio task results are `Result<T, JoinError>` where JoinError covers panics and cancellation. Asupersync uses a four-valued `Outcome<T, E>` that distinguishes `Ok`, `Err`, `Cancelled(reason)`, and `Panicked(payload)`. The severity lattice (`Ok < Err < Cancelled < Panicked`) drives how combinators aggregate results.
+
+### Quick example: tokio vs asupersync
+
+**tokio:**
+
+```rust
+use tokio::sync::mpsc;
+use tokio::time::{sleep, Duration};
+
+#[tokio::main]
+async fn main() {
+    let (tx, mut rx) = mpsc::channel(10);
+
+    tokio::spawn(async move {
+        for i in 0..5 {
+            tx.send(i).await.unwrap();
+            sleep(Duration::from_millis(100)).await;
+        }
+    });
+
+    while let Some(val) = rx.recv().await {
+        println!("got: {val}");
+    }
+}
+```
+
+**asupersync:**
+
+```rust
+use asupersync::channel::mpsc;
+use asupersync::time::sleep;
+use std::time::Duration;
+
+async fn run(cx: &Cx, scope: &Scope) {
+    let (tx, mut rx) = mpsc::channel::<i32>(10);
+
+    scope.spawn(&mut state, cx, move |cx| async move {
+        for i in 0..5 {
+            let permit = tx.reserve(&cx).await.unwrap(); // cancel-safe
+            permit.send(i);                               // cannot fail
+            sleep(cx.now(), Duration::from_millis(100)).await;
+        }
+    });
+
+    while let Ok(val) = rx.recv(&cx).await {
+        println!("got: {val}");
+    }
+}
+```
+
+The key differences: `reserve`/`send` two-phase pattern prevents message loss on cancellation, `&cx` threads through capabilities, and the task is owned by the scope rather than detached.
+
+---
+
 ## Design Philosophy
 
 ### 1. Structured Concurrency by Construction
