@@ -13,22 +13,32 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 /// Async directory entry iterator.
-#[derive(Debug)]
 pub struct ReadDir {
-    inner: std::fs::ReadDir,
+    state: ReadDirState,
+}
+
+impl std::fmt::Debug for ReadDir {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadDir").finish()
+    }
+}
+
+type ReadDirFuture = dyn std::future::Future<
+        Output = io::Result<(Option<io::Result<std::fs::DirEntry>>, std::fs::ReadDir)>,
+    > + Send;
+
+enum ReadDirState {
+    Idle(std::fs::ReadDir),
+    Pending(Pin<Box<ReadDirFuture>>),
+    Done,
 }
 
 impl ReadDir {
     /// Returns the next directory entry.
-    #[allow(clippy::unused_async)]
     pub async fn next_entry(&mut self) -> io::Result<Option<DirEntry>> {
-        match self.inner.next() {
-            Some(Ok(entry)) => Ok(Some(DirEntry {
-                inner: Arc::new(entry),
-            })),
-            Some(Err(err)) => Err(err),
-            None => Ok(None),
-        }
+        std::future::poll_fn(|cx| Pin::new(&mut *self).poll_next(cx))
+            .await
+            .transpose()
     }
 }
 
@@ -44,7 +54,9 @@ impl ReadDir {
 pub async fn read_dir<P: AsRef<Path>>(path: P) -> io::Result<ReadDir> {
     let path = path.as_ref().to_owned();
     let inner = spawn_blocking_io(move || std::fs::read_dir(path)).await?;
-    Ok(ReadDir { inner })
+    Ok(ReadDir {
+        state: ReadDirState::Idle(inner),
+    })
 }
 
 /// A directory entry returned by [`ReadDir`].
@@ -84,17 +96,44 @@ impl DirEntry {
 impl Stream for ReadDir {
     type Item = io::Result<DirEntry>;
 
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        let next = this.inner.next();
-        let mapped = match next {
-            Some(Ok(entry)) => Some(Ok(DirEntry {
-                inner: Arc::new(entry),
-            })),
-            Some(Err(err)) => Some(Err(err)),
-            None => None,
-        };
-        Poll::Ready(mapped)
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            match std::mem::replace(&mut self.state, ReadDirState::Done) {
+                ReadDirState::Idle(mut inner) => {
+                    let fut = Box::pin(spawn_blocking_io(move || {
+                        let next = inner.next();
+                        Ok((next, inner))
+                    }));
+                    self.state = ReadDirState::Pending(fut);
+                }
+                ReadDirState::Pending(mut fut) => match fut.as_mut().poll(cx) {
+                    Poll::Ready(Ok((Some(Ok(entry)), inner))) => {
+                        self.state = ReadDirState::Idle(inner);
+                        return Poll::Ready(Some(Ok(DirEntry {
+                            inner: Arc::new(entry),
+                        })));
+                    }
+                    Poll::Ready(Ok((Some(Err(err)), inner))) => {
+                        self.state = ReadDirState::Idle(inner);
+                        return Poll::Ready(Some(Err(err)));
+                    }
+                    Poll::Ready(Ok((None, inner))) => {
+                        self.state = ReadDirState::Idle(inner);
+                        return Poll::Ready(None);
+                    }
+                    Poll::Ready(Err(err)) => {
+                        return Poll::Ready(Some(Err(err)));
+                    }
+                    Poll::Pending => {
+                        self.state = ReadDirState::Pending(fut);
+                        return Poll::Pending;
+                    }
+                },
+                ReadDirState::Done => {
+                    return Poll::Ready(None);
+                }
+            }
+        }
     }
 }
 

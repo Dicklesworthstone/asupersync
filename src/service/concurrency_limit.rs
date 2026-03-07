@@ -194,24 +194,19 @@ where
 
     #[inline]
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        match self
-            .inner
-            .poll_ready(cx)
-            .map_err(ConcurrencyLimitError::Inner)
-        {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(Err(err)) => {
-                // If we had already reserved (or were acquiring) a permit,
-                // release that state on inner readiness failure.
-                self.state = State::Idle;
-                return Poll::Ready(Err(err));
-            }
-            Poll::Ready(Ok(())) => {}
-        }
-
         loop {
             match &mut self.state {
                 State::Idle => {
+                    match self
+                        .inner
+                        .poll_ready(cx)
+                        .map_err(ConcurrencyLimitError::Inner)
+                    {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                        Poll::Ready(Ok(())) => {}
+                    }
+
                     // Fast lock-free check: skip mutex when at capacity.
                     if self.semaphore.available_permits() > 0 {
                         // Try to acquire synchronously (may still fail due to FIFO fairness).
@@ -240,7 +235,6 @@ where
                 State::Acquiring(future) => match future.as_mut().poll(cx) {
                     Poll::Ready(Ok(permit)) => {
                         self.state = State::Ready(permit);
-                        return Poll::Ready(Ok(()));
                     }
                     Poll::Ready(Err(_)) => {
                         // Reset state and return error (e.g. closed/cancelled)
@@ -249,7 +243,22 @@ where
                     }
                     Poll::Pending => return Poll::Pending,
                 },
-                State::Ready(_) => return Poll::Ready(Ok(())),
+                State::Ready(_) => {
+                    match self
+                        .inner
+                        .poll_ready(cx)
+                        .map_err(ConcurrencyLimitError::Inner)
+                    {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Ok(())) => return Poll::Ready(Ok(())),
+                        Poll::Ready(Err(err)) => {
+                            // Release the reserved permit if the inner service
+                            // becomes not-callable after we acquired capacity.
+                            self.state = State::Idle;
+                            return Poll::Ready(Err(err));
+                        }
+                    }
+                }
             }
         }
     }
@@ -804,6 +813,59 @@ mod tests {
         let ready_ok = matches!(ready, Poll::Ready(Ok(())));
         crate::assert_with_log!(ready_ok, "waiter ready", true, ready_ok);
         crate::test_complete!("pending_without_current_cx_registers_waiter_and_wakes_on_release");
+    }
+
+    #[test]
+    fn queued_waiter_claims_released_permit_before_rechecking_inner() {
+        init_test("queued_waiter_claims_released_permit_before_rechecking_inner");
+        let ready = Arc::new(AtomicBool::new(true));
+        let layer = ConcurrencyLimitLayer::new(1);
+        let mut holder = layer.layer(NeverCompleteService);
+        let mut waiter = layer.layer(ToggleReadyService::new(ready.clone(), false));
+        let holder_waker = noop_waker();
+        let mut holder_cx = Context::from_waker(&holder_waker);
+
+        let holder_ready = holder.poll_ready(&mut holder_cx);
+        let holder_ok = matches!(holder_ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(holder_ok, "holder ready", true, holder_ok);
+        let held = holder.call(());
+
+        let waiter_waker = CountingWaker::new();
+        let waiter_waker_handle = waiter_waker.clone();
+        let waiter_std_waker: Waker = waiter_waker.into();
+        let mut waiter_cx = Context::from_waker(&waiter_std_waker);
+
+        let first = waiter.poll_ready(&mut waiter_cx);
+        crate::assert_with_log!(
+            first.is_pending(),
+            "waiter queued",
+            true,
+            first.is_pending()
+        );
+
+        ready.store(false, Ordering::SeqCst);
+        drop(held);
+
+        let wake_count = waiter_waker_handle.count();
+        crate::assert_with_log!(wake_count > 0, "wake_count > 0", true, wake_count > 0);
+
+        let second = waiter.poll_ready(&mut waiter_cx);
+        crate::assert_with_log!(
+            second.is_pending(),
+            "inner pending keeps waiter pending",
+            true,
+            second.is_pending()
+        );
+        let has_permit = has_ready_permit(&waiter);
+        crate::assert_with_log!(has_permit, "permit claimed", true, has_permit);
+        let available = waiter.available();
+        crate::assert_with_log!(available == 0, "available", 0, available);
+
+        ready.store(true, Ordering::SeqCst);
+        let third = waiter.poll_ready(&mut waiter_cx);
+        let third_ok = matches!(third, Poll::Ready(Ok(())));
+        crate::assert_with_log!(third_ok, "waiter becomes ready", true, third_ok);
+        crate::test_complete!("queued_waiter_claims_released_permit_before_rechecking_inner");
     }
 
     // =========================================================================

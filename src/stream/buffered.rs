@@ -94,25 +94,13 @@ where
             }
         }
 
-        // Fast path: front already resolved from a previous poll — yield
-        // without re-polling the entire in-flight set.
-        if self.in_flight.front().is_some_and(|e| e.output.is_some()) {
-            let mut entry = self.in_flight.pop_front().expect("front exists");
-            return Poll::Ready(entry.output.take());
-        }
-
-        for (i, entry) in self.in_flight.iter_mut().enumerate() {
+        for entry in &mut self.in_flight {
             if entry.output.is_some() {
                 continue;
             }
 
             if let Poll::Ready(output) = Pin::new(&mut entry.fut).poll(cx) {
                 entry.output = Some(output);
-                // Front just became ready — skip polling remaining
-                // futures since we will yield it immediately below.
-                if i == 0 {
-                    break;
-                }
             }
         }
 

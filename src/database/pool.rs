@@ -593,9 +593,12 @@ impl<M: ConnectionManager> DbPool<M> {
     /// Returns the number of connections successfully created.
     pub fn warm_up(&self) -> usize {
         let mut created = 0;
-        for _ in 0..self.config.min_idle {
+        let mut attempts_remaining = self.config.min_idle;
+        while attempts_remaining > 0 {
+            attempts_remaining -= 1;
             let mut inner = self.inner.lock();
-            if inner.total >= self.config.max_size || inner.closed {
+            let missing_idle = self.config.min_idle.saturating_sub(inner.idle.len());
+            if missing_idle == 0 || inner.total >= self.config.max_size || inner.closed {
                 break;
             }
             inner.total += 1;
@@ -1733,6 +1736,42 @@ mod tests {
         assert_eq!(created, 2);
         assert_eq!(pool.stats().total, 2);
         crate::test_complete!("warm_up_respects_max_size");
+    }
+
+    #[test]
+    fn warm_up_does_not_recreate_existing_idle_capacity() {
+        init_test("warm_up_does_not_recreate_existing_idle_capacity");
+        let pool = DbPool::new(TestManager::new(), DbPoolConfig::default().min_idle(2));
+
+        let first = pool.warm_up();
+        assert_eq!(first, 2);
+        assert_eq!(pool.stats().idle, 2);
+
+        let second = pool.warm_up();
+        assert_eq!(second, 0);
+        assert_eq!(pool.stats().idle, 2);
+        assert_eq!(pool.stats().total, 2);
+        crate::test_complete!("warm_up_does_not_recreate_existing_idle_capacity");
+    }
+
+    #[test]
+    fn warm_up_only_tops_up_missing_idle_connections() {
+        init_test("warm_up_only_tops_up_missing_idle_connections");
+        let pool = DbPool::new(TestManager::new(), DbPoolConfig::default().min_idle(2));
+
+        assert_eq!(pool.warm_up(), 2);
+        let held = pool.get().unwrap();
+        assert_eq!(pool.stats().idle, 1);
+        assert_eq!(pool.stats().active, 1);
+
+        let created = pool.warm_up();
+        assert_eq!(created, 1);
+        assert_eq!(pool.stats().idle, 2);
+        assert_eq!(pool.stats().active, 1);
+        assert_eq!(pool.stats().total, 3);
+
+        drop(held);
+        crate::test_complete!("warm_up_only_tops_up_missing_idle_connections");
     }
 
     // ================================================================

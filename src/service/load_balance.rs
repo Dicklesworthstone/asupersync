@@ -119,10 +119,14 @@ impl PowerOfTwoChoices {
 
     /// Simple deterministic scatter using a counter-based hash.
     fn pseudo_random(&self, n: usize) -> usize {
-        let c = self.counter.fetch_add(1, Ordering::Relaxed);
-        // Use a simple multiplicative hash for reasonable spread.
-        let hash = c.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-        hash % n
+        let c = self.counter.fetch_add(1, Ordering::Relaxed) as u64;
+        // Use a 64-bit multiplicative hash, then fold it back into usize so
+        // the spread stays deterministic on both 32-bit and 64-bit targets.
+        let hash = c
+            .wrapping_mul(6_364_136_223_846_793_005_u64)
+            .wrapping_add(1);
+        let folded = hash ^ (hash >> 32);
+        (folded as usize) % n
     }
 }
 

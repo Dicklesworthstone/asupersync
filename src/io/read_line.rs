@@ -48,6 +48,7 @@ where
         reader,
         buf,
         bytes_read: 0,
+        pending: Vec::new(),
     }
 }
 
@@ -56,6 +57,124 @@ pub struct ReadLine<'a, R: ?Sized> {
     reader: &'a mut R,
     buf: &'a mut String,
     bytes_read: usize,
+    /// Holds incomplete UTF-8 bytes that were consumed from the reader
+    /// but not yet appended to `buf`.
+    pending: Vec<u8>,
+}
+
+fn strip_cr_before_nl(buf: &mut String) {
+    let buf_bytes = buf.as_bytes();
+    let len = buf_bytes.len();
+    if len >= 2 && buf_bytes[len - 2] == b'\r' && buf_bytes[len - 1] == b'\n' {
+        let cr_pos = len - 2;
+        buf.remove(cr_pos);
+    }
+}
+
+enum ChunkAction {
+    Consume,
+    Finish(io::Result<usize>),
+    ConsumeAndFinish(io::Result<usize>),
+}
+
+fn invalid_data_result(err: std::str::Utf8Error) -> io::Result<usize> {
+    Err(io::Error::new(io::ErrorKind::InvalidData, err))
+}
+
+fn append_utf8(buf: &mut String, bytes_read: &mut usize, bytes: &[u8]) -> io::Result<()> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let s = std::str::from_utf8(bytes)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    buf.push_str(s);
+    *bytes_read += bytes.len();
+    Ok(())
+}
+
+fn finish_line(buf: &mut String, bytes_read: usize) -> ChunkAction {
+    strip_cr_before_nl(buf);
+    ChunkAction::ConsumeAndFinish(Ok(bytes_read))
+}
+
+fn process_fresh_chunk(
+    buf: &mut String,
+    pending: &mut Vec<u8>,
+    bytes_read: &mut usize,
+    chunk: &[u8],
+    found_newline: bool,
+) -> ChunkAction {
+    match std::str::from_utf8(chunk) {
+        Ok(s) => {
+            buf.push_str(s);
+            *bytes_read += chunk.len();
+            if found_newline {
+                finish_line(buf, *bytes_read)
+            } else {
+                ChunkAction::Consume
+            }
+        }
+        Err(e) => {
+            let valid_len = e.valid_up_to();
+            if valid_len > 0 {
+                if let Err(err) = append_utf8(buf, bytes_read, &chunk[..valid_len]) {
+                    return ChunkAction::Finish(Err(err));
+                }
+                if found_newline {
+                    ChunkAction::Finish(invalid_data_result(e))
+                } else {
+                    pending.extend_from_slice(&chunk[valid_len..]);
+                    ChunkAction::Consume
+                }
+            } else if e.error_len().is_some() || found_newline {
+                ChunkAction::Finish(invalid_data_result(e))
+            } else {
+                pending.extend_from_slice(chunk);
+                ChunkAction::Consume
+            }
+        }
+    }
+}
+
+fn process_pending_chunk(
+    buf: &mut String,
+    pending: &mut Vec<u8>,
+    bytes_read: &mut usize,
+    chunk: &[u8],
+    found_newline: bool,
+) -> ChunkAction {
+    pending.extend_from_slice(chunk);
+    match std::str::from_utf8(pending) {
+        Ok(s) => {
+            let pending_len = pending.len();
+            buf.push_str(s);
+            *bytes_read += pending_len;
+            pending.clear();
+            if found_newline {
+                finish_line(buf, *bytes_read)
+            } else {
+                ChunkAction::Consume
+            }
+        }
+        Err(e) => {
+            let valid_len = e.valid_up_to();
+            if valid_len > 0 {
+                if let Err(err) = append_utf8(buf, bytes_read, &pending[..valid_len]) {
+                    return ChunkAction::Finish(Err(err));
+                }
+                pending.drain(..valid_len);
+                if found_newline {
+                    ChunkAction::ConsumeAndFinish(invalid_data_result(e))
+                } else {
+                    ChunkAction::Consume
+                }
+            } else if e.error_len().is_some() {
+                ChunkAction::Finish(invalid_data_result(e))
+            } else {
+                ChunkAction::Consume
+            }
+        }
+    }
 }
 
 impl<R> Future for ReadLine<'_, R>
@@ -74,43 +193,47 @@ where
                 Poll::Ready(Ok(buf)) => buf,
             };
 
-            // EOF
             if available.is_empty() {
-                return Poll::Ready(Ok(this.bytes_read));
-            }
-
-            // Scan for newline
-            if let Some(pos) = available.iter().position(|&b| b == b'\n') {
-                // Include everything up to and including the newline
-                let chunk = &available[..=pos];
-                let chunk_len = chunk.len();
-
-                // Validate as UTF-8 and append
-                let s = std::str::from_utf8(chunk)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                this.buf.push_str(s);
-                this.bytes_read += chunk_len;
-                Pin::new(&mut *this.reader).consume(chunk_len);
-
-                // Strip \r before \n if present
-                let buf_bytes = this.buf.as_bytes();
-                let len = buf_bytes.len();
-                if len >= 2 && buf_bytes[len - 2] == b'\r' && buf_bytes[len - 1] == b'\n' {
-                    // Remove the \r (keep the \n)
-                    let cr_pos = this.buf.len() - 2;
-                    this.buf.remove(cr_pos);
+                if let Err(err) = append_utf8(this.buf, &mut this.bytes_read, &this.pending) {
+                    return Poll::Ready(Err(err));
                 }
-
+                this.pending.clear();
                 return Poll::Ready(Ok(this.bytes_read));
             }
 
-            // No newline found — consume all available bytes
-            let all_len = available.len();
-            let s = std::str::from_utf8(available)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            this.buf.push_str(s);
-            this.bytes_read += all_len;
-            Pin::new(&mut *this.reader).consume(all_len);
+            let (chunk, consume_len, found_newline) = available
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or((available, available.len(), false), |pos| {
+                    (&available[..=pos], pos + 1, true)
+                });
+
+            let action = if this.pending.is_empty() {
+                process_fresh_chunk(
+                    this.buf,
+                    &mut this.pending,
+                    &mut this.bytes_read,
+                    chunk,
+                    found_newline,
+                )
+            } else {
+                process_pending_chunk(
+                    this.buf,
+                    &mut this.pending,
+                    &mut this.bytes_read,
+                    chunk,
+                    found_newline,
+                )
+            };
+
+            match action {
+                ChunkAction::Consume => Pin::new(&mut *this.reader).consume(consume_len),
+                ChunkAction::Finish(result) => return Poll::Ready(result),
+                ChunkAction::ConsumeAndFinish(result) => {
+                    Pin::new(&mut *this.reader).consume(consume_len);
+                    return Poll::Ready(result);
+                }
+            }
         }
     }
 }
@@ -119,8 +242,9 @@ where
 mod tests {
     use super::*;
     use crate::io::BufReader;
+    use crate::io::{AsyncBufRead, AsyncRead, ReadBuf};
     use std::sync::Arc;
-    use std::task::{Wake, Waker};
+    use std::task::{Poll, Wake, Waker};
 
     struct NoopWaker;
 
@@ -146,6 +270,43 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    struct SplitReader {
+        chunks: Vec<Vec<u8>>,
+    }
+
+    impl AsyncRead for SplitReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            unreachable!("read_line should use poll_fill_buf for this test")
+        }
+    }
+
+    impl AsyncBufRead for SplitReader {
+        fn poll_fill_buf(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+            let this = self.get_mut();
+            if this.chunks.is_empty() {
+                Poll::Ready(Ok(&[]))
+            } else {
+                Poll::Ready(Ok(&this.chunks[0]))
+            }
+        }
+
+        fn consume(self: Pin<&mut Self>, amt: usize) {
+            let this = self.get_mut();
+            if this.chunks.is_empty() {
+                return;
+            }
+            if amt >= this.chunks[0].len() {
+                this.chunks.remove(0);
+            } else {
+                this.chunks[0] = this.chunks[0][amt..].to_vec();
+            }
+        }
     }
 
     #[test]
@@ -277,5 +438,23 @@ mod tests {
             kind
         );
         crate::test_complete!("read_line_invalid_utf8");
+    }
+
+    #[test]
+    fn read_line_split_utf8_across_chunks() {
+        init_test("read_line_split_utf8_across_chunks");
+
+        let mut reader = SplitReader {
+            chunks: vec![vec![0xF0, 0x9F], vec![0x94, 0xA5, b'\n']],
+        };
+        let mut line = String::new();
+        let mut fut = read_line(&mut reader, &mut line);
+        let mut fut = Pin::new(&mut fut);
+        let bytes = poll_ready(&mut fut)
+            .expect("future did not resolve")
+            .expect("split UTF-8 line should decode");
+        crate::assert_with_log!(bytes == "🔥\n".len(), "bytes", "🔥\n".len(), bytes);
+        crate::assert_with_log!(line == "🔥\n", "line", "🔥\n", line);
+        crate::test_complete!("read_line_split_utf8_across_chunks");
     }
 }

@@ -61,7 +61,6 @@
 use super::recorder::{DEFAULT_MAX_FILE_SIZE, LimitAction, LimitKind, LimitReached};
 use super::replay::{REPLAY_SCHEMA_VERSION, ReplayEvent, TraceMetadata};
 use crate::tracing_compat::{error, warn};
-use libc::ENOSPC;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -111,6 +110,38 @@ pub const MAX_EVENT_LEN: usize = 16 * 1024 * 1024;
 ///
 /// Compressed chunks should not exceed this before decompression.
 pub const MAX_COMPRESSED_CHUNK_LEN: usize = 64 * 1024 * 1024;
+
+#[cfg(unix)]
+const DISK_FULL_OS_ERROR: i32 = 28;
+
+#[cfg(windows)]
+const DISK_FULL_OS_ERROR: i32 = 112;
+
+fn is_disk_full_os_error(code: Option<i32>) -> bool {
+    #[cfg(unix)]
+    {
+        code == Some(DISK_FULL_OS_ERROR)
+    }
+
+    #[cfg(windows)]
+    {
+        code == Some(DISK_FULL_OS_ERROR)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = code;
+        false
+    }
+}
+
+fn truncated_or_io(err: io::Error) -> TraceFileError {
+    if err.kind() == io::ErrorKind::UnexpectedEof {
+        TraceFileError::Truncated
+    } else {
+        TraceFileError::Io(err)
+    }
+}
 
 // =============================================================================
 // Compression Types
@@ -477,7 +508,7 @@ impl TraceWriter {
     }
 
     fn is_disk_full(err: &io::Error) -> bool {
-        err.raw_os_error() == Some(ENOSPC)
+        is_disk_full_os_error(err.raw_os_error())
     }
 
     fn handle_disk_full(&mut self, err: io::Error) -> TraceFileError {
@@ -936,9 +967,9 @@ impl TraceReader {
     fn read_uncompressed_event(&mut self) -> TraceFileResult<Option<ReplayEvent>> {
         // Read event length
         let mut len_bytes = [0u8; 4];
-        if self.reader.read_exact(&mut len_bytes).is_err() {
-            return Ok(None);
-        }
+        self.reader
+            .read_exact(&mut len_bytes)
+            .map_err(truncated_or_io)?;
         let len = u32::from_le_bytes(len_bytes) as usize;
 
         // Guard against oversized event length (DoS mitigation — issues #8, #10)
@@ -952,7 +983,9 @@ impl TraceReader {
 
         // Read event data
         let mut event_bytes = vec![0u8; len];
-        self.reader.read_exact(&mut event_bytes)?;
+        self.reader
+            .read_exact(&mut event_bytes)
+            .map_err(truncated_or_io)?;
 
         let event: ReplayEvent = rmp_serde::from_slice(&event_bytes)?;
         self.events_read += 1;
@@ -964,10 +997,8 @@ impl TraceReader {
     #[cfg(feature = "trace-compression")]
     fn read_compressed_event(&mut self) -> TraceFileResult<Option<ReplayEvent>> {
         // Refill buffer if needed
-        if self.buffer_pos >= self.decompressed_buffer.len()
-            && !self.refill_decompressed_buffer()?
-        {
-            return Ok(None);
+        if self.buffer_pos >= self.decompressed_buffer.len() {
+            self.refill_decompressed_buffer()?;
         }
 
         // Read event length from buffer
@@ -994,18 +1025,16 @@ impl TraceReader {
 
     /// Refills the decompressed buffer from the next compressed chunk.
     #[cfg(feature = "trace-compression")]
-    fn refill_decompressed_buffer(&mut self) -> TraceFileResult<bool> {
+    fn refill_decompressed_buffer(&mut self) -> TraceFileResult<()> {
         // Read chunk length
         let mut chunk_len_bytes = [0u8; 4];
-        match self.reader.read_exact(&mut chunk_len_bytes) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(false),
-            Err(e) => return Err(TraceFileError::Io(e)),
-        }
+        self.reader
+            .read_exact(&mut chunk_len_bytes)
+            .map_err(truncated_or_io)?;
         let chunk_len = u32::from_le_bytes(chunk_len_bytes) as usize;
 
         if chunk_len == 0 {
-            return Ok(false);
+            return Err(TraceFileError::Truncated);
         }
 
         // Guard against oversized compressed chunks (DoS mitigation — issues #8, #10)
@@ -1019,7 +1048,9 @@ impl TraceReader {
 
         // Read compressed chunk
         let mut compressed = vec![0u8; chunk_len];
-        self.reader.read_exact(&mut compressed)?;
+        self.reader
+            .read_exact(&mut compressed)
+            .map_err(truncated_or_io)?;
 
         // Decompress
         self.decompressed_buffer = lz4_flex::decompress_size_prepended(&compressed).map_err(
@@ -1027,7 +1058,7 @@ impl TraceReader {
         )?;
         self.buffer_pos = 0;
 
-        Ok(true)
+        Ok(())
     }
 
     /// Resets the reader to the beginning of the events section.
@@ -1096,10 +1127,10 @@ impl Iterator for TraceEventIterator {
 
         #[cfg(feature = "trace-compression")]
         if self.compression.is_compressed() {
-            return self.next_compressed();
+            return Some(self.next_compressed());
         }
 
-        self.next_uncompressed()
+        Some(self.next_uncompressed())
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -1110,68 +1141,63 @@ impl Iterator for TraceEventIterator {
 
 impl TraceEventIterator {
     /// Reads the next uncompressed event.
-    fn next_uncompressed(&mut self) -> Option<TraceFileResult<ReplayEvent>> {
+    fn next_uncompressed(&mut self) -> TraceFileResult<ReplayEvent> {
         // Read event length
         let mut len_bytes = [0u8; 4];
         if let Err(e) = self.reader.read_exact(&mut len_bytes) {
-            if e.kind() == io::ErrorKind::UnexpectedEof {
-                return None;
-            }
-            return Some(Err(TraceFileError::Io(e)));
+            return Err(truncated_or_io(e));
         }
         let len = u32::from_le_bytes(len_bytes) as usize;
 
         // Guard against oversized event length (DoS mitigation — issues #8, #10)
         if len > MAX_EVENT_LEN {
-            return Some(Err(TraceFileError::OversizedField {
+            return Err(TraceFileError::OversizedField {
                 field: "event_len",
                 actual: len as u64,
                 max: MAX_EVENT_LEN as u64,
-            }));
+            });
         }
 
         // Read event data
         let mut event_bytes = vec![0u8; len];
         if let Err(e) = self.reader.read_exact(&mut event_bytes) {
-            return Some(Err(TraceFileError::Io(e)));
+            return Err(truncated_or_io(e));
         }
 
         match rmp_serde::from_slice(&event_bytes) {
             Ok(event) => {
                 self.remaining -= 1;
-                Some(Ok(event))
+                Ok(event)
             }
-            Err(e) => Some(Err(TraceFileError::from(e))),
+            Err(e) => Err(TraceFileError::from(e)),
         }
     }
 
     /// Reads the next compressed event.
     #[cfg(feature = "trace-compression")]
-    fn next_compressed(&mut self) -> Option<TraceFileResult<ReplayEvent>> {
+    fn next_compressed(&mut self) -> TraceFileResult<ReplayEvent> {
         // Refill buffer if needed
         if self.buffer_pos >= self.decompressed_buffer.len() {
-            match self.refill_buffer() {
-                Ok(true) => {}
-                Ok(false) => return None,
-                Err(e) => return Some(Err(e)),
+            if let Err(e) = self.refill_buffer() {
+                return Err(e);
             }
         }
 
         // Read event length from buffer
         if self.buffer_pos + 4 > self.decompressed_buffer.len() {
-            return Some(Err(TraceFileError::Truncated));
+            return Err(TraceFileError::Truncated);
         }
         let len_bytes: [u8; 4] =
             match self.decompressed_buffer[self.buffer_pos..self.buffer_pos + 4].try_into() {
                 Ok(b) => b,
-                Err(_) => return Some(Err(TraceFileError::Truncated)),
+                Err(_) => return Err(TraceFileError::Truncated),
             };
         let len = u32::from_le_bytes(len_bytes) as usize;
         self.buffer_pos += 4;
 
         // Read event data from buffer
         if self.buffer_pos + len > self.decompressed_buffer.len() {
-            return Some(Err(TraceFileError::Truncated));
+            return Err(TraceFileError::Truncated);
         }
         let event_bytes = &self.decompressed_buffer[self.buffer_pos..self.buffer_pos + len];
 
@@ -1179,26 +1205,24 @@ impl TraceEventIterator {
             Ok(event) => {
                 self.buffer_pos += len;
                 self.remaining -= 1;
-                Some(Ok(event))
+                Ok(event)
             }
-            Err(e) => Some(Err(TraceFileError::from(e))),
+            Err(e) => Err(TraceFileError::from(e)),
         }
     }
 
     /// Refills the decompressed buffer from the next compressed chunk.
     #[cfg(feature = "trace-compression")]
-    fn refill_buffer(&mut self) -> TraceFileResult<bool> {
+    fn refill_buffer(&mut self) -> TraceFileResult<()> {
         // Read chunk length
         let mut chunk_len_bytes = [0u8; 4];
-        match self.reader.read_exact(&mut chunk_len_bytes) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(false),
-            Err(e) => return Err(TraceFileError::Io(e)),
-        }
+        self.reader
+            .read_exact(&mut chunk_len_bytes)
+            .map_err(truncated_or_io)?;
         let chunk_len = u32::from_le_bytes(chunk_len_bytes) as usize;
 
         if chunk_len == 0 {
-            return Ok(false);
+            return Err(TraceFileError::Truncated);
         }
 
         // Guard against oversized compressed chunks (DoS mitigation — issues #8, #10)
@@ -1212,7 +1236,9 @@ impl TraceEventIterator {
 
         // Read compressed chunk
         let mut compressed = vec![0u8; chunk_len];
-        self.reader.read_exact(&mut compressed)?;
+        self.reader
+            .read_exact(&mut compressed)
+            .map_err(truncated_or_io)?;
 
         // Decompress
         self.decompressed_buffer = lz4_flex::decompress_size_prepended(&compressed).map_err(
@@ -1220,7 +1246,7 @@ impl TraceEventIterator {
         )?;
         self.buffer_pos = 0;
 
-        Ok(true)
+        Ok(())
     }
 }
 
@@ -1274,6 +1300,7 @@ pub fn read_trace(path: impl AsRef<Path>) -> TraceFileResult<(TraceMetadata, Vec
 mod tests {
     use super::*;
     use crate::trace::replay::CompactTaskId;
+    use std::io::Write;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::NamedTempFile;
@@ -1301,6 +1328,26 @@ mod tests {
                 outcome: 0,
             },
         ]
+    }
+
+    fn write_header_with_metadata(file: &mut std::fs::File, compression: CompressionMode) {
+        let metadata = TraceMetadata::new(42);
+        let meta_bytes = rmp_serde::to_vec(&metadata).expect("serialize metadata");
+        let flags = if compression.is_compressed() {
+            FLAG_COMPRESSED
+        } else {
+            0
+        };
+
+        file.write_all(TRACE_MAGIC).expect("write magic");
+        file.write_all(&TRACE_FILE_VERSION.to_le_bytes())
+            .expect("write version");
+        file.write_all(&flags.to_le_bytes()).expect("write flags");
+        file.write_all(&[compression.to_byte()])
+            .expect("write compression");
+        file.write_all(&(meta_bytes.len() as u32).to_le_bytes())
+            .expect("write metadata length");
+        file.write_all(&meta_bytes).expect("write metadata");
     }
 
     // =========================================================================
@@ -1493,6 +1540,45 @@ mod tests {
     }
 
     #[test]
+    fn reader_read_event_errors_on_truncated_stream() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        let path = temp.path();
+        let mut file = std::fs::File::create(path).expect("create file");
+        write_header_with_metadata(&mut file, CompressionMode::None);
+        file.write_all(&1u64.to_le_bytes())
+            .expect("write event count");
+        file.flush().expect("flush");
+        drop(file);
+
+        let mut reader = TraceReader::open(path).expect("open reader");
+        let err = reader
+            .read_event()
+            .expect_err("missing declared event must error");
+        assert!(matches!(err, TraceFileError::Truncated), "got: {err:?}");
+    }
+
+    #[test]
+    fn event_iterator_errors_on_truncated_stream() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        let path = temp.path();
+        let mut file = std::fs::File::create(path).expect("create file");
+        write_header_with_metadata(&mut file, CompressionMode::None);
+        file.write_all(&1u64.to_le_bytes())
+            .expect("write event count");
+        file.flush().expect("flush");
+        drop(file);
+
+        let mut iter = TraceReader::open(path).expect("open reader").events();
+        let first = iter
+            .next()
+            .expect("iterator should emit an error for the missing event");
+        assert!(
+            matches!(first, Err(TraceFileError::Truncated)),
+            "got: {first:?}"
+        );
+    }
+
+    #[test]
     fn file_size_reasonable() {
         let temp = NamedTempFile::new().expect("create temp file");
         let path = temp.path();
@@ -1623,7 +1709,7 @@ mod tests {
         let result = writer.finish();
         assert!(matches!(
             result,
-            Err(TraceFileError::Io(err)) if err.raw_os_error() == Some(ENOSPC)
+            Err(TraceFileError::Io(err)) if is_disk_full_os_error(err.raw_os_error())
         ));
     }
 
@@ -1851,6 +1937,45 @@ mod tests {
 
             let read_events = reader.load_all().expect("load all");
             assert_eq!(read_events, events);
+        }
+
+        #[test]
+        fn reader_read_event_errors_on_truncated_compressed_stream() {
+            let temp = NamedTempFile::new().expect("create temp file");
+            let path = temp.path();
+            let mut file = std::fs::File::create(path).expect("create file");
+            write_header_with_metadata(&mut file, CompressionMode::Lz4 { level: 1 });
+            file.write_all(&1u64.to_le_bytes())
+                .expect("write event count");
+            file.flush().expect("flush");
+            drop(file);
+
+            let mut reader = TraceReader::open(path).expect("open reader");
+            let err = reader
+                .read_event()
+                .expect_err("missing compressed chunk must error");
+            assert!(matches!(err, TraceFileError::Truncated), "got: {err:?}");
+        }
+
+        #[test]
+        fn event_iterator_errors_on_truncated_compressed_stream() {
+            let temp = NamedTempFile::new().expect("create temp file");
+            let path = temp.path();
+            let mut file = std::fs::File::create(path).expect("create file");
+            write_header_with_metadata(&mut file, CompressionMode::Lz4 { level: 1 });
+            file.write_all(&1u64.to_le_bytes())
+                .expect("write event count");
+            file.flush().expect("flush");
+            drop(file);
+
+            let mut iter = TraceReader::open(path).expect("open reader").events();
+            let first = iter
+                .next()
+                .expect("iterator should emit an error for the missing chunk");
+            assert!(
+                matches!(first, Err(TraceFileError::Truncated)),
+                "got: {first:?}"
+            );
         }
     }
 }
