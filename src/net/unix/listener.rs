@@ -35,11 +35,29 @@ use crate::stream::Stream;
 use parking_lot::Mutex;
 use std::future::poll_fn;
 use std::io;
-use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{self, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::task::{Context, Poll};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SocketFileIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+pub(crate) fn socket_file_identity(path: &Path) -> io::Result<Option<SocketFileIdentity>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_socket() => Ok(Some(SocketFileIdentity {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        })),
+        Ok(_) => Ok(None),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
 
 pub(crate) fn remove_stale_socket_file(path: &Path) -> io::Result<()> {
     match std::fs::symlink_metadata(path) {
@@ -51,6 +69,25 @@ pub(crate) fn remove_stale_socket_file(path: &Path) -> io::Result<()> {
                 path.display()
             ),
         )),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+pub(crate) fn remove_socket_file_if_same_inode(
+    path: &Path,
+    identity: SocketFileIdentity,
+) -> io::Result<()> {
+    let Some(current_identity) = socket_file_identity(path)? else {
+        return Ok(());
+    };
+
+    if current_identity != identity {
+        return Ok(());
+    }
+
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err),
     }
@@ -78,6 +115,8 @@ pub struct UnixListener {
     /// Path to the socket file (for cleanup on drop).
     /// None for abstract namespace sockets or from_std().
     path: Option<PathBuf>,
+    /// Device/inode identity captured at bind time for safe cleanup.
+    cleanup_identity: Option<SocketFileIdentity>,
     /// Reactor registration for I/O events (lazily initialized).
     registration: Mutex<Option<IoRegistration>>,
 }
@@ -116,6 +155,9 @@ impl UnixListener {
         Ok(Self {
             inner,
             path: Some(path.to_path_buf()),
+            // If identity capture fails, skip automatic cleanup rather than risk
+            // unlinking a different socket later rebound at the same pathname.
+            cleanup_identity: socket_file_identity(path).ok().flatten(),
             registration: Mutex::new(None), // Lazy registration on first poll
         })
     }
@@ -148,7 +190,8 @@ impl UnixListener {
 
         Ok(Self {
             inner,
-            path: None,                     // No filesystem path for abstract sockets
+            path: None, // No filesystem path for abstract sockets
+            cleanup_identity: None,
             registration: Mutex::new(None), // Lazy registration on first poll
         })
     }
@@ -280,7 +323,8 @@ impl UnixListener {
 
         Ok(Self {
             inner: listener,
-            path: None,                     // Don't clean up sockets we didn't create
+            path: None, // Don't clean up sockets we didn't create
+            cleanup_identity: None,
             registration: Mutex::new(None), // Lazy registration on first poll
         })
     }
@@ -320,15 +364,16 @@ impl UnixListener {
     /// After calling this, the socket file will **not** be removed when the
     /// listener is dropped. Returns the path if it was set.
     pub fn take_path(&mut self) -> Option<PathBuf> {
+        self.cleanup_identity = None;
         self.path.take()
     }
 }
 
 impl Drop for UnixListener {
     fn drop(&mut self) {
-        // Clean up socket file if we created it
-        if let Some(path) = &self.path {
-            let _ = std::fs::remove_file(path);
+        // Clean up only the socket file we originally created.
+        if let (Some(path), Some(identity)) = (&self.path, self.cleanup_identity) {
+            let _ = remove_socket_file_if_same_inode(path, identity);
         }
         // Registration (when added) will auto-deregister via RAII
     }
@@ -653,6 +698,34 @@ mod tests {
         // Clean up manually
         std::fs::remove_file(&path).ok();
         crate::test_complete!("test_take_path_prevents_cleanup");
+    }
+
+    #[test]
+    fn replacement_socket_path_survives_old_listener_drop() {
+        init_test("replacement_socket_path_survives_old_listener_drop");
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("listener_rebind.sock");
+
+        let original =
+            futures_lite::future::block_on(UnixListener::bind(&path)).expect("bind failed");
+        crate::assert_with_log!(path.exists(), "socket exists", true, path.exists());
+
+        std::fs::remove_file(&path).expect("unlink original path");
+        let replacement = net::UnixListener::bind(&path).expect("bind replacement failed");
+        crate::assert_with_log!(path.exists(), "replacement exists", true, path.exists());
+
+        drop(original);
+
+        crate::assert_with_log!(
+            path.exists(),
+            "old listener drop preserved replacement path",
+            true,
+            path.exists()
+        );
+
+        drop(replacement);
+        std::fs::remove_file(&path).ok();
+        crate::test_complete!("replacement_socket_path_survives_old_listener_drop");
     }
 
     #[cfg(target_os = "linux")]

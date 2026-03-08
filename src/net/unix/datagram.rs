@@ -52,10 +52,10 @@ use std::task::{Context, Poll};
 ///
 /// # Socket File Cleanup
 ///
-/// When dropped, a bound listener removes the socket file from the filesystem
+/// When dropped, a bound datagram socket removes the socket file from the
+/// filesystem
 /// (unless it was created with [`from_std`](Self::from_std) or is an abstract
 /// namespace socket).
-/// A Unix domain socket datagram.
 ///
 /// Async methods take `&mut self` to avoid concurrent waiters clobbering
 /// the single reactor registration/waker slot.
@@ -66,6 +66,8 @@ pub struct UnixDatagram {
     /// Path to the socket file (for cleanup on drop).
     /// None for abstract namespace sockets, unbound sockets, or from_std().
     path: Option<PathBuf>,
+    /// Device/inode identity captured at bind time for safe cleanup.
+    cleanup_identity: Option<super::listener::SocketFileIdentity>,
     /// Reactor registration for async I/O wakeup.
     registration: Option<IoRegistration>,
 }
@@ -104,6 +106,9 @@ impl UnixDatagram {
         Ok(Self {
             inner,
             path: Some(path.to_path_buf()),
+            // If identity capture fails, skip automatic cleanup rather than risk
+            // unlinking a different socket later rebound at the same pathname.
+            cleanup_identity: super::listener::socket_file_identity(path).ok().flatten(),
             registration: None,
         })
     }
@@ -137,6 +142,7 @@ impl UnixDatagram {
         Ok(Self {
             inner,
             path: None, // No filesystem path for abstract sockets
+            cleanup_identity: None,
             registration: None,
         })
     }
@@ -164,6 +170,7 @@ impl UnixDatagram {
         Ok(Self {
             inner,
             path: None,
+            cleanup_identity: None,
             registration: None,
         })
     }
@@ -196,11 +203,13 @@ impl UnixDatagram {
             Self {
                 inner: s1,
                 path: None,
+                cleanup_identity: None,
                 registration: None,
             },
             Self {
                 inner: s2,
                 path: None,
+                cleanup_identity: None,
                 registration: None,
             },
         ))
@@ -539,6 +548,7 @@ impl UnixDatagram {
         Ok(Self {
             inner: socket,
             path: None, // Don't clean up sockets we didn't create
+            cleanup_identity: None,
             registration: None,
         })
     }
@@ -554,6 +564,7 @@ impl UnixDatagram {
     /// After calling this, the socket file will **not** be removed when the
     /// socket is dropped. Returns the path if it was set.
     pub fn take_path(&mut self) -> Option<PathBuf> {
+        self.cleanup_identity = None;
         self.path.take()
     }
 
@@ -736,9 +747,9 @@ impl UnixDatagram {
 
 impl Drop for UnixDatagram {
     fn drop(&mut self) {
-        // Clean up socket file if we created it
-        if let Some(path) = &self.path {
-            let _ = std::fs::remove_file(path);
+        // Clean up only the socket file we originally created.
+        if let (Some(path), Some(identity)) = (&self.path, self.cleanup_identity) {
+            let _ = super::listener::remove_socket_file_if_same_inode(path, identity);
         }
     }
 }
@@ -1043,6 +1054,33 @@ mod tests {
         // Clean up manually
         std::fs::remove_file(&path).ok();
         crate::test_complete!("test_datagram_take_path");
+    }
+
+    #[test]
+    fn replacement_socket_path_survives_old_datagram_drop() {
+        init_test("replacement_socket_path_survives_old_datagram_drop");
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("datagram_rebind.sock");
+
+        let original = UnixDatagram::bind(&path).expect("bind failed");
+        crate::assert_with_log!(path.exists(), "socket exists", true, path.exists());
+
+        std::fs::remove_file(&path).expect("unlink original path");
+        let replacement = net::UnixDatagram::bind(&path).expect("bind replacement failed");
+        crate::assert_with_log!(path.exists(), "replacement exists", true, path.exists());
+
+        drop(original);
+
+        crate::assert_with_log!(
+            path.exists(),
+            "old datagram drop preserved replacement path",
+            true,
+            path.exists()
+        );
+
+        drop(replacement);
+        std::fs::remove_file(&path).ok();
+        crate::test_complete!("replacement_socket_path_survives_old_datagram_drop");
     }
 
     #[test]
