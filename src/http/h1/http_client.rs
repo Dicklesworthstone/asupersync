@@ -670,12 +670,7 @@ impl HttpClient {
     }
 
     /// Send a PUT request to the given URL with a body.
-    pub async fn put(
-        &self,
-        cx: &Cx,
-        url: &str,
-        body: Vec<u8>,
-    ) -> Result<Response, ClientError> {
+    pub async fn put(&self, cx: &Cx, url: &str, body: Vec<u8>) -> Result<Response, ClientError> {
         self.request(cx, Method::Put, url, Vec::new(), body).await
     }
 
@@ -975,7 +970,12 @@ impl HttpClient {
         if let Some(proxy_url) = self.config.proxy_url.as_deref() {
             return self
                 .execute_single_streaming_with_proxy(
-                    cx, method, parsed, extra_headers, body, proxy_url,
+                    cx,
+                    method,
+                    parsed,
+                    extra_headers,
+                    body,
+                    proxy_url,
                 )
                 .await;
         }

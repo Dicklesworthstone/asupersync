@@ -1136,7 +1136,7 @@ impl RuntimeHandle {
         Fut: Future<Output = ()> + Send + 'static,
     {
         self.try_spawn_with_cx(f)
-            .expect("failed to spawn task with cx")
+            .expect("failed to spawn task with cx");
     }
 
     /// Spawn a task with a [`Cx`](crate::cx::Cx) from outside async context,
@@ -1530,7 +1530,7 @@ impl RuntimeInner {
         use crate::runtime::StoredTask;
         use crate::types::Outcome;
 
-        let (task_id, future) = {
+        let task_id = {
             let mut guard = self
                 .state
                 .lock()
@@ -1547,12 +1547,12 @@ impl RuntimeInner {
             };
 
             guard.store_spawned_task(task_id, StoredTask::new_with_id(wrapped, task_id));
+            drop(guard);
 
-            (task_id, ())
+            task_id
         };
 
         self.scheduler.inject_ready(task_id, Budget::new().priority);
-        let _ = future; // suppress unused binding warning
 
         Ok(())
     }

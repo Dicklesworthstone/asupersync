@@ -309,9 +309,9 @@ impl RegionOutcome {
     /// Convert the outcome into an HTTP [`Response`].
     ///
     /// - `Ok(resp)` → `resp`
-    /// - `Error(e)` → 500 with error message body
+    /// - `Error(e)` → generic 500 response
     /// - `Cancelled` → 503 Service Unavailable
-    /// - `Panicked(msg)` → 500 Internal Server Error
+    /// - `Panicked(msg)` → generic 500 response
     #[inline]
     #[must_use]
     pub fn into_response(self) -> Response {
