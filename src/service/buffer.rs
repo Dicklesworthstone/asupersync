@@ -83,6 +83,8 @@ impl<S> Layer<S> for BufferLayer {
 /// and worker.
 pub struct Buffer<S> {
     shared: Arc<SharedBuffer<S>>,
+    /// Tracks whether this clone is holding a slot reserved by `poll_ready`.
+    ready_slot_reserved: bool,
 }
 
 struct InnerWakers {
@@ -103,7 +105,7 @@ struct SharedBuffer<S> {
     inner: Mutex<S>,
     /// Buffer capacity.
     capacity: usize,
-    /// Number of requests currently in the buffer (pending processing).
+    /// Number of claimed request slots across requests and ready reservations.
     pending: Mutex<usize>,
     /// Whether the buffer has been closed.
     closed: Mutex<bool>,
@@ -133,6 +135,7 @@ impl<S> Buffer<S> {
                     wakers: Mutex::new(Vec::new()),
                 }),
             }),
+            ready_slot_reserved: false,
         }
     }
 
@@ -142,7 +145,10 @@ impl<S> Buffer<S> {
         self.shared.capacity
     }
 
-    /// Returns the number of pending (buffered) requests.
+    /// Returns the number of claimed request slots.
+    ///
+    /// This includes requests already in flight plus any slot reserved by a
+    /// successful `poll_ready` that has not yet been consumed by `call`.
     #[must_use]
     pub fn pending(&self) -> usize {
         *self.shared.pending.lock()
@@ -187,6 +193,18 @@ impl<S> Clone for Buffer<S> {
     fn clone(&self) -> Self {
         Self {
             shared: self.shared.clone(),
+            // Reservations are specific to a single handle; a freshly cloned
+            // handle must not inherit a readiness claim from the source clone.
+            ready_slot_reserved: false,
+        }
+    }
+}
+
+impl<S> Drop for Buffer<S> {
+    fn drop(&mut self) {
+        if self.ready_slot_reserved {
+            self.ready_slot_reserved = false;
+            release_capacity_claim(&self.shared);
         }
     }
 }
@@ -196,6 +214,7 @@ impl<S> fmt::Debug for Buffer<S> {
         f.debug_struct("Buffer")
             .field("capacity", &self.shared.capacity)
             .field("pending", &self.pending())
+            .field("ready_slot_reserved", &self.ready_slot_reserved)
             .finish()
     }
 }
@@ -243,6 +262,20 @@ struct PendingGuard<S> {
     shared: Option<Arc<SharedBuffer<S>>>,
 }
 
+fn release_capacity_claim<S>(shared: &SharedBuffer<S>) {
+    let mut pending = shared.pending.lock();
+    *pending = pending.saturating_sub(1);
+    let wakers = std::mem::take(&mut *shared.ready_wakers.lock());
+    drop(pending);
+    for w in wakers {
+        w.wake();
+    }
+    let inner_wakers = std::mem::take(&mut *shared.inner_wakers.wakers.lock());
+    for w in inner_wakers {
+        w.wake();
+    }
+}
+
 impl<S> PendingGuard<S> {
     fn new(shared: Arc<SharedBuffer<S>>) -> Self {
         Self {
@@ -262,17 +295,7 @@ impl<S> PendingGuard<S> {
 impl<S> Drop for PendingGuard<S> {
     fn drop(&mut self) {
         if let Some(shared) = self.shared.take() {
-            let mut pending = shared.pending.lock();
-            *pending = pending.saturating_sub(1);
-            let wakers = std::mem::take(&mut *shared.ready_wakers.lock());
-            drop(pending);
-            for w in wakers {
-                w.wake();
-            }
-            let inner_wakers = std::mem::take(&mut *shared.inner_wakers.wakers.lock());
-            for w in inner_wakers {
-                w.wake();
-            }
+            release_capacity_claim(&shared);
         }
     }
 }
@@ -434,20 +457,7 @@ impl<F, E, S, R> Drop for BufferFuture<F, E, S, R> {
         match &mut self.state {
             BufferFutureState::WaitingForReady { shared, .. }
             | BufferFutureState::Active { shared, .. } => {
-                let mut pending = shared.pending.lock();
-                *pending = pending.saturating_sub(1);
-                let wakers = std::mem::take(&mut *shared.ready_wakers.lock());
-                drop(pending);
-                for w in wakers {
-                    w.wake();
-                }
-
-                // Also wake any other tasks waiting for inner_ready, since we
-                // might have been holding the spot, or we just freed a slot.
-                let inner_wakers = std::mem::take(&mut *shared.inner_wakers.wakers.lock());
-                for w in inner_wakers {
-                    w.wake();
-                }
+                release_capacity_claim(shared);
             }
             _ => {}
         }
@@ -486,23 +496,40 @@ where
         if *self.shared.closed.lock() {
             return Poll::Ready(Err(BufferError::Closed));
         }
+        if self.ready_slot_reserved {
+            return Poll::Ready(Ok(()));
+        }
         // Lock ordering is pending -> ready_wakers everywhere to avoid inversion
         // with completion/drop paths that decrement pending then wake waiters.
-        let pending = self.shared.pending.lock();
+        let mut pending = self.shared.pending.lock();
         if *pending >= self.shared.capacity {
             let mut wakers = self.shared.ready_wakers.lock();
             if !wakers.iter().any(|w| w.will_wake(cx.waker())) {
                 wakers.push(cx.waker().clone());
             }
+            drop(wakers);
+            drop(pending);
             Poll::Pending
         } else {
+            *pending += 1;
+            drop(pending);
+            self.ready_slot_reserved = true;
             Poll::Ready(Ok(()))
         }
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
         if *self.shared.closed.lock() {
+            if self.ready_slot_reserved {
+                self.ready_slot_reserved = false;
+                release_capacity_claim(&self.shared);
+            }
             return BufferFuture::error(BufferError::Closed);
+        }
+
+        if self.ready_slot_reserved {
+            self.ready_slot_reserved = false;
+            return BufferFuture::waiting(req, self.shared.clone());
         }
 
         {
@@ -983,6 +1010,120 @@ mod tests {
         assert!(svc.poll_ready(&mut cx).is_pending());
         assert_eq!(svc.shared.ready_wakers.lock().len(), 1);
         crate::test_complete!("poll_ready_deduplicates_waker_when_full");
+    }
+
+    #[test]
+    fn poll_ready_reserves_slot_until_call() {
+        init_test("poll_ready_reserves_slot_until_call");
+        let mut svc = Buffer::new(EchoService, 1);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert_eq!(svc.pending(), 1);
+
+        // Re-polling the same handle must not consume another slot.
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert_eq!(svc.pending(), 1);
+
+        let mut future = svc.call(5);
+        assert!(matches!(
+            Pin::new(&mut future).poll(&mut cx),
+            Poll::Ready(Ok(10))
+        ));
+        assert_eq!(svc.pending(), 0);
+        crate::test_complete!("poll_ready_reserves_slot_until_call");
+    }
+
+    #[test]
+    fn poll_ready_reservation_blocks_other_clones() {
+        init_test("poll_ready_reservation_blocks_other_clones");
+        let mut holder = Buffer::new(EchoService, 1);
+        let mut waiter = holder.clone();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(holder.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert_eq!(holder.pending(), 1);
+        assert!(waiter.poll_ready(&mut cx).is_pending());
+
+        let mut future = holder.call(11);
+        assert!(matches!(
+            Pin::new(&mut future).poll(&mut cx),
+            Poll::Ready(Ok(22))
+        ));
+        assert_eq!(waiter.pending(), 0);
+        crate::test_complete!("poll_ready_reservation_blocks_other_clones");
+    }
+
+    #[test]
+    fn reserved_slot_prevents_clone_from_stealing_capacity() {
+        init_test("reserved_slot_prevents_clone_from_stealing_capacity");
+        let mut ready_holder = Buffer::new(EchoService, 1);
+        let mut thief = ready_holder.clone();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(
+            ready_holder.poll_ready(&mut cx),
+            Poll::Ready(Ok(()))
+        ));
+
+        let mut stolen = thief.call(9);
+        assert!(matches!(
+            Pin::new(&mut stolen).poll(&mut cx),
+            Poll::Ready(Err(BufferError::Full))
+        ));
+
+        let mut reserved = ready_holder.call(9);
+        assert!(matches!(
+            Pin::new(&mut reserved).poll(&mut cx),
+            Poll::Ready(Ok(18))
+        ));
+        crate::test_complete!("reserved_slot_prevents_clone_from_stealing_capacity");
+    }
+
+    #[test]
+    fn dropping_reserved_clone_releases_capacity() {
+        init_test("dropping_reserved_clone_releases_capacity");
+        let mut holder = Buffer::new(EchoService, 1);
+        let mut waiter = holder.clone();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(holder.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert_eq!(holder.pending(), 1);
+
+        drop(holder);
+
+        assert!(matches!(waiter.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        let mut future = waiter.call(3);
+        assert!(matches!(
+            Pin::new(&mut future).poll(&mut cx),
+            Poll::Ready(Ok(6))
+        ));
+        crate::test_complete!("dropping_reserved_clone_releases_capacity");
+    }
+
+    #[test]
+    fn call_after_close_releases_reserved_slot() {
+        init_test("call_after_close_releases_reserved_slot");
+        let mut svc = Buffer::new(EchoService, 1);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert_eq!(svc.pending(), 1);
+
+        svc.close();
+
+        let mut future = svc.call(7);
+        assert!(matches!(
+            Pin::new(&mut future).poll(&mut cx),
+            Poll::Ready(Err(BufferError::Closed))
+        ));
+        assert_eq!(svc.pending(), 0);
+        crate::test_complete!("call_after_close_releases_reserved_slot");
     }
 
     // ================================================================
