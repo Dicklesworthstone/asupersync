@@ -431,6 +431,17 @@ fn upsert_sim_waiter(waiters: &mut Vec<SimWaiter>, queued: &Arc<AtomicBool>, wak
     }
 }
 
+fn pop_next_queued_waiter(waiters: &mut Vec<SimWaiter>) -> Option<SimWaiter> {
+    waiters.retain(|entry| entry.queued.load(Ordering::Acquire));
+    if waiters.is_empty() {
+        None
+    } else {
+        // Match the real transport channel wake order so tests exercise the
+        // same fairness semantics instead of a mock-only LIFO queue.
+        Some(waiters.remove(0))
+    }
+}
+
 #[derive(Debug)]
 struct SimQueueState {
     queue: VecDeque<AuthenticatedSymbol>,
@@ -584,7 +595,7 @@ impl SimSymbolStream {
             return Err(StreamError::Closed);
         }
         state.queue.push_back(symbol);
-        let waiter = state.recv_wakers.pop();
+        let waiter = pop_next_queued_waiter(&mut state.recv_wakers);
         drop(state);
         if let Some(waiter) = waiter {
             waiter.queued.store(false, Ordering::Release);
@@ -782,7 +793,7 @@ impl SymbolSink for SimSymbolSink {
             state.sent_symbols.push(delivered);
         }
 
-        let recv_waiter = state.recv_wakers.pop();
+        let recv_waiter = pop_next_queued_waiter(&mut state.recv_wakers);
         drop(state);
         *op_count = op_count.saturating_add(1);
         if let Some(waiter) = recv_waiter {
@@ -842,7 +853,7 @@ impl SymbolStream for SimSymbolStream {
                 waiter.store(false, Ordering::Release);
             }
             let delay = sample_latency(&this.inner.config, &mut state.rng);
-            let send_waiter = state.send_wakers.pop();
+            let send_waiter = pop_next_queued_waiter(&mut state.send_wakers);
             drop(state);
             if let Some(waiter) = send_waiter {
                 waiter.queued.store(false, Ordering::Release);
@@ -974,13 +985,37 @@ mod tests {
     use crate::transport::{SymbolSinkExt, SymbolStreamExt};
     use crate::types::{Symbol, SymbolId, SymbolKind};
     use futures_lite::future;
-    use std::task::Poll;
+    use std::task::{Poll, Wake, Waker};
 
     fn create_symbol(i: u32) -> AuthenticatedSymbol {
         let id = SymbolId::new_for_test(1, 0, i);
         let symbol = Symbol::new(id, vec![i as u8], SymbolKind::Source);
         let tag = AuthenticationTag::zero();
         AuthenticatedSymbol::new_verified(symbol, tag)
+    }
+
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn noop_waker() -> Waker {
+        Waker::from(Arc::new(NoopWake))
+    }
+
+    struct FlagWake {
+        flag: Arc<AtomicBool>,
+    }
+
+    impl Wake for FlagWake {
+        fn wake(self: Arc<Self>) {
+            self.flag.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn flagged_waker(flag: Arc<AtomicBool>) -> Waker {
+        Waker::from(Arc::new(FlagWake { flag }))
     }
 
     #[test]
@@ -1094,6 +1129,154 @@ mod tests {
         }));
 
         assert!(matches!(poll_result, Some(Poll::Pending)));
+    }
+
+    #[test]
+    fn test_sim_channel_sink_skips_stale_recv_waiter_entries() {
+        let shared = Arc::new(SimQueue::new(SimTransportConfig {
+            capacity: 2,
+            ..SimTransportConfig::reliable()
+        }));
+        let (mut sink, _stream) = channel_from_shared(Arc::clone(&shared));
+
+        let stale_flag = Arc::new(AtomicBool::new(false));
+        let active_flag = Arc::new(AtomicBool::new(false));
+        let stale_queued = Arc::new(AtomicBool::new(false));
+        let active_queued = Arc::new(AtomicBool::new(true));
+
+        {
+            let mut state = shared.state.lock();
+            state.recv_wakers.push(SimWaiter {
+                waker: flagged_waker(Arc::clone(&stale_flag)),
+                queued: Arc::clone(&stale_queued),
+            });
+            state.recv_wakers.push(SimWaiter {
+                waker: flagged_waker(Arc::clone(&active_flag)),
+                queued: Arc::clone(&active_queued),
+            });
+        }
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let send = Pin::new(&mut sink).poll_send(&mut context, create_symbol(5));
+        assert!(matches!(send, Poll::Ready(Ok(()))));
+        assert!(!stale_flag.load(Ordering::Acquire));
+        assert!(active_flag.load(Ordering::Acquire));
+        assert!(!active_queued.load(Ordering::Acquire));
+        assert!(shared.state.lock().recv_wakers.is_empty());
+    }
+
+    #[test]
+    fn test_sim_channel_sink_wakes_oldest_recv_waiter_first() {
+        let shared = Arc::new(SimQueue::new(SimTransportConfig {
+            capacity: 2,
+            ..SimTransportConfig::reliable()
+        }));
+        let (mut sink, _stream) = channel_from_shared(Arc::clone(&shared));
+
+        let first_flag = Arc::new(AtomicBool::new(false));
+        let second_flag = Arc::new(AtomicBool::new(false));
+        let first_queued = Arc::new(AtomicBool::new(true));
+        let second_queued = Arc::new(AtomicBool::new(true));
+
+        {
+            let mut state = shared.state.lock();
+            state.recv_wakers.push(SimWaiter {
+                waker: flagged_waker(Arc::clone(&first_flag)),
+                queued: Arc::clone(&first_queued),
+            });
+            state.recv_wakers.push(SimWaiter {
+                waker: flagged_waker(Arc::clone(&second_flag)),
+                queued: Arc::clone(&second_queued),
+            });
+        }
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let send = Pin::new(&mut sink).poll_send(&mut context, create_symbol(9));
+        assert!(matches!(send, Poll::Ready(Ok(()))));
+        assert!(first_flag.load(Ordering::Acquire));
+        assert!(!second_flag.load(Ordering::Acquire));
+        assert!(second_queued.load(Ordering::Acquire));
+        assert_eq!(shared.state.lock().recv_wakers.len(), 1);
+    }
+
+    #[test]
+    fn test_sim_channel_stream_skips_stale_send_waiter_entries() {
+        let shared = Arc::new(SimQueue::new(SimTransportConfig {
+            capacity: 2,
+            ..SimTransportConfig::reliable()
+        }));
+        {
+            let mut state = shared.state.lock();
+            state.queue.push_back(create_symbol(1));
+        }
+        let (_sink, mut stream) = channel_from_shared(Arc::clone(&shared));
+
+        let stale_flag = Arc::new(AtomicBool::new(false));
+        let active_flag = Arc::new(AtomicBool::new(false));
+        let stale_queued = Arc::new(AtomicBool::new(false));
+        let active_queued = Arc::new(AtomicBool::new(true));
+
+        {
+            let mut state = shared.state.lock();
+            state.send_wakers.push(SimWaiter {
+                waker: flagged_waker(Arc::clone(&stale_flag)),
+                queued: Arc::clone(&stale_queued),
+            });
+            state.send_wakers.push(SimWaiter {
+                waker: flagged_waker(Arc::clone(&active_flag)),
+                queued: Arc::clone(&active_queued),
+            });
+        }
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let recv = Pin::new(&mut stream).poll_next(&mut context);
+        assert!(matches!(recv, Poll::Ready(Some(Ok(_)))));
+        assert!(!stale_flag.load(Ordering::Acquire));
+        assert!(active_flag.load(Ordering::Acquire));
+        assert!(!active_queued.load(Ordering::Acquire));
+        assert!(shared.state.lock().send_wakers.is_empty());
+    }
+
+    #[test]
+    fn test_sim_channel_stream_wakes_oldest_send_waiter_first() {
+        let shared = Arc::new(SimQueue::new(SimTransportConfig {
+            capacity: 2,
+            ..SimTransportConfig::reliable()
+        }));
+        {
+            let mut state = shared.state.lock();
+            state.queue.push_back(create_symbol(1));
+        }
+        let (_sink, mut stream) = channel_from_shared(Arc::clone(&shared));
+
+        let first_flag = Arc::new(AtomicBool::new(false));
+        let second_flag = Arc::new(AtomicBool::new(false));
+        let first_queued = Arc::new(AtomicBool::new(true));
+        let second_queued = Arc::new(AtomicBool::new(true));
+
+        {
+            let mut state = shared.state.lock();
+            state.send_wakers.push(SimWaiter {
+                waker: flagged_waker(Arc::clone(&first_flag)),
+                queued: Arc::clone(&first_queued),
+            });
+            state.send_wakers.push(SimWaiter {
+                waker: flagged_waker(Arc::clone(&second_flag)),
+                queued: Arc::clone(&second_queued),
+            });
+        }
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let recv = Pin::new(&mut stream).poll_next(&mut context);
+        assert!(matches!(recv, Poll::Ready(Some(Ok(_)))));
+        assert!(first_flag.load(Ordering::Acquire));
+        assert!(!second_flag.load(Ordering::Acquire));
+        assert!(second_queued.load(Ordering::Acquire));
+        assert_eq!(shared.state.lock().send_wakers.len(), 1);
     }
 
     #[test]
