@@ -329,6 +329,7 @@ declare -A SUITES=(
     [wasm-packaged-cancellation]="test_wasm_packaged_cancellation_e2e.sh"
     [wasm-cross-framework]="test_wasm_cross_framework_e2e.sh"
     [wasm-incident-forensics]="test_wasm_incident_forensics_e2e.sh"
+    [wasm-qa-evidence-smoke]="run_wasm_qa_evidence_smoke.sh"
     [doctor-workspace-scan]="test_doctor_workspace_scan_e2e.sh"
     [doctor-replay-launcher]="test_doctor_replay_launcher_e2e.sh"
     [doctor-orchestration-state-machine]="test_doctor_orchestration_state_machine_e2e.sh"
@@ -356,6 +357,7 @@ declare -A SUITE_ARTIFACT_ROOTS=(
     [wasm-packaged-cancellation]="target/e2e-results/wasm_packaged_cancellation"
     [wasm-cross-framework]="target/e2e-results/wasm_cross_framework"
     [wasm-incident-forensics]="target/e2e-results/wasm_incident_forensics"
+    [wasm-qa-evidence-smoke]="target/e2e-results/wasm_qa_evidence_smoke"
     [doctor-workspace-scan]="target/e2e-results/doctor_workspace_scan"
     [doctor-replay-launcher]="target/e2e-results/doctor_replay_launcher"
     [doctor-orchestration-state-machine]="target/e2e-results/doctor_orchestration_state_machine"
@@ -383,6 +385,7 @@ declare -A SUITE_SUMMARY_GLOBS=(
     [wasm-packaged-cancellation]="summary.json"
     [wasm-cross-framework]="summary.json"
     [wasm-incident-forensics]="summary.json"
+    [wasm-qa-evidence-smoke]="summary.json"
     [doctor-workspace-scan]="summary.json"
     [doctor-replay-launcher]="summary.json"
     [doctor-orchestration-state-machine]="summary.json"
@@ -410,6 +413,7 @@ declare -A SUITE_ARTIFACT_DIR_GLOBS=(
     [wasm-packaged-cancellation]="e2e-runs"
     [wasm-cross-framework]="artifacts_*"
     [wasm-incident-forensics]="artifacts_*"
+    [wasm-qa-evidence-smoke]="run_*"
     [doctor-workspace-scan]="artifacts_*"
     [doctor-replay-launcher]="artifacts_*"
     [doctor-orchestration-state-machine]="artifacts_*"
@@ -437,6 +441,7 @@ declare -A SUITE_CANONICAL_SCENARIO_ID=(
     [wasm-packaged-cancellation]="E2E-SUITE-WASM-PACKAGED-CANCELLATION"
     [wasm-cross-framework]="E2E-SUITE-WASM-CROSS-FRAMEWORK"
     [wasm-incident-forensics]="E2E-SUITE-WASM-INCIDENT-FORENSICS"
+    [wasm-qa-evidence-smoke]="E2E-SUITE-WASM-QA-EVIDENCE-SMOKE"
     [doctor-workspace-scan]="E2E-SUITE-DOCTOR-WORKSPACE-SCAN"
     [doctor-replay-launcher]="E2E-SUITE-DOCTOR-REPLAY-LAUNCHER"
     [doctor-orchestration-state-machine]="E2E-SUITE-DOCTOR-ORCHESTRATION-STATE-MACHINE"
@@ -462,7 +467,7 @@ RAPTORQ_REQUIRED_SCENARIOS=(
 SUITE_ORDER=(
     websocket http messaging transport database distributed
     h2-security net-hardening redis
-    combinators cancel-attribution scheduler wasm-packaged-bootstrap wasm-packaged-cancellation wasm-cross-framework wasm-incident-forensics doctor-workspace-scan
+    combinators cancel-attribution scheduler wasm-packaged-bootstrap wasm-packaged-cancellation wasm-cross-framework wasm-incident-forensics wasm-qa-evidence-smoke doctor-workspace-scan
     doctor-replay-launcher doctor-orchestration-state-machine doctor-scenario-coverage-packs doctor-stress-soak
     doctor-frankensuite-export
     phase6

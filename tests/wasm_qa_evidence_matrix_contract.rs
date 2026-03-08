@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 const DOC_PATH: &str = "docs/wasm_qa_evidence_matrix_contract.md";
 const ARTIFACT_PATH: &str = "artifacts/wasm_qa_evidence_matrix_v1.json";
 const RUNNER_SCRIPT_PATH: &str = "scripts/run_wasm_qa_evidence_smoke.sh";
+const PRIMARY_E2E_SCRIPT_PATH: &str = "scripts/run_all_e2e.sh";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -559,17 +560,42 @@ fn runner_script_exists_and_declares_modes() {
     let script = std::fs::read_to_string(&script_path).unwrap();
     for token in [
         "--list",
+        "--all",
         "--scenario",
         "--dry-run",
         "--execute",
         "wasm-qa-evidence-smoke-bundle-v1",
         "wasm-qa-evidence-smoke-run-report-v1",
         "wasm-qa-e2e-log-v1",
+        "e2e-suite-summary-v3",
         "events.ndjson",
+        "Summary:",
+        "target/e2e-results/wasm_qa_evidence_smoke",
         "retention_class",
         "retention_until_utc",
     ] {
         assert!(script.contains(token), "runner missing token: {token}");
+    }
+}
+
+#[test]
+fn runner_is_wired_into_primary_e2e_orchestrator() {
+    let root = repo_root();
+    let script_path = root.join(PRIMARY_E2E_SCRIPT_PATH);
+    assert!(script_path.exists(), "primary e2e orchestrator must exist");
+    let script = std::fs::read_to_string(&script_path).unwrap();
+    for token in [
+        "[wasm-qa-evidence-smoke]=\"run_wasm_qa_evidence_smoke.sh\"",
+        "[wasm-qa-evidence-smoke]=\"target/e2e-results/wasm_qa_evidence_smoke\"",
+        "[wasm-qa-evidence-smoke]=\"summary.json\"",
+        "[wasm-qa-evidence-smoke]=\"run_*\"",
+        "[wasm-qa-evidence-smoke]=\"E2E-SUITE-WASM-QA-EVIDENCE-SMOKE\"",
+        "wasm-qa-evidence-smoke doctor-workspace-scan",
+    ] {
+        assert!(
+            script.contains(token),
+            "primary e2e orchestrator missing token: {token}"
+        );
     }
 }
 

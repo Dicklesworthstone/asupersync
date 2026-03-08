@@ -180,12 +180,14 @@ Bundle manifests and run reports must both include `retention_class` and `retent
 
 Canonical runner: `scripts/run_wasm_qa_evidence_smoke.sh`
 
-The runner reads `artifacts/wasm_qa_evidence_matrix_v1.json`, supports deterministic dry-run or execute modes, and emits:
+The runner reads `artifacts/wasm_qa_evidence_matrix_v1.json`, supports deterministic dry-run or execute modes for either a single scenario or the full smoke matrix (`--all`), and emits:
 
 1. Per-scenario manifests with schema `wasm-qa-evidence-smoke-bundle-v1`
 2. Aggregate run report with schema `wasm-qa-evidence-smoke-run-report-v1`
 3. Structured event logs (`events.ndjson`) with schema `wasm-qa-e2e-log-v1`
 4. Retention metadata following `wasm-qa-artifact-retention-v1`
+
+When invoked as `bash ./scripts/run_wasm_qa_evidence_smoke.sh --all --execute`, the runner also emits a suite-level `summary.json` with schema `e2e-suite-summary-v3` under `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/`. That is the canonical surface used by `scripts/run_all_e2e.sh --suite wasm-qa-evidence-smoke`.
 
 Packaged bootstrap/load/reload baseline harness (bead `asupersync-3qv04.8.4.1`) is tracked as smoke scenario `WASM-QA-SMOKE-PACKAGED-BOOTSTRAP`, which invokes:
 
@@ -207,6 +209,13 @@ rch exec -- env HARNESS_PROFILE=full HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_M
 
 ## Validation
 
+Canonical orchestration commands:
+
+```bash
+bash ./scripts/run_wasm_qa_evidence_smoke.sh --all --execute
+bash ./scripts/run_all_e2e.sh --suite wasm-qa-evidence-smoke
+```
+
 Focused invariant test command (routed through `rch`):
 
 ```bash
@@ -225,6 +234,7 @@ rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-cfg car
 - `src/trace/file.rs` -- Native file-trace hotspot
 - `Cargo.toml` -- Feature definitions (wasm-browser-*)
 - `artifacts/wasm_qa_evidence_matrix_v1.json`
+- `scripts/run_all_e2e.sh`
 - `scripts/run_wasm_qa_evidence_smoke.sh`
 - `tests/wasm_qa_evidence_matrix_contract.rs`
 - `tests/wasm_cfg_compile_invariants.rs`

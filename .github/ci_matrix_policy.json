@@ -126,6 +126,32 @@
       }
     },
     {
+      "lane_id": "wasm-browser-qa-smoke",
+      "title": "Browser Edition onboarding and QA smoke artifact lane",
+      "owner": "wasm-runtime",
+      "required_job_ids": ["check"],
+      "required_step_names": [
+        "Browser Edition onboarding command bundle smoke",
+        "WASM QA smoke runner (dry-run bundle contract)"
+      ],
+      "required_artifact_names": [
+        "wasm-browser-onboarding-smoke",
+        "wasm-qa-smoke-bundles"
+      ],
+      "replay_command": "python3 scripts/run_browser_onboarding_checks.py --scenario all --dry-run --out-dir artifacts/onboarding && bash scripts/run_wasm_qa_evidence_smoke.sh --scenario WASM-QA-SMOKE-LAYERS --dry-run && bash scripts/run_wasm_qa_evidence_smoke.sh --scenario WASM-QA-SMOKE-CROSS-BROWSER --dry-run",
+      "require_rch": false,
+      "rch_required_step_names": [],
+      "failure_taxonomy": [
+        "entrypoint_drift",
+        "artifact_bundle_contract_regression",
+        "browser_qa_smoke_artifact_missing"
+      ],
+      "thresholds": {
+        "max_failures": 0,
+        "required_artifacts_min": 2
+      }
+    },
+    {
       "lane_id": "wasm-certification",
       "title": "WASM certification cargo-test lane",
       "owner": "wasm-runtime",

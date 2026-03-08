@@ -271,6 +271,52 @@ jobs:
             artifacts/security_release_gate_events.ndjson
           retention-days: 30
 
+      - name: Browser Edition onboarding command bundle smoke
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/onboarding
+          python3 scripts/run_browser_onboarding_checks.py \
+            --scenario all \
+            --dry-run \
+            --out-dir artifacts/onboarding
+
+      - name: Upload Browser Edition onboarding smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-browser-onboarding-smoke
+          path: |
+            artifacts/onboarding/*.ndjson
+            artifacts/onboarding/*.summary.json
+          retention-days: 30
+
+      - name: WASM QA smoke runner (dry-run bundle contract)
+        run: |
+          set -euo pipefail
+          for scenario in \
+            WASM-QA-SMOKE-LAYERS \
+            WASM-QA-SMOKE-PROFILES \
+            WASM-QA-SMOKE-EVIDENCE \
+            WASM-QA-SMOKE-CFG-MATRIX \
+            WASM-QA-SMOKE-NATIVE-BACKSTOP \
+            WASM-QA-SMOKE-PACKAGED-BOOTSTRAP \
+            WASM-QA-SMOKE-PACKAGED-CANCELLATION \
+            WASM-QA-SMOKE-HOST-BRIDGE \
+            WASM-QA-SMOKE-CROSS-BROWSER
+          do
+            bash scripts/run_wasm_qa_evidence_smoke.sh \
+              --scenario "$scenario" \
+              --dry-run
+          done
+
+      - name: Upload WASM QA smoke bundles
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-qa-smoke-bundles
+          path: target/wasm-qa-evidence-smoke/
+          retention-days: 30
+
       - name: WASM bundler compatibility certification
         run: |
           set -euo pipefail

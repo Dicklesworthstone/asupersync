@@ -3,6 +3,7 @@
 Contract ID: `wasm-browser-troubleshooting-cookbook-v1`  
 Legacy bead lineage: `asupersync-umelq.16.4`  
 Current bead: `asupersync-3qv04.9.4`  
+Follow-on bead: `asupersync-3qv04.8.6.3`  
 Parent track: `asupersync-3qv04.9`  
 Adjacent QA/failure-triage bead: `asupersync-3qv04.8.6`
 
@@ -32,6 +33,9 @@ mkdir -p artifacts/troubleshooting
 python3 scripts/run_browser_onboarding_checks.py --scenario all \
   | tee artifacts/troubleshooting/onboarding_all.log
 
+bash ./scripts/run_all_e2e.sh --suite wasm-qa-evidence-smoke \
+  | tee artifacts/troubleshooting/wasm_qa_evidence_smoke.log
+
 bash ./scripts/run_all_e2e.sh --verify-matrix \
   | tee artifacts/troubleshooting/e2e_verify_matrix.log
 
@@ -53,6 +57,7 @@ evidence landed.
 | Workflow | Canonical command | Primary artifacts |
 |---|---|---|
 | Onboarding smoke and framework readiness | `python3 scripts/run_browser_onboarding_checks.py --scenario all` | `artifacts/onboarding/{vanilla,react,next}.ndjson`, `artifacts/onboarding/{vanilla,react,next}.summary.json` |
+| Browser Edition onboarding + QA smoke lane | `python3 scripts/run_browser_onboarding_checks.py --scenario all --dry-run --out-dir artifacts/onboarding && bash ./scripts/run_all_e2e.sh --suite wasm-qa-evidence-smoke` | `artifacts/onboarding/{vanilla,react,next}.summary.json`, `target/wasm-qa-evidence-smoke/<run>/<scenario>/{bundle_manifest.json,run_report.json,run.log,events.ndjson}`, `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/summary.json` |
 | WASM dependency/profile audit | `python3 scripts/check_wasm_dependency_policy.py --policy .github/wasm_dependency_policy.json` | `artifacts/wasm_dependency_audit_summary.json`, `artifacts/wasm_dependency_audit_log.ndjson` |
 | WASM flake governance | `python3 scripts/check_wasm_flake_governance.py --policy .github/wasm_flake_governance_policy.json` | `artifacts/wasm_flake_governance_report.json`, `artifacts/wasm_flake_governance_events.ndjson` |
 | E2E orchestration matrix | `bash ./scripts/run_all_e2e.sh --verify-matrix` | `target/e2e-results/orchestrator_<timestamp>/report.json`, `artifact_manifest.json`, `artifact_manifest.ndjson`, `replay_verification.json`, `artifact_lifecycle_policy.json` |
@@ -69,6 +74,7 @@ evidence landed.
 | `ASUPERSYNC_*_UNSUPPORTED_RUNTIME` thrown during init/bootstrap | direct runtime attempted in Node, SSR, Next server/edge, or another environment outside the shipped browser support boundary | `rch exec -- cargo test --test wasm_js_exports_coverage_contract -- --nocapture` | contract test output proves package-specific unsupported-runtime codes, support reasons, and guidance strings; use `docs/integration.md` support matrix to choose the correct bridge-only fallback |
 | packaged consumer validation says required Browser Edition artifacts are missing | `packages/browser-core/` wasm artifacts or higher-level package `dist/` outputs were not built/staged before running consumer validation | `PATH=/usr/bin:$PATH corepack pnpm run build && bash ./scripts/validate_react_consumer.sh` | built artifacts appear under `packages/browser-core/`; consumer evidence appears at `target/e2e-results/react_consumer/<timestamp>/consumer_build.log` and `summary.json` |
 | `npm pack --dry-run` or package-shape validation fails | manifest/export-map/files-array drift, missing staged browser-core artifacts, or resolver policy drift | `bash ./scripts/validate_npm_pack_smoke.sh` | terminal output names the failing manifest field or missing artifact; warnings reference `packages/browser-core/*` and tell you whether `build:wasm` must run first |
+| Browser Edition onboarding + QA smoke CI lane red | onboarding command bundle drift, smoke-scenario command drift, or mismatch between `.github/workflows/ci.yml` and `.github/ci_matrix_policy.json` for lane `wasm-browser-qa-smoke` | `python3 scripts/run_browser_onboarding_checks.py --scenario all --dry-run --out-dir artifacts/onboarding && bash ./scripts/run_all_e2e.sh --suite wasm-qa-evidence-smoke` | onboarding summaries under `artifacts/onboarding/`; per-scenario smoke bundles under `target/wasm-qa-evidence-smoke/<run>/<scenario>/`; suite summary under `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/summary.json`; CI lane id `wasm-browser-qa-smoke` |
 | `run_all_e2e --verify-matrix` fails on redaction/retention/lifecycle policy | invalid `ARTIFACT_REDACTION_MODE`, retention settings, or suite matrix drift | `bash ./scripts/run_all_e2e.sh --verify-matrix` | orchestrator report bundle under `target/e2e-results/orchestrator_<timestamp>/`; inspect `report.json`, `artifact_manifest.json`, `replay_verification.json`, and `artifact_lifecycle_policy.json` |
 | log-quality gate failure | missing required summary fields, low score under threshold, or doc/workflow drift against the schema contract | `rch exec -- cargo test --test e2e_log_quality_schema -- --nocapture` | `e2e_log_quality_schema` pinpoints missing/invalid contract tokens; pair it with the latest orchestrator `report.json` when the failure originated from an E2E run |
 | bundler compatibility lane red | bundler matrix drift, docs/workflow mismatch, or package staging gap | `rch exec -- cargo test --test wasm_bundler_compatibility -- --nocapture` | pass/fail tied to matrix contract; artifact pointers include `artifacts/wasm_bundler_compatibility_summary.json` and `artifacts/wasm_bundler_compatibility_test.log` |
@@ -174,7 +180,47 @@ Evidence to capture:
 Each summary includes ordered correlation IDs and the failing step IDs; use
 those before opening individual harness logs.
 
-### E. Replay, Matrix, and Incident Forensics
+### E. Browser Edition Onboarding + QA Smoke Lane Failures
+
+Use when the CI smoke lane is red, when `run_all_e2e.sh --suite
+wasm-qa-evidence-smoke` fails locally, or when the onboarding bundle and smoke
+bundle disagree about whether Browser Edition is healthy.
+
+```bash
+python3 scripts/run_browser_onboarding_checks.py \
+  --scenario all --dry-run --out-dir artifacts/onboarding
+
+bash ./scripts/run_wasm_qa_evidence_smoke.sh --all --execute
+
+bash ./scripts/run_all_e2e.sh --suite wasm-qa-evidence-smoke
+```
+
+Evidence to capture:
+
+- `artifacts/onboarding/vanilla.summary.json`
+- `artifacts/onboarding/react.summary.json`
+- `artifacts/onboarding/next.summary.json`
+- latest `target/wasm-qa-evidence-smoke/<run>/<scenario>/bundle_manifest.json`
+- latest `target/wasm-qa-evidence-smoke/<run>/<scenario>/run_report.json`
+- latest `target/wasm-qa-evidence-smoke/<run>/<scenario>/events.ndjson`
+- latest `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/summary.json`
+- CI lane id `wasm-browser-qa-smoke` plus the step names
+  `Browser Edition onboarding command bundle smoke` and
+  `WASM QA smoke runner (dry-run bundle contract)` when the red failure came
+  from GitHub Actions
+
+Interpretation order:
+
+1. If onboarding fails first, treat that as the primary user-facing regression
+   and use the per-framework summaries before the smoke bundles.
+2. If onboarding passes but the smoke suite fails, open the failing
+   `bundle_manifest.json` and `run_report.json` first; they point to the exact
+   scenario command, evidence ID, and retained artifact paths.
+3. If the local suite passes but CI is red, compare `.github/workflows/ci.yml`
+   and `.github/ci_matrix_policy.json` for drift in the `wasm-browser-qa-smoke`
+   lane contract before changing runner logic.
+
+### F. Replay, Matrix, and Incident Forensics
 
 Use when behavior is flaky across runs or incident triage lacks reproducible
 logs.
@@ -195,7 +241,7 @@ Evidence to capture:
 - `artifacts/wasm_flake_governance_events.ndjson`
 - replay command, trace pointer, and scenario ID from the emitted suite summary
 
-### F. Log Contract Violations
+### G. Log Contract Violations
 
 Use when diagnostics are present but not machine-parseable or policy-compliant.
 
@@ -210,7 +256,7 @@ Evidence to capture:
 - the newest relevant `report.json` or onboarding `*.summary.json`
 - updated doc/workflow references if contract drift is intentional
 
-### G. Lifecycle, Quiescence, and Packaged Bootstrap Failures
+### H. Lifecycle, Quiescence, and Packaged Bootstrap Failures
 
 Use when a browser lifecycle or shutdown path leaks work, skips loser drain, or
 fails to reach quiescence.
@@ -253,6 +299,7 @@ Escalation route:
 - `docs/integration.md` (Browser Documentation IA + guardrails)
 - `docs/wasm_dx_error_taxonomy.md` (package error codes, recoverability, and guidance contract)
 - `docs/wasm_quickstart_migration.md` (onboarding/release-channel flow)
+- `docs/wasm_qa_evidence_matrix_contract.md` (smoke runner contract and artifact bundle schema)
 - `docs/wasm_bundler_compatibility_matrix.md` (bundler contract and CI lane)
 - `docs/wasm_flake_governance_and_forensics.md` (incident governance)
 - `docs/doctor_logging_contract.md` (redaction and log-quality contracts)
