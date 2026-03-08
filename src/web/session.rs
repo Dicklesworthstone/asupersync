@@ -24,13 +24,14 @@ use std::sync::Arc;
 
 use super::extract::Request;
 use super::handler::Handler;
-use super::response::Response;
+use super::response::{Response, StatusCode};
 
 /// Default session cookie name.
 const DEFAULT_COOKIE_NAME: &str = "session_id";
 
 /// Session ID length in hex characters (16 bytes = 32 hex chars).
 const SESSION_ID_HEX_LEN: usize = 32;
+const INTERNAL_SERVER_ERROR_BODY: &[u8] = b"Internal Server Error";
 
 // ─── SessionStore trait ─────────────────────────────────────────────────────
 
@@ -111,6 +112,11 @@ impl SessionData {
         self.modified = true;
         self.values.clear();
     }
+
+    /// Reset the transient per-request dirty bit after load/persistence.
+    fn mark_clean(&mut self) {
+        self.modified = false;
+    }
 }
 
 // ─── MemoryStore ────────────────────────────────────────────────────────────
@@ -162,11 +168,15 @@ impl fmt::Debug for MemoryStore {
 
 impl SessionStore for MemoryStore {
     fn load(&self, id: &str) -> Option<SessionData> {
-        self.sessions.lock().get(id).cloned()
+        let mut data = self.sessions.lock().get(id).cloned()?;
+        data.mark_clean();
+        Some(data)
     }
 
     fn save(&self, id: &str, data: &SessionData) {
-        self.sessions.lock().insert(id.to_string(), data.clone());
+        let mut stored = data.clone();
+        stored.mark_clean();
+        self.sessions.lock().insert(id.to_string(), stored);
     }
 
     fn delete(&self, id: &str) {
@@ -176,15 +186,23 @@ impl SessionStore for MemoryStore {
 
 // ─── Session ID generation ──────────────────────────────────────────────────
 
-/// Generate a cryptographically random session ID (16 random bytes as hex).
-fn generate_session_id() -> String {
+/// Generate a session ID from caller-supplied entropy.
+fn generate_session_id_with<F, E>(mut fill: F) -> Result<String, E>
+where
+    F: FnMut(&mut [u8]) -> Result<(), E>,
+{
     let mut buf = [0u8; 16];
-    getrandom::fill(&mut buf).expect("OS entropy source unavailable");
+    fill(&mut buf)?;
     let mut hex = String::with_capacity(32);
     for b in &buf {
         let _ = write!(hex, "{b:02x}");
     }
-    hex
+    Ok(hex)
+}
+
+/// Generate a cryptographically random session ID (16 random bytes as hex).
+fn generate_session_id() -> Result<String, getrandom::Error> {
+    generate_session_id_with(|buf| getrandom::fill(&mut buf[..]))
 }
 
 /// Validate that a session ID looks legitimate (hex, correct length).
@@ -366,55 +384,71 @@ pub struct SessionMiddleware<S: SessionStore, H: Handler> {
 
 impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
     fn call(&self, mut req: Request) -> Response {
-        // 1. Extract or generate session ID.
-        //    If the client-supplied ID is syntactically valid but absent from the
-        //    store, regenerate to prevent session-fixation attacks (an attacker
-        //    could plant a chosen ID and later hijack it).
-        let (mut session_id, mut is_new) = match get_cookie(&req, &self.config.cookie_name) {
-            Some(id) if is_valid_session_id(&id) => (id, false),
-            _ => (generate_session_id(), true),
+        let internal_error = || {
+            Response::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                INTERNAL_SERVER_ERROR_BODY.to_vec(),
+            )
         };
 
-        // 2. Load existing session data.
-        //    If the client-supplied ID is not in the store, regenerate to
-        //    prevent session-fixation attacks.
-        let mut session_data = if is_new {
-            SessionData::new()
-        } else if let Some(data) = self.store.load(&session_id) {
-            data
-        } else {
-            session_id = generate_session_id();
-            is_new = true;
-            SessionData::new()
+        // 1. Load a persisted session if the client presents a valid cookie.
+        //    Unknown-but-well-formed IDs are treated as fixation attempts and
+        //    do not allocate a fresh server-side session unless the handler
+        //    later mutates session state.
+        let mut session_id = None;
+        let mut session_data = match get_cookie(&req, &self.config.cookie_name) {
+            Some(id) if is_valid_session_id(&id) => {
+                self.store.load(&id).map_or_else(SessionData::new, |data| {
+                    session_id = Some(id);
+                    data
+                })
+            }
+            _ => SessionData::new(),
         };
+        let had_existing_session = session_id.is_some();
+        session_data.mark_clean();
 
-        // 3. Inject session data into request extensions.
+        // 2. Inject session data into request extensions.
         //    We use a shared Arc<Mutex<SessionData>> so the handler can modify it.
         let session_handle = Arc::new(Mutex::new(session_data.clone()));
         req.extensions
             .insert_typed(Session(Arc::clone(&session_handle)));
 
-        // 4. Call inner handler.
+        // 3. Call inner handler.
         let mut resp = self.inner.call(req);
 
-        // 5. Extract (possibly modified) session data.
+        // 4. Extract (possibly modified) session data.
         session_data = {
             let guard = session_handle.lock();
             guard.clone()
         };
 
-        // 6. Save if modified or new.
-        let session_cleared = session_data.is_empty() && !is_new && session_data.is_modified();
-        if session_data.is_modified() || is_new {
-            if session_cleared {
-                // Session cleared → delete server-side data and expire the cookie.
-                self.store.delete(&session_id);
-            } else {
-                self.store.save(&session_id, &session_data);
+        // 5. Persist only real session state changes.
+        let session_cleared =
+            had_existing_session && session_data.is_empty() && session_data.is_modified();
+        let should_persist = session_data.is_modified() && !session_data.is_empty();
+        let created_session = if should_persist && session_id.is_none() {
+            session_id = match generate_session_id() {
+                Ok(id) => Some(id),
+                Err(_err) => return internal_error(),
+            };
+            true
+        } else {
+            false
+        };
+
+        if session_cleared {
+            if let Some(existing_id) = session_id.as_deref() {
+                self.store.delete(existing_id);
             }
+        } else if should_persist {
+            let persist_id = session_id
+                .as_deref()
+                .expect("session id must exist before persisting session data");
+            self.store.save(persist_id, &session_data);
         }
 
-        // 7. Set cookie on new sessions or modified sessions.
+        // 6. Set or expire the cookie only when session state actually changed.
         if session_cleared {
             // Expire the cookie so the browser deletes it.
             // Reuse set_cookie_header to ensure all configured attributes
@@ -424,8 +458,14 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
             expire_config.max_age = Some(0);
             let cookie_val = set_cookie_header(&self.config.cookie_name, "", &expire_config);
             resp.headers.insert("set-cookie".to_string(), cookie_val);
-        } else if is_new || session_data.is_modified() {
-            let cookie_val = set_cookie_header(&self.config.cookie_name, &session_id, &self.config);
+        } else if created_session || (had_existing_session && session_data.is_modified()) {
+            let cookie_val = set_cookie_header(
+                &self.config.cookie_name,
+                session_id
+                    .as_deref()
+                    .expect("session id must exist before setting session cookie"),
+                &self.config,
+            );
             resp.headers.insert("set-cookie".to_string(), cookie_val);
         }
 
@@ -566,6 +606,10 @@ mod tests {
 
         let loaded = store.load("sess1").unwrap();
         assert_eq!(loaded.get("user"), Some("bob"));
+        assert!(
+            !loaded.is_modified(),
+            "persisted sessions must not keep the transient dirty bit"
+        );
     }
 
     #[test]
@@ -604,16 +648,32 @@ mod tests {
 
     #[test]
     fn generate_id_is_valid() {
-        let id = generate_session_id();
+        let id = generate_session_id().expect("OS entropy source available");
         assert!(is_valid_session_id(&id));
         assert_eq!(id.len(), SESSION_ID_HEX_LEN);
     }
 
     #[test]
     fn generate_id_uniqueness() {
-        let id1 = generate_session_id();
-        let id2 = generate_session_id();
+        let id1 = generate_session_id().expect("OS entropy source available");
+        let id2 = generate_session_id().expect("OS entropy source available");
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn generate_id_with_formats_bytes_as_hex() {
+        let id = generate_session_id_with(|buf| {
+            buf.copy_from_slice(&[0xab; 16]);
+            Ok::<(), ()>(())
+        })
+        .expect("hex encoding should succeed");
+        assert_eq!(id, "abababababababababababababababab");
+    }
+
+    #[test]
+    fn generate_id_with_propagates_entropy_failure() {
+        let result = generate_session_id_with(|_| Err::<(), _>("entropy unavailable"));
+        assert!(result.is_err());
     }
 
     #[test]
@@ -735,6 +795,21 @@ mod tests {
         }
     }
 
+    /// A read-only handler that proves the middleware does not eagerly create
+    /// or rewrite sessions when no mutation occurred.
+    struct ReadOnlyHandler;
+
+    impl Handler for ReadOnlyHandler {
+        fn call(&self, req: Request) -> Response {
+            let body = req
+                .extensions
+                .get_typed::<Session>()
+                .and_then(|session| session.get("count"))
+                .unwrap_or_else(|| "missing".to_string());
+            Response::new(StatusCode::OK, body.into_bytes())
+        }
+    }
+
     #[test]
     fn middleware_creates_session_on_first_request() {
         let store = MemoryStore::new();
@@ -819,6 +894,49 @@ mod tests {
     }
 
     #[test]
+    fn middleware_read_only_first_request_does_not_create_empty_session() {
+        let store = MemoryStore::new();
+        let layer = SessionLayer::new(store.clone());
+        let handler = layer.wrap(ReadOnlyHandler);
+
+        let resp = handler.call(Request::new("GET", "/"));
+
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(&resp.body[..], b"missing");
+        assert!(
+            !resp.headers.contains_key("set-cookie"),
+            "read-only requests must not create empty sessions"
+        );
+        assert!(store.is_empty(), "no empty session should be persisted");
+    }
+
+    #[test]
+    fn middleware_read_only_existing_session_does_not_reissue_cookie() {
+        let store = MemoryStore::new();
+        let mut seed = SessionData::new();
+        seed.insert("count", "41");
+        let session_id = "abcdef0123456789abcdef0123456789";
+        store.save(session_id, &seed);
+
+        let layer = SessionLayer::new(store.clone());
+        let handler = layer.wrap(ReadOnlyHandler);
+
+        let mut req = Request::new("GET", "/");
+        req.headers
+            .insert("cookie".to_string(), format!("session_id={session_id}"));
+        let resp = handler.call(req);
+
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(&resp.body[..], b"41");
+        assert!(
+            !resp.headers.contains_key("set-cookie"),
+            "untouched persisted sessions must not be re-saved or reissued"
+        );
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.load(session_id).unwrap().get("count"), Some("41"));
+    }
+
+    #[test]
     fn middleware_clear_session_expires_cookie() {
         // Regression: clearing a session must expire the cookie (Max-Age=0),
         // not re-set it with the same ID.
@@ -859,7 +977,9 @@ mod tests {
     #[test]
     fn generate_id_uses_crypto_randomness() {
         // Verify 16 bytes of entropy → 32 hex chars, all unique.
-        let ids: Vec<String> = (0..100).map(|_| generate_session_id()).collect();
+        let ids: Vec<String> = (0..100)
+            .map(|_| generate_session_id().expect("OS entropy source available"))
+            .collect();
         for id in &ids {
             assert!(is_valid_session_id(id));
         }
