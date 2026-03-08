@@ -44,7 +44,7 @@
 //! }
 //!
 //! // Initiate graceful shutdown with 30s drain:
-//! signal.begin_drain(Duration::from_secs(30));
+//! manager.begin_drain(Duration::from_secs(30));
 //! manager.wait_all_closed().await;
 //! signal.mark_stopped();
 //! ```

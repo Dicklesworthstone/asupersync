@@ -11,8 +11,8 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 /// Unique identifier for a tracked connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -65,9 +65,11 @@ pub struct ConnectionInfo {
 /// }
 /// // guard dropped here — active_count returns to 0
 /// ```
+#[derive(Clone)]
 pub struct ConnectionManager {
     state: Arc<Mutex<HashMap<ConnectionId, ConnectionInfo>>>,
     next_id: Arc<AtomicU64>,
+    accepting: Arc<AtomicBool>,
     max_connections: Option<usize>,
     shutdown_signal: ShutdownSignal,
     all_closed: Arc<Notify>,
@@ -87,6 +89,7 @@ impl ConnectionManager {
                 max_connections.unwrap_or(64),
             ))),
             next_id: Arc::new(AtomicU64::new(1)),
+            accepting: Arc::new(AtomicBool::new(true)),
             max_connections,
             shutdown_signal,
             all_closed: Arc::new(Notify::new()),
@@ -99,16 +102,16 @@ impl ConnectionManager {
     /// when dropped. Returns `None` if the server is at capacity or shutting down.
     #[must_use]
     pub fn register(&self, addr: SocketAddr) -> Option<ConnectionGuard> {
-        // Reject new connections during shutdown
-        if self.shutdown_signal.is_shutting_down() {
+        // Reject new connections during shutdown or after the drain gate closes.
+        if !self.accepting.load(Ordering::Acquire) || self.shutdown_signal.is_shutting_down() {
             return None;
         }
 
         let mut connections = self.state.lock();
 
-        // Re-check after acquiring state lock to close the race where shutdown
-        // begins between the first phase check and registration.
-        if self.shutdown_signal.is_shutting_down() {
+        // Re-check after acquiring the state lock so begin_drain() can close
+        // acceptance before any waiter finishes registration.
+        if !self.accepting.load(Ordering::Acquire) || self.shutdown_signal.is_shutting_down() {
             return None;
         }
 
@@ -132,6 +135,19 @@ impl ConnectionManager {
             state: Arc::clone(&self.state),
             all_closed: Arc::clone(&self.all_closed),
         })
+    }
+
+    /// Begins graceful drain in a way that races correctly with registration.
+    ///
+    /// This closes the registration gate while holding the connection-state lock,
+    /// then transitions the shared shutdown signal into draining.
+    #[must_use]
+    pub fn begin_drain(&self, timeout: Duration) -> bool {
+        {
+            let _connections = self.state.lock();
+            self.accepting.store(false, Ordering::Release);
+        }
+        self.shutdown_signal.begin_drain(timeout)
     }
 
     /// Returns the number of active connections.
@@ -205,7 +221,7 @@ impl ConnectionManager {
     /// # Example
     ///
     /// ```ignore
-    /// signal.begin_drain(Duration::from_secs(30));
+    /// manager.begin_drain(Duration::from_secs(30));
     /// let stats = manager.drain_with_stats().await;
     /// signal.mark_stopped();
     /// println!("Drained: {}, Force-closed: {}", stats.drained, stats.force_closed);
@@ -393,7 +409,7 @@ mod tests {
         let has_g1 = g1.is_some();
         crate::assert_with_log!(has_g1, "accepted before shutdown", true, has_g1);
 
-        let began = signal.begin_drain(Duration::from_secs(30));
+        let began = manager.begin_drain(Duration::from_secs(30));
         crate::assert_with_log!(began, "begin drain", true, began);
 
         let g2 = manager.register(test_addr(2));
@@ -612,7 +628,7 @@ mod tests {
             crate::assert_with_log!(count == 1, "one active", 1, count);
 
             // Begin drain
-            let began = signal.begin_drain(Duration::from_secs(30));
+            let began = manager.begin_drain(Duration::from_secs(30));
             crate::assert_with_log!(began, "drain started", true, began);
 
             // New connections should be rejected
@@ -656,7 +672,7 @@ mod tests {
             crate::assert_with_log!(count == 5, "five connected", 5, count);
 
             // Phase 2: Begin drain
-            let initiated = signal.begin_drain(Duration::from_secs(30));
+            let initiated = manager.begin_drain(Duration::from_secs(30));
             crate::assert_with_log!(initiated, "drain started", true, initiated);
 
             // New connections rejected
@@ -699,7 +715,7 @@ mod tests {
             let manager = ConnectionManager::new(None, signal.clone());
 
             // Begin drain with no active connections
-            let began = signal.begin_drain(Duration::from_secs(30));
+            let began = manager.begin_drain(Duration::from_secs(30));
             crate::assert_with_log!(began, "drain started", true, began);
 
             let stats = manager.drain_with_stats().await;
@@ -730,7 +746,7 @@ mod tests {
             let g3 = manager.register(test_addr(3)).expect("register 3");
 
             // Begin drain with generous timeout
-            let began = signal.begin_drain(Duration::from_secs(30));
+            let began = manager.begin_drain(Duration::from_secs(30));
             crate::assert_with_log!(began, "drain started", true, began);
 
             // Drop all connections from a thread (simulating graceful close)
@@ -776,7 +792,7 @@ mod tests {
             let _g3 = manager.register(test_addr(3)).expect("register 3");
 
             // Very short drain timeout so it expires quickly
-            let began = signal.begin_drain(Duration::from_millis(50));
+            let began = manager.begin_drain(Duration::from_millis(50));
             crate::assert_with_log!(began, "drain started", true, began);
 
             // Drop one connection quickly, leave two lingering
@@ -836,6 +852,28 @@ mod tests {
         let total = successes.load(std::sync::atomic::Ordering::Relaxed);
         crate::assert_with_log!(total <= 5, "capacity not exceeded", "<=5", total);
         crate::test_complete!("concurrent_register_respects_capacity");
+    }
+
+    #[test]
+    fn begin_drain_closes_acceptance_gate() {
+        init_test("begin_drain_closes_acceptance_gate");
+        let signal = ShutdownSignal::new();
+        let manager = ConnectionManager::new(None, signal.clone());
+
+        let began = manager.begin_drain(Duration::from_secs(30));
+        crate::assert_with_log!(began, "drain started", true, began);
+
+        let rejected = manager.register(test_addr(1)).is_none();
+        crate::assert_with_log!(
+            rejected,
+            "register rejected after begin_drain",
+            true,
+            rejected
+        );
+
+        let draining = signal.is_draining();
+        crate::assert_with_log!(draining, "signal entered draining", true, draining);
+        crate::test_complete!("begin_drain_closes_acceptance_gate");
     }
 
     #[test]

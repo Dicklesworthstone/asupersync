@@ -87,7 +87,7 @@ impl Http1ListenerConfig {
 ///     })
 ///     .await?;
 ///
-///     // In another task: listener.shutdown_signal().begin_drain(Duration::from_secs(30));
+///     // In another task: listener.begin_drain();
 ///     let stats = listener.run(&handle).await?;
 ///     Ok::<_, std::io::Error>(stats)
 /// })?;
@@ -149,10 +149,17 @@ where
         }
     }
 
-    /// Returns a clone of the shutdown signal for external shutdown triggering.
+    /// Returns a clone of the shutdown signal for external phase observation.
     #[must_use]
     pub fn shutdown_signal(&self) -> ShutdownSignal {
         self.shutdown_signal.clone()
+    }
+
+    /// Begins graceful shutdown using the listener's configured drain timeout.
+    #[must_use]
+    pub fn begin_drain(&self) -> bool {
+        self.connection_manager
+            .begin_drain(self.config.drain_timeout)
     }
 
     /// Returns a reference to the connection manager.
@@ -256,9 +263,8 @@ where
         }
 
         // Drain phase
-        let drain_timeout = self.config.drain_timeout;
         if self.shutdown_signal.phase() == ShutdownPhase::Running {
-            let _ = self.shutdown_signal.begin_drain(drain_timeout);
+            let _ = self.begin_drain();
         }
 
         let stats = self.connection_manager.drain_with_stats().await;
@@ -545,8 +551,8 @@ mod tests {
             .expect("bind failed");
 
             // Trigger shutdown before running
-            let signal = listener.shutdown_signal();
-            let _ = signal.begin_drain(Duration::from_millis(100));
+            let began = listener.begin_drain();
+            assert!(began);
 
             let stats = listener.run(&handle).await.expect("run");
             assert_eq!(stats.drained, 0);
@@ -591,6 +597,7 @@ mod tests {
 
             let addr = listener.local_addr().expect("local_addr");
             let shutdown = listener.shutdown_signal();
+            let manager = listener.connection_manager().clone();
 
             let run_handle = handle
                 .clone()
@@ -606,7 +613,7 @@ mod tests {
                 .expect("write request");
 
             started.notified().await;
-            let began = shutdown.begin_drain(Duration::from_millis(0));
+            let began = manager.begin_drain(Duration::from_millis(0));
             assert!(began);
 
             shutdown.wait_for_phase(ShutdownPhase::ForceClosing).await;

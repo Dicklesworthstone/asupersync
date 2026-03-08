@@ -347,15 +347,17 @@ impl Pool {
         self.maybe_cleanup(now);
         let host_pool = self.hosts.get_mut(key)?;
 
-        // Find an idle connection that's not expired
+        // HashMap iteration order is randomized, so explicitly choose the
+        // lowest viable connection ID to keep reuse deterministic.
         let idle_id = host_pool
             .connections
             .iter()
-            .find(|(_, conn)| {
+            .filter(|(_, conn)| {
                 conn.state == PooledConnectionState::Idle
                     && !conn.is_expired(now, self.config.idle_timeout)
             })
-            .map(|(id, _)| *id);
+            .map(|(id, _)| *id)
+            .min();
 
         if let Some(id) = idle_id {
             if let Some(conn) = host_pool.connections.get_mut(&id) {
@@ -741,6 +743,30 @@ mod tests {
         // At time 120: id1 is expired (idle 120ms), id2 is not (idle 70ms)
         let acquired = pool.try_acquire(&key, make_time(120));
         assert_eq!(acquired, Some(id2));
+    }
+
+    #[test]
+    fn acquire_uses_lowest_idle_id_for_deterministic_tie_break() {
+        let mut pool = Pool::new();
+        let key = PoolKey::https("example.com", None);
+        let now = make_time(100);
+
+        let id1 = pool.register_connecting(key.clone(), now, 2);
+        let id2 = pool.register_connecting(key.clone(), now, 2);
+        let id3 = pool.register_connecting(key.clone(), now, 2);
+
+        pool.mark_connected(&key, id1, now);
+        pool.mark_connected(&key, id2, now);
+        pool.mark_connected(&key, id3, now);
+
+        let acquired = pool.try_acquire(&key, now);
+        assert_eq!(acquired, Some(id1));
+
+        let acquired = pool.try_acquire(&key, now);
+        assert_eq!(acquired, Some(id2));
+
+        let acquired = pool.try_acquire(&key, now);
+        assert_eq!(acquired, Some(id3));
     }
 
     #[test]
