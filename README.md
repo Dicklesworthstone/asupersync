@@ -1095,6 +1095,10 @@ Asupersync is feature-light by default; the lab runtime is available without fla
 | `simd-intrinsics` | AVX2/NEON GF(256) kernels for RaptorQ | No |
 | `loom-tests` | Loom scheduler/concurrency verification surface | No |
 | `cli` | CLI tools (trace inspection) | No |
+| `wasm-browser-minimal` | Browser WASM: minimal semantic core | No |
+| `wasm-browser-dev` | Browser WASM: development profile with browser I/O | No |
+| `wasm-browser-prod` | Browser WASM: production profile with browser I/O | No |
+| `wasm-browser-deterministic` | Browser WASM: replay-safe with browser trace | No |
 
 ### Minimum Supported Rust Version
 
@@ -1288,6 +1292,57 @@ disallows `std::collections::HashMap/HashSet` in favor of `util::DetHashMap/DetH
 
 ---
 
+## Browser Edition (WASM)
+
+Asupersync compiles to `wasm32-unknown-unknown` and ships a Browser Edition
+that exposes the structured concurrency runtime to JavaScript and TypeScript
+applications via `wasm-bindgen`.
+
+### What works today
+
+- **JS/TS consumers**: install `@asupersync/browser` (or framework-specific
+  packages `@asupersync/react`, `@asupersync/next`) and use structured
+  scopes, cancel-correct fetch, WebSocket management, and four-valued
+  outcomes from JavaScript.
+- **Core invariants preserved**: no orphan tasks, cancel-correctness,
+  obligation accounting, and region-close-implies-quiescence all hold in
+  the browser runtime.
+- **Single-threaded cooperative model**: the scheduler yields back to the
+  browser event loop between steps, preserving UI responsiveness.
+
+### What does not work yet
+
+- **Rust-to-WASM compilation**: writing async Rust code that uses
+  Asupersync's `Cx`/scopes/combinators and compiling it to wasm32 is
+  architecturally feasible (the semantic core is target-agnostic) but
+  is not documented, tested, or exposed as a public API path.
+- **Multi-threaded WASM**: the browser runtime is single-threaded.
+  A future phase may add `SharedArrayBuffer` + Web Worker parallelism,
+  but this requires cross-origin isolation headers that many deployments
+  cannot enable.
+- **Raw TCP/UDP, filesystem, process/signal**: these native-only surfaces
+  are `cfg`-gated out on `wasm32`. Browser networking uses `fetch` and
+  `WebSocket` APIs instead.
+
+### Quick start
+
+```bash
+rustup target add wasm32-unknown-unknown
+# Verify the core compiles for browser
+cargo check --target wasm32-unknown-unknown \
+  --no-default-features --features wasm-browser-dev
+```
+
+```bash
+# Install the JS/TS SDK
+npm install @asupersync/browser
+```
+
+See [`docs/WASM.md`](./docs/WASM.md) for the full Browser Edition guide,
+architecture diagrams, crate map, and known limitations.
+
+---
+
 ## Limitations
 
 ### Current State
@@ -1304,6 +1359,8 @@ disallows `std::collections::HashMap/HashSet` in favor of `util::DetHashMap/DetH
 | Distributed runtime (remote tasks, sagas, leases, recovery) | ✅ Implemented |
 | RaptorQ fountain coding for snapshot distribution | ✅ Implemented |
 | Formal methods (Lean coverage artifacts + TLA+ export) | ✅ Implemented |
+| Browser Edition (WASM, JS/TS consumers) | ✅ Implemented (single-threaded, event-loop-driven) |
+| Rust-to-WASM compilation path | Planned (semantic core is portable, runtime API not yet exposed) |
 
 ### What Asupersync Doesn't Do
 
@@ -1376,6 +1433,7 @@ Open an issue at https://github.com/Dicklesworthstone/asupersync/issues
 | [`asupersync_v4_formal_semantics.md`](./asupersync_v4_formal_semantics.md) | **Operational Semantics**: Small-step rules, TLA+ sketch |
 | [`asupersync_v4_api_skeleton.rs`](./asupersync_v4_api_skeleton.rs) | **API Skeleton**: Rust types and signatures |
 | [`docs/integration.md`](./docs/integration.md) | **Integration Docs**: Architecture, API orientation, tutorials, Browser Edition docs IA/navigation contract, support matrix, and fail-closed boundary guidance |
+| [`docs/WASM.md`](./docs/WASM.md) | **Browser Edition Overview**: what works (JS consumers), what doesn't (Rust-to-WASM), architectural boundary, runtime model, known limitations, and future phases |
 | [`docs/wasm_quickstart_migration.md`](./docs/wasm_quickstart_migration.md) | **Browser Quickstart + Migration**: deterministic onboarding commands, migration anti-pattern map, deferred-surface fallback guidance |
 | [`docs/wasm_canonical_examples.md`](./docs/wasm_canonical_examples.md) | **Browser Canonical Examples**: vanilla/TypeScript/React/Next scenario catalog with deterministic repro commands and artifact pointers |
 | [`docs/wasm_troubleshooting_compendium.md`](./docs/wasm_troubleshooting_compendium.md) | **Browser Troubleshooting Cookbook**: unsupported-runtime recovery paths, failure recipes, and deterministic verification commands |
