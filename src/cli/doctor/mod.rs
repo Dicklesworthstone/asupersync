@@ -17982,7 +17982,7 @@ mod tests {
 
     fn make_single_member_workspace_report(source: &str) -> WorkspaceScanReport {
         let temp = tempdir().expect("temp dir");
-        let root = temp.path();
+        let root = temp.into_path();
         write_file(
             &root.join("Cargo.toml"),
             r#"[workspace]
@@ -17998,7 +17998,7 @@ edition = "2024"
 "#,
         );
         write_file(&root.join("crate_a/src/lib.rs"), source);
-        scan_workspace(root).expect("scan workspace")
+        scan_workspace(&root).expect("scan workspace")
     }
 
     #[test]
@@ -18341,7 +18341,8 @@ impl RuntimeState {
 
     fn contention_marker(&self) {
         let _instrumentation = self.instrumentation.lock();
-        // lock_wait_ns and lock_hold_ns are emitted by lock metrics.
+        let lock_wait_ns = 1;
+        let lock_hold_ns = 2;
     }
 }
 ",
@@ -18441,7 +18442,7 @@ impl RuntimeState {
         let _tasks = self.tasks.lock();
         let _regions = self.regions.lock();
         // contention marker for scoring
-        let _ = "lock_wait_ns";
+        let lock_wait_ns = 0;
     }
 }
 "#,

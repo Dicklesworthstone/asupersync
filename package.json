@@ -12,7 +12,7 @@
     "build:dev": "pnpm run build:wasm:dev && pnpm run build:packages",
     "clean": "bash scripts/clean_packages.sh",
     "typecheck": "pnpm -r run typecheck",
-    "validate": "bash scripts/validate_package_build.sh",
+    "validate": "bash scripts/validate_package_build.sh && bash scripts/validate_npm_pack_smoke.sh",
     "validate:next-consumer": "bash scripts/validate_next_turbopack_consumer.sh",
     "validate:vite-consumer": "bash scripts/validate_vite_vanilla_consumer.sh",
     "validate:webpack-consumer": "bash scripts/validate_webpack_consumer.sh"

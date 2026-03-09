@@ -499,11 +499,7 @@ impl crate::codec::Encoder<Request> for Http1ClientCodec {
         }
 
         // Pre-reserve capacity.
-        let headers_bytes: usize = req
-            .headers
-            .iter()
-            .map(|(n, v)| n.len() + v.len() + 4)
-            .sum();
+        let headers_bytes: usize = req.headers.iter().map(|(n, v)| n.len() + v.len() + 4).sum();
         dst.reserve(64 + req.uri.len() + headers_bytes + req.body.len());
 
         // Request line: "GET /path HTTP/1.1\r\n"
