@@ -9,6 +9,20 @@ use crate::bytes::{Bytes, BytesMut};
 
 use super::error::H2Error;
 
+/// Pre-built Huffman decode index: (code, code_bits) → symbol byte.
+/// Covers codes of 9-30 bits (5-8 bit codes are handled by inline fast paths).
+/// Symbol 256 (EOS) is stored as `None` so the decoder can reject it.
+static HUFFMAN_DECODE_INDEX: LazyLock<HashMap<(u32, u8), Option<u8>>> = LazyLock::new(|| {
+    let mut map = HashMap::with_capacity(257);
+    for (sym, &(code, code_bits)) in HUFFMAN_TABLE.iter().enumerate() {
+        if code_bits >= 9 {
+            let value = if sym == 256 { None } else { Some(sym as u8) };
+            map.insert((code, code_bits), value);
+        }
+    }
+    map
+});
+
 /// Pre-built index for exact (name, value) → 1-based static table index lookups.
 static STATIC_EXACT_INDEX: LazyLock<HashMap<(&'static str, &'static str), usize>> =
     LazyLock::new(|| {
@@ -1156,9 +1170,8 @@ fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
                 }
             }
 
-            // Slow path for codes 9-30 bits: use table scan but only for
-            // codes of the exact length range we need. Since we already
-            // handled 5-8 bit codes above, we start at 9.
+            // Slow path for codes 9-30 bits: O(1) lookup per code length
+            // via pre-built HUFFMAN_DECODE_INDEX instead of scanning 257 entries.
             let mut decoded = false;
             for code_len in 9u32..=30 {
                 if bits < code_len {
@@ -1169,23 +1182,20 @@ fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
                 let mask = (1u32 << code_len) - 1;
                 let candidate = candidate & mask;
 
-                // Scan only entries with matching code length.
-                for (sym, &(code, code_bits)) in HUFFMAN_TABLE.iter().enumerate() {
-                    if u32::from(code_bits) != code_len {
-                        continue;
-                    }
-                    if (code & mask) == candidate {
-                        if sym == 256 {
-                            return Err(H2Error::compression("invalid huffman code (EOS symbol)"));
+                if let Some(sym_opt) = HUFFMAN_DECODE_INDEX.get(&(candidate, code_len as u8)) {
+                    match sym_opt {
+                        None => {
+                            return Err(H2Error::compression(
+                                "invalid huffman code (EOS symbol)",
+                            ));
                         }
-                        result.push(sym as u8);
-                        bits = shift;
-                        accumulator &= BIT_MASKS[bits as usize];
-                        decoded = true;
-                        break;
+                        Some(sym) => {
+                            result.push(*sym);
+                            bits = shift;
+                            accumulator &= BIT_MASKS[bits as usize];
+                            decoded = true;
+                        }
                     }
-                }
-                if decoded {
                     break;
                 }
             }
