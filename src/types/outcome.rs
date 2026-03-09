@@ -168,6 +168,7 @@ impl Severity {
     /// Returns the numeric severity value (0-3).
     ///
     /// This is useful for serialization or comparison.
+    #[inline]
     #[must_use]
     pub const fn as_u8(self) -> u8 {
         self as u8
@@ -254,6 +255,7 @@ impl<T, E> Outcome<T, E> {
     /// assert!(outcome.is_ok());
     /// assert_eq!(outcome.unwrap(), 42);
     /// ```
+    #[inline]
     #[must_use]
     pub const fn ok(value: T) -> Self {
         Self::Ok(value)
@@ -269,6 +271,7 @@ impl<T, E> Outcome<T, E> {
     /// let outcome: Outcome<i32, &str> = Outcome::err("not found");
     /// assert!(outcome.is_err());
     /// ```
+    #[inline]
     #[must_use]
     pub const fn err(error: E) -> Self {
         Self::Err(error)
@@ -284,6 +287,7 @@ impl<T, E> Outcome<T, E> {
     /// let outcome: Outcome<i32, &str> = Outcome::cancelled(CancelReason::timeout());
     /// assert!(outcome.is_cancelled());
     /// ```
+    #[inline]
     #[must_use]
     pub const fn cancelled(reason: CancelReason) -> Self {
         Self::Cancelled(reason)
@@ -299,6 +303,7 @@ impl<T, E> Outcome<T, E> {
     /// let outcome: Outcome<i32, &str> = Outcome::panicked(PanicPayload::new("oops"));
     /// assert!(outcome.is_panicked());
     /// ```
+    #[inline]
     #[must_use]
     pub const fn panicked(payload: PanicPayload) -> Self {
         Self::Panicked(payload)
@@ -327,6 +332,7 @@ impl<T, E> Outcome<T, E> {
     /// assert_eq!(cancelled.severity(), Severity::Cancelled);
     /// assert!(ok.severity() < err.severity());
     /// ```
+    #[inline]
     #[must_use]
     pub const fn severity(&self) -> Severity {
         match self {
@@ -340,6 +346,7 @@ impl<T, E> Outcome<T, E> {
     /// Returns the numeric severity level (0 = Ok, 3 = Panicked).
     ///
     /// Prefer [`severity()`][Self::severity] for type-safe comparisons.
+    #[inline]
     #[must_use]
     pub const fn severity_u8(&self) -> u8 {
         self.severity().as_u8()
@@ -348,6 +355,7 @@ impl<T, E> Outcome<T, E> {
     /// Returns true if this is a terminal outcome (any non-pending state).
     ///
     /// All `Outcome` variants are terminal states.
+    #[inline]
     #[must_use]
     pub const fn is_terminal(&self) -> bool {
         true // All variants are terminal
@@ -366,6 +374,7 @@ impl<T, E> Outcome<T, E> {
     /// assert!(ok.is_ok());
     /// assert!(!err.is_ok());
     /// ```
+    #[inline]
     #[must_use]
     pub const fn is_ok(&self) -> bool {
         matches!(self, Self::Ok(_))
@@ -381,6 +390,7 @@ impl<T, E> Outcome<T, E> {
     /// let err: Outcome<i32, &str> = Outcome::err("oops");
     /// assert!(err.is_err());
     /// ```
+    #[inline]
     #[must_use]
     pub const fn is_err(&self) -> bool {
         matches!(self, Self::Err(_))
@@ -396,6 +406,7 @@ impl<T, E> Outcome<T, E> {
     /// let cancelled: Outcome<i32, &str> = Outcome::cancelled(CancelReason::timeout());
     /// assert!(cancelled.is_cancelled());
     /// ```
+    #[inline]
     #[must_use]
     pub const fn is_cancelled(&self) -> bool {
         matches!(self, Self::Cancelled(_))
@@ -411,6 +422,7 @@ impl<T, E> Outcome<T, E> {
     /// let panicked: Outcome<i32, &str> = Outcome::panicked(PanicPayload::new("oops"));
     /// assert!(panicked.is_panicked());
     /// ```
+    #[inline]
     #[must_use]
     pub const fn is_panicked(&self) -> bool {
         matches!(self, Self::Panicked(_))
@@ -419,6 +431,7 @@ impl<T, E> Outcome<T, E> {
     /// Converts this outcome to a standard Result, with cancellation and panic as errors.
     ///
     /// This is useful when interfacing with code that expects `Result`.
+    #[inline]
     pub fn into_result(self) -> Result<T, OutcomeError<E>> {
         match self {
             Self::Ok(v) => Ok(v),
@@ -429,6 +442,7 @@ impl<T, E> Outcome<T, E> {
     }
 
     /// Maps the success value using the provided function.
+    #[inline]
     pub fn map<U, F: FnOnce(T) -> U>(self, f: F) -> Outcome<U, E> {
         match self {
             Self::Ok(v) => Outcome::Ok(f(v)),
@@ -449,6 +463,7 @@ impl<T, E> Outcome<T, E> {
     /// let mapped = err.map_err(str::len);
     /// assert!(matches!(mapped, Outcome::Err(5)));
     /// ```
+    #[inline]
     pub fn map_err<F2, G: FnOnce(E) -> F2>(self, g: G) -> Outcome<T, F2> {
         match self {
             Self::Ok(v) => Outcome::Ok(v),
@@ -482,6 +497,7 @@ impl<T, E> Outcome<T, E> {
     /// let result = parse_int("abc").and_then(double);
     /// assert!(result.is_err());
     /// ```
+    #[inline]
     pub fn and_then<U, F: FnOnce(T) -> Outcome<U, E>>(self, f: F) -> Outcome<U, E> {
         match self {
             Self::Ok(v) => f(v),
@@ -583,6 +599,7 @@ impl<T, E> Outcome<T, E> {
     }
 
     /// Returns the success value or a default.
+    #[inline]
     pub fn unwrap_or(self, default: T) -> T {
         match self {
             Self::Ok(v) => v,
@@ -591,6 +608,7 @@ impl<T, E> Outcome<T, E> {
     }
 
     /// Returns the success value or computes it from a closure.
+    #[inline]
     pub fn unwrap_or_else<F: FnOnce() -> T>(self, f: F) -> T {
         match self {
             Self::Ok(v) => v,
