@@ -61,6 +61,7 @@ pub trait BufMut {
     /// # Panics
     ///
     /// Panics if `src.len() > self.remaining_mut()`.
+    #[inline]
     fn put_slice(&mut self, src: &[u8]) {
         assert!(
             self.remaining_mut() >= src.len(),
@@ -84,166 +85,199 @@ pub trait BufMut {
     }
 
     /// Put a single byte.
+    #[inline]
     fn put_u8(&mut self, n: u8) {
         self.put_slice(&[n]);
     }
 
     /// Put an i8.
+    #[inline]
     fn put_i8(&mut self, n: i8) {
         self.put_slice(&n.to_ne_bytes());
     }
 
     /// Put a big-endian u16.
+    #[inline]
     fn put_u16(&mut self, n: u16) {
         self.put_slice(&n.to_be_bytes());
     }
 
     /// Put a little-endian u16.
+    #[inline]
     fn put_u16_le(&mut self, n: u16) {
         self.put_slice(&n.to_le_bytes());
     }
 
     /// Put a native-endian u16.
+    #[inline]
     fn put_u16_ne(&mut self, n: u16) {
         self.put_slice(&n.to_ne_bytes());
     }
 
     /// Put a big-endian i16.
+    #[inline]
     fn put_i16(&mut self, n: i16) {
         self.put_slice(&n.to_be_bytes());
     }
 
     /// Put a little-endian i16.
+    #[inline]
     fn put_i16_le(&mut self, n: i16) {
         self.put_slice(&n.to_le_bytes());
     }
 
     /// Put a native-endian i16.
+    #[inline]
     fn put_i16_ne(&mut self, n: i16) {
         self.put_slice(&n.to_ne_bytes());
     }
 
     /// Put a big-endian u32.
+    #[inline]
     fn put_u32(&mut self, n: u32) {
         self.put_slice(&n.to_be_bytes());
     }
 
     /// Put a little-endian u32.
+    #[inline]
     fn put_u32_le(&mut self, n: u32) {
         self.put_slice(&n.to_le_bytes());
     }
 
     /// Put a native-endian u32.
+    #[inline]
     fn put_u32_ne(&mut self, n: u32) {
         self.put_slice(&n.to_ne_bytes());
     }
 
     /// Put a big-endian i32.
+    #[inline]
     fn put_i32(&mut self, n: i32) {
         self.put_slice(&n.to_be_bytes());
     }
 
     /// Put a little-endian i32.
+    #[inline]
     fn put_i32_le(&mut self, n: i32) {
         self.put_slice(&n.to_le_bytes());
     }
 
     /// Put a native-endian i32.
+    #[inline]
     fn put_i32_ne(&mut self, n: i32) {
         self.put_slice(&n.to_ne_bytes());
     }
 
     /// Put a big-endian u64.
+    #[inline]
     fn put_u64(&mut self, n: u64) {
         self.put_slice(&n.to_be_bytes());
     }
 
     /// Put a little-endian u64.
+    #[inline]
     fn put_u64_le(&mut self, n: u64) {
         self.put_slice(&n.to_le_bytes());
     }
 
     /// Put a native-endian u64.
+    #[inline]
     fn put_u64_ne(&mut self, n: u64) {
         self.put_slice(&n.to_ne_bytes());
     }
 
     /// Put a big-endian i64.
+    #[inline]
     fn put_i64(&mut self, n: i64) {
         self.put_slice(&n.to_be_bytes());
     }
 
     /// Put a little-endian i64.
+    #[inline]
     fn put_i64_le(&mut self, n: i64) {
         self.put_slice(&n.to_le_bytes());
     }
 
     /// Put a native-endian i64.
+    #[inline]
     fn put_i64_ne(&mut self, n: i64) {
         self.put_slice(&n.to_ne_bytes());
     }
 
     /// Put a big-endian u128.
+    #[inline]
     fn put_u128(&mut self, n: u128) {
         self.put_slice(&n.to_be_bytes());
     }
 
     /// Put a little-endian u128.
+    #[inline]
     fn put_u128_le(&mut self, n: u128) {
         self.put_slice(&n.to_le_bytes());
     }
 
     /// Put a native-endian u128.
+    #[inline]
     fn put_u128_ne(&mut self, n: u128) {
         self.put_slice(&n.to_ne_bytes());
     }
 
     /// Put a big-endian i128.
+    #[inline]
     fn put_i128(&mut self, n: i128) {
         self.put_slice(&n.to_be_bytes());
     }
 
     /// Put a little-endian i128.
+    #[inline]
     fn put_i128_le(&mut self, n: i128) {
         self.put_slice(&n.to_le_bytes());
     }
 
     /// Put a native-endian i128.
+    #[inline]
     fn put_i128_ne(&mut self, n: i128) {
         self.put_slice(&n.to_ne_bytes());
     }
 
     /// Put a big-endian f32.
+    #[inline]
     fn put_f32(&mut self, n: f32) {
         self.put_u32(n.to_bits());
     }
 
     /// Put a little-endian f32.
+    #[inline]
     fn put_f32_le(&mut self, n: f32) {
         self.put_u32_le(n.to_bits());
     }
 
     /// Put a native-endian f32.
+    #[inline]
     fn put_f32_ne(&mut self, n: f32) {
         self.put_u32_ne(n.to_bits());
     }
 
     /// Put a big-endian f64.
+    #[inline]
     fn put_f64(&mut self, n: f64) {
         self.put_u64(n.to_bits());
     }
 
     /// Put a little-endian f64.
+    #[inline]
     fn put_f64_le(&mut self, n: f64) {
         self.put_u64_le(n.to_bits());
     }
 
     /// Put a native-endian f64.
+    #[inline]
     fn put_f64_ne(&mut self, n: f64) {
         self.put_u64_ne(n.to_bits());
     }
 
     /// Limit writing to `limit` bytes.
+    #[inline]
     fn limit(self, limit: usize) -> Limit<Self>
     where
         Self: Sized,
@@ -260,6 +294,7 @@ impl BufMut for Vec<u8> {
         usize::MAX - self.len()
     }
 
+    #[inline]
     fn chunk_mut(&mut self) -> &mut [u8] {
         // For Vec, we grow dynamically via put_slice override.
         // chunk_mut returns empty because Vec doesn't have pre-allocated
@@ -267,6 +302,7 @@ impl BufMut for Vec<u8> {
         &mut []
     }
 
+    #[inline]
     fn advance_mut(&mut self, cnt: usize) {
         // For Vec, advance is handled in put_slice.
         // Any non-zero advance would silently drop data, so fail fast.
@@ -277,20 +313,24 @@ impl BufMut for Vec<u8> {
     }
 
     // Override put_slice for efficient Vec implementation
+    #[inline]
     fn put_slice(&mut self, src: &[u8]) {
         self.extend_from_slice(src);
     }
 }
 
 impl BufMut for &mut [u8] {
+    #[inline]
     fn remaining_mut(&self) -> usize {
         self.len()
     }
 
+    #[inline]
     fn chunk_mut(&mut self) -> &mut [u8] {
         self
     }
 
+    #[inline]
     fn advance_mut(&mut self, cnt: usize) {
         assert!(
             cnt <= self.len(),

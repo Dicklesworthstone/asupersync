@@ -58,6 +58,7 @@ pub trait Buf {
     /// # Panics
     ///
     /// Panics if `dst.len() > self.remaining()`.
+    #[inline]
     fn copy_to_slice(&mut self, dst: &mut [u8]) {
         assert!(
             self.remaining() >= dst.len(),
@@ -81,6 +82,7 @@ pub trait Buf {
     /// # Panics
     ///
     /// Panics if fewer than 1 byte remains.
+    #[inline]
     fn get_u8(&mut self) -> u8 {
         assert!(self.remaining() >= 1, "buffer underflow: need 1 byte");
         let val = self.chunk()[0];
@@ -89,11 +91,13 @@ pub trait Buf {
     }
 
     /// Get an i8, advancing the cursor.
+    #[inline]
     fn get_i8(&mut self) -> i8 {
         i8::from_ne_bytes([self.get_u8()])
     }
 
     /// Get a big-endian u16.
+    #[inline]
     fn get_u16(&mut self) -> u16 {
         let mut buf = [0u8; 2];
         self.copy_to_slice(&mut buf);
@@ -101,6 +105,7 @@ pub trait Buf {
     }
 
     /// Get a little-endian u16.
+    #[inline]
     fn get_u16_le(&mut self) -> u16 {
         let mut buf = [0u8; 2];
         self.copy_to_slice(&mut buf);
@@ -108,6 +113,7 @@ pub trait Buf {
     }
 
     /// Get a native-endian u16.
+    #[inline]
     fn get_u16_ne(&mut self) -> u16 {
         let mut buf = [0u8; 2];
         self.copy_to_slice(&mut buf);
@@ -115,6 +121,7 @@ pub trait Buf {
     }
 
     /// Get a big-endian i16.
+    #[inline]
     fn get_i16(&mut self) -> i16 {
         let mut buf = [0u8; 2];
         self.copy_to_slice(&mut buf);
@@ -122,6 +129,7 @@ pub trait Buf {
     }
 
     /// Get a little-endian i16.
+    #[inline]
     fn get_i16_le(&mut self) -> i16 {
         let mut buf = [0u8; 2];
         self.copy_to_slice(&mut buf);
@@ -129,6 +137,7 @@ pub trait Buf {
     }
 
     /// Get a native-endian i16.
+    #[inline]
     fn get_i16_ne(&mut self) -> i16 {
         let mut buf = [0u8; 2];
         self.copy_to_slice(&mut buf);
@@ -136,6 +145,7 @@ pub trait Buf {
     }
 
     /// Get a big-endian u32.
+    #[inline]
     fn get_u32(&mut self) -> u32 {
         let mut buf = [0u8; 4];
         self.copy_to_slice(&mut buf);
@@ -143,6 +153,7 @@ pub trait Buf {
     }
 
     /// Get a little-endian u32.
+    #[inline]
     fn get_u32_le(&mut self) -> u32 {
         let mut buf = [0u8; 4];
         self.copy_to_slice(&mut buf);
@@ -150,6 +161,7 @@ pub trait Buf {
     }
 
     /// Get a native-endian u32.
+    #[inline]
     fn get_u32_ne(&mut self) -> u32 {
         let mut buf = [0u8; 4];
         self.copy_to_slice(&mut buf);
@@ -157,6 +169,7 @@ pub trait Buf {
     }
 
     /// Get a big-endian i32.
+    #[inline]
     fn get_i32(&mut self) -> i32 {
         let mut buf = [0u8; 4];
         self.copy_to_slice(&mut buf);
@@ -164,6 +177,7 @@ pub trait Buf {
     }
 
     /// Get a little-endian i32.
+    #[inline]
     fn get_i32_le(&mut self) -> i32 {
         let mut buf = [0u8; 4];
         self.copy_to_slice(&mut buf);
@@ -171,6 +185,7 @@ pub trait Buf {
     }
 
     /// Get a native-endian i32.
+    #[inline]
     fn get_i32_ne(&mut self) -> i32 {
         let mut buf = [0u8; 4];
         self.copy_to_slice(&mut buf);
@@ -178,6 +193,7 @@ pub trait Buf {
     }
 
     /// Get a big-endian u64.
+    #[inline]
     fn get_u64(&mut self) -> u64 {
         let mut buf = [0u8; 8];
         self.copy_to_slice(&mut buf);
@@ -185,6 +201,7 @@ pub trait Buf {
     }
 
     /// Get a little-endian u64.
+    #[inline]
     fn get_u64_le(&mut self) -> u64 {
         let mut buf = [0u8; 8];
         self.copy_to_slice(&mut buf);
@@ -192,6 +209,7 @@ pub trait Buf {
     }
 
     /// Get a native-endian u64.
+    #[inline]
     fn get_u64_ne(&mut self) -> u64 {
         let mut buf = [0u8; 8];
         self.copy_to_slice(&mut buf);
@@ -199,6 +217,7 @@ pub trait Buf {
     }
 
     /// Get a big-endian i64.
+    #[inline]
     fn get_i64(&mut self) -> i64 {
         let mut buf = [0u8; 8];
         self.copy_to_slice(&mut buf);
@@ -206,6 +225,7 @@ pub trait Buf {
     }
 
     /// Get a little-endian i64.
+    #[inline]
     fn get_i64_le(&mut self) -> i64 {
         let mut buf = [0u8; 8];
         self.copy_to_slice(&mut buf);
@@ -213,6 +233,7 @@ pub trait Buf {
     }
 
     /// Get a native-endian i64.
+    #[inline]
     fn get_i64_ne(&mut self) -> i64 {
         let mut buf = [0u8; 8];
         self.copy_to_slice(&mut buf);
@@ -220,6 +241,7 @@ pub trait Buf {
     }
 
     /// Get a big-endian u128.
+    #[inline]
     fn get_u128(&mut self) -> u128 {
         let mut buf = [0u8; 16];
         self.copy_to_slice(&mut buf);
@@ -227,6 +249,7 @@ pub trait Buf {
     }
 
     /// Get a little-endian u128.
+    #[inline]
     fn get_u128_le(&mut self) -> u128 {
         let mut buf = [0u8; 16];
         self.copy_to_slice(&mut buf);
@@ -234,6 +257,7 @@ pub trait Buf {
     }
 
     /// Get a native-endian u128.
+    #[inline]
     fn get_u128_ne(&mut self) -> u128 {
         let mut buf = [0u8; 16];
         self.copy_to_slice(&mut buf);
@@ -241,6 +265,7 @@ pub trait Buf {
     }
 
     /// Get a big-endian i128.
+    #[inline]
     fn get_i128(&mut self) -> i128 {
         let mut buf = [0u8; 16];
         self.copy_to_slice(&mut buf);
@@ -248,6 +273,7 @@ pub trait Buf {
     }
 
     /// Get a little-endian i128.
+    #[inline]
     fn get_i128_le(&mut self) -> i128 {
         let mut buf = [0u8; 16];
         self.copy_to_slice(&mut buf);
@@ -255,6 +281,7 @@ pub trait Buf {
     }
 
     /// Get a native-endian i128.
+    #[inline]
     fn get_i128_ne(&mut self) -> i128 {
         let mut buf = [0u8; 16];
         self.copy_to_slice(&mut buf);
@@ -262,31 +289,37 @@ pub trait Buf {
     }
 
     /// Get a big-endian f32.
+    #[inline]
     fn get_f32(&mut self) -> f32 {
         f32::from_bits(self.get_u32())
     }
 
     /// Get a little-endian f32.
+    #[inline]
     fn get_f32_le(&mut self) -> f32 {
         f32::from_bits(self.get_u32_le())
     }
 
     /// Get a native-endian f32.
+    #[inline]
     fn get_f32_ne(&mut self) -> f32 {
         f32::from_bits(self.get_u32_ne())
     }
 
     /// Get a big-endian f64.
+    #[inline]
     fn get_f64(&mut self) -> f64 {
         f64::from_bits(self.get_u64())
     }
 
     /// Get a little-endian f64.
+    #[inline]
     fn get_f64_le(&mut self) -> f64 {
         f64::from_bits(self.get_u64_le())
     }
 
     /// Get a native-endian f64.
+    #[inline]
     fn get_f64_ne(&mut self) -> f64 {
         f64::from_bits(self.get_u64_ne())
     }
@@ -294,6 +327,7 @@ pub trait Buf {
     /// Chain this buffer with another.
     ///
     /// Returns a buffer that reads from `self` first, then `next`.
+    #[inline]
     fn chain<U: Buf>(self, next: U) -> Chain<Self, U>
     where
         Self: Sized,
@@ -302,6 +336,7 @@ pub trait Buf {
     }
 
     /// Limit reading to the first `limit` bytes.
+    #[inline]
     fn take(self, limit: usize) -> Take<Self>
     where
         Self: Sized,

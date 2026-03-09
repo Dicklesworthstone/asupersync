@@ -91,6 +91,7 @@ impl BytesMut {
     /// let frozen = buf.freeze();
     /// assert_eq!(&frozen[..], b"hello world");
     /// ```
+    #[inline]
     #[must_use]
     pub fn freeze(self) -> Bytes {
         Bytes::from(self.data)
@@ -107,6 +108,7 @@ impl BytesMut {
     /// buf.reserve(100);
     /// assert!(buf.capacity() >= 100);
     /// ```
+    #[inline]
     pub fn reserve(&mut self, additional: usize) {
         self.data.reserve(additional);
     }
@@ -123,16 +125,19 @@ impl BytesMut {
     /// buf.put_slice(b" world");
     /// assert_eq!(&buf[..], b"hello world");
     /// ```
+    #[inline]
     pub fn put_slice(&mut self, src: &[u8]) {
         self.data.extend_from_slice(src);
     }
 
     /// Extend from slice (alias for `put_slice`).
+    #[inline]
     pub fn extend_from_slice(&mut self, src: &[u8]) {
         self.put_slice(src);
     }
 
     /// Put a single byte.
+    #[inline]
     pub fn put_u8(&mut self, n: u8) {
         self.data.push(n);
     }
@@ -157,6 +162,7 @@ impl BytesMut {
     /// assert_eq!(&buf[..], b"hello ");
     /// assert_eq!(&world[..], b"world");
     /// ```
+    #[inline]
     #[must_use]
     pub fn split_off(&mut self, at: usize) -> Self {
         assert!(
@@ -189,6 +195,7 @@ impl BytesMut {
     /// assert_eq!(&hello[..], b"hello ");
     /// assert_eq!(&buf[..], b"world");
     /// ```
+    #[inline]
     #[must_use]
     pub fn split_to(&mut self, at: usize) -> Self {
         assert!(
@@ -209,11 +216,13 @@ impl BytesMut {
     /// Truncate to `len` bytes.
     ///
     /// If `len` is greater than the current length, this has no effect.
+    #[inline]
     pub fn truncate(&mut self, len: usize) {
         self.data.truncate(len);
     }
 
     /// Clear the buffer.
+    #[inline]
     pub fn clear(&mut self) {
         self.data.clear();
     }
