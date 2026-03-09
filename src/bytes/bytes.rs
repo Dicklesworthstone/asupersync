@@ -258,6 +258,7 @@ impl Bytes {
     }
 
     /// Get the underlying byte slice.
+    #[inline]
     fn as_slice(&self) -> &[u8] {
         match &self.data {
             BytesInner::Empty => &[],
@@ -407,10 +408,12 @@ impl BytesCursor {
 }
 
 impl Buf for BytesCursor {
+    #[inline]
     fn remaining(&self) -> usize {
         self.inner.len().saturating_sub(self.pos)
     }
 
+    #[inline]
     fn chunk(&self) -> &[u8] {
         let slice = self.inner.as_slice();
         if self.pos >= slice.len() {
@@ -420,6 +423,7 @@ impl Buf for BytesCursor {
         }
     }
 
+    #[inline]
     fn advance(&mut self, cnt: usize) {
         assert!(
             cnt <= self.remaining(),

@@ -409,16 +409,19 @@ impl std::hash::Hash for BytesMut {
 // === BufMut trait implementation ===
 
 impl BufMut for BytesMut {
+    #[inline]
     fn remaining_mut(&self) -> usize {
         usize::MAX - self.len()
     }
 
+    #[inline]
     fn chunk_mut(&mut self) -> &mut [u8] {
         // For BytesMut, we grow dynamically via put_slice
         // Return an empty slice since we handle growth in put_slice
         &mut []
     }
 
+    #[inline]
     fn advance_mut(&mut self, cnt: usize) {
         // For BytesMut, advance is handled implicitly in put_slice
         assert!(
@@ -428,6 +431,7 @@ impl BufMut for BytesMut {
     }
 
     // Override put_slice for efficient BytesMut implementation
+    #[inline]
     fn put_slice(&mut self, src: &[u8]) {
         self.data.extend_from_slice(src);
     }
