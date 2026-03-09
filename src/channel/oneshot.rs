@@ -239,12 +239,14 @@ impl<T> Sender<T> {
     /// # Errors
     ///
     /// Returns `Err(SendError::Disconnected(value))` if the receiver was dropped.
+    #[inline]
     pub fn send(self, cx: &Cx, value: T) -> Result<(), SendError<T>> {
         let permit = self.reserve(cx);
         permit.send(value)
     }
 
     /// Checks if the receiver has been dropped.
+    #[inline]
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.inner.lock().receiver_dropped
@@ -296,6 +298,7 @@ impl<T> SendPermit<T> {
     /// # Errors
     ///
     /// Returns `Err(SendError::Disconnected(value))` if the receiver was dropped.
+    #[inline]
     pub fn send(mut self, value: T) -> Result<(), SendError<T>> {
         let (result, waker) = {
             let mut inner = self.inner.lock();
@@ -376,31 +379,19 @@ pub(crate) struct RecvUninterruptibleFuture<'a, T> {
 impl<T> RecvUninterruptibleFuture<'_, T> {
     #[must_use]
     pub(crate) fn receiver_finished(&self) -> bool {
-
         self.receiver.is_ready() || self.receiver.is_closed()
-
     }
-
 }
 
-
-
 impl<T> Future for RecvUninterruptibleFuture<'_, T> {
-
     type Output = Result<T, RecvError>;
 
-
-
     fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
-
         let this = &mut *self;
 
         let mut inner = this.receiver.inner.lock();
 
-
-
         if let Some(value) = inner.value.take() {
-
             inner.clear_waker();
 
             this.waiter_id = None;
@@ -408,13 +399,9 @@ impl<T> Future for RecvUninterruptibleFuture<'_, T> {
             drop(inner);
 
             return Poll::Ready(Ok(value));
-
         }
 
-
-
         if inner.is_closed() {
-
             inner.clear_waker();
 
             this.waiter_id = None;
@@ -422,31 +409,18 @@ impl<T> Future for RecvUninterruptibleFuture<'_, T> {
             drop(inner);
 
             return Poll::Ready(Err(RecvError::Closed));
-
         }
 
-
-
         if let Some(my_id) = this.waiter_id {
-
             if inner.waker_id == Some(my_id) {
-
                 if let Some(existing) = &inner.waker {
-
                     if !existing.will_wake(ctx.waker()) {
-
                         inner.waker = Some(ctx.waker().clone());
-
                     }
-
                 } else {
-
                     inner.waker = Some(ctx.waker().clone());
-
                 }
-
             } else {
-
                 let waiter_id = inner.next_waiter_id;
 
                 inner.next_waiter_id = inner.next_waiter_id.wrapping_add(1);
@@ -456,11 +430,8 @@ impl<T> Future for RecvUninterruptibleFuture<'_, T> {
                 inner.waker_id = Some(waiter_id);
 
                 this.waiter_id = Some(waiter_id);
-
             }
-
         } else {
-
             let waiter_id = inner.next_waiter_id;
 
             inner.next_waiter_id = inner.next_waiter_id.wrapping_add(1);
@@ -470,24 +441,22 @@ impl<T> Future for RecvUninterruptibleFuture<'_, T> {
             inner.waker_id = Some(waiter_id);
 
             this.waiter_id = Some(waiter_id);
-
         }
 
         drop(inner);
 
         Poll::Pending
-
     }
-
 }
-
-
 
 impl<T> Drop for RecvUninterruptibleFuture<'_, T> {
     fn drop(&mut self) {
         {
             let mut inner = self.receiver.inner.lock();
-            if self.waiter_id.is_some_and(|waiter_id| inner.waker_id == Some(waiter_id)) {
+            if self
+                .waiter_id
+                .is_some_and(|waiter_id| inner.waker_id == Some(waiter_id))
+            {
                 inner.clear_waker();
             }
         }
@@ -654,6 +623,7 @@ impl<T> Receiver<T> {
     ///
     /// - `TryRecvError::Empty` if no value is available yet but sender exists
     /// - `TryRecvError::Closed` if the sender was dropped without sending
+    #[inline]
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
         let mut inner = self.inner.lock();
 

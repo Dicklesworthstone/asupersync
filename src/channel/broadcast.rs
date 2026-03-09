@@ -172,6 +172,7 @@ impl<T: Clone> Sender<T> {
     /// reservation is attempted.
     ///
     /// Returns `Ok(0)` if all receivers drop between reservation and commit.
+    #[inline]
     pub fn send(&self, cx: &Cx, msg: T) -> Result<usize, SendError<T>> {
         let permit = match self.reserve(cx) {
             Ok(p) => p,
@@ -296,6 +297,7 @@ impl<T: Clone> Receiver<T> {
     ///
     /// - `RecvError::Lagged(n)`: The receiver fell behind.
     /// - `RecvError::Closed`: All senders dropped.
+    #[inline]
     pub fn recv<'a>(&'a mut self, cx: &'a Cx) -> Recv<'a, T> {
         Recv {
             receiver: self,
@@ -304,6 +306,7 @@ impl<T: Clone> Receiver<T> {
         }
     }
 
+    #[inline]
     pub(crate) fn poll_recv_with_waiter(
         &mut self,
         cx: &Cx,
