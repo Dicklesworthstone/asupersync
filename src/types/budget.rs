@@ -278,12 +278,14 @@ impl Budget {
     /// Returns true if the budget has been exhausted.
     ///
     /// This checks only poll and cost quotas, not deadline (which requires current time).
+    #[inline]
     #[must_use]
     pub const fn is_exhausted(&self) -> bool {
         self.poll_quota == 0 || matches!(self.cost_quota, Some(0))
     }
 
     /// Returns true if the deadline has passed.
+    #[inline]
     #[must_use]
     pub fn is_past_deadline(&self, now: Time) -> bool {
         self.deadline.is_some_and(|d| now >= d)
@@ -527,6 +529,7 @@ impl Budget {
     /// let budget = Budget::new().with_poll_quota(100);
     /// assert_eq!(budget.remaining_polls(), 100);
     /// ```
+    #[inline]
     #[must_use]
     pub const fn remaining_polls(&self) -> u32 {
         self.poll_quota
@@ -546,6 +549,7 @@ impl Budget {
     /// let unlimited = Budget::unlimited();
     /// assert_eq!(unlimited.remaining_cost(), None);
     /// ```
+    #[inline]
     #[must_use]
     pub const fn remaining_cost(&self) -> Option<u64> {
         self.cost_quota
