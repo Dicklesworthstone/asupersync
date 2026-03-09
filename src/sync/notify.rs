@@ -147,6 +147,7 @@ impl WaiterSlab {
 
 impl Notify {
     /// Creates a new `Notify` in the empty state.
+    #[inline]
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -160,6 +161,7 @@ impl Notify {
     ///
     /// The returned future is cancel-safe: if dropped before completion,
     /// the waiter is cleanly removed.
+    #[inline]
     pub fn notified(&self) -> Notified<'_> {
         Notified {
             notify: self,
@@ -247,6 +249,7 @@ impl Notify {
     }
 
     /// Returns the number of tasks currently waiting.
+    #[inline]
     #[must_use]
     pub fn waiter_count(&self) -> usize {
         let waiters = self.waiters.lock();

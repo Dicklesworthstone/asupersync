@@ -58,6 +58,7 @@ impl StoredTask {
     }
 
     /// Sets the task ID for tracing.
+    #[inline]
     pub fn set_task_id(&mut self, task_id: TaskId) {
         self.task_id = Some(task_id);
     }
@@ -168,11 +169,13 @@ impl LocalStoredTask {
     }
 
     /// Sets the task ID for tracing.
+    #[inline]
     pub fn set_task_id(&mut self, task_id: TaskId) {
         self.task_id = Some(task_id);
     }
 
     /// Returns the task ID associated with this task.
+    #[inline]
     #[must_use]
     pub fn task_id(&self) -> Option<TaskId> {
         self.task_id

@@ -254,6 +254,7 @@ impl<T> Mutex<T> {
     }
 
     /// Returns the number of tasks currently waiting for the lock.
+    #[inline]
     #[must_use]
     pub fn waiters(&self) -> usize {
         self.state.lock().waiters.len()

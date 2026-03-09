@@ -71,12 +71,14 @@ impl RegionTable {
     // =========================================================================
 
     /// Returns a shared reference to a region record by arena index.
+    #[inline]
     #[must_use]
     pub fn get(&self, index: ArenaIndex) -> Option<&RegionRecord> {
         self.regions.get(index)
     }
 
     /// Returns a mutable reference to a region record by arena index.
+    #[inline]
     pub fn get_mut(&mut self, index: ArenaIndex) -> Option<&mut RegionRecord> {
         self.regions.get_mut(index)
     }
@@ -104,6 +106,7 @@ impl RegionTable {
     }
 
     /// Removes a region record from the arena.
+    #[inline]
     pub fn remove(&mut self, index: ArenaIndex) -> Option<RegionRecord> {
         self.regions.remove(index)
     }
@@ -114,12 +117,14 @@ impl RegionTable {
     }
 
     /// Returns the number of region records in the table.
+    #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
         self.regions.len()
     }
 
     /// Returns `true` if the region table is empty.
+    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.regions.is_empty()
@@ -209,6 +214,7 @@ impl RegionTable {
     }
 
     /// Returns the current admission limits for a region.
+    #[inline]
     #[must_use]
     pub fn limits(&self, region: RegionId) -> Option<RegionLimits> {
         self.regions
@@ -217,6 +223,7 @@ impl RegionTable {
     }
 
     /// Returns the current state of a region.
+    #[inline]
     #[must_use]
     pub fn state(&self, region: RegionId) -> Option<crate::record::region::RegionState> {
         self.regions
@@ -225,12 +232,14 @@ impl RegionTable {
     }
 
     /// Returns the parent of a region.
+    #[inline]
     #[must_use]
     pub fn parent(&self, region: RegionId) -> Option<Option<RegionId>> {
         self.regions.get(region.arena_index()).map(|r| r.parent)
     }
 
     /// Returns the budget of a region.
+    #[inline]
     #[must_use]
     pub fn budget(&self, region: RegionId) -> Option<Budget> {
         self.regions
@@ -239,6 +248,7 @@ impl RegionTable {
     }
 
     /// Returns child IDs of a region.
+    #[inline]
     #[must_use]
     pub fn child_ids(&self, region: RegionId) -> Option<Vec<RegionId>> {
         self.regions
@@ -247,6 +257,7 @@ impl RegionTable {
     }
 
     /// Returns task IDs of a region.
+    #[inline]
     #[must_use]
     pub fn task_ids(&self, region: RegionId) -> Option<Vec<crate::types::TaskId>> {
         self.regions
@@ -255,6 +266,7 @@ impl RegionTable {
     }
 
     /// Returns the number of pending obligations for a region.
+    #[inline]
     #[must_use]
     pub fn pending_obligations(&self, region: RegionId) -> Option<usize> {
         self.regions

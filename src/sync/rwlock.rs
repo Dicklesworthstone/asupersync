@@ -199,6 +199,7 @@ impl<T> RwLock<T> {
     /// # Panics
     ///
     /// Panics if the lock is poisoned.
+    #[inline]
     #[must_use]
     pub fn into_inner(self) -> T {
         assert!(!self.is_poisoned(), "rwlock poisoned");
@@ -218,6 +219,7 @@ impl<T> RwLock<T> {
     ///
     /// This is cancel-safe: cancellation while waiting returns an error
     /// without acquiring the lock.
+    #[inline]
     pub fn read<'a, 'b>(&'a self, cx: &'b Cx) -> ReadFuture<'a, 'b, T> {
         ReadFuture {
             lock: self,
@@ -237,6 +239,7 @@ impl<T> RwLock<T> {
     ///
     /// This is cancel-safe: cancellation while waiting returns an error
     /// without acquiring the lock.
+    #[inline]
     pub fn write<'a, 'b>(&'a self, cx: &'b Cx) -> WriteFuture<'a, 'b, T> {
         WriteFuture {
             lock: self,
@@ -258,6 +261,7 @@ impl<T> RwLock<T> {
     /// # Panics
     ///
     /// Panics if the lock is poisoned.
+    #[inline]
     pub fn get_mut(&mut self) -> &mut T {
         assert!(!self.is_poisoned(), "rwlock poisoned");
         self.data.get_mut()
