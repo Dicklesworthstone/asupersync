@@ -1647,7 +1647,7 @@ fn run_future_with_budget<F: Future>(future: F, poll_budget: u32) -> F::Output {
     let thread = std::thread::current();
     let waker = Waker::from(Arc::new(ThreadWaker(thread)));
     let mut cx = Context::from_waker(&waker);
-    let mut future = Box::pin(future);
+    let mut future = std::pin::pin!(future);
     let mut polls = 0u32;
     let budget = poll_budget.max(1);
     let mut consecutive_budget_exhaustions: u32 = 0;

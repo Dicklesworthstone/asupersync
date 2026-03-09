@@ -1100,7 +1100,7 @@ impl<P: Policy> Scope<'_, P> {
                         // In no-scheduler contexts (e.g. direct unit-test block_on),
                         // full join can deadlock because nothing drives stored tasks.
                         // Keep this as best-effort and return promptly.
-                        let mut drain = Box::pin(h1.join(cx));
+                        let mut drain = std::pin::pin!(h1.join(cx));
                         let waker = std::task::Waker::noop();
                         let mut poll_cx = Context::from_waker(waker);
                         match drain.as_mut().poll(&mut poll_cx) {
@@ -1514,7 +1514,7 @@ mod tests {
             .expect("spawn_registered must store the task");
         assert!(stored.poll(&mut poll_cx).is_ready());
 
-        let mut join_fut = Box::pin(handle.join(&cx));
+        let mut join_fut = std::pin::pin!(handle.join(&cx));
         match join_fut.as_mut().poll(&mut poll_cx) {
             Poll::Ready(Ok((same_registry, origin))) => {
                 assert!(
@@ -1552,7 +1552,7 @@ mod tests {
         let mut poll_cx = Context::from_waker(&waker);
         assert!(stored.poll(&mut poll_cx).is_ready());
 
-        let mut join_fut = Box::pin(handle.join(&cx));
+        let mut join_fut = std::pin::pin!(handle.join(&cx));
         match join_fut.as_mut().poll(&mut poll_cx) {
             Poll::Ready(Ok(has_timer)) => assert!(has_timer),
             other => unreachable!("Expected Ready(Ok(_)), got {other:?}"),
@@ -1584,7 +1584,7 @@ mod tests {
         let mut poll_cx = Context::from_waker(&waker);
         assert!(stored.poll(&mut poll_cx).is_ready());
 
-        let mut join_fut = Box::pin(handle.join(&cx));
+        let mut join_fut = std::pin::pin!(handle.join(&cx));
         match join_fut.as_mut().poll(&mut poll_cx) {
             Poll::Ready(Ok(has_timer)) => assert!(has_timer),
             other => unreachable!("Expected Ready(Ok(_)), got {other:?}"),
@@ -1644,7 +1644,7 @@ mod tests {
         );
 
         // Join should now have the result
-        let mut join_fut = Box::pin(handle.join(&cx));
+        let mut join_fut = std::pin::pin!(handle.join(&cx));
         match join_fut.as_mut().poll(&mut poll_cx) {
             Poll::Ready(Ok(val)) => assert_eq!(val, 42),
             other => unreachable!("Expected Ready(Ok(42)), got {other:?}"),
@@ -1741,7 +1741,7 @@ mod tests {
             queue.remove(0)
         };
 
-        let mut join_fut = Box::pin(handle.join(&cx));
+        let mut join_fut = std::pin::pin!(handle.join(&cx));
         let waker = Waker::from(Arc::new(NoopWaker));
         let mut ctx = Context::from_waker(&waker);
 
@@ -1831,7 +1831,7 @@ mod tests {
         // The stored task is returned directly, not put in state by scope.spawn
 
         // Create join future
-        let mut join_fut = Box::pin(handle.join(&cx));
+        let mut join_fut = std::pin::pin!(handle.join(&cx));
 
         // Create waker context
         let waker = Waker::from(Arc::new(NoopWaker));
@@ -1890,7 +1890,7 @@ mod tests {
         }
 
         // Check result via handle
-        let mut join_fut = Box::pin(handle.join(&cx));
+        let mut join_fut = std::pin::pin!(handle.join(&cx));
         match join_fut.as_mut().poll(&mut ctx) {
             Poll::Ready(Ok(val)) => assert_eq!(val, "cancelled"),
             Poll::Ready(Err(e)) => unreachable!("Task failed unexpectedly: {e}"),
@@ -2124,7 +2124,7 @@ mod tests {
         }
 
         // Check result via handle
-        let mut join_fut = Box::pin(handle.join(&cx));
+        let mut join_fut = std::pin::pin!(handle.join(&cx));
         match join_fut.as_mut().poll(&mut ctx) {
             Poll::Ready(Err(JoinError::Panicked(p))) => {
                 assert_eq!(p.message(), "oops");

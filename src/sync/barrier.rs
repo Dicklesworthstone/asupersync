@@ -307,7 +307,7 @@ mod tests {
 
     // Helper to block on futures for testing (since we don't have the full runtime here)
     fn block_on<F: Future>(f: F) -> F::Output {
-        let mut f = Box::pin(f);
+        let mut f = std::pin::pin!(f);
         let waker = Waker::noop();
         let mut cx = Context::from_waker(waker);
         loop {

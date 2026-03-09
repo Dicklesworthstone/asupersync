@@ -59,7 +59,7 @@ mod tests {
         let wake_counter = Arc::new(WakeCounter::default());
         let waker = std::task::Waker::from(Arc::clone(&wake_counter));
         let mut cx = Context::from_waker(&waker);
-        let mut fut = Box::pin(yield_now());
+        let mut fut = std::pin::pin!(yield_now());
 
         assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
         assert_eq!(wake_counter.wakes.load(Ordering::Relaxed), 1);
