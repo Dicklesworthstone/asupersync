@@ -7,12 +7,17 @@ use crate::combinator::select::{Either, Select};
 use crate::server::shutdown::{ShutdownPhase, ShutdownSignal};
 use crate::sync::Notify;
 use crate::time::sleep_until;
+use crate::types::Time;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+fn wall_clock_now() -> Time {
+    crate::time::wall_now()
+}
 
 /// Unique identifier for a tracked connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -38,7 +43,7 @@ pub struct ConnectionInfo {
     /// Remote peer address.
     pub addr: SocketAddr,
     /// When the connection was accepted.
-    pub connected_at: Instant,
+    pub connected_at: Time,
 }
 
 /// Tracks active connections and enforces capacity limits.
@@ -71,6 +76,7 @@ pub struct ConnectionManager {
     next_id: Arc<AtomicU64>,
     accepting: Arc<AtomicBool>,
     max_connections: Option<usize>,
+    time_getter: fn() -> Time,
     shutdown_signal: ShutdownSignal,
     all_closed: Arc<Notify>,
 }
@@ -84,6 +90,16 @@ impl ConnectionManager {
     /// * `shutdown_signal` — Shared shutdown signal for drain coordination.
     #[must_use]
     pub fn new(max_connections: Option<usize>, shutdown_signal: ShutdownSignal) -> Self {
+        Self::with_time_getter(max_connections, shutdown_signal, wall_clock_now)
+    }
+
+    /// Creates a new connection manager with a custom time source.
+    #[must_use]
+    pub fn with_time_getter(
+        max_connections: Option<usize>,
+        shutdown_signal: ShutdownSignal,
+        time_getter: fn() -> Time,
+    ) -> Self {
         Self {
             state: Arc::new(Mutex::new(HashMap::with_capacity(
                 max_connections.unwrap_or(64),
@@ -91,6 +107,7 @@ impl ConnectionManager {
             next_id: Arc::new(AtomicU64::new(1)),
             accepting: Arc::new(AtomicBool::new(true)),
             max_connections,
+            time_getter,
             shutdown_signal,
             all_closed: Arc::new(Notify::new()),
         }
@@ -125,7 +142,7 @@ impl ConnectionManager {
         let id = ConnectionId(self.next_id.fetch_add(1, Ordering::Relaxed));
         let info = ConnectionInfo {
             addr,
-            connected_at: Instant::now(),
+            connected_at: (self.time_getter)(),
         };
         connections.insert(id, info);
         drop(connections);
@@ -340,11 +357,22 @@ impl std::fmt::Debug for ConnectionGuard {
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
+
+    static TEST_NOW: AtomicU64 = AtomicU64::new(0);
 
     fn init_test(name: &str) {
         init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn set_test_time(nanos: u64) {
+        TEST_NOW.store(nanos, Ordering::Relaxed);
+    }
+
+    fn test_time() -> Time {
+        Time::from_nanos(TEST_NOW.load(Ordering::Relaxed))
     }
 
     fn test_addr(port: u16) -> SocketAddr {
@@ -978,11 +1006,33 @@ mod tests {
     fn connection_info_debug_clone() {
         let info = ConnectionInfo {
             addr: test_addr(9090),
-            connected_at: Instant::now(),
+            connected_at: Time::from_nanos(42),
         };
         let info2 = info.clone();
         assert_eq!(info.addr, info2.addr);
+        assert_eq!(info.connected_at, info2.connected_at);
         let dbg = format!("{info:?}");
         assert!(dbg.contains("ConnectionInfo"));
+    }
+
+    #[test]
+    fn connection_manager_time_getter_controls_connected_at() {
+        init_test("connection_manager_time_getter_controls_connected_at");
+        let signal = ShutdownSignal::new();
+        let manager = ConnectionManager::with_time_getter(None, signal, test_time);
+
+        set_test_time(7);
+        let _g1 = manager.register(test_addr(1)).expect("first register");
+        let active = manager.active_connections();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].1.connected_at, Time::from_nanos(7));
+
+        set_test_time(42);
+        let _g2 = manager.register(test_addr(2)).expect("second register");
+        let active = manager.active_connections();
+        assert_eq!(active.len(), 2);
+        assert_eq!(active[0].1.connected_at, Time::from_nanos(7));
+        assert_eq!(active[1].1.connected_at, Time::from_nanos(42));
+        crate::test_complete!("connection_manager_time_getter_controls_connected_at");
     }
 }

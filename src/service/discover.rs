@@ -22,11 +22,20 @@
 //! let changes = endpoints.poll_discover();
 //! ```
 
+use crate::types::Time;
 use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::fmt;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+fn wall_clock_now() -> Time {
+    crate::time::wall_now()
+}
+
+fn duration_to_nanos(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
 
 // ─── Change type ────────────────────────────────────────────────────────────
 
@@ -175,6 +184,7 @@ pub struct DnsDiscoveryConfig {
     pub port: u16,
     /// How often to re-resolve the hostname.
     pub poll_interval: Duration,
+    time_getter: fn() -> Time,
 }
 
 impl DnsDiscoveryConfig {
@@ -184,6 +194,7 @@ impl DnsDiscoveryConfig {
             hostname: hostname.into(),
             port,
             poll_interval: Duration::from_secs(30),
+            time_getter: wall_clock_now,
         }
     }
 
@@ -192,6 +203,19 @@ impl DnsDiscoveryConfig {
     pub fn poll_interval(mut self, interval: Duration) -> Self {
         self.poll_interval = interval;
         self
+    }
+
+    /// Set a custom time source for deterministic retry cooldowns.
+    #[must_use]
+    pub const fn with_time_getter(mut self, time_getter: fn() -> Time) -> Self {
+        self.time_getter = time_getter;
+        self
+    }
+
+    /// Returns the time source used by this config.
+    #[must_use]
+    pub const fn time_getter(&self) -> fn() -> Time {
+        self.time_getter
     }
 }
 
@@ -209,7 +233,7 @@ struct DnsDiscoveryState {
     /// Currently known endpoints.
     current: HashSet<SocketAddr>,
     /// When the last resolution attempt was performed.
-    last_resolve: Option<Instant>,
+    last_resolve: Option<Time>,
     /// Number of successful resolutions.
     resolve_count: u64,
     /// Number of failed resolutions.
@@ -300,10 +324,11 @@ impl DnsServiceDiscovery {
     }
 
     /// Check if a re-resolution is needed based on the poll interval.
-    fn needs_resolve(&self, state: &DnsDiscoveryState) -> bool {
+    fn needs_resolve(&self, now: Time, state: &DnsDiscoveryState) -> bool {
+        let poll_interval_nanos = duration_to_nanos(self.config.poll_interval);
         state
             .last_resolve
-            .is_none_or(|last| last.elapsed() >= self.config.poll_interval)
+            .is_none_or(|last| now.duration_since(last) >= poll_interval_nanos)
     }
 }
 
@@ -313,8 +338,9 @@ impl Discover for DnsServiceDiscovery {
 
     fn poll_discover(&self) -> Result<Vec<Change<SocketAddr>>, DnsDiscoveryError> {
         let mut state = self.state.lock();
+        let now = (self.config.time_getter)();
 
-        if !self.needs_resolve(&state) {
+        if !self.needs_resolve(now, &state) {
             return Ok(Vec::new());
         }
 
@@ -322,7 +348,7 @@ impl Discover for DnsServiceDiscovery {
         let new_addrs = match self.resolve() {
             Ok(addrs) => {
                 state.resolve_count += 1;
-                state.last_resolve = Some(Instant::now());
+                state.last_resolve = Some((self.config.time_getter)());
                 addrs
             }
             Err(e) => {
@@ -330,7 +356,7 @@ impl Discover for DnsServiceDiscovery {
                 // resolutions so callers that poll frequently do not hot-loop
                 // on an unhealthy hostname.
                 state.error_count += 1;
-                state.last_resolve = Some(Instant::now());
+                state.last_resolve = Some((self.config.time_getter)());
                 return Err(DnsDiscoveryError::Resolve(e));
             }
         };
@@ -364,6 +390,19 @@ impl fmt::Debug for DnsServiceDiscovery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    thread_local! {
+        static TEST_NOW: Cell<u64> = const { Cell::new(0) };
+    }
+
+    fn set_test_time(nanos: u64) {
+        TEST_NOW.with(|now| now.set(nanos));
+    }
+
+    fn test_time() -> Time {
+        Time::from_nanos(TEST_NOW.with(std::cell::Cell::get))
+    }
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -490,6 +529,12 @@ mod tests {
         let config =
             DnsDiscoveryConfig::new("example.com", 80).poll_interval(Duration::from_mins(1));
         assert_eq!(config.poll_interval, Duration::from_mins(1));
+    }
+
+    #[test]
+    fn dns_config_with_time_getter() {
+        let config = DnsDiscoveryConfig::new("example.com", 80).with_time_getter(test_time);
+        assert_eq!((config.time_getter())().as_nanos(), 0);
     }
 
     #[test]
@@ -662,6 +707,58 @@ mod tests {
         );
         assert_eq!(discovery.error_count(), 1);
         crate::test_complete!("dns_discovery_failed_resolution_respects_poll_interval");
+    }
+
+    #[test]
+    fn dns_discovery_time_getter_respects_poll_interval_without_sleep() {
+        init_test("dns_discovery_time_getter_respects_poll_interval_without_sleep");
+        set_test_time(0);
+        let discovery = DnsServiceDiscovery::new(
+            DnsDiscoveryConfig::new("localhost", 80)
+                .poll_interval(Duration::from_secs(30))
+                .with_time_getter(test_time),
+        );
+
+        let first = discovery.poll_discover().unwrap();
+        assert!(!first.is_empty());
+        assert_eq!(discovery.resolve_count(), 1);
+
+        set_test_time(Duration::from_secs(10).as_nanos() as u64);
+        let second = discovery.poll_discover().unwrap();
+        assert!(second.is_empty());
+        assert_eq!(discovery.resolve_count(), 1);
+
+        set_test_time(Duration::from_secs(30).as_nanos() as u64);
+        let third = discovery.poll_discover().unwrap();
+        assert!(third.is_empty());
+        assert_eq!(discovery.resolve_count(), 2);
+        crate::test_complete!("dns_discovery_time_getter_respects_poll_interval_without_sleep");
+    }
+
+    #[test]
+    fn dns_discovery_time_getter_controls_failed_resolution_cooldown() {
+        init_test("dns_discovery_time_getter_controls_failed_resolution_cooldown");
+        set_test_time(0);
+        // Use a syntactically invalid host so resolution fails deterministically
+        // without relying on external DNS behavior.
+        let discovery = DnsServiceDiscovery::new(
+            DnsDiscoveryConfig::new("[::1", 80)
+                .poll_interval(Duration::from_secs(30))
+                .with_time_getter(test_time),
+        );
+
+        assert!(discovery.poll_discover().is_err());
+        assert_eq!(discovery.error_count(), 1);
+
+        set_test_time(Duration::from_secs(10).as_nanos() as u64);
+        let second = discovery.poll_discover().unwrap();
+        assert!(second.is_empty());
+        assert_eq!(discovery.error_count(), 1);
+
+        set_test_time(Duration::from_secs(30).as_nanos() as u64);
+        assert!(discovery.poll_discover().is_err());
+        assert_eq!(discovery.error_count(), 2);
+        crate::test_complete!("dns_discovery_time_getter_controls_failed_resolution_cooldown");
     }
 
     #[test]

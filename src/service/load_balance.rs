@@ -17,9 +17,29 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Wake, Waker};
 
 use super::Service;
+
+fn noop_waker() -> Waker {
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+        fn wake_by_ref(self: &Arc<Self>) {}
+    }
+
+    Waker::from(Arc::new(NoopWaker))
+}
+
+fn poll_service_ready_once<S, Request>(service: &mut S) -> Poll<Result<(), S::Error>>
+where
+    S: Service<Request>,
+{
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    service.poll_ready(&mut cx)
+}
 
 // ─── Load metric ──────────────────────────────────────────────────────────
 
@@ -275,6 +295,8 @@ impl Strategy for Weighted {
 pub enum LoadBalanceError<E> {
     /// No backends available.
     NoBackends,
+    /// Backends exist, but none are currently ready to accept work.
+    NoReadyBackends,
     /// Inner service error.
     Inner(E),
 }
@@ -283,6 +305,7 @@ impl<E: fmt::Display> fmt::Display for LoadBalanceError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoBackends => write!(f, "no backends available"),
+            Self::NoReadyBackends => write!(f, "no ready backends available"),
             Self::Inner(e) => write!(f, "backend error: {e}"),
         }
     }
@@ -291,7 +314,7 @@ impl<E: fmt::Display> fmt::Display for LoadBalanceError<E> {
 impl<E: std::error::Error + 'static> std::error::Error for LoadBalanceError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NoBackends => None,
+            Self::NoBackends | Self::NoReadyBackends => None,
             Self::Inner(e) => Some(e),
         }
     }
@@ -424,8 +447,35 @@ impl<S: Clone, T: Strategy> LoadBalancer<S, T> {
             return Err(LoadBalanceError::NoBackends);
         }
 
-        let load_guard = LoadMetricGuard::new(Arc::clone(&backends[idx].load));
-        let mut svc = backends[idx].service.clone();
+        let mut first_error = None;
+        let mut selected = None;
+
+        for offset in 0..backends.len() {
+            let candidate_idx = (idx + offset) % backends.len();
+            let mut svc = backends[candidate_idx].service.clone();
+
+            match poll_service_ready_once::<S, Request>(&mut svc) {
+                Poll::Ready(Ok(())) => {
+                    selected = Some((candidate_idx, svc));
+                    break;
+                }
+                Poll::Ready(Err(err)) => {
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                }
+                Poll::Pending => {}
+            }
+        }
+
+        let Some((selected_idx, mut svc)) = selected else {
+            if let Some(err) = first_error {
+                return Err(LoadBalanceError::Inner(err));
+            }
+            return Err(LoadBalanceError::NoReadyBackends);
+        };
+
+        let load_guard = LoadMetricGuard::new(Arc::clone(&backends[selected_idx].load));
         drop(backends);
 
         let fut = svc.call(req);
@@ -759,6 +809,53 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug, Default)]
+    struct ReadyArmService {
+        armed: bool,
+        response: u32,
+        is_pending: bool,
+    }
+
+    impl ReadyArmService {
+        fn new(response: u32) -> Self {
+            Self {
+                armed: false,
+                response,
+                is_pending: false,
+            }
+        }
+
+        fn pending() -> Self {
+            Self {
+                armed: false,
+                response: 0,
+                is_pending: true,
+            }
+        }
+    }
+
+    impl Service<u32> for ReadyArmService {
+        type Response = u32;
+        type Error = ();
+        type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if self.is_pending {
+                Poll::Pending
+            } else {
+                self.armed = true;
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        fn call(&mut self, _req: u32) -> Self::Future {
+            assert!(!self.is_pending, "pending backend must not be called");
+            assert!(self.armed, "call must be preceded by poll_ready");
+            self.armed = false;
+            std::future::ready(Ok(self.response))
+        }
+    }
+
     #[test]
     fn lb_new_and_len() {
         init_test("lb_new_and_len");
@@ -843,6 +940,57 @@ mod tests {
             "panic path must roll back the in-flight increment"
         );
         crate::test_complete!("lb_panic_during_call_does_not_leak_load_metric");
+    }
+
+    #[test]
+    fn lb_call_balanced_polls_ready_before_dispatch() {
+        init_test("lb_call_balanced_polls_ready_before_dispatch");
+        let lb = LoadBalancer::new(RoundRobin::new(), vec![ReadyArmService::new(41)]);
+
+        let mut fut = lb
+            .call_balanced(7)
+            .expect("ready backend should dispatch successfully");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let output = Pin::new(&mut fut).poll(&mut cx);
+
+        assert!(matches!(output, Poll::Ready(Ok(41))));
+        assert_eq!(lb.loads(), vec![0]);
+        crate::test_complete!("lb_call_balanced_polls_ready_before_dispatch");
+    }
+
+    #[test]
+    fn lb_call_balanced_skips_pending_backend() {
+        init_test("lb_call_balanced_skips_pending_backend");
+        let lb = LoadBalancer::new(
+            RoundRobin::new(),
+            vec![ReadyArmService::pending(), ReadyArmService::new(99)],
+        );
+
+        let mut fut = lb
+            .call_balanced(7)
+            .expect("second backend is ready and should be selected");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let output = Pin::new(&mut fut).poll(&mut cx);
+
+        assert!(matches!(output, Poll::Ready(Ok(99))));
+        assert_eq!(lb.loads(), vec![0, 0]);
+        crate::test_complete!("lb_call_balanced_skips_pending_backend");
+    }
+
+    #[test]
+    fn lb_call_balanced_reports_when_all_backends_pending() {
+        init_test("lb_call_balanced_reports_when_all_backends_pending");
+        let lb = LoadBalancer::new(RoundRobin::new(), vec![ReadyArmService::pending()]);
+
+        let err = lb
+            .call_balanced(7)
+            .expect_err("all-pending backends should not be called");
+
+        assert!(matches!(err, LoadBalanceError::NoReadyBackends));
+        assert_eq!(lb.loads(), vec![0]);
+        crate::test_complete!("lb_call_balanced_reports_when_all_backends_pending");
     }
 
     // ================================================================
