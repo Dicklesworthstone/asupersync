@@ -89,6 +89,21 @@ fn root_workspace_scripts_use_pnpm_for_package_builds() {
 }
 
 #[test]
+fn root_validate_script_runs_npm_pack_smoke_validation() {
+    let root = read_root_pkg();
+    let scripts = root["scripts"]
+        .as_object()
+        .expect("scripts object required");
+    let validate = scripts["validate"]
+        .as_str()
+        .expect("root validate script must be a string");
+    assert!(
+        validate.contains("bash scripts/validate_npm_pack_smoke.sh"),
+        "root validate script must run scripts/validate_npm_pack_smoke.sh"
+    );
+}
+
+#[test]
 fn pnpm_workspace_and_npmrc_exist() {
     let workspace = repo_root().join("pnpm-workspace.yaml");
     let npmrc = repo_root().join(".npmrc");

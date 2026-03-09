@@ -53,6 +53,21 @@ fn root_package_json_exists_with_workspace_scripts() {
 }
 
 #[test]
+fn root_validate_script_runs_browser_package_build_validation() {
+    let path = repo_root().join("package.json");
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
+    let v: serde_json::Value = serde_json::from_str(&content).expect("invalid JSON");
+    let validate = v["scripts"]["validate"]
+        .as_str()
+        .expect("root validate script must be a string");
+    assert!(
+        validate.contains("bash scripts/validate_package_build.sh"),
+        "root validate script must run scripts/validate_package_build.sh"
+    );
+}
+
+#[test]
 fn npmrc_exists() {
     let path = repo_root().join(".npmrc");
     assert!(path.exists(), ".npmrc must exist");
