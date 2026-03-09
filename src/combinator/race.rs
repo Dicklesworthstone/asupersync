@@ -80,6 +80,7 @@ pub enum Race3<A, B, C> {
 
 impl<A, B, C> Race3<A, B, C> {
     /// Returns the winner index (0, 1, or 2).
+    #[inline]
     #[must_use]
     pub const fn winner_index(&self) -> usize {
         match self {
@@ -105,6 +106,7 @@ pub enum Race4<A, B, C, D> {
 
 impl<A, B, C, D> Race4<A, B, C, D> {
     /// Returns the winner index (0-3).
+    #[inline]
     #[must_use]
     pub const fn winner_index(&self) -> usize {
         match self {
@@ -229,18 +231,21 @@ pub enum RaceResult<A, B> {
 
 impl<A, B> RaceResult<A, B> {
     /// Returns true if the first branch won.
+    #[inline]
     #[must_use]
     pub const fn is_first(&self) -> bool {
         matches!(self, Self::First(_))
     }
 
     /// Returns true if the second branch won.
+    #[inline]
     #[must_use]
     pub const fn is_second(&self) -> bool {
         matches!(self, Self::Second(_))
     }
 
     /// Maps the first variant.
+    #[inline]
     pub fn map_first<C, F: FnOnce(A) -> C>(self, f: F) -> RaceResult<C, B> {
         match self {
             Self::First(a) => RaceResult::First(f(a)),
@@ -249,6 +254,7 @@ impl<A, B> RaceResult<A, B> {
     }
 
     /// Maps the second variant.
+    #[inline]
     pub fn map_second<C, F: FnOnce(B) -> C>(self, f: F) -> RaceResult<A, C> {
         match self {
             Self::First(a) => RaceResult::First(a),
@@ -257,6 +263,7 @@ impl<A, B> RaceResult<A, B> {
     }
 
     /// Returns the winner index (0 or 1) for consistency with RaceN types.
+    #[inline]
     #[must_use]
     pub const fn winner_index(&self) -> usize {
         match self {
@@ -326,6 +333,7 @@ pub enum RaceAllError<E> {
 
 impl<E> RaceAllError<E> {
     /// Returns the index for any error variant (the winning branch, or the branch that panicked).
+    #[inline]
     #[must_use]
     pub const fn winner_index(&self) -> usize {
         match self {
@@ -337,18 +345,21 @@ impl<E> RaceAllError<E> {
     }
 
     /// Returns true if this was an application error (not cancel/panic).
+    #[inline]
     #[must_use]
     pub const fn is_error(&self) -> bool {
         matches!(self, Self::Error { .. })
     }
 
     /// Returns true if the winner was cancelled.
+    #[inline]
     #[must_use]
     pub const fn is_cancelled(&self) -> bool {
         matches!(self, Self::Cancelled { .. })
     }
 
     /// Returns true if the winner panicked.
+    #[inline]
     #[must_use]
     pub const fn is_panicked(&self) -> bool {
         matches!(self, Self::Panicked { .. })
@@ -396,12 +407,14 @@ pub enum RaceWinner {
 
 impl RaceWinner {
     /// Returns true if the first branch won.
+    #[inline]
     #[must_use]
     pub const fn is_first(self) -> bool {
         matches!(self, Self::First)
     }
 
     /// Returns true if the second branch won.
+    #[inline]
     #[must_use]
     pub const fn is_second(self) -> bool {
         matches!(self, Self::Second)
@@ -535,6 +548,7 @@ impl<T, E> RaceAllResult<T, E> {
     }
 
     /// Returns true if the winner succeeded.
+    #[inline]
     #[must_use]
     pub fn winner_succeeded(&self) -> bool {
         self.winner_outcome.is_ok()

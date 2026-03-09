@@ -164,6 +164,7 @@ impl<T, E> JoinAllResult<T, E> {
     }
 
     /// Returns true if all branches succeeded.
+    #[inline]
     #[must_use]
     pub fn all_succeeded(&self) -> bool {
         matches!(self.decision, AggregateDecision::AllOk)
@@ -171,12 +172,14 @@ impl<T, E> JoinAllResult<T, E> {
     }
 
     /// Returns the number of successful branches.
+    #[inline]
     #[must_use]
     pub fn success_count(&self) -> usize {
         self.successes.len()
     }
 
     /// Returns the number of failed branches.
+    #[inline]
     #[must_use]
     pub fn failure_count(&self) -> usize {
         self.total_count - self.successes.len()

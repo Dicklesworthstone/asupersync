@@ -74,12 +74,14 @@ pub fn store_local_task(task_id: TaskId, mut task: LocalStoredTask) {
 }
 
 /// Removes and returns a local task from the current thread's storage.
+#[inline]
 #[must_use]
 pub fn remove_local_task(task_id: TaskId) -> Option<LocalStoredTask> {
     LOCAL_TASKS.with(|tasks| tasks.borrow_mut().remove(task_id))
 }
 
 /// Returns the number of local tasks on this thread.
+#[inline]
 #[must_use]
 pub fn local_task_count() -> usize {
     LOCAL_TASKS.with(|tasks| tasks.borrow().len())

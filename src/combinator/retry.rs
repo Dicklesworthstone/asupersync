@@ -330,30 +330,35 @@ pub enum RetryResult<T, E> {
 
 impl<T, E> RetryResult<T, E> {
     /// Returns true if the operation succeeded.
+    #[inline]
     #[must_use]
     pub const fn is_ok(&self) -> bool {
         matches!(self, Self::Ok(_))
     }
 
     /// Returns true if all attempts failed.
+    #[inline]
     #[must_use]
     pub const fn is_failed(&self) -> bool {
         matches!(self, Self::Failed(_))
     }
 
     /// Returns true if the operation was cancelled.
+    #[inline]
     #[must_use]
     pub const fn is_cancelled(&self) -> bool {
         matches!(self, Self::Cancelled(_))
     }
 
     /// Returns true if the operation panicked.
+    #[inline]
     #[must_use]
     pub const fn is_panicked(&self) -> bool {
         matches!(self, Self::Panicked(_))
     }
 
     /// Converts to an Outcome.
+    #[inline]
     pub fn into_outcome(self) -> Outcome<T, RetryError<E>> {
         match self {
             Self::Ok(v) => Outcome::Ok(v),
@@ -424,12 +429,14 @@ impl RetryState {
     }
 
     /// Returns true if more attempts are available.
+    #[inline]
     #[must_use]
     pub fn has_attempts_remaining(&self) -> bool {
         !self.cancelled && self.attempt < self.policy.max_attempts
     }
 
     /// Returns the number of attempts remaining.
+    #[inline]
     #[must_use]
     pub fn attempts_remaining(&self) -> u32 {
         if self.cancelled {
@@ -472,6 +479,7 @@ impl RetryState {
     }
 
     /// Returns the policy being used.
+    #[inline]
     #[must_use]
     pub const fn policy(&self) -> &RetryPolicy {
         &self.policy
