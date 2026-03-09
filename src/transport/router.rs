@@ -509,31 +509,40 @@ impl LoadBalancer {
         &self,
         endpoints: &'a [Arc<Endpoint>],
     ) -> Option<&'a Arc<Endpoint>> {
+        if endpoints.is_empty() {
+            return None;
+        }
         let mut seed = self.random_seed.fetch_add(1, Ordering::Relaxed);
-        let mut selected: Option<&Arc<Endpoint>> = None;
-        let mut healthy_seen = 0usize;
+        let total = endpoints.len();
 
-        for endpoint in endpoints {
-            if !endpoint.state().can_receive() {
-                continue;
-            }
-
-            healthy_seen += 1;
-            // Reservoir update: replace with probability 1 / healthy_seen.
+        // Rejection sampling: pick random index, check health.
+        // For all-healthy pools this succeeds on first attempt.
+        let max_attempts = total.min(64);
+        for _ in 0..max_attempts {
             seed = Self::next_lcg(seed);
-            if (seed as usize).is_multiple_of(healthy_seen) {
-                selected = Some(endpoint);
+            let idx = (seed as usize) % total;
+            if endpoints[idx].state().can_receive() {
+                return Some(&endpoints[idx]);
             }
         }
 
-        selected
+        // Fallback: linear scan for pools with very few healthy endpoints.
+        for endpoint in endpoints {
+            if endpoint.state().can_receive() {
+                return Some(endpoint);
+            }
+        }
+
+        None
     }
 
-    /// Small-n random selection using one-pass reservoir sampling.
+    /// Small-n random selection using rejection sampling.
     ///
-    /// This avoids the previous "count healthy endpoints, sample ranks, then
-    /// scan again to map ranks back to endpoints" flow while preserving
-    /// uniform ordered selection without replacement.
+    /// For small n relative to a large endpoint pool, this generates n
+    /// random indices and checks health + uniqueness, avoiding both the
+    /// O(N)-push materialization and the O(N)-RNG reservoir scan.
+    /// Expected attempts for n=3 from 512 all-healthy endpoints: ~3.006.
+    /// Falls through to `None` if too many attempts needed (unhealthy-heavy pools).
     fn select_n_random_small_without_materializing<'a>(
         &self,
         endpoints: &'a [Arc<Endpoint>],
@@ -542,45 +551,34 @@ impl LoadBalancer {
         if n == 0 {
             return Some(Vec::new());
         }
-        if endpoints.is_empty() {
+        let total = endpoints.len();
+        if total == 0 {
             return None;
         }
 
         let mut seed = self.random_seed.fetch_add(n as u64, Ordering::Relaxed);
-        let mut healthy_seen = 0usize;
-        let mut selected = SmallVec::<[&Arc<Endpoint>; Self::RANDOM_FLOYD_SMALL_N_MAX]>::new();
-        selected.reserve_exact(n);
+        let mut selected = SmallVec::<[usize; Self::RANDOM_FLOYD_SMALL_N_MAX]>::new();
+        let max_attempts = n * 4 + 16;
+        let mut attempts = 0;
 
-        for endpoint in endpoints {
-            if !endpoint.state().can_receive() {
+        while selected.len() < n {
+            if attempts >= max_attempts {
+                return None; // Fall through to general Fisher-Yates path.
+            }
+            attempts += 1;
+            seed = Self::next_lcg(seed);
+            let idx = (seed as usize) % total;
+
+            if !endpoints[idx].state().can_receive() {
                 continue;
             }
-
-            healthy_seen += 1;
-
-            if selected.len() < n {
-                selected.push(endpoint);
+            if selected.contains(&idx) {
                 continue;
             }
-
-            seed = Self::next_lcg(seed);
-            let candidate = (seed as usize) % healthy_seen;
-            if candidate < n {
-                selected[candidate] = endpoint;
-            }
+            selected.push(idx);
         }
 
-        if healthy_seen <= n {
-            return Some(selected.into_iter().collect());
-        }
-
-        for i in 0..n {
-            seed = Self::next_lcg(seed);
-            let swap = i + ((seed as usize) % (n - i));
-            selected.swap(i, swap);
-        }
-
-        Some(selected.into_iter().collect())
+        Some(selected.into_iter().map(|i| &endpoints[i]).collect())
     }
 }
 
