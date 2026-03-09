@@ -308,6 +308,7 @@ impl<T> Sender<T> {
     ///
     /// This acquires a read lock on the value. The returned `Ref` holds
     /// the lock and provides access to the value.
+    #[inline]
     #[must_use]
     pub fn borrow(&self) -> Ref<'_, T> {
         Ref {
@@ -340,12 +341,14 @@ impl<T> Sender<T> {
     }
 
     /// Returns the number of active receivers (excluding sender).
+    #[inline]
     #[must_use]
     pub fn receiver_count(&self) -> usize {
         self.inner.receiver_count.load(Ordering::Acquire)
     }
 
     /// Returns true if all receivers have been dropped.
+    #[inline]
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.inner.receiver_count.load(Ordering::Acquire) == 0
@@ -406,6 +409,7 @@ impl<T> Receiver<T> {
     ///
     /// This does NOT update `seen_version`. Use `mark_seen()` after
     /// if you want to acknowledge seeing the value.
+    #[inline]
     #[must_use]
     pub fn borrow(&self) -> Ref<'_, T> {
         Ref {
@@ -417,6 +421,7 @@ impl<T> Receiver<T> {
     ///
     /// Convenience method that borrows and clones in one operation.
     /// Does NOT update `seen_version`.
+    #[inline]
     #[must_use]
     pub fn borrow_and_clone(&self) -> T
     where
@@ -429,17 +434,20 @@ impl<T> Receiver<T> {
     ///
     /// After this call, `changed()` will only return when a newer
     /// value is available.
+    #[inline]
     pub fn mark_seen(&mut self) {
         self.seen_version = self.inner.current_version();
     }
 
     /// Returns true if there's a new value since last seen.
+    #[inline]
     #[must_use]
     pub fn has_changed(&self) -> bool {
         self.inner.current_version() != self.seen_version
     }
 
     /// Returns true if the sender has been dropped.
+    #[inline]
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.inner.is_sender_dropped()

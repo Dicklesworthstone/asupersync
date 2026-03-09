@@ -242,6 +242,7 @@ impl Sleep {
     }
 
     /// Returns the deadline for this sleep.
+    #[inline]
     #[must_use]
     pub const fn deadline(&self) -> Time {
         self.deadline
@@ -254,6 +255,7 @@ impl Sleep {
     /// # Arguments
     ///
     /// * `now` - The current time to compare against
+    #[inline]
     #[must_use]
     pub fn remaining(&self, now: Time) -> Duration {
         if now >= self.deadline {
@@ -269,6 +271,7 @@ impl Sleep {
     /// # Arguments
     ///
     /// * `now` - The current time to compare against
+    #[inline]
     #[must_use]
     pub fn is_elapsed(&self, now: Time) -> bool {
         now >= self.deadline
