@@ -429,7 +429,13 @@ impl CallContext {
         Self::from_metadata_at(metadata, default_timeout, peer_addr, Instant::now())
     }
 
-    fn from_metadata_at(
+    /// Create a call context from incoming request metadata using an explicit
+    /// clock sample.
+    ///
+    /// This is useful for deterministic tests and replay harnesses that need
+    /// to avoid ambient wall-clock reads.
+    #[must_use]
+    pub fn from_metadata_at(
         metadata: Metadata,
         default_timeout: Option<Duration>,
         peer_addr: Option<String>,
@@ -485,7 +491,9 @@ impl CallContext {
         self.remaining_at(Instant::now())
     }
 
-    fn remaining_at(&self, now: Instant) -> Option<Duration> {
+    /// Returns remaining time to deadline using an explicit clock sample.
+    #[must_use]
+    pub fn remaining_at(&self, now: Instant) -> Option<Duration> {
         self.deadline.and_then(|d| d.checked_duration_since(now))
     }
 
@@ -495,7 +503,9 @@ impl CallContext {
         self.is_expired_at(Instant::now())
     }
 
-    fn is_expired_at(&self, now: Instant) -> bool {
+    /// Check if deadline is expired using an explicit clock sample.
+    #[must_use]
+    pub fn is_expired_at(&self, now: Instant) -> bool {
         self.deadline.is_some_and(|deadline| now >= deadline)
     }
 

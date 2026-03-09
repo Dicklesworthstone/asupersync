@@ -199,23 +199,26 @@ fn call_context_from_metadata_with_timeout_header() {
     let mut metadata = Metadata::new();
     metadata.insert("grpc-timeout", "5000m");
     let now = Instant::now();
-    let ctx = CallContext::from_metadata(metadata, None, None);
-    // Deadline should be approximately now + 5s
+    let ctx = CallContext::from_metadata_at(metadata, None, None, now);
     let deadline = ctx.deadline().expect("deadline should be set");
-    let diff = deadline.duration_since(now);
-    assert!(diff >= Duration::from_millis(4900));
-    assert!(diff <= Duration::from_millis(5100));
+    assert_eq!(
+        deadline,
+        now.checked_add(Duration::from_secs(5))
+            .expect("5s timeout should fit in Instant range")
+    );
 }
 
 #[test]
 fn call_context_from_metadata_uses_default_timeout_when_no_header() {
     let metadata = Metadata::new();
     let now = Instant::now();
-    let ctx = CallContext::from_metadata(metadata, Some(Duration::from_secs(10)), None);
+    let ctx = CallContext::from_metadata_at(metadata, Some(Duration::from_secs(10)), None, now);
     let deadline = ctx.deadline().expect("deadline should be set");
-    let diff = deadline.duration_since(now);
-    assert!(diff >= Duration::from_millis(9900));
-    assert!(diff <= Duration::from_millis(10100));
+    assert_eq!(
+        deadline,
+        now.checked_add(Duration::from_secs(10))
+            .expect("10s timeout should fit in Instant range")
+    );
 }
 
 #[test]
@@ -223,16 +226,18 @@ fn call_context_from_metadata_header_overrides_default() {
     let mut metadata = Metadata::new();
     metadata.insert("grpc-timeout", "1000m"); // 1 second
     let now = Instant::now();
-    let ctx = CallContext::from_metadata(
+    let ctx = CallContext::from_metadata_at(
         metadata,
         Some(Duration::from_secs(60)), // default 60s, should be overridden
         None,
+        now,
     );
     let deadline = ctx.deadline().expect("deadline should be set");
-    let diff = deadline.duration_since(now);
-    assert!(
-        diff < Duration::from_secs(2),
-        "should use 1s header not 60s default"
+    assert_eq!(
+        deadline,
+        now.checked_add(Duration::from_secs(1))
+            .expect("1s timeout should fit in Instant range"),
+        "header timeout must override default timeout"
     );
 }
 
@@ -252,19 +257,19 @@ fn call_context_from_metadata_preserves_peer_addr() {
 
 #[test]
 fn call_context_remaining_before_deadline() {
-    let ctx = CallContext::with_deadline(Instant::now() + Duration::from_secs(10));
-    let remaining = ctx.remaining().expect("should have remaining time");
-    assert!(remaining > Duration::from_secs(9));
+    let now = Instant::now();
+    let ctx = CallContext::with_deadline(now + Duration::from_secs(10));
+    assert_eq!(ctx.remaining_at(now), Some(Duration::from_secs(10)));
 }
 
 #[test]
 fn call_context_remaining_after_deadline() {
+    let now = Instant::now();
     let ctx = CallContext::with_deadline(
-        Instant::now()
-            .checked_sub(Duration::from_millis(1))
-            .unwrap(),
+        now.checked_sub(Duration::from_millis(1))
+            .expect("instant subtraction should succeed"),
     );
-    assert!(ctx.remaining().is_none());
+    assert_eq!(ctx.remaining_at(now), None);
 }
 
 #[test]
@@ -275,18 +280,19 @@ fn call_context_remaining_no_deadline() {
 
 #[test]
 fn call_context_is_expired_with_past_deadline() {
+    let now = Instant::now();
     let ctx = CallContext::with_deadline(
-        Instant::now()
-            .checked_sub(Duration::from_millis(1))
-            .unwrap(),
+        now.checked_sub(Duration::from_millis(1))
+            .expect("instant subtraction should succeed"),
     );
-    assert!(ctx.is_expired());
+    assert!(ctx.is_expired_at(now));
 }
 
 #[test]
 fn call_context_is_expired_with_future_deadline() {
-    let ctx = CallContext::with_deadline(Instant::now() + Duration::from_secs(10));
-    assert!(!ctx.is_expired());
+    let now = Instant::now();
+    let ctx = CallContext::with_deadline(now + Duration::from_secs(10));
+    assert!(!ctx.is_expired_at(now));
 }
 
 // ===========================================================================
