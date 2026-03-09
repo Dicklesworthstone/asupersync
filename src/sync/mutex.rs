@@ -269,6 +269,7 @@ impl<T> Mutex<T> {
     }
 
     /// Tries to acquire the mutex without waiting.
+    #[inline]
     pub fn try_lock(&self) -> Result<MutexGuard<'_, T>, TryLockError> {
         let mut state = self.state.lock();
         if self.is_poisoned() {

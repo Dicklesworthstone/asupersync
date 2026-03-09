@@ -224,7 +224,9 @@ impl Notify {
                 .filter_map(|entry| {
                     // Only mark active waiters as notified. Marking free slab slots
                     // (`waker == None` and `!notified`) can pin tail entries and prevent shrinking.
-                    if entry.generation < new_generation && (entry.waker.is_some() || entry.notified) {
+                    if entry.generation < new_generation
+                        && (entry.waker.is_some() || entry.notified)
+                    {
                         entry.generation = new_generation;
                         if let Some(waker) = entry.waker.take() {
                             entry.notified = true;
@@ -311,7 +313,7 @@ impl Notified<'_> {
                 stored,
                 stored - 1,
                 Ordering::Acquire,
-                Ordering::Acquire,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => return true,
                 Err(actual) => stored = actual,

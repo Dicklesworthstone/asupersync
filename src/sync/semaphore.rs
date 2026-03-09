@@ -184,6 +184,7 @@ impl Semaphore {
     }
 
     /// Tries to acquire the given number of permits without waiting.
+    #[inline]
     pub fn try_acquire(&self, count: usize) -> Result<SemaphorePermit<'_>, TryAcquireError> {
         assert!(count > 0, "cannot acquire 0 permits");
 

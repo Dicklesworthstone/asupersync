@@ -227,6 +227,7 @@ impl<T> RwLock<T> {
     }
 
     /// Tries to acquire a read guard without waiting.
+    #[inline]
     pub fn try_read(&self) -> Result<RwLockReadGuard<'_, T>, TryReadError> {
         self.try_acquire_read_state()?;
         Ok(RwLockReadGuard { lock: self })
@@ -246,6 +247,7 @@ impl<T> RwLock<T> {
     }
 
     /// Tries to acquire a write guard without waiting.
+    #[inline]
     pub fn try_write(&self) -> Result<RwLockWriteGuard<'_, T>, TryWriteError> {
         self.try_acquire_write_state()?;
         Ok(RwLockWriteGuard { lock: self })
