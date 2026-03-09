@@ -57,6 +57,10 @@ struct WaiterSlab {
     /// Number of active waiters (those with a waker set). Maintained
     /// incrementally so `active_count()` is O(1) instead of a linear scan.
     active: usize,
+    /// Lower-bound hint for the first potentially-active (non-notified, has-waker)
+    /// entry. `notify_one` starts scanning from here instead of index 0,
+    /// making sequential notifications O(1) amortized instead of O(n).
+    scan_start: usize,
 }
 
 /// Entry in the waiter queue.
@@ -76,6 +80,7 @@ impl WaiterSlab {
             entries: Vec::new(),
             free_slots: SmallVec::new(),
             active: 0,
+            scan_start: 0,
         }
     }
 
@@ -99,6 +104,10 @@ impl WaiterSlab {
         };
         if is_active {
             self.active += 1;
+            // New active entry before the scan cursor → lower the hint.
+            if index < self.scan_start {
+                self.scan_start = index;
+            }
         }
         index
     }
@@ -169,12 +178,15 @@ impl Notify {
     pub fn notify_one(&self) {
         let mut waiters = self.waiters.lock();
 
-        // Find a waiter to notify.
+        // Find a waiter to notify, starting from the scan cursor.
         let mut found_waker = None;
-        for entry in &mut waiters.entries {
+        let start = waiters.scan_start;
+        for i in start..waiters.entries.len() {
+            let entry = &mut waiters.entries[i];
             if !entry.notified && entry.waker.is_some() {
                 entry.notified = true;
                 found_waker = entry.waker.take();
+                waiters.scan_start = i + 1;
                 break;
             }
         }
