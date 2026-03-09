@@ -849,7 +849,7 @@ mod tests {
     #[test]
     fn middleware_loads_existing_session() {
         let store = MemoryStore::new();
-        let layer = SessionLayer::new(store.clone());
+        let layer = SessionLayer::new(store);
         let handler = layer.wrap(TestHandler);
 
         // First request — creates session.
@@ -993,7 +993,7 @@ mod tests {
         let session_id = "abcdef0123456789abcdef0123456789";
         store.save(session_id, &seed);
 
-        let layer = SessionLayer::new(store.clone());
+        let layer = SessionLayer::new(store);
         let handler = layer.wrap(ReadOnlyHandler);
 
         let fake_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0";
