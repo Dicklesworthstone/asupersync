@@ -106,7 +106,10 @@ impl<H: Handler> CompressionMiddleware<H> {
 impl<H: Handler> Handler for CompressionMiddleware<H> {
     fn call(&self, req: Request) -> Response {
         // Extract accept-encoding before passing the request.
-        let accept_encoding = req.header("accept-encoding").unwrap_or_default().to_string();
+        let accept_encoding = req
+            .header("accept-encoding")
+            .unwrap_or_default()
+            .to_string();
 
         let mut resp = self.inner.call(req);
 
@@ -223,7 +226,8 @@ mod tests {
     fn handler_with_mixed_case_vary() -> Response {
         let body = "Hello, World! ".repeat(100);
         let mut resp = Response::new(StatusCode::OK, body.into_bytes());
-        resp.headers.insert("Vary".to_string(), "origin".to_string());
+        resp.headers
+            .insert("Vary".to_string(), "origin".to_string());
         resp
     }
 
@@ -305,11 +309,17 @@ mod tests {
     #[test]
     fn skips_mixed_case_existing_content_encoding_and_canonicalizes_name() {
         let policy = CompressionPolicy::default().with_min_body_size(0);
-        let mw = CompressionMiddleware::new(FnHandler::new(mixed_case_already_compressed_handler), policy);
+        let mw = CompressionMiddleware::new(
+            FnHandler::new(mixed_case_already_compressed_handler),
+            policy,
+        );
         let req = make_request_with_encoding("gzip");
         let resp = mw.call(req);
 
-        assert_eq!(resp.headers.get("content-encoding"), Some(&"gzip".to_string()));
+        assert_eq!(
+            resp.headers.get("content-encoding"),
+            Some(&"gzip".to_string())
+        );
         assert!(!resp.headers.contains_key("Content-Encoding"));
         assert!(!resp.headers.contains_key("vary"));
     }

@@ -35,7 +35,7 @@
 
 use std::fmt;
 
-use crate::cx::{cap, Cx};
+use crate::cx::{Cx, cap};
 use crate::error::Error;
 use crate::web::extract::Request;
 use crate::web::response::{Response, StatusCode};

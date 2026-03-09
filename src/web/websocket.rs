@@ -95,7 +95,7 @@ impl FromRequest for WebSocketUpgrade {
         let connection = req
             .header("connection")
             .ok_or_else(|| ExtractionError::bad_request("missing Connection header"))?;
-        if !connection.to_ascii_lowercase().contains("upgrade") {
+        if !header_has_token(connection, "upgrade") {
             return Err(ExtractionError::bad_request(format!(
                 "Connection header must contain 'Upgrade', got '{connection}'"
             )));
@@ -163,6 +163,13 @@ impl FromRequest for WebSocketUpgrade {
 }
 
 use base64::Engine;
+
+fn header_has_token(value: &str, token: &str) -> bool {
+    value
+        .split(',')
+        .map(str::trim)
+        .any(|part| part.eq_ignore_ascii_case(token))
+}
 
 impl WebSocketUpgrade {
     /// Select a subprotocol from the client's requested list.
@@ -366,6 +373,18 @@ mod tests {
         let req = Request::new("GET", "/ws")
             .with_header("upgrade", "websocket")
             .with_header("connection", "keep-alive")
+            .with_header("sec-websocket-version", "13")
+            .with_header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==");
+
+        let err = WebSocketUpgrade::from_request(req).unwrap_err();
+        assert!(err.message.contains("Upgrade"));
+    }
+
+    #[test]
+    fn rejects_connection_with_upgrade_only_as_substring() {
+        let req = Request::new("GET", "/ws")
+            .with_header("upgrade", "websocket")
+            .with_header("connection", "notupgrade")
             .with_header("sec-websocket-version", "13")
             .with_header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==");
 

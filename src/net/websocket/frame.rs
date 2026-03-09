@@ -411,7 +411,9 @@ impl FrameCodec {
         loop {
             match &self.state {
                 DecodeState::Poisoned => {
-                    return Err(WsError::ProtocolViolation("codec is poisoned after a fatal error"));
+                    return Err(WsError::ProtocolViolation(
+                        "codec is poisoned after a fatal error",
+                    ));
                 }
                 DecodeState::Header => {
                     if src.len() < 2 {

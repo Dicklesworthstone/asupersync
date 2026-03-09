@@ -71,16 +71,6 @@ pub enum Severity {
 pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     // ── Time ────────────────────────────────────────────────────────────
     AmbientFinding {
-        file: "web/middleware.rs",
-        line: 268,
-        evidence_pattern: "Instant::now()",
-        category: AmbientCategory::Time,
-        severity: Severity::Warning,
-        description: "Instant::now() in TimeoutMiddleware::call()",
-        exempt: false,
-        exemption_reason: None,
-    },
-    AmbientFinding {
         file: "time/driver.rs",
         line: 38,
         evidence_pattern: "std::time::Instant::now()",

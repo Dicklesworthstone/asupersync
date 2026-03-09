@@ -42,15 +42,15 @@
 
 use std::convert::Infallible;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use crate::combinator::bulkhead::{Bulkhead, BulkheadPolicy};
 use crate::combinator::circuit_breaker::{CircuitBreaker, CircuitBreakerPolicy};
 use crate::combinator::rate_limit::{RateLimitPolicy, RateLimiter};
 use crate::combinator::retry::RetryPolicy;
-use crate::http::compress::{negotiate_encoding, ContentEncoding};
+use crate::http::compress::{ContentEncoding, negotiate_encoding};
 use crate::tracing_compat::{debug, warn};
 use crate::types::Time;
 
@@ -831,17 +831,32 @@ impl Default for RequestTracePolicy {
 pub struct RequestTraceMiddleware<H> {
     inner: H,
     policy: RequestTracePolicy,
+    time_getter: fn() -> Time,
 }
 
 impl<H: Handler> RequestTraceMiddleware<H> {
     /// Wrap a handler with request/response tracing.
     #[must_use]
     pub fn new(inner: H, policy: RequestTracePolicy) -> Self {
+        Self::with_time_getter(inner, policy, wall_clock_now)
+    }
+
+    /// Wrap a handler with request/response tracing using a custom time source.
+    #[must_use]
+    pub fn with_time_getter(
+        inner: H,
+        policy: RequestTracePolicy,
+        time_getter: fn() -> Time,
+    ) -> Self {
         let policy = RequestTracePolicy {
             duration_header: policy.duration_header.map(normalize_header_name),
             trace_header: policy.trace_header.map(normalize_header_name),
         };
-        Self { inner, policy }
+        Self {
+            inner,
+            policy,
+            time_getter,
+        }
     }
 
     fn resolve_trace_id(req: &Request) -> Option<String> {
@@ -860,7 +875,7 @@ impl<H: Handler> Handler for RequestTraceMiddleware<H> {
         let _method = req.method.clone();
         let _path = req.path.clone();
         let trace_id = Self::resolve_trace_id(&req);
-        let start = Instant::now();
+        let start = (self.time_getter)();
 
         debug!(
             method = %_method,
@@ -870,8 +885,8 @@ impl<H: Handler> Handler for RequestTraceMiddleware<H> {
         );
 
         let mut resp = self.inner.call(req);
-        let elapsed = start.elapsed();
-        let duration_ms = elapsed.as_millis();
+        let duration_ms =
+            Duration::from_nanos((self.time_getter)().duration_since(start)).as_millis();
         let status_code = resp.status.as_u16();
 
         if let Some(header_name) = &self.policy.duration_header {
@@ -1444,6 +1459,7 @@ mod tests {
 
     static TIMEOUT_TEST_TIME_MS: AtomicU64 = AtomicU64::new(0);
     static CIRCUIT_TEST_TIME_MS: AtomicU64 = AtomicU64::new(0);
+    static REQUEST_TRACE_TEST_TIME_MS: AtomicU64 = AtomicU64::new(0);
     static RATE_LIMIT_TEST_TIME_MS: AtomicU64 = AtomicU64::new(0);
 
     fn set_timeout_test_time(ms: u64) {
@@ -1460,6 +1476,14 @@ mod tests {
 
     fn circuit_test_time() -> Time {
         Time::from_millis(CIRCUIT_TEST_TIME_MS.load(Ordering::SeqCst))
+    }
+
+    fn set_request_trace_test_time(ms: u64) {
+        REQUEST_TRACE_TEST_TIME_MS.store(ms, Ordering::SeqCst);
+    }
+
+    fn request_trace_test_time() -> Time {
+        Time::from_millis(REQUEST_TRACE_TEST_TIME_MS.load(Ordering::SeqCst))
     }
 
     fn set_rate_limit_test_time(ms: u64) {
@@ -1547,6 +1571,18 @@ mod tests {
         fn call(&self, _req: Request) -> Response {
             set_timeout_test_time(self.next_time_ms);
             Response::new(self.status, b"advanced".to_vec())
+        }
+    }
+
+    struct AdvanceRequestTraceTimeHandler {
+        next_time_ms: u64,
+        body: &'static [u8],
+    }
+
+    impl Handler for AdvanceRequestTraceTimeHandler {
+        fn call(&self, _req: Request) -> Response {
+            set_request_trace_test_time(self.next_time_ms);
+            Response::new(StatusCode::OK, self.body.to_vec())
         }
     }
 
@@ -1775,7 +1811,7 @@ mod tests {
         let policy = RateLimitPolicy {
             rate: 1,
             burst: 1,
-            period: Duration::from_secs(60),
+            period: Duration::from_mins(1),
             ..Default::default()
         };
         let mw = RateLimitMiddleware::with_time_getter(
@@ -2445,6 +2481,31 @@ mod tests {
             duration.parse::<u128>().is_ok(),
             "duration header should be numeric: {duration}"
         );
+    }
+
+    #[test]
+    fn request_trace_time_getter_can_drive_duration_header_without_sleep() {
+        set_request_trace_test_time(0);
+        let mw = RequestTraceMiddleware::with_time_getter(
+            AdvanceRequestTraceTimeHandler {
+                next_time_ms: 25,
+                body: b"traced",
+            },
+            RequestTracePolicy::default(),
+            request_trace_test_time,
+        );
+        let resp = mw.call(make_request().with_header("x-request-id", "trace-99"));
+
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(
+            resp.headers.get("x-response-time-ms"),
+            Some(&"25".to_string())
+        );
+        assert_eq!(
+            resp.headers.get("x-trace-id"),
+            Some(&"trace-99".to_string())
+        );
+        assert_eq!(resp.body.as_ref(), b"traced");
     }
 
     #[test]

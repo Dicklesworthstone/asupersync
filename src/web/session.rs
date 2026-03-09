@@ -929,7 +929,10 @@ mod tests {
             cookie.contains("Max-Age=0"),
             "unknown fixation cookie must be expired"
         );
-        assert!(store.is_empty(), "read-only fixation requests must not persist data");
+        assert!(
+            store.is_empty(),
+            "read-only fixation requests must not persist data"
+        );
     }
 
     #[test]

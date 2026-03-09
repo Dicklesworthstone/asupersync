@@ -597,7 +597,9 @@ impl ControllerRegistry {
         self.next_id += 1;
 
         let mode = if registration.initial_mode == ControllerMode::Active
-            && !registration.max_version.is_compatible_with(&SNAPSHOT_VERSION)
+            && !registration
+                .max_version
+                .is_compatible_with(&SNAPSHOT_VERSION)
         {
             // Downgrade to shadow if snapshot is newer than controller expects
             ControllerMode::Shadow
