@@ -981,6 +981,7 @@ impl<Caps> Cx<Caps> {
     ///     println!("Running in region: {:?}", cx.region_id());
     /// }
     /// ```
+    #[inline]
     #[must_use]
     pub fn region_id(&self) -> RegionId {
         self.inner.read().region
@@ -998,6 +999,7 @@ impl<Caps> Cx<Caps> {
     ///     println!("Task {:?} starting work", cx.task_id());
     /// }
     /// ```
+    #[inline]
     #[must_use]
     pub fn task_id(&self) -> TaskId {
         self.inner.read().task
@@ -1042,6 +1044,7 @@ impl<Caps> Cx<Caps> {
     ///     Ok(())
     /// }
     /// ```
+    #[inline]
     #[must_use]
     pub fn budget(&self) -> Budget {
         self.inner.read().budget
@@ -1070,6 +1073,7 @@ impl<Caps> Cx<Caps> {
     ///     Ok(())
     /// }
     /// ```
+    #[inline]
     #[must_use]
     pub fn is_cancel_requested(&self) -> bool {
         self.inner.read().cancel_requested
