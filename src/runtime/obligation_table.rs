@@ -124,12 +124,14 @@ impl ObligationTable {
     // =========================================================================
 
     /// Returns a shared reference to an obligation record by arena index.
+    #[inline]
     #[must_use]
     pub fn get(&self, index: ArenaIndex) -> Option<&ObligationRecord> {
         self.obligations.get(index)
     }
 
     /// Returns a mutable reference to an obligation record by arena index.
+    #[inline]
     pub fn get_mut(&mut self, index: ArenaIndex) -> Option<&mut ObligationRecord> {
         self.obligations.get_mut(index)
     }
@@ -180,6 +182,7 @@ impl ObligationTable {
     }
 
     /// Removes an obligation record from the arena.
+    #[inline]
     pub fn remove(&mut self, index: ArenaIndex) -> Option<ObligationRecord> {
         let record = self.obligations.remove(index)?;
         if record.is_pending() {
@@ -204,12 +207,14 @@ impl ObligationTable {
     }
 
     /// Returns the number of obligation records in the table.
+    #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
         self.obligations.len()
     }
 
     /// Returns `true` if the obligation table is empty.
+    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.obligations.is_empty()

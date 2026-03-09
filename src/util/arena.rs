@@ -109,12 +109,14 @@ impl<T> Arena<T> {
     }
 
     /// Returns the number of occupied slots.
+    #[inline]
     #[must_use]
     pub const fn len(&self) -> usize {
         self.len
     }
 
     /// Returns true if the arena has no occupied slots.
+    #[inline]
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.len == 0

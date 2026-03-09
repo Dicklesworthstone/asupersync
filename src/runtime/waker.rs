@@ -40,6 +40,7 @@ pub struct WakerState {
 
 impl WakerState {
     /// Creates a new waker state.
+    #[inline]
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -66,6 +67,7 @@ impl WakerState {
     }
 
     /// Drains all woken tasks.
+    #[inline]
     pub fn drain_woken(&self) -> Vec<TaskId> {
         let mut woken = self.woken.lock();
         woken.drain().collect()

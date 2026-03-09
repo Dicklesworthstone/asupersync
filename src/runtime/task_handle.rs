@@ -125,6 +125,7 @@ impl<T> TaskHandle<T> {
     ///     Err(JoinError::Panicked(p)) => println!("Task panicked: {p}"),
     /// }
     /// ```
+    #[inline]
     #[must_use]
     pub fn join<'a>(&'a mut self, _cx: &'a Cx) -> JoinFuture<'a, T> {
         let cx_inner = self.inner.clone();
@@ -164,6 +165,7 @@ impl<T> TaskHandle<T> {
     /// - `Ok(Some(result))` if the task has completed
     /// - `Ok(None)` if the task is still running
     /// - `Err(JoinError)` if the task was cancelled or panicked
+    #[inline]
     pub fn try_join(&mut self) -> Result<Option<T>, JoinError> {
         match self.receiver.try_recv() {
             Ok(result) => Ok(Some(result?)),
