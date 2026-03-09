@@ -32,7 +32,6 @@ use std::io;
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const CONNECT_MAX_HEADERS_SIZE: usize = 64 * 1024;
 /// Maximum number of cookies stored per host (RFC 6265 recommends at least 50).
@@ -137,6 +136,10 @@ fn check_cx(cx: &Cx) -> Result<(), ClientError> {
     } else {
         Ok(())
     }
+}
+
+fn wall_clock_now() -> Time {
+    crate::time::wall_now()
 }
 
 impl From<crate::http::h1::codec::HttpError> for ClientError {
@@ -541,6 +544,13 @@ impl HttpClientBuilder {
         self
     }
 
+    /// Sets a custom time source for deterministic pool timestamps.
+    #[must_use]
+    pub fn with_time_getter(mut self, time_getter: fn() -> Time) -> Self {
+        self.config.time_getter = time_getter;
+        self
+    }
+
     /// Builds the [`HttpClient`].
     #[must_use]
     pub fn build(self) -> HttpClient {
@@ -561,6 +571,8 @@ pub struct HttpClientConfig {
     pub cookie_store: bool,
     /// Optional proxy URL used for outbound requests.
     pub proxy_url: Option<String>,
+    /// Time source used for pool bookkeeping.
+    time_getter: fn() -> Time,
 }
 
 impl Default for HttpClientConfig {
@@ -571,7 +583,23 @@ impl Default for HttpClientConfig {
             user_agent: Some("asupersync/0.1".into()),
             cookie_store: false,
             proxy_url: None,
+            time_getter: wall_clock_now,
         }
+    }
+}
+
+impl HttpClientConfig {
+    /// Sets a custom time source for deterministic pool timestamps.
+    #[must_use]
+    pub const fn with_time_getter(mut self, time_getter: fn() -> Time) -> Self {
+        self.time_getter = time_getter;
+        self
+    }
+
+    /// Returns the time source used for pool bookkeeping.
+    #[must_use]
+    pub const fn time_getter(&self) -> fn() -> Time {
+        self.time_getter
     }
 }
 
@@ -619,6 +647,10 @@ impl HttpClient {
             idle_connections: Mutex::new(HashMap::new()),
             cookies: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn pool_now(&self) -> Time {
+        (self.config.time_getter)()
     }
 
     /// Send a GET request to the given URL.
@@ -1319,7 +1351,7 @@ impl HttpClient {
         }
 
         let key = parsed.pool_key();
-        let now = pool_now();
+        let now = self.pool_now();
 
         let pooled_id = {
             let mut pool = self.pool.lock();
@@ -1365,7 +1397,7 @@ impl HttpClient {
 
     fn release_connection(&self, key: &PoolKey, pool_id: Option<u64>, fresh: bool, io: ClientIo) {
         if let Some(id) = pool_id {
-            let now = pool_now();
+            let now = self.pool_now();
             if fresh {
                 self.pool.lock().mark_connected(key, id, now);
             } else {
@@ -1903,15 +1935,6 @@ fn header_has_token(headers: &[(String, String)], name: &str, token: &str) -> bo
     })
 }
 
-fn pool_now() -> Time {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
-        });
-    Time::from_nanos(nanos)
-}
-
 /// Resolve a redirect Location header relative to the current URL.
 fn resolve_redirect(current: &ParsedUrl, location: &str) -> String {
     // Absolute URL
@@ -2141,6 +2164,27 @@ mod tests {
     use crate::io::AsyncWriteExt;
     use futures_lite::future::block_on;
     use std::future::poll_fn;
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static HTTP_CLIENT_TEST_TIME_NANOS: AtomicU64 = AtomicU64::new(0);
+
+    fn set_http_client_test_time(nanos: u64) {
+        HTTP_CLIENT_TEST_TIME_NANOS.store(nanos, Ordering::Relaxed);
+    }
+
+    fn http_client_test_time() -> Time {
+        Time::from_nanos(HTTP_CLIENT_TEST_TIME_NANOS.load(Ordering::Relaxed))
+    }
+
+    fn loopback_client_io() -> ClientIo {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener address");
+        let client = std::net::TcpStream::connect(addr).expect("connect client");
+        let (_server, _) = listener.accept().expect("accept client");
+        let stream = TcpStream::from_std(client).expect("wrap stream");
+        ClientIo::Plain(stream)
+    }
 
     // =========================================================================
     // URL parsing
@@ -2443,6 +2487,13 @@ mod tests {
     }
 
     #[test]
+    fn config_with_time_getter_exposes_custom_clock() {
+        set_http_client_test_time(77);
+        let config = HttpClientConfig::default().with_time_getter(http_client_test_time);
+        assert_eq!((config.time_getter())().as_nanos(), 77);
+    }
+
+    #[test]
     fn builder_default_matches_client_defaults() {
         let client = HttpClient::builder().build();
         assert_eq!(client.config.pool_config.max_connections_per_host, 6);
@@ -2541,10 +2592,95 @@ mod tests {
     }
 
     #[test]
+    fn builder_with_time_getter_overrides_pool_clock() {
+        set_http_client_test_time(777);
+        let client = HttpClient::builder()
+            .with_time_getter(http_client_test_time)
+            .build();
+        assert_eq!(client.pool_now().as_nanos(), 777);
+        assert_eq!((client.config.time_getter())().as_nanos(), 777);
+    }
+
+    #[test]
     fn client_default_creates_pool() {
         let client = HttpClient::new();
         let stats = client.pool_stats();
         assert_eq!(stats.total_connections, 0);
+    }
+
+    #[test]
+    fn release_connection_marks_fresh_connection_with_custom_time_getter() {
+        set_http_client_test_time(123);
+        let client = HttpClient::builder()
+            .with_time_getter(http_client_test_time)
+            .build();
+        let key = PoolKey::http("example.com", None);
+        let id = client
+            .pool
+            .lock()
+            .register_connecting(key.clone(), Time::ZERO, 1);
+
+        client.release_connection(&key, Some(id), true, loopback_client_io());
+
+        let (created_at, last_used, state, requests_served) = {
+            let pool = client.pool.lock();
+            let meta = pool
+                .get_connection_meta(&key, id)
+                .expect("connection metadata");
+            let values = (
+                meta.created_at,
+                meta.last_used,
+                meta.state,
+                meta.requests_served,
+            );
+            drop(pool);
+            values
+        };
+        assert_eq!(created_at, Time::ZERO);
+        assert_eq!(last_used, Time::from_nanos(123));
+        assert_eq!(state, crate::http::pool::PooledConnectionState::Idle);
+        assert_eq!(requests_served, 0);
+    }
+
+    #[test]
+    fn release_connection_marks_reused_connection_with_custom_time_getter() {
+        let client = HttpClient::builder()
+            .with_time_getter(http_client_test_time)
+            .build();
+        let key = PoolKey::http("example.com", None);
+        let id = {
+            let mut pool = client.pool.lock();
+            let id = pool.register_connecting(key.clone(), Time::from_nanos(10), 1);
+            pool.mark_connected(&key, id, Time::from_nanos(20));
+            let acquired = pool
+                .try_acquire(&key, Time::from_nanos(30))
+                .expect("acquire pooled connection");
+            assert_eq!(acquired, id);
+            drop(pool);
+            id
+        };
+
+        set_http_client_test_time(456);
+        client.release_connection(&key, Some(id), false, loopback_client_io());
+
+        let (created_at, last_used, state, requests_served) = {
+            let pool = client.pool.lock();
+            let meta = pool
+                .get_connection_meta(&key, id)
+                .expect("connection metadata");
+            let values = (
+                meta.created_at,
+                meta.last_used,
+                meta.state,
+                meta.requests_served,
+            );
+            drop(pool);
+            values
+        };
+        assert_eq!(created_at, Time::from_nanos(10));
+        assert_eq!(last_used, Time::from_nanos(456));
+        assert_eq!(state, crate::http::pool::PooledConnectionState::Idle);
+        assert_eq!(requests_served, 1);
     }
 
     #[test]
