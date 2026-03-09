@@ -140,6 +140,7 @@ impl Semaphore {
     }
 
     /// Returns the number of currently available permits.
+    #[inline]
     #[must_use]
     pub fn available_permits(&self) -> usize {
         // Relaxed: advisory fast-path hint only. Stale reads are benign —
@@ -148,12 +149,14 @@ impl Semaphore {
     }
 
     /// Returns the maximum number of permits (initial count).
+    #[inline]
     #[must_use]
     pub fn max_permits(&self) -> usize {
         self.max_permits
     }
 
     /// Returns true if the semaphore is closed.
+    #[inline]
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.closed_shadow.load(Ordering::Acquire)
@@ -366,12 +369,14 @@ pub struct SemaphorePermit<'a> {
 
 impl SemaphorePermit<'_> {
     /// Returns the number of permits held.
+    #[inline]
     #[must_use]
     pub fn count(&self) -> usize {
         self.count
     }
 
     /// Forgets the permit without releasing it back to the semaphore.
+    #[inline]
     pub fn forget(mut self) {
         self.count = 0;
     }
@@ -445,12 +450,14 @@ impl OwnedSemaphorePermit {
     }
 
     /// Returns the number of permits held.
+    #[inline]
     #[must_use]
     pub fn count(&self) -> usize {
         self.count
     }
 
     /// Forgets the permit without releasing it back to the semaphore.
+    #[inline]
     pub fn forget(mut self) {
         self.count = 0;
     }

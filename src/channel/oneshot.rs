@@ -348,6 +348,7 @@ impl<T> SendPermit<T> {
     }
 
     /// Returns `true` if the receiver has been dropped.
+    #[inline]
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.inner.lock().receiver_dropped
@@ -596,6 +597,7 @@ impl<T> Receiver<T> {
     /// # Errors
     ///
     /// Returns `Err(RecvError::Closed)` if the sender was dropped without sending.
+    #[inline]
     #[must_use]
     pub fn recv<'a>(&'a mut self, cx: &'a Cx) -> RecvFuture<'a, T> {
         RecvFuture {
@@ -645,12 +647,14 @@ impl<T> Receiver<T> {
     }
 
     /// Returns true if a value is ready to receive.
+    #[inline]
     #[must_use]
     pub fn is_ready(&self) -> bool {
         self.inner.lock().is_ready()
     }
 
     /// Returns true if the sender has been dropped without sending.
+    #[inline]
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.inner.lock().is_closed()

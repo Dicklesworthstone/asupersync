@@ -156,18 +156,11 @@ impl Response {
             return Some(value.as_str());
         }
 
-        let mut matching_keys: Vec<&String> = self
-            .headers
-            .keys()
-            .filter(|key| key.eq_ignore_ascii_case(name))
-            .collect();
-        matching_keys.sort_unstable();
-
-        matching_keys
-            .into_iter()
-            .next()
-            .and_then(|key| self.headers.get(key))
-            .map(String::as_str)
+        self.headers
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+            .min_by(|(a, _), (b, _)| a.cmp(b))
+            .map(|(_, value)| value.as_str())
     }
 
     /// Returns `true` when the response contains the named header.
@@ -496,7 +489,8 @@ mod tests {
     #[test]
     fn response_ensure_header_preserves_existing_value_and_canonicalizes_name() {
         let mut resp = Response::empty(StatusCode::OK);
-        resp.headers.insert("Server".to_string(), "custom".to_string());
+        resp.headers
+            .insert("Server".to_string(), "custom".to_string());
 
         resp.ensure_header("server", "fallback");
 

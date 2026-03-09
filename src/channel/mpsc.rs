@@ -268,6 +268,7 @@ impl<T> Sender<T> {
     }
 
     /// Returns the channel's capacity.
+    #[inline]
     #[must_use]
     pub fn capacity(&self) -> usize {
         self.shared.capacity
@@ -692,6 +693,7 @@ impl<T> Receiver<T> {
     ///
     /// This is useful in manual `poll_*` implementations that need to avoid
     /// creating-and-dropping transient `Recv` futures each poll cycle.
+    #[inline]
     pub fn poll_recv(&mut self, cx: &Cx, task_cx: &mut Context<'_>) -> Poll<Result<T, RecvError>> {
         if cx.checkpoint().is_err() {
             cx.trace("mpsc::recv cancelled");
@@ -761,24 +763,28 @@ impl<T> Receiver<T> {
     }
 
     /// Returns true if there are any queued messages.
+    #[inline]
     #[must_use]
     pub fn has_messages(&self) -> bool {
         !self.shared.inner.lock().queue.is_empty()
     }
 
     /// Returns the number of queued messages.
+    #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
         self.shared.inner.lock().queue.len()
     }
 
     /// Returns true if the queue is empty.
+    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.shared.inner.lock().queue.is_empty()
     }
 
     /// Returns the channel capacity.
+    #[inline]
     #[must_use]
     pub fn capacity(&self) -> usize {
         self.shared.capacity
