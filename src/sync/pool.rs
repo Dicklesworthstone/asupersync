@@ -215,6 +215,10 @@ use smallvec::SmallVec;
 
 use crate::cx::Cx;
 
+fn wall_clock_now() -> Instant {
+    Instant::now()
+}
+
 /// Boxed future helper for async trait-like APIs.
 pub type PoolFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -391,6 +395,7 @@ pub struct PooledResource<R> {
     return_tx: PoolReturnSender<R>,
     acquired_at: Instant,
     created_at: Instant,
+    time_getter: fn() -> Instant,
     /// Shared waker list for notifying pool waiters when a resource is
     /// returned.  [`GenericPool`] populates this; custom [`Pool`]
     /// implementations that use only the public `new()` constructor get
@@ -401,14 +406,26 @@ pub struct PooledResource<R> {
 
 impl<R> PooledResource<R> {
     /// Creates a new pooled resource wrapper for a freshly created resource.
+    ///
+    /// This uses the wall clock for hold-duration bookkeeping.
     pub fn new(resource: R, return_tx: PoolReturnSender<R>) -> Self {
-        let now = Instant::now();
+        Self::new_with_time_getter(resource, return_tx, wall_clock_now)
+    }
+
+    /// Creates a new pooled resource wrapper with a custom time source.
+    pub fn new_with_time_getter(
+        resource: R,
+        return_tx: PoolReturnSender<R>,
+        time_getter: fn() -> Instant,
+    ) -> Self {
+        let now = time_getter();
         Self {
             resource: Some(resource),
             return_obligation: ReturnObligation::new(),
             return_tx,
             acquired_at: now,
             created_at: now,
+            time_getter,
             return_wakers: None,
         }
     }
@@ -418,13 +435,15 @@ impl<R> PooledResource<R> {
         resource: R,
         return_tx: PoolReturnSender<R>,
         created_at: Instant,
+        time_getter: fn() -> Instant,
     ) -> Self {
         Self {
             resource: Some(resource),
             return_obligation: ReturnObligation::new(),
             return_tx,
-            acquired_at: Instant::now(),
+            acquired_at: time_getter(),
             created_at,
+            time_getter,
             return_wakers: None,
         }
     }
@@ -468,7 +487,7 @@ impl<R> PooledResource<R> {
     /// How long this resource has been held.
     #[must_use]
     pub fn held_duration(&self) -> Duration {
-        self.acquired_at.elapsed()
+        (self.time_getter)().saturating_duration_since(self.acquired_at)
     }
 
     fn return_inner(&mut self) {
@@ -979,6 +998,9 @@ where
     return_tx: PoolReturnSender<R>,
     /// Channel receiver for returned resources.
     return_rx: PoolMutex<PoolReturnReceiver<R>>,
+    /// Time source for lifecycle bookkeeping that should remain deterministic
+    /// in tests and virtual-time harnesses.
+    time_getter: fn() -> Instant,
     /// Optional synchronous health check function.
     ///
     /// When set and `config.health_check_on_acquire` is true, idle resources
@@ -1004,6 +1026,13 @@ where
 {
     /// Creates a new generic pool with the given factory and configuration.
     pub fn new(factory: F, config: PoolConfig) -> Self {
+        Self::with_time_getter(factory, config, wall_clock_now)
+    }
+
+    /// Creates a new generic pool with a custom time source for lifecycle
+    /// bookkeeping such as idle eviction, hold durations, and warmup-created
+    /// timestamps.
+    pub fn with_time_getter(factory: F, config: PoolConfig, time_getter: fn() -> Instant) -> Self {
         let (return_tx, return_rx) = mpsc::channel();
         Self {
             factory,
@@ -1021,6 +1050,7 @@ where
             }),
             return_tx,
             return_rx: PoolMutex::new(return_rx),
+            time_getter,
             health_check_fn: None,
             return_wakers: Arc::new(PoolMutex::new(SmallVec::new())),
             closed: AtomicBool::new(false),
@@ -1032,6 +1062,12 @@ where
     /// Creates a new pool with default configuration.
     pub fn with_factory(factory: F) -> Self {
         Self::new(factory, PoolConfig::default())
+    }
+
+    /// Returns the time source used for lifecycle bookkeeping.
+    #[must_use]
+    pub const fn time_getter(&self) -> fn() -> Instant {
+        self.time_getter
     }
 
     /// Configures metrics collection for this pool.
@@ -1202,7 +1238,7 @@ where
                     if !state.closed {
                         state.idle.push_back(IdleResource {
                             resource,
-                            idle_since: Instant::now(),
+                            idle_since: (self.time_getter)(),
                             created_at,
                         });
 
@@ -1247,7 +1283,7 @@ where
         let mut state = self.state.lock();
 
         // Evict expired resources first and track eviction reasons for metrics
-        let now = Instant::now();
+        let now = (self.time_getter)();
         #[cfg(feature = "metrics")]
         let mut idle_timeout_evictions = 0u64;
         #[cfg(feature = "metrics")]
@@ -1399,10 +1435,11 @@ where
                 return;
             }
 
+            let now = (self.time_getter)();
             state.idle.push_back(IdleResource {
                 resource,
-                idle_since: Instant::now(),
-                created_at: Instant::now(),
+                idle_since: now,
+                created_at: now,
             });
 
             let total = state.active + state.idle.len() + state.creating;
@@ -1609,6 +1646,7 @@ where
                         resource,
                         self.return_tx.clone(),
                         created_at,
+                        self.time_getter,
                     )
                     .with_return_notify(Arc::clone(&self.return_wakers)));
                 }
@@ -1635,8 +1673,12 @@ where
                         self.update_metrics_gauges();
                     }
 
-                    return Ok(PooledResource::new(resource, self.return_tx.clone())
-                        .with_return_notify(Arc::clone(&self.return_wakers)));
+                    return Ok(PooledResource::new_with_time_getter(
+                        resource,
+                        self.return_tx.clone(),
+                        self.time_getter,
+                    )
+                    .with_return_notify(Arc::clone(&self.return_wakers)));
                 }
 
                 // Check for timeout
@@ -1686,7 +1728,7 @@ where
 
     #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
     fn try_acquire(&self) -> Option<PooledResource<Self::Resource>> {
-        let acquire_start = Instant::now();
+        let acquire_start = (self.time_getter)();
 
         self.process_returns();
 
@@ -1716,13 +1758,19 @@ where
             // Record metrics for the acquire
             #[cfg(feature = "metrics")]
             if let Some(ref metrics) = self.metrics {
-                metrics.record_acquired(acquire_start.elapsed());
+                metrics
+                    .record_acquired((self.time_getter)().saturating_duration_since(acquire_start));
                 self.update_metrics_gauges();
             }
 
             return Some(
-                PooledResource::new_with_created_at(resource, self.return_tx.clone(), created_at)
-                    .with_return_notify(Arc::clone(&self.return_wakers)),
+                PooledResource::new_with_created_at(
+                    resource,
+                    self.return_tx.clone(),
+                    created_at,
+                    self.time_getter,
+                )
+                .with_return_notify(Arc::clone(&self.return_wakers)),
             );
         }
 
@@ -2180,10 +2228,47 @@ pub use pool_metrics::{PoolMetrics, PoolMetricsHandle, PoolMetricsState};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::{Cell, RefCell};
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
+    std::thread_local! {
+        static TEST_POOL_TIME_BASE: RefCell<Option<Instant>> = const { RefCell::new(None) };
+        static TEST_POOL_TIME_OFFSET_NANOS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    fn test_pool_time_now() -> Instant {
+        let offset = TEST_POOL_TIME_OFFSET_NANOS.with(Cell::get);
+        TEST_POOL_TIME_BASE.with(|base| {
+            let mut base = base.borrow_mut();
+            let base_instant = *base.get_or_insert_with(Instant::now);
+            base_instant
+                .checked_add(Duration::from_nanos(offset))
+                .unwrap_or(base_instant)
+        })
+    }
+
+    fn reset_test_pool_time() {
+        TEST_POOL_TIME_BASE.with(|base| {
+            *base.borrow_mut() = None;
+        });
+        TEST_POOL_TIME_OFFSET_NANOS.with(|offset| offset.set(0));
+    }
+
+    fn set_test_pool_time_offset(offset: Duration) {
+        let nanos = offset.as_nanos().min(u128::from(u64::MAX)) as u64;
+        TEST_POOL_TIME_OFFSET_NANOS.with(|value| value.set(nanos));
+    }
+
+    fn advance_test_pool_time(delta: Duration) {
+        let nanos = delta.as_nanos().min(u128::from(u64::MAX)) as u64;
+        TEST_POOL_TIME_OFFSET_NANOS.with(|offset| {
+            offset.set(offset.get().saturating_add(nanos));
+        });
+    }
+
     fn init_test(name: &str) {
+        reset_test_pool_time();
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
     }
@@ -2809,15 +2894,13 @@ mod tests {
         init_test("generic_pool_held_duration_increases");
 
         let (tx, _rx) = mpsc::channel();
-        let pooled = PooledResource::new(42u8, tx);
-
-        // Small sleep to ensure time passes
-        std::thread::sleep(Duration::from_millis(10));
+        let pooled = PooledResource::new_with_time_getter(42u8, tx, test_pool_time_now);
+        advance_test_pool_time(Duration::from_millis(10));
 
         let held = pooled.held_duration();
         crate::assert_with_log!(
-            held >= Duration::from_millis(10),
-            "held duration at least 10ms",
+            held == Duration::from_millis(10),
+            "held duration follows injected clock exactly",
             Duration::from_millis(10),
             held
         );
@@ -3239,6 +3322,29 @@ mod tests {
         crate::test_complete!("warmup_require_minimum_passes_above_min");
     }
 
+    #[test]
+    fn warmup_created_timestamps_follow_time_getter() {
+        init_test("warmup_created_timestamps_follow_time_getter");
+
+        set_test_pool_time_offset(Duration::from_secs(24 * 60 * 60));
+
+        let config = PoolConfig::with_max_size(4)
+            .warmup_connections(1)
+            .max_lifetime(Duration::from_secs(1));
+        let pool = GenericPool::with_time_getter(simple_factory, config, test_pool_time_now);
+
+        let created = futures_lite::future::block_on(pool.warmup()).expect("warmup should succeed");
+        assert_eq!(created, 1, "warmup should create one idle resource");
+
+        let resource = pool
+            .try_acquire()
+            .expect("warmup resource should not look immediately expired");
+        assert_eq!(*resource, 42u32, "warmup resource should stay reusable");
+
+        resource.return_to_pool();
+        crate::test_complete!("warmup_created_timestamps_follow_time_getter");
+    }
+
     // ========================================================================
     // Audit regression tests (asupersync-10x0x.44)
     // ========================================================================
@@ -3347,24 +3453,18 @@ mod tests {
     fn idle_eviction_respects_idle_timeout() {
         init_test("idle_eviction_respects_idle_timeout");
 
-        // Use a very short idle timeout so we can test eviction
         let config = PoolConfig::with_max_size(5).idle_timeout(Duration::from_millis(10));
-        let pool = GenericPool::new(simple_factory, config);
+        let pool = GenericPool::with_time_getter(simple_factory, config, test_pool_time_now);
         let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
 
-        // Acquire and return a resource
         let r = futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire");
         r.return_to_pool();
 
-        // Verify it's idle
         let stats = pool.stats();
         assert_eq!(stats.idle, 1, "resource should be idle");
 
-        // Wait for the idle timeout to expire
-        std::thread::sleep(Duration::from_millis(20));
+        advance_test_pool_time(Duration::from_millis(20));
 
-        // try_acquire should evict the expired resource and return None
-        // (no more idle resources, and try_acquire doesn't create new ones)
         let result = pool.try_acquire();
         assert!(
             result.is_none(),
@@ -3384,20 +3484,25 @@ mod tests {
     fn idle_eviction_respects_max_lifetime() {
         init_test("idle_eviction_respects_max_lifetime");
 
-        // Use a very short max lifetime
         let config = PoolConfig::with_max_size(5).max_lifetime(Duration::from_millis(10));
-        let pool = GenericPool::new(simple_factory, config);
+        let pool = GenericPool::with_time_getter(simple_factory, config, test_pool_time_now);
         let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
 
         let r = futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire");
         r.return_to_pool();
 
-        std::thread::sleep(Duration::from_millis(20));
+        advance_test_pool_time(Duration::from_millis(20));
 
         let result = pool.try_acquire();
         assert!(
             result.is_none(),
             "resource past max_lifetime should be evicted"
+        );
+
+        let stats = pool.stats();
+        assert_eq!(
+            stats.idle, 0,
+            "expired resource should be evicted from idle"
         );
 
         crate::test_complete!("idle_eviction_respects_max_lifetime");

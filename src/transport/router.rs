@@ -301,10 +301,10 @@ impl LoadBalancer {
 
     #[inline]
     fn compare_weighted_load(a: &Endpoint, b: &Endpoint) -> std::cmp::Ordering {
-        let a_conn = u128::from(a.connection_count());
-        let b_conn = u128::from(b.connection_count());
-        let a_weight = u128::from(a.weight.max(1));
-        let b_weight = u128::from(b.weight.max(1));
+        let a_conn = u64::from(a.connection_count());
+        let b_conn = u64::from(b.connection_count());
+        let a_weight = u64::from(a.weight.max(1));
+        let b_weight = u64::from(b.weight.max(1));
         (a_conn * b_weight).cmp(&(b_conn * a_weight))
     }
 
@@ -377,6 +377,9 @@ impl LoadBalancer {
                         if count < best_count {
                             best_count = count;
                             best = Some(ep);
+                            if count == 0 {
+                                break;
+                            }
                         }
                     }
                 }
@@ -387,18 +390,21 @@ impl LoadBalancer {
                 let mut best_score = None;
                 for ep in endpoints {
                     if ep.state().can_receive() {
-                        let count = u128::from(ep.connection_count());
-                        let weight = u128::from(ep.weight.max(1));
+                        let count = u64::from(ep.connection_count());
+                        let weight = u64::from(ep.weight.max(1));
 
                         let is_better = match best_score {
                             None => true,
-                            Some((best_count_u128, best_weight_u128)) => {
-                                (count * best_weight_u128) < (best_count_u128 * weight)
+                            Some((best_count_u64, best_weight_u64)) => {
+                                (count * best_weight_u64) < (best_count_u64 * weight)
                             }
                         };
                         if is_better {
                             best_score = Some((count, weight));
                             best = Some(ep);
+                            if count == 0 {
+                                break;
+                            }
                         }
                     }
                 }
@@ -502,6 +508,9 @@ impl LoadBalancer {
                             if count < best_count {
                                 best_count = count;
                                 best = Some(ep);
+                                if count == 0 {
+                                    break;
+                                }
                             }
                         }
                     }
@@ -512,18 +521,21 @@ impl LoadBalancer {
                     let mut best_score = None;
                     for ep in endpoints {
                         if ep.state().can_receive() {
-                            let count = u128::from(ep.connection_count());
-                            let weight = u128::from(ep.weight.max(1));
+                            let count = u64::from(ep.connection_count());
+                            let weight = u64::from(ep.weight.max(1));
 
                             let is_better = match best_score {
                                 None => true,
-                                Some((best_count_u128, best_weight_u128)) => {
-                                    (count * best_weight_u128) < (best_count_u128 * weight)
+                                Some((best_count_u64, best_weight_u64)) => {
+                                    (count * best_weight_u64) < (best_count_u64 * weight)
                                 }
                             };
                             if is_better {
                                 best_score = Some((count, weight));
                                 best = Some(ep);
+                                if count == 0 {
+                                    break;
+                                }
                             }
                         }
                     }
@@ -551,6 +563,10 @@ impl LoadBalancer {
                             let count = ep.connection_count();
                             if top_n.len() == n {
                                 let last = &top_n[n - 1];
+                                if last.1 == 0 && count >= last.1 {
+                                    // Already have N items with 0 connections, can't improve
+                                    continue;
+                                }
                                 if count > last.1 || (count == last.1 && idx > last.0) {
                                     continue;
                                 }
@@ -575,14 +591,17 @@ impl LoadBalancer {
                 }
                 LoadBalanceStrategy::WeightedLeastConnections => {
                     let mut top_n =
-                        smallvec::SmallVec::<[(usize, u128, u128, &'a Arc<Endpoint>); 16]>::new();
+                        smallvec::SmallVec::<[(usize, u64, u64, &'a Arc<Endpoint>); 16]>::new();
                     for (idx, ep) in endpoints.iter().enumerate() {
                         if ep.state().can_receive() {
-                            let count = u128::from(ep.connection_count());
-                            let weight = u128::from(ep.weight.max(1));
+                            let count = u64::from(ep.connection_count());
+                            let weight = u64::from(ep.weight.max(1));
 
                             if top_n.len() == n {
                                 let last = &top_n[n - 1];
+                                if last.1 == 0 && count > 0 {
+                                    continue; // Can't beat zero load
+                                }
                                 let (other_idx, other_count, other_weight, _) = *last;
                                 let is_better = (count * other_weight) < (other_count * weight)
                                     || ((count * other_weight) == (other_count * weight)
