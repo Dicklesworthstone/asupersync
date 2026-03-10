@@ -557,30 +557,6 @@ pub(crate) fn schedule_local_task(task: TaskId) -> bool {
 }
 
 #[inline]
-fn remove_from_local_ready(queue: &Arc<LocalReadyQueue>, task: TaskId) -> bool {
-    let mut local_ready = queue.lock();
-    // Single scan: wake_state.notify() dedup prevents duplicate entries, so
-    // at most one match exists. The old `while` loop would scan the remainder
-    // of the Vec after the first removal for a match that can never be there.
-    local_ready
-        .iter()
-        .position(|t| *t == task)
-        .is_some_and(|pos| {
-            local_ready.swap_remove(pos);
-            true
-        })
-}
-
-#[inline]
-pub(crate) fn remove_from_current_local_ready(task: TaskId) -> bool {
-    CURRENT_LOCAL_READY.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .is_some_and(|queue| remove_from_local_ready(queue, task))
-    })
-}
-
-#[inline]
 pub(crate) fn current_worker_id() -> Option<WorkerId> {
     CURRENT_WORKER_ID.with(|cell| *cell.borrow())
 }
@@ -741,8 +717,17 @@ pub(crate) fn schedule_cancel_on_current_local(task: TaskId, priority: u8) -> bo
         };
         // LOCK ORDER: local_ready (B) then local (A)
         // Matches order in inject_cancel: remove from ready queue first
-        let _ = remove_from_current_local_ready(task);
-        local.lock().move_to_cancel_lane(task, priority);
+        CURRENT_LOCAL_READY.with(|lr_cell| {
+            if let Some(queue) = lr_cell.borrow().as_ref() {
+                let mut local_ready_guard = queue.lock();
+                if let Some(pos) = local_ready_guard.iter().position(|t| *t == task) {
+                    local_ready_guard.swap_remove(pos);
+                }
+                local.lock().move_to_cancel_lane(task, priority);
+            } else {
+                local.lock().move_to_cancel_lane(task, priority);
+            }
+        });
         true
     })
 }
@@ -1124,9 +1109,14 @@ impl ThreeLaneScheduler {
             if let Some(worker_id) = pinned_worker {
                 if let Some(local) = self.local_schedulers.get(worker_id) {
                     if let Some(local_ready) = self.local_ready.get(worker_id) {
-                        let _ = remove_from_local_ready(local_ready, task);
+                        let mut local_ready_guard = local_ready.lock();
+                        if let Some(pos) = local_ready_guard.iter().position(|t| *t == task) {
+                            local_ready_guard.swap_remove(pos);
+                        }
+                        local.lock().move_to_cancel_lane(task, priority);
+                    } else {
+                        local.lock().move_to_cancel_lane(task, priority);
                     }
-                    local.lock().move_to_cancel_lane(task, priority);
                     if let Some(parker) = self.parkers.get(worker_id) {
                         parker.unpark();
                     }
@@ -2587,52 +2577,6 @@ impl ThreeLaneWorker {
         local.pop_ready_only_with_hint(rng_hint)
     }
 
-    /// Single-lock local lane check with suggestion-aware ordering.
-    ///
-    /// Acquires the local `PriorityScheduler` lock once and checks
-    /// cancel, timed, and ready lanes in the order dictated by the
-    /// governor suggestion.  Returns `(lane_tag, task_id)` where
-    /// lane_tag is 0=cancel, 1=timed.
-    #[inline]
-    fn try_local_priority_lanes(
-        &mut self,
-        suggestion: SchedulingSuggestion,
-        check_cancel: bool,
-        now: Time,
-    ) -> Option<(u8, TaskId)> {
-        let mut local = self.local.lock();
-        let rng_hint = self.rng.next_u64();
-
-        // Check cancel + timed in suggestion-specific order.
-        if suggestion == SchedulingSuggestion::MeetDeadlines {
-            // timed > cancel (deadline pressure).
-            local
-                .pop_timed_only_with_hint(rng_hint, now)
-                .map(|t| (1u8, t))
-                .or_else(|| {
-                    check_cancel
-                        .then(|| local.pop_cancel_only_with_hint(rng_hint).map(|t| (0u8, t)))
-                        .flatten()
-                })
-        } else {
-            // cancel > timed (default / drain).
-            if check_cancel {
-                local
-                    .pop_cancel_only_with_hint(rng_hint)
-                    .map(|t| (0u8, t))
-                    .or_else(|| {
-                        local
-                            .pop_timed_only_with_hint(rng_hint, now)
-                            .map(|t| (1u8, t))
-                    })
-            } else {
-                local
-                    .pop_timed_only_with_hint(rng_hint, now)
-                    .map(|t| (1u8, t))
-            }
-        }
-    }
-
     /// Tries to steal work from other workers.
     ///
     /// Fast path: O(1) steal from other workers' `LocalQueue` IntrusiveStacks.
@@ -2757,8 +2701,11 @@ impl ThreeLaneWorker {
                 record.wake_state.notify();
             }
         });
-        let _ = remove_from_local_ready(&self.local_ready, task);
         {
+            let mut local_ready_guard = self.local_ready.lock();
+            if let Some(pos) = local_ready_guard.iter().position(|t| *t == task) {
+                local_ready_guard.swap_remove(pos);
+            }
             let mut local = self.local.lock();
             local.move_to_cancel_lane(task, priority);
         }
@@ -3252,7 +3199,10 @@ impl ThreeLaneWorker {
                         if schedule_cancel {
                             // Cancel still goes to PriorityScheduler for ordering.
                             // Cancel lane is not stolen by steal_ready_batch_into.
-                            let _ = remove_from_local_ready(&self.local_ready, task_id);
+                            let mut local_ready_guard = self.local_ready.lock();
+                            if let Some(pos) = local_ready_guard.iter().position(|t| *t == task_id) {
+                                local_ready_guard.swap_remove(pos);
+                            }
                             let mut local = self.local.lock();
                             local.schedule_cancel(task_id, cancel_priority);
                         } else {
@@ -3401,6 +3351,7 @@ impl ThreeLaneLocalWaker {
     #[inline]
     fn schedule(&self) {
         if self.wake_state.notify() {
+            let mut local_ready_guard = self.local_ready.lock();
             let is_cancelling = self.fast_cancel.load(Ordering::Relaxed);
             let mut priority = 0;
 
@@ -3418,12 +3369,10 @@ impl ThreeLaneLocalWaker {
                 let mut local = self.local.lock();
                 local.schedule_cancel(self.task_id, priority);
             } else {
-                // Fast path: push to non-stealable local_ready queue via TLS.
-                if !schedule_local_task(self.task_id) {
-                    // Cross-thread wake: push to the owner's non-stealable local_ready queue.
-                    self.local_ready.lock().push(self.task_id);
-                }
+                // We already hold the lock for the correct queue, no need for TLS.
+                local_ready_guard.push(self.task_id);
             }
+            drop(local_ready_guard);
             self.parker.unpark();
         }
     }
@@ -3532,7 +3481,10 @@ impl ThreeLaneLocalCancelWaker {
         // Promote to local cancel lane, matching global inject_cancel semantics.
         // move_to_cancel_lane relocates from ready/timed if already scheduled.
         {
-            let _ = remove_from_local_ready(&self.local_ready, self.task_id);
+            let mut local_ready_guard = self.local_ready.lock();
+            if let Some(pos) = local_ready_guard.iter().position(|t| *t == self.task_id) {
+                local_ready_guard.swap_remove(pos);
+            }
             let mut local = self.local.lock();
             local.move_to_cancel_lane(self.task_id, priority);
         }

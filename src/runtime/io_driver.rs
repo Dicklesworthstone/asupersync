@@ -1970,10 +1970,10 @@ mod tests {
 
         let wake_calls = reactor.wake_calls();
         crate::assert_with_log!(
-            wake_calls >= baseline + 1,
+            wake_calls > baseline,
             "rearm preemptively wakes reactor",
             true,
-            wake_calls >= baseline + 1
+            wake_calls > baseline
         );
 
         crate::test_complete!("io_registration_rearm_preemptively_wakes_reactor");
