@@ -16,7 +16,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
 use super::Service;
@@ -32,13 +32,32 @@ fn noop_waker() -> Waker {
     Waker::from(Arc::new(NoopWaker))
 }
 
-fn poll_service_ready_once<S, Request>(service: &mut S) -> Poll<Result<(), S::Error>>
+fn tracked_probe_waker() -> (Waker, Arc<AtomicBool>) {
+    struct TrackWaker(Arc<AtomicBool>);
+
+    impl Wake for TrackWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let woke = Arc::new(AtomicBool::new(false));
+    let waker = Waker::from(Arc::new(TrackWaker(Arc::clone(&woke))));
+    (waker, woke)
+}
+
+fn poll_service_ready_once<S, Request>(service: &mut S) -> (Poll<Result<(), S::Error>>, bool)
 where
     S: Service<Request>,
 {
-    let waker = noop_waker();
+    let (waker, woke) = tracked_probe_waker();
     let mut cx = Context::from_waker(&waker);
-    service.poll_ready(&mut cx)
+    let poll = service.poll_ready(&mut cx);
+    (poll, woke.load(Ordering::SeqCst))
 }
 
 // ─── Load metric ──────────────────────────────────────────────────────────
@@ -454,7 +473,17 @@ impl<S: Clone, T: Strategy> LoadBalancer<S, T> {
             let candidate_idx = (idx + offset) % backends.len();
             let mut svc = backends[candidate_idx].service.clone();
 
-            match poll_service_ready_once::<S, Request>(&mut svc) {
+            let (mut readiness, woke_during_poll) = poll_service_ready_once::<S, Request>(&mut svc);
+            if matches!(readiness, Poll::Pending) && woke_during_poll {
+                // Preserve same-turn readiness edges from backends that
+                // self-wake during `poll_ready` and become callable on the
+                // immediate follow-up poll, without spinning forever on a
+                // repeatedly self-waking-but-still-pending backend.
+                let (next_readiness, _) = poll_service_ready_once::<S, Request>(&mut svc);
+                readiness = next_readiness;
+            }
+
+            match readiness {
                 Poll::Ready(Ok(())) => {
                     selected = Some((candidate_idx, svc));
                     break;
@@ -856,6 +885,57 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug)]
+    struct WakeDuringPollReadyService {
+        woke_once: bool,
+        armed: bool,
+        becomes_ready_after_wake: bool,
+        response: u32,
+    }
+
+    impl WakeDuringPollReadyService {
+        fn new(response: u32) -> Self {
+            Self {
+                woke_once: false,
+                armed: false,
+                becomes_ready_after_wake: true,
+                response,
+            }
+        }
+
+        fn pending_forever() -> Self {
+            Self {
+                woke_once: false,
+                armed: false,
+                becomes_ready_after_wake: false,
+                response: 0,
+            }
+        }
+    }
+
+    impl Service<u32> for WakeDuringPollReadyService {
+        type Response = u32;
+        type Error = ();
+        type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if self.woke_once && self.becomes_ready_after_wake {
+                self.armed = true;
+                Poll::Ready(Ok(()))
+            } else {
+                self.woke_once = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+
+        fn call(&mut self, _req: u32) -> Self::Future {
+            assert!(self.armed, "call must be preceded by ready after self-wake");
+            self.armed = false;
+            std::future::ready(Ok(self.response))
+        }
+    }
+
     #[test]
     fn lb_new_and_len() {
         init_test("lb_new_and_len");
@@ -991,6 +1071,46 @@ mod tests {
         assert!(matches!(err, LoadBalanceError::NoReadyBackends));
         assert_eq!(lb.loads(), vec![0]);
         crate::test_complete!("lb_call_balanced_reports_when_all_backends_pending");
+    }
+
+    #[test]
+    fn lb_call_balanced_repolls_backend_after_self_wake() {
+        init_test("lb_call_balanced_repolls_backend_after_self_wake");
+        let lb = LoadBalancer::new(RoundRobin::new(), vec![WakeDuringPollReadyService::new(77)]);
+
+        let mut fut = lb
+            .call_balanced(7)
+            .expect("self-woken backend should become ready on immediate repoll");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let output = Pin::new(&mut fut).poll(&mut cx);
+
+        assert!(matches!(output, Poll::Ready(Ok(77))));
+        assert_eq!(lb.loads(), vec![0]);
+        crate::test_complete!("lb_call_balanced_repolls_backend_after_self_wake");
+    }
+
+    #[test]
+    fn lb_call_balanced_skips_repeatedly_self_waking_pending_backend() {
+        init_test("lb_call_balanced_skips_repeatedly_self_waking_pending_backend");
+        let lb = LoadBalancer::new(
+            RoundRobin::new(),
+            vec![
+                WakeDuringPollReadyService::pending_forever(),
+                WakeDuringPollReadyService::new(88),
+            ],
+        );
+
+        let mut fut = lb
+            .call_balanced(7)
+            .expect("balancer should skip a backend that stays pending after one self-wake");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let output = Pin::new(&mut fut).poll(&mut cx);
+
+        assert!(matches!(output, Poll::Ready(Ok(88))));
+        assert_eq!(lb.loads(), vec![0, 0]);
+        crate::test_complete!("lb_call_balanced_skips_repeatedly_self_waking_pending_backend");
     }
 
     // ================================================================
