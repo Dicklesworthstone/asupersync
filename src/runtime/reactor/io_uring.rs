@@ -155,6 +155,29 @@ mod imp {
                 break;
             }
         }
+
+        fn rearm_wake_poll(&self) -> io::Result<()> {
+            let mut ring = self.ring.lock();
+            if let Err(err) = submit_poll_entry(
+                &mut ring,
+                self.wake_fd.as_raw_fd(),
+                Interest::READABLE,
+                WAKE_USER_DATA,
+            ) {
+                if err.kind() != io::ErrorKind::WouldBlock {
+                    return Err(err);
+                }
+                ring.submit()?;
+                submit_poll_entry(
+                    &mut ring,
+                    self.wake_fd.as_raw_fd(),
+                    Interest::READABLE,
+                    WAKE_USER_DATA,
+                )?;
+            }
+            ring.submit()?;
+            Ok(())
+        }
     }
 
     impl Reactor for IoUringReactor {
@@ -288,14 +311,7 @@ mod imp {
                     // wakeup instead of being suppressed forever.
                     self.wake_pending.store(false, Ordering::Release);
                     self.drain_wake_fd();
-                    let mut ring = self.ring.lock();
-                    let _ = submit_poll_entry(
-                        &mut ring,
-                        self.wake_fd.as_raw_fd(),
-                        Interest::READABLE,
-                        WAKE_USER_DATA,
-                    );
-                    let _ = ring.submit();
+                    self.rearm_wake_poll()?;
                     continue;
                 }
                 if user_data == REMOVE_USER_DATA {
@@ -539,6 +555,19 @@ mod imp {
 
         fn tracked_poll_op_count(reactor: &IoUringReactor) -> usize {
             reactor.state.lock().poll_ops.len()
+        }
+
+        fn fill_submission_queue(ring: &mut IoUring) {
+            let mut user_data = 1_000_000_u64;
+            loop {
+                let entry = opcode::Nop::new().build().user_data(user_data);
+                // SAFETY: NOP entries have no external buffers or fd lifetimes.
+                let pushed = unsafe { ring.submission().push(&entry) };
+                if pushed.is_err() {
+                    break;
+                }
+                user_data = user_data.wrapping_add(1);
+            }
         }
 
         #[test]
@@ -934,6 +963,31 @@ mod imp {
             assert_eq!(
                 counter, 1,
                 "reactor must remain wakeable after clearing the pending flag"
+            );
+        }
+
+        #[test]
+        fn test_rearm_wake_poll_flushes_full_submission_queue() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+
+            {
+                let mut ring = reactor.ring.lock();
+                fill_submission_queue(&mut ring);
+            }
+
+            reactor
+                .rearm_wake_poll()
+                .expect("wake rearm should flush and retry when the SQ is full");
+
+            let mut events = Events::with_capacity(8);
+            reactor
+                .poll(&mut events, Some(Duration::ZERO))
+                .expect("poll should drain synthetic SQEs after wake rearm");
+            assert!(
+                events.is_empty(),
+                "synthetic NOP completions must not surface as readiness"
             );
         }
     }
