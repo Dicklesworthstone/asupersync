@@ -136,7 +136,7 @@ use std::time::Duration;
 ///
 /// Budgets form a product semiring for combination:
 /// - Deadlines/quotas use min (tighter wins)
-/// - Priority uses min (lower/tighter wins)
+/// - Priority uses max (higher urgency wins)
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Budget {
     /// Absolute deadline by which work must complete.
@@ -155,7 +155,7 @@ impl Budget {
         deadline: None,
         poll_quota: u32::MAX,
         cost_quota: None,
-        priority: 255,
+        priority: 0,
     };
 
     /// A budget with zero resources (nothing allowed).
@@ -163,7 +163,7 @@ impl Budget {
         deadline: Some(Time::ZERO),
         poll_quota: 0,
         cost_quota: Some(0),
-        priority: 0,
+        priority: 255,
     };
 
     /// A minimal budget for cleanup operations.
@@ -363,7 +363,7 @@ impl Budget {
                 (None, Some(b)) => Some(b),
                 (None, None) => None,
             },
-            priority: self.priority.min(other.priority),
+            priority: self.priority.max(other.priority),
         };
 
         // Trace when budget is tightened (any constraint becomes stricter)
@@ -385,7 +385,7 @@ impl Budget {
             _ => false,
         };
         let priority_tightened =
-            combined.priority < self.priority || combined.priority < other.priority;
+            combined.priority > self.priority || combined.priority > other.priority;
 
         if deadline_tightened || poll_tightened || cost_tightened || priority_tightened {
             trace!(
@@ -837,7 +837,7 @@ mod tests {
         assert_eq!(b.deadline, None);
         assert_eq!(b.poll_quota, u32::MAX);
         assert_eq!(b.cost_quota, None);
-        assert_eq!(b.priority, 255);
+        assert_eq!(b.priority, 0);
     }
 
     #[test]
@@ -846,7 +846,7 @@ mod tests {
         assert_eq!(b.deadline, Some(Time::ZERO));
         assert_eq!(b.poll_quota, 0);
         assert_eq!(b.cost_quota, Some(0));
-        assert_eq!(b.priority, 0);
+        assert_eq!(b.priority, 255);
     }
 
     #[test]
@@ -1024,8 +1024,8 @@ mod tests {
         assert_eq!(combined.deadline, Some(Time::from_secs(5)));
         // Poll quota: min
         assert_eq!(combined.poll_quota, 100);
-        // Priority: min
-        assert_eq!(combined.priority, 50);
+        // Priority: max
+        assert_eq!(combined.priority, 100);
     }
 
     #[test]
@@ -1081,8 +1081,8 @@ mod tests {
         assert_eq!(combined.poll_quota, 0);
         // ZERO's cost_quota (Some(0)) is tighter
         assert_eq!(combined.cost_quota, Some(0));
-        // Priority: min of 200 and 0 = 0
-        assert_eq!(combined.priority, 0);
+        // Priority: max of 200 and 255 = 255
+        assert_eq!(combined.priority, 255);
     }
 
     #[test]
@@ -1099,7 +1099,7 @@ mod tests {
         assert_eq!(combined.deadline, Some(Time::from_secs(10)));
         assert_eq!(combined.poll_quota, 100);
         assert_eq!(combined.cost_quota, Some(1000));
-        // Priority: min of 50 and 255 = 50
+        // Priority: max of 50 and 0 = 50
         assert_eq!(combined.priority, 50);
     }
 
@@ -1484,9 +1484,8 @@ mod tests {
             .with_cost_quota(500)
             .with_priority(50);
 
-        // Note: priority of INFINITE (255) > a's priority (50), so
-        // meet takes min priority. This is by design — INFINITE
-        // represents "no constraint" which includes default priority.
+        // INFINITE has priority 0 (identity for max).
+        // meet takes max priority.
         let result = Budget::INFINITE.meet(a);
         assert_eq!(result.deadline, a.deadline);
         assert_eq!(result.poll_quota, a.poll_quota);
