@@ -1305,10 +1305,8 @@ where
             if let Some(idle) = state.idle.pop_front() {
                 state.active += 1;
                 state.total_acquisitions += 1;
-                if let Some(id) = waiter_id {
-                    if let Some(idx) = state.waiters.iter().position(|w| w.id == id) {
-                        state.waiters.remove(idx);
-                    }
+                if waiter_id.is_some() && pos < state.waiters.len() {
+                    state.waiters.remove(pos);
                 }
                 Some((idle.resource, idle.created_at))
             } else {
@@ -1353,10 +1351,8 @@ where
         }
 
         state.creating += 1;
-        if let Some(id) = waiter_id {
-            if let Some(idx) = state.waiters.iter().position(|w| w.id == id) {
-                state.waiters.remove(idx);
-            }
+        if waiter_id.is_some() && pos < state.waiters.len() {
+            state.waiters.remove(pos);
         }
         true
     }

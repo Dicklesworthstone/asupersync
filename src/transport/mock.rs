@@ -624,7 +624,7 @@ impl SimSymbolStream {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         let state = self.inner.state.lock();
-        state.queue.is_empty()
+        self.pending.is_none() && state.queue.is_empty()
     }
 
     /// Reset the operation counter (for fail_after behavior).
@@ -1289,6 +1289,25 @@ mod tests {
             Duration::ZERO,
         ));
         assert!(q.delays.is_some());
+    }
+
+    #[test]
+    fn sim_stream_is_not_empty_while_delayed_symbol_is_pending() {
+        let shared = Arc::new(SimQueue::new(SimTransportConfig::with_latency(
+            Duration::from_secs(1),
+            Duration::ZERO,
+        )));
+        {
+            let mut state = shared.state.lock();
+            state.queue.push_back(create_symbol(1));
+        }
+        let (_sink, mut stream) = channel_from_shared(shared);
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let poll = Pin::new(&mut stream).poll_next(&mut context);
+        assert!(matches!(poll, Poll::Pending));
+        assert!(!stream.is_empty());
     }
 
     // Pure data-type tests (wave 14 – CyanBarn)

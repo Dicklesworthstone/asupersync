@@ -353,7 +353,8 @@ impl LoadBalancer {
         }
     }
 
-    /// Selects an endpoint from the available set.
+    /// Selects an endpoint based on the routing strategy.
+    #[allow(clippy::too_many_lines)]
     pub fn select<'a>(
         &self,
         endpoints: &'a [Arc<Endpoint>],
@@ -388,7 +389,7 @@ impl LoadBalancer {
                     if ep.state().can_receive() {
                         let count = u128::from(ep.connection_count());
                         let weight = u128::from(ep.weight.max(1));
-                        
+
                         let is_better = match best_score {
                             None => true,
                             Some((best_count_u128, best_weight_u128)) => {
@@ -409,7 +410,11 @@ impl LoadBalancer {
                     return None;
                 }
                 let target = (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize) % count;
-                endpoints.iter().filter(|e| e.state().can_receive()).nth(target)
+                endpoints
+                    .iter()
+                    .filter(|e| e.state().can_receive())
+                    .nth(target)
+                    .or_else(|| endpoints.iter().find(|e| e.state().can_receive()))
             }
             LoadBalanceStrategy::WeightedRoundRobin => {
                 let total_weight: u64 = endpoints
@@ -433,7 +438,7 @@ impl LoadBalancer {
                         }
                     }
                 }
-                endpoints.iter().filter(|e| e.state().can_receive()).last()
+                endpoints.iter().rfind(|e| e.state().can_receive())
             }
             LoadBalanceStrategy::HashBased => {
                 let count = endpoints.iter().filter(|e| e.state().can_receive()).count();
@@ -443,13 +448,22 @@ impl LoadBalancer {
                 object_id.map_or_else(
                     || {
                         // Fall back to round-robin
-                        let idx = (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize) % count;
-                        endpoints.iter().filter(|e| e.state().can_receive()).nth(idx)
+                        let idx =
+                            (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize) % count;
+                        endpoints
+                            .iter()
+                            .filter(|e| e.state().can_receive())
+                            .nth(idx)
+                            .or_else(|| endpoints.iter().find(|e| e.state().can_receive()))
                     },
                     |oid| {
                         let hash = oid.as_u128() as usize;
                         let idx = hash % count;
-                        endpoints.iter().filter(|e| e.state().can_receive()).nth(idx)
+                        endpoints
+                            .iter()
+                            .filter(|e| e.state().can_receive())
+                            .nth(idx)
+                            .or_else(|| endpoints.iter().find(|e| e.state().can_receive()))
                     },
                 )
             }
@@ -459,7 +473,8 @@ impl LoadBalancer {
         }
     }
 
-    /// Selects multiple endpoints from the available set.
+    /// Selects multiple endpoints.
+    #[allow(clippy::too_many_lines)]
     pub fn select_n<'a>(
         &self,
         endpoints: &'a [Arc<Endpoint>],
@@ -499,7 +514,7 @@ impl LoadBalancer {
                         if ep.state().can_receive() {
                             let count = u128::from(ep.connection_count());
                             let weight = u128::from(ep.weight.max(1));
-                            
+
                             let is_better = match best_score {
                                 None => true,
                                 Some((best_count_u128, best_weight_u128)) => {
@@ -529,7 +544,8 @@ impl LoadBalancer {
         if n <= 16 {
             match self.strategy {
                 LoadBalanceStrategy::LeastConnections => {
-                    let mut top_n = smallvec::SmallVec::<[(usize, u32, &'a Arc<Endpoint>); 16]>::new();
+                    let mut top_n =
+                        smallvec::SmallVec::<[(usize, u32, &'a Arc<Endpoint>); 16]>::new();
                     for (idx, ep) in endpoints.iter().enumerate() {
                         if ep.state().can_receive() {
                             let count = ep.connection_count();
@@ -558,17 +574,19 @@ impl LoadBalancer {
                     return top_n.into_iter().map(|(_, _, ep)| ep).collect();
                 }
                 LoadBalanceStrategy::WeightedLeastConnections => {
-                    let mut top_n = smallvec::SmallVec::<[(usize, u128, u128, &'a Arc<Endpoint>); 16]>::new();
+                    let mut top_n =
+                        smallvec::SmallVec::<[(usize, u128, u128, &'a Arc<Endpoint>); 16]>::new();
                     for (idx, ep) in endpoints.iter().enumerate() {
                         if ep.state().can_receive() {
                             let count = u128::from(ep.connection_count());
                             let weight = u128::from(ep.weight.max(1));
-                            
+
                             if top_n.len() == n {
                                 let last = &top_n[n - 1];
                                 let (other_idx, other_count, other_weight, _) = *last;
-                                let is_better = (count * other_weight) < (other_count * weight) ||
-                                    ((count * other_weight) == (other_count * weight) && idx < other_idx);
+                                let is_better = (count * other_weight) < (other_count * weight)
+                                    || ((count * other_weight) == (other_count * weight)
+                                        && idx < other_idx);
                                 if !is_better {
                                     continue;
                                 }
@@ -578,8 +596,9 @@ impl LoadBalancer {
                             let mut insert_pos = top_n.len();
                             for i in 0..top_n.len() {
                                 let (other_idx, other_count, other_weight, _) = top_n[i];
-                                let is_better = (count * other_weight) < (other_count * weight) ||
-                                    ((count * other_weight) == (other_count * weight) && idx < other_idx);
+                                let is_better = (count * other_weight) < (other_count * weight)
+                                    || ((count * other_weight) == (other_count * weight)
+                                        && idx < other_idx);
                                 if is_better {
                                     insert_pos = i;
                                     break;

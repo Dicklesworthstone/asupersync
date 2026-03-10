@@ -15,6 +15,12 @@ fn wall_clock_now() -> Time {
     crate::time::wall_now()
 }
 
+/// Cooperative budget for suppressed items drained in a single poll.
+///
+/// Without this cap, an always-ready inner stream can monopolize the executor
+/// forever while the throttle window is still closed.
+const MAX_SUPPRESSED_DRAIN_PER_POLL: usize = 64;
+
 /// A stream that yields at most one item per time period.
 ///
 /// Created by [`StreamExt::throttle`](super::StreamExt::throttle).
@@ -75,6 +81,7 @@ impl<S: Stream> Stream for Throttle<S> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<S::Item>> {
         let mut this = self.project();
+        let mut suppressed = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Ready(Some(item)) => {
@@ -89,7 +96,13 @@ impl<S: Stream> Stream for Throttle<S> {
                         *this.last_yield = Some(now);
                         return Poll::Ready(Some(item));
                     }
-                    // Drop the item and poll the next one.
+                    // Drop suppressed items in bounded batches so an always-ready
+                    // producer cannot monopolize the executor while the window is closed.
+                    suppressed += 1;
+                    if suppressed >= MAX_SUPPRESSED_DRAIN_PER_POLL {
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
                 }
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Pending => return Poll::Pending,
@@ -102,9 +115,9 @@ impl<S: Stream> Stream for Throttle<S> {
 mod tests {
     use super::*;
     use crate::stream::iter;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::task::{Wake, Waker};
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
 
     static TEST_NOW_NANOS: AtomicU64 = AtomicU64::new(0);
 
@@ -116,6 +129,18 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    struct TrackWaker(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Wake for TrackWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
     }
 
     fn init_test(name: &str) {
@@ -254,5 +279,49 @@ mod tests {
         let stream = Throttle::new(iter(vec![1, 2, 3]), Duration::from_millis(100));
         let dbg = format!("{stream:?}");
         assert!(dbg.contains("Throttle"));
+    }
+
+    struct AlwaysReadyStream {
+        polls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Stream for AlwaysReadyStream {
+        type Item = usize;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let call = self.polls.fetch_add(1, Ordering::SeqCst) + 1;
+            assert!(
+                call <= MAX_SUPPRESSED_DRAIN_PER_POLL + 1,
+                "throttle kept draining suppressed items without yielding"
+            );
+            Poll::Ready(Some(call))
+        }
+    }
+
+    #[test]
+    fn throttle_yields_after_suppression_budget_on_always_ready_stream() {
+        init_test("throttle_yields_after_suppression_budget_on_always_ready_stream");
+        set_test_time(0);
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wake_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waker: Waker = Arc::new(TrackWaker(Arc::clone(&wake_flag))).into();
+        let mut cx = Context::from_waker(&waker);
+        let inner = AlwaysReadyStream {
+            polls: Arc::clone(&polls),
+        };
+        let mut stream = Throttle::with_time_getter(inner, Duration::from_secs(1), test_time);
+
+        let first = Pin::new(&mut stream).poll_next(&mut cx);
+        assert_eq!(first, Poll::Ready(Some(1)));
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+
+        let second = Pin::new(&mut stream).poll_next(&mut cx);
+        assert_eq!(second, Poll::Pending);
+        assert!(wake_flag.load(Ordering::SeqCst));
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            MAX_SUPPRESSED_DRAIN_PER_POLL + 1
+        );
+        crate::test_complete!("throttle_yields_after_suppression_budget_on_always_ready_stream");
     }
 }
