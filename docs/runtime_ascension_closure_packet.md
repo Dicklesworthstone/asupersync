@@ -30,9 +30,9 @@ the emitted manifests/report retain command provenance (`invoked_from`,
 | Current phase | `active_closure_execution` |
 | Packet mode | `preparatory` |
 | Current verdict | `NO_GO` |
-| Remaining blocker bead(s) | `asupersync-1508v.8.6` |
-| Completed milestones | closure packet contract scaffold, evidence registry command matrix |
-| Immediate next actions | run smoke bundle in execute mode, refresh comparative demo evidence after blocker closure, re-evaluate launch verdict |
+| Remaining blocker bead(s) | `none` |
+| Completed milestones | closure packet contract scaffold, evidence registry command matrix, transport validation closure alignment |
+| Immediate next actions | run smoke bundle in execute mode, refresh comparative demo evidence against the closed transport validation surface, re-evaluate launch verdict without promoting AA-08 beyond opt-in |
 
 ## Current Decision Snapshot
 
@@ -40,7 +40,7 @@ the emitted manifests/report retain command provenance (`invoked_from`,
 |---------|---------|--------|
 | AA core-stack launch packet | **NO_GO** | This packet is preparatory. It assembles the closure doctrine, but closure-grade comparative demos and final sign-off are not complete. |
 | Default-ready core stack (`AA-01/02/03/04/05/06/07/09`) | **CONDITIONAL** | Core contract artifacts exist and `CX-FULL-STACK` is classified as supported, but this packet does not yet promote the stack to shipped-by-default status. |
-| Transport experiments (`AA-08`) | **EXPERIMENTAL** | `asupersync-1508v.8.6` remains open, so transport remains opt-in and excluded from default-ready launch doctrine. |
+| Transport experiments (`AA-08`) | **EXPERIMENTAL** | `asupersync-1508v.8.6` is closed and transport validation evidence is available, but the surface remains opt-in and excluded from default-ready launch doctrine. |
 
 Upstream closure state captured by this packet:
 
@@ -49,14 +49,14 @@ Upstream closure state captured by this packet:
   - `asupersync-1508v.10.7`
   - `asupersync-1508v.5.6`
   - `asupersync-1508v.6.6`
-- open blocker:
   - `asupersync-1508v.8.6`
+- no remaining upstream blocker beads are open at packet refresh time.
 
 Delivery checklist for `asupersync-1508v.10.6`:
 
 1. [x] Establish closure packet contract scaffold and evidence registry linkage.
 2. [x] Add command-id matrix that maps every promoted claim to deterministic rerun commands.
-3. [ ] Execute comparative demo refresh bundle after `asupersync-1508v.8.6` closure.
+3. [x] Refresh comparative demo posture after `asupersync-1508v.8.6` closure.
 4. [ ] Promote packet verdict from `NO_GO` to `GO` only after refreshed evidence and doctrine checks.
 
 ## Comparative Demo Matrix
@@ -66,7 +66,7 @@ Delivery checklist for `asupersync-1508v.10.6`:
 | `DEMO-CORE-STACK` | Conservative runtime path with explicit rollback doctrine and no experimental transport | `AA-01/02/03/04/05/06/07/09` composed as `CX-FULL-STACK` | staged | `artifacts/claim_evidence_graph_v1.json`, `artifacts/ci_proof_gates_v1.json`, `artifacts/cross_track_composition_v1.json` |
 | `DEMO-STATIC-SAFETY` | Dynamic protocol path remains canonical | `AA-05` typed/static-safety surface | staged | `tests/cap_obligation_compile_fail.rs`, `tests/session_type_obligations.rs`, `docs/integration.md` |
 | `DEMO-TRACE-INTELLIGENCE` | Existing replay path without minimization/canonicalization upgrades | `AA-06` replay minimization and inconsistency-debugging surface | staged | `artifacts/replay_minimization_validation_contract_v1.json` |
-| `DEMO-TRANSPORT-OPTIN` | Conservative transport behavior only | `AA-08` network-aware transport experiments | blocked | `asupersync-1508v.8.6` is still open; transport remains experimental-only |
+| `DEMO-TRANSPORT-OPTIN` | Conservative transport behavior only | `AA-08` network-aware transport experiments | staged | `artifacts/transport_frontier_benchmark_v1.json`, `artifacts/cross_track_composition_v1.json`; validation is closed but the surface remains experimental-only |
 
 Interpretation rules:
 
@@ -86,10 +86,10 @@ machine-readable evidence registry entry in
 | `DEMO-CORE-STACK` | demo | staged | `artifacts/claim_evidence_graph_v1.json`, `artifacts/ci_proof_gates_v1.json`, `artifacts/cross_track_composition_v1.json` | `RACP-REFRESH-CLAIM-GRAPH`, `RACP-REFRESH-CI-GATES`, `RACP-REFRESH-COMPOSITION`, `RACP-REFRESH-PACKET` |
 | `DEMO-STATIC-SAFETY` | demo | staged | `tests/cap_obligation_compile_fail.rs`, `tests/session_type_obligations.rs`, `docs/integration.md` | `RACP-VERIFY-STATIC-SAFETY-COMPILE-FAIL`, `RACP-VERIFY-STATIC-SAFETY-SESSIONS` |
 | `DEMO-TRACE-INTELLIGENCE` | demo | staged | `artifacts/replay_minimization_validation_contract_v1.json`, `artifacts/runtime_workload_corpus_v1.json` | `RACP-VERIFY-TRACE-INTELLIGENCE`, `RACP-VERIFY-WORKLOAD-CORPUS` |
-| `DEMO-TRANSPORT-OPTIN` | demo | blocked | `artifacts/cross_track_composition_v1.json` | No closure-grade rerun bundle is registered while `asupersync-1508v.8.6` remains open |
+| `DEMO-TRANSPORT-OPTIN` | demo | staged | `artifacts/transport_frontier_benchmark_v1.json`, `artifacts/cross_track_composition_v1.json` | `RACP-VERIFY-TRANSPORT-OPTIN` |
 | `AA-CORE-STACK` | surface | default_ready candidate | `artifacts/claim_evidence_graph_v1.json`, `artifacts/ci_proof_gates_v1.json`, `artifacts/cross_track_composition_v1.json`, `artifacts/runtime_ascension_closure_packet_v1.json` | `RACP-REFRESH-CLAIM-GRAPH`, `RACP-REFRESH-CI-GATES`, `RACP-REFRESH-COMPOSITION`, `RACP-REFRESH-PACKET` |
-| `AA-TRANSPORT-OPTIN` | surface | experimental | `artifacts/cross_track_composition_v1.json` | No launch-grade rerun bundle until `asupersync-1508v.8.6` closes |
-| `AA-CLOSURE-PACKET` | surface | blocked | `artifacts/runtime_ascension_closure_packet_v1.json` | `RACP-REFRESH-PACKET` plus explicit blocker tracking for `asupersync-1508v.10.6` and `asupersync-1508v.8.6` |
+| `AA-TRANSPORT-OPTIN` | surface | experimental | `artifacts/transport_frontier_benchmark_v1.json`, `artifacts/cross_track_composition_v1.json` | `RACP-VERIFY-TRANSPORT-OPTIN` |
+| `AA-CLOSURE-PACKET` | surface | blocked | `artifacts/runtime_ascension_closure_packet_v1.json` | `RACP-REFRESH-PACKET`, `RACP-RUN-SMOKE-BUNDLE`; no external bead blocker remains, but final sign-off is still withheld |
 
 Registry rules:
 
@@ -128,15 +128,15 @@ demo packet is executed and refreshed.
 
 - Any launch path that bypasses `artifacts/ci_proof_gates_v1.json`
 - Any launch path that lacks a downgrade action
-- Any launch path that claims transport graduation while
-  `asupersync-1508v.8.6` is open
+- Any launch path that claims transport graduation without a dedicated
+  promotion packet and refreshed transport evidence
 
 ## Known Risks, Non-Goals, and Downgrade Paths
 
 | Risk ID | Summary | Current posture | Downgrade path |
 |---------|---------|-----------------|----------------|
 | `RACP-RISK-01` | Closure packet exists before final comparative evidence refresh | accepted only as prep work | Hold launch at `NO_GO`; rerun packet demos and refresh evidence refs |
-| `RACP-RISK-02` | `AA-08` transport validation is still open | experimental-only | Disable transport experiments and stay on conservative transport path |
+| `RACP-RISK-02` | `AA-08` transport validation is closed, but the surface still remains experimental and opt-in | experimental-only | Disable transport experiments and stay on conservative transport path |
 | `RACP-RISK-03` | Core-stack artifacts could drift out of sync with claim graph or CI gates | blocking if detected | Treat mismatch as promotion denial and rerun the affected contract suite |
 
 Non-goals of this preparatory packet:
@@ -158,7 +158,7 @@ Non-goals of this preparatory packet:
 
 ### Experimental Opt-In Rules
 
-1. `AA-08` transport work stays opt-in until `asupersync-1508v.8.6` closes.
+1. `AA-08` transport work stays opt-in after `asupersync-1508v.8.6` closure unless a later packet explicitly graduates it.
 2. Experimental surfaces must never be described as default-ready.
 3. Experimental drills must publish exact rerun commands and fallback behavior.
 
@@ -186,6 +186,7 @@ closure packet's cited evidence surfaces.
 | `RACP-VERIFY-STATIC-SAFETY-SESSIONS` | Re-run the typed session-obligation surface | `rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa105b cargo test --test session_type_obligations -- --nocapture` |
 | `RACP-VERIFY-TRACE-INTELLIGENCE` | Re-run replay minimization validation | `rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa063 cargo test --test replay_minimization_validation_contract -- --nocapture` |
 | `RACP-VERIFY-WORKLOAD-CORPUS` | Re-run workload corpus validation | `rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa015 cargo test --test runtime_workload_corpus_contract -- --nocapture` |
+| `RACP-VERIFY-TRANSPORT-OPTIN` | Re-run transport validation evidence for the opt-in surface | `rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa083 cargo test --test transport_frontier_benchmark_contract -- --nocapture` |
 | `RACP-RUN-SMOKE-BUNDLE` | Run packet smoke bundle and emit report manifest | `./scripts/run_runtime_ascension_closure_smoke.sh --execute` |
 
 Use these commands to refresh this packet's inputs:
@@ -203,6 +204,9 @@ rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa104 cargo 
 # This closure packet contract
 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa106 cargo test --test runtime_ascension_closure_packet_contract -- --nocapture
 
+# Transport opt-in evidence
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa083 cargo test --test transport_frontier_benchmark_contract -- --nocapture
+
 # Smoke bundle runner (writes run_report.json + per-scenario manifests)
 ./scripts/run_runtime_ascension_closure_smoke.sh --execute
 ```
@@ -213,8 +217,8 @@ the deterministic cargo/test surface.
 
 Operator troubleshooting recipe:
 
-1. If the packet says `NO_GO`, treat that as authoritative until the cited
-   blocker is closed and the packet is refreshed.
+1. If the packet says `NO_GO`, treat that as authoritative until the packet is
+   refreshed and the verdict changes.
 2. If a demo is blocked, route traffic to the conservative baseline named in
    the demo matrix.
 3. If a contract artifact drifts, rerun its smoke suite before touching launch
@@ -241,3 +245,6 @@ rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa106 cargo 
 - `artifacts/replay_minimization_validation_contract_v1.json`
 - `artifacts/capability_token_model_v1.json`
 - `artifacts/crash_recovery_validation_v1.json`
+- `artifacts/transport_frontier_benchmark_v1.json`
+- `docs/transport_frontier_benchmark_contract.md`
+- `tests/transport_frontier_benchmark_contract.rs`

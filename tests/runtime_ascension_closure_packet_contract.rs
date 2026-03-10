@@ -74,8 +74,8 @@ fn packet_doc_declares_current_no_go() {
         "doc must state current NO_GO posture"
     );
     assert!(
-        doc.contains("asupersync-1508v.8.6"),
-        "doc must cite open AA-08 transport blocker"
+        doc.contains("| Remaining blocker bead(s) | `none` |"),
+        "doc must reflect that no external blocker beads remain"
     );
 }
 
@@ -86,6 +86,7 @@ fn packet_doc_mentions_registry_command_ids() {
         "RACP-REFRESH-CLAIM-GRAPH",
         "RACP-VERIFY-STATIC-SAFETY-COMPILE-FAIL",
         "RACP-VERIFY-TRACE-INTELLIGENCE",
+        "RACP-VERIFY-TRANSPORT-OPTIN",
         "RACP-VERIFY-WORKLOAD-CORPUS",
         "RACP-RUN-SMOKE-BUNDLE",
     ] {
@@ -153,18 +154,14 @@ fn packet_artifact_declares_execution_state() {
     assert_eq!(
         state["verdict"].as_str().unwrap(),
         "no_go",
-        "execution_state.verdict must remain no_go while blockers are open"
+        "execution_state.verdict must remain no_go while final sign-off is withheld"
     );
     let blockers = state["remaining_blockers"]
         .as_array()
         .expect("execution_state.remaining_blockers must be an array");
-    let blocker_ids: HashSet<&str> = blockers
-        .iter()
-        .map(|value| value.as_str().unwrap())
-        .collect();
     assert!(
-        blocker_ids.contains("asupersync-1508v.8.6"),
-        "execution_state must track the open transport blocker"
+        blockers.is_empty(),
+        "execution_state must show no remaining external blocker beads"
     );
 }
 
@@ -224,10 +221,9 @@ fn packet_decision_snapshot_is_no_go_preparatory() {
     assert_eq!(snapshot["overall_verdict"].as_str().unwrap(), "no_go");
     assert_eq!(snapshot["packet_mode"].as_str().unwrap(), "preparatory");
     let blockers = snapshot["blocking_beads"].as_array().unwrap();
-    let blocker_ids: HashSet<&str> = blockers.iter().map(|b| b.as_str().unwrap()).collect();
     assert!(
-        blocker_ids.contains("asupersync-1508v.8.6"),
-        "snapshot must include transport validation blocker"
+        blockers.is_empty(),
+        "decision snapshot must show no external blocker beads"
     );
 }
 
@@ -278,19 +274,28 @@ fn demo_ids_are_unique() {
 }
 
 #[test]
-fn demo_transport_optin_is_blocked_on_transport_validation() {
+fn demo_transport_optin_is_staged_after_transport_validation_closes() {
     let art = load_artifact();
     let demos = art["comparative_demos"].as_array().unwrap();
     let transport_demo = demos
         .iter()
         .find(|demo| demo["demo_id"].as_str().unwrap() == "DEMO-TRANSPORT-OPTIN")
         .unwrap();
-    assert_eq!(transport_demo["status"].as_str().unwrap(), "blocked");
+    assert_eq!(transport_demo["status"].as_str().unwrap(), "staged");
     let blockers = transport_demo["blockers"].as_array().unwrap();
-    let blocker_ids: HashSet<&str> = blockers.iter().map(|b| b.as_str().unwrap()).collect();
     assert!(
-        blocker_ids.contains("asupersync-1508v.8.6"),
-        "transport demo must be blocked on AA-08 validation"
+        blockers.is_empty(),
+        "transport demo must no longer report AA-08 as an open blocker"
+    );
+    let evidence_refs: HashSet<&str> = transport_demo["evidence_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    assert!(
+        evidence_refs.contains("artifacts/transport_frontier_benchmark_v1.json"),
+        "transport demo must cite the closed transport validation artifact"
     );
 }
 
@@ -596,7 +601,7 @@ fn launch_continuation_beads_include_parent_and_transport_blocker() {
         "continuation set must include parent closure bead"
     );
     assert!(
-        bead_ids.contains("asupersync-1508v.8.6"),
-        "continuation set must include transport blocker bead"
+        bead_ids.contains("asupersync-1508v.8"),
+        "continuation set must include the experimental AA-08 transport track"
     );
 }
