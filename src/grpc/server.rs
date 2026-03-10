@@ -17,6 +17,10 @@ use super::service::{NamedService, ServiceHandler};
 use super::status::{GrpcError, Status};
 use super::streaming::{Metadata, Request, Response};
 
+fn wall_clock_instant_now() -> Instant {
+    Instant::now()
+}
+
 /// gRPC server configuration.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -402,6 +406,8 @@ pub struct CallContext {
     deadline: Option<Instant>,
     /// Peer address.
     peer_addr: Option<String>,
+    /// Clock source used by deadline helpers that do not take an explicit time.
+    time_getter: fn() -> Instant,
 }
 
 impl CallContext {
@@ -412,6 +418,7 @@ impl CallContext {
             metadata: Metadata::new(),
             deadline: None,
             peer_addr: None,
+            time_getter: wall_clock_instant_now,
         }
     }
 
@@ -426,7 +433,27 @@ impl CallContext {
         default_timeout: Option<Duration>,
         peer_addr: Option<String>,
     ) -> Self {
-        Self::from_metadata_at(metadata, default_timeout, peer_addr, Instant::now())
+        Self::from_metadata_with_time_getter(
+            metadata,
+            default_timeout,
+            peer_addr,
+            wall_clock_instant_now,
+        )
+    }
+
+    /// Create a call context from incoming request metadata with a custom time source.
+    ///
+    /// This preserves the default ergonomics while allowing deterministic callers to
+    /// control deadline helpers like [`Self::remaining`] and [`Self::is_expired`].
+    #[must_use]
+    pub fn from_metadata_with_time_getter(
+        metadata: Metadata,
+        default_timeout: Option<Duration>,
+        peer_addr: Option<String>,
+        time_getter: fn() -> Instant,
+    ) -> Self {
+        Self::from_metadata_at(metadata, default_timeout, peer_addr, time_getter())
+            .with_time_getter(time_getter)
     }
 
     /// Create a call context from incoming request metadata using an explicit
@@ -453,6 +480,7 @@ impl CallContext {
             metadata,
             deadline,
             peer_addr,
+            time_getter: wall_clock_instant_now,
         }
     }
 
@@ -463,7 +491,21 @@ impl CallContext {
             metadata: Metadata::new(),
             deadline: Some(deadline),
             peer_addr: None,
+            time_getter: wall_clock_instant_now,
         }
+    }
+
+    /// Override the time source used by [`Self::remaining`] and [`Self::is_expired`].
+    #[must_use]
+    pub const fn with_time_getter(mut self, time_getter: fn() -> Instant) -> Self {
+        self.time_getter = time_getter;
+        self
+    }
+
+    /// Returns the time source used by deadline helpers that do not take an explicit time.
+    #[must_use]
+    pub const fn time_getter(&self) -> fn() -> Instant {
+        self.time_getter
     }
 
     /// Get the request metadata.
@@ -488,7 +530,7 @@ impl CallContext {
     /// deadline is set or it has already expired.
     #[must_use]
     pub fn remaining(&self) -> Option<Duration> {
-        self.remaining_at(Instant::now())
+        self.remaining_at((self.time_getter)())
     }
 
     /// Returns remaining time to deadline using an explicit clock sample.
@@ -500,7 +542,7 @@ impl CallContext {
     /// Check if the deadline has expired.
     #[must_use]
     pub fn is_expired(&self) -> bool {
-        self.is_expired_at(Instant::now())
+        self.is_expired_at((self.time_getter)())
     }
 
     /// Check if deadline is expired using an explicit clock sample.
@@ -848,6 +890,7 @@ mod tests {
             metadata: Metadata::new(),
             deadline: Some(now),
             peer_addr: None,
+            time_getter: wall_clock_instant_now,
         };
         let expired_at_boundary = ctx.is_expired_at(now);
         crate::assert_with_log!(
@@ -861,6 +904,7 @@ mod tests {
             metadata: Metadata::new(),
             deadline: Some(now + std::time::Duration::from_millis(1)),
             peer_addr: None,
+            time_getter: wall_clock_instant_now,
         };
         let not_yet_expired = before_deadline_ctx.is_expired_at(now);
         crate::assert_with_log!(
@@ -870,6 +914,58 @@ mod tests {
             not_yet_expired
         );
         crate::test_complete!("test_call_context_expiry_boundary_is_inclusive");
+    }
+
+    #[test]
+    fn test_call_context_time_getter_controls_deadline_helpers_without_sleep() {
+        use std::sync::OnceLock;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static BASE: OnceLock<std::time::Instant> = OnceLock::new();
+        static NOW_OFFSET_NS: AtomicU64 = AtomicU64::new(0);
+
+        fn test_now() -> std::time::Instant {
+            BASE.get_or_init(std::time::Instant::now)
+                .checked_add(std::time::Duration::from_nanos(
+                    NOW_OFFSET_NS.load(Ordering::Relaxed),
+                ))
+                .expect("test instant overflow")
+        }
+
+        init_test("test_call_context_time_getter_controls_deadline_helpers_without_sleep");
+
+        NOW_OFFSET_NS.store(0, Ordering::Relaxed);
+        let mut metadata = Metadata::new();
+        metadata.insert("grpc-timeout", "5m");
+        let ctx = CallContext::from_metadata_with_time_getter(metadata, None, None, test_now);
+
+        let initial_remaining = ctx.remaining();
+        crate::assert_with_log!(
+            initial_remaining == Some(std::time::Duration::from_millis(5)),
+            "remaining uses custom time getter at construction time",
+            Some(std::time::Duration::from_millis(5)),
+            initial_remaining
+        );
+
+        NOW_OFFSET_NS.store(6_000_000, Ordering::Relaxed);
+        let expired = ctx.is_expired();
+        crate::assert_with_log!(
+            expired,
+            "is_expired follows custom time getter without sleeping",
+            true,
+            expired
+        );
+
+        let remaining_after_expiry = ctx.remaining();
+        crate::assert_with_log!(
+            remaining_after_expiry.is_none(),
+            "remaining returns none after custom-clock expiry",
+            true,
+            remaining_after_expiry.is_none()
+        );
+        crate::test_complete!(
+            "test_call_context_time_getter_controls_deadline_helpers_without_sleep"
+        );
     }
 
     #[test]
