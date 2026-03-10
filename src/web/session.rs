@@ -18,20 +18,22 @@
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::fmt;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use crate::util::{EntropySource, OsEntropy};
+
 use super::extract::Request;
 use super::handler::Handler;
-use super::response::{Response, StatusCode};
+use super::response::Response;
 
 /// Default session cookie name.
 const DEFAULT_COOKIE_NAME: &str = "session_id";
 
 /// Session ID length in hex characters (16 bytes = 32 hex chars).
 const SESSION_ID_HEX_LEN: usize = 32;
-const INTERNAL_SERVER_ERROR_BODY: &[u8] = b"Internal Server Error";
 
 // ─── SessionStore trait ─────────────────────────────────────────────────────
 
@@ -200,9 +202,13 @@ where
     Ok(hex)
 }
 
-/// Generate a cryptographically random session ID (16 random bytes as hex).
-fn generate_session_id() -> Result<String, getrandom::Error> {
-    generate_session_id_with(|buf| getrandom::fill(&mut buf[..]))
+/// Generate a session ID using an explicit entropy source.
+fn generate_session_id_from_entropy(entropy: &dyn EntropySource) -> String {
+    generate_session_id_with(|buf| {
+        entropy.fill_bytes(buf);
+        Ok::<(), Infallible>(())
+    })
+    .expect("entropy source should be infallible")
 }
 
 /// Validate that a session ID looks legitimate (hex, correct length).
@@ -303,6 +309,7 @@ impl Default for SessionConfig {
 pub struct SessionLayer<S: SessionStore> {
     store: Arc<S>,
     config: SessionConfig,
+    entropy: Arc<dyn EntropySource>,
 }
 
 impl<S: SessionStore> SessionLayer<S> {
@@ -311,6 +318,7 @@ impl<S: SessionStore> SessionLayer<S> {
         Self {
             store: Arc::new(store),
             config: SessionConfig::default(),
+            entropy: Arc::new(OsEntropy),
         }
     }
 
@@ -356,12 +364,20 @@ impl<S: SessionStore> SessionLayer<S> {
         self
     }
 
+    /// Override the entropy source used for newly minted session IDs.
+    #[must_use]
+    pub fn entropy_source(mut self, entropy: Arc<dyn EntropySource>) -> Self {
+        self.entropy = entropy;
+        self
+    }
+
     /// Wrap a handler with session management.
     pub fn wrap<H: Handler>(self, inner: H) -> SessionMiddleware<S, H> {
         SessionMiddleware {
             inner,
             store: self.store,
             config: self.config,
+            entropy: self.entropy,
         }
     }
 }
@@ -370,6 +386,7 @@ impl<S: SessionStore> fmt::Debug for SessionLayer<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SessionLayer")
             .field("config", &self.config)
+            .field("entropy_source", &self.entropy.source_id())
             .finish_non_exhaustive()
     }
 }
@@ -381,17 +398,11 @@ pub struct SessionMiddleware<S: SessionStore, H: Handler> {
     inner: H,
     store: Arc<S>,
     config: SessionConfig,
+    entropy: Arc<dyn EntropySource>,
 }
 
 impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
     fn call(&self, mut req: Request) -> Response {
-        let internal_error = || {
-            Response::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                INTERNAL_SERVER_ERROR_BODY.to_vec(),
-            )
-        };
-
         // 1. Load a persisted session if the client presents a valid cookie.
         //    Unknown-but-well-formed IDs are treated as fixation attempts and
         //    do not allocate a fresh server-side session unless the handler
@@ -435,10 +446,7 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
             had_existing_session && session_data.is_empty() && session_data.is_modified();
         let should_persist = session_data.is_modified() && !session_data.is_empty();
         let created_session = if should_persist && session_id.is_none() {
-            session_id = match generate_session_id() {
-                Ok(id) => Some(id),
-                Err(_err) => return internal_error(),
-            };
+            session_id = Some(generate_session_id_from_entropy(self.entropy.as_ref()));
             true
         } else {
             false
@@ -542,6 +550,7 @@ mod tests {
     use super::super::handler::Handler;
     use super::super::response::StatusCode;
     use super::*;
+    use crate::types::TaskId;
 
     // ================================================================
     // SessionData
@@ -660,17 +669,44 @@ mod tests {
     // Session ID
     // ================================================================
 
+    #[derive(Debug)]
+    struct FixedEntropy {
+        bytes: [u8; 16],
+    }
+
+    impl EntropySource for FixedEntropy {
+        fn fill_bytes(&self, dest: &mut [u8]) {
+            for (idx, slot) in dest.iter_mut().enumerate() {
+                *slot = self.bytes[idx % self.bytes.len()];
+            }
+        }
+
+        fn next_u64(&self) -> u64 {
+            let mut buf = [0u8; 8];
+            self.fill_bytes(&mut buf);
+            u64::from_le_bytes(buf)
+        }
+
+        fn fork(&self, _task_id: TaskId) -> Arc<dyn EntropySource> {
+            Arc::new(Self { bytes: self.bytes })
+        }
+
+        fn source_id(&self) -> &'static str {
+            "fixed-test"
+        }
+    }
+
     #[test]
     fn generate_id_is_valid() {
-        let id = generate_session_id().expect("OS entropy source available");
+        let id = generate_session_id_from_entropy(&OsEntropy);
         assert!(is_valid_session_id(&id));
         assert_eq!(id.len(), SESSION_ID_HEX_LEN);
     }
 
     #[test]
     fn generate_id_uniqueness() {
-        let id1 = generate_session_id().expect("OS entropy source available");
-        let id2 = generate_session_id().expect("OS entropy source available");
+        let id1 = generate_session_id_from_entropy(&OsEntropy);
+        let id2 = generate_session_id_from_entropy(&OsEntropy);
         assert_ne!(id1, id2);
     }
 
@@ -1053,7 +1089,7 @@ mod tests {
     fn generate_id_uses_crypto_randomness() {
         // Verify 16 bytes of entropy → 32 hex chars, all unique.
         let ids: Vec<String> = (0..100)
-            .map(|_| generate_session_id().expect("OS entropy source available"))
+            .map(|_| generate_session_id_from_entropy(&OsEntropy))
             .collect();
         for id in &ids {
             assert!(is_valid_session_id(id));
@@ -1061,6 +1097,21 @@ mod tests {
         // All 100 must be unique (probability of collision is negligible).
         let set: std::collections::HashSet<_> = ids.iter().collect();
         assert_eq!(set.len(), 100);
+    }
+
+    #[test]
+    fn middleware_uses_injected_entropy_source_for_new_session_ids() {
+        let store = MemoryStore::new();
+        let layer = SessionLayer::new(store.clone())
+            .entropy_source(Arc::new(FixedEntropy { bytes: [0xab; 16] }));
+        let handler = layer.wrap(TestHandler);
+
+        let resp = handler.call(Request::new("GET", "/"));
+        let cookie = resp.headers.get("set-cookie").unwrap();
+        let expected_id = "abababababababababababababababab";
+
+        assert!(cookie.contains(expected_id));
+        assert!(store.load(expected_id).is_some());
     }
 
     // ================================================================
