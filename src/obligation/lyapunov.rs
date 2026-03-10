@@ -1158,7 +1158,7 @@ mod tests {
         let converged = verdict.converged();
         crate::assert_with_log!(converged, "converged", true, converged);
         let v_final = verdict.v_final;
-        crate::assert_with_log!(v_final == 0.0, "v_final", 0.0, v_final);
+        crate::assert_with_log!(v_final.abs() < f64::EPSILON, "v_final", 0.0, v_final);
         crate::test_complete!("convergence_monotone_drain");
     }
 
@@ -1382,9 +1382,9 @@ mod tests {
         let snap = active_snapshot(5, 3, 1_000_000_000, 2);
         let record = governor.compute_record(&snap);
 
-        let only_tasks = record.obligation_component == 0.0
-            && record.region_component == 0.0
-            && record.deadline_component == 0.0;
+        let only_tasks = record.obligation_component.abs() < f64::EPSILON
+            && record.region_component.abs() < f64::EPSILON
+            && record.deadline_component.abs() < f64::EPSILON;
         crate::assert_with_log!(only_tasks, "only task component", true, only_tasks);
         let expected = 5.0;
         let close = (record.total - expected).abs() < f64::EPSILON;

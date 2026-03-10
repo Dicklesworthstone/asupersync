@@ -2166,15 +2166,18 @@ mod tests {
     use std::future::poll_fn;
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::cell::Cell;
 
-    static HTTP_CLIENT_TEST_TIME_NANOS: AtomicU64 = AtomicU64::new(0);
+    thread_local! {
+        static HTTP_CLIENT_TEST_TIME_NANOS: Cell<u64> = Cell::new(0);
+    }
 
     fn set_http_client_test_time(nanos: u64) {
-        HTTP_CLIENT_TEST_TIME_NANOS.store(nanos, Ordering::Relaxed);
+        HTTP_CLIENT_TEST_TIME_NANOS.with(|t| t.set(nanos));
     }
 
     fn http_client_test_time() -> Time {
-        Time::from_nanos(HTTP_CLIENT_TEST_TIME_NANOS.load(Ordering::Relaxed))
+        Time::from_nanos(HTTP_CLIENT_TEST_TIME_NANOS.with(|t| t.get()))
     }
 
     fn loopback_client_io() -> ClientIo {

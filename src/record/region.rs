@@ -773,21 +773,29 @@ impl RegionRecord {
         // Enforce structural quiescence: a region cannot close if it still has live
         // tasks, children, or pending obligations, as doing so would prematurely clear
         // its heap memory and violate structured concurrency invariants.
-        if !self.is_quiescent() {
+        let mut inner = self.inner.write();
+
+        if !(inner.children.is_empty()
+            && inner.tasks.is_empty()
+            && inner.pending_obligations == 0
+            && inner.finalizers.is_empty())
+        {
             return false;
         }
 
         let transitioned = self
             .state
             .transition(RegionState::Finalizing, RegionState::Closed);
+
         if transitioned {
             self.trace_state_change(RegionState::Closed);
-            self.clear_heap();
+            inner.heap.reclaim_all();
             let waker = {
                 let mut notify = self.close_notify.lock();
                 notify.closed = true;
                 notify.waker.take()
             };
+            drop(inner);
             if let Some(waker) = waker {
                 waker.wake();
             }

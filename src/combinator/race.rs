@@ -722,14 +722,11 @@ pub fn make_race_all_result<T, E>(
 macro_rules! race {
     // Biased mode
     (biased; $($future:expr),+ $(,)?) => {{
-        // Placeholder: accept syntax and ensure futures are type-checked.
-        $(::core::mem::drop($future);)+
+        compile_error!("race! macro is not yet implemented. Use Scope::race() or Cx::race() instead.");
     }};
-
     // Basic positional syntax
     ($($future:expr),+ $(,)?) => {{
-        // Placeholder: accept syntax and ensure futures are type-checked.
-        $(::core::mem::drop($future);)+
+        compile_error!("race! macro is not yet implemented. Use Scope::race() or Cx::race() instead.");
     }};
 }
 
@@ -1228,13 +1225,9 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "macro emits compile_error!"]
     fn race_macro_compiles_and_runs() {
-        // Simple synchronous future for testing
-        let f1 = std::future::ready(1);
-        let f2 = std::future::pending::<i32>();
-
-        // The macro is currently a placeholder that returns `()`.
-        let (): () = futures_lite::future::block_on(async { race!(f1, f2) });
+        // Test ignored
     }
 
     // =========================================================================

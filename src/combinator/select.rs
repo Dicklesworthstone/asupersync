@@ -209,7 +209,10 @@ impl<F: Future + Unpin> Future for SelectAllDrain<F> {
         }
 
         if let Some((idx, value)) = ready {
-            let mut all = this.futures.take().unwrap();
+            let mut all = this
+                .futures
+                .take()
+                .expect("futures should be Some if we found a ready value");
             all.remove(idx);
             return Poll::Ready(SelectAllDrainResult {
                 value,
