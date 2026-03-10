@@ -10,6 +10,18 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+/// Cooperative budget for admitting new futures from the source stream.
+///
+/// Without this cap, large buffer limits plus always-ready upstream streams can
+/// monopolize one executor turn while filling the in-flight queue.
+const BUFFERED_ADMISSION_BUDGET: usize = 1024;
+
+/// Cooperative budget for polling buffered futures in a single call.
+///
+/// Without this cap, large in-flight buffers can monopolize one executor turn
+/// when every future is ready or repeatedly returns `Poll::Pending`.
+const BUFFERED_POLL_BUDGET: usize = 1024;
+
 struct BufferedEntry<Fut: Future> {
     fut: Fut,
     output: Option<Fut::Output>,
@@ -34,6 +46,7 @@ where
     in_flight: VecDeque<BufferedEntry<S::Item>>,
     limit: usize,
     done: bool,
+    next_poll_index: usize,
 }
 
 impl<S> Buffered<S>
@@ -49,6 +62,7 @@ where
             in_flight: VecDeque::with_capacity(limit),
             limit,
             done: false,
+            next_poll_index: 0,
         }
     }
 
@@ -83,9 +97,18 @@ where
     type Item = <S::Item as Future>::Output;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut budget_exhausted = false;
+        let mut admitted_this_poll = 0usize;
         while !self.done && self.in_flight.len() < self.limit {
+            if admitted_this_poll >= BUFFERED_ADMISSION_BUDGET {
+                budget_exhausted = true;
+                break;
+            }
             match Pin::new(&mut self.stream).poll_next(cx) {
-                Poll::Ready(Some(fut)) => self.in_flight.push_back(BufferedEntry::new(fut)),
+                Poll::Ready(Some(fut)) => {
+                    self.in_flight.push_back(BufferedEntry::new(fut));
+                    admitted_this_poll += 1;
+                }
                 Poll::Ready(None) => {
                     self.done = true;
                     break;
@@ -94,26 +117,57 @@ where
             }
         }
 
-        for entry in &mut self.in_flight {
-            if entry.output.is_some() {
-                continue;
+        if matches!(self.in_flight.front(), Some(front) if front.output.is_some()) {
+            let mut entry = self.in_flight.pop_front().expect("front exists");
+            self.next_poll_index = self.next_poll_index.saturating_sub(1);
+            if self.in_flight.is_empty() {
+                self.next_poll_index = 0;
+            } else {
+                self.next_poll_index %= self.in_flight.len();
             }
+            return Poll::Ready(entry.output.take());
+        }
 
-            if let Poll::Ready(output) = Pin::new(&mut entry.fut).poll(cx) {
-                entry.output = Some(output);
+        let len = self.in_flight.len();
+        if len > 0 {
+            let mut index = self.next_poll_index.min(len.saturating_sub(1));
+            let scan_budget = len.min(BUFFERED_POLL_BUDGET);
+            for _ in 0..scan_budget {
+                if let Some(entry) = self.in_flight.get_mut(index) {
+                    if entry.output.is_none() {
+                        if let Poll::Ready(output) = Pin::new(&mut entry.fut).poll(cx) {
+                            entry.output = Some(output);
+                        }
+                    }
+                }
+                index += 1;
+                if index >= len {
+                    index = 0;
+                }
+            }
+            self.next_poll_index = index;
+            if len > BUFFERED_POLL_BUDGET {
+                budget_exhausted = true;
             }
         }
 
-        if let Some(front) = self.in_flight.front_mut() {
-            if front.output.is_some() {
-                let mut entry = self.in_flight.pop_front().expect("front exists");
-                return Poll::Ready(entry.output.take());
+        if matches!(self.in_flight.front(), Some(front) if front.output.is_some()) {
+            let mut entry = self.in_flight.pop_front().expect("front exists");
+            self.next_poll_index = self.next_poll_index.saturating_sub(1);
+            if self.in_flight.is_empty() {
+                self.next_poll_index = 0;
+            } else {
+                self.next_poll_index %= self.in_flight.len();
             }
+            return Poll::Ready(entry.output.take());
         }
 
         if self.done && self.in_flight.is_empty() {
             Poll::Ready(None)
         } else {
+            if budget_exhausted {
+                cx.waker().wake_by_ref();
+            }
             Poll::Pending
         }
     }
@@ -219,9 +273,18 @@ where
     type Item = <S::Item as Future>::Output;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut budget_exhausted = false;
+        let mut admitted_this_poll = 0usize;
         while !self.done && self.in_flight.len() < self.limit {
+            if admitted_this_poll >= BUFFERED_ADMISSION_BUDGET {
+                budget_exhausted = true;
+                break;
+            }
             match Pin::new(&mut self.stream).poll_next(cx) {
-                Poll::Ready(Some(fut)) => self.in_flight.push_back(fut),
+                Poll::Ready(Some(fut)) => {
+                    self.in_flight.push_back(fut);
+                    admitted_this_poll += 1;
+                }
                 Poll::Ready(None) => {
                     self.done = true;
                     break;
@@ -231,17 +294,24 @@ where
         }
 
         let len = self.in_flight.len();
-        for _ in 0..len {
+        let poll_budget = len.min(BUFFERED_POLL_BUDGET);
+        for _ in 0..poll_budget {
             let mut fut = self.in_flight.pop_front().expect("length checked");
             match Pin::new(&mut fut).poll(cx) {
                 Poll::Ready(output) => return Poll::Ready(Some(output)),
                 Poll::Pending => self.in_flight.push_back(fut),
             }
         }
+        if len > BUFFERED_POLL_BUDGET {
+            budget_exhausted = true;
+        }
 
         if self.done && self.in_flight.is_empty() {
             Poll::Ready(None)
         } else {
+            if budget_exhausted {
+                cx.waker().wake_by_ref();
+            }
             Poll::Pending
         }
     }
@@ -261,8 +331,11 @@ where
 mod tests {
     use super::*;
     use crate::stream::iter;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::Arc;
-    use std::task::{Wake, Waker};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
 
     struct NoopWaker;
 
@@ -272,6 +345,80 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    struct TrackWaker(Arc<AtomicBool>);
+
+    impl Wake for TrackWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[derive(Debug)]
+    struct PendingOnceFuture {
+        value: usize,
+        poll_counter: Arc<AtomicUsize>,
+        polled_once: bool,
+    }
+
+    impl PendingOnceFuture {
+        fn new(value: usize, poll_counter: Arc<AtomicUsize>) -> Self {
+            Self {
+                value,
+                poll_counter,
+                polled_once: false,
+            }
+        }
+    }
+
+    impl Future for PendingOnceFuture {
+        type Output = usize;
+
+        fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            self.poll_counter.fetch_add(1, Ordering::SeqCst);
+            if self.polled_once {
+                Poll::Ready(self.value)
+            } else {
+                self.polled_once = true;
+                Poll::Pending
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct AlwaysReadyPendingFutureStream {
+        next: usize,
+        end: usize,
+        poll_counter: Arc<AtomicUsize>,
+    }
+
+    impl AlwaysReadyPendingFutureStream {
+        fn new(end: usize, poll_counter: Arc<AtomicUsize>) -> Self {
+            Self {
+                next: 0,
+                end,
+                poll_counter,
+            }
+        }
+    }
+
+    impl Stream for AlwaysReadyPendingFutureStream {
+        type Item = PendingOnceFuture;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if self.next >= self.end {
+                return Poll::Ready(None);
+            }
+
+            let item = PendingOnceFuture::new(self.next, self.poll_counter.clone());
+            self.next += 1;
+            Poll::Ready(Some(item))
+        }
     }
 
     fn init_test(name: &str) {
@@ -404,5 +551,121 @@ mod tests {
         let is_none = matches!(poll, Poll::Ready(None));
         crate::assert_with_log!(is_none, "empty stream yields None", true, is_none);
         crate::test_complete!("buffer_unordered_empty_stream_terminates");
+    }
+
+    #[test]
+    fn buffered_yields_pending_after_budget_on_large_pending_batch() {
+        init_test("buffered_yields_pending_after_budget_on_large_pending_batch");
+        let poll_counter = Arc::new(AtomicUsize::new(0));
+        let mut stream = Buffered::new(
+            AlwaysReadyPendingFutureStream::new(
+                BUFFERED_ADMISSION_BUDGET + 5,
+                poll_counter.clone(),
+            ),
+            BUFFERED_ADMISSION_BUDGET + 5,
+        );
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TrackWaker(woke.clone())));
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut stream).poll_next(&mut cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Pending),
+            "first poll yields pending after cooperative budget",
+            "Poll::Pending",
+            first
+        );
+        crate::assert_with_log!(
+            stream.stream.next == BUFFERED_ADMISSION_BUDGET,
+            "admission capped at budget",
+            BUFFERED_ADMISSION_BUDGET,
+            stream.stream.next
+        );
+        crate::assert_with_log!(
+            stream.in_flight.len() == BUFFERED_ADMISSION_BUDGET,
+            "in-flight queue capped at admission budget on first poll",
+            BUFFERED_ADMISSION_BUDGET,
+            stream.in_flight.len()
+        );
+        crate::assert_with_log!(
+            poll_counter.load(Ordering::SeqCst) == BUFFERED_POLL_BUDGET,
+            "future polling capped at cooperative budget",
+            BUFFERED_POLL_BUDGET,
+            poll_counter.load(Ordering::SeqCst)
+        );
+        crate::assert_with_log!(
+            woke.load(Ordering::SeqCst),
+            "self-wake requested after budget exhaustion",
+            true,
+            woke.load(Ordering::SeqCst)
+        );
+
+        let second = Pin::new(&mut stream).poll_next(&mut cx);
+        crate::assert_with_log!(
+            second == Poll::Ready(Some(0)),
+            "second poll resumes and yields the front output",
+            Poll::Ready(Some(0)),
+            second
+        );
+        crate::test_complete!("buffered_yields_pending_after_budget_on_large_pending_batch");
+    }
+
+    #[test]
+    fn buffer_unordered_yields_pending_after_budget_on_large_pending_batch() {
+        init_test("buffer_unordered_yields_pending_after_budget_on_large_pending_batch");
+        let poll_counter = Arc::new(AtomicUsize::new(0));
+        let mut stream = BufferUnordered::new(
+            AlwaysReadyPendingFutureStream::new(
+                BUFFERED_ADMISSION_BUDGET + 5,
+                poll_counter.clone(),
+            ),
+            BUFFERED_ADMISSION_BUDGET + 5,
+        );
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TrackWaker(woke.clone())));
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut stream).poll_next(&mut cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Pending),
+            "first poll yields pending after cooperative budget",
+            "Poll::Pending",
+            first
+        );
+        crate::assert_with_log!(
+            stream.stream.next == BUFFERED_ADMISSION_BUDGET,
+            "admission capped at budget",
+            BUFFERED_ADMISSION_BUDGET,
+            stream.stream.next
+        );
+        crate::assert_with_log!(
+            stream.in_flight.len() == BUFFERED_ADMISSION_BUDGET,
+            "in-flight queue capped at admission budget on first poll",
+            BUFFERED_ADMISSION_BUDGET,
+            stream.in_flight.len()
+        );
+        crate::assert_with_log!(
+            poll_counter.load(Ordering::SeqCst) == BUFFERED_POLL_BUDGET,
+            "future polling capped at cooperative budget",
+            BUFFERED_POLL_BUDGET,
+            poll_counter.load(Ordering::SeqCst)
+        );
+        crate::assert_with_log!(
+            woke.load(Ordering::SeqCst),
+            "self-wake requested after budget exhaustion",
+            true,
+            woke.load(Ordering::SeqCst)
+        );
+
+        let second = Pin::new(&mut stream).poll_next(&mut cx);
+        crate::assert_with_log!(
+            second == Poll::Ready(Some(0)),
+            "second poll resumes and yields the first completed output",
+            Poll::Ready(Some(0)),
+            second
+        );
+        crate::test_complete!(
+            "buffer_unordered_yields_pending_after_budget_on_large_pending_batch"
+        );
     }
 }

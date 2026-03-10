@@ -8,6 +8,12 @@ use std::collections::VecDeque;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+/// Cooperative budget for child-stream scans in a single poll.
+///
+/// Without this bound, a large merge set can monopolize one executor turn
+/// while `Merge` walks every child looking for a ready item.
+const MERGE_COOPERATIVE_POLL_BUDGET: usize = 64;
+
 /// A stream that merges multiple streams.
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
@@ -65,6 +71,7 @@ where
         // Track how many original streams we've visited (removals don't reduce the budget).
         let mut remaining = initial_len;
         let mut i = start;
+        let mut scanned_this_poll = 0usize;
 
         while remaining > 0 {
             let len = self.streams.len();
@@ -85,12 +92,32 @@ where
                     // Stream exhausted; remove it.
                     self.streams.remove(i);
                     remaining -= 1;
+                    scanned_this_poll += 1;
+                    if scanned_this_poll >= MERGE_COOPERATIVE_POLL_BUDGET && remaining > 0 {
+                        self.next_index = if self.streams.is_empty() {
+                            0
+                        } else {
+                            i % self.streams.len()
+                        };
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
                     // i now points at the next element (shifted into this slot), don't advance.
                     continue;
                 }
                 Poll::Pending => {}
             }
             remaining -= 1;
+            scanned_this_poll += 1;
+            if scanned_this_poll >= MERGE_COOPERATIVE_POLL_BUDGET && remaining > 0 {
+                self.next_index = if self.streams.is_empty() {
+                    0
+                } else {
+                    (i + 1) % self.streams.len()
+                };
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
             i += 1;
         }
 
@@ -136,8 +163,8 @@ mod tests {
     use super::*;
     use crate::stream::{StreamExt, iter};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::task::{Wake, Waker};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
 
     struct NoopWaker;
 
@@ -147,6 +174,18 @@ mod tests {
 
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    struct TrackWaker(Arc<AtomicBool>);
+
+    impl Wake for TrackWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
     }
 
     fn init_test(name: &str) {
@@ -301,6 +340,17 @@ mod tests {
 
         fn size_hint(&self) -> (usize, Option<usize>) {
             (0, None)
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct AlwaysPending;
+
+    impl Stream for AlwaysPending {
+        type Item = usize;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Pending
         }
     }
 
@@ -676,5 +726,60 @@ mod tests {
         tracing::info!(total = items.len(), "merge total");
         crate::assert_with_log!(items == expected, "no loss", expected, items);
         crate::test_complete!("merge_backpressure_resume_no_loss");
+    }
+
+    #[test]
+    fn merge_yields_cooperatively_when_scan_budget_is_exhausted() {
+        init_test("merge_yields_cooperatively_when_scan_budget_is_exhausted");
+        let stream_count = MERGE_COOPERATIVE_POLL_BUDGET + 5;
+        let streams: Vec<BoxedStream<usize>> = (0..stream_count)
+            .map(|_| boxed_stream(AlwaysPending))
+            .collect();
+        let mut stream = merge(streams);
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TrackWaker(woke.clone())));
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut stream).poll_next(&mut cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Pending),
+            "first poll yields cooperatively",
+            "Poll::Pending",
+            first
+        );
+        crate::assert_with_log!(
+            woke.load(Ordering::SeqCst),
+            "self-wake requested",
+            true,
+            woke.load(Ordering::SeqCst)
+        );
+        crate::assert_with_log!(
+            stream.next_index == MERGE_COOPERATIVE_POLL_BUDGET,
+            "resume cursor advanced to budget boundary",
+            MERGE_COOPERATIVE_POLL_BUDGET,
+            stream.next_index
+        );
+
+        woke.store(false, Ordering::SeqCst);
+        let second = Pin::new(&mut stream).poll_next(&mut cx);
+        crate::assert_with_log!(
+            matches!(second, Poll::Pending),
+            "second poll also yields cooperatively",
+            "Poll::Pending",
+            second
+        );
+        crate::assert_with_log!(
+            woke.load(Ordering::SeqCst),
+            "second self-wake requested",
+            true,
+            woke.load(Ordering::SeqCst)
+        );
+        crate::assert_with_log!(
+            stream.next_index == (MERGE_COOPERATIVE_POLL_BUDGET * 2) % stream_count,
+            "resume cursor keeps rotating across polls",
+            (MERGE_COOPERATIVE_POLL_BUDGET * 2) % stream_count,
+            stream.next_index
+        );
+        crate::test_complete!("merge_yields_cooperatively_when_scan_budget_is_exhausted");
     }
 }
