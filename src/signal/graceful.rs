@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use super::ShutdownReceiver;
 use crate::combinator::{Either, Select};
+use crate::time::{timeout, wall_now};
 
 fn wall_clock_now() -> std::time::Instant {
     std::time::Instant::now()
@@ -182,9 +183,58 @@ impl GracefulBuilder {
     /// Runs the given future with graceful shutdown support.
     pub async fn run<F, T>(self, fut: F) -> GracefulOutcome<T>
     where
-        F: Future<Output = T> + Unpin,
+        F: Future<Output = T>,
     {
-        with_graceful_shutdown(fut, self.shutdown).await
+        let Self {
+            mut shutdown,
+            config,
+        } = self;
+
+        if shutdown.is_shutting_down() {
+            if config.log_events {
+                tracing::info!("graceful builder observed pre-signaled shutdown");
+            }
+            return GracefulOutcome::ShutdownSignaled;
+        }
+
+        let mut fut = Box::pin(fut);
+        let mut shutdown_fut = Box::pin(async { shutdown.wait().await });
+
+        match Select::new(fut.as_mut(), shutdown_fut.as_mut()).await {
+            Either::Left(result) => GracefulOutcome::Completed(result),
+            Either::Right(()) => {
+                if config.log_events {
+                    tracing::info!(grace_period = ?config.grace_period, "graceful shutdown signaled");
+                }
+
+                if config.grace_period.is_zero() {
+                    return GracefulOutcome::ShutdownSignaled;
+                }
+
+                timeout(wall_now(), config.grace_period, fut.as_mut())
+                    .await
+                    .map_or_else(
+                        |_| {
+                            if config.log_events {
+                                tracing::warn!(
+                                    grace_period = ?config.grace_period,
+                                    "grace period elapsed before task completed"
+                                );
+                            }
+                            GracefulOutcome::ShutdownSignaled
+                        },
+                        |result| {
+                            if config.log_events {
+                                tracing::info!(
+                                    grace_period = ?config.grace_period,
+                                    "task completed within graceful shutdown grace period"
+                                );
+                            }
+                            GracefulOutcome::Completed(result)
+                        },
+                    )
+            }
+        }
     }
 
     /// Returns the configuration.
@@ -277,6 +327,7 @@ impl GracePeriodGuard {
 mod tests {
     use super::*;
     use crate::signal::ShutdownController;
+    use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -302,6 +353,64 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    struct ShutdownThenComplete {
+        shutdown: Option<ShutdownController>,
+        remaining_pending_polls: usize,
+        value: i32,
+    }
+
+    impl ShutdownThenComplete {
+        fn new(shutdown: ShutdownController, remaining_pending_polls: usize, value: i32) -> Self {
+            Self {
+                shutdown: Some(shutdown),
+                remaining_pending_polls,
+                value,
+            }
+        }
+    }
+
+    impl Future for ShutdownThenComplete {
+        type Output = i32;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if let Some(shutdown) = self.shutdown.take() {
+                shutdown.shutdown();
+            }
+
+            if self.remaining_pending_polls == 0 {
+                return Poll::Ready(self.value);
+            }
+
+            self.remaining_pending_polls -= 1;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+
+    struct ShutdownThenPending {
+        shutdown: Option<ShutdownController>,
+    }
+
+    impl ShutdownThenPending {
+        fn new(shutdown: ShutdownController) -> Self {
+            Self {
+                shutdown: Some(shutdown),
+            }
+        }
+    }
+
+    impl Future for ShutdownThenPending {
+        type Output = i32;
+
+        fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if let Some(shutdown) = self.shutdown.take() {
+                shutdown.shutdown();
+            }
+
+            Poll::Pending
+        }
     }
 
     static TEST_GRACE_TIME_BASE: OnceLock<std::time::Instant> = OnceLock::new();
@@ -373,7 +482,14 @@ mod tests {
                 let shutdown = outcome.is_shutdown();
                 crate::assert_with_log!(shutdown, "shutdown", true, shutdown);
             }
-            Poll::Pending => panic!("Expected Ready"),
+            Poll::Pending => {
+                crate::assert_with_log!(
+                    false,
+                    "already-shutdown future should be ready",
+                    true,
+                    false
+                );
+            }
         }
         crate::test_complete!("with_graceful_shutdown_already_shutdown");
     }
@@ -398,6 +514,46 @@ mod tests {
         let log_events = builder.config().log_events;
         crate::assert_with_log!(!log_events, "log_events false", false, log_events);
         crate::test_complete!("graceful_builder_config");
+    }
+
+    #[test]
+    fn graceful_builder_run_completes_within_grace_period_after_shutdown() {
+        init_test("graceful_builder_run_completes_within_grace_period_after_shutdown");
+        let controller = ShutdownController::new();
+        let receiver = controller.subscribe();
+        let builder = GracefulBuilder::new(receiver)
+            .grace_period(Duration::from_millis(50))
+            .logging(false);
+        let fut = ShutdownThenComplete::new(controller, 1, 42);
+        let result = futures_lite::future::block_on(builder.run(fut));
+
+        crate::assert_with_log!(
+            matches!(result, GracefulOutcome::Completed(42)),
+            "future completed during grace period",
+            "GracefulOutcome::Completed(42)",
+            result
+        );
+        crate::test_complete!("graceful_builder_run_completes_within_grace_period_after_shutdown");
+    }
+
+    #[test]
+    fn graceful_builder_run_returns_shutdown_after_grace_period_elapses() {
+        init_test("graceful_builder_run_returns_shutdown_after_grace_period_elapses");
+        let controller = ShutdownController::new();
+        let receiver = controller.subscribe();
+        let builder = GracefulBuilder::new(receiver)
+            .grace_period(Duration::from_millis(10))
+            .logging(false);
+        let fut = ShutdownThenPending::new(controller);
+        let result = futures_lite::future::block_on(builder.run(fut));
+
+        crate::assert_with_log!(
+            matches!(result, GracefulOutcome::ShutdownSignaled),
+            "future interrupted after grace period elapsed",
+            "GracefulOutcome::ShutdownSignaled",
+            result
+        );
+        crate::test_complete!("graceful_builder_run_returns_shutdown_after_grace_period_elapses");
     }
 
     #[test]
