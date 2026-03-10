@@ -34,7 +34,6 @@ use crate::types::{ObligationId, RegionId, TaskId};
 use crate::util::det_hash::DetHashSet;
 use crate::util::{DetEntropy, DetRng};
 use parking_lot::Mutex;
-use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
@@ -2094,7 +2093,7 @@ const DEFAULT_LAB_CANCEL_STREAK_LIMIT: usize = 16;
 /// runtime to simulate parallel execution deterministically.
 pub struct LabScheduler {
     workers: Vec<crate::runtime::scheduler::PriorityScheduler>,
-    scheduled: HashSet<TaskId>,
+    scheduled: DetHashSet<TaskId>,
     /// Task → worker assignment, indexed by arena slot.
     assignments: Vec<Option<usize>>,
     next_worker: usize,
@@ -2110,7 +2109,7 @@ impl LabScheduler {
             workers: (0..count)
                 .map(|_| crate::runtime::scheduler::PriorityScheduler::new())
                 .collect(),
-            scheduled: HashSet::new(),
+            scheduled: DetHashSet::default(),
             assignments: Vec::new(),
             next_worker: 0,
             cancel_streak: vec![0; count],
