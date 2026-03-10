@@ -351,7 +351,7 @@ where
 {
     type Response = S::Response;
     type Error = RateLimitError<S::Error>;
-    type Future = RateLimitFuture<S::Future>;
+    type Future = RateLimitFuture<S::Future, S::Error>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let now = (self.time_getter)();
@@ -360,11 +360,12 @@ where
 
     #[inline]
     fn call(&mut self, req: Request) -> Self::Future {
-        let had_reserved_token = self.reserved_tokens > 0;
-        if had_reserved_token {
-            self.reserved_tokens -= 1;
+        if self.reserved_tokens == 0 {
+            return RateLimitFuture::immediate_error(RateLimitError::RateLimitExceeded);
         }
-        let mut token_restore_guard = ReservedTokenGuard::new(&mut self.tokens, had_reserved_token);
+
+        self.reserved_tokens -= 1;
+        let mut token_restore_guard = ReservedTokenGuard::new(&mut self.tokens, true);
         let future = self.inner.call(req);
         token_restore_guard.defuse();
         RateLimitFuture::new(future)
@@ -395,19 +396,26 @@ impl Drop for ReservedTokenGuard<'_> {
 }
 
 /// Future returned by [`RateLimit`] service.
-pub struct RateLimitFuture<F> {
-    inner: F,
+pub enum RateLimitFuture<F, E> {
+    Inner(F),
+    Error(Option<RateLimitError<E>>),
 }
 
-impl<F> RateLimitFuture<F> {
+impl<F, E> RateLimitFuture<F, E> {
     /// Creates a new rate-limited future.
     #[must_use]
     pub fn new(inner: F) -> Self {
-        Self { inner }
+        Self::Inner(inner)
+    }
+
+    /// Creates a future that resolves to an immediate rate-limit error.
+    #[must_use]
+    pub fn immediate_error(error: RateLimitError<E>) -> Self {
+        Self::Error(Some(error))
     }
 }
 
-impl<F, T, E> Future for RateLimitFuture<F>
+impl<F, T, E> Future for RateLimitFuture<F, E>
 where
     F: Future<Output = Result<T, E>> + Unpin,
 {
@@ -415,20 +423,34 @@ where
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        match Pin::new(&mut this.inner).poll(cx) {
-            Poll::Ready(Ok(response)) => Poll::Ready(Ok(response)),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(RateLimitError::Inner(e))),
-            Poll::Pending => Poll::Pending,
+        match self.get_mut() {
+            Self::Inner(inner) => match Pin::new(inner).poll(cx) {
+                Poll::Ready(Ok(response)) => Poll::Ready(Ok(response)),
+                Poll::Ready(Err(e)) => Poll::Ready(Err(RateLimitError::Inner(e))),
+                Poll::Pending => Poll::Pending,
+            },
+            Self::Error(error) => Poll::Ready(Err(
+                error
+                    .take()
+                    .expect("rate-limit future immediate error already taken"),
+            )),
         }
     }
 }
 
-impl<F: std::fmt::Debug> std::fmt::Debug for RateLimitFuture<F> {
+impl<F: std::fmt::Debug, E> std::fmt::Debug for RateLimitFuture<F, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RateLimitFuture")
-            .field("inner", &self.inner)
-            .finish()
+        match self {
+            Self::Inner(inner) => f
+                .debug_struct("RateLimitFuture")
+                .field("state", &"Inner")
+                .field("inner", inner)
+                .finish(),
+            Self::Error(_) => f
+                .debug_struct("RateLimitFuture")
+                .field("state", &"ImmediateError")
+                .finish(),
+        }
     }
 }
 
@@ -826,6 +848,31 @@ mod tests {
     }
 
     #[test]
+    fn call_without_poll_ready_returns_rate_limit_exceeded() {
+        init_test("call_without_poll_ready_returns_rate_limit_exceeded");
+        let mut svc = RateLimit::new(PanicOnCallService, 1, Duration::from_secs(1));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut future = svc.call(());
+            Pin::new(&mut future).poll(&mut cx)
+        }))
+        .expect("call without poll_ready must not invoke inner service");
+
+        let limited = matches!(result, Poll::Ready(Err(RateLimitError::RateLimitExceeded)));
+        crate::assert_with_log!(limited, "rate limit exceeded", true, limited);
+        crate::assert_with_log!(
+            svc.available_tokens() == 1,
+            "available tokens unchanged",
+            1,
+            svc.available_tokens()
+        );
+        crate::assert_with_log!(svc.reserved_tokens == 0, "reserved", 0, svc.reserved_tokens);
+        crate::test_complete!("call_without_poll_ready_returns_rate_limit_exceeded");
+    }
+
+    #[test]
     fn zero_period_keeps_bucket_full() {
         init_test("zero_period_keeps_bucket_full");
         let mut svc = RateLimit::with_time_getter(EchoService, 2, Duration::ZERO, test_time);
@@ -933,7 +980,8 @@ mod tests {
 
     #[test]
     fn rate_limit_future_debug() {
-        let future = RateLimitFuture::new(std::future::ready(Ok::<i32, &str>(42)));
+        let future: RateLimitFuture<_, &str> =
+            RateLimitFuture::new(std::future::ready(Ok::<i32, &str>(42)));
         let dbg = format!("{future:?}");
         assert!(dbg.contains("RateLimitFuture"));
     }
