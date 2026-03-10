@@ -9,6 +9,10 @@ use std::time::Duration;
 use super::ShutdownReceiver;
 use crate::combinator::{Either, Select};
 
+fn wall_clock_now() -> std::time::Instant {
+    std::time::Instant::now()
+}
+
 /// Outcome of a task run with graceful shutdown support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GracefulOutcome<T> {
@@ -198,6 +202,7 @@ impl GracefulBuilder {
 pub struct GracePeriodGuard {
     started_at: std::time::Instant,
     duration: Duration,
+    time_getter: fn() -> std::time::Instant,
 }
 
 impl GracePeriodGuard {
@@ -205,22 +210,48 @@ impl GracePeriodGuard {
     #[must_use]
     pub fn new(duration: Duration) -> Self {
         Self {
-            started_at: std::time::Instant::now(),
+            started_at: wall_clock_now(),
             duration,
+            time_getter: wall_clock_now,
+        }
+    }
+
+    /// Creates a new grace period guard with a custom time source.
+    ///
+    /// This is useful for deterministic tests and virtual-time harnesses that
+    /// should not depend on wall-clock progression.
+    #[must_use]
+    pub fn with_time_getter(duration: Duration, time_getter: fn() -> std::time::Instant) -> Self {
+        Self {
+            started_at: time_getter(),
+            duration,
+            time_getter,
         }
     }
 
     /// Returns the remaining time in the grace period.
     #[must_use]
     pub fn remaining(&self) -> Duration {
-        let elapsed = self.started_at.elapsed();
+        self.remaining_at((self.time_getter)())
+    }
+
+    /// Returns the remaining time in the grace period at a specific instant.
+    #[must_use]
+    pub fn remaining_at(&self, now: std::time::Instant) -> Duration {
+        let elapsed = now.saturating_duration_since(self.started_at);
         self.duration.saturating_sub(elapsed)
     }
 
     /// Returns `true` if the grace period has elapsed.
     #[must_use]
     pub fn is_elapsed(&self) -> bool {
-        self.started_at.elapsed() >= self.duration
+        self.is_elapsed_at((self.time_getter)())
+    }
+
+    /// Returns `true` if the grace period has elapsed at a specific instant.
+    #[must_use]
+    pub fn is_elapsed_at(&self, now: std::time::Instant) -> bool {
+        now.saturating_duration_since(self.started_at) >= self.duration
     }
 
     /// Returns the total duration of the grace period.
@@ -234,6 +265,12 @@ impl GracePeriodGuard {
     pub fn started_at(&self) -> std::time::Instant {
         self.started_at
     }
+
+    /// Returns the time source used by this guard.
+    #[must_use]
+    pub const fn time_getter(&self) -> fn() -> std::time::Instant {
+        self.time_getter
+    }
 }
 
 #[cfg(test)]
@@ -241,8 +278,9 @@ mod tests {
     use super::*;
     use crate::signal::ShutdownController;
     use std::sync::Arc;
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
-    use std::thread;
 
     struct NoopWaker;
 
@@ -264,6 +302,15 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    static TEST_GRACE_TIME_BASE: OnceLock<std::time::Instant> = OnceLock::new();
+    static TEST_GRACE_TIME_NANOS: AtomicU64 = AtomicU64::new(0);
+
+    fn test_grace_time_now() -> std::time::Instant {
+        let base = *TEST_GRACE_TIME_BASE.get_or_init(std::time::Instant::now);
+        let offset = Duration::from_nanos(TEST_GRACE_TIME_NANOS.load(Ordering::SeqCst));
+        base.checked_add(offset).unwrap_or(base)
     }
 
     #[test]
@@ -356,17 +403,33 @@ mod tests {
     #[test]
     fn grace_period_guard() {
         init_test("grace_period_guard");
-        let guard = GracePeriodGuard::new(Duration::from_millis(100));
+        TEST_GRACE_TIME_NANOS.store(0, Ordering::SeqCst);
+        let guard =
+            GracePeriodGuard::with_time_getter(Duration::from_millis(100), test_grace_time_now);
         let elapsed = guard.is_elapsed();
         crate::assert_with_log!(!elapsed, "not elapsed", false, elapsed);
         let remaining = guard.remaining();
-        let within = remaining <= Duration::from_millis(100);
-        crate::assert_with_log!(within, "remaining <= 100ms", true, within);
+        crate::assert_with_log!(
+            remaining == Duration::from_millis(100),
+            "remaining == 100ms",
+            Duration::from_millis(100),
+            remaining
+        );
 
-        thread::sleep(Duration::from_millis(150));
-
+        TEST_GRACE_TIME_NANOS.store(40_000_000, Ordering::SeqCst);
         let elapsed = guard.is_elapsed();
-        crate::assert_with_log!(elapsed, "elapsed", true, elapsed);
+        crate::assert_with_log!(!elapsed, "not elapsed at 40ms", false, elapsed);
+        let remaining = guard.remaining();
+        crate::assert_with_log!(
+            remaining == Duration::from_millis(60),
+            "remaining == 60ms",
+            Duration::from_millis(60),
+            remaining
+        );
+
+        TEST_GRACE_TIME_NANOS.store(150_000_000, Ordering::SeqCst);
+        let elapsed = guard.is_elapsed();
+        crate::assert_with_log!(elapsed, "elapsed at 150ms", true, elapsed);
         let remaining = guard.remaining();
         crate::assert_with_log!(
             remaining == Duration::ZERO,
@@ -477,10 +540,29 @@ mod tests {
 
     #[test]
     fn grace_period_guard_started_at_accessor() {
-        let before = std::time::Instant::now();
-        let guard = GracePeriodGuard::new(Duration::from_secs(1));
-        let after = std::time::Instant::now();
-        assert!(guard.started_at() >= before);
-        assert!(guard.started_at() <= after);
+        TEST_GRACE_TIME_NANOS.store(3_000_000, Ordering::SeqCst);
+        let guard = GracePeriodGuard::with_time_getter(Duration::from_secs(1), test_grace_time_now);
+        assert_eq!(guard.started_at(), test_grace_time_now());
+    }
+
+    #[test]
+    fn grace_period_guard_remaining_and_elapsed_at() {
+        TEST_GRACE_TIME_NANOS.store(0, Ordering::SeqCst);
+        let guard =
+            GracePeriodGuard::with_time_getter(Duration::from_millis(250), test_grace_time_now);
+
+        let at_100 = guard
+            .started_at()
+            .checked_add(Duration::from_millis(100))
+            .expect("test instant should not overflow");
+        assert_eq!(guard.remaining_at(at_100), Duration::from_millis(150));
+        assert!(!guard.is_elapsed_at(at_100));
+
+        let at_260 = guard
+            .started_at()
+            .checked_add(Duration::from_millis(260))
+            .expect("test instant should not overflow");
+        assert_eq!(guard.remaining_at(at_260), Duration::ZERO);
+        assert!(guard.is_elapsed_at(at_260));
     }
 }
