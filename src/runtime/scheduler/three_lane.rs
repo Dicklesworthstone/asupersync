@@ -723,6 +723,7 @@ pub(crate) fn schedule_cancel_on_current_local(task: TaskId, priority: u8) -> bo
                 if let Some(pos) = local_ready_guard.iter().position(|t| *t == task) {
                     local_ready_guard.swap_remove(pos);
                 }
+                drop(local_ready_guard);
                 local.lock().move_to_cancel_lane(task, priority);
             } else {
                 local.lock().move_to_cancel_lane(task, priority);
@@ -1113,6 +1114,7 @@ impl ThreeLaneScheduler {
                         if let Some(pos) = local_ready_guard.iter().position(|t| *t == task) {
                             local_ready_guard.swap_remove(pos);
                         }
+                        drop(local_ready_guard);
                         local.lock().move_to_cancel_lane(task, priority);
                     } else {
                         local.lock().move_to_cancel_lane(task, priority);
@@ -2706,6 +2708,7 @@ impl ThreeLaneWorker {
             if let Some(pos) = local_ready_guard.iter().position(|t| *t == task) {
                 local_ready_guard.swap_remove(pos);
             }
+            drop(local_ready_guard);
             let mut local = self.local.lock();
             local.move_to_cancel_lane(task, priority);
         }
@@ -3203,6 +3206,7 @@ impl ThreeLaneWorker {
                             if let Some(pos) = local_ready_guard.iter().position(|t| *t == task_id) {
                                 local_ready_guard.swap_remove(pos);
                             }
+                            drop(local_ready_guard);
                             let mut local = self.local.lock();
                             local.schedule_cancel(task_id, cancel_priority);
                         } else {
@@ -3485,6 +3489,7 @@ impl ThreeLaneLocalCancelWaker {
             if let Some(pos) = local_ready_guard.iter().position(|t| *t == self.task_id) {
                 local_ready_guard.swap_remove(pos);
             }
+            drop(local_ready_guard);
             let mut local = self.local.lock();
             local.move_to_cancel_lane(self.task_id, priority);
         }
