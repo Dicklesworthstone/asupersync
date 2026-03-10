@@ -267,21 +267,18 @@ impl<S> RateLimit<S> {
 
     /// Polls readiness with an explicit time value.
     ///
-    /// Single lock acquisition: refill + acquire in one critical section.
-    pub fn poll_ready_with_time(
+    /// This mirrors [`Service::poll_ready`] while taking the current logical
+    /// time as an explicit parameter for deterministic tests.
+    pub fn poll_ready_with_time<Request>(
         &mut self,
         now: Time,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<(), RateLimitError<std::convert::Infallible>>>
+    ) -> Poll<Result<(), RateLimitError<S::Error>>>
     where
-        S: Service<()>,
+        S: Service<Request>,
     {
         self.refill_state(now);
-        if self.tokens > 0 {
-            self.tokens -= 1;
-            self.sleep = None;
-            Poll::Ready(Ok(()))
-        } else {
+        if self.tokens == 0 {
             // Wake up caller to retry later
             if let Some(last) = self.last_refill {
                 let period_nanos = self.period.as_nanos().min(u128::from(u64::MAX)) as u64;
@@ -301,7 +298,21 @@ impl<S> RateLimit<S> {
             } else {
                 cx.waker().wake_by_ref();
             }
-            Poll::Pending
+            return Poll::Pending;
+        }
+
+        self.sleep = None;
+        self.tokens -= 1;
+
+        match self.inner.poll_ready(cx).map_err(RateLimitError::Inner) {
+            Poll::Ready(Ok(())) => {
+                self.reserved_tokens += 1;
+                Poll::Ready(Ok(()))
+            }
+            other => {
+                self.tokens += 1;
+                other
+            }
         }
     }
 }
@@ -344,45 +355,7 @@ where
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         let now = (self.time_getter)();
-
-        // Refill + eagerly acquire token (no lock — `&mut self` is exclusive).
-        self.refill_state(now);
-        if self.tokens == 0 {
-            if let Some(last) = self.last_refill {
-                let period_nanos = self.period.as_nanos().min(u128::from(u64::MAX)) as u64;
-                let next_deadline = last.saturating_add_nanos(period_nanos);
-
-                let need_new_sleep = self
-                    .sleep
-                    .as_ref()
-                    .is_none_or(|s| s.deadline() != next_deadline);
-                if need_new_sleep {
-                    self.sleep = Some(crate::time::Sleep::new(next_deadline));
-                }
-
-                if let Some(sleep) = &mut self.sleep {
-                    let _ = std::pin::Pin::new(sleep).poll(cx);
-                }
-            } else {
-                cx.waker().wake_by_ref();
-            }
-            return Poll::Pending;
-        }
-        self.sleep = None;
-        self.tokens -= 1;
-
-        // Token reserved. Check inner readiness.
-        match self.inner.poll_ready(cx).map_err(RateLimitError::Inner) {
-            Poll::Ready(Ok(())) => {
-                self.reserved_tokens += 1;
-                Poll::Ready(Ok(()))
-            }
-            other => {
-                // Inner not ready or errored — return the reserved token.
-                self.tokens += 1;
-                other
-            }
-        }
+        self.poll_ready_with_time::<Request>(now, cx)
     }
 
     #[inline]
@@ -752,6 +725,104 @@ mod tests {
         let available = svc.available_tokens();
         crate::assert_with_log!(available == 4, "available", 4, available);
         crate::test_complete!("poll_ready_uses_time_getter");
+    }
+
+    #[test]
+    fn poll_ready_with_time_respects_inner_pending_and_reserves_token_on_ready() {
+        init_test("poll_ready_with_time_respects_inner_pending_and_reserves_token_on_ready");
+        let ready = Arc::new(AtomicBool::new(false));
+        let mut svc = RateLimit::new(
+            ToggleReadyService::new(ready.clone(), false),
+            1,
+            Duration::from_secs(1),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = svc.poll_ready_with_time::<()>(Time::from_secs(0), &mut cx);
+        crate::assert_with_log!(first.is_pending(), "pending", true, first.is_pending());
+        crate::assert_with_log!(
+            svc.available_tokens() == 1,
+            "available",
+            1,
+            svc.available_tokens()
+        );
+        crate::assert_with_log!(svc.reserved_tokens == 0, "reserved", 0, svc.reserved_tokens);
+
+        ready.store(true, Ordering::SeqCst);
+        let second = svc.poll_ready_with_time::<()>(Time::from_secs(0), &mut cx);
+        let ok = matches!(second, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ok, "ready ok", true, ok);
+        crate::assert_with_log!(
+            svc.available_tokens() == 0,
+            "available",
+            0,
+            svc.available_tokens()
+        );
+        crate::assert_with_log!(svc.reserved_tokens == 1, "reserved", 1, svc.reserved_tokens);
+        crate::test_complete!(
+            "poll_ready_with_time_respects_inner_pending_and_reserves_token_on_ready"
+        );
+    }
+
+    #[test]
+    fn poll_ready_with_time_propagates_inner_error() {
+        init_test("poll_ready_with_time_propagates_inner_error");
+        let ready = Arc::new(AtomicBool::new(true));
+        let mut svc = RateLimit::new(
+            ToggleReadyService::new(ready, true),
+            1,
+            Duration::from_secs(1),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let result = svc.poll_ready_with_time::<()>(Time::from_secs(0), &mut cx);
+        let err = matches!(
+            result,
+            Poll::Ready(Err(RateLimitError::Inner("inner error")))
+        );
+        crate::assert_with_log!(err, "inner err", true, err);
+        crate::assert_with_log!(
+            svc.available_tokens() == 1,
+            "available",
+            1,
+            svc.available_tokens()
+        );
+        crate::assert_with_log!(svc.reserved_tokens == 0, "reserved", 0, svc.reserved_tokens);
+        crate::test_complete!("poll_ready_with_time_propagates_inner_error");
+    }
+
+    #[test]
+    fn poll_ready_with_time_reserved_token_restores_on_call_panic() {
+        init_test("poll_ready_with_time_reserved_token_restores_on_call_panic");
+        let mut svc = RateLimit::new(PanicOnCallService, 1, Duration::from_secs(1));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let ready = svc.poll_ready_with_time::<()>(Time::from_secs(0), &mut cx);
+        let ok = matches!(ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ok, "ready ok", true, ok);
+        crate::assert_with_log!(
+            svc.available_tokens() == 0,
+            "available after reserve",
+            0,
+            svc.available_tokens()
+        );
+        crate::assert_with_log!(svc.reserved_tokens == 1, "reserved", 1, svc.reserved_tokens);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _future = svc.call(());
+        }));
+        let panicked = panic.is_err();
+        crate::assert_with_log!(panicked, "inner call panicked", true, panicked);
+        crate::assert_with_log!(
+            svc.available_tokens() == 1,
+            "available after panic",
+            1,
+            svc.available_tokens()
+        );
+        crate::test_complete!("poll_ready_with_time_reserved_token_restores_on_call_panic");
     }
 
     #[test]
