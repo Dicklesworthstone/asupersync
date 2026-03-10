@@ -24,6 +24,12 @@ fn wall_clock_now() -> Time {
 /// executor turn if every symbol is rejected by the predicate.
 const FILTER_REJECTION_BUDGET: usize = 64;
 
+/// Cooperative budget for symbols collected into a set in a single poll.
+///
+/// Without this cap, `collect_to_set()` can monopolize one executor turn when
+/// the upstream stream is always-ready for long runs.
+const COLLECT_TO_SET_COOPERATIVE_BUDGET: usize = 1024;
+
 fn duration_to_nanos(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
@@ -174,10 +180,16 @@ impl<S: SymbolStream + Unpin + ?Sized> Future for CollectToSetFuture<'_, S> {
     type Output = Result<usize, StreamError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut collected_this_poll = 0usize;
         loop {
             match Pin::new(&mut *self.stream).poll_next(cx) {
                 Poll::Ready(Some(Ok(symbol))) => {
                     self.set.insert(symbol.into_symbol());
+                    collected_this_poll += 1;
+                    if collected_this_poll >= COLLECT_TO_SET_COOPERATIVE_BUDGET {
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
                 }
                 Poll::Ready(Some(Err(e))) => return Poll::Ready(Err(e)),
                 Poll::Ready(None) => return Poll::Ready(Ok(self.set.len())),
@@ -674,6 +686,38 @@ mod tests {
         }
     }
 
+    struct AlwaysReadySymbolStream {
+        next_esi: u32,
+        end_esi: u32,
+        emitted: Arc<AtomicUsize>,
+    }
+
+    impl AlwaysReadySymbolStream {
+        fn new(total: usize, emitted: Arc<AtomicUsize>) -> Self {
+            Self {
+                next_esi: 0,
+                end_esi: total as u32,
+                emitted,
+            }
+        }
+    }
+
+    impl SymbolStream for AlwaysReadySymbolStream {
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
+            if self.next_esi >= self.end_esi {
+                return Poll::Ready(None);
+            }
+
+            let esi = self.next_esi;
+            self.next_esi = self.next_esi.saturating_add(1);
+            self.emitted.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(Some(Ok(create_symbol(esi))))
+        }
+    }
+
     struct ErrorStream {
         returned: bool,
     }
@@ -764,6 +808,63 @@ mod tests {
         crate::assert_with_log!(count == 2, "unique count", 2usize, count);
         crate::assert_with_log!(set.len() == 2, "set size", 2usize, set.len());
         crate::test_complete!("test_collect_to_set_deduplicates_and_counts");
+    }
+
+    #[test]
+    fn test_collect_to_set_yields_after_budget_on_always_ready_stream() {
+        init_test("test_collect_to_set_yields_after_budget_on_always_ready_stream");
+        let emitted = Arc::new(AtomicUsize::new(0));
+        let total = COLLECT_TO_SET_COOPERATIVE_BUDGET + 5;
+        let mut stream = AlwaysReadySymbolStream::new(total, Arc::clone(&emitted));
+        let mut set = SymbolSet::new();
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = flagged_waker(Arc::clone(&woke));
+        let mut context = Context::from_waker(&waker);
+
+        {
+            let mut future = stream.collect_to_set(&mut set);
+            let mut future = Pin::new(&mut future);
+            let first = future.as_mut().poll(&mut context);
+            crate::assert_with_log!(
+                matches!(first, Poll::Pending),
+                "first poll yields cooperatively",
+                true,
+                matches!(first, Poll::Pending)
+            );
+        }
+
+        crate::assert_with_log!(
+            woke.load(Ordering::SeqCst),
+            "cooperative yield self-wakes",
+            true,
+            woke.load(Ordering::SeqCst)
+        );
+        crate::assert_with_log!(
+            emitted.load(Ordering::SeqCst) == COLLECT_TO_SET_COOPERATIVE_BUDGET,
+            "drained symbols bounded by budget",
+            COLLECT_TO_SET_COOPERATIVE_BUDGET,
+            emitted.load(Ordering::SeqCst)
+        );
+        crate::assert_with_log!(
+            set.len() == COLLECT_TO_SET_COOPERATIVE_BUDGET,
+            "partial set retained across yield",
+            COLLECT_TO_SET_COOPERATIVE_BUDGET,
+            set.len()
+        );
+
+        {
+            let mut future = stream.collect_to_set(&mut set);
+            let mut future = Pin::new(&mut future);
+            let second = future.as_mut().poll(&mut context);
+            crate::assert_with_log!(
+                matches!(second, Poll::Ready(Ok(count)) if count == total),
+                "second poll completes collection",
+                total,
+                second
+            );
+        }
+        crate::assert_with_log!(set.len() == total, "set fully populated", total, set.len());
+        crate::test_complete!("test_collect_to_set_yields_after_budget_on_always_ready_stream");
     }
 
     #[test]

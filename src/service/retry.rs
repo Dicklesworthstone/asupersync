@@ -9,6 +9,14 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+/// Cooperative budget for immediately completed retry attempts in a single
+/// outer poll.
+///
+/// Without this bound, an always-ready inner service combined with an
+/// immediate retry policy can monopolize one executor turn while it burns
+/// through a long retry chain.
+const RETRY_COOPERATIVE_BUDGET: usize = 1024;
+
 /// A policy that determines whether and how to retry a request.
 ///
 /// The policy is consulted after each request completes to determine if
@@ -211,6 +219,7 @@ where
     #[allow(clippy::too_many_lines)]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        let mut completed_attempts_this_poll = 0usize;
 
         loop {
             let state = std::mem::replace(&mut this.state, RetryState::Done);
@@ -284,12 +293,18 @@ where
                                 return Poll::Ready(result);
                             }
                             Some(retry_future) => {
+                                completed_attempts_this_poll += 1;
                                 this.state = RetryState::Checking {
                                     service,
                                     request,
                                     result: Some(result),
                                     retry_future,
                                 };
+
+                                if completed_attempts_this_poll >= RETRY_COOPERATIVE_BUDGET {
+                                    cx.waker().wake_by_ref();
+                                    return Poll::Pending;
+                                }
                             }
                         }
                     }
@@ -441,7 +456,7 @@ mod tests {
     use super::*;
     use crate::service::concurrency_limit::ConcurrencyLimitLayer;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -454,6 +469,18 @@ mod tests {
     impl Wake for NoopWaker {
         fn wake(self: Arc<Self>) {}
         fn wake_by_ref(self: &Arc<Self>) {}
+    }
+
+    struct TrackWaker(Arc<AtomicBool>);
+
+    impl Wake for TrackWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
     }
 
     fn noop_waker() -> Waker {
@@ -730,6 +757,58 @@ mod tests {
         let count = calls.load(Ordering::SeqCst);
         crate::assert_with_log!(count == 3, "call count", 3, count);
         crate::test_complete!("retry_exhausts_and_returns_error");
+    }
+
+    #[test]
+    fn retry_yields_after_budget_on_immediate_retry_loop() {
+        init_test("retry_yields_after_budget_on_immediate_retry_loop");
+        let policy = LimitedRetry::<i32>::new(RETRY_COOPERATIVE_BUDGET);
+        let (svc, calls) = FailingService::new(RETRY_COOPERATIVE_BUDGET + 1);
+        let mut retry_svc = Retry::new(svc, policy);
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TrackWaker(woke.clone())));
+        let mut cx = Context::from_waker(&waker);
+
+        let _ = retry_svc.poll_ready(&mut cx);
+        let mut future = retry_svc.call(21);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Pending),
+            "first poll yields after cooperative budget",
+            "Poll::Pending",
+            first
+        );
+        let first_calls = calls.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            first_calls == RETRY_COOPERATIVE_BUDGET,
+            "retry attempts capped at cooperative budget",
+            RETRY_COOPERATIVE_BUDGET,
+            first_calls
+        );
+        let was_woken = woke.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            was_woken,
+            "self-wake requested after budget exhaustion",
+            true,
+            was_woken
+        );
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Err("service error"))),
+            "second poll resumes and returns the terminal error",
+            "Poll::Ready(Err(\"service error\"))",
+            second
+        );
+        let total_calls = calls.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            total_calls == RETRY_COOPERATIVE_BUDGET + 1,
+            "remaining retry completes on second poll",
+            RETRY_COOPERATIVE_BUDGET + 1,
+            total_calls
+        );
+        crate::test_complete!("retry_yields_after_budget_on_immediate_retry_loop");
     }
 
     #[test]
