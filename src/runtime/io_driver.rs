@@ -1896,7 +1896,7 @@ mod tests {
         let mut reg = driver
             .register(&source, Interest::READABLE, waker)
             .expect("register should succeed");
-        let driver_clone = driver.clone();
+        let driver_clone = driver;
 
         let join = std::thread::spawn(move || {
             let result = driver_clone.try_turn_with(Some(Duration::ZERO), |_event, _interest| {});
