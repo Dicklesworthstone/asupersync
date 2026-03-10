@@ -8,8 +8,8 @@
 use super::{Layer, Service};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::task::{Wake, Waker};
 
