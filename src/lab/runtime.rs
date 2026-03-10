@@ -31,6 +31,7 @@ use crate::trace::{TraceData, TraceEvent, check_refinement_firewall};
 use crate::trace::{canonicalize::trace_fingerprint, certificate::TraceCertificate};
 use crate::types::Time;
 use crate::types::{ObligationId, RegionId, TaskId};
+use crate::util::det_hash::DetHashSet;
 use crate::util::{DetEntropy, DetRng};
 use parking_lot::Mutex;
 use std::collections::HashSet;
@@ -648,7 +649,7 @@ pub struct LabRuntime {
     /// Lab reactor for deterministic I/O simulation.
     lab_reactor: Arc<LabReactor>,
     /// Tokens seen for I/O submissions (for trace emission).
-    seen_io_tokens: HashSet<usize>,
+    seen_io_tokens: DetHashSet<usize>,
     /// Scheduler.
     pub scheduler: Arc<Mutex<LabScheduler>>,
     /// Configuration.
@@ -714,7 +715,7 @@ impl LabRuntime {
         Self {
             state,
             lab_reactor,
-            seen_io_tokens: HashSet::new(),
+            seen_io_tokens: DetHashSet::default(),
             scheduler: Arc::new(Mutex::new(LabScheduler::new(config.worker_count))),
             config,
             rng,
@@ -1456,6 +1457,7 @@ impl LabRuntime {
                 // Enforce poll quota
                 if guard.budget.consume_poll().is_none() {
                     guard.cancel_requested = true;
+                    guard.fast_cancel.store(true, std::sync::atomic::Ordering::Release);
                     if let Some(existing) = &mut guard.cancel_reason {
                         existing.strengthen(&crate::types::CancelReason::poll_quota());
                     } else {

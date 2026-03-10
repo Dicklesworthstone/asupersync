@@ -1780,6 +1780,7 @@ impl<Caps> Cx<Caps> {
             }
 
             inner.cancel_requested = true;
+            inner.fast_cancel.store(true, std::sync::atomic::Ordering::Release);
             inner.cancel_reason = Some(reason);
             drop(inner);
             (region, task)
@@ -1829,6 +1830,7 @@ impl<Caps> Cx<Caps> {
             let reason = CancelReason::new(kind).with_region(region);
 
             inner.cancel_requested = true;
+            inner.fast_cancel.store(true, std::sync::atomic::Ordering::Release);
             inner.cancel_reason = Some(reason);
             region
         };
@@ -2018,6 +2020,7 @@ impl<Caps> Cx<Caps> {
     pub fn set_cancel_reason(&self, reason: CancelReason) {
         let mut inner = self.inner.write();
         inner.cancel_requested = true;
+        inner.fast_cancel.store(true, std::sync::atomic::Ordering::Release);
         inner.cancel_reason = Some(reason);
     }
 
@@ -2079,7 +2082,7 @@ impl<Caps> Cx<Caps> {
     where
         Caps: cap::HasTime,
     {
-        let race_fut = Box::pin(self.race(futures));
+        let race_fut = std::pin::pin!(self.race(futures));
         let now = self
             .handles
             .timer_driver

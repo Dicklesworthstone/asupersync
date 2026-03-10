@@ -102,6 +102,8 @@ pub struct CxInner {
     pub mask_depth: u32,
     /// Progress checkpoint state.
     pub checkpoint_state: CheckpointState,
+    /// Fast atomic flag for cancellation (avoids RwLock on wake hot path).
+    pub fast_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl CxInner {
@@ -120,6 +122,7 @@ impl CxInner {
             cancel_waker: None,
             mask_depth: 0,
             checkpoint_state: CheckpointState::new(),
+            fast_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }

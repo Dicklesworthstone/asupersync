@@ -1227,14 +1227,19 @@ impl<T> Future for JoinHandle<T> {
     }
 }
 
-struct CatchUnwind<F>(Pin<Box<F>>);
+#[allow(unsafe_code)]
+#[pin_project::pin_project]
+struct CatchUnwind<F> {
+    #[pin]
+    inner: F,
+}
 
 impl<F: Future> Future for CatchUnwind<F> {
     type Output = std::thread::Result<F::Output>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let inner = self.0.as_mut();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.poll(cx)));
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut this = self.project();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| this.inner.as_mut().poll(cx)));
         match result {
             Ok(Poll::Pending) => Poll::Pending,
             Ok(Poll::Ready(v)) => Poll::Ready(Ok(v)),
@@ -1499,7 +1504,7 @@ impl RuntimeInner {
         let wrapped = async move {
             // Ensure panics in the spawned task don't take down a worker thread. If the join
             // handle is awaited, we re-raise the original panic payload on the awaiter.
-            let result = CatchUnwind(Box::pin(future)).await;
+            let result = CatchUnwind { inner: future }.await;
             complete_task(&join_state_for_task, result);
         };
 

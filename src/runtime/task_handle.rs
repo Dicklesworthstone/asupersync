@@ -191,6 +191,7 @@ impl<T> TaskHandle<T> {
             let cancel_waker = {
                 let mut lock = inner.write();
                 lock.cancel_requested = true;
+                lock.fast_cancel.store(true, std::sync::atomic::Ordering::Release);
                 if let Some(existing) = &mut lock.cancel_reason {
                     existing.strengthen(&reason);
                 } else {
@@ -236,6 +237,7 @@ impl<T> JoinFuture<'_, T> {
             let cancel_waker = {
                 let mut lock = inner.write();
                 lock.cancel_requested = true;
+                lock.fast_cancel.store(true, std::sync::atomic::Ordering::Release);
                 if let Some(existing) = &mut lock.cancel_reason {
                     existing.strengthen(&reason);
                 } else {
@@ -418,6 +420,7 @@ mod tests {
         {
             let mut lock = cx.inner.write();
             lock.cancel_requested = true;
+            lock.fast_cancel.store(true, std::sync::atomic::Ordering::Release);
             lock.cancel_reason = Some(CancelReason::timeout());
         }
 

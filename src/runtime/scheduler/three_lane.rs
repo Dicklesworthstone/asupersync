@@ -2949,7 +2949,9 @@ impl ThreeLaneWorker {
         let waker = if let Some((w, _)) = cached_waker {
             w
         } else {
-            let weak_inner = cx_inner.as_ref().map(Arc::downgrade).unwrap_or_default();
+            let inner = cx_inner.as_ref().expect("cx_inner missing");
+            let fast_cancel = Arc::clone(&inner.read().fast_cancel);
+            let weak_inner = Arc::downgrade(inner);
             if is_local {
                 Waker::from(Arc::new(ThreeLaneLocalWaker {
                     task_id,
@@ -2957,6 +2959,7 @@ impl ThreeLaneWorker {
                     local: Arc::clone(&self.local),
                     local_ready: Arc::clone(&self.local_ready),
                     parker: self.parker.clone(),
+                    fast_cancel,
                     cx_inner: weak_inner,
                 }))
             } else {
@@ -2966,6 +2969,7 @@ impl ThreeLaneWorker {
                     global: Arc::clone(&self.global),
                     coordinator: Arc::clone(&self.coordinator),
                     priority,
+                    fast_cancel,
                     cx_inner: weak_inner,
                 }))
             }
@@ -2990,6 +2994,7 @@ impl ThreeLaneWorker {
                         local: Arc::clone(&self.local),
                         local_ready: Arc::clone(&self.local_ready),
                         parker: self.parker.clone(),
+                        fast_cancel: Arc::clone(&inner.read().fast_cancel),
                         cx_inner: Arc::downgrade(inner),
                     }))
                 } else {
@@ -2999,6 +3004,7 @@ impl ThreeLaneWorker {
                         wake_state: Arc::clone(&wake_state),
                         global: Arc::clone(&self.global),
                         coordinator: Arc::clone(&self.coordinator),
+                        fast_cancel: Arc::clone(&inner.read().fast_cancel),
                         cx_inner: Arc::downgrade(inner),
                     }))
                 };
@@ -3267,6 +3273,7 @@ struct ThreeLaneWaker {
     /// Cached priority to avoid `Weak::upgrade` + `RwLock::read` on every wake.
     /// Safe because `budget.priority` is immutable after task creation.
     priority: u8,
+    fast_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     cx_inner: Weak<RwLock<CxInner>>,
 }
 
@@ -3277,12 +3284,11 @@ impl ThreeLaneWaker {
             // Check for cancellation to route to correct lane (cancel > ready).
             // This ensures "Losers are drained" with high priority even during I/O wakeups.
             let mut priority = self.priority;
-            let mut is_cancelling = false;
+            let is_cancelling = self.fast_cancel.load(Ordering::Relaxed);
 
-            if let Some(inner) = self.cx_inner.upgrade() {
-                let guard = inner.read();
-                if guard.cancel_requested {
-                    is_cancelling = true;
+            if is_cancelling {
+                if let Some(inner) = self.cx_inner.upgrade() {
+                    let guard = inner.read();
                     if let Some(reason) = &guard.cancel_reason {
                         priority = reason.cleanup_budget().priority;
                     }
@@ -3317,6 +3323,7 @@ struct ThreeLaneLocalWaker {
     local: Arc<Mutex<PriorityScheduler>>,
     local_ready: Arc<LocalReadyQueue>,
     parker: Parker,
+    fast_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     cx_inner: Weak<RwLock<CxInner>>,
 }
 
@@ -3324,13 +3331,12 @@ impl ThreeLaneLocalWaker {
     #[inline]
     fn schedule(&self) {
         if self.wake_state.notify() {
-            let mut is_cancelling = false;
+            let is_cancelling = self.fast_cancel.load(Ordering::Relaxed);
             let mut priority = 0;
 
-            if let Some(inner) = self.cx_inner.upgrade() {
-                let guard = inner.read();
-                if guard.cancel_requested {
-                    is_cancelling = true;
+            if is_cancelling {
+                if let Some(inner) = self.cx_inner.upgrade() {
+                    let guard = inner.read();
                     if let Some(reason) = &guard.cancel_reason {
                         priority = reason.cleanup_budget().priority;
                     }
@@ -3371,6 +3377,7 @@ struct CancelLaneWaker {
     wake_state: Arc<crate::record::task::TaskWakeState>,
     global: Arc<GlobalInjector>,
     coordinator: Arc<WorkerCoordinator>,
+    fast_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     cx_inner: Weak<RwLock<CxInner>>,
 }
 
@@ -3424,6 +3431,7 @@ struct ThreeLaneLocalCancelWaker {
     local: Arc<Mutex<PriorityScheduler>>,
     local_ready: Arc<LocalReadyQueue>,
     parker: Parker,
+    fast_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     cx_inner: Weak<RwLock<CxInner>>,
 }
 
@@ -4195,6 +4203,7 @@ mod tests {
         {
             let mut guard = cx_inner.write();
             guard.cancel_requested = true;
+            guard.fast_cancel.store(true, std::sync::atomic::Ordering::Release);
             guard.cancel_reason = Some(CancelReason::timeout());
         }
 
@@ -4208,6 +4217,7 @@ mod tests {
             wake_state,
             global: Arc::clone(&global),
             coordinator,
+            fast_cancel: Arc::clone(&cx_inner.read().fast_cancel),
             cx_inner: Arc::downgrade(&cx_inner),
         }));
 
@@ -4382,6 +4392,7 @@ mod tests {
         {
             let mut guard = cx_inner.write();
             guard.cancel_requested = true;
+            guard.fast_cancel.store(true, std::sync::atomic::Ordering::Release);
             guard.cancel_reason = Some(CancelReason::new(CancelKind::User));
         }
 
@@ -4392,6 +4403,7 @@ mod tests {
             local: Arc::clone(&local),
             local_ready: Arc::clone(&local_ready),
             parker: Parker::new(),
+            fast_cancel: Arc::clone(&cx_inner.read().fast_cancel),
             cx_inner: Arc::downgrade(&cx_inner),
         };
 
@@ -4599,6 +4611,7 @@ mod tests {
                     global: Arc::clone(&global),
                     coordinator: Arc::clone(&coordinator),
                     priority: 0,
+                    fast_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     cx_inner: Weak::new(),
                 }))
             })
@@ -6054,7 +6067,8 @@ mod tests {
             local: Arc::clone(&priority_sched),
             local_ready: Arc::clone(&local_ready),
             parker,
-            cx_inner: Weak::new(),
+            fast_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    cx_inner: Weak::new(),
         }));
 
         // Set local_ready TLS (waker uses schedule_local_task, not LocalQueue).
@@ -6093,7 +6107,8 @@ mod tests {
             local: Arc::clone(&priority_sched),
             local_ready: Arc::clone(&local_ready),
             parker,
-            cx_inner: Weak::new(),
+            fast_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    cx_inner: Weak::new(),
         }));
 
         waker.wake_by_ref();

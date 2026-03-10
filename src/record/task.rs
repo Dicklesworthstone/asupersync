@@ -470,6 +470,7 @@ impl TaskRecord {
         if let Some(inner) = &self.cx_inner {
             let mut guard = inner.write();
             guard.cancel_requested = true;
+            guard.fast_cancel.store(true, std::sync::atomic::Ordering::Release);
             // Budget update is deferred to acknowledge_cancel to prevent
             // pre-empting the cancellation check with a budget exhaustion error.
         }
