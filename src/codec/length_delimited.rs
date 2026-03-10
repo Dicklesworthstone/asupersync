@@ -199,6 +199,17 @@ impl Decoder for LengthDelimitedCodec {
 
                     let raw_len = self.decode_head(src)?;
                     let frame_len = self.adjusted_frame_len(raw_len)?;
+                    let total_frame_len = header_len.checked_add(frame_len).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "frame length overflow")
+                    })?;
+                    let retained_len = total_frame_len
+                        .checked_sub(self.builder.num_skip)
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "num_skip exceeds total frame length",
+                            )
+                        })?;
 
                     if src.len() < self.builder.num_skip {
                         return Ok(None);
@@ -208,7 +219,11 @@ impl Decoder for LengthDelimitedCodec {
                         let _ = src.split_to(self.builder.num_skip);
                     }
 
-                    self.state = DecodeState::Data(frame_len);
+                    // The decoder must wait for the bytes still visible after
+                    // applying `num_skip`, not just the payload length. When
+                    // callers retain some header bytes (`num_skip < header_len`),
+                    // those retained prefix bytes are part of the returned frame.
+                    self.state = DecodeState::Data(retained_len);
                 }
                 DecodeState::Data(frame_len) => {
                     if src.len() < frame_len {
@@ -404,6 +419,46 @@ mod tests {
 
         let frame = codec.decode(&mut buf).unwrap().unwrap();
         assert_eq!(&frame[..], b"xyz");
+    }
+
+    #[test]
+    fn builder_num_skip_zero_retains_entire_header_and_keeps_alignment() {
+        let mut codec = LengthDelimitedCodec::builder().num_skip(0).new_codec();
+
+        let mut buf = BytesMut::new();
+        buf.put_u8(0);
+        buf.put_u8(0);
+        buf.put_u8(0);
+        buf.put_u8(1);
+        buf.put_slice(b"a");
+        buf.put_u8(0);
+        buf.put_u8(0);
+        buf.put_u8(0);
+        buf.put_u8(1);
+        buf.put_slice(b"b");
+
+        let frame1 = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(&frame1[..], &[0, 0, 0, 1, b'a']);
+
+        let frame2 = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(&frame2[..], &[0, 0, 0, 1, b'b']);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn builder_partial_header_retention_returns_remaining_prefix_bytes() {
+        let mut codec = LengthDelimitedCodec::builder().num_skip(2).new_codec();
+
+        let mut buf = BytesMut::new();
+        buf.put_u8(0);
+        buf.put_u8(0);
+        buf.put_u8(0);
+        buf.put_u8(3);
+        buf.put_slice(b"hey");
+
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(&frame[..], &[0, 3, b'h', b'e', b'y']);
+        assert!(buf.is_empty());
     }
 
     #[test]
