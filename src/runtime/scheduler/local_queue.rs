@@ -4,7 +4,7 @@
 //! The stack stores links in `TaskRecord` via a shared `TaskTable` arena,
 //! keeping hot-path operations allocation-free.
 
-use super::intrusive::{IntrusiveStack, QUEUE_TAG_READY};
+use std::collections::VecDeque;
 use crate::record::task::TaskRecord;
 use crate::runtime::{RuntimeState, TaskTable};
 use crate::sync::ContendedMutex;
@@ -13,7 +13,6 @@ use crate::types::TaskId;
 use crate::types::{Budget, RegionId};
 use crate::util::Arena;
 use parking_lot::Mutex;
-use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -66,7 +65,7 @@ impl TaskSource {
 #[derive(Debug, Clone)]
 pub struct LocalQueue {
     tasks: TaskSource,
-    inner: Arc<Mutex<IntrusiveStack>>,
+    inner: Arc<Mutex<VecDeque<TaskId>>>,
 }
 
 impl LocalQueue {
@@ -88,7 +87,7 @@ impl LocalQueue {
     fn new_with_source(tasks: TaskSource) -> Self {
         Self {
             tasks,
-            inner: Arc::new(Mutex::new(IntrusiveStack::new(QUEUE_TAG_READY))),
+            inner: Arc::new(Mutex::new(VecDeque::with_capacity(256))),
         }
     }
 
@@ -157,10 +156,8 @@ impl LocalQueue {
     /// Pushes a task to the local queue.
     #[inline]
     pub fn push(&self, task: TaskId) {
-        self.tasks.with_tasks_arena_mut(|arena| {
-            let mut stack = self.inner.lock();
-            stack.push(task, arena);
-        });
+        let mut queue = self.inner.lock();
+        queue.push_back(task);
     }
 
     /// Pushes a task from the TLS scheduling fast path.
@@ -174,9 +171,10 @@ impl LocalQueue {
             if arena.get(task.arena_index()).is_none() {
                 return false;
             }
-
-            let mut stack = self.inner.lock();
-            stack.push(task, arena);
+            let mut queue = self.inner.lock();
+            if !queue.contains(&task) {
+                queue.push_back(task);
+            }
             true
         })
     }
@@ -187,22 +185,18 @@ impl LocalQueue {
         if tasks.is_empty() {
             return;
         }
-        self.tasks.with_tasks_arena_mut(|arena| {
-            let mut stack = self.inner.lock();
-            for &task in tasks {
-                stack.push(task, arena);
-            }
-        });
+        let mut queue = self.inner.lock();
+        for &task in tasks {
+            queue.push_back(task);
+        }
     }
 
     /// Pops a task from the local queue (LIFO).
     #[inline]
     #[must_use]
     pub fn pop(&self) -> Option<TaskId> {
-        self.tasks.with_tasks_arena_mut(|arena| {
-            let mut stack = self.inner.lock();
-            stack.pop(arena)
-        })
+        let mut queue = self.inner.lock();
+        queue.pop_back()
     }
 
     /// Returns true if the local queue is empty.
@@ -241,7 +235,7 @@ impl Drop for CurrentQueueGuard {
 #[derive(Debug, Clone)]
 pub struct Stealer {
     tasks: TaskSource,
-    inner: Arc<Mutex<IntrusiveStack>>,
+    inner: Arc<Mutex<VecDeque<TaskId>>>,
 }
 
 impl Stealer {
@@ -264,62 +258,32 @@ impl Stealer {
     }
 
     #[inline]
-    fn restore_skipped_locals(
-        stack: &mut IntrusiveStack,
-        arena: &mut Arena<TaskRecord>,
-        skipped_locals: &mut SmallVec<[TaskId; Self::SKIPPED_LOCALS_INLINE_CAP]>,
-    ) {
-        // Skipped locals were popped from oldest -> newest. Restore in reverse
-        // (newest -> oldest) so owner-visible LIFO order remains unchanged.
-        while let Some(task_id) = skipped_locals.pop() {
-            stack.push_bottom(task_id, arena);
-        }
-    }
-
-    #[inline]
     fn steal_batch_locked(
-        src: &mut IntrusiveStack,
-        dest: &mut IntrusiveStack,
+        src: &mut VecDeque<TaskId>,
+        dest: &mut VecDeque<TaskId>,
         arena: &mut Arena<TaskRecord>,
     ) -> bool {
-        let mut stolen = 0usize;
-        // Keep the common "few local tasks skipped" path allocation-free.
-        let mut skipped_locals = SmallVec::<[TaskId; Self::SKIPPED_LOCALS_INLINE_CAP]>::new();
-
         let initial_len = src.len();
         if initial_len == 0 {
             return false;
         }
-        // Cap theft at 256 tasks to avoid monopolizing the destination queue
-        // or holding locks too long processing the batch.
         let steal_limit = (initial_len / 2).clamp(1, 256);
-
-        // Common case: queue has only stealable tasks. Skip per-task locality
-        // branching and temporary local-task buffering entirely.
-        if !src.has_local_tasks() {
-            return src.steal_batch_into_non_local(steal_limit, arena, dest) > 0;
-        }
-
-        // Steal loop with bounded lookahead.
-        // We stop probing if we encounter too many local tasks (SKIPPED_LOCALS_INLINE_CAP)
-        // to prevent:
-        // 1. O(N) scan times in the lock (latency spikes).
-        // 2. Heap allocation for skipped_locals (SmallVec spill).
-        while stolen < steal_limit && skipped_locals.len() < Self::SKIPPED_LOCALS_INLINE_CAP {
-            let Some((task_id, is_local)) = src.steal_one_with_locality(arena) else {
-                break;
-            };
-            if is_local {
-                // Local (!Send) tasks must not be transferred across workers.
-                // Preserve original owner-visible ordering when restoring.
-                skipped_locals.push(task_id);
-                continue;
+        let mut stolen = 0;
+        let mut i = 0;
+        
+        while i < src.len() && stolen < steal_limit && i < Self::SKIPPED_LOCALS_INLINE_CAP {
+            let task_id = src[i];
+            if let Some(record) = arena.get(task_id.arena_index()) {
+                if !record.is_local() {
+                    let task = src.remove(i).unwrap();
+                    dest.push_back(task);
+                    stolen += 1;
+                    continue; // Skip incrementing i because elements shifted left
+                }
             }
-            dest.push(task_id, arena);
-            stolen += 1;
+            i += 1;
         }
-        Self::restore_skipped_locals(src, arena, &mut skipped_locals);
-
+        
         stolen > 0
     }
 
@@ -327,38 +291,21 @@ impl Stealer {
     #[inline]
     #[must_use]
     pub fn steal(&self) -> Option<TaskId> {
+        let mut stack = self.inner.lock();
+        if stack.is_empty() { return None; }
+        
         self.tasks.with_tasks_arena_mut(|arena| {
-            let mut stack = self.inner.lock();
-            if !stack.has_local_tasks() {
-                // Common case: queue contains only stealable tasks.
-                // Skip locality bookkeeping and temporary local buffering.
-                let stolen = stack.steal_one_assume_non_local(arena);
-                drop(stack);
-                return stolen;
-            }
-
-            let mut remaining_attempts = stack.len();
-            // Keep the common "few local tasks skipped" path allocation-free.
-            let mut skipped_locals = SmallVec::<[TaskId; Self::SKIPPED_LOCALS_INLINE_CAP]>::new();
-            while remaining_attempts > 0 && skipped_locals.len() < Self::SKIPPED_LOCALS_INLINE_CAP {
-                remaining_attempts -= 1;
-                let Some((task_id, is_local)) = stack.steal_one_with_locality(arena) else {
-                    break;
-                };
-                if is_local {
-                    // Local (!Send) tasks must never be stolen. Temporarily set
-                    // aside while scanning for remote work; restore afterwards.
-                    skipped_locals.push(task_id);
-                    continue;
+            let mut i = 0;
+            let len = stack.len();
+            while i < len && i < Self::SKIPPED_LOCALS_INLINE_CAP {
+                let task_id = stack[i];
+                if let Some(record) = arena.get(task_id.arena_index()) {
+                    if !record.is_local() {
+                        return stack.remove(i);
+                    }
                 }
-                Self::restore_skipped_locals(&mut stack, arena, &mut skipped_locals);
-                return Some(task_id);
+                i += 1;
             }
-            Self::restore_skipped_locals(&mut stack, arena, &mut skipped_locals);
-
-            // Drop the queue lock before returning from the arena closure to
-            // minimize lock hold time on contention-heavy steal probes.
-            drop(stack);
             None
         })
     }

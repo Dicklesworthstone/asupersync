@@ -192,6 +192,21 @@ impl GlobalInjector {
         self.ready_queue.push(PriorityTask { task, priority });
     }
 
+    /// Injects a ready task without incrementing the atomic counter.
+    /// Must be paired with a subsequent call to `add_ready_count`.
+    #[inline]
+    pub(crate) fn inject_ready_uncounted(&self, task: TaskId, priority: u8) {
+        self.ready_queue.push(PriorityTask { task, priority });
+    }
+
+    /// Bulk increments the atomic ready count.
+    #[inline]
+    pub(crate) fn add_ready_count(&self, count: usize) {
+        if count > 0 {
+            self.ready_count.fetch_add(count, Ordering::Relaxed);
+        }
+    }
+
     /// Pops a task from the cancel lane.
     ///
     /// Returns `None` if the cancel lane is empty.

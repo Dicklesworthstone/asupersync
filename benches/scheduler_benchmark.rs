@@ -127,7 +127,7 @@ fn bench_local_queue(c: &mut Criterion) {
     group.bench_function("interleaved_push_pop", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || local_queue(199),
-            |queue| {
+            |queue: LocalQueue| {
                 for i in 0..100u32 {
                     queue.push(task(i * 2));
                     queue.push(task(i * 2 + 1));

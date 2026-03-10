@@ -424,6 +424,27 @@ impl WorkerCoordinator {
     }
 
     #[inline]
+    pub(crate) fn wake_many(&self, num_wakes: usize) {
+        let count = self.parkers.len();
+        if count == 0 || num_wakes == 0 {
+            return;
+        }
+        if num_wakes >= count {
+            self.wake_all();
+            return;
+        }
+        let start_idx = self.next_wake.fetch_add(num_wakes, Ordering::Relaxed);
+        for i in 0..num_wakes {
+            let idx = start_idx + i;
+            let slot = self.mask.map_or_else(|| idx % count, |mask| idx & mask);
+            self.parkers[slot].unpark();
+        }
+        if let Some(io) = &self.io_driver {
+            let _ = io.wake();
+        }
+    }
+
+    #[inline]
     pub(crate) fn wake_worker(&self, worker_id: WorkerId) {
         if let Some(parker) = self.parkers.get(worker_id) {
             parker.unpark();
@@ -2751,6 +2772,7 @@ impl ThreeLaneWorker {
         state: &RuntimeState,
         waiters: impl IntoIterator<Item = TaskId>,
     ) {
+        let mut global_wakes = 0;
         for waiter in waiters {
             if let Some(record) = state.task(waiter) {
                 let waiter_priority = record.sched_priority;
@@ -2782,11 +2804,15 @@ impl ThreeLaneWorker {
                         }
                     } else {
                         // Global waiters are ready tasks.
-                        self.global.inject_ready(waiter, waiter_priority);
-                        self.coordinator.wake_one();
+                        self.global.inject_ready_uncounted(waiter, waiter_priority);
+                        global_wakes += 1;
                     }
                 }
             }
+        }
+        if global_wakes > 0 {
+            self.global.add_ready_count(global_wakes);
+            self.coordinator.wake_many(global_wakes);
         }
     }
 
@@ -2829,9 +2855,14 @@ impl ThreeLaneWorker {
 
                     self.worker.wake_dependents_locked(&state, waiters);
 
+                    let mut finalizer_wakes = 0;
                     for (finalizer_task, priority) in finalizers {
-                        self.worker.global.inject_ready(finalizer_task, priority);
-                        self.worker.coordinator.wake_one();
+                        self.worker.global.inject_ready_uncounted(finalizer_task, priority);
+                        finalizer_wakes += 1;
+                    }
+                    if finalizer_wakes > 0 {
+                        self.worker.global.add_ready_count(finalizer_wakes);
+                        self.worker.coordinator.wake_many(finalizer_wakes);
                     }
                 }
             }
@@ -3100,9 +3131,14 @@ impl ThreeLaneWorker {
 
                 self.wake_dependents_locked(&state, waiters);
 
+                let mut finalizer_wakes = 0;
                 for (finalizer_task, priority) in finalizers {
-                    self.global.inject_ready(finalizer_task, priority);
-                    self.coordinator.wake_one();
+                    self.global.inject_ready_uncounted(finalizer_task, priority);
+                    finalizer_wakes += 1;
+                }
+                if finalizer_wakes > 0 {
+                    self.global.add_ready_count(finalizer_wakes);
+                    self.coordinator.wake_many(finalizer_wakes);
                 }
                 drop(state);
                 guard.completed = true;
