@@ -8,7 +8,52 @@
 use super::{Layer, Service};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
+use std::task::{Wake, Waker};
+
+fn tracked_probe_waker(delegate: &Waker) -> (Waker, Arc<AtomicBool>) {
+    struct TrackWaker {
+        woke: Arc<AtomicBool>,
+        delegate: Waker,
+    }
+
+    impl Wake for TrackWaker {
+        fn wake(self: Arc<Self>) {
+            self.woke.store(true, Ordering::SeqCst);
+            self.delegate.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.woke.store(true, Ordering::SeqCst);
+            self.delegate.wake_by_ref();
+        }
+    }
+
+    let woke = Arc::new(AtomicBool::new(false));
+    let waker = Waker::from(Arc::new(TrackWaker {
+        woke: Arc::clone(&woke),
+        delegate: delegate.clone(),
+    }));
+    (waker, woke)
+}
+
+fn poll_ready_preserving_self_wake<S, Request>(
+    service: &mut S,
+    cx: &mut Context<'_>,
+) -> Poll<Result<(), S::Error>>
+where
+    S: Service<Request>,
+{
+    let (probe_waker, woke_during_poll) = tracked_probe_waker(cx.waker());
+    let mut probe_cx = Context::from_waker(&probe_waker);
+    let mut readiness = service.poll_ready(&mut probe_cx);
+    if matches!(readiness, Poll::Pending) && woke_during_poll.load(Ordering::SeqCst) {
+        readiness = service.poll_ready(cx);
+    }
+    readiness
+}
 
 /// A layer that sheds load when the inner service is not ready.
 ///
@@ -155,7 +200,7 @@ where
 
     #[inline]
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        match self.inner.poll_ready(cx) {
+        match poll_ready_preserving_self_wake::<S, Request>(&mut self.inner, cx) {
             Poll::Ready(Ok(())) => {
                 self.overloaded = false;
                 Poll::Ready(Ok(()))
@@ -257,8 +302,6 @@ impl<F: std::fmt::Debug> std::fmt::Debug for LoadShedFuture<F> {
 mod tests {
     use super::*;
     use std::future::ready;
-    use std::sync::Arc;
-    use std::task::{Wake, Waker};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -329,6 +372,30 @@ mod tests {
 
         fn call(&mut self, req: i32) -> Self::Future {
             ready(Ok(req))
+        }
+    }
+
+    struct SelfWakeReadyService {
+        armed: bool,
+    }
+
+    impl Service<i32> for SelfWakeReadyService {
+        type Response = i32;
+        type Error = std::convert::Infallible;
+        type Future = std::future::Ready<Result<i32, std::convert::Infallible>>;
+
+        fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if self.armed {
+                Poll::Ready(Ok(()))
+            } else {
+                self.armed = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+
+        fn call(&mut self, req: i32) -> Self::Future {
+            ready(Ok(req + 1))
         }
     }
 
@@ -451,6 +518,36 @@ mod tests {
         let success_ok = matches!(success_result, Poll::Ready(Ok(99)));
         crate::assert_with_log!(success_ok, "call succeeds after recovery", true, success_ok);
         crate::test_complete!("load_shed_keeps_shedding_until_ready_again");
+    }
+
+    #[test]
+    fn load_shed_preserves_same_turn_self_wake_readiness() {
+        init_test("load_shed_preserves_same_turn_self_wake_readiness");
+        let mut svc = LoadShed::new(SelfWakeReadyService { armed: false });
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let ready = svc.poll_ready(&mut cx);
+        let ready_ok = matches!(ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready_ok, "ready after self-wake repoll", true, ready_ok);
+        let overloaded = svc.is_overloaded();
+        crate::assert_with_log!(
+            !overloaded,
+            "self-wake readiness does not leave overload armed",
+            false,
+            overloaded
+        );
+
+        let mut future = svc.call(41);
+        let result = Pin::new(&mut future).poll(&mut cx);
+        let success = matches!(result, Poll::Ready(Ok(42)));
+        crate::assert_with_log!(
+            success,
+            "immediate follow-up call succeeds after self-wake",
+            true,
+            success
+        );
+        crate::test_complete!("load_shed_preserves_same_turn_self_wake_readiness");
     }
 
     #[test]
