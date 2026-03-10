@@ -649,7 +649,9 @@ impl ControllerRegistry {
         if reg.min_version > reg.max_version {
             return Err(RegistrationError::InvertedVersionRange);
         }
-        if SNAPSHOT_VERSION < reg.min_version || SNAPSHOT_VERSION > reg.max_version {
+        if !SNAPSHOT_VERSION.is_compatible_with(&reg.min_version)
+            || SNAPSHOT_VERSION.major != reg.max_version.major
+        {
             return Err(RegistrationError::IncompatibleVersion {
                 current: SNAPSHOT_VERSION,
                 min: reg.min_version,
