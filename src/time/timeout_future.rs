@@ -81,6 +81,18 @@ impl<F> TimeoutFuture<F> {
         }
     }
 
+    /// Creates a new timeout wrapper with an explicit time getter.
+    ///
+    /// This is useful for deterministic tests and synthetic clocks that
+    /// should not rely on wall-clock progression.
+    #[must_use]
+    pub fn with_time_getter(future: F, deadline: Time, time_getter: fn() -> Time) -> Self {
+        Self {
+            future,
+            sleep: Sleep::with_time_getter(deadline, time_getter),
+        }
+    }
+
     /// Creates a timeout that expires after the given duration.
     ///
     /// # Arguments

@@ -1064,7 +1064,7 @@ mod tests {
     fn test_shutdown_and_wait_timeout_respected() {
         let pool = BlockingPool::new(1, 1);
         pool.spawn(|| {
-            thread::sleep(Duration::from_secs(5));
+            thread::sleep(Duration::from_millis(200));
         });
 
         thread::sleep(Duration::from_millis(20));

@@ -518,7 +518,8 @@ fn crashpack_builder_fingerprint_matches_trace() {
         },
         virtual_time: Time::ZERO,
     })
-    .build();
+    .build()
+    .expect("contract test crash pack should include failure metadata");
 
     assert_eq!(
         pack.fingerprint(),
@@ -555,7 +556,8 @@ fn crashpack_deterministic_equality() {
     })
     .from_trace(&events)
     .failure(failure.clone())
-    .build();
+    .build()
+    .expect("contract test crash pack should include failure metadata");
 
     let pack2 = CrashPack::builder(CrashPackConfig {
         seed: 99,
@@ -564,7 +566,8 @@ fn crashpack_deterministic_equality() {
     })
     .from_trace(&events)
     .failure(failure)
-    .build();
+    .build()
+    .expect("contract test crash pack should include failure metadata");
 
     assert_eq!(pack1, pack2, "crash packs with same inputs must be equal");
 }
@@ -585,7 +588,8 @@ fn crashpack_replay_command_well_formed() {
         outcome: FailureOutcome::Err,
         virtual_time: Time::ZERO,
     })
-    .build();
+    .build()
+    .expect("contract test crash pack should include failure metadata");
 
     let cmd = pack.replay_command(Some("crashpack.bin"));
     assert!(

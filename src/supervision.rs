@@ -2023,6 +2023,12 @@ impl RestartStormMonitor {
         let lr = ratio.max(1.0) / normalizer;
 
         self.log_e_value += lr.ln();
+        // Prevent wealth depletion: reset evidence if it drops below initial state.
+        // This ensures the monitor reacts quickly to storms even after long periods
+        // of low intensity (CUSUM-style reset).
+        if self.log_e_value < 0.0 {
+            self.log_e_value = 0.0;
+        }
         self.e_value = self.log_e_value.exp();
 
         if self.e_value > self.peak_e_value {
