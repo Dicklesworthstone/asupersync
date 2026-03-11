@@ -108,7 +108,13 @@ pub fn encode_trailers(status: &Status, metadata: &Metadata, dst: &mut BytesMut)
 
     if !status.message().is_empty() {
         block.push_str("grpc-message: ");
-        block.push_str(status.message());
+        // Percent-encode CR/LF per gRPC spec to prevent trailer injection.
+        let sanitized_msg = status
+            .message()
+            .replace('%', "%25")
+            .replace('\r', "%0D")
+            .replace('\n', "%0A");
+        block.push_str(&sanitized_msg);
         block.push_str("\r\n");
     }
 
@@ -121,7 +127,11 @@ pub fn encode_trailers(status: &Status, metadata: &Metadata, dst: &mut BytesMut)
         block.push_str(&key_lower);
         block.push_str(": ");
         match value {
-            MetadataValue::Ascii(s) => block.push_str(s),
+            // Sanitize CR/LF in ASCII values to prevent trailer injection.
+            MetadataValue::Ascii(s) => {
+                let sanitized = s.replace('\r', "").replace('\n', "");
+                block.push_str(&sanitized);
+            }
             MetadataValue::Binary(b) => {
                 use base64::Engine;
                 block.push_str(&base64::engine::general_purpose::STANDARD.encode(b.as_ref()));
@@ -133,7 +143,7 @@ pub fn encode_trailers(status: &Status, metadata: &Metadata, dst: &mut BytesMut)
     let block_bytes = block.as_bytes();
     dst.reserve(5 + block_bytes.len());
     dst.put_u8(TRAILER_FLAG);
-    dst.put_u32(block_bytes.len() as u32);
+    dst.put_u32(u32::try_from(block_bytes.len()).unwrap_or(u32::MAX));
     dst.extend_from_slice(block_bytes);
 }
 
