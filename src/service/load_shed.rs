@@ -184,6 +184,8 @@ impl std::error::Error for Overloaded {}
 pub enum LoadShedError<E> {
     /// The caller attempted `call()` without a preceding successful `poll_ready()`.
     NotReady,
+    /// The load-shed future was polled after it had already completed.
+    PolledAfterCompletion,
     /// The service is overloaded and the request was shed.
     Overloaded(Overloaded),
     /// The inner service returned an error.
@@ -194,6 +196,7 @@ impl<E: std::fmt::Display> std::fmt::Display for LoadShedError<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotReady => write!(f, "poll_ready required before call"),
+            Self::PolledAfterCompletion => write!(f, "load shed future polled after completion"),
             Self::Overloaded(e) => write!(f, "{e}"),
             Self::Inner(e) => write!(f, "inner service error: {e}"),
         }
@@ -203,7 +206,7 @@ impl<E: std::fmt::Display> std::fmt::Display for LoadShedError<E> {
 impl<E: std::error::Error + 'static> std::error::Error for LoadShedError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NotReady => None,
+            Self::NotReady | Self::PolledAfterCompletion => None,
             Self::Overloaded(e) => Some(e),
             Self::Inner(e) => Some(e),
         }
@@ -327,9 +330,7 @@ where
                     Poll::Pending => Poll::Pending,
                 }
             }
-            LoadShedState::Done => {
-                panic!("LoadShedFuture polled after completion")
-            }
+            LoadShedState::Done => Poll::Ready(Err(LoadShedError::PolledAfterCompletion)),
         }
     }
 }
@@ -738,6 +739,16 @@ mod tests {
         let has_not_ready = display.contains("poll_ready required");
         crate::assert_with_log!(has_not_ready, "not ready", true, has_not_ready);
 
+        let err: LoadShedError<&str> = LoadShedError::PolledAfterCompletion;
+        let display = format!("{err}");
+        let has_polled_after_completion = display.contains("polled after completion");
+        crate::assert_with_log!(
+            has_polled_after_completion,
+            "polled-after-completion",
+            true,
+            has_polled_after_completion
+        );
+
         let err: LoadShedError<&str> = LoadShedError::Overloaded(Overloaded::new());
         let display = format!("{err}");
         let has_overloaded = display.contains("overloaded");
@@ -824,6 +835,10 @@ mod tests {
         let dbg = format!("{not_ready:?}");
         assert!(dbg.contains("NotReady"));
 
+        let done: LoadShedError<String> = LoadShedError::PolledAfterCompletion;
+        let dbg = format!("{done:?}");
+        assert!(dbg.contains("PolledAfterCompletion"));
+
         let overloaded: LoadShedError<String> = LoadShedError::Overloaded(Overloaded::new());
         let dbg = format!("{overloaded:?}");
         assert!(dbg.contains("Overloaded"));
@@ -838,6 +853,10 @@ mod tests {
         use std::io;
         let not_ready: LoadShedError<io::Error> = LoadShedError::NotReady;
         let err: &dyn std::error::Error = &not_ready;
+        assert!(err.source().is_none());
+
+        let done: LoadShedError<io::Error> = LoadShedError::PolledAfterCompletion;
+        let err: &dyn std::error::Error = &done;
         assert!(err.source().is_none());
 
         let overloaded: LoadShedError<io::Error> = LoadShedError::Overloaded(Overloaded::new());
@@ -856,5 +875,31 @@ mod tests {
             );
         let dbg = format!("{fut:?}");
         assert!(dbg.contains("LoadShedFuture"));
+    }
+
+    #[test]
+    fn load_shed_future_second_poll_fails_closed() {
+        init_test("load_shed_future_second_poll_fails_closed");
+        let mut fut =
+            LoadShedFuture::<std::future::Ready<Result<(), std::convert::Infallible>>>::not_ready();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut fut).poll(&mut cx);
+        let first_not_ready = matches!(first, Poll::Ready(Err(LoadShedError::NotReady)));
+        crate::assert_with_log!(
+            first_not_ready,
+            "first poll not ready",
+            true,
+            first_not_ready
+        );
+
+        let second = Pin::new(&mut fut).poll(&mut cx);
+        let second_done = matches!(
+            second,
+            Poll::Ready(Err(LoadShedError::PolledAfterCompletion))
+        );
+        crate::assert_with_log!(second_done, "second poll fails closed", true, second_done);
+        crate::test_complete!("load_shed_future_second_poll_fails_closed");
     }
 }
