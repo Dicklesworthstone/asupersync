@@ -1291,14 +1291,14 @@ impl SymbolReorderer {
         if seq == state.next_expected {
             // Deliver immediately
             ready.push(symbol);
-            state.next_expected = state.next_expected.saturating_add(1);
+            state.next_expected = state.next_expected.wrapping_add(1);
             state.last_delivery = now;
             self.in_order_deliveries.fetch_add(1, Ordering::Relaxed);
 
             // Check buffer for consecutive symbols
             while let Some(buffered) = state.buffer.remove(&state.next_expected) {
                 ready.push(buffered.symbol);
-                state.next_expected = state.next_expected.saturating_add(1);
+                state.next_expected = state.next_expected.wrapping_add(1);
                 self.reordered_deliveries.fetch_add(1, Ordering::Relaxed);
             }
         } else if seq > state.next_expected {
@@ -1322,7 +1322,7 @@ impl SymbolReorderer {
                     ready.push(buffered.symbol);
                     self.timeout_deliveries.fetch_add(1, Ordering::Relaxed);
                 }
-                state.next_expected = seq.saturating_add(1);
+                state.next_expected = seq.wrapping_add(1);
                 state.last_delivery = now;
                 ready.push(symbol);
             }
@@ -1377,14 +1377,14 @@ impl SymbolReorderer {
                 }
 
                 if cutoff >= state.next_expected {
-                    state.next_expected = cutoff.saturating_add(1);
+                    state.next_expected = cutoff.wrapping_add(1);
                 }
             }
 
             // Drain any consecutive buffered symbols that are now deliverable.
             while let Some(buffered) = state.buffer.remove(&state.next_expected) {
                 flushed.push(buffered.symbol);
-                state.next_expected = state.next_expected.saturating_add(1);
+                state.next_expected = state.next_expected.wrapping_add(1);
                 self.reordered_deliveries.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -1617,7 +1617,7 @@ impl MultipathAggregator {
         // Check flush interval (lock-free CAS)
         let interval_nanos = self.config.flush_interval.as_nanos();
         loop {
-            let last_nanos = self.last_flush.load(Ordering::Relaxed);
+            let last_nanos = self.last_flush.load(Ordering::Acquire);
             if now.as_nanos().saturating_sub(last_nanos) < interval_nanos {
                 return vec![];
             }
@@ -1626,8 +1626,8 @@ impl MultipathAggregator {
                 .compare_exchange_weak(
                     last_nanos,
                     now.as_nanos(),
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
+                    Ordering::Release,
+                    Ordering::Acquire,
                 )
                 .is_ok()
             {

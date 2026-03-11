@@ -836,6 +836,9 @@ impl Connection {
             return Err(H2Error::protocol("RST_STREAM received on idle stream"));
         }
 
+        // Track stream ID so GOAWAY last_stream_id is correct (RFC 9113 §6.8).
+        self.track_stream_id(frame.stream_id);
+
         // Rate-limit RST_STREAM frames (CVE-2023-44487 mitigation).
         let elapsed = (self.time_getter)()
             .saturating_duration_since(self.rst_stream_window_start)
@@ -958,8 +961,10 @@ impl Connection {
 
         let max_concurrent = self.local_settings.max_concurrent_streams;
         if self.streams.active_count() as u32 >= max_concurrent {
+            // RST_STREAM must target the promised stream (RFC 7540 §8.2.2),
+            // not the parent request stream.
             return Err(H2Error::stream(
-                frame.stream_id,
+                frame.promised_stream_id,
                 ErrorCode::RefusedStream,
                 "max concurrent streams exceeded",
             ));
@@ -1311,6 +1316,10 @@ impl Connection {
             .map_err(|_| H2Error::flow_control("window increment too large"))?;
         if let Some(stream) = self.streams.get_mut(stream_id) {
             stream.update_recv_window(delta)?;
+        } else {
+            // Stream already closed/pruned — skip the WINDOW_UPDATE to avoid
+            // sending it for a stream the peer may consider idle (protocol error).
+            return Ok(());
         }
         self.pending_ops.push_back(PendingOp::WindowUpdate {
             stream_id,
