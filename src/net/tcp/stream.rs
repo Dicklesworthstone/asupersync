@@ -207,6 +207,27 @@ impl TcpStream {
         }
     }
 
+    /// Connect directly to a concrete socket address without DNS resolution.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) async fn connect_socket_addr(addr: SocketAddr) -> io::Result<Self> {
+        let domain = if addr.is_ipv4() {
+            Domain::IPV4
+        } else {
+            Domain::IPV6
+        };
+
+        let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+        Self::connect_from_socket(socket, addr).await
+    }
+
+    /// Connect directly to a concrete socket address without DNS resolution.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) async fn connect_socket_addr(_addr: SocketAddr) -> io::Result<Self> {
+        Err(super::browser_tcp_unsupported(
+            "TcpStream::connect_socket_addr",
+        ))
+    }
+
     /// Connects using an existing configured socket.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) async fn connect_from_socket(socket: Socket, addr: SocketAddr) -> io::Result<Self> {

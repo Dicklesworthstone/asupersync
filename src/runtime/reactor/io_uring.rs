@@ -119,19 +119,25 @@ mod imp {
             user_data: u64,
         ) -> io::Result<()> {
             let mut ring = self.ring.lock();
-            submit_poll_entry(&mut ring, raw_fd, interest, user_data)?;
+            if let Err(err) = submit_poll_entry(&mut ring, raw_fd, interest, user_data) {
+                if err.kind() != io::ErrorKind::WouldBlock {
+                    return Err(err);
+                }
+                ring.submit()?;
+                submit_poll_entry(&mut ring, raw_fd, interest, user_data)?;
+            }
             ring.submit()?;
             Ok(())
         }
 
         fn submit_poll_remove(&self, target_user_data: u64) -> io::Result<()> {
             let mut ring = self.ring.lock();
-            let entry = opcode::PollRemove::new(target_user_data)
-                .build()
-                .user_data(REMOVE_USER_DATA);
-            // SAFETY: PollRemove takes ownership of user_data only; no external buffers.
-            unsafe {
-                ring.submission().push(&entry).map_err(push_error_to_io)?;
+            if let Err(err) = push_poll_remove_entry(&mut ring, target_user_data) {
+                if err.kind() != io::ErrorKind::WouldBlock {
+                    return Err(err);
+                }
+                ring.submit()?;
+                push_poll_remove_entry(&mut ring, target_user_data)?;
             }
             ring.submit()?;
             Ok(())
@@ -423,6 +429,7 @@ mod imp {
         let mut mask = 0u32;
         if interest.is_readable() {
             mask |= libc::POLLIN as u32;
+            mask |= libc::POLLRDHUP as u32;
         }
         if interest.is_writable() {
             mask |= libc::POLLOUT as u32;
@@ -435,6 +442,7 @@ mod imp {
         }
         if interest.is_hup() {
             mask |= libc::POLLHUP as u32;
+            mask |= libc::POLLRDHUP as u32;
         }
         mask
     }
@@ -456,11 +464,25 @@ mod imp {
         if (mask & libc::POLLHUP as u32) != 0 {
             interest = interest.add(Interest::HUP);
         }
+        if (mask & libc::POLLRDHUP as u32) != 0 {
+            interest = interest.add(Interest::HUP);
+        }
         interest
     }
 
     fn push_error_to_io(_err: io_uring::squeue::PushError) -> io::Error {
         io::Error::new(io::ErrorKind::WouldBlock, "submission queue full")
+    }
+
+    fn push_poll_remove_entry(ring: &mut IoUring, target_user_data: u64) -> io::Result<()> {
+        let entry = opcode::PollRemove::new(target_user_data)
+            .build()
+            .user_data(REMOVE_USER_DATA);
+        // SAFETY: PollRemove takes ownership of user_data only; no external buffers.
+        unsafe {
+            ring.submission().push(&entry).map_err(push_error_to_io)?;
+        }
+        Ok(())
     }
 
     fn remove_registration_poll_ops(state: &mut ReactorState, token: Token) -> Vec<u64> {
@@ -542,6 +564,12 @@ mod imp {
             let mask = interest_to_poll_mask(Interest::NONE);
             let roundtrip = poll_mask_to_interest(mask);
             assert!(roundtrip.is_empty());
+        }
+
+        #[test]
+        fn test_poll_mask_maps_rdhup_to_hup() {
+            let roundtrip = poll_mask_to_interest(libc::POLLRDHUP as u32);
+            assert!(roundtrip.is_hup(), "POLLRDHUP must surface as HUP interest");
         }
 
         fn active_poll_user_data_for_token(reactor: &IoUringReactor, token: Token) -> Option<u64> {
@@ -988,6 +1016,58 @@ mod imp {
             assert!(
                 events.is_empty(),
                 "synthetic NOP completions must not surface as readiness"
+            );
+        }
+
+        #[test]
+        fn test_submit_poll_add_flushes_full_submission_queue() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+
+            {
+                let mut ring = reactor.ring.lock();
+                fill_submission_queue(&mut ring);
+            }
+
+            let (left, mut right) = UnixStream::pair().expect("unix stream pair");
+            reactor
+                .submit_poll_add(left.as_raw_fd(), Interest::READABLE, 77_777)
+                .expect("poll add should flush and retry when the SQ is full");
+            std::io::Write::write_all(&mut right, b"x").expect("write should succeed");
+
+            let mut events = Events::with_capacity(8);
+            reactor
+                .poll(&mut events, Some(Duration::from_millis(50)))
+                .expect("poll should drain synthetic SQEs after poll add retry");
+            assert!(
+                events.is_empty(),
+                "unknown completion user_data must not surface as readiness"
+            );
+        }
+
+        #[test]
+        fn test_submit_poll_remove_flushes_full_submission_queue() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+
+            {
+                let mut ring = reactor.ring.lock();
+                fill_submission_queue(&mut ring);
+            }
+
+            reactor
+                .submit_poll_remove(90_909)
+                .expect("poll remove should flush and retry when the SQ is full");
+
+            let mut events = Events::with_capacity(8);
+            reactor
+                .poll(&mut events, Some(Duration::ZERO))
+                .expect("poll should drain synthetic SQEs after poll remove retry");
+            assert!(
+                events.is_empty(),
+                "synthetic poll-remove completions must not surface as readiness"
             );
         }
     }

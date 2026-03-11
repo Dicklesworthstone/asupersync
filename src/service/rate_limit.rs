@@ -5,6 +5,7 @@
 
 use super::{Layer, Service};
 use crate::types::Time;
+use pin_project::pin_project;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -396,8 +397,11 @@ impl Drop for ReservedTokenGuard<'_> {
 }
 
 /// Future returned by [`RateLimit`] service.
+#[pin_project(project = RateLimitFutureProj)]
 pub enum RateLimitFuture<F, E> {
-    Inner(F),
+    /// Inner service future that is still pending.
+    Inner(#[pin] F),
+    /// Immediate rate-limit error that should resolve without polling an inner future.
     Error(Option<RateLimitError<E>>),
 }
 
@@ -423,17 +427,15 @@ where
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.get_mut() {
-            Self::Inner(inner) => match Pin::new(inner).poll(cx) {
+        match self.project() {
+            RateLimitFutureProj::Inner(inner) => match inner.poll(cx) {
                 Poll::Ready(Ok(response)) => Poll::Ready(Ok(response)),
                 Poll::Ready(Err(e)) => Poll::Ready(Err(RateLimitError::Inner(e))),
                 Poll::Pending => Poll::Pending,
             },
-            Self::Error(error) => Poll::Ready(Err(
-                error
-                    .take()
-                    .expect("rate-limit future immediate error already taken"),
-            )),
+            RateLimitFutureProj::Error(error) => Poll::Ready(Err(error
+                .take()
+                .expect("rate-limit future immediate error already taken"))),
         }
     }
 }

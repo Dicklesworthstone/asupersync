@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::future::poll_fn;
 use std::io;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -1346,10 +1346,16 @@ impl HttpClient {
 
     async fn connect_io(&self, cx: &Cx, parsed: &ParsedUrl) -> Result<ClientIo, ClientError> {
         check_cx(cx)?;
-        let addr = format!("{}:{}", parsed.host, parsed.port);
-        let stream = TcpStream::connect(addr)
-            .await
-            .map_err(ClientError::ConnectError)?;
+        let stream = if let Some(socket_addr) = parsed_numeric_socket_addr(parsed) {
+            TcpStream::connect_socket_addr(socket_addr)
+                .await
+                .map_err(ClientError::ConnectError)?
+        } else {
+            let addr = format!("{}:{}", parsed.host, parsed.port);
+            TcpStream::connect(addr)
+                .await
+                .map_err(ClientError::ConnectError)?
+        };
 
         // Check cancellation after TCP connect, before TLS.
         check_cx(cx)?;
@@ -1644,6 +1650,13 @@ fn canonical_cookie_host(host: &str) -> String {
     host.trim_start_matches('[')
         .trim_end_matches(']')
         .to_ascii_lowercase()
+}
+
+fn parsed_numeric_socket_addr(parsed: &ParsedUrl) -> Option<SocketAddr> {
+    let host = parsed.host.trim_start_matches('[').trim_end_matches(']');
+    host.parse::<IpAddr>()
+        .ok()
+        .map(|ip| SocketAddr::new(ip, parsed.port))
 }
 
 fn parse_set_cookie_pair(raw: &str) -> Option<(String, String)> {
@@ -2324,6 +2337,20 @@ mod tests {
     fn parse_url_with_query() {
         let url = ParsedUrl::parse("http://example.com/search?q=test&page=1").unwrap();
         assert_eq!(url.path, "/search?q=test&page=1");
+    }
+
+    #[test]
+    fn parsed_numeric_socket_addr_handles_ipv4_host() {
+        let url = ParsedUrl::parse("http://127.0.0.1:8765/healthz").expect("parse url");
+        let socket_addr = parsed_numeric_socket_addr(&url).expect("numeric addr");
+        assert_eq!(socket_addr, "127.0.0.1:8765".parse().unwrap());
+    }
+
+    #[test]
+    fn parsed_numeric_socket_addr_handles_ipv6_host() {
+        let url = ParsedUrl::parse("http://[::1]:8765/healthz").expect("parse url");
+        let socket_addr = parsed_numeric_socket_addr(&url).expect("numeric addr");
+        assert_eq!(socket_addr, "[::1]:8765".parse().unwrap());
     }
 
     #[test]
