@@ -932,9 +932,10 @@ where
         }
     }
 
-    fn commit(mut self) {
-        self.pool.commit_create_slot();
+    fn commit(mut self) -> bool {
+        let handed_out = self.pool.commit_create_slot();
         self.committed = true;
+        handed_out
     }
 
     /// Mark the reservation as committed without calling
@@ -1433,12 +1434,22 @@ where
     }
 
     /// Commit a completed creation slot into active accounting.
-    fn commit_create_slot(&self) {
+    ///
+    /// Returns `true` when the created resource may still be handed out.
+    /// If the pool was closed while creation was in flight, this returns
+    /// `false` and the caller must drop the freshly created resource.
+    fn commit_create_slot(&self) -> bool {
         let mut state = self.state.lock();
         state.creating = state.creating.saturating_sub(1);
+        state.total_created += 1;
+
+        if state.closed {
+            return false;
+        }
+
         state.active += 1;
         state.total_acquisitions += 1;
-        state.total_created += 1;
+        true
     }
 
     /// Commit a completed creation slot as an idle resource (for warmup).
@@ -1682,7 +1693,7 @@ where
                     }
 
                     let resource = self.create_resource().await?;
-                    create_slot.commit();
+                    let committed = create_slot.commit();
                     let acquire_duration =
                         Duration::from_nanos(get_now().duration_since(acquire_start));
 
@@ -1690,8 +1701,14 @@ where
                     #[cfg(feature = "metrics")]
                     if let Some(ref metrics) = self.metrics {
                         metrics.record_created();
-                        metrics.record_acquired(acquire_duration);
+                        if committed {
+                            metrics.record_acquired(acquire_duration);
+                        }
                         self.update_metrics_gauges();
+                    }
+
+                    if !committed {
+                        return Err(PoolError::Closed);
                     }
 
                     return Ok(PooledResource::new_with_time_getter(
@@ -4062,6 +4079,88 @@ mod tests {
         crate::assert_with_log!(ok, "second acquire succeeds", true, ok);
 
         crate::test_complete!("pool_factory_error_releases_create_slot");
+    }
+
+    #[test]
+    fn pool_close_while_create_in_flight_returns_closed() {
+        init_test("pool_close_while_create_in_flight_returns_closed");
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (unblock_tx, unblock_rx) = std::sync::mpsc::channel();
+        let unblock_rx = Arc::new(std::sync::Mutex::new(unblock_rx));
+
+        let factory = {
+            let unblock_rx = Arc::clone(&unblock_rx);
+            move || {
+                let unblock_rx = Arc::clone(&unblock_rx);
+                let entered_tx = entered_tx.clone();
+                Box::pin(async move {
+                    entered_tx.send(()).expect("factory entered");
+                    unblock_rx
+                        .lock()
+                        .expect("factory unblock receiver lock")
+                        .recv()
+                        .expect("factory unblock signal");
+                    Ok::<u32, Box<dyn std::error::Error + Send + Sync>>(7)
+                })
+                    as std::pin::Pin<
+                        Box<
+                            dyn Future<
+                                    Output = Result<u32, Box<dyn std::error::Error + Send + Sync>>,
+                                > + Send,
+                        >,
+                    >
+            }
+        };
+
+        let pool = Arc::new(GenericPool::new(factory, PoolConfig::with_max_size(1)));
+        let acquire_pool = Arc::clone(&pool);
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+
+        let worker = std::thread::spawn(move || {
+            let cx_handle: crate::cx::Cx = crate::cx::Cx::for_testing();
+            let result = futures_lite::future::block_on(acquire_pool.acquire(&cx_handle))
+                .map(|resource| *resource);
+            result_tx.send(result).expect("send acquire result");
+        });
+
+        entered_rx.recv().expect("wait for factory entry");
+        futures_lite::future::block_on(pool.close());
+        unblock_tx.send(()).expect("unblock factory");
+
+        let result = result_rx.recv().expect("receive acquire result");
+        crate::assert_with_log!(
+            matches!(result, Err(PoolError::Closed)),
+            "acquire returns closed once close wins the create race",
+            true,
+            matches!(result, Err(PoolError::Closed))
+        );
+
+        worker.join().expect("worker thread panicked");
+
+        let stats = pool.stats();
+        crate::assert_with_log!(
+            stats.active == 0,
+            "no active resources leaked",
+            0usize,
+            stats.active
+        );
+        crate::assert_with_log!(
+            stats.total == 0,
+            "no total capacity leaked",
+            0usize,
+            stats.total
+        );
+
+        let reacquire = pool.try_acquire();
+        crate::assert_with_log!(
+            reacquire.is_none(),
+            "closed pool does not expose created resource",
+            true,
+            reacquire.is_none()
+        );
+
+        crate::test_complete!("pool_close_while_create_in_flight_returns_closed");
     }
 
     // =========================================================================

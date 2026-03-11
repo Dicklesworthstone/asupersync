@@ -167,7 +167,10 @@ impl Semaphore {
         let taken = {
             let mut state = self.state.lock();
             state.closed = true;
+            // Closed semaphores do not advertise reusable capacity.
+            state.permits = 0;
             self.closed_shadow.store(true, Ordering::Release);
+            self.permits_shadow.store(0, Ordering::Relaxed);
             std::mem::take(&mut state.waiters)
         };
         for waiter in taken {
@@ -223,6 +226,9 @@ impl Semaphore {
             return;
         }
         let mut state = self.state.lock();
+        if state.closed {
+            return;
+        }
         state.permits = state.permits.saturating_add(count);
         self.permits_shadow.store(state.permits, Ordering::Relaxed);
         // Only wake the first waiter since FIFO ordering means only it can acquire.
@@ -1102,6 +1108,59 @@ mod tests {
         );
         crate::assert_with_log!(sem.is_closed(), "is_closed", true, sem.is_closed());
         crate::test_complete!("try_acquire_fails_when_closed");
+    }
+
+    #[test]
+    fn close_zeroes_available_permits_and_keeps_them_zero() {
+        init_test("close_zeroes_available_permits_and_keeps_them_zero");
+        let sem = Semaphore::new(2);
+        let permit = sem.try_acquire(1).expect("acquire before close");
+        crate::assert_with_log!(
+            sem.available_permits() == 1,
+            "available before close",
+            1usize,
+            sem.available_permits()
+        );
+
+        sem.close();
+        crate::assert_with_log!(
+            sem.available_permits() == 0,
+            "available after close",
+            0usize,
+            sem.available_permits()
+        );
+
+        // Releasing held permits after close should not revive capacity.
+        drop(permit);
+        crate::assert_with_log!(
+            sem.available_permits() == 0,
+            "available after dropping held permit",
+            0usize,
+            sem.available_permits()
+        );
+        crate::test_complete!("close_zeroes_available_permits_and_keeps_them_zero");
+    }
+
+    #[test]
+    fn add_permits_is_noop_after_close() {
+        init_test("add_permits_is_noop_after_close");
+        let sem = Semaphore::new(0);
+        sem.close();
+        sem.add_permits(10);
+
+        crate::assert_with_log!(
+            sem.available_permits() == 0,
+            "add_permits ignored after close",
+            0usize,
+            sem.available_permits()
+        );
+        crate::assert_with_log!(
+            sem.try_acquire(1).is_err(),
+            "closed semaphore still rejects acquire",
+            true,
+            sem.try_acquire(1).is_err()
+        );
+        crate::test_complete!("add_permits_is_noop_after_close");
     }
 
     #[test]
