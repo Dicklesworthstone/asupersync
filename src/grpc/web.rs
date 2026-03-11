@@ -129,7 +129,7 @@ pub fn encode_trailers(status: &Status, metadata: &Metadata, dst: &mut BytesMut)
         match value {
             // Sanitize CR/LF in ASCII values to prevent trailer injection.
             MetadataValue::Ascii(s) => {
-                let sanitized = s.replace('\r', "").replace('\n', "");
+                let sanitized = s.replace(['\r', '\n'], "");
                 block.push_str(&sanitized);
             }
             MetadataValue::Binary(b) => {

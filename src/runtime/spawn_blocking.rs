@@ -469,13 +469,11 @@ mod tests {
         }));
 
         let payload = panic.expect_err("receiver should fail closed when sender drops");
-        let message = if let Some(message) = payload.downcast_ref::<&str>() {
-            (*message).to_string()
-        } else if let Some(message) = payload.downcast_ref::<String>() {
-            message.clone()
-        } else {
-            String::new()
-        };
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(ToString::to_string)
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
 
         crate::assert_with_log!(
             message.contains("without producing a result"),

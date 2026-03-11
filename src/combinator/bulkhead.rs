@@ -526,6 +526,7 @@ impl Bulkhead {
 
                 self.pending_queue_count.fetch_sub(1, Ordering::Relaxed);
                 self.total_cancelled_atomic.fetch_add(1, Ordering::Relaxed);
+                let _ = self.process_queue(now);
             }
             // If entry.result was Some(Err(_)), it was already counted (e.g. as Timeout)
             // and pending_queue_count was decremented. Removing it keeps queue capacity honest.

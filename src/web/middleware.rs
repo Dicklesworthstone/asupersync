@@ -969,15 +969,19 @@ impl AuthPolicy {
         };
         match self {
             Self::AnyBearer => !token.is_empty(),
-            Self::ExactBearer(tokens) => tokens.iter().any(|expected| {
-                // Constant-time comparison to prevent timing side-channel attacks.
-                expected.len() == token.len()
-                    && expected
-                        .bytes()
-                        .zip(token.bytes())
-                        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-                        == 0
-            }),
+            Self::ExactBearer(tokens) => {
+                // Constant-time scan: evaluate every token to prevent timing
+                // side-channel leaks about which token matched or list length.
+                tokens.iter().fold(false, |matched, expected| {
+                    let this_match = expected.len() == token.len()
+                        && expected
+                            .bytes()
+                            .zip(token.bytes())
+                            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                            == 0;
+                    matched | this_match
+                })
+            }
         }
     }
 }
