@@ -495,6 +495,7 @@ mod tests {
         Arc::new(NoopWaker).into()
     }
 
+    #[derive(Clone, Copy)]
     struct EchoService;
 
     impl Service<i32> for EchoService {
@@ -955,12 +956,14 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::redundant_clone)]
     fn rate_limit_service_clone() {
         let svc = RateLimit::new(42_i32, 10, Duration::from_secs(1));
         let cloned = svc.clone();
         assert_eq!(*cloned.inner(), 42);
         assert_eq!(cloned.rate(), 10);
         assert_eq!(cloned.available_tokens(), 10);
+        assert_eq!(svc.rate(), cloned.rate()); // use svc to avoid redundant_clone warning
     }
 
     #[test]

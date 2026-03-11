@@ -197,27 +197,12 @@ where
         loop {
             match &mut self.state {
                 State::Idle => {
-                    match self
-                        .inner
-                        .poll_ready(cx)
-                        .map_err(ConcurrencyLimitError::Inner)
-                    {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-                        Poll::Ready(Ok(())) => {}
-                    }
-
-                    // Fast lock-free check: skip mutex when at capacity.
-                    if self.semaphore.available_permits() > 0 {
-                        // Try to acquire synchronously (may still fail due to FIFO fairness).
-                        // Uses try_acquire_arc to defer Arc::clone to the success path,
-                        // avoiding a refcount round-trip on contention.
-                        if let Ok(permit) =
-                            OwnedSemaphorePermit::try_acquire_arc(&self.semaphore, 1)
-                        {
-                            self.state = State::Ready(permit);
-                            return Poll::Ready(Ok(()));
-                        }
+                    // Claim outer capacity before consulting the inner service so
+                    // stateful inner poll_ready reservations cannot be stranded
+                    // while this limiter still waits on its own semaphore.
+                    if let Ok(permit) = OwnedSemaphorePermit::try_acquire_arc(&self.semaphore, 1) {
+                        self.state = State::Ready(permit);
+                        continue;
                     }
 
                     // Fallback to queued acquisition. When a task-local Cx is
@@ -249,7 +234,13 @@ where
                         .poll_ready(cx)
                         .map_err(ConcurrencyLimitError::Inner)
                     {
-                        Poll::Pending => return Poll::Pending,
+                        Poll::Pending => {
+                            // The inner service did not actually admit work, so
+                            // release the outer capacity and let the caller wait
+                            // on the inner readiness edge instead.
+                            self.state = State::Idle;
+                            return Poll::Pending;
+                        }
                         Poll::Ready(Ok(())) => return Poll::Ready(Ok(())),
                         Poll::Ready(Err(err)) => {
                             // Release the reserved permit if the inner service
@@ -496,6 +487,43 @@ mod tests {
             if self.error {
                 Poll::Ready(Err("inner error"))
             } else if self.ready.load(Ordering::SeqCst) {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        }
+
+        fn call(&mut self, _req: ()) -> Self::Future {
+            ready(Ok(()))
+        }
+    }
+
+    struct CountingReadyService {
+        ready: Arc<AtomicBool>,
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl CountingReadyService {
+        fn new(ready: Arc<AtomicBool>) -> (Self, Arc<AtomicUsize>) {
+            let polls = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    ready,
+                    polls: polls.clone(),
+                },
+                polls,
+            )
+        }
+    }
+
+    impl Service<()> for CountingReadyService {
+        type Response = ();
+        type Error = std::convert::Infallible;
+        type Future = std::future::Ready<Result<(), std::convert::Infallible>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            if self.ready.load(Ordering::SeqCst) {
                 Poll::Ready(Ok(()))
             } else {
                 Poll::Pending
@@ -816,8 +844,8 @@ mod tests {
     }
 
     #[test]
-    fn queued_waiter_claims_released_permit_before_rechecking_inner() {
-        init_test("queued_waiter_claims_released_permit_before_rechecking_inner");
+    fn queued_waiter_releases_permit_if_inner_recheck_is_pending() {
+        init_test("queued_waiter_releases_permit_if_inner_recheck_is_pending");
         let ready = Arc::new(AtomicBool::new(true));
         let layer = ConcurrencyLimitLayer::new(1);
         let mut holder = layer.layer(NeverCompleteService);
@@ -857,15 +885,64 @@ mod tests {
             second.is_pending()
         );
         let has_permit = has_ready_permit(&waiter);
-        crate::assert_with_log!(has_permit, "permit claimed", true, has_permit);
+        crate::assert_with_log!(!has_permit, "permit released", false, has_permit);
         let available = waiter.available();
-        crate::assert_with_log!(available == 0, "available", 0, available);
+        crate::assert_with_log!(available == 1, "available", 1, available);
 
         ready.store(true, Ordering::SeqCst);
         let third = waiter.poll_ready(&mut waiter_cx);
         let third_ok = matches!(third, Poll::Ready(Ok(())));
         crate::assert_with_log!(third_ok, "waiter becomes ready", true, third_ok);
-        crate::test_complete!("queued_waiter_claims_released_permit_before_rechecking_inner");
+        crate::test_complete!("queued_waiter_releases_permit_if_inner_recheck_is_pending");
+    }
+
+    #[test]
+    fn outer_capacity_wait_does_not_poll_inner_ready_service() {
+        init_test("outer_capacity_wait_does_not_poll_inner_ready_service");
+        let ready = Arc::new(AtomicBool::new(true));
+        let (waiter_inner, poll_count) = CountingReadyService::new(ready);
+        let layer = ConcurrencyLimitLayer::new(1);
+        let mut holder = layer.layer(NeverCompleteService);
+        let mut waiter = layer.layer(waiter_inner);
+        let holder_waker = noop_waker();
+        let mut holder_cx = Context::from_waker(&holder_waker);
+
+        let holder_ready = holder.poll_ready(&mut holder_cx);
+        let holder_ok = matches!(holder_ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(holder_ok, "holder ready", true, holder_ok);
+        let held = holder.call(());
+
+        let waiter_waker = noop_waker();
+        let mut waiter_cx = Context::from_waker(&waiter_waker);
+
+        let first = waiter.poll_ready(&mut waiter_cx);
+        crate::assert_with_log!(
+            first.is_pending(),
+            "waiter pending without capacity",
+            true,
+            first.is_pending()
+        );
+        let first_poll_count = poll_count.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            first_poll_count == 0,
+            "inner not polled",
+            0,
+            first_poll_count
+        );
+
+        drop(held);
+
+        let second = waiter.poll_ready(&mut waiter_cx);
+        let second_ok = matches!(second, Poll::Ready(Ok(())));
+        crate::assert_with_log!(second_ok, "waiter ready after release", true, second_ok);
+        let second_poll_count = poll_count.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            second_poll_count == 1,
+            "inner polled exactly once after capacity release",
+            1,
+            second_poll_count
+        );
+        crate::test_complete!("outer_capacity_wait_does_not_poll_inner_ready_service");
     }
 
     // =========================================================================

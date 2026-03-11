@@ -96,10 +96,26 @@ impl<S> Layer<S> for LoadShedLayer {
 /// If the inner service returns `Poll::Pending`, the load shedder marks
 /// itself as overloaded and will reject the next `call` with an [`Overloaded`]
 /// error instead of processing it.
-#[derive(Debug, Clone)]
+///
+/// Each successful `poll_ready` authorizes exactly one subsequent `call`.
+/// Calling without first observing readiness fails closed with
+/// [`LoadShedError::NotReady`].
+#[derive(Debug)]
 pub struct LoadShed<S> {
     inner: S,
     overloaded: bool,
+    ready_observed: bool,
+}
+
+impl<S: Clone> Clone for LoadShed<S> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            overloaded: self.overloaded,
+            // Readiness is handle-local and must not be duplicated across clones.
+            ready_observed: false,
+        }
+    }
 }
 
 impl<S> LoadShed<S> {
@@ -109,6 +125,7 @@ impl<S> LoadShed<S> {
         Self {
             inner,
             overloaded: false,
+            ready_observed: false,
         }
     }
 
@@ -165,6 +182,8 @@ impl std::error::Error for Overloaded {}
 /// Error returned by the load shedding service.
 #[derive(Debug)]
 pub enum LoadShedError<E> {
+    /// The caller attempted `call()` without a preceding successful `poll_ready()`.
+    NotReady,
     /// The service is overloaded and the request was shed.
     Overloaded(Overloaded),
     /// The inner service returned an error.
@@ -174,6 +193,7 @@ pub enum LoadShedError<E> {
 impl<E: std::fmt::Display> std::fmt::Display for LoadShedError<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::NotReady => write!(f, "poll_ready required before call"),
             Self::Overloaded(e) => write!(f, "{e}"),
             Self::Inner(e) => write!(f, "inner service error: {e}"),
         }
@@ -183,6 +203,7 @@ impl<E: std::fmt::Display> std::fmt::Display for LoadShedError<E> {
 impl<E: std::error::Error + 'static> std::error::Error for LoadShedError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::NotReady => None,
             Self::Overloaded(e) => Some(e),
             Self::Inner(e) => Some(e),
         }
@@ -203,22 +224,29 @@ where
         match poll_ready_preserving_self_wake::<S, Request>(&mut self.inner, cx) {
             Poll::Ready(Ok(())) => {
                 self.overloaded = false;
+                self.ready_observed = true;
                 Poll::Ready(Ok(()))
             }
             Poll::Ready(Err(e)) => {
                 self.overloaded = false;
+                self.ready_observed = false;
                 Poll::Ready(Err(LoadShedError::Inner(e)))
             }
             Poll::Pending => {
                 // Inner service is not ready; mark as overloaded but return Ready
                 // so the caller can call us immediately (and we'll shed)
                 self.overloaded = true;
+                self.ready_observed = true;
                 Poll::Ready(Ok(()))
             }
         }
     }
 
     fn call(&mut self, req: Request) -> Self::Future {
+        if !std::mem::replace(&mut self.ready_observed, false) {
+            return LoadShedFuture::not_ready();
+        }
+
         if self.overloaded {
             // Stay overloaded until `poll_ready` observes the inner service as ready.
             LoadShedFuture::overloaded()
@@ -234,6 +262,8 @@ pub struct LoadShedFuture<F> {
 }
 
 enum LoadShedState<F> {
+    /// Caller skipped `poll_ready` or reused a consumed readiness window.
+    NotReady,
     /// Request was shed due to overload.
     Overloaded,
     /// Request is being processed by the inner service.
@@ -243,6 +273,14 @@ enum LoadShedState<F> {
 }
 
 impl<F> LoadShedFuture<F> {
+    /// Creates a future that immediately returns a readiness misuse error.
+    #[must_use]
+    pub fn not_ready() -> Self {
+        Self {
+            state: LoadShedState::NotReady,
+        }
+    }
+
     /// Creates a future that immediately returns an overloaded error.
     #[must_use]
     pub fn overloaded() -> Self {
@@ -270,6 +308,10 @@ where
         let this = self.get_mut();
 
         match &mut this.state {
+            LoadShedState::NotReady => {
+                this.state = LoadShedState::Done;
+                Poll::Ready(Err(LoadShedError::NotReady))
+            }
             LoadShedState::Overloaded => {
                 this.state = LoadShedState::Done;
                 Poll::Ready(Err(LoadShedError::Overloaded(Overloaded::new())))
@@ -302,6 +344,7 @@ impl<F: std::fmt::Debug> std::fmt::Debug for LoadShedFuture<F> {
 mod tests {
     use super::*;
     use std::future::ready;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -399,6 +442,32 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct CountingReadyService {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl CountingReadyService {
+        fn new(calls: Arc<AtomicUsize>) -> Self {
+            Self { calls }
+        }
+    }
+
+    impl Service<i32> for CountingReadyService {
+        type Response = i32;
+        type Error = std::convert::Infallible;
+        type Future = std::future::Ready<Result<i32, std::convert::Infallible>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: i32) -> Self::Future {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            ready(Ok(req))
+        }
+    }
+
     #[test]
     fn load_shed_layer_creates_service() {
         init_test("load_shed_layer_creates_service");
@@ -427,6 +496,32 @@ mod tests {
         let ok = matches!(result, Poll::Ready(Ok(42)));
         crate::assert_with_log!(ok, "call ok", true, ok);
         crate::test_complete!("load_shed_passes_through_when_ready");
+    }
+
+    #[test]
+    fn load_shed_call_without_poll_ready_returns_not_ready() {
+        init_test("load_shed_call_without_poll_ready_returns_not_ready");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut svc = LoadShed::new(CountingReadyService::new(Arc::clone(&calls)));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut future = svc.call(21);
+        let result = Pin::new(&mut future).poll(&mut cx);
+        let not_ready = matches!(result, Poll::Ready(Err(LoadShedError::NotReady)));
+        crate::assert_with_log!(
+            not_ready,
+            "call without poll_ready fails closed",
+            true,
+            not_ready
+        );
+        crate::assert_with_log!(
+            calls.load(Ordering::SeqCst) == 0,
+            "inner service not invoked on readiness misuse",
+            0,
+            calls.load(Ordering::SeqCst)
+        );
+        crate::test_complete!("load_shed_call_without_poll_ready_returns_not_ready");
     }
 
     #[test]
@@ -495,6 +590,15 @@ mod tests {
             first_overloaded
         );
 
+        let ready = svc.poll_ready(&mut cx);
+        let second_ready_ok = matches!(ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(
+            second_ready_ok,
+            "repoll while still overloaded re-arms one shed",
+            true,
+            second_ready_ok
+        );
+
         let mut second = svc.call(2);
         let second_result = Pin::new(&mut second).poll(&mut cx);
         let second_overloaded = matches!(
@@ -551,6 +655,72 @@ mod tests {
     }
 
     #[test]
+    fn load_shed_ready_window_is_consumed_by_call() {
+        init_test("load_shed_ready_window_is_consumed_by_call");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut svc = LoadShed::new(CountingReadyService::new(Arc::clone(&calls)));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let ready = svc.poll_ready(&mut cx);
+        let ready_ok = matches!(ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready_ok, "poll_ready authorizes one call", true, ready_ok);
+
+        let mut first = svc.call(7);
+        let first_result = Pin::new(&mut first).poll(&mut cx);
+        let first_ok = matches!(first_result, Poll::Ready(Ok(7)));
+        crate::assert_with_log!(first_ok, "first call succeeds", true, first_ok);
+
+        let mut second = svc.call(8);
+        let second_result = Pin::new(&mut second).poll(&mut cx);
+        let second_not_ready = matches!(second_result, Poll::Ready(Err(LoadShedError::NotReady)));
+        crate::assert_with_log!(
+            second_not_ready,
+            "second call without repoll fails closed",
+            true,
+            second_not_ready
+        );
+        crate::assert_with_log!(
+            calls.load(Ordering::SeqCst) == 1,
+            "only the authorized call reaches the inner service",
+            1,
+            calls.load(Ordering::SeqCst)
+        );
+        crate::test_complete!("load_shed_ready_window_is_consumed_by_call");
+    }
+
+    #[test]
+    fn load_shed_clone_does_not_inherit_ready_window() {
+        init_test("load_shed_clone_does_not_inherit_ready_window");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut svc = LoadShed::new(CountingReadyService::new(Arc::clone(&calls)));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let ready = svc.poll_ready(&mut cx);
+        let ready_ok = matches!(ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(ready_ok, "original service ready", true, ready_ok);
+
+        let mut cloned = svc.clone();
+        let mut future = cloned.call(5);
+        let result = Pin::new(&mut future).poll(&mut cx);
+        let not_ready = matches!(result, Poll::Ready(Err(LoadShedError::NotReady)));
+        crate::assert_with_log!(
+            not_ready,
+            "clone requires its own readiness observation",
+            true,
+            not_ready
+        );
+        crate::assert_with_log!(
+            calls.load(Ordering::SeqCst) == 0,
+            "clone misuse does not invoke inner service",
+            0,
+            calls.load(Ordering::SeqCst)
+        );
+        crate::test_complete!("load_shed_clone_does_not_inherit_ready_window");
+    }
+
+    #[test]
     fn overloaded_error_display() {
         init_test("overloaded_error_display");
         let err = Overloaded::new();
@@ -563,6 +733,11 @@ mod tests {
     #[test]
     fn load_shed_error_display() {
         init_test("load_shed_error_display");
+        let err: LoadShedError<&str> = LoadShedError::NotReady;
+        let display = format!("{err}");
+        let has_not_ready = display.contains("poll_ready required");
+        crate::assert_with_log!(has_not_ready, "not ready", true, has_not_ready);
+
         let err: LoadShedError<&str> = LoadShedError::Overloaded(Overloaded::new());
         let display = format!("{err}");
         let has_overloaded = display.contains("overloaded");
@@ -644,7 +819,11 @@ mod tests {
     }
 
     #[test]
-    fn load_shed_error_debug_both_variants() {
+    fn load_shed_error_debug_all_variants() {
+        let not_ready: LoadShedError<String> = LoadShedError::NotReady;
+        let dbg = format!("{not_ready:?}");
+        assert!(dbg.contains("NotReady"));
+
         let overloaded: LoadShedError<String> = LoadShedError::Overloaded(Overloaded::new());
         let dbg = format!("{overloaded:?}");
         assert!(dbg.contains("Overloaded"));
@@ -657,6 +836,10 @@ mod tests {
     #[test]
     fn load_shed_error_source() {
         use std::io;
+        let not_ready: LoadShedError<io::Error> = LoadShedError::NotReady;
+        let err: &dyn std::error::Error = &not_ready;
+        assert!(err.source().is_none());
+
         let overloaded: LoadShedError<io::Error> = LoadShedError::Overloaded(Overloaded::new());
         let err: &dyn std::error::Error = &overloaded;
         assert!(err.source().is_some()); // Overloaded implements Error
