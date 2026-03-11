@@ -1032,7 +1032,7 @@ mod tests {
         }
 
         let stealer = queue.stealer();
-        let schedule_queue = queue.clone();
+        let schedule_queue = queue;
         let barrier = Arc::new(Barrier::new(3));
         let done = Arc::new(AtomicBool::new(false));
 

@@ -185,8 +185,7 @@ impl<E: std::fmt::Display> std::fmt::Display for TimeoutError<E> {
 impl<E: std::error::Error + 'static> std::error::Error for TimeoutError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NotReady => None,
-            Self::PolledAfterCompletion => None,
+            Self::NotReady | Self::PolledAfterCompletion => None,
             Self::Elapsed(e) => Some(e),
             Self::Inner(e) => Some(e),
         }
