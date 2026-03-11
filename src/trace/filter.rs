@@ -486,8 +486,11 @@ impl TraceFilter {
     /// Uses a simple xorshift for fast, reproducible sampling.
     #[allow(clippy::cast_precision_loss)]
     fn sample(&mut self) -> bool {
-        // xorshift64
-        let mut x = self.sample_state.wrapping_add(1);
+        // xorshift64 — avoid the zero fixed-point
+        let mut x = self.sample_state;
+        if x == 0 {
+            x = 1;
+        }
         x ^= x << 13;
         x ^= x >> 7;
         x ^= x << 17;

@@ -310,7 +310,7 @@ impl SymbolDistributor {
 
         DistributionResult {
             object_id: encoded.params.object_id,
-            symbols_distributed: encoded.symbols.len() as u32,
+            symbols_distributed: u32::try_from(encoded.symbols.len()).unwrap_or(u32::MAX),
             acks,
             failures,
             quorum_achieved: quorum_result.quorum_met,
