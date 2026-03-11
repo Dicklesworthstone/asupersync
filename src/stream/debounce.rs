@@ -165,8 +165,23 @@ impl<S: Stream> Stream for Debounce<S> {
             if let Some(ref mut timer) = *this.timer {
                 if Pin::new(timer).poll(cx).is_ready() {
                     *this.timer = None;
-                    let (item, _) = this.pending.take().unwrap();
-                    return Poll::Ready(Some(item));
+                    let now = (this.time_getter)();
+                    let elapsed = Duration::from_nanos(now.duration_since(*received_at));
+                    if *this.done || elapsed >= *this.period {
+                        let (item, _) = this.pending.take().unwrap();
+                        return Poll::Ready(Some(item));
+                    }
+                    // A wall-clock wake must not override a custom logical
+                    // clock. Re-arm the timer for the remaining period so
+                    // there is always a wake source for the buffered item.
+                    let remaining = this.period.saturating_sub(elapsed);
+                    let remaining_nanos = remaining.as_nanos().min(u128::from(u64::MAX)) as u64;
+                    let wake_deadline = wall_clock_now().saturating_add_nanos(remaining_nanos);
+                    let mut new_timer = Box::pin(Sleep::new(wake_deadline));
+                    // Register the waker with the new timer.
+                    let _ = Pin::new(&mut new_timer).poll(cx);
+                    *this.timer = Some(new_timer);
+                    return Poll::Pending;
                 }
             }
             return Poll::Pending;
@@ -358,7 +373,7 @@ mod tests {
 
     #[test]
     fn debounce_emits_immediately_when_timer_future_is_ready() {
-        init_test("debounce_emits_immediately_when_timer_future_is_ready");
+        init_test("debounce_does_not_emit_early_when_timer_future_is_ready");
         set_test_time(0);
         let mut stream =
             Debounce::with_time_getter(PendingStream, Duration::from_mins(1), test_time);
@@ -367,13 +382,24 @@ mod tests {
 
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Pending);
+        assert_eq!(
+            stream.pending.as_ref().map(|(item, _)| *item),
+            Some(7),
+            "pending item must remain buffered until the custom clock reaches the quiet period"
+        );
+        assert!(
+            stream.timer.is_some(),
+            "timer should be re-armed for the remaining period so there is a wake source"
+        );
+
+        set_test_time(Duration::from_mins(1).as_nanos() as u64);
         assert_eq!(
             Pin::new(&mut stream).poll_next(&mut cx),
             Poll::Ready(Some(7))
         );
         assert!(stream.pending.is_none(), "pending item should be drained");
-        assert!(stream.timer.is_none(), "timer should be cleared after emit");
-        crate::test_complete!("debounce_emits_immediately_when_timer_future_is_ready");
+        crate::test_complete!("debounce_does_not_emit_early_when_timer_future_is_ready");
     }
 
     #[test]
