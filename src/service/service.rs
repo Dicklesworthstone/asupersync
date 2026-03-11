@@ -337,7 +337,8 @@ pub struct AdapterConfig {
     /// How to handle Tower services that ignore cancellation.
     pub cancellation_mode: CancellationMode,
 
-    /// Timeout for non-cancellable operations.
+    /// Timeout deadline shared across non-cancellable readiness waits and
+    /// request futures.
     pub fallback_timeout: Option<std::time::Duration>,
 
     /// Minimum budget required to wait for service readiness.
@@ -787,11 +788,25 @@ where
             return Err(TowerAdapterError::Overloaded);
         }
 
+        let timeout_deadline = match self.config.cancellation_mode {
+            CancellationMode::TimeoutFallback => self
+                .config
+                .fallback_timeout
+                .and_then(|timeout| cx.timer_driver().map(|timer| timer.now() + timeout)),
+            _ => None,
+        };
+
         // Get the inner service
         let mut service = self.inner.lock();
 
         // Poll for readiness
-        let ready_result = poll_fn(|poll_cx| service.poll_ready(poll_cx)).await;
+        let ready_result = if let Some(deadline) = timeout_deadline {
+            crate::time::timeout_at(deadline, poll_fn(|poll_cx| service.poll_ready(poll_cx)))
+                .await
+                .map_err(|_| TowerAdapterError::Timeout)?
+        } else {
+            poll_fn(|poll_cx| service.poll_ready(poll_cx)).await
+        };
         if let Err(e) = ready_result {
             return Err(TowerAdapterError::Service(e));
         }
@@ -827,20 +842,15 @@ where
                 result
             }
             CancellationMode::TimeoutFallback => {
-                if let Some(timeout_duration) = self.config.fallback_timeout {
-                    if let Some(timer) = cx.timer_driver() {
-                        let now = timer.now();
-                        crate::time::timeout(now, timeout_duration, Box::pin(future))
-                            .await
-                            .map_or_else(
-                                |_| Err(TowerAdapterError::Timeout),
-                                |output| output.map_err(TowerAdapterError::Service),
-                            )
-                    } else {
-                        // No timer driver available; fall back to best-effort.
-                        future.await.map_err(TowerAdapterError::Service)
-                    }
+                if let Some(deadline) = timeout_deadline {
+                    crate::time::timeout_at(deadline, Box::pin(future))
+                        .await
+                        .map_or_else(
+                            |_| Err(TowerAdapterError::Timeout),
+                            |output| output.map_err(TowerAdapterError::Service),
+                        )
                 } else {
+                    // No timer driver or fallback timeout available; fall back to best-effort.
                     future.await.map_err(TowerAdapterError::Service)
                 }
             }
@@ -1313,8 +1323,27 @@ mod tests {
             Arc::new(NoopWaker).into()
         }
 
+        fn test_cx_with_timer() -> (Cx, Arc<VirtualClock>, TimerDriverHandle) {
+            let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+            let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+            let cx = Cx::new_with_drivers(
+                RegionId::new_for_test(1, 0),
+                TaskId::new_for_test(1, 0),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(timer.clone()),
+                None,
+            );
+            (cx, clock, timer)
+        }
+
         #[derive(Clone)]
         struct PendingService;
+
+        #[derive(Clone)]
+        struct PendingReadyService;
 
         #[derive(Debug)]
         struct TestError;
@@ -1339,24 +1368,26 @@ mod tests {
             }
         }
 
+        impl tower::Service<()> for PendingReadyService {
+            type Response = ();
+            type Error = TestError;
+            type Future = std::future::Ready<Result<(), TestError>>;
+
+            fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+                Poll::Pending
+            }
+
+            fn call(&mut self, _req: ()) -> Self::Future {
+                std::future::ready(Ok(()))
+            }
+        }
+
         #[test]
         fn timeout_fallback_triggers_timeout_error() {
             crate::test_utils::init_test_logging();
             crate::test_phase!("timeout_fallback_triggers_timeout_error");
 
-            let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
-            let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
-
-            let cx = Cx::new_with_drivers(
-                RegionId::new_for_test(1, 0),
-                TaskId::new_for_test(1, 0),
-                Budget::INFINITE,
-                None,
-                None,
-                None,
-                Some(timer.clone()),
-                None,
-            );
+            let (cx, clock, timer) = test_cx_with_timer();
             let _guard = Cx::set_current(Some(cx.clone()));
 
             let config = AdapterConfig::new()
@@ -1378,6 +1409,35 @@ mod tests {
             let timed_out = matches!(result, Poll::Ready(Err(TowerAdapterError::Timeout)));
             crate::assert_with_log!(timed_out, "timeout error", true, timed_out);
             crate::test_complete!("timeout_fallback_triggers_timeout_error");
+        }
+
+        #[test]
+        fn timeout_fallback_times_out_while_waiting_for_ready() {
+            crate::test_utils::init_test_logging();
+            crate::test_phase!("timeout_fallback_times_out_while_waiting_for_ready");
+
+            let (cx, clock, timer) = test_cx_with_timer();
+            let _guard = Cx::set_current(Some(cx.clone()));
+
+            let config = AdapterConfig::new()
+                .cancellation_mode(CancellationMode::TimeoutFallback)
+                .fallback_timeout(Duration::from_millis(5));
+            let adapter = AsupersyncAdapter::with_config(PendingReadyService, config);
+
+            let mut fut = pin!(adapter.call(&cx, ()));
+            let waker = noop_waker();
+            let mut context = Context::from_waker(&waker);
+
+            let first = fut.as_mut().poll(&mut context);
+            assert!(first.is_pending());
+
+            clock.advance(Time::from_millis(6).as_nanos());
+            let _ = timer.process_timers();
+
+            let result = fut.as_mut().poll(&mut context);
+            let timed_out = matches!(result, Poll::Ready(Err(TowerAdapterError::Timeout)));
+            crate::assert_with_log!(timed_out, "readiness timeout error", true, timed_out);
+            crate::test_complete!("timeout_fallback_times_out_while_waiting_for_ready");
         }
     }
 

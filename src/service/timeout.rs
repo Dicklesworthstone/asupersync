@@ -82,12 +82,27 @@ impl<S> Layer<S> for TimeoutLayer {
 /// A service that imposes a timeout on requests.
 ///
 /// If the inner service doesn't complete within the timeout, the request
-/// fails with a [`TimeoutError`].
-#[derive(Debug, Clone)]
+/// fails with a [`TimeoutError`]. Each successful `poll_ready` authorizes
+/// exactly one subsequent `call`; skipping readiness fails closed with
+/// [`TimeoutError::NotReady`].
+#[derive(Debug)]
 pub struct Timeout<S> {
     inner: S,
     duration: Duration,
     time_getter: fn() -> Time,
+    ready_observed: bool,
+}
+
+impl<S: Clone> Clone for Timeout<S> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            duration: self.duration,
+            time_getter: self.time_getter,
+            // Readiness authorization is handle-local and must not be cloned.
+            ready_observed: false,
+        }
+    }
 }
 
 impl<S> Timeout<S> {
@@ -98,6 +113,7 @@ impl<S> Timeout<S> {
             inner,
             duration: timeout,
             time_getter: wall_clock_now,
+            ready_observed: false,
         }
     }
 
@@ -108,6 +124,7 @@ impl<S> Timeout<S> {
             inner,
             duration: timeout,
             time_getter,
+            ready_observed: false,
         }
     }
 
@@ -144,6 +161,10 @@ impl<S> Timeout<S> {
 /// Error returned when a request times out.
 #[derive(Debug)]
 pub enum TimeoutError<E> {
+    /// The caller attempted `call()` without a preceding successful `poll_ready()`.
+    NotReady,
+    /// The timeout future was polled after it had already completed.
+    PolledAfterCompletion,
     /// The request timed out.
     Elapsed(Elapsed),
     /// The inner service returned an error.
@@ -153,6 +174,8 @@ pub enum TimeoutError<E> {
 impl<E: std::fmt::Display> std::fmt::Display for TimeoutError<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::NotReady => write!(f, "poll_ready required before call"),
+            Self::PolledAfterCompletion => write!(f, "timeout future polled after completion"),
             Self::Elapsed(e) => write!(f, "request timed out: {e}"),
             Self::Inner(e) => write!(f, "inner service error: {e}"),
         }
@@ -162,6 +185,8 @@ impl<E: std::fmt::Display> std::fmt::Display for TimeoutError<E> {
 impl<E: std::error::Error + 'static> std::error::Error for TimeoutError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::NotReady => None,
+            Self::PolledAfterCompletion => None,
             Self::Elapsed(e) => Some(e),
             Self::Inner(e) => Some(e),
         }
@@ -179,11 +204,27 @@ where
 
     #[inline]
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx).map_err(TimeoutError::Inner)
+        match self.inner.poll_ready(cx) {
+            Poll::Ready(Ok(())) => {
+                self.ready_observed = true;
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(err)) => {
+                self.ready_observed = false;
+                Poll::Ready(Err(TimeoutError::Inner(err)))
+            }
+            Poll::Pending => {
+                self.ready_observed = false;
+                Poll::Pending
+            }
+        }
     }
 
     #[inline]
     fn call(&mut self, req: Request) -> Self::Future {
+        if !std::mem::replace(&mut self.ready_observed, false) {
+            return TimeoutFuture::not_ready();
+        }
         let now = (self.time_getter)();
         let deadline = now.saturating_add_nanos(duration_to_nanos(self.duration));
         TimeoutFuture::with_time_getter(self.inner.call(req), deadline, self.time_getter)
@@ -193,19 +234,41 @@ where
 /// Future returned by [`Timeout`] service.
 #[derive(Debug)]
 pub struct TimeoutFuture<F> {
-    inner: F,
-    sleep: Sleep,
-    time_getter: Option<fn() -> Time>,
+    state: TimeoutFutureState<F>,
+}
+
+#[derive(Debug)]
+enum TimeoutFutureState<F> {
+    /// Caller skipped `poll_ready` or reused a consumed readiness window.
+    NotReady,
+    /// Active timeout-wrapped inner future.
+    Running {
+        inner: F,
+        sleep: Sleep,
+        time_getter: Option<fn() -> Time>,
+    },
+    /// Future has completed.
+    Done,
 }
 
 impl<F> TimeoutFuture<F> {
+    /// Creates a future that immediately returns a readiness misuse error.
+    #[must_use]
+    pub const fn not_ready() -> Self {
+        Self {
+            state: TimeoutFutureState::NotReady,
+        }
+    }
+
     /// Creates a new timeout future.
     #[must_use]
     pub fn new(inner: F, deadline: Time) -> Self {
         Self {
-            inner,
-            sleep: Sleep::new(deadline),
-            time_getter: None,
+            state: TimeoutFutureState::Running {
+                inner,
+                sleep: Sleep::new(deadline),
+                time_getter: None,
+            },
         }
     }
 
@@ -216,16 +279,21 @@ impl<F> TimeoutFuture<F> {
     #[must_use]
     pub fn with_time_getter(inner: F, deadline: Time, time_getter: fn() -> Time) -> Self {
         Self {
-            inner,
-            sleep: Sleep::new(deadline),
-            time_getter: Some(time_getter),
+            state: TimeoutFutureState::Running {
+                inner,
+                sleep: Sleep::new(deadline),
+                time_getter: Some(time_getter),
+            },
         }
     }
 
     /// Returns the deadline for this timeout.
     #[must_use]
-    pub const fn deadline(&self) -> Time {
-        self.sleep.deadline()
+    pub fn deadline(&self) -> Time {
+        match &self.state {
+            TimeoutFutureState::Running { sleep, .. } => sleep.deadline(),
+            TimeoutFutureState::NotReady | TimeoutFutureState::Done => Time::ZERO,
+        }
     }
 
     /// Polls with an explicit time value.
@@ -242,19 +310,33 @@ impl<F> TimeoutFuture<F> {
     where
         F: Future<Output = Result<T, E>> + Unpin,
     {
-        // Prefer completed work at the timeout boundary.
-        match Pin::new(&mut self.inner).poll(cx) {
-            Poll::Ready(Ok(response)) => Poll::Ready(Ok(response)),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(TimeoutError::Inner(e))),
-            Poll::Pending => {
-                if self.sleep.poll_with_time(now).is_ready() {
-                    Poll::Ready(Err(TimeoutError::Elapsed(Elapsed::new(
-                        self.sleep.deadline(),
-                    ))))
-                } else {
-                    // Register the waker with the underlying sleep future
-                    let _ = Pin::new(&mut self.sleep).poll(cx);
-                    Poll::Pending
+        let state = std::mem::replace(&mut self.state, TimeoutFutureState::Done);
+        match state {
+            TimeoutFutureState::NotReady => Poll::Ready(Err(TimeoutError::NotReady)),
+            TimeoutFutureState::Done => Poll::Ready(Err(TimeoutError::PolledAfterCompletion)),
+            TimeoutFutureState::Running {
+                mut inner,
+                mut sleep,
+                time_getter,
+            } => {
+                // Prefer completed work at the timeout boundary.
+                match Pin::new(&mut inner).poll(cx) {
+                    Poll::Ready(Ok(response)) => Poll::Ready(Ok(response)),
+                    Poll::Ready(Err(e)) => Poll::Ready(Err(TimeoutError::Inner(e))),
+                    Poll::Pending => {
+                        if sleep.poll_with_time(now).is_ready() {
+                            Poll::Ready(Err(TimeoutError::Elapsed(Elapsed::new(sleep.deadline()))))
+                        } else {
+                            // Register the waker with the underlying sleep future
+                            let _ = Pin::new(&mut sleep).poll(cx);
+                            self.state = TimeoutFutureState::Running {
+                                inner,
+                                sleep,
+                                time_getter,
+                            };
+                            Poll::Pending
+                        }
+                    }
                 }
             }
         }
@@ -270,30 +352,53 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
 
-        match Pin::new(&mut this.inner).poll(cx) {
-            Poll::Ready(Ok(response)) => return Poll::Ready(Ok(response)),
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(TimeoutError::Inner(e))),
-            Poll::Pending => {}
-        }
+        let state = std::mem::replace(&mut this.state, TimeoutFutureState::Done);
+        match state {
+            TimeoutFutureState::NotReady => Poll::Ready(Err(TimeoutError::NotReady)),
+            TimeoutFutureState::Done => Poll::Ready(Err(TimeoutError::PolledAfterCompletion)),
+            TimeoutFutureState::Running {
+                mut inner,
+                mut sleep,
+                time_getter,
+            } => {
+                match Pin::new(&mut inner).poll(cx) {
+                    Poll::Ready(Ok(response)) => return Poll::Ready(Ok(response)),
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(TimeoutError::Inner(e))),
+                    Poll::Pending => {}
+                }
 
-        if let Some(time_getter) = this.time_getter {
-            if this.sleep.poll_with_time(time_getter()).is_ready() {
-                return Poll::Ready(Err(TimeoutError::Elapsed(Elapsed::new(
-                    this.sleep.deadline(),
-                ))));
+                if let Some(time_getter) = time_getter {
+                    if sleep.poll_with_time(time_getter()).is_ready() {
+                        return Poll::Ready(Err(TimeoutError::Elapsed(Elapsed::new(
+                            sleep.deadline(),
+                        ))));
+                    }
+
+                    // Preserve wake registration even when timeout decisions use a
+                    // manual or virtual clock.
+                    let _ = Pin::new(&mut sleep).poll(cx);
+                    this.state = TimeoutFutureState::Running {
+                        inner,
+                        sleep,
+                        time_getter: Some(time_getter),
+                    };
+                    return Poll::Pending;
+                }
+
+                match Pin::new(&mut sleep).poll(cx) {
+                    Poll::Ready(()) => {
+                        Poll::Ready(Err(TimeoutError::Elapsed(Elapsed::new(sleep.deadline()))))
+                    }
+                    Poll::Pending => {
+                        this.state = TimeoutFutureState::Running {
+                            inner,
+                            sleep,
+                            time_getter: None,
+                        };
+                        Poll::Pending
+                    }
+                }
             }
-
-            // Preserve wake registration even when timeout decisions use a
-            // manual or virtual clock.
-            let _ = Pin::new(&mut this.sleep).poll(cx);
-            return Poll::Pending;
-        }
-
-        match Pin::new(&mut this.sleep).poll(cx) {
-            Poll::Ready(()) => Poll::Ready(Err(TimeoutError::Elapsed(Elapsed::new(
-                this.sleep.deadline(),
-            )))),
-            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -377,6 +482,32 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct CountingReadyService {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl CountingReadyService {
+        fn new(calls: Arc<AtomicUsize>) -> Self {
+            Self { calls }
+        }
+    }
+
+    impl Service<i32> for CountingReadyService {
+        type Response = i32;
+        type Error = std::convert::Infallible;
+        type Future = std::future::Ready<Result<i32, std::convert::Infallible>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: i32) -> Self::Future {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            ready(Ok(req))
+        }
+    }
+
     #[test]
     fn timeout_layer_creates_service() {
         let layer = TimeoutLayer::new(Duration::from_secs(5));
@@ -400,6 +531,9 @@ mod tests {
     fn timeout_uses_time_getter_for_deadline() {
         TEST_NOW.store(1_000, Ordering::SeqCst);
         let mut svc = Timeout::with_time_getter(EchoService, Duration::from_nanos(500), test_time);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
         let future = svc.call(1);
         assert_eq!(future.deadline(), Time::from_nanos(1_500));
     }
@@ -408,9 +542,10 @@ mod tests {
     fn timeout_future_poll_honors_custom_time_getter() {
         TEST_NOW.store(1_000, Ordering::SeqCst);
         let mut svc = Timeout::with_time_getter(NeverService, Duration::from_nanos(500), test_time);
-        let mut future = svc.call(());
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        let mut future = svc.call(());
 
         let first: Poll<Result<(), TimeoutError<std::convert::Infallible>>> =
             Future::poll(Pin::new(&mut future), &mut cx);
@@ -524,7 +659,56 @@ mod tests {
     }
 
     #[test]
+    fn timeout_call_without_poll_ready_returns_not_ready() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut svc = Timeout::new(
+            CountingReadyService::new(Arc::clone(&calls)),
+            Duration::from_secs(1),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut future = svc.call(7);
+        let result = Future::poll(Pin::new(&mut future), &mut cx);
+        assert!(matches!(result, Poll::Ready(Err(TimeoutError::NotReady))));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn timeout_readiness_authorizes_only_one_call() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut svc = Timeout::new(
+            CountingReadyService::new(Arc::clone(&calls)),
+            Duration::from_secs(1),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        let mut first = svc.call(11);
+        let first_result = Future::poll(Pin::new(&mut first), &mut cx);
+        assert!(matches!(first_result, Poll::Ready(Ok(11))));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let mut second = svc.call(12);
+        let second_result = Future::poll(Pin::new(&mut second), &mut cx);
+        assert!(matches!(
+            second_result,
+            Poll::Ready(Err(TimeoutError::NotReady))
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn timeout_error_display() {
+        let err: TimeoutError<&str> = TimeoutError::NotReady;
+        let display = format!("{err}");
+        assert!(display.contains("poll_ready"));
+
+        let err: TimeoutError<&str> = TimeoutError::PolledAfterCompletion;
+        let display = format!("{err}");
+        assert!(display.contains("polled after completion"));
+
         let err: TimeoutError<&str> = TimeoutError::Elapsed(Elapsed::new(Time::from_secs(5)));
         let display = format!("{err}");
         assert!(display.contains("timed out"));
@@ -556,6 +740,14 @@ mod tests {
 
     #[test]
     fn timeout_error_debug() {
+        let err0: TimeoutError<&str> = TimeoutError::NotReady;
+        let dbg0 = format!("{err0:?}");
+        assert!(dbg0.contains("NotReady"), "{dbg0}");
+
+        let err1: TimeoutError<&str> = TimeoutError::PolledAfterCompletion;
+        let dbg1 = format!("{err1:?}");
+        assert!(dbg1.contains("PolledAfterCompletion"), "{dbg1}");
+
         let err: TimeoutError<&str> = TimeoutError::Elapsed(Elapsed::new(Time::from_secs(5)));
         let dbg = format!("{err:?}");
         assert!(dbg.contains("Elapsed"), "{dbg}");

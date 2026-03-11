@@ -159,6 +159,8 @@ impl<S> ConcurrencyLimit<S> {
 /// Error returned when concurrency limit operations fail.
 #[derive(Debug)]
 pub enum ConcurrencyLimitError<E> {
+    /// The caller attempted `call()` without a preceding successful `poll_ready()`.
+    NotReady,
     /// Failed to acquire a permit (should not happen in normal operation).
     LimitExceeded,
     /// The inner service returned an error.
@@ -168,6 +170,7 @@ pub enum ConcurrencyLimitError<E> {
 impl<E: std::fmt::Display> std::fmt::Display for ConcurrencyLimitError<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::NotReady => write!(f, "poll_ready required before call"),
             Self::LimitExceeded => write!(f, "concurrency limit exceeded"),
             Self::Inner(e) => write!(f, "inner service error: {e}"),
         }
@@ -177,7 +180,7 @@ impl<E: std::fmt::Display> std::fmt::Display for ConcurrencyLimitError<E> {
 impl<E: std::error::Error + 'static> std::error::Error for ConcurrencyLimitError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::LimitExceeded => None,
+            Self::NotReady | Self::LimitExceeded => None,
             Self::Inner(e) => Some(e),
         }
     }
@@ -263,9 +266,7 @@ where
             other => {
                 // Preserve in-flight acquisition state on contract misuse.
                 self.state = other;
-                return ConcurrencyLimitFuture::immediate_error(
-                    ConcurrencyLimitError::LimitExceeded,
-                );
+                return ConcurrencyLimitFuture::immediate_error(ConcurrencyLimitError::NotReady);
             }
         };
         ConcurrencyLimitFuture::new(self.inner.call(req), permit)
@@ -648,8 +649,8 @@ mod tests {
     }
 
     #[test]
-    fn call_without_poll_ready_returns_limit_exceeded() {
-        init_test("call_without_poll_ready_returns_limit_exceeded");
+    fn call_without_poll_ready_returns_not_ready() {
+        init_test("call_without_poll_ready_returns_not_ready");
         let layer = ConcurrencyLimitLayer::new(1);
         let mut svc = layer.layer(EchoService);
         let waker = noop_waker();
@@ -657,12 +658,9 @@ mod tests {
 
         let mut future = svc.call(7);
         let result = Pin::new(&mut future).poll(&mut cx);
-        let limited = matches!(
-            result,
-            Poll::Ready(Err(ConcurrencyLimitError::LimitExceeded))
-        );
-        crate::assert_with_log!(limited, "limit exceeded", true, limited);
-        crate::test_complete!("call_without_poll_ready_returns_limit_exceeded");
+        let not_ready = matches!(result, Poll::Ready(Err(ConcurrencyLimitError::NotReady)));
+        crate::assert_with_log!(not_ready, "not ready", true, not_ready);
+        crate::test_complete!("call_without_poll_ready_returns_not_ready");
     }
 
     #[test]
@@ -897,6 +895,44 @@ mod tests {
     }
 
     #[test]
+    fn queued_acquire_survives_call_misuse() {
+        init_test("queued_acquire_survives_call_misuse");
+        let layer = ConcurrencyLimitLayer::new(1);
+        let mut holder = layer.layer(NeverCompleteService);
+        let mut waiter = layer.layer(NeverCompleteService);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let holder_ready = holder.poll_ready(&mut cx);
+        let holder_ok = matches!(holder_ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(holder_ok, "holder ready", true, holder_ok);
+        let held = holder.call(());
+
+        let waiter_ready = waiter.poll_ready(&mut cx);
+        crate::assert_with_log!(
+            waiter_ready.is_pending(),
+            "waiter pending",
+            true,
+            waiter_ready.is_pending()
+        );
+
+        let mut misuse = waiter.call(());
+        let misuse_result = Pin::new(&mut misuse).poll(&mut cx);
+        let not_ready = matches!(
+            misuse_result,
+            Poll::Ready(Err(ConcurrencyLimitError::NotReady))
+        );
+        crate::assert_with_log!(not_ready, "misuse not ready", true, not_ready);
+
+        drop(held);
+
+        let waiter_ready = waiter.poll_ready(&mut cx);
+        let waiter_ok = matches!(waiter_ready, Poll::Ready(Ok(())));
+        crate::assert_with_log!(waiter_ok, "waiter ready", true, waiter_ok);
+        crate::test_complete!("queued_acquire_survives_call_misuse");
+    }
+
+    #[test]
     fn outer_capacity_wait_does_not_poll_inner_ready_service() {
         init_test("outer_capacity_wait_does_not_poll_inner_ready_service");
         let ready = Arc::new(AtomicBool::new(true));
@@ -994,6 +1030,10 @@ mod tests {
 
     #[test]
     fn concurrency_limit_error_debug() {
+        let err: ConcurrencyLimitError<&str> = ConcurrencyLimitError::NotReady;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("NotReady"));
+
         let err: ConcurrencyLimitError<&str> = ConcurrencyLimitError::LimitExceeded;
         let dbg = format!("{err:?}");
         assert!(dbg.contains("LimitExceeded"));
@@ -1007,6 +1047,9 @@ mod tests {
     #[test]
     fn concurrency_limit_error_source() {
         use std::error::Error;
+        let err: ConcurrencyLimitError<std::io::Error> = ConcurrencyLimitError::NotReady;
+        assert!(err.source().is_none());
+
         let err: ConcurrencyLimitError<std::io::Error> = ConcurrencyLimitError::LimitExceeded;
         assert!(err.source().is_none());
 
@@ -1035,6 +1078,11 @@ mod tests {
     #[test]
     fn error_display() {
         init_test("error_display");
+        let err: ConcurrencyLimitError<&str> = ConcurrencyLimitError::NotReady;
+        let display = format!("{err}");
+        let has_not_ready = display.contains("poll_ready required before call");
+        crate::assert_with_log!(has_not_ready, "not ready", true, has_not_ready);
+
         let err: ConcurrencyLimitError<&str> = ConcurrencyLimitError::LimitExceeded;
         let display = format!("{err}");
         let has_limit = display.contains("limit exceeded");

@@ -324,6 +324,8 @@ impl<S> RateLimit<S> {
 /// Error returned by rate-limited services.
 #[derive(Debug)]
 pub enum RateLimitError<E> {
+    /// The caller attempted `call()` without a preceding successful `poll_ready()`.
+    NotReady,
     /// Rate limit exceeded (should not normally be seen - poll_ready handles this).
     RateLimitExceeded,
     /// The inner service returned an error.
@@ -333,6 +335,7 @@ pub enum RateLimitError<E> {
 impl<E: std::fmt::Display> std::fmt::Display for RateLimitError<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::NotReady => write!(f, "poll_ready required before call"),
             Self::RateLimitExceeded => write!(f, "rate limit exceeded"),
             Self::Inner(e) => write!(f, "inner service error: {e}"),
         }
@@ -342,7 +345,7 @@ impl<E: std::fmt::Display> std::fmt::Display for RateLimitError<E> {
 impl<E: std::error::Error + 'static> std::error::Error for RateLimitError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::RateLimitExceeded => None,
+            Self::NotReady | Self::RateLimitExceeded => None,
             Self::Inner(e) => Some(e),
         }
     }
@@ -364,7 +367,7 @@ where
     #[inline]
     fn call(&mut self, req: Request) -> Self::Future {
         if self.reserved_tokens == 0 {
-            return RateLimitFuture::immediate_error(RateLimitError::RateLimitExceeded);
+            return RateLimitFuture::immediate_error(RateLimitError::NotReady);
         }
 
         self.reserved_tokens -= 1;
@@ -866,8 +869,8 @@ mod tests {
     }
 
     #[test]
-    fn call_without_poll_ready_returns_rate_limit_exceeded() {
-        init_test("call_without_poll_ready_returns_rate_limit_exceeded");
+    fn call_without_poll_ready_returns_not_ready() {
+        init_test("call_without_poll_ready_returns_not_ready");
         let mut svc = RateLimit::new(PanicOnCallService, 1, Duration::from_secs(1));
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -878,8 +881,8 @@ mod tests {
         }))
         .expect("call without poll_ready must not invoke inner service");
 
-        let limited = matches!(result, Poll::Ready(Err(RateLimitError::RateLimitExceeded)));
-        crate::assert_with_log!(limited, "rate limit exceeded", true, limited);
+        let not_ready = matches!(result, Poll::Ready(Err(RateLimitError::NotReady)));
+        crate::assert_with_log!(not_ready, "not ready", true, not_ready);
         crate::assert_with_log!(
             svc.available_tokens() == 1,
             "available tokens unchanged",
@@ -887,7 +890,7 @@ mod tests {
             svc.available_tokens()
         );
         crate::assert_with_log!(svc.reserved_tokens == 0, "reserved", 0, svc.reserved_tokens);
-        crate::test_complete!("call_without_poll_ready_returns_rate_limit_exceeded");
+        crate::test_complete!("call_without_poll_ready_returns_not_ready");
     }
 
     #[test]
@@ -988,10 +991,7 @@ mod tests {
 
         let mut clone_future = cloned.call(7);
         let clone_result = Pin::new(&mut clone_future).poll(&mut cx);
-        let clone_limited = matches!(
-            clone_result,
-            Poll::Ready(Err(RateLimitError::RateLimitExceeded))
-        );
+        let clone_limited = matches!(clone_result, Poll::Ready(Err(RateLimitError::NotReady)));
         crate::assert_with_log!(
             clone_limited,
             "clone cannot spend original reservation",
@@ -1023,6 +1023,10 @@ mod tests {
 
     #[test]
     fn rate_limit_error_debug() {
+        let err: RateLimitError<&str> = RateLimitError::NotReady;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("NotReady"));
+
         let err: RateLimitError<&str> = RateLimitError::RateLimitExceeded;
         let dbg = format!("{err:?}");
         assert!(dbg.contains("RateLimitExceeded"));
@@ -1035,6 +1039,9 @@ mod tests {
     #[test]
     fn rate_limit_error_source() {
         use std::error::Error;
+        let err: RateLimitError<std::io::Error> = RateLimitError::NotReady;
+        assert!(err.source().is_none());
+
         let err: RateLimitError<std::io::Error> = RateLimitError::RateLimitExceeded;
         assert!(err.source().is_none());
 
@@ -1106,6 +1113,11 @@ mod tests {
     #[test]
     fn error_display() {
         init_test("error_display");
+        let err: RateLimitError<&str> = RateLimitError::NotReady;
+        let display = format!("{err}");
+        let has_not_ready = display.contains("poll_ready required before call");
+        crate::assert_with_log!(has_not_ready, "not ready", true, has_not_ready);
+
         let err: RateLimitError<&str> = RateLimitError::RateLimitExceeded;
         let display = format!("{err}");
         let has_rate = display.contains("rate limit exceeded");
