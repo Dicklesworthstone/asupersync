@@ -23,12 +23,15 @@ use crate::cx::Cx;
 pub enum BarrierWaitError {
     /// Cancelled while waiting.
     Cancelled,
+    /// The wait future was polled after it had already completed.
+    PolledAfterCompletion,
 }
 
 impl std::fmt::Display for BarrierWaitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Cancelled => write!(f, "barrier wait cancelled"),
+            Self::PolledAfterCompletion => write!(f, "barrier future polled after completion"),
         }
     }
 }
@@ -99,6 +102,7 @@ enum WaitState {
         id: u64,
         slot: usize,
     },
+    Done,
 }
 
 /// Future returned by `Barrier::wait`.
@@ -114,6 +118,10 @@ impl Future for BarrierWaitFuture<'_> {
 
     #[allow(clippy::too_many_lines)]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if matches!(self.state, WaitState::Done) {
+            return Poll::Ready(Err(BarrierWaitError::PolledAfterCompletion));
+        }
+
         // 1. Check cancellation first.
         if let Err(_e) = self.cx.checkpoint() {
             // If we were waiting, we need to unregister.
@@ -140,16 +148,17 @@ impl Future for BarrierWaitFuture<'_> {
                     drop(state);
 
                     // Mark state as done so Drop doesn't decrement again.
-                    self.state = WaitState::Init;
+                    self.state = WaitState::Done;
                     return Poll::Ready(Err(BarrierWaitError::Cancelled));
                 }
                 // Generation changed means barrier tripped just before cancel.
                 // We treat this as success.
                 drop(state);
-                self.state = WaitState::Init;
+                self.state = WaitState::Done;
                 return Poll::Ready(Ok(BarrierWaitResult { is_leader: false }));
             }
             // Cancelled before even registering.
+            self.state = WaitState::Done;
             return Poll::Ready(Err(BarrierWaitError::Cancelled));
         }
 
@@ -171,6 +180,7 @@ impl Future for BarrierWaitFuture<'_> {
                         waker.wake();
                     }
 
+                    self.state = WaitState::Done;
                     Poll::Ready(Ok(BarrierWaitResult { is_leader: true }))
                 } else {
                     // Not full yet. Arrive and wait.
@@ -243,10 +253,11 @@ impl Future for BarrierWaitFuture<'_> {
                 } else {
                     // Generation advanced! We are done.
                     drop(state);
-                    self.state = WaitState::Init;
+                    self.state = WaitState::Done;
                     Poll::Ready(Ok(BarrierWaitResult { is_leader: false }))
                 }
             }
+            WaitState::Done => Poll::Ready(Err(BarrierWaitError::PolledAfterCompletion)),
         }
     }
 }
@@ -628,6 +639,38 @@ mod tests {
     }
 
     #[test]
+    fn barrier_wait_second_poll_fails_closed() {
+        init_test("barrier_wait_second_poll_fails_closed");
+        let barrier = Barrier::new(1);
+        let cx: Cx = Cx::for_testing();
+        let waker = Waker::noop();
+        let mut poll_cx = Context::from_waker(waker);
+
+        let mut fut = barrier.wait(&cx);
+        let first = Pin::new(&mut fut).poll(&mut poll_cx);
+        let first_is_leader = matches!(first, Poll::Ready(Ok(result)) if result.is_leader());
+        crate::assert_with_log!(
+            first_is_leader,
+            "first poll completes as leader",
+            true,
+            first_is_leader
+        );
+
+        let second = Pin::new(&mut fut).poll(&mut poll_cx);
+        let second_is_polled_after_completion = matches!(
+            second,
+            Poll::Ready(Err(BarrierWaitError::PolledAfterCompletion))
+        );
+        crate::assert_with_log!(
+            second_is_polled_after_completion,
+            "second poll fails closed",
+            true,
+            second_is_polled_after_completion
+        );
+        crate::test_complete!("barrier_wait_second_poll_fails_closed");
+    }
+
+    #[test]
     fn barrier_wait_error_debug() {
         init_test("barrier_wait_error_debug");
         let err = BarrierWaitError::Cancelled;
@@ -643,6 +686,9 @@ mod tests {
         let err2 = err;
         let err3 = err;
         assert_eq!(err2, err3);
+        let done = BarrierWaitError::PolledAfterCompletion;
+        let done2 = done;
+        assert_eq!(done2, BarrierWaitError::PolledAfterCompletion);
         crate::test_complete!("barrier_wait_error_clone_copy_eq");
     }
 
@@ -652,6 +698,9 @@ mod tests {
         let err = BarrierWaitError::Cancelled;
         let display = format!("{err}");
         assert_eq!(display, "barrier wait cancelled");
+        let done = BarrierWaitError::PolledAfterCompletion;
+        let done_display = format!("{done}");
+        assert_eq!(done_display, "barrier future polled after completion");
         crate::test_complete!("barrier_wait_error_display");
     }
 
