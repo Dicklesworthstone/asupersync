@@ -1064,7 +1064,7 @@ impl JsMessage {
 // Helper functions
 
 /// Escape a string for safe embedding in JSON values.
-/// Handles `"`, `\`, and control characters (U+0000..U+001F).
+/// Handles `"`, `\`, and control characters.
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -1075,10 +1075,8 @@ fn json_escape(s: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             c if c.is_control() => {
-                // \u00XX for other control characters
-                for byte in c.encode_utf8(&mut [0; 4]).bytes() {
-                    write!(&mut out, "\\u{byte:04x}").expect("write to String");
-                }
+                // \uXXXX for the Unicode code point (not per-byte)
+                write!(&mut out, "\\u{:04x}", c as u32).expect("write to String");
             }
             c => out.push(c),
         }
