@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use super::ShutdownReceiver;
 use crate::combinator::{Either, Select};
-use crate::time::{timeout, wall_now};
+use crate::time::{TimeoutFuture, wall_now};
+use crate::types::Time;
 
 fn wall_clock_now() -> std::time::Instant {
     std::time::Instant::now()
@@ -120,6 +121,8 @@ pub struct GracefulConfig {
     pub grace_period: Duration,
     /// Whether to log shutdown events.
     pub log_events: bool,
+    /// Optional custom time source used for grace-period deadlines.
+    pub time_getter: Option<fn() -> Time>,
 }
 
 impl Default for GracefulConfig {
@@ -127,6 +130,7 @@ impl Default for GracefulConfig {
         Self {
             grace_period: Duration::from_secs(30),
             log_events: true,
+            time_getter: None,
         }
     }
 }
@@ -143,6 +147,13 @@ impl GracefulConfig {
     #[must_use]
     pub fn with_logging(mut self, enabled: bool) -> Self {
         self.log_events = enabled;
+        self
+    }
+
+    /// Sets the time source used for grace-period deadlines.
+    #[must_use]
+    pub fn with_time_getter(mut self, time_getter: fn() -> Time) -> Self {
+        self.time_getter = Some(time_getter);
         self
     }
 }
@@ -180,6 +191,13 @@ impl GracefulBuilder {
         self
     }
 
+    /// Sets the time source used for grace-period deadlines.
+    #[must_use]
+    pub fn time_getter(mut self, time_getter: fn() -> Time) -> Self {
+        self.config.time_getter = Some(time_getter);
+        self
+    }
+
     /// Runs the given future with graceful shutdown support.
     pub async fn run<F, T>(self, fut: F) -> GracefulOutcome<T>
     where
@@ -211,28 +229,33 @@ impl GracefulBuilder {
                     return GracefulOutcome::ShutdownSignaled;
                 }
 
-                timeout(wall_now(), config.grace_period, fut.as_mut())
-                    .await
-                    .map_or_else(
-                        |_| {
-                            if config.log_events {
-                                tracing::warn!(
-                                    grace_period = ?config.grace_period,
-                                    "grace period elapsed before task completed"
-                                );
-                            }
-                            GracefulOutcome::ShutdownSignaled
-                        },
-                        |result| {
-                            if config.log_events {
-                                tracing::info!(
-                                    grace_period = ?config.grace_period,
-                                    "task completed within graceful shutdown grace period"
-                                );
-                            }
-                            GracefulOutcome::Completed(result)
-                        },
-                    )
+                let result = if let Some(time_getter) = config.time_getter {
+                    let deadline = time_getter() + config.grace_period;
+                    TimeoutFuture::with_time_getter(fut.as_mut(), deadline, time_getter).await
+                } else {
+                    TimeoutFuture::after(wall_now(), config.grace_period, fut.as_mut()).await
+                };
+
+                result.map_or_else(
+                    |_| {
+                        if config.log_events {
+                            tracing::warn!(
+                                grace_period = ?config.grace_period,
+                                "grace period elapsed before task completed"
+                            );
+                        }
+                        GracefulOutcome::ShutdownSignaled
+                    },
+                    |result| {
+                        if config.log_events {
+                            tracing::info!(
+                                grace_period = ?config.grace_period,
+                                "task completed within graceful shutdown grace period"
+                            );
+                        }
+                        GracefulOutcome::Completed(result)
+                    },
+                )
             }
         }
     }
@@ -348,6 +371,15 @@ mod tests {
         std::pin::Pin::new(fut).poll(&mut cx)
     }
 
+    fn poll_until_ready<F: Future + Unpin>(fut: &mut F, max_polls: usize) -> Option<F::Output> {
+        for _ in 0..max_polls {
+            if let Poll::Ready(output) = poll_once(fut) {
+                return Some(output);
+            }
+        }
+        None
+    }
+
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
@@ -421,6 +453,86 @@ mod tests {
             let offset = Duration::from_nanos(TEST_GRACE_TIME_NANOS.with(std::cell::Cell::get));
             base.checked_add(offset).unwrap_or(*base)
         })
+    }
+
+    fn test_shutdown_time_now() -> Time {
+        Time::from_nanos(TEST_GRACE_TIME_NANOS.with(std::cell::Cell::get))
+    }
+
+    struct ShutdownThenAdvanceTimeAndComplete {
+        shutdown: Option<ShutdownController>,
+        advance_nanos: u64,
+        complete_after_pending_polls: usize,
+        value: i32,
+    }
+
+    impl ShutdownThenAdvanceTimeAndComplete {
+        fn new(
+            shutdown: ShutdownController,
+            advance_nanos: u64,
+            complete_after_pending_polls: usize,
+            value: i32,
+        ) -> Self {
+            Self {
+                shutdown: Some(shutdown),
+                advance_nanos,
+                complete_after_pending_polls,
+                value,
+            }
+        }
+    }
+
+    impl Future for ShutdownThenAdvanceTimeAndComplete {
+        type Output = i32;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if let Some(shutdown) = self.shutdown.take() {
+                shutdown.shutdown();
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+
+            if self.complete_after_pending_polls == 0 {
+                return Poll::Ready(self.value);
+            }
+
+            TEST_GRACE_TIME_NANOS
+                .with(|nanos| nanos.set(nanos.get().saturating_add(self.advance_nanos)));
+            self.complete_after_pending_polls -= 1;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+
+    struct ShutdownThenAdvanceTimeAndPending {
+        shutdown: Option<ShutdownController>,
+        advance_nanos: u64,
+    }
+
+    impl ShutdownThenAdvanceTimeAndPending {
+        fn new(shutdown: ShutdownController, advance_nanos: u64) -> Self {
+            Self {
+                shutdown: Some(shutdown),
+                advance_nanos,
+            }
+        }
+    }
+
+    impl Future for ShutdownThenAdvanceTimeAndPending {
+        type Output = i32;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if let Some(shutdown) = self.shutdown.take() {
+                shutdown.shutdown();
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+
+            TEST_GRACE_TIME_NANOS
+                .with(|nanos| nanos.set(nanos.get().saturating_add(self.advance_nanos)));
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
     }
 
     #[test]
@@ -600,9 +712,11 @@ mod tests {
     #[test]
     fn graceful_config_builder() {
         init_test("graceful_config_builder");
+        TEST_GRACE_TIME_NANOS.with(|n| n.set(0));
         let config = GracefulConfig::default()
             .with_grace_period(Duration::from_secs(10))
-            .with_logging(false);
+            .with_logging(false)
+            .with_time_getter(test_shutdown_time_now);
 
         crate::assert_with_log!(
             config.grace_period == Duration::from_secs(10),
@@ -616,7 +730,61 @@ mod tests {
             false,
             config.log_events
         );
+        crate::assert_with_log!(
+            config
+                .time_getter
+                .is_some_and(|time_getter| time_getter() == Time::ZERO),
+            "time_getter",
+            true,
+            config.time_getter.map(|time_getter| time_getter())
+        );
         crate::test_complete!("graceful_config_builder");
+    }
+
+    #[test]
+    fn graceful_builder_run_completes_with_time_getter() {
+        init_test("graceful_builder_run_completes_with_time_getter");
+        TEST_GRACE_TIME_NANOS.with(|n| n.set(0));
+        let controller = ShutdownController::new();
+        let receiver = controller.subscribe();
+        let builder = GracefulBuilder::new(receiver)
+            .grace_period(Duration::from_millis(10))
+            .logging(false)
+            .time_getter(test_shutdown_time_now);
+        let fut = ShutdownThenAdvanceTimeAndComplete::new(controller, 4_000_000, 1, 42);
+        let mut run = Box::pin(builder.run(fut));
+        let result = poll_until_ready(&mut run, 4);
+
+        crate::assert_with_log!(
+            matches!(result, Some(GracefulOutcome::Completed(42))),
+            "future completed within deterministic grace period",
+            "Some(GracefulOutcome::Completed(42))",
+            result
+        );
+        crate::test_complete!("graceful_builder_run_completes_with_time_getter");
+    }
+
+    #[test]
+    fn graceful_builder_run_times_out_with_time_getter() {
+        init_test("graceful_builder_run_times_out_with_time_getter");
+        TEST_GRACE_TIME_NANOS.with(|n| n.set(0));
+        let controller = ShutdownController::new();
+        let receiver = controller.subscribe();
+        let builder = GracefulBuilder::new(receiver)
+            .grace_period(Duration::from_millis(10))
+            .logging(false)
+            .time_getter(test_shutdown_time_now);
+        let fut = ShutdownThenAdvanceTimeAndPending::new(controller, 15_000_000);
+        let mut run = Box::pin(builder.run(fut));
+        let result = poll_until_ready(&mut run, 3);
+
+        crate::assert_with_log!(
+            matches!(result, Some(GracefulOutcome::ShutdownSignaled)),
+            "future times out from deterministic grace-period clock",
+            "Some(GracefulOutcome::ShutdownSignaled)",
+            result
+        );
+        crate::test_complete!("graceful_builder_run_times_out_with_time_getter");
     }
 
     // =========================================================================
@@ -679,6 +847,7 @@ mod tests {
         let config = GracefulConfig::default();
         assert_eq!(config.grace_period, Duration::from_secs(30));
         assert!(config.log_events);
+        assert!(config.time_getter.is_none());
     }
 
     #[test]
