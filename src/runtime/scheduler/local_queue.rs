@@ -1062,7 +1062,9 @@ mod tests {
 
         barrier.wait();
         // If this test hangs, the ABBA deadlock is present.
-        t1.join().expect("steal thread should complete without deadlock");
-        t2.join().expect("schedule_local thread should complete without deadlock");
+        t1.join()
+            .expect("steal thread should complete without deadlock");
+        t2.join()
+            .expect("schedule_local thread should complete without deadlock");
     }
 }
