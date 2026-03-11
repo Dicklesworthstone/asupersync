@@ -348,7 +348,7 @@ impl Discover for DnsServiceDiscovery {
         let new_addrs = match self.resolve() {
             Ok(addrs) => {
                 state.resolve_count += 1;
-                state.last_resolve = Some((self.config.time_getter)());
+                state.last_resolve = Some(now);
                 addrs
             }
             Err(e) => {
@@ -356,7 +356,7 @@ impl Discover for DnsServiceDiscovery {
                 // resolutions so callers that poll frequently do not hot-loop
                 // on an unhealthy hostname.
                 state.error_count += 1;
-                state.last_resolve = Some((self.config.time_getter)());
+                state.last_resolve = Some(now);
                 return Err(DnsDiscoveryError::Resolve(e));
             }
         };
@@ -779,6 +779,50 @@ mod tests {
         assert!(second.is_err());
         assert_eq!(discovery.error_count(), 2);
         crate::test_complete!("dns_discovery_invalidate_forces_retry_after_failed_resolution");
+    }
+
+    // ================================================================
+    // Regression: last_resolve uses decision-time `now`
+    // ================================================================
+
+    #[test]
+    fn dns_discovery_last_resolve_uses_decision_time_not_post_resolve_time() {
+        init_test("dns_discovery_last_resolve_uses_decision_time_not_post_resolve_time");
+        // Before the fix, poll_discover() called time_getter() a second time
+        // after resolve() returned to set last_resolve. With virtual time that
+        // advances between calls, this pushed the cooldown window forward,
+        // making the next re-resolution happen later than expected.
+        //
+        // After the fix, last_resolve is set to the `now` captured at the
+        // start of poll_discover(), so the cooldown is anchored to the
+        // decision point.
+        set_test_time(1_000_000_000); // 1s
+        let discovery = DnsServiceDiscovery::new(
+            DnsDiscoveryConfig::new("localhost", 80)
+                .poll_interval(Duration::from_secs(10))
+                .with_time_getter(test_time),
+        );
+
+        let first = discovery.poll_discover().unwrap();
+        assert!(!first.is_empty());
+
+        // Verify that last_resolve was set to the decision time (1s),
+        // not a later time. Advance virtual clock to exactly 1s + 10s = 11s.
+        // If last_resolve used the decision time, this should trigger a
+        // new resolution (11s - 1s = 10s >= poll_interval).
+        set_test_time(11_000_000_000); // 11s
+        let second = discovery.poll_discover().unwrap();
+        // Should resolve again because 11s - 1s = 10s >= 10s poll_interval
+        assert_eq!(
+            discovery.resolve_count(),
+            2,
+            "last_resolve should anchor to decision time, allowing re-resolve at exactly poll_interval"
+        );
+        // second may be empty (same addresses) but resolution happened
+        let _ = second;
+        crate::test_complete!(
+            "dns_discovery_last_resolve_uses_decision_time_not_post_resolve_time"
+        );
     }
 
     // ================================================================
