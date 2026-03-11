@@ -20,9 +20,7 @@ use std::time::Duration;
 use super::cache::{CacheConfig, CacheStats, DnsCache};
 use super::error::DnsError;
 use super::lookup::{HappyEyeballs, LookupIp, LookupMx, LookupSrv, LookupTxt};
-use crate::cx::Cx;
 use crate::net::TcpStream;
-use crate::runtime::spawn_blocking;
 use crate::runtime::spawn_blocking::spawn_blocking_on_thread;
 use crate::time::{Elapsed, Sleep};
 use crate::types::Time;
@@ -126,7 +124,7 @@ impl Resolver {
         Self {
             config,
             cache,
-            time_getter: default_timeout_now,
+            time_getter: crate::time::wall_now,
         }
     }
 
@@ -413,15 +411,6 @@ impl Clone for Resolver {
     }
 }
 
-fn default_timeout_now() -> Time {
-    if let Some(current) = Cx::current() {
-        if let Some(driver) = current.timer_driver() {
-            return driver.now();
-        }
-    }
-    crate::time::wall_now()
-}
-
 fn duration_to_nanos(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
@@ -479,20 +468,15 @@ where
     F: FnOnce() -> Result<T, DnsError> + Send + 'static,
     T: Send + 'static,
 {
-    if let Some(cx) = Cx::current() {
-        if cx.blocking_pool_handle().is_some() {
-            return spawn_blocking(f).await;
-        }
-    }
-
-    // No pool available? Force a background thread so DNS and connect fallbacks
-    // do not block the runtime worker thread.
+    // Keep resolver behavior independent from any ambient current `Cx`.
+    // This phase-0 path always uses a dedicated thread for synchronous DNS/connect work.
     spawn_blocking_on_thread(f).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cx::Cx;
     use futures_lite::future;
     use std::future::{Future, pending};
     use std::sync::Arc;
@@ -687,6 +671,44 @@ mod tests {
     }
 
     #[test]
+    fn resolver_default_timeout_deadline_ignores_current_cx_timer_driver() {
+        init_test("resolver_default_timeout_deadline_ignores_current_cx_timer_driver");
+
+        let clock = Arc::new(crate::time::VirtualClock::new());
+        clock.set(Time::from_nanos(5_000_000_000));
+
+        let cx = Cx::new_with_drivers(
+            crate::types::RegionId::new_for_test(0, 0),
+            crate::types::TaskId::new_for_test(0, 0),
+            crate::types::Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(crate::time::TimerDriverHandle::with_virtual_clock(clock)),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let before = crate::time::wall_now();
+        let resolver = Resolver::new();
+        let future = resolver.timeout_future(Duration::from_nanos(500), pending::<()>());
+        let after = crate::time::wall_now();
+        let deadline = future.deadline();
+        let min_deadline = before.saturating_add_nanos(500);
+        let max_deadline = after.saturating_add_nanos(500);
+
+        crate::assert_with_log!(
+            deadline.as_nanos() >= min_deadline.as_nanos()
+                && deadline.as_nanos() <= max_deadline.as_nanos(),
+            "default deadline should follow wall clock, not ambient timer driver",
+            (min_deadline, max_deadline),
+            deadline
+        );
+
+        crate::test_complete!("resolver_default_timeout_deadline_ignores_current_cx_timer_driver");
+    }
+
+    #[test]
     fn resolver_blocking_dns_uses_fallback_thread_without_pool() {
         init_test("resolver_blocking_dns_uses_fallback_thread_without_pool");
         let cx: Cx = Cx::for_testing();
@@ -707,6 +729,39 @@ mod tests {
         );
 
         crate::test_complete!("resolver_blocking_dns_uses_fallback_thread_without_pool");
+    }
+
+    #[test]
+    fn resolver_blocking_dns_ignores_current_pool_and_uses_dedicated_thread() {
+        init_test("resolver_blocking_dns_ignores_current_pool_and_uses_dedicated_thread");
+
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        let cx: Cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+        let _guard = Cx::set_current(Some(cx));
+
+        let thread_name = future::block_on(async {
+            spawn_blocking_dns(|| {
+                Ok::<_, DnsError>(
+                    std::thread::current()
+                        .name()
+                        .unwrap_or("unnamed")
+                        .to_string(),
+                )
+            })
+            .await
+            .unwrap()
+        });
+
+        crate::assert_with_log!(
+            thread_name == "asupersync-blocking",
+            "resolver DNS fallback should stay on dedicated thread even with ambient pool",
+            "asupersync-blocking",
+            thread_name
+        );
+
+        crate::test_complete!(
+            "resolver_blocking_dns_ignores_current_pool_and_uses_dedicated_thread"
+        );
     }
 
     #[test]
