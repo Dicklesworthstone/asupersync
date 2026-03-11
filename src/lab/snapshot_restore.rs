@@ -61,10 +61,10 @@
 //! assert!(restored.oracles.obligation_leak.check().is_ok());
 //! ```
 
-use crate::runtime::RuntimeState;
 use crate::runtime::state::{
     ObligationStateSnapshot, RegionStateSnapshot, RuntimeSnapshot, TaskSnapshot, TaskStateSnapshot,
 };
+use crate::runtime::RuntimeState;
 use crate::types::Time;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -86,6 +86,24 @@ pub enum RestoreError {
         obligation_id: u32,
         /// The non-existent task ID referenced by the obligation.
         task_id: u32,
+    },
+    /// An obligation references a non-existent owning region.
+    OrphanObligationRegion {
+        /// The orphan obligation's ID.
+        obligation_id: u32,
+        /// The non-existent region ID referenced by the obligation.
+        region_id: u32,
+    },
+    /// An obligation's owning region disagrees with its holder task's region.
+    ObligationRegionMismatch {
+        /// The obligation with inconsistent ownership.
+        obligation_id: u32,
+        /// The task holding the obligation.
+        task_id: u32,
+        /// The holder task's actual region.
+        holder_region_id: u32,
+        /// The obligation's recorded owning region.
+        owning_region_id: u32,
     },
     /// A region references a non-existent parent.
     InvalidParent {
@@ -142,6 +160,27 @@ impl fmt::Display for RestoreError {
                 write!(
                     f,
                     "obligation {obligation_id} references non-existent task {task_id}"
+                )
+            }
+            Self::OrphanObligationRegion {
+                obligation_id,
+                region_id,
+            } => {
+                write!(
+                    f,
+                    "obligation {obligation_id} references non-existent owning region {region_id}"
+                )
+            }
+            Self::ObligationRegionMismatch {
+                obligation_id,
+                task_id,
+                holder_region_id,
+                owning_region_id,
+            } => {
+                write!(
+                    f,
+                    "obligation {obligation_id} held by task {task_id} is in region \
+                     {holder_region_id}, but records owning region {owning_region_id}"
                 )
             }
             Self::InvalidParent {
@@ -294,6 +333,12 @@ impl RestorableSnapshot {
             .iter()
             .map(|o| o.id.index)
             .collect();
+        let task_regions: HashMap<u32, u32> = self
+            .snapshot
+            .tasks
+            .iter()
+            .map(|task| (task.id.index, task.region_id.index))
+            .collect();
 
         stats.region_count = self.snapshot.regions.len();
         stats.task_count = self.snapshot.tasks.len();
@@ -374,6 +419,21 @@ impl RestorableSnapshot {
                     obligation_id: obligation.id.index,
                     task_id: obligation.holder_task.index,
                 });
+            }
+            if !region_ids.contains(&obligation.owning_region.index) {
+                errors.push(RestoreError::OrphanObligationRegion {
+                    obligation_id: obligation.id.index,
+                    region_id: obligation.owning_region.index,
+                });
+            } else if let Some(holder_region_id) = task_regions.get(&obligation.holder_task.index) {
+                if *holder_region_id != obligation.owning_region.index {
+                    errors.push(RestoreError::ObligationRegionMismatch {
+                        obligation_id: obligation.id.index,
+                        task_id: obligation.holder_task.index,
+                        holder_region_id: *holder_region_id,
+                        owning_region_id: obligation.owning_region.index,
+                    });
+                }
             }
             if is_obligation_resolved(&obligation.state) {
                 stats.resolved_obligation_count += 1;
@@ -620,6 +680,15 @@ mod tests {
         task_id: u32,
         state: ObligationStateSnapshot,
     ) -> ObligationSnapshot {
+        make_obligation_in_region(id, task_id, 0, state)
+    }
+
+    fn make_obligation_in_region(
+        id: u32,
+        task_id: u32,
+        owning_region: u32,
+        state: ObligationStateSnapshot,
+    ) -> ObligationSnapshot {
         ObligationSnapshot {
             id: IdSnapshot {
                 index: id,
@@ -632,7 +701,7 @@ mod tests {
                 generation: 0,
             },
             owning_region: IdSnapshot {
-                index: 0,
+                index: owning_region,
                 generation: 0,
             },
             created_at: 0,
@@ -743,6 +812,69 @@ mod tests {
             .any(|e| matches!(e, RestoreError::OrphanObligation { .. }));
         crate::assert_with_log!(has_error, "has OrphanObligation error", true, has_error);
         crate::test_complete!("orphan_obligation_detected");
+    }
+
+    #[test]
+    fn orphan_obligation_region_detected() {
+        init_test("orphan_obligation_region_detected");
+        let snapshot = make_snapshot(
+            vec![make_region(0, None, RegionStateSnapshot::Open)],
+            vec![make_task(0, 0, TaskStateSnapshot::Running)],
+            vec![make_obligation_in_region(
+                0,
+                0,
+                99,
+                ObligationStateSnapshot::Reserved,
+            )],
+        );
+        let result = snapshot.validate();
+
+        let not_valid = !result.is_valid;
+        crate::assert_with_log!(not_valid, "not valid", true, not_valid);
+        let has_error = result
+            .errors
+            .iter()
+            .any(|e| matches!(e, RestoreError::OrphanObligationRegion { .. }));
+        crate::assert_with_log!(
+            has_error,
+            "has OrphanObligationRegion error",
+            true,
+            has_error
+        );
+        crate::test_complete!("orphan_obligation_region_detected");
+    }
+
+    #[test]
+    fn obligation_region_mismatch_detected() {
+        init_test("obligation_region_mismatch_detected");
+        let snapshot = make_snapshot(
+            vec![
+                make_region(0, None, RegionStateSnapshot::Open),
+                make_region(1, None, RegionStateSnapshot::Open),
+            ],
+            vec![make_task(0, 0, TaskStateSnapshot::Running)],
+            vec![make_obligation_in_region(
+                0,
+                0,
+                1,
+                ObligationStateSnapshot::Reserved,
+            )],
+        );
+        let result = snapshot.validate();
+
+        let not_valid = !result.is_valid;
+        crate::assert_with_log!(not_valid, "not valid", true, not_valid);
+        let has_error = result
+            .errors
+            .iter()
+            .any(|e| matches!(e, RestoreError::ObligationRegionMismatch { .. }));
+        crate::assert_with_log!(
+            has_error,
+            "has ObligationRegionMismatch error",
+            true,
+            has_error
+        );
+        crate::test_complete!("obligation_region_mismatch_detected");
     }
 
     #[test]
