@@ -984,7 +984,9 @@ impl SystematicEncoder {
         let mut buf = vec![0u8; symbol_size];
 
         for i in 0..count {
-            let esi = start_esi + i as u32;
+            let esi = start_esi
+                .checked_add(u32::try_from(i).expect("repair count exceeds u32"))
+                .expect("repair ESI overflow");
             let degree = self.repair_symbol_into_with_degree(esi, &mut buf);
             let data = buf[..symbol_size].to_vec();
 
@@ -1005,7 +1007,9 @@ impl SystematicEncoder {
         }
 
         // Advance cursor
-        self.next_repair_esi = start_esi + count as u32;
+        self.next_repair_esi = start_esi
+            .checked_add(u32::try_from(count).expect("repair count exceeds u32"))
+            .expect("repair ESI cursor overflow");
 
         // Invariant: all emitted ESIs are strictly ascending and >= K
         debug_assert!(

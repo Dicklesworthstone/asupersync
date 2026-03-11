@@ -96,7 +96,7 @@ fn hash_node(mut h: u64, node: &PlanNode) -> u64 {
         PlanNode::Timeout { child, duration } => {
             h = fnv_u8(h, 3);
             h = fnv_u64(h, child.index() as u64);
-            h = fnv_u64(h, duration.as_nanos() as u64);
+            h = fnv_u64(h, u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX));
         }
     }
     h
