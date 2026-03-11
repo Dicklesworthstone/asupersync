@@ -887,19 +887,22 @@ impl CancelReason {
         }
 
         // Same timestamp: fallback to message comparison
-        match (self.message, other.message) {
-            (None, Some(msg)) => {
-                self.kind = other.kind;
-                self.message = Some(msg);
-                true
-            }
-            (Some(current), Some(candidate)) if candidate < current => {
-                self.kind = other.kind;
-                self.message = Some(candidate);
-                true
-            }
+        let should_replace = match (self.message, other.message) {
+            (None, Some(_)) => true,
+            (Some(current), Some(candidate)) if candidate < current => true,
             _ => false,
+        };
+        if should_replace {
+            self.kind = other.kind;
+            self.origin_region = other.origin_region;
+            self.origin_task = other.origin_task;
+            self.timestamp = other.timestamp;
+            self.message = other.message;
+            self.cause.clone_from(&other.cause);
+            self.truncated = other.truncated;
+            self.truncated_at_depth = other.truncated_at_depth;
         }
+        should_replace
     }
 
     // ========================================================================

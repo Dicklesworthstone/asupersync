@@ -147,11 +147,10 @@ impl CaveatPredicate {
             Self::ResourceScope(pattern) => {
                 buf.push(0x07);
                 let pb = pattern.as_bytes();
-                #[allow(clippy::cast_possible_truncation)]
-                {
-                    buf.extend_from_slice(&(pb.len() as u16).to_le_bytes());
-                    buf.extend_from_slice(pb);
-                }
+                let len =
+                    u16::try_from(pb.len()).expect("ResourceScope pattern exceeds u16::MAX bytes");
+                buf.extend_from_slice(&len.to_le_bytes());
+                buf.extend_from_slice(pb);
             }
             Self::RateLimit {
                 max_count,
@@ -165,13 +164,14 @@ impl CaveatPredicate {
                 buf.push(0x06);
                 let kb = key.as_bytes();
                 let vb = value.as_bytes();
-                #[allow(clippy::cast_possible_truncation)]
-                {
-                    buf.extend_from_slice(&(kb.len() as u16).to_le_bytes());
-                    buf.extend_from_slice(kb);
-                    buf.extend_from_slice(&(vb.len() as u16).to_le_bytes());
-                    buf.extend_from_slice(vb);
-                }
+                let klen =
+                    u16::try_from(kb.len()).expect("Custom caveat key exceeds u16::MAX bytes");
+                let vlen =
+                    u16::try_from(vb.len()).expect("Custom caveat value exceeds u16::MAX bytes");
+                buf.extend_from_slice(&klen.to_le_bytes());
+                buf.extend_from_slice(kb);
+                buf.extend_from_slice(&vlen.to_le_bytes());
+                buf.extend_from_slice(vb);
             }
         }
         buf
@@ -367,10 +367,23 @@ impl Caveat {
 // ---------------------------------------------------------------------------
 
 /// A 32-byte HMAC signature for a Macaroon token.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Hash)]
 pub struct MacaroonSignature {
     bytes: [u8; AUTH_KEY_SIZE],
 }
+
+impl PartialEq for MacaroonSignature {
+    fn eq(&self, other: &Self) -> bool {
+        // Constant-time comparison to prevent timing side-channel attacks.
+        let mut diff = 0u8;
+        for i in 0..AUTH_KEY_SIZE {
+            diff |= self.bytes[i] ^ other.bytes[i];
+        }
+        diff == 0
+    }
+}
+
+impl Eq for MacaroonSignature {}
 
 impl MacaroonSignature {
     /// Create a signature from raw bytes.
@@ -670,25 +683,29 @@ impl MacaroonToken {
         let mut buf = Vec::new();
         buf.push(MACAROON_SCHEMA_VERSION);
 
+        // Helper to write a length-prefixed byte slice, asserting u16 bounds.
+        fn write_len_prefixed(buf: &mut Vec<u8>, data: &[u8]) {
+            let len = u16::try_from(data.len()).expect("macaroon field exceeds u16::MAX bytes");
+            buf.extend_from_slice(&len.to_le_bytes());
+            buf.extend_from_slice(data);
+        }
+
         // Identifier
-        let id_bytes = self.identifier.as_bytes();
-        buf.extend_from_slice(&(id_bytes.len() as u16).to_le_bytes());
-        buf.extend_from_slice(id_bytes);
+        write_len_prefixed(&mut buf, self.identifier.as_bytes());
 
         // Location
-        let loc_bytes = self.location.as_bytes();
-        buf.extend_from_slice(&(loc_bytes.len() as u16).to_le_bytes());
-        buf.extend_from_slice(loc_bytes);
+        write_len_prefixed(&mut buf, self.location.as_bytes());
 
         // Caveats
-        buf.extend_from_slice(&(self.caveats.len() as u16).to_le_bytes());
+        let caveat_count =
+            u16::try_from(self.caveats.len()).expect("macaroon caveat count exceeds u16::MAX");
+        buf.extend_from_slice(&caveat_count.to_le_bytes());
         for caveat in &self.caveats {
             match caveat {
                 Caveat::FirstParty { predicate } => {
                     buf.push(0x00);
                     let pred_bytes = predicate.to_bytes();
-                    buf.extend_from_slice(&(pred_bytes.len() as u16).to_le_bytes());
-                    buf.extend_from_slice(&pred_bytes);
+                    write_len_prefixed(&mut buf, &pred_bytes);
                 }
                 Caveat::ThirdParty {
                     location: tp_loc,
@@ -696,14 +713,9 @@ impl MacaroonToken {
                     vid,
                 } => {
                     buf.push(0x01);
-                    let loc_b = tp_loc.as_bytes();
-                    buf.extend_from_slice(&(loc_b.len() as u16).to_le_bytes());
-                    buf.extend_from_slice(loc_b);
-                    let id_b = tp_id.as_bytes();
-                    buf.extend_from_slice(&(id_b.len() as u16).to_le_bytes());
-                    buf.extend_from_slice(id_b);
-                    buf.extend_from_slice(&(vid.len() as u16).to_le_bytes());
-                    buf.extend_from_slice(vid);
+                    write_len_prefixed(&mut buf, tp_loc.as_bytes());
+                    write_len_prefixed(&mut buf, tp_id.as_bytes());
+                    write_len_prefixed(&mut buf, vid);
                 }
             }
         }

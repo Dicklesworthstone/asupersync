@@ -519,9 +519,9 @@ pub fn horizontal_deviation(alpha: &PiecewiseLinearCurve, beta: &PiecewiseLinear
 
     // Add intermediate samples for better accuracy.
     let t_max = sample_times
-        .last()
+        .iter()
         .copied()
-        .unwrap_or(0.0)
+        .fold(0.0_f64, f64::max)
         .mul_add(2.0, 10.0);
     let num_extra: u32 = 256;
     for i in 0..=num_extra {
@@ -617,9 +617,9 @@ pub fn vertical_deviation(alpha: &PiecewiseLinearCurve, beta: &PiecewiseLinearCu
     }
 
     let t_max = sample_times
-        .last()
+        .iter()
         .copied()
-        .unwrap_or(0.0)
+        .fold(0.0_f64, f64::max)
         .mul_add(2.0, 10.0);
     let num_extra: u32 = 256;
     for i in 0..=num_extra {
