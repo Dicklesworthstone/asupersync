@@ -295,6 +295,7 @@ impl Stealer {
     /// `schedule_local_push` on the same queue.
     #[inline]
     #[must_use]
+    #[allow(clippy::significant_drop_tightening)]
     pub fn steal(&self) -> Option<TaskId> {
         self.tasks.with_tasks_arena_mut(|arena| {
             let mut stack = self.inner.lock();

@@ -771,6 +771,7 @@ mod tests {
         );
 
         let second: Poll<Result<(), Elapsed>> = Future::poll(Pin::new(&mut future), &mut cx);
+        println!("DEBUG: second = {:?}", second);
         crate::assert_with_log!(
             second.is_pending(),
             "ambient wake alone must not expire custom-clock timeout",
