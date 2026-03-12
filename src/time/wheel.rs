@@ -872,27 +872,24 @@ impl TimerWheel {
                 >= min_group_size
         });
 
-        // Process in-place with swap_remove — no separate `remaining` allocation.
-        let i = 0;
-        while i < ready.len() {
-            if !self.is_live(&ready[i]) {
-                ready.swap_remove(i);
+        // Process in-place efficiently using drain — no separate `remaining` allocation.
+        #[allow(clippy::iter_with_drain)]
+        for entry in ready.drain(..) {
+            if !self.is_live(&entry) {
                 continue;
             }
 
             let should_fire = if coalescing_enabled {
                 let coalesced = coalesced_time.unwrap_or(now);
-                ready[i].deadline <= coalesced
+                entry.deadline <= coalesced
             } else {
-                ready[i].deadline <= now
+                entry.deadline <= now
             };
 
             if should_fire {
-                let entry = ready.swap_remove(i);
                 self.active.remove(entry.id as usize);
                 wakers.push(entry.waker);
             } else {
-                let entry = ready.swap_remove(i);
                 self.insert_entry(entry);
             }
         }

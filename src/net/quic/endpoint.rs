@@ -82,22 +82,22 @@ impl QuicEndpoint {
     pub fn server(cx: &Cx, addr: SocketAddr, config: &QuicConfig) -> Result<Self, QuicError> {
         cx.checkpoint()?;
 
-        if !config.is_valid_for_server() {
-            return Err(QuicError::Config(
-                "server requires cert_chain/private_key and client_auth_roots when client_auth is enabled".into(),
-            ));
-        }
+        let (cert_chain_raw, private_key_raw) = match (&config.cert_chain, &config.private_key) {
+            (Some(c), Some(k)) if config.is_valid_for_server() => (c, k),
+            _ => {
+                return Err(QuicError::Config(
+                    "server requires cert_chain/private_key and client_auth_roots when client_auth is enabled".into(),
+                ));
+            }
+        };
 
-        let cert_chain = config
-            .cert_chain
-            .as_ref()
-            .unwrap()
+        let cert_chain = cert_chain_raw
             .iter()
             .map(|c| rustls::pki_types::CertificateDer::from(c.clone()))
             .collect::<Vec<_>>();
 
         let private_key = rustls::pki_types::PrivateKeyDer::try_from(
-            config.private_key.as_ref().unwrap().clone(),
+            private_key_raw.clone(),
         )
         .map_err(|e| QuicError::TlsConfig(format!("invalid private key: {e}")))?;
 
