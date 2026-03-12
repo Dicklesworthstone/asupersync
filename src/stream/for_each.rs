@@ -47,7 +47,9 @@ where
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let mut this = self.project();
-        assert!(!*this.completed, "ForEach polled after completion");
+        if *this.completed {
+            return Poll::Ready(());
+        }
         let mut processed_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
@@ -105,7 +107,9 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let mut this = self.project();
-        assert!(!*this.completed, "ForEachAsync polled after completion");
+        if *this.completed {
+            return Poll::Ready(());
+        }
         let mut processed_this_poll = 0usize;
         loop {
             // Complete pending future first
@@ -474,14 +478,13 @@ mod tests {
             polls.load(Ordering::SeqCst)
         );
 
-        let repoll = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = Pin::new(&mut future).poll(&mut cx);
-        }));
+        // Fail-closed: repoll returns Ready(()) instead of panicking
+        let repoll = Pin::new(&mut future).poll(&mut cx);
         crate::assert_with_log!(
-            repoll.is_err(),
-            "repoll panics fail-closed",
-            true,
-            repoll.is_err()
+            matches!(repoll, Poll::Ready(())),
+            "repoll returns Ready(())",
+            "Poll::Ready(())",
+            repoll
         );
         crate::assert_with_log!(
             polls.load(Ordering::SeqCst) == 1,
@@ -519,14 +522,13 @@ mod tests {
             polls.load(Ordering::SeqCst)
         );
 
-        let repoll = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = Pin::new(&mut future).poll(&mut cx);
-        }));
+        // Fail-closed: repoll returns Ready(()) instead of panicking
+        let repoll = Pin::new(&mut future).poll(&mut cx);
         crate::assert_with_log!(
-            repoll.is_err(),
-            "repoll panics fail-closed",
-            true,
-            repoll.is_err()
+            matches!(repoll, Poll::Ready(())),
+            "repoll returns Ready(())",
+            "Poll::Ready(())",
+            repoll
         );
         crate::assert_with_log!(
             polls.load(Ordering::SeqCst) == 1,

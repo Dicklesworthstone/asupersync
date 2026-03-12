@@ -46,7 +46,9 @@ where
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<C> {
-        assert!(!self.completed, "Collect polled after completion");
+        if self.completed {
+            return Poll::Ready(C::default());
+        }
         let mut collected_this_poll = 0usize;
         loop {
             match Pin::new(&mut self.stream).poll_next(cx) {

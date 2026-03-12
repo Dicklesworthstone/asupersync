@@ -47,7 +47,9 @@ where
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<usize> {
         let mut this = self.project();
-        assert!(!*this.completed, "Count polled after completion");
+        if *this.completed {
+            return Poll::Ready(*this.total);
+        }
         let mut counted_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
@@ -248,8 +250,8 @@ mod tests {
     }
 
     #[test]
-    fn count_repoll_panics_after_completion() {
-        init_test("count_repoll_panics_after_completion");
+    fn count_repoll_returns_cached_total_after_completion() {
+        init_test("count_repoll_returns_cached_total_after_completion");
         let mut future = Count::new(OneThenDoneThenPanicStream::default());
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -262,21 +264,20 @@ mod tests {
             first
         );
 
-        let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = Pin::new(&mut future).poll(&mut cx);
-        }));
+        // Fail-closed: repoll returns cached total instead of panicking
+        let second = Pin::new(&mut future).poll(&mut cx);
         crate::assert_with_log!(
-            second.is_err(),
-            "second poll panics fail-closed",
-            true,
+            second == Poll::Ready(1),
+            "repoll returns cached total",
+            Poll::Ready(1),
             second
         );
-        crate::test_complete!("count_repoll_panics_after_completion");
+        crate::test_complete!("count_repoll_returns_cached_total_after_completion");
     }
 
     #[test]
-    fn count_empty_repoll_panics_after_completion() {
-        init_test("count_empty_repoll_panics_after_completion");
+    fn count_empty_repoll_returns_zero_after_completion() {
+        init_test("count_empty_repoll_returns_zero_after_completion");
         let mut future = Count::new(iter(Vec::<usize>::new()));
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -289,15 +290,14 @@ mod tests {
             first
         );
 
-        let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = Pin::new(&mut future).poll(&mut cx);
-        }));
+        // Fail-closed: repoll returns cached zero instead of panicking
+        let second = Pin::new(&mut future).poll(&mut cx);
         crate::assert_with_log!(
-            second.is_err(),
-            "second poll panics fail-closed",
-            true,
-            second.is_err()
+            second == Poll::Ready(0),
+            "repoll returns cached zero",
+            Poll::Ready(0),
+            second
         );
-        crate::test_complete!("count_empty_repoll_panics_after_completion");
+        crate::test_complete!("count_empty_repoll_returns_zero_after_completion");
     }
 }
