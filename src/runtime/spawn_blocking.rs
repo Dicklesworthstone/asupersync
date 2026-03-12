@@ -88,7 +88,10 @@ impl<T> BlockingOneshot<T> {
                 state: state.clone(),
                 sent: false,
             },
-            BlockingOneshotReceiver { state },
+            BlockingOneshotReceiver {
+                state,
+                completed: false,
+            },
         )
     }
 
@@ -131,6 +134,7 @@ impl<T> Drop for BlockingOneshot<T> {
 
 struct BlockingOneshotReceiver<T> {
     state: Arc<Mutex<BlockingOneshotState<T>>>,
+    completed: bool,
 }
 
 impl<T> Drop for BlockingOneshotReceiver<T> {
@@ -146,14 +150,25 @@ impl<T> std::future::Future for BlockingOneshotReceiver<T> {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        let mut guard = self.state.lock();
+        let this = self.get_mut();
+        assert!(
+            !this.completed,
+            "blocking operation polled after completion"
+        );
+
+        let mut guard = this.state.lock();
         if guard.done {
-            guard.result.take().map_or_else(
+            this.completed = true;
+            let result = guard.result.take();
+            let closed_without_result = guard.closed_without_result;
+            drop(guard);
+
+            result.map_or_else(
                 || {
-                    if guard.closed_without_result {
+                    if closed_without_result {
                         panic!("blocking operation ended without producing a result");
                     } else {
-                        panic!("result consumed twice");
+                        panic!("blocking operation polled after completion");
                     }
                 },
                 |result| match result {
@@ -482,6 +497,77 @@ mod tests {
             message.contains("without producing a result")
         );
         crate::test_complete!("blocking_oneshot_sender_drop_fails_closed");
+    }
+
+    #[test]
+    fn blocking_oneshot_success_repoll_fails_closed() {
+        init_test("blocking_oneshot_success_repoll_fails_closed");
+        let (tx, rx) = BlockingOneshot::<u32>::new();
+        tx.send(Ok(42));
+
+        let mut rx = Box::pin(rx);
+        let first = future::block_on(std::future::poll_fn(|cx| rx.as_mut().poll(cx)));
+        crate::assert_with_log!(first == 42, "first result", 42u32, first);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            future::block_on(std::future::poll_fn(|cx| rx.as_mut().poll(cx)));
+        }));
+
+        let payload = panic.expect_err("second poll should fail closed");
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(ToString::to_string)
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+
+        crate::assert_with_log!(
+            message.contains("polled after completion"),
+            "repoll panic message",
+            true,
+            message.contains("polled after completion")
+        );
+        crate::test_complete!("blocking_oneshot_success_repoll_fails_closed");
+    }
+
+    #[test]
+    fn blocking_oneshot_sender_drop_repoll_fails_closed() {
+        init_test("blocking_oneshot_sender_drop_repoll_fails_closed");
+        let (tx, rx) = BlockingOneshot::<u32>::new();
+        drop(tx);
+
+        let mut rx = Box::pin(rx);
+        let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            future::block_on(std::future::poll_fn(|cx| rx.as_mut().poll(cx)));
+        }));
+        let first_payload = first.expect_err("first poll should fail closed on sender drop");
+        let first_message = first_payload
+            .downcast_ref::<&str>()
+            .map(ToString::to_string)
+            .or_else(|| first_payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        crate::assert_with_log!(
+            first_message.contains("without producing a result"),
+            "first sender-drop panic message",
+            true,
+            first_message.contains("without producing a result")
+        );
+
+        let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            future::block_on(std::future::poll_fn(|cx| rx.as_mut().poll(cx)));
+        }));
+        let second_payload = second.expect_err("second poll should fail closed");
+        let second_message = second_payload
+            .downcast_ref::<&str>()
+            .map(ToString::to_string)
+            .or_else(|| second_payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        crate::assert_with_log!(
+            second_message.contains("polled after completion"),
+            "second sender-drop panic message",
+            true,
+            second_message.contains("polled after completion")
+        );
+        crate::test_complete!("blocking_oneshot_sender_drop_repoll_fails_closed");
     }
 
     #[test]
