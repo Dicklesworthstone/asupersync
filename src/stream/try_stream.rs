@@ -84,6 +84,7 @@ pub struct TryFold<S, F, Acc> {
     stream: S,
     f: F,
     acc: Option<Acc>,
+    completed: bool,
 }
 
 impl<S, F, Acc> TryFold<S, F, Acc> {
@@ -93,6 +94,7 @@ impl<S, F, Acc> TryFold<S, F, Acc> {
             stream,
             f,
             acc: Some(init),
+            completed: false,
         }
     }
 }
@@ -107,6 +109,7 @@ where
     type Output = Result<Acc, E>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<Acc, E>> {
+        assert!(!self.completed, "TryFold polled after completion");
         let mut processed_this_poll = 0usize;
         loop {
             match Pin::new(&mut self.stream).poll_next(cx) {
@@ -114,7 +117,10 @@ where
                     let acc = self.acc.take().expect("TryFold polled after completion");
                     match (self.f)(acc, item) {
                         Ok(new_acc) => self.acc = Some(new_acc),
-                        Err(e) => return Poll::Ready(Err(e)),
+                        Err(e) => {
+                            self.completed = true;
+                            return Poll::Ready(Err(e));
+                        }
                     }
                     processed_this_poll += 1;
                     if processed_this_poll >= TRY_STREAM_COOPERATIVE_BUDGET {
@@ -122,8 +128,12 @@ where
                         return Poll::Pending;
                     }
                 }
-                Poll::Ready(Some(Err(e))) => return Poll::Ready(Err(e)),
+                Poll::Ready(Some(Err(e))) => {
+                    self.completed = true;
+                    return Poll::Ready(Err(e));
+                }
                 Poll::Ready(None) => {
+                    self.completed = true;
                     return Poll::Ready(Ok(self
                         .acc
                         .take()
@@ -199,7 +209,7 @@ mod tests {
     use super::*;
     use crate::stream::iter;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
 
     struct NoopWaker;
@@ -273,6 +283,26 @@ mod tests {
             let item = self.next;
             self.next += 1;
             Poll::Ready(Some(item))
+        }
+    }
+
+    #[derive(Debug)]
+    struct PollCountingEmptyTryStream {
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl PollCountingEmptyTryStream {
+        fn new(polls: Arc<AtomicUsize>) -> Self {
+            Self { polls }
+        }
+    }
+
+    impl Stream for PollCountingEmptyTryStream {
+        type Item = Result<i32, &'static str>;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(None)
         }
     }
 
@@ -399,6 +429,50 @@ mod tests {
             Poll::Pending => panic!("expected Ready"),
         }
         crate::test_complete!("try_fold_closure_error");
+    }
+
+    #[test]
+    fn try_fold_repoll_after_completion_does_not_repoll_stream() {
+        init_test("try_fold_repoll_after_completion_does_not_repoll_stream");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut future = TryFold::new(
+            PollCountingEmptyTryStream::new(polls.clone()),
+            7i32,
+            |acc, x| Ok::<i32, &'static str>(acc + x),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            first == Poll::Ready(Ok(7)),
+            "first poll returns final accumulator",
+            Poll::Ready(Ok::<i32, &'static str>(7)),
+            first
+        );
+        crate::assert_with_log!(
+            polls.load(Ordering::SeqCst) == 1,
+            "first poll touches upstream once",
+            1,
+            polls.load(Ordering::SeqCst)
+        );
+
+        let repoll = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut future).poll(&mut cx);
+        }));
+        crate::assert_with_log!(
+            repoll.is_err(),
+            "second poll panics immediately",
+            true,
+            repoll.is_err()
+        );
+        crate::assert_with_log!(
+            polls.load(Ordering::SeqCst) == 1,
+            "second poll does not touch upstream",
+            1,
+            polls.load(Ordering::SeqCst)
+        );
+        crate::test_complete!("try_fold_repoll_after_completion_does_not_repoll_stream");
     }
 
     #[test]

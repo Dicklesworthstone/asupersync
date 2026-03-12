@@ -25,6 +25,7 @@ pub struct Fold<S, F, Acc> {
     stream: S,
     f: F,
     acc: Option<Acc>,
+    completed: bool,
 }
 
 impl<S, F, Acc> Fold<S, F, Acc> {
@@ -34,6 +35,7 @@ impl<S, F, Acc> Fold<S, F, Acc> {
             stream,
             f,
             acc: Some(init),
+            completed: false,
         }
     }
 }
@@ -48,6 +50,7 @@ where
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Acc> {
         let mut this = self.project();
+        assert!(!*this.completed, "Fold polled after completion");
         let mut folded_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
@@ -61,6 +64,7 @@ where
                     }
                 }
                 Poll::Ready(None) => {
+                    *this.completed = true;
                     return Poll::Ready(this.acc.take().expect("Fold polled after completion"));
                 }
                 Poll::Pending => return Poll::Pending,
@@ -74,7 +78,7 @@ mod tests {
     use super::*;
     use crate::stream::iter;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
 
     struct NoopWaker;
@@ -122,6 +126,26 @@ mod tests {
             let item = self.next;
             self.next += 1;
             Poll::Ready(Some(item))
+        }
+    }
+
+    #[derive(Debug)]
+    struct PollCountingEmptyStream {
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl PollCountingEmptyStream {
+        fn new(polls: Arc<AtomicUsize>) -> Self {
+            Self { polls }
+        }
+    }
+
+    impl Stream for PollCountingEmptyStream {
+        type Item = usize;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(None)
         }
     }
 
@@ -253,5 +277,52 @@ mod tests {
             second
         );
         crate::test_complete!("fold_yields_after_budget_on_always_ready_stream");
+    }
+
+    #[test]
+    fn fold_repoll_after_completion_fails_closed_without_repolling_upstream() {
+        init_test("fold_repoll_after_completion_fails_closed_without_repolling_upstream");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut future = Fold::new(
+            PollCountingEmptyStream::new(Arc::clone(&polls)),
+            7usize,
+            |acc, item| acc + item,
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            first == Poll::Ready(7),
+            "first poll completes empty fold",
+            Poll::Ready(7),
+            first
+        );
+        crate::assert_with_log!(
+            polls.load(Ordering::SeqCst) == 1,
+            "first completion polls upstream once",
+            1,
+            polls.load(Ordering::SeqCst)
+        );
+
+        let repoll = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut future).poll(&mut cx);
+        }));
+        crate::assert_with_log!(
+            repoll.is_err(),
+            "repoll panics fail-closed",
+            true,
+            repoll.is_err()
+        );
+        crate::assert_with_log!(
+            polls.load(Ordering::SeqCst) == 1,
+            "repoll does not touch upstream again",
+            1,
+            polls.load(Ordering::SeqCst)
+        );
+
+        crate::test_complete!(
+            "fold_repoll_after_completion_fails_closed_without_repolling_upstream"
+        );
     }
 }
