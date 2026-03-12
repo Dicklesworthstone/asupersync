@@ -198,7 +198,9 @@ impl<F: Future + Unpin> TimeoutFuture<F> {
         now: Time,
         cx: &mut Context<'_>,
     ) -> Poll<Result<F::Output, Elapsed>> {
-        assert!(!self.completed, "TimeoutFuture polled after completion");
+        if self.completed {
+            return Poll::Ready(Err(Elapsed::new(self.sleep.deadline())));
+        }
         // Poll the inner future first — if it's ready, return its result
         // even if the timeout has also elapsed, to avoid losing completed work.
         // SAFETY: We require F: Unpin, so this is safe
@@ -230,7 +232,9 @@ impl<F: Future> Future for TimeoutFuture<F> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
-        assert!(!*this.completed, "TimeoutFuture polled after completion");
+        if *this.completed {
+            return Poll::Ready(Err(Elapsed::new(this.sleep.deadline())));
+        }
 
         // Poll the inner future first — if it's ready, we should return its
         // result even if the timeout has also elapsed. This avoids losing
@@ -343,7 +347,7 @@ mod tests {
     }
 
     fn get_current_time() -> u64 {
-        CURRENT_TIME.with(|t| t.get())
+        CURRENT_TIME.with(std::cell::Cell::get)
     }
 
     struct CountingFuture {
@@ -619,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn poll_with_time_panics_after_success_completion() {
+    fn poll_with_time_returns_elapsed_after_success_completion() {
         let mut t = TimeoutFuture::new(ready(42), Time::from_secs(10));
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -627,20 +631,13 @@ mod tests {
         let first = t.poll_with_time(Time::from_secs(5), &mut cx);
         assert!(matches!(first, Poll::Ready(Ok(42))));
 
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = t.poll_with_time(Time::from_secs(6), &mut cx);
-        }));
-        let message = panic.expect_err("re-poll after success should panic");
-        let text = message
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| message.downcast_ref::<String>().map(String::as_str))
-            .expect("unexpected panic payload");
-        assert!(text.contains("TimeoutFuture polled after completion"));
+        // Fail-closed: repoll returns Elapsed instead of panicking
+        let repoll = t.poll_with_time(Time::from_secs(6), &mut cx);
+        assert!(matches!(repoll, Poll::Ready(Err(_))));
     }
 
     #[test]
-    fn poll_with_time_panics_after_timeout_until_reset() {
+    fn poll_with_time_returns_elapsed_after_timeout_until_reset() {
         let future = CountingFuture {
             count: 0,
             ready_at: 3,
@@ -654,10 +651,9 @@ mod tests {
         let elapsed = t.poll_with_time(Time::from_secs(10), &mut cx);
         assert!(matches!(elapsed, Poll::Ready(Err(_))));
 
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = t.poll_with_time(Time::from_secs(11), &mut cx);
-        }));
-        panic.expect_err("re-poll after timeout should panic");
+        // Fail-closed: repoll returns Elapsed instead of panicking
+        let repoll = t.poll_with_time(Time::from_secs(11), &mut cx);
+        assert!(matches!(repoll, Poll::Ready(Err(_))));
 
         t.reset(Time::from_secs(20));
         let resumed = t.poll_with_time(Time::from_secs(12), &mut cx);
@@ -669,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn poll_panics_after_success_completion() {
+    fn poll_returns_elapsed_after_success_completion() {
         set_current_time(0);
         let mut t = TimeoutFuture::with_time_getter(ready(42), Time::from_secs(10), test_now);
         let waker = noop_waker();
@@ -678,14 +674,13 @@ mod tests {
         let first = Pin::new(&mut t).poll(&mut cx);
         assert!(matches!(first, Poll::Ready(Ok(42))));
 
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = Pin::new(&mut t).poll(&mut cx);
-        }));
-        panic.expect_err("re-poll after success should panic");
+        // Fail-closed: repoll returns Elapsed instead of panicking
+        let repoll = Pin::new(&mut t).poll(&mut cx);
+        assert!(matches!(repoll, Poll::Ready(Err(_))));
     }
 
     #[test]
-    fn poll_panics_after_timeout_until_reset() {
+    fn poll_returns_elapsed_after_timeout_until_reset() {
         set_current_time(0);
         let future = CountingFuture {
             count: 0,
@@ -701,10 +696,9 @@ mod tests {
         let elapsed = Pin::new(&mut t).poll(&mut cx);
         assert!(matches!(elapsed, Poll::Ready(Err(_))));
 
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = Pin::new(&mut t).poll(&mut cx);
-        }));
-        panic.expect_err("re-poll after timeout should panic");
+        // Fail-closed: repoll returns Elapsed instead of panicking
+        let repoll = Pin::new(&mut t).poll(&mut cx);
+        assert!(matches!(repoll, Poll::Ready(Err(_))));
 
         t.reset(Time::from_secs(20));
         set_current_time(12_000_000_000);

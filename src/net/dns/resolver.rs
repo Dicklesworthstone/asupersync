@@ -430,6 +430,7 @@ struct ResolverTimeout<F> {
     deadline: Time,
     sleep: Sleep,
     time_getter: fn() -> Time,
+    completed: bool,
 }
 
 impl<F> ResolverTimeout<F> {
@@ -443,6 +444,7 @@ impl<F> ResolverTimeout<F> {
             // but keep `deadline` authoritative for timeout decisions.
             sleep: Sleep::new(wake_deadline),
             time_getter,
+            completed: false,
         }
     }
 
@@ -467,18 +469,24 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        if this.completed {
+            return Poll::Ready(Err(Elapsed::new(this.deadline)));
+        }
 
         if let Poll::Ready(output) = Pin::new(&mut this.future).poll(cx) {
+            this.completed = true;
             return Poll::Ready(Ok(output));
         }
 
         if (this.time_getter)() >= this.deadline {
+            this.completed = true;
             return Poll::Ready(Err(Elapsed::new(this.deadline)));
         }
 
         match Pin::new(&mut this.sleep).poll(cx) {
             Poll::Ready(()) => {
                 if (this.time_getter)() >= this.deadline {
+                    this.completed = true;
                     return Poll::Ready(Err(Elapsed::new(this.deadline)));
                 }
 

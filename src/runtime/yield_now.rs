@@ -13,7 +13,9 @@ impl Future for YieldNow {
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        assert!(!self.completed, "YieldNow polled after completion");
+        if self.completed {
+            return Poll::Ready(());
+        }
         if self.yielded {
             self.completed = true;
             Poll::Ready(())
@@ -75,10 +77,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "YieldNow polled after completion")]
-    fn yield_now_panics_on_repoll_after_completion() {
+    fn yield_now_repoll_after_completion_returns_ready() {
         crate::test_utils::init_test_logging();
-        crate::test_phase!("yield_now_panics_on_repoll_after_completion");
+        crate::test_phase!("yield_now_repoll_after_completion_returns_ready");
 
         let wake_counter = Arc::new(WakeCounter::default());
         let waker = std::task::Waker::from(Arc::clone(&wake_counter));
@@ -87,7 +88,7 @@ mod tests {
 
         assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
         assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Ready(())));
-        // This third poll should panic
-        let _ = fut.as_mut().poll(&mut cx);
+        // Fail-closed: repoll returns Ready(()) instead of panicking
+        assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Ready(())));
     }
 }
