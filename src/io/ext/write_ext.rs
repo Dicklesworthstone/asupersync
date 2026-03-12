@@ -44,6 +44,7 @@ macro_rules! write_int_trait_method {
                 writer: self,
                 buf: n.$to_bytes(),
                 pos: 0,
+                completed: false,
             }
         }
     };
@@ -59,7 +60,11 @@ pub trait AsyncWriteExt: AsyncWrite {
     where
         Self: Unpin,
     {
-        Write { writer: self, buf }
+        Write {
+            writer: self,
+            buf,
+            completed: false,
+        }
     }
 
     /// Write all bytes from `buf`.
@@ -72,6 +77,7 @@ pub trait AsyncWriteExt: AsyncWrite {
             buf,
             pos: 0,
             yield_counter: 0,
+            completed: false,
         }
     }
 
@@ -85,6 +91,7 @@ pub trait AsyncWriteExt: AsyncWrite {
             writer: self,
             buf,
             yield_counter: 0,
+            completed: false,
         }
     }
 
@@ -96,6 +103,7 @@ pub trait AsyncWriteExt: AsyncWrite {
         WriteU8 {
             writer: self,
             byte: n,
+            completed: false,
         }
     }
 
@@ -107,6 +115,7 @@ pub trait AsyncWriteExt: AsyncWrite {
         WriteI8 {
             writer: self,
             byte: n.cast_unsigned(),
+            completed: false,
         }
     }
 
@@ -206,7 +215,10 @@ pub trait AsyncWriteExt: AsyncWrite {
     where
         Self: Unpin,
     {
-        Flush { writer: self }
+        Flush {
+            writer: self,
+            completed: false,
+        }
     }
 
     /// Shutdown the writer.
@@ -214,7 +226,10 @@ pub trait AsyncWriteExt: AsyncWrite {
     where
         Self: Unpin,
     {
-        Shutdown { writer: self }
+        Shutdown {
+            writer: self,
+            completed: false,
+        }
     }
 
     /// Write data from multiple buffers (vectored I/O).
@@ -222,7 +237,11 @@ pub trait AsyncWriteExt: AsyncWrite {
     where
         Self: Unpin,
     {
-        WriteVectored { writer: self, bufs }
+        WriteVectored {
+            writer: self,
+            bufs,
+            completed: false,
+        }
     }
 }
 
@@ -236,6 +255,7 @@ impl<W: AsyncWrite + ?Sized> AsyncWriteExt for W {}
 pub struct Write<'a, W: ?Sized> {
     writer: &'a mut W,
     buf: &'a [u8],
+    completed: bool,
 }
 
 impl<W> Future for Write<'_, W>
@@ -246,7 +266,16 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        Pin::new(&mut *this.writer).poll_write(cx, this.buf)
+        if this.completed {
+            return Poll::Ready(Err(io::Error::other(
+                "Write future polled after completion",
+            )));
+        }
+        let result = Pin::new(&mut *this.writer).poll_write(cx, this.buf);
+        if result.is_ready() {
+            this.completed = true;
+        }
+        result
     }
 }
 
@@ -256,6 +285,7 @@ pub struct WriteAll<'a, W: ?Sized> {
     buf: &'a [u8],
     pos: usize,
     yield_counter: u8,
+    completed: bool,
 }
 
 impl<W> Future for WriteAll<'_, W>
@@ -266,6 +296,11 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        if this.completed {
+            return Poll::Ready(Err(io::Error::other(
+                "WriteAll future polled after completion",
+            )));
+        }
 
         while this.pos < this.buf.len() {
             if this.yield_counter > 32 {
@@ -280,9 +315,13 @@ where
                     this.yield_counter = 0;
                     return Poll::Pending;
                 }
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Ready(Err(err)) => {
+                    this.completed = true;
+                    return Poll::Ready(Err(err));
+                }
                 Poll::Ready(Ok(n)) => {
                     if n == 0 {
+                        this.completed = true;
                         return Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)));
                     }
                     this.pos += n;
@@ -290,6 +329,7 @@ where
             }
         }
 
+        this.completed = true;
         Poll::Ready(Ok(()))
     }
 }
@@ -299,6 +339,7 @@ pub struct WriteAllBuf<'a, W: ?Sized, B: ?Sized> {
     writer: &'a mut W,
     buf: &'a mut B,
     yield_counter: u8,
+    completed: bool,
 }
 
 impl<W, B> Future for WriteAllBuf<'_, W, B>
@@ -310,6 +351,11 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        if this.completed {
+            return Poll::Ready(Err(io::Error::other(
+                "WriteAllBuf future polled after completion",
+            )));
+        }
         while this.buf.remaining() > 0 {
             if this.yield_counter > 32 {
                 this.yield_counter = 0;
@@ -320,6 +366,7 @@ where
 
             let chunk = this.buf.chunk();
             if chunk.is_empty() {
+                this.completed = true;
                 return Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)));
             }
             match Pin::new(&mut *this.writer).poll_write(cx, chunk) {
@@ -327,15 +374,20 @@ where
                     this.yield_counter = 0;
                     return Poll::Pending;
                 }
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Ready(Err(err)) => {
+                    this.completed = true;
+                    return Poll::Ready(Err(err));
+                }
                 Poll::Ready(Ok(n)) => {
                     if n == 0 {
+                        this.completed = true;
                         return Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)));
                     }
                     this.buf.advance(n);
                 }
             }
         }
+        this.completed = true;
         Poll::Ready(Ok(()))
     }
 }
@@ -344,6 +396,7 @@ where
 pub struct WriteU8<'a, W: ?Sized> {
     writer: &'a mut W,
     byte: u8,
+    completed: bool,
 }
 
 impl<W> Future for WriteU8<'_, W>
@@ -354,11 +407,20 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        if this.completed {
+            return Poll::Ready(Err(io::Error::other(
+                "WriteU8 future polled after completion",
+            )));
+        }
         let buf = [this.byte];
         match Pin::new(&mut *this.writer).poll_write(cx, &buf) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Ready(Err(err)) => {
+                this.completed = true;
+                Poll::Ready(Err(err))
+            }
             Poll::Ready(Ok(n)) => {
+                this.completed = true;
                 if n == 0 {
                     Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)))
                 } else {
@@ -373,6 +435,7 @@ where
 pub struct WriteI8<'a, W: ?Sized> {
     writer: &'a mut W,
     byte: u8,
+    completed: bool,
 }
 
 impl<W> Future for WriteI8<'_, W>
@@ -383,11 +446,20 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        if this.completed {
+            return Poll::Ready(Err(io::Error::other(
+                "WriteI8 future polled after completion",
+            )));
+        }
         let buf = [this.byte];
         match Pin::new(&mut *this.writer).poll_write(cx, &buf) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Ready(Err(err)) => {
+                this.completed = true;
+                Poll::Ready(Err(err))
+            }
             Poll::Ready(Ok(n)) => {
+                this.completed = true;
                 if n == 0 {
                     Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)))
                 } else {
@@ -401,6 +473,7 @@ where
 /// Future for `flush`.
 pub struct Flush<'a, W: ?Sized> {
     writer: &'a mut W,
+    completed: bool,
 }
 
 impl<W> Future for Flush<'_, W>
@@ -411,13 +484,23 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        Pin::new(&mut *this.writer).poll_flush(cx)
+        if this.completed {
+            return Poll::Ready(Err(io::Error::other(
+                "Flush future polled after completion",
+            )));
+        }
+        let result = Pin::new(&mut *this.writer).poll_flush(cx);
+        if result.is_ready() {
+            this.completed = true;
+        }
+        result
     }
 }
 
 /// Future for `shutdown`.
 pub struct Shutdown<'a, W: ?Sized> {
     writer: &'a mut W,
+    completed: bool,
 }
 
 impl<W> Future for Shutdown<'_, W>
@@ -428,7 +511,16 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        Pin::new(&mut *this.writer).poll_shutdown(cx)
+        if this.completed {
+            return Poll::Ready(Err(io::Error::other(
+                "Shutdown future polled after completion",
+            )));
+        }
+        let result = Pin::new(&mut *this.writer).poll_shutdown(cx);
+        if result.is_ready() {
+            this.completed = true;
+        }
+        result
     }
 }
 
@@ -436,6 +528,7 @@ where
 pub struct WriteVectored<'a, W: ?Sized> {
     writer: &'a mut W,
     bufs: &'a [IoSlice<'a>],
+    completed: bool,
 }
 
 impl<W> Future for WriteVectored<'_, W>
@@ -446,7 +539,16 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        Pin::new(&mut *this.writer).poll_write_vectored(cx, this.bufs)
+        if this.completed {
+            return Poll::Ready(Err(io::Error::other(
+                "WriteVectored future polled after completion",
+            )));
+        }
+        let result = Pin::new(&mut *this.writer).poll_write_vectored(cx, this.bufs);
+        if result.is_ready() {
+            this.completed = true;
+        }
+        result
     }
 }
 
@@ -462,6 +564,7 @@ macro_rules! write_int_future {
             writer: &'a mut W,
             buf: [u8; $size],
             pos: usize,
+            completed: bool,
         }
 
         impl<W> Future for $future<'_, W>
@@ -472,18 +575,29 @@ macro_rules! write_int_future {
 
             fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
                 let this = self.get_mut();
+                if this.completed {
+                    return Poll::Ready(Err(io::Error::other(concat!(
+                        stringify!($future),
+                        " future polled after completion"
+                    ))));
+                }
                 while this.pos < $size {
                     match Pin::new(&mut *this.writer).poll_write(cx, &this.buf[this.pos..]) {
                         Poll::Pending => return Poll::Pending,
-                        Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                        Poll::Ready(Err(err)) => {
+                            this.completed = true;
+                            return Poll::Ready(Err(err));
+                        }
                         Poll::Ready(Ok(n)) => {
                             if n == 0 {
+                                this.completed = true;
                                 return Poll::Ready(Err(io::Error::from(io::ErrorKind::WriteZero)));
                             }
                             this.pos += n;
                         }
                     }
                 }
+                this.completed = true;
                 Poll::Ready(Ok(()))
             }
         }

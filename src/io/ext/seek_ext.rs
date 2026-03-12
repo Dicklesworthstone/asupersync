@@ -13,7 +13,11 @@ pub trait AsyncSeekExt: AsyncSeek {
     where
         Self: Unpin,
     {
-        Seek { seeker: self, pos }
+        Seek {
+            seeker: self,
+            pos,
+            completed: false,
+        }
     }
 
     /// Rewind to the beginning of the stream.
@@ -39,6 +43,7 @@ impl<S: AsyncSeek + ?Sized> AsyncSeekExt for S {}
 pub struct Seek<'a, S: ?Sized> {
     seeker: &'a mut S,
     pos: SeekFrom,
+    completed: bool,
 }
 
 impl<S> Future for Seek<'_, S>
@@ -49,7 +54,14 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        Pin::new(&mut *this.seeker).poll_seek(cx, this.pos)
+        if this.completed {
+            return Poll::Ready(Err(io::Error::other("Seek future polled after completion")));
+        }
+        let result = Pin::new(&mut *this.seeker).poll_seek(cx, this.pos);
+        if result.is_ready() {
+            this.completed = true;
+        }
+        result
     }
 }
 
