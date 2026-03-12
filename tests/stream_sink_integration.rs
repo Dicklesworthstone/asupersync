@@ -18,7 +18,9 @@ mod common;
 
 use asupersync::channel::mpsc;
 use asupersync::cx::Cx;
-use asupersync::stream::{ReceiverStream, SinkStream, Stream, StreamExt, forward, into_sink, iter};
+use asupersync::stream::{
+    ReceiverStream, SinkStream, Stream, StreamExt, TryStreamError, forward, into_sink, iter,
+};
 use common::*;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -576,8 +578,13 @@ fn try_collect_after_map_in_pipeline() {
 
     let mut future = pipeline;
     let poll = Pin::new(&mut future).poll(&mut cx);
-    let ok = matches!(poll, Poll::Ready(Err("four")));
-    assert_with_log!(ok, "try_collect short-circuits", "Err(\"four\")", poll);
+    let ok = matches!(poll, Poll::Ready(Err(TryStreamError::Inner("four"))));
+    assert_with_log!(
+        ok,
+        "try_collect short-circuits",
+        "Err(TryStreamError::Inner(\"four\"))",
+        poll
+    );
     test_complete!("try_collect_after_map_in_pipeline");
 }
 
@@ -623,8 +630,13 @@ fn try_for_each_with_scan_pipeline() {
 
     let mut future = pipeline;
     let poll = Pin::new(&mut future).poll(&mut cx);
-    let ok = matches!(poll, Poll::Ready(Err("too big")));
-    assert_with_log!(ok, "try_for_each stops", "Err(\"too big\")", poll);
+    let ok = matches!(poll, Poll::Ready(Err(TryStreamError::Inner("too big"))));
+    assert_with_log!(
+        ok,
+        "try_for_each stops",
+        "Err(TryStreamError::Inner(\"too big\"))",
+        poll
+    );
     let ok = seen == vec![1, 3, 6];
     assert_with_log!(ok, "seen before error", vec![1, 3, 6], seen);
     test_complete!("try_for_each_with_scan_pipeline");

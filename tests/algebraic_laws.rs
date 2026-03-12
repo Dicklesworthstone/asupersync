@@ -258,15 +258,15 @@ proptest! {
         prop_assert_eq!(combined.poll_quota, q1.min(q2));
     }
 
-    /// LAW: Priority combination is min (lower/tighter wins)
+    /// LAW: Priority combination is max (higher urgency wins)
     #[test]
-    fn budget_priority_is_min(p1 in 0u8..=255u8, p2 in 0u8..=255u8) {
+    fn budget_priority_is_max(p1 in 0u8..=255u8, p2 in 0u8..=255u8) {
         init_test_logging();
-        test_phase!("budget_priority_is_min");
+        test_phase!("budget_priority_is_max");
         let b1 = Budget::new().with_priority(p1);
         let b2 = Budget::new().with_priority(p2);
         let combined = b1.combine(b2);
-        prop_assert_eq!(combined.priority, p1.min(p2));
+        prop_assert_eq!(combined.priority, p1.max(p2));
     }
 }
 

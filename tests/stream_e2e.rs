@@ -18,7 +18,7 @@ mod common;
 use asupersync::channel::{broadcast, mpsc, watch};
 use asupersync::cx::Cx;
 use asupersync::stream::{
-    BroadcastStream, ReceiverStream, Stream, StreamExt, WatchStream, iter, merge,
+    BroadcastStream, ReceiverStream, Stream, StreamExt, TryStreamError, WatchStream, iter, merge,
 };
 use common::*;
 use std::cell::RefCell;
@@ -541,8 +541,13 @@ fn test_try_collect_error() {
     let mut cx = Context::from_waker(&waker);
     let poll = Pin::new(&mut collected).poll(&mut cx);
 
-    let ok = matches!(poll, Poll::Ready(Err("error")));
-    assert_with_log!(ok, "try_collect error", "Err(\"error\")", poll);
+    let ok = matches!(poll, Poll::Ready(Err(TryStreamError::Inner("error"))));
+    assert_with_log!(
+        ok,
+        "try_collect error",
+        "Err(TryStreamError::Inner(\"error\"))",
+        poll
+    );
 
     test_complete!("test_try_collect_error");
 }
@@ -583,8 +588,16 @@ fn test_try_for_each_error() {
     let mut cx = Context::from_waker(&waker);
     let poll = Pin::new(&mut result).poll(&mut cx);
 
-    let ok = matches!(poll, Poll::Ready(Err("stopped at 3")));
-    assert_with_log!(ok, "try_for_each error", "Err(\"stopped at 3\")", poll);
+    let ok = matches!(
+        poll,
+        Poll::Ready(Err(TryStreamError::Inner("stopped at 3")))
+    );
+    assert_with_log!(
+        ok,
+        "try_for_each error",
+        "Err(TryStreamError::Inner(\"stopped at 3\"))",
+        poll
+    );
 
     // Should have processed items up to and including 3
     let items = processed.borrow().clone();

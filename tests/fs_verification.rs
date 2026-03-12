@@ -62,7 +62,7 @@ use common::*;
 
 use asupersync::fs::{self, BufReader, BufWriter, File, OpenOptions};
 use asupersync::io::{AsyncReadExt, AsyncWriteExt};
-use asupersync::stream::StreamExt;
+use asupersync::stream::{StreamExt, TryStreamError};
 use futures_lite::future::block_on;
 use std::io;
 use tempfile::tempdir;
@@ -958,7 +958,16 @@ fn fs_verify_027_buf_reader_lines() {
 
         let file = File::open(&path).await?;
         let reader = BufReader::new(file);
-        let lines: Vec<String> = reader.lines().try_collect().await?;
+        let lines: Vec<String> = reader
+            .lines()
+            .try_collect()
+            .await
+            .map_err(|err| match err {
+                TryStreamError::Inner(err) => err,
+                TryStreamError::PolledAfterCompletion => {
+                    io::Error::other("BufReader::lines try_collect polled after completion")
+                }
+            })?;
 
         assert_eq!(lines, vec!["line1", "line2", "line3"]);
 
