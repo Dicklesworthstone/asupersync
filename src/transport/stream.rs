@@ -92,7 +92,10 @@ pub trait SymbolStreamExt: SymbolStream {
     where
         Self: Unpin,
     {
-        NextFuture { stream: self }
+        NextFuture {
+            stream: self,
+            completed: false,
+        }
     }
 
     /// Collect all symbols into a SymbolSet.
@@ -100,7 +103,11 @@ pub trait SymbolStreamExt: SymbolStream {
     where
         Self: Unpin,
     {
-        CollectToSetFuture { stream: self, set }
+        CollectToSetFuture {
+            stream: self,
+            set,
+            completed: false,
+        }
     }
 
     /// Transform successful symbols while preserving stream shape.
@@ -149,7 +156,11 @@ pub trait SymbolStreamExt: SymbolStream {
     where
         Self: Unpin,
     {
-        NextWithCancelFuture { stream: self, cx }
+        NextWithCancelFuture {
+            stream: self,
+            cx,
+            completed: false,
+        }
     }
 }
 
@@ -160,13 +171,26 @@ impl<S: SymbolStream + ?Sized> SymbolStreamExt for S {}
 /// Future for `next()`.
 pub struct NextFuture<'a, S: ?Sized> {
     stream: &'a mut S,
+    completed: bool,
 }
 
 impl<S: SymbolStream + Unpin + ?Sized> Future for NextFuture<'_, S> {
     type Output = Option<Result<AuthenticatedSymbol, StreamError>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut *self.stream).poll_next(cx)
+        let this = &mut *self;
+
+        if this.completed {
+            return Poll::Ready(Some(Err(StreamError::PolledAfterCompletion)));
+        }
+
+        match Pin::new(&mut *this.stream).poll_next(cx) {
+            Poll::Ready(result) => {
+                this.completed = true;
+                Poll::Ready(result)
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -174,25 +198,38 @@ impl<S: SymbolStream + Unpin + ?Sized> Future for NextFuture<'_, S> {
 pub struct CollectToSetFuture<'a, S: ?Sized> {
     stream: &'a mut S,
     set: &'a mut SymbolSet,
+    completed: bool,
 }
 
 impl<S: SymbolStream + Unpin + ?Sized> Future for CollectToSetFuture<'_, S> {
     type Output = Result<usize, StreamError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = &mut *self;
+
+        if this.completed {
+            return Poll::Ready(Err(StreamError::PolledAfterCompletion));
+        }
+
         let mut collected_this_poll = 0usize;
         loop {
-            match Pin::new(&mut *self.stream).poll_next(cx) {
+            match Pin::new(&mut *this.stream).poll_next(cx) {
                 Poll::Ready(Some(Ok(symbol))) => {
-                    self.set.insert(symbol.into_symbol());
+                    this.set.insert(symbol.into_symbol());
                     collected_this_poll += 1;
                     if collected_this_poll >= COLLECT_TO_SET_COOPERATIVE_BUDGET {
                         cx.waker().wake_by_ref();
                         return Poll::Pending;
                     }
                 }
-                Poll::Ready(Some(Err(e))) => return Poll::Ready(Err(e)),
-                Poll::Ready(None) => return Poll::Ready(Ok(self.set.len())),
+                Poll::Ready(Some(Err(e))) => {
+                    this.completed = true;
+                    return Poll::Ready(Err(e));
+                }
+                Poll::Ready(None) => {
+                    this.completed = true;
+                    return Poll::Ready(Ok(this.set.len()));
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }
@@ -203,22 +240,40 @@ impl<S: SymbolStream + Unpin + ?Sized> Future for CollectToSetFuture<'_, S> {
 pub struct NextWithCancelFuture<'a, S: ?Sized> {
     stream: &'a mut S,
     cx: &'a Cx,
+    completed: bool,
 }
 
 impl<S: SymbolStream + Unpin + ?Sized> Future for NextWithCancelFuture<'_, S> {
     type Output = Result<Option<AuthenticatedSymbol>, StreamError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.cx.is_cancel_requested() {
+        let this = &mut *self;
+
+        if this.completed {
+            return Poll::Ready(Err(StreamError::PolledAfterCompletion));
+        }
+
+        if this.cx.is_cancel_requested() {
+            this.completed = true;
             return Poll::Ready(Err(StreamError::Cancelled));
         }
 
-        match Pin::new(&mut *self.stream).poll_next(cx) {
-            Poll::Ready(Some(Ok(symbol))) => Poll::Ready(Ok(Some(symbol))),
-            Poll::Ready(Some(Err(err))) => Poll::Ready(Err(err)),
-            Poll::Ready(None) => Poll::Ready(Ok(None)),
+        match Pin::new(&mut *this.stream).poll_next(cx) {
+            Poll::Ready(Some(Ok(symbol))) => {
+                this.completed = true;
+                Poll::Ready(Ok(Some(symbol)))
+            }
+            Poll::Ready(Some(Err(err))) => {
+                this.completed = true;
+                Poll::Ready(Err(err))
+            }
+            Poll::Ready(None) => {
+                this.completed = true;
+                Poll::Ready(Ok(None))
+            }
             Poll::Pending => {
-                if self.cx.is_cancel_requested() {
+                if this.cx.is_cancel_requested() {
+                    this.completed = true;
                     Poll::Ready(Err(StreamError::Cancelled))
                 } else {
                     Poll::Pending
@@ -604,7 +659,7 @@ mod tests {
     use super::*;
     use crate::security::authenticated::AuthenticatedSymbol;
     use crate::security::tag::AuthenticationTag;
-    use crate::transport::sink::SymbolSink;
+    use crate::transport::sink::{SymbolSink, SymbolSinkExt};
     use crate::transport::{SymbolStreamExt, channel};
     use crate::types::{Symbol, SymbolId, SymbolKind};
     use futures_lite::future;
@@ -798,6 +853,114 @@ mod tests {
     }
 
     #[test]
+    fn test_next_future_repoll_after_completion_fails_closed_without_consuming_next_item() {
+        init_test(
+            "test_next_future_repoll_after_completion_fails_closed_without_consuming_next_item",
+        );
+        let mut stream = VecStream::new(vec![create_symbol(1), create_symbol(2)]);
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let mut future = stream.next();
+        let mut pinned = Pin::new(&mut future);
+
+        let first = pinned.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(&first, Poll::Ready(Some(Ok(symbol))) if symbol.symbol().id().esi() == 1),
+            "first poll yields first symbol",
+            true,
+            &first
+        );
+
+        let second = pinned.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(
+                &second,
+                Poll::Ready(Some(Err(StreamError::PolledAfterCompletion)))
+            ),
+            "second poll fails closed",
+            true,
+            &second
+        );
+
+
+
+        let mut next_future = stream.next();
+        let third = Pin::new(&mut next_future).poll(&mut context);
+        crate::assert_with_log!(
+            matches!(&third, Poll::Ready(Some(Ok(symbol))) if symbol.symbol().id().esi() == 2),
+            "fresh future still yields second symbol",
+            true,
+            &third
+        );
+
+        crate::test_complete!(
+            "test_next_future_repoll_after_completion_fails_closed_without_consuming_next_item"
+        );
+    }
+
+    #[test]
+    fn test_next_future_repoll_after_error_fails_closed() {
+        init_test("test_next_future_repoll_after_error_fails_closed");
+        let mut stream = ErrorStream::new();
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let mut future = stream.next();
+        let mut future = Pin::new(&mut future);
+
+        let first = future.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(&first, Poll::Ready(Some(Err(StreamError::Reset)))),
+            "first poll yields source error",
+            true,
+            &first
+        );
+
+        let second = future.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(
+                &second,
+                Poll::Ready(Some(Err(StreamError::PolledAfterCompletion)))
+            ),
+            "second poll fails closed after error",
+            true,
+            &second
+        );
+
+        crate::test_complete!("test_next_future_repoll_after_error_fails_closed");
+    }
+
+    #[test]
+    fn test_next_future_repoll_after_none_fails_closed() {
+        init_test("test_next_future_repoll_after_none_fails_closed");
+        let mut stream = VecStream::new(Vec::new());
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let mut future = stream.next();
+        let mut future = Pin::new(&mut future);
+
+        let first = future.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(&first, Poll::Ready(None)),
+            "first poll reports exhaustion",
+            true,
+            &first
+        );
+
+        let second = future.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(
+                &second,
+                Poll::Ready(Some(Err(StreamError::PolledAfterCompletion)))
+            ),
+            "second poll fails closed after exhaustion",
+            true,
+            &second
+        );
+
+        crate::test_complete!("test_next_future_repoll_after_none_fails_closed");
+    }
+
+    #[test]
     fn test_collect_to_set_deduplicates_and_counts() {
         init_test("test_collect_to_set_deduplicates_and_counts");
         let mut stream = VecStream::new(vec![create_symbol(1), create_symbol(1), create_symbol(2)]);
@@ -808,6 +971,41 @@ mod tests {
         crate::assert_with_log!(count == 2, "unique count", 2usize, count);
         crate::assert_with_log!(set.len() == 2, "set size", 2usize, set.len());
         crate::test_complete!("test_collect_to_set_deduplicates_and_counts");
+    }
+
+    #[test]
+    fn test_collect_to_set_repoll_after_completion_fails_closed() {
+        init_test("test_collect_to_set_repoll_after_completion_fails_closed");
+        let mut stream = VecStream::new(vec![create_symbol(1), create_symbol(1), create_symbol(2)]);
+        let mut set = SymbolSet::new();
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let mut future = stream.collect_to_set(&mut set);
+        let mut pinned = Pin::new(&mut future);
+
+        let first = pinned.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(&first, Poll::Ready(Ok(2))),
+            "first poll completes collection",
+            true,
+            &first
+        );
+
+        let second = pinned.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(
+                &second,
+                Poll::Ready(Err(StreamError::PolledAfterCompletion))
+            ),
+            "second poll fails closed",
+            true,
+            &second
+        );
+
+
+
+        crate::assert_with_log!(set.len() == 2, "set preserved", 2usize, set.len());
+        crate::test_complete!("test_collect_to_set_repoll_after_completion_fails_closed");
     }
 
     #[test]
@@ -870,19 +1068,47 @@ mod tests {
     #[test]
     fn test_next_with_cancel_immediate() {
         init_test("test_next_with_cancel_immediate");
-        let (_sink, mut stream) = channel(1);
+        let (mut sink, mut stream) = channel(1);
         let cx: Cx = Cx::for_testing();
+        future::block_on(async {
+            SymbolSinkExt::send(&mut sink, create_symbol(5)).await.unwrap();
+        });
         cx.set_cancel_requested(true);
 
-        future::block_on(async {
-            let res = stream.next_with_cancel(&cx).await;
-            crate::assert_with_log!(
-                matches!(res, Err(StreamError::Cancelled)),
-                "cancelled",
-                true,
-                matches!(res, Err(StreamError::Cancelled))
-            );
-        });
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let mut future = stream.next_with_cancel(&cx);
+        let mut pinned = Pin::new(&mut future);
+
+        let first = pinned.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(&first, Poll::Ready(Err(StreamError::Cancelled))),
+            "first poll cancels immediately",
+            true,
+            &first
+        );
+
+        let second = pinned.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(
+                &second,
+                Poll::Ready(Err(StreamError::PolledAfterCompletion))
+            ),
+            "second poll fails closed",
+            true,
+            &second
+        );
+
+
+        cx.set_cancel_requested(false);
+        let mut next_future = stream.next_with_cancel(&cx);
+        let third = Pin::new(&mut next_future).poll(&mut context);
+        crate::assert_with_log!(
+            matches!(&third, Poll::Ready(Ok(Some(symbol))) if symbol.symbol().id().esi() == 5),
+            "cancelled future does not consume queued symbol",
+            true,
+            &third
+        );
 
         crate::test_complete!("test_next_with_cancel_immediate");
     }
@@ -900,22 +1126,77 @@ mod tests {
 
         let first = fut.as_mut().poll(&mut context);
         crate::assert_with_log!(
-            matches!(first, Poll::Pending),
+            matches!(&first, Poll::Pending),
             "first pending",
             true,
-            matches!(first, Poll::Pending)
+            &first
         );
 
         cx.set_cancel_requested(true);
         let second = fut.as_mut().poll(&mut context);
         crate::assert_with_log!(
-            matches!(second, Poll::Ready(Err(StreamError::Cancelled))),
+            matches!(&second, Poll::Ready(Err(StreamError::Cancelled))),
             "cancel after pending",
             true,
-            matches!(second, Poll::Ready(Err(StreamError::Cancelled)))
+            &second
+        );
+
+        let third = fut.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(&third, Poll::Ready(Err(StreamError::PolledAfterCompletion))),
+            "third poll fails closed after cancellation",
+            true,
+            &third
         );
 
         crate::test_complete!("test_next_with_cancel_after_pending");
+    }
+
+    #[test]
+    fn test_next_with_cancel_repoll_after_success_fails_closed_without_consuming_next_item() {
+        init_test(
+            "test_next_with_cancel_repoll_after_success_fails_closed_without_consuming_next_item",
+        );
+        let mut stream = VecStream::new(vec![create_symbol(1), create_symbol(2)]);
+        let cx: Cx = Cx::for_testing();
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let mut future = stream.next_with_cancel(&cx);
+        let mut pinned = Pin::new(&mut future);
+
+        let first = pinned.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(&first, Poll::Ready(Ok(Some(symbol))) if symbol.symbol().id().esi() == 1),
+            "first poll yields first symbol",
+            true,
+            &first
+        );
+
+        let second = pinned.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(
+                &second,
+                Poll::Ready(Err(StreamError::PolledAfterCompletion))
+            ),
+            "second poll fails closed",
+            true,
+            &second
+        );
+
+
+
+        let mut next_future = stream.next_with_cancel(&cx);
+        let third = Pin::new(&mut next_future).poll(&mut context);
+        crate::assert_with_log!(
+            matches!(&third, Poll::Ready(Ok(Some(symbol))) if symbol.symbol().id().esi() == 2),
+            "fresh future still yields second symbol",
+            true,
+            &third
+        );
+
+        crate::test_complete!(
+            "test_next_with_cancel_repoll_after_success_fails_closed_without_consuming_next_item"
+        );
     }
 
     #[test]

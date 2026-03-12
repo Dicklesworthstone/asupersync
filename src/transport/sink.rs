@@ -69,6 +69,7 @@ pub trait SymbolSinkExt: SymbolSink {
         SendFuture {
             sink: self,
             symbol: Some(symbol),
+            completed: false,
         }
     }
 
@@ -83,6 +84,7 @@ pub trait SymbolSinkExt: SymbolSink {
             iter: symbols.into_iter(),
             buffered: None,
             count: 0,
+            completed: false,
         }
     }
 
@@ -91,7 +93,10 @@ pub trait SymbolSinkExt: SymbolSink {
     where
         Self: Unpin,
     {
-        FlushFuture { sink: self }
+        FlushFuture {
+            sink: self,
+            completed: false,
+        }
     }
 
     /// Close the sink.
@@ -99,7 +104,10 @@ pub trait SymbolSinkExt: SymbolSink {
     where
         Self: Unpin,
     {
-        CloseFuture { sink: self }
+        CloseFuture {
+            sink: self,
+            completed: false,
+        }
     }
 
     /// Buffer symbols for batch sending.
@@ -125,6 +133,7 @@ const SEND_ALL_COOPERATIVE_BUDGET: usize = 1024;
 pub struct SendFuture<'a, S: ?Sized> {
     sink: &'a mut S,
     symbol: Option<AuthenticatedSymbol>,
+    completed: bool,
 }
 
 impl<S: SymbolSink + Unpin + ?Sized> Future for SendFuture<'_, S> {
@@ -133,25 +142,39 @@ impl<S: SymbolSink + Unpin + ?Sized> Future for SendFuture<'_, S> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
 
+        if this.completed {
+            return Poll::Ready(Err(SinkError::PolledAfterCompletion));
+        }
+
         // First wait for ready
         match Pin::new(&mut *this.sink).poll_ready(cx) {
             Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Ready(Err(e)) => {
+                this.completed = true;
+                return Poll::Ready(Err(e));
+            }
             Poll::Pending => return Poll::Pending,
         }
 
         // Then send
         if let Some(symbol) = this.symbol.take() {
             match Pin::new(&mut *this.sink).poll_send(cx, symbol.clone()) {
-                Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
-                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                Poll::Ready(Ok(())) => {
+                    this.completed = true;
+                    Poll::Ready(Ok(()))
+                }
+                Poll::Ready(Err(e)) => {
+                    this.completed = true;
+                    Poll::Ready(Err(e))
+                }
                 Poll::Pending => {
                     this.symbol = Some(symbol);
                     Poll::Pending
                 }
             }
         } else {
-            Poll::Ready(Ok(()))
+            this.completed = true;
+            Poll::Ready(Err(SinkError::PolledAfterCompletion))
         }
     }
 }
@@ -162,6 +185,7 @@ pub struct SendAllFuture<'a, S: ?Sized, I> {
     iter: I,
     buffered: Option<AuthenticatedSymbol>,
     count: usize,
+    completed: bool,
 }
 
 impl<S, I> Future for SendAllFuture<'_, S, I>
@@ -172,13 +196,20 @@ where
     type Output = Result<usize, SinkError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.completed {
+            return Poll::Ready(Err(SinkError::PolledAfterCompletion));
+        }
+
         let mut sent_this_poll = 0usize;
         loop {
             // Try to send buffered item
             if let Some(symbol) = self.buffered.take() {
                 match Pin::new(&mut *self.sink).poll_ready(cx) {
                     Poll::Ready(Ok(())) => {}
-                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Ready(Err(e)) => {
+                        self.completed = true;
+                        return Poll::Ready(Err(e));
+                    }
                     Poll::Pending => {
                         self.buffered = Some(symbol);
                         return Poll::Pending;
@@ -193,7 +224,10 @@ where
                             return Poll::Pending;
                         }
                     }
-                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Ready(Err(e)) => {
+                        self.completed = true;
+                        return Poll::Ready(Err(e));
+                    }
                     Poll::Pending => {
                         self.buffered = Some(symbol);
                         return Poll::Pending;
@@ -207,8 +241,14 @@ where
                 None => {
                     // Flush
                     match Pin::new(&mut *self.sink).poll_flush(cx) {
-                        Poll::Ready(Ok(())) => return Poll::Ready(Ok(self.count)),
-                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                        Poll::Ready(Ok(())) => {
+                            self.completed = true;
+                            return Poll::Ready(Ok(self.count));
+                        }
+                        Poll::Ready(Err(e)) => {
+                            self.completed = true;
+                            return Poll::Ready(Err(e));
+                        }
                         Poll::Pending => return Poll::Pending,
                     }
                 }
@@ -220,26 +260,48 @@ where
 /// Future for `flush()`.
 pub struct FlushFuture<'a, S: ?Sized> {
     sink: &'a mut S,
+    completed: bool,
 }
 
 impl<S: SymbolSink + Unpin + ?Sized> Future for FlushFuture<'_, S> {
     type Output = Result<(), SinkError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut *self.sink).poll_flush(cx)
+        if self.completed {
+            return Poll::Ready(Err(SinkError::PolledAfterCompletion));
+        }
+
+        match Pin::new(&mut *self.sink).poll_flush(cx) {
+            Poll::Ready(result) => {
+                self.completed = true;
+                Poll::Ready(result)
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
 /// Future for `close()`.
 pub struct CloseFuture<'a, S: ?Sized> {
     sink: &'a mut S,
+    completed: bool,
 }
 
 impl<S: SymbolSink + Unpin + ?Sized> Future for CloseFuture<'_, S> {
     type Output = Result<(), SinkError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut *self.sink).poll_close(cx)
+        if self.completed {
+            return Poll::Ready(Err(SinkError::PolledAfterCompletion));
+        }
+
+        match Pin::new(&mut *self.sink).poll_close(cx) {
+            Poll::Ready(result) => {
+                self.completed = true;
+                Poll::Ready(result)
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -760,6 +822,39 @@ mod tests {
     }
 
     #[test]
+    fn test_send_future_repoll_after_completion_fails_closed() {
+        init_test("test_send_future_repoll_after_completion_fails_closed");
+        let mut sink = TrackingSink::new(TrackingSinkState::new());
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let mut future = sink.send(create_symbol(44));
+        let mut future = Pin::new(&mut future);
+
+        let first = future.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(Ok(()))),
+            "first send completes",
+            true,
+            matches!(first, Poll::Ready(Ok(())))
+        );
+
+        let second = future.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Err(SinkError::PolledAfterCompletion))),
+            "second poll fails closed",
+            true,
+            matches!(second, Poll::Ready(Err(SinkError::PolledAfterCompletion)))
+        );
+
+        let sent_len = {
+            let state = sink.state.lock();
+            state.sent.len()
+        };
+        crate::assert_with_log!(sent_len == 1, "symbol sent once", 1usize, sent_len);
+        crate::test_complete!("test_send_future_repoll_after_completion_fails_closed");
+    }
+
+    #[test]
     fn test_send_all_counts_and_flushes() {
         init_test("test_send_all_counts_and_flushes");
         let mut sink = TrackingSink::new(TrackingSinkState::new());
@@ -858,6 +953,40 @@ mod tests {
     }
 
     #[test]
+    fn test_send_all_repoll_after_completion_fails_closed() {
+        init_test("test_send_all_repoll_after_completion_fails_closed");
+        let mut sink = TrackingSink::new(TrackingSinkState::new());
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let mut future = sink.send_all(vec![create_symbol(8), create_symbol(9)]);
+        let mut future = Pin::new(&mut future);
+
+        let first = future.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(Ok(2))),
+            "first poll sends all",
+            true,
+            matches!(first, Poll::Ready(Ok(2)))
+        );
+
+        let second = future.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Err(SinkError::PolledAfterCompletion))),
+            "second poll fails closed",
+            true,
+            matches!(second, Poll::Ready(Err(SinkError::PolledAfterCompletion)))
+        );
+
+        let (sent_len, flush_count) = {
+            let state = sink.state.lock();
+            (state.sent.len(), state.flush_count)
+        };
+        crate::assert_with_log!(sent_len == 2, "symbols sent once", 2usize, sent_len);
+        crate::assert_with_log!(flush_count == 1, "flush ran once", 1usize, flush_count);
+        crate::test_complete!("test_send_all_repoll_after_completion_fails_closed");
+    }
+
+    #[test]
     fn test_send_all_propagates_error() {
         init_test("test_send_all_propagates_error");
         let mut sink = TrackingSink::new({
@@ -874,6 +1003,72 @@ mod tests {
             matches!(res, Err(SinkError::SendFailed { .. }))
         );
         crate::test_complete!("test_send_all_propagates_error");
+    }
+
+    #[test]
+    fn test_flush_future_repoll_after_completion_fails_closed() {
+        init_test("test_flush_future_repoll_after_completion_fails_closed");
+        let mut sink = TrackingSink::new(TrackingSinkState::new());
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let mut future = sink.flush();
+        let mut future = Pin::new(&mut future);
+
+        let first = future.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(Ok(()))),
+            "first flush completes",
+            true,
+            matches!(first, Poll::Ready(Ok(())))
+        );
+
+        let second = future.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Err(SinkError::PolledAfterCompletion))),
+            "second flush poll fails closed",
+            true,
+            matches!(second, Poll::Ready(Err(SinkError::PolledAfterCompletion)))
+        );
+
+        let flush_count = {
+            let state = sink.state.lock();
+            state.flush_count
+        };
+        crate::assert_with_log!(flush_count == 1, "flush invoked once", 1usize, flush_count);
+        crate::test_complete!("test_flush_future_repoll_after_completion_fails_closed");
+    }
+
+    #[test]
+    fn test_close_future_repoll_after_completion_fails_closed() {
+        init_test("test_close_future_repoll_after_completion_fails_closed");
+        let mut sink = TrackingSink::new(TrackingSinkState::new());
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        let mut future = sink.close();
+        let mut future = Pin::new(&mut future);
+
+        let first = future.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(Ok(()))),
+            "first close completes",
+            true,
+            matches!(first, Poll::Ready(Ok(())))
+        );
+
+        let second = future.as_mut().poll(&mut context);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Err(SinkError::PolledAfterCompletion))),
+            "second close poll fails closed",
+            true,
+            matches!(second, Poll::Ready(Err(SinkError::PolledAfterCompletion)))
+        );
+
+        let closed = {
+            let state = sink.state.lock();
+            state.closed
+        };
+        crate::assert_with_log!(closed, "sink closed", true, closed);
+        crate::test_complete!("test_close_future_repoll_after_completion_fails_closed");
     }
 
     #[test]

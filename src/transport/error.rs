@@ -10,6 +10,10 @@ pub enum StreamError {
     #[error("Connection closed")]
     Closed,
 
+    /// A stream helper future was polled again after it had already completed.
+    #[error("stream future polled after completion")]
+    PolledAfterCompletion,
+
     /// The connection was reset.
     #[error("Connection reset")]
     Reset,
@@ -52,6 +56,10 @@ pub enum SinkError {
     #[error("Connection closed")]
     Closed,
 
+    /// A sink helper future was polled again after it had already completed.
+    #[error("sink future polled after completion")]
+    PolledAfterCompletion,
+
     /// The internal buffer is full and cannot accept more items.
     #[error("Buffer full")]
     BufferFull,
@@ -90,6 +98,9 @@ mod tests {
         assert!(format!("{closed:?}").contains("Closed"));
         assert_eq!(format!("{closed}"), "Connection closed");
 
+        let done = StreamError::PolledAfterCompletion;
+        assert_eq!(format!("{done}"), "stream future polled after completion");
+
         let reset = StreamError::Reset;
         assert_eq!(format!("{reset}"), "Connection reset");
 
@@ -123,6 +134,9 @@ mod tests {
         let closed = SinkError::Closed;
         assert!(format!("{closed:?}").contains("Closed"));
         assert_eq!(format!("{closed}"), "Connection closed");
+
+        let done = SinkError::PolledAfterCompletion;
+        assert_eq!(format!("{done}"), "sink future polled after completion");
 
         let full = SinkError::BufferFull;
         assert_eq!(format!("{full}"), "Buffer full");
