@@ -505,6 +505,9 @@ impl SqliteConnection {
             Err(crate::channel::oneshot::RecvError::Closed) => {
                 Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string()))
             }
+            Err(crate::channel::oneshot::RecvError::PolledAfterCompletion) => {
+                unreachable!("SQLite blocking-pool open awaits a fresh oneshot recv future")
+            }
         }
     }
 
@@ -554,6 +557,9 @@ impl SqliteConnection {
             }
             Err(crate::channel::oneshot::RecvError::Closed) => {
                 Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string()))
+            }
+            Err(crate::channel::oneshot::RecvError::PolledAfterCompletion) => {
+                unreachable!("SQLite in-memory open awaits a fresh oneshot recv future")
             }
         }
     }
@@ -623,6 +629,9 @@ impl SqliteConnection {
             Err(crate::channel::oneshot::RecvError::Closed) => {
                 Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string()))
             }
+            Err(crate::channel::oneshot::RecvError::PolledAfterCompletion) => {
+                unreachable!("SQLite execute awaits a fresh oneshot recv future")
+            }
         }
     }
 
@@ -676,6 +685,9 @@ impl SqliteConnection {
             }
             Err(crate::channel::oneshot::RecvError::Closed) => {
                 Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string()))
+            }
+            Err(crate::channel::oneshot::RecvError::PolledAfterCompletion) => {
+                unreachable!("SQLite execute_batch awaits a fresh oneshot recv future")
             }
         }
     }
@@ -776,6 +788,9 @@ impl SqliteConnection {
             }
             Err(crate::channel::oneshot::RecvError::Closed) => {
                 Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string()))
+            }
+            Err(crate::channel::oneshot::RecvError::PolledAfterCompletion) => {
+                unreachable!("SQLite query awaits a fresh oneshot recv future")
             }
         }
     }
@@ -898,6 +913,9 @@ impl SqliteConnection {
             }
             Err(crate::channel::oneshot::RecvError::Closed) => {
                 Outcome::Err(SqliteError::Sqlite("failed to receive result".to_string()))
+            }
+            Err(crate::channel::oneshot::RecvError::PolledAfterCompletion) => {
+                unreachable!("SQLite set_busy_timeout awaits a fresh oneshot recv future")
             }
         }
     }

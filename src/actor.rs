@@ -298,6 +298,9 @@ impl<A: Actor> ActorHandle<A> {
                     .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
                 Err(JoinError::Cancelled(reason))
             }
+            Err(crate::channel::oneshot::RecvError::PolledAfterCompletion) => {
+                unreachable!("ActorHandle::join awaits a fresh oneshot recv future")
+            }
         }
     }
 

@@ -584,6 +584,9 @@ impl RemoteHandle {
                     .unwrap_or_else(CancelReason::parent_cancelled);
                 Err(RemoteError::Cancelled(reason))
             }
+            Err(oneshot::RecvError::PolledAfterCompletion) => {
+                unreachable!("RemoteHandle::join awaits a fresh oneshot recv future")
+            }
         }
     }
 

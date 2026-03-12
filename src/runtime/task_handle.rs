@@ -313,6 +313,13 @@ impl<T> std::future::Future for JoinFuture<'_, T> {
             std::task::Poll::Ready(Err(crate::channel::oneshot::RecvError::Cancelled)) => {
                 unreachable!("RecvUninterruptibleFuture cannot return Cancelled");
             }
+            std::task::Poll::Ready(Err(
+                crate::channel::oneshot::RecvError::PolledAfterCompletion,
+            )) => {
+                unreachable!(
+                    "JoinFuture guards repolls before polling the inner oneshot recv future"
+                );
+            }
             std::task::Poll::Pending => std::task::Poll::Pending,
         }
     }

@@ -76,6 +76,8 @@ pub enum RecvError {
     Closed,
     /// The receive operation was cancelled.
     Cancelled,
+    /// The same recv future was polled again after a terminal result.
+    PolledAfterCompletion,
 }
 
 impl std::fmt::Display for RecvError {
@@ -83,6 +85,7 @@ impl std::fmt::Display for RecvError {
         match self {
             Self::Closed => write!(f, "receiving on a closed oneshot channel"),
             Self::Cancelled => write!(f, "receive operation cancelled"),
+            Self::PolledAfterCompletion => write!(f, "oneshot recv future polled after completion"),
         }
     }
 }
@@ -375,12 +378,13 @@ impl<T> Drop for SendPermit<T> {
 pub(crate) struct RecvUninterruptibleFuture<'a, T> {
     receiver: &'a mut Receiver<T>,
     waiter_id: Option<u64>,
+    completed: bool,
 }
 
 impl<T> RecvUninterruptibleFuture<'_, T> {
     #[must_use]
     pub(crate) fn receiver_finished(&self) -> bool {
-        self.receiver.is_ready() || self.receiver.is_closed()
+        self.completed || self.receiver.is_ready() || self.receiver.is_closed()
     }
 }
 
@@ -391,12 +395,17 @@ impl<T> Future for RecvUninterruptibleFuture<'_, T> {
     fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
 
+        if this.completed {
+            return Poll::Ready(Err(RecvError::PolledAfterCompletion));
+        }
+
         let mut inner = this.receiver.inner.lock();
 
         if let Some(value) = inner.value.take() {
             inner.clear_waker();
 
             this.waiter_id = None;
+            this.completed = true;
 
             drop(inner);
 
@@ -407,6 +416,7 @@ impl<T> Future for RecvUninterruptibleFuture<'_, T> {
             inner.clear_waker();
 
             this.waiter_id = None;
+            this.completed = true;
 
             drop(inner);
 
@@ -471,12 +481,13 @@ pub struct RecvFuture<'a, T> {
     receiver: &'a mut Receiver<T>,
     cx: &'a Cx,
     waiter_id: Option<u64>,
+    completed: bool,
 }
 
 impl<T> RecvFuture<'_, T> {
     #[must_use]
     pub(crate) fn receiver_finished(&self) -> bool {
-        self.receiver.is_ready() || self.receiver.is_closed()
+        self.completed || self.receiver.is_ready() || self.receiver.is_closed()
     }
 }
 
@@ -486,6 +497,11 @@ impl<T> Future for RecvFuture<'_, T> {
     #[inline]
     fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
+
+        if this.completed {
+            return Poll::Ready(Err(RecvError::PolledAfterCompletion));
+        }
+
         let mut inner = this.receiver.inner.lock();
 
         // 1. Check if value is ready
@@ -494,6 +510,7 @@ impl<T> Future for RecvFuture<'_, T> {
             // after the channel is done.
             inner.clear_waker();
             this.waiter_id = None;
+            this.completed = true;
             drop(inner);
             this.cx.trace("oneshot::recv received value");
             return Poll::Ready(Ok(value));
@@ -503,6 +520,7 @@ impl<T> Future for RecvFuture<'_, T> {
         if inner.is_closed() {
             inner.clear_waker();
             this.waiter_id = None;
+            this.completed = true;
             drop(inner);
             this.cx.trace("oneshot::recv channel closed");
             return Poll::Ready(Err(RecvError::Closed));
@@ -518,6 +536,7 @@ impl<T> Future for RecvFuture<'_, T> {
                 inner.clear_waker();
             }
             this.waiter_id = None;
+            this.completed = true;
             drop(inner);
             this.cx.trace("oneshot::recv cancelled while waiting");
             return Poll::Ready(Err(RecvError::Cancelled));
@@ -606,6 +625,7 @@ impl<T> Receiver<T> {
             receiver: self,
             cx,
             waiter_id: None,
+            completed: false,
         }
     }
 
@@ -618,6 +638,7 @@ impl<T> Receiver<T> {
         RecvUninterruptibleFuture {
             receiver: self,
             waiter_id: None,
+            completed: false,
         }
     }
 
@@ -964,6 +985,20 @@ mod tests {
             "receiving on a closed oneshot channel",
             text
         );
+        let cancelled = RecvError::Cancelled.to_string();
+        crate::assert_with_log!(
+            cancelled == "receive operation cancelled",
+            "cancelled display",
+            "receive operation cancelled",
+            cancelled
+        );
+        let polled_after_completion = RecvError::PolledAfterCompletion.to_string();
+        crate::assert_with_log!(
+            polled_after_completion == "oneshot recv future polled after completion",
+            "polled-after-completion display",
+            "oneshot recv future polled after completion",
+            polled_after_completion
+        );
         crate::test_complete!("recv_error_display");
     }
 
@@ -1116,6 +1151,14 @@ mod tests {
             registered_after_cancel
         );
 
+        let repoll = fut.as_mut().poll(&mut task_cx);
+        crate::assert_with_log!(
+            matches!(repoll, Poll::Ready(Err(RecvError::PolledAfterCompletion))),
+            "cancelled recv repoll fails closed",
+            "Ready(Err(PolledAfterCompletion))",
+            format!("{repoll:?}")
+        );
+
         crate::test_complete!("recv_cancel_after_pending_clears_registered_waker");
     }
 
@@ -1157,6 +1200,12 @@ mod tests {
             "waker should be cleared after successful recv"
         );
 
+        let third = fut.as_mut().poll(&mut task_cx);
+        assert!(
+            matches!(third, Poll::Ready(Err(RecvError::PolledAfterCompletion))),
+            "repoll after value should fail closed"
+        );
+
         crate::test_complete!("recv_value_ready_clears_stale_waker");
     }
 
@@ -1193,7 +1242,73 @@ mod tests {
             "waker should be cleared after Closed recv"
         );
 
+        let third = fut.as_mut().poll(&mut task_cx);
+        assert!(
+            matches!(third, Poll::Ready(Err(RecvError::PolledAfterCompletion))),
+            "repoll after close should fail closed"
+        );
+
         crate::test_complete!("recv_closed_clears_stale_waker");
+    }
+
+    #[test]
+    fn recv_uninterruptible_repoll_after_value_fails_closed() {
+        init_test("recv_uninterruptible_repoll_after_value_fails_closed");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>();
+
+        tx.send(&cx, 7).expect("send should succeed");
+
+        let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut fut = Box::pin(rx.recv_uninterruptible());
+
+        let first = fut.as_mut().poll(&mut task_cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(Ok(7))),
+            "uninterruptible recv gets value",
+            "Ready(Ok(7))",
+            format!("{first:?}")
+        );
+
+        let second = fut.as_mut().poll(&mut task_cx);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Err(RecvError::PolledAfterCompletion))),
+            "uninterruptible recv repoll fails closed",
+            "Ready(Err(PolledAfterCompletion))",
+            format!("{second:?}")
+        );
+
+        crate::test_complete!("recv_uninterruptible_repoll_after_value_fails_closed");
+    }
+
+    #[test]
+    fn recv_uninterruptible_repoll_after_closed_fails_closed() {
+        init_test("recv_uninterruptible_repoll_after_closed_fails_closed");
+        let (tx, mut rx) = channel::<i32>();
+        drop(tx);
+
+        let waker = Waker::from(std::sync::Arc::new(TestNoopWaker));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut fut = Box::pin(rx.recv_uninterruptible());
+
+        let first = fut.as_mut().poll(&mut task_cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(Err(RecvError::Closed))),
+            "uninterruptible recv closes",
+            "Ready(Err(Closed))",
+            format!("{first:?}")
+        );
+
+        let second = fut.as_mut().poll(&mut task_cx);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Err(RecvError::PolledAfterCompletion))),
+            "uninterruptible closed repoll fails closed",
+            "Ready(Err(PolledAfterCompletion))",
+            format!("{second:?}")
+        );
+
+        crate::test_complete!("recv_uninterruptible_repoll_after_closed_fails_closed");
     }
 
     #[test]

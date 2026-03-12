@@ -901,6 +901,9 @@ impl<S: GenServer> GenServerHandle<S> {
                     .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
                 Err(CallError::Cancelled(reason))
             }
+            Err(oneshot::RecvError::PolledAfterCompletion) => {
+                unreachable!("GenServer call awaits a fresh reply oneshot recv future")
+            }
         }
     }
 
@@ -1107,6 +1110,9 @@ impl<S: GenServer> GenServerHandle<S> {
                     .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
                 Err(JoinError::Cancelled(reason))
             }
+            Err(oneshot::RecvError::PolledAfterCompletion) => {
+                unreachable!("GenServerHandle::join awaits a fresh oneshot recv future")
+            }
         }
     }
 }
@@ -1199,6 +1205,9 @@ impl<S: GenServer> GenServerRef<S> {
                     .cancel_reason()
                     .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
                 Err(CallError::Cancelled(reason))
+            }
+            Err(oneshot::RecvError::PolledAfterCompletion) => {
+                unreachable!("GenServerRef::call awaits a fresh reply oneshot recv future")
             }
         }
     }
