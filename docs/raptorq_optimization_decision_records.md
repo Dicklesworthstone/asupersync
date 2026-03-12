@@ -91,14 +91,15 @@ Current artifact summary (`coverage_summary` in JSON):
 - `cards_pending_measured_evidence = 0`
 - `partial_measured_levers = [E5]`
 - `pending_measured_levers = []`
-- `closure_blocker_levers = []`
+- `closure_blocker_levers = [E5]`
 
 Closure blockers for `asupersync-3ltrv`:
 
-1. **F7 RESOLVED** — promoted to `approved_guarded` with v3 closure artifact (`artifacts/raptorq_track_f_factor_cache_p95p99_v3.json`). Rollback rehearsal verified correct across k=48/k=64 scenarios, 100% cache hit rate, zero regression. Dense-column ordering cache is too cheap to show material p95/p99 gain at current workload sizes, but is safe to ship with zero regression risk.
-2. **F8 RESOLVED** — promoted to `approved_guarded` with v1 wavefront pipeline artifact (`artifacts/raptorq_track_f_wavefront_pipeline_v1.json`). Wavefront decode (`decode_wavefront`) produces identical source symbols to sequential decode across all scenarios (k=48, k=64, k=48-large) and batch sizes (4, 8, 16). Rollback rehearsal verified via `batch_size=0` sequential fallback. Zero correctness risk, deterministic behavior.
+1. **E5 PARTIAL** — `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` keeps `ready_for_e5_closure = false`, `acceptance_criterion_4_status = not_met`, and `scope_sufficiency = insufficient`. The current narrowed high-confidence packet is useful guardrail evidence, but broader multi-scenario or raw-sample comparator evidence is still required before `asupersync-36m6p` can be treated as closure-complete for G3.
 
-**All G3 closure blockers are now resolved.** All 8 high-impact lever cards have measured comparator evidence and rollback rehearsal artifacts.
+`F7` and `F8` remain resolved and are no longer current blockers.
+
+**G3 closure remains blocked by E5.** All 8 high-impact lever cards have measured comparator evidence, but the E5 card is still partial on the current checked-in frontier.
 
 Recent evidence alignment updates (2026-02-19):
 
@@ -121,13 +122,13 @@ Recent evidence alignment updates (2026-02-20):
 - Added ninth-slice run-state note (`coord thread #1493/#1504`): high-confidence reruns temporarily hit unrelated `src/combinator/retry.rs` compile-frontier issues while remediation is active.
 - Added follow-up compile verification note: `rch exec -- cargo check -p asupersync --lib` exits 0, so closure focus remains on publishing/signing off the high-confidence E5 artifact.
 - Added G7 dependency-state note (`asupersync-m7o6i` comment `#1886`, `coord thread #1520`): targeted expected-loss contract reruns are all PASS; remaining G3 gating now centers on F7/F8 closure evidence linkage.
-- Added tenth-slice E5 high-confidence publication update (`asupersync-36m6p` comment `#1894`, `agent-mail asupersync-3ltrv #1542`, `coord #1543`): `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` is published with owner sign-off for G3 integration, so E5 publication/sign-off blocker is cleared from G3 closure blockers.
+- Added tenth-slice E5 high-confidence publication update (`asupersync-36m6p` comment `#1894`, `agent-mail asupersync-3ltrv #1542`, `coord #1543`): `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` is published, but the checked-in `closure_assessment` still keeps E5 in a not-ready state on the narrowed corpus.
 - Added independent support refresh (`asupersync-3ltrv` comment `#1896`, agent-mail thread `asupersync-3ltrv` msg `#1555`): fresh `bv --robot-next` still ranks G3 top-impact; targeted `cargo test --test raptorq_perf_invariants g3_decision -- --nocapture` rerun is PASS (2/2), and cross-agent request for latest E5/F7/F8 closure anchors has been rebroadcast in-thread.
 - Added focused F7/F8 evidence-harvest integration (`asupersync-3ltrv` comment `#1907`, agent-mail `#1587`): F7 implementation anchors are now explicit (`asupersync-n5fk6` thread msgs `#1194/#1207`), but promotion remains blocked pending closure-grade burst comparator (p95/p99) + rollback outcome artifacts; F8 remains open with no thread evidence anchors in `asupersync-2zu9p`.
 - Added latest post-frontier verification: `cargo test --test raptorq_perf_invariants g3_decision -- --nocapture` PASS (2/2) after repair of unrelated compile-frontier issues.
 - Added eleventh-slice F7 comparator/rollback artifact publication: `artifacts/raptorq_track_f_factor_cache_p95p99_v1.json` generated from deterministic burst comparator command `cargo test --test ci_regression_gates g2_f7_burst_cache_p95p99_report -- --nocapture` plus rollback rehearsal command `cargo test --test ci_regression_gates g2_f7_factor_cache_observed -- --nocapture` (both PASS). G3 blocker wording was tightened: F7 now has concrete comparator+rollback artifacts but still needs closure-grade material p95/p99 gain across broader workload coverage.
 - Added twelfth-slice F7 multi-scenario comparator publication: `artifacts/raptorq_track_f_factor_cache_p95p99_v2.json` generated from `cargo test --test ci_regression_gates g2_f7_burst_cache_p95p99_multiscenario_report -- --nocapture` + rollback rehearsal command `cargo test --test ci_regression_gates g2_f7_factor_cache_observed -- --nocapture` (PASS). Coverage is broader (3 deterministic burst workloads), but current outcome is still non-closure-grade (`material_gain_scenarios=0`) with unresolved warmed-cache tail-latency variability across reruns.
-- Removed stale compile-mismatch blocker text and reconciled closure blockers to current state (E5 publication/sign-off cleared; F7/F8 remain).
+- Removed stale compile-mismatch blocker text and reconciled closure blockers to the then-current state; later checked-in E5 closure evidence kept `ready_for_e5_closure = false`, so E5 remains the live blocker on the present frontier.
 
 Recent evidence alignment updates (2026-02-21):
 
@@ -179,3 +180,11 @@ Recent evidence alignment updates (2026-03-06):
 - Captured the targeted chronology-alignment support slice: the new governance
   invariant and doc-token checks for this chronology contract pass via focused
   `tests/raptorq_perf_invariants.rs` coverage.
+
+Recent evidence alignment updates (2026-03-12):
+
+- Corrected stale E5/G3 closure wording across the decision-record surfaces. The current checked-in high-confidence artifact (`artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json`) is now treated as the canonical closure-status source for this lane, and it keeps:
+  - `ready_for_e5_closure = false`
+  - `acceptance_criterion_4_status = not_met`
+  - `scope_sufficiency = insufficient`
+- `coverage_summary.closure_blocker_levers` therefore returns to `[E5]` on the present frontier, while `F7` and `F8` remain resolved historical non-blockers.

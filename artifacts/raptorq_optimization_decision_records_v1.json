@@ -130,7 +130,7 @@
           "2026-02-20 eighth E5 slice started high-confidence p95/p99 corpus generation targeting artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json (coord thread msg #1487).",
           "2026-02-20 ninth E5 status update captured transient unrelated retry.rs compile-frontier breakage during high-confidence reruns (coord msgs #1493/#1504).",
           "2026-02-20 follow-up compile verification (`rch exec -- cargo check -p asupersync --lib`) exited 0.",
-          "2026-02-20 tenth E5 slice published artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json with owner sign-off for G3 closure integration (asupersync-36m6p comment #1894; agent-mail asupersync-3ltrv #1542; coord #1543).",
+      "2026-02-20 tenth E5 slice published artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json; the current checked-in packet keeps `ready_for_e5_closure=false` / `acceptance_criterion_4_status=not_met` on the narrowed high-confidence corpus.",
           "2026-03-05 E5 support slice made the command-surface split explicit: manifest-level comparator/rollback `command_bundle` remains `gf256_primitives`, while probe-only `repro_command` remains `gf256_dual_policy` (agent-mail asupersync-36m6p #4585)."
         ]
       },
@@ -167,7 +167,7 @@
           "agent-mail thread coord-2026-02-19 msgs #1493/#1504 (transient retry.rs compile-frontier blockage and active remediation while high-confidence run proceeds)",
           "asupersync-36m6p comment #1894 (high-confidence p95/p99 closure artifact + headline)",
           "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
-          "agent-mail thread asupersync-3ltrv msg #1542 and coord thread msg #1543 (E5 high-confidence publish confirmation + closure-ready sign-off wording)"
+      "agent-mail thread asupersync-3ltrv msg #1542 and coord thread msg #1543 (E5 high-confidence publication confirmation; earlier closure-ready wording is superseded by the checked-in closure_assessment block)"
         ]
       },
       "fallback_plan": {
@@ -236,14 +236,15 @@
           "Environment reproducibility metadata (target_arch/target_os/target_env/target_endian/target_pointer_width_bits) is now included in manifest snapshots and emitted in policy logs.",
           "The manifest-level comparator/rollback `command_bundle` is intentionally distinct from the probe-level `repro_command` surface and is now tracked explicitly in this artifact.",
           "Directional p95/p99 summaries are now attached via artifacts/raptorq_track_e_gf256_p95p99_v1.json.",
-          "High-confidence p95/p99 corpus is published at artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json with owner sign-off for G3 integration.",
+      "High-confidence p95/p99 corpus is published at artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json and currently encodes `ready_for_e5_closure=false`, `acceptance_criterion_4_status=not_met`, and `scope_sufficiency=insufficient`.",
           "High-confidence headline (overall proxy p95/p99 time, us): baseline 9.0743/9.0743, auto 9.3392/9.3392, rollback 9.9333/9.9333.",
           "Transient compile-frontier interruption noted in coord msgs #1493/#1504 has follow-up green check evidence (`rch exec -- cargo check -p asupersync --lib` exit 0).",
           "High-confidence closure slice is intentionally narrowed to RQ-E-GF256-005 and uses conservative interval-endpoint proxies; limitations are explicitly documented in the artifact."
         ],
-        "pending_blockers": [
-          "No additional E5 publication blocker remains for G3 closure tracking; future broader multi-scenario/raw-sample expansion is follow-on optimization work."
-        ]
+    "pending_blockers": [
+      "Current high-confidence packet (artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json) still records `ready_for_e5_closure=false`, `acceptance_criterion_4_status=not_met`, and `scope_sufficiency=insufficient`.",
+      "Broader multi-scenario or raw-sample comparator evidence is still required before G3 can treat E5 as closure-complete."
+    ]
       },
       "deterministic_replay": {
         "seed": 424242,
@@ -678,10 +679,11 @@
       "E5"
     ],
     "pending_measured_levers": [],
-    "closure_blocker_levers": [],
+    "closure_blocker_levers": [
+      "E5"
+    ],
     "closure_blockers": [
-      "F7 RESOLVED: promoted to approved_guarded with v3 closure artifact (artifacts/raptorq_track_f_factor_cache_p95p99_v3.json). Rollback rehearsal verified, zero regression, cache correct and deterministic.",
-      "F8 RESOLVED: promoted to approved_guarded with v1 wavefront pipeline artifact (artifacts/raptorq_track_f_wavefront_pipeline_v1.json). Wavefront decode produces identical source symbols to sequential across all scenarios and batch sizes. Rollback rehearsal verified via batch_size=0 sequential fallback. Zero correctness risk."
+      "E5 PARTIAL: artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json still reports `ready_for_e5_closure=false`, `acceptance_criterion_4_status=not_met`, and `scope_sufficiency=insufficient`; broader multi-scenario or raw-sample evidence is still required."
     ]
   }
 }

@@ -2388,9 +2388,10 @@ fn g3_decision_records_schema_and_high_impact_lever_coverage() {
                 .to_string()
         })
         .collect::<BTreeSet<_>>();
-    assert!(
-        closure_blocker_levers.is_empty(),
-        "closure_blocker_levers must be empty after F7+F8 closure"
+    assert_eq!(
+        closure_blocker_levers,
+        BTreeSet::from(["E5".to_string()]),
+        "closure_blocker_levers must keep E5 visible while its measured evidence remains partial"
     );
 
     let f7_card = cards
@@ -2450,6 +2451,79 @@ fn g3_decision_record_docs_are_cross_linked() {
         assert!(
             RAPTORQ_OPT_DECISIONS_MD.contains(required),
             "decision-record doc must mention {required}"
+        );
+    }
+}
+
+/// Validate the E5 decision card stays aligned with the checked-in
+/// high-confidence closure artifact instead of drifting into closure-ready
+/// wording.
+#[test]
+fn g3_e5_decision_record_matches_current_highconf_blocker_state() {
+    let decision_artifact: serde_json::Value = serde_json::from_str(RAPTORQ_OPT_DECISIONS_JSON)
+        .expect("decision artifact must be valid JSON");
+    let cards = decision_artifact["decision_cards"]
+        .as_array()
+        .expect("decision_cards must be an array");
+    let e5 = cards
+        .iter()
+        .find(|card| card["lever_code"].as_str() == Some("E5"))
+        .expect("decision cards must include E5");
+
+    let highconf: serde_json::Value = serde_json::from_str(include_str!(
+        "../artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json"
+    ))
+    .expect("Track-E high-confidence artifact must be valid JSON");
+    let closure = &highconf["closure_assessment"];
+    assert_eq!(
+        closure["ready_for_e5_closure"].as_bool(),
+        Some(false),
+        "high-confidence closure assessment must keep E5 not-ready on the current frontier"
+    );
+    assert_eq!(
+        closure["acceptance_criterion_4_status"].as_str(),
+        Some("not_met"),
+        "high-confidence closure assessment must keep AC#4 unresolved on the current frontier"
+    );
+    assert_eq!(
+        e5["measured_comparator_evidence"]["status"].as_str(),
+        Some("partial"),
+        "E5 decision card must remain partial while the closure artifact is not ready"
+    );
+    let pending_blockers = e5["measured_comparator_evidence"]["pending_blockers"]
+        .as_array()
+        .expect("E5 pending_blockers must be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("E5 pending_blockers entries must be strings")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        pending_blockers.iter().any(|entry| {
+            entry.contains("ready_for_e5_closure=false")
+                || entry.contains("ready_for_e5_closure = false")
+        }),
+        "E5 pending blockers must cite the current high-confidence not-ready state"
+    );
+    assert!(
+        pending_blockers
+            .iter()
+            .any(|entry| entry.contains("Broader multi-scenario") || entry.contains("raw-sample")),
+        "E5 pending blockers must preserve the broader-corpus follow-up requirement"
+    );
+
+    for required in [
+        "closure_blocker_levers = [E5]",
+        "ready_for_e5_closure = false",
+        "acceptance_criterion_4_status = not_met",
+        "G3 closure remains blocked by E5",
+    ] {
+        assert!(
+            RAPTORQ_OPT_DECISIONS_MD.contains(required),
+            "decision-record doc must mention current E5 blocker token {required}"
         );
     }
 }
