@@ -16,6 +16,28 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
+/// Error returned by [`Bracket`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BracketError<E> {
+    /// The inner acquire or use function returned an error.
+    Inner(E),
+    /// The future was polled after it had already returned a terminal result.
+    PolledAfterCompletion,
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for BracketError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Inner(err) => write!(f, "bracket inner error: {err}"),
+            Self::PolledAfterCompletion => {
+                write!(f, "bracket future polled after completion")
+            }
+        }
+    }
+}
+
+impl<E: std::fmt::Debug + std::fmt::Display> std::error::Error for BracketError<E> {}
+
 // ============================================================================
 // Cancel-Safe Bracket Implementation
 // ============================================================================
@@ -114,7 +136,7 @@ where
     RF: Future<Output = ()>,
     Res: Clone,
 {
-    type Output = Result<T, E>;
+    type Output = Result<T, BracketError<E>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // Bracket is Unpin when all its fields are Unpin (which they are due to bounds)
@@ -127,7 +149,7 @@ where
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Err(e)) => {
                             this.state.phase = BracketPhase::Done;
-                            return Poll::Ready(Err(e));
+                            return Poll::Ready(Err(BracketError::Inner(e)));
                         }
                         Poll::Ready(Ok(resource)) => {
                             // Clone resource for release before use_fn consumes it
@@ -195,7 +217,9 @@ where
                             this.state.phase = BracketPhase::Done;
                             // Return the stored use result
                             match this.state.use_result.take().expect("use_result missing") {
-                                Ok(result) => return Poll::Ready(result),
+                                Ok(result) => {
+                                    return Poll::Ready(result.map_err(BracketError::Inner));
+                                }
                                 Err(panic_payload) => std::panic::resume_unwind(panic_payload),
                             }
                         }
@@ -203,7 +227,7 @@ where
                 }
 
                 BracketPhase::Done => {
-                    unreachable!("Bracket polled after completion");
+                    return Poll::Ready(Err(BracketError::PolledAfterCompletion));
                 }
             }
         }
@@ -536,7 +560,7 @@ mod tests {
 
         assert!(!used.load(Ordering::SeqCst));
         assert!(!released.load(Ordering::SeqCst));
-        assert_eq!(result, Err("acquire failed"));
+        assert_eq!(result, Err(BracketError::Inner("acquire failed")));
     }
 
     #[test]
@@ -554,7 +578,7 @@ mod tests {
         ));
 
         assert!(released.load(Ordering::SeqCst));
-        assert_eq!(result, Err("use failed"));
+        assert_eq!(result, Err(BracketError::Inner("use failed")));
     }
 
     #[test]
@@ -909,5 +933,54 @@ mod tests {
             released.load(Ordering::SeqCst),
             "release must complete even when bracket is dropped during Releasing phase"
         );
+    }
+
+    // =========================================================================
+    // Repoll-after-completion Regression Test
+    // =========================================================================
+
+    #[derive(Debug)]
+    struct PollCountingStream {
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl Future for PollCountingStream {
+        type Output = Result<i32, &'static str>;
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(Ok(42))
+        }
+    }
+
+    /// Regression: polling a `Bracket` after it has returned a terminal result
+    /// must return `Err(BracketError::PolledAfterCompletion)` without touching
+    /// upstream (acquire/use/release) futures.
+    #[test]
+    fn bracket_repoll_after_completion_returns_error_without_repolling_upstream() {
+        let acquire_polls = Arc::new(AtomicUsize::new(0));
+        let ap = acquire_polls.clone();
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut fut = Box::pin(bracket(
+            PollCountingStream { polls: ap },
+            |x| async move { Ok::<_, &str>(x * 2) },
+            |_| async {},
+        ));
+
+        // First poll: completes normally.
+        let first = fut.as_mut().poll(&mut cx);
+        assert_eq!(first, Poll::Ready(Ok(84)));
+        assert_eq!(acquire_polls.load(Ordering::SeqCst), 1);
+
+        // Second poll: must return PolledAfterCompletion.
+        let second = fut.as_mut().poll(&mut cx);
+        assert_eq!(
+            second,
+            Poll::Ready(Err(BracketError::PolledAfterCompletion))
+        );
+        // Acquire stream must NOT have been polled again.
+        assert_eq!(acquire_polls.load(Ordering::SeqCst), 1);
     }
 }

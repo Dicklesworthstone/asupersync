@@ -36,7 +36,7 @@ pub mod select;
 pub mod timeout;
 
 pub use adaptive_hedge::PeakEwmaHedgeController;
-pub use bracket::{bracket, bracket_move, commit_section, try_commit_section};
+pub use bracket::{BracketError, bracket, bracket_move, commit_section, try_commit_section};
 pub use bulkhead::{
     Bulkhead, BulkheadError, BulkheadMetrics, BulkheadPermit, BulkheadPolicy,
     BulkheadPolicyBuilder, BulkheadRegistry, FullCallback,
