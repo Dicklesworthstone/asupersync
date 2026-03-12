@@ -170,6 +170,9 @@ impl Response {
     }
 
     /// Insert or replace a header while canonicalizing the stored name.
+    ///
+    /// Header values are sanitized: CR (`\r`) and LF (`\n`) characters are
+    /// stripped to prevent HTTP response header injection (CRLF injection).
     pub fn set_header(&mut self, name: impl Into<String>, value: impl Into<String>) {
         let normalized = name.into().to_ascii_lowercase();
         let stale_keys: Vec<String> = self
@@ -183,16 +186,20 @@ impl Response {
             self.headers.remove(&key);
         }
 
-        self.headers.insert(normalized, value.into());
+        self.headers
+            .insert(normalized, sanitize_header_value(value.into()));
     }
 
     /// Ensure a header exists while preserving any existing value.
     pub fn ensure_header(&mut self, name: &str, default_value: impl Into<String>) {
         if let Some(existing) = self.remove_header(name) {
-            self.headers.insert(name.to_ascii_lowercase(), existing);
-        } else {
             self.headers
-                .insert(name.to_ascii_lowercase(), default_value.into());
+                .insert(name.to_ascii_lowercase(), sanitize_header_value(existing));
+        } else {
+            self.headers.insert(
+                name.to_ascii_lowercase(),
+                sanitize_header_value(default_value.into()),
+            );
         }
     }
 
@@ -298,7 +305,8 @@ impl<T: IntoResponse> IntoResponse for (StatusCode, Vec<(String, String)>, T) {
         let mut resp = self.2.into_response();
         resp.status = self.0;
         for (k, v) in self.1 {
-            resp.headers.insert(k.to_ascii_lowercase(), v);
+            resp.headers
+                .insert(k.to_ascii_lowercase(), sanitize_header_value(v));
         }
         resp
     }
@@ -402,8 +410,25 @@ impl Redirect {
 
 impl IntoResponse for Redirect {
     fn into_response(self) -> Response {
+        // CRLF stripping is now handled by set_header, but we keep the
+        // explicit sanitization here as belt-and-suspenders for the
+        // security-critical Location header.
         let location = self.location.replace(['\r', '\n'], "");
         Response::empty(self.status).header("location", location)
+    }
+}
+
+// ─── Header Sanitization ─────────────────────────────────────────────────────
+
+/// Strip CR and LF from a header value to prevent CRLF injection attacks.
+///
+/// HTTP response headers are delimited by CRLF; allowing raw CR/LF in values
+/// lets attackers inject arbitrary headers or split responses.
+fn sanitize_header_value(value: String) -> String {
+    if value.bytes().any(|b| b == b'\r' || b == b'\n') {
+        value.replace(['\r', '\n'], "")
+    } else {
+        value
     }
 }
 
@@ -572,6 +597,65 @@ mod tests {
         let cloned = r;
         let dbg2 = format!("{cloned:?}");
         assert_eq!(dbg, dbg2);
+    }
+
+    // =========================================================================
+    // CRLF injection defense
+    // =========================================================================
+
+    #[test]
+    fn set_header_strips_crlf_from_value() {
+        let mut resp = Response::empty(StatusCode::OK);
+        resp.set_header("x-test", "value\r\nEvil-Header: injected");
+        assert_eq!(
+            resp.headers.get("x-test").unwrap(),
+            "valueEvil-Header: injected"
+        );
+    }
+
+    #[test]
+    fn set_header_strips_bare_lf_from_value() {
+        let mut resp = Response::empty(StatusCode::OK);
+        resp.set_header("x-test", "line1\nline2");
+        assert_eq!(resp.headers.get("x-test").unwrap(), "line1line2");
+    }
+
+    #[test]
+    fn set_header_strips_bare_cr_from_value() {
+        let mut resp = Response::empty(StatusCode::OK);
+        resp.set_header("x-test", "line1\rline2");
+        assert_eq!(resp.headers.get("x-test").unwrap(), "line1line2");
+    }
+
+    #[test]
+    fn builder_header_strips_crlf() {
+        let resp = Response::empty(StatusCode::OK).header("x-test", "safe\r\nX-Injected: oops");
+        assert_eq!(resp.headers.get("x-test").unwrap(), "safeX-Injected: oops");
+    }
+
+    #[test]
+    fn ensure_header_strips_crlf_from_default() {
+        let mut resp = Response::empty(StatusCode::OK);
+        resp.ensure_header("x-test", "default\r\nEvil: yes");
+        assert_eq!(resp.headers.get("x-test").unwrap(), "defaultEvil: yes");
+    }
+
+    #[test]
+    fn tuple_headers_strip_crlf() {
+        let resp = (
+            StatusCode::OK,
+            vec![("x-test".to_string(), "a\r\nb".to_string())],
+            "body",
+        )
+            .into_response();
+        assert_eq!(resp.headers.get("x-test").unwrap(), "ab");
+    }
+
+    #[test]
+    fn clean_header_value_passes_through_unchanged() {
+        let mut resp = Response::empty(StatusCode::OK);
+        resp.set_header("x-test", "normal-value");
+        assert_eq!(resp.headers.get("x-test").unwrap(), "normal-value");
     }
 
     #[test]
