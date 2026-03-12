@@ -20,6 +20,7 @@ macro_rules! read_int_trait_method {
                 reader: self,
                 buf: [0u8; $size],
                 pos: 0,
+                completed: false,
             }
         }
     };
@@ -34,7 +35,11 @@ pub trait AsyncReadExt: AsyncRead {
     where
         Self: Unpin,
     {
-        Read { reader: self, buf }
+        Read {
+            reader: self,
+            buf,
+            completed: false,
+        }
     }
 
     /// Read the exact number of bytes to fill `buf`.
@@ -47,6 +52,7 @@ pub trait AsyncReadExt: AsyncRead {
             buf,
             pos: 0,
             yield_counter: 0,
+            completed: false,
         }
     }
 
@@ -61,6 +67,7 @@ pub trait AsyncReadExt: AsyncRead {
             buf,
             start_len,
             yield_counter: 0,
+            completed: false,
         }
     }
 
@@ -77,6 +84,7 @@ pub trait AsyncReadExt: AsyncRead {
             read: 0,
             start_len,
             yield_counter: 0,
+            completed: false,
         }
     }
 
@@ -85,7 +93,10 @@ pub trait AsyncReadExt: AsyncRead {
     where
         Self: Unpin,
     {
-        ReadU8 { reader: self }
+        ReadU8 {
+            reader: self,
+            completed: false,
+        }
     }
 
     /// Read a single signed byte.
@@ -93,7 +104,10 @@ pub trait AsyncReadExt: AsyncRead {
     where
         Self: Unpin,
     {
-        ReadI8 { reader: self }
+        ReadI8 {
+            reader: self,
+            completed: false,
+        }
     }
 
     read_int_trait_method!(read_u16, ReadU16, u16, 2, "big-endian");
@@ -143,7 +157,11 @@ pub trait AsyncReadVectoredExt: AsyncReadVectored {
     where
         Self: Unpin,
     {
-        ReadVectored { reader: self, bufs }
+        ReadVectored {
+            reader: self,
+            bufs,
+            completed: false,
+        }
     }
 }
 
@@ -157,6 +175,7 @@ impl<R: AsyncReadVectored + ?Sized> AsyncReadVectoredExt for R {}
 pub struct Read<'a, R: ?Sized> {
     reader: &'a mut R,
     buf: &'a mut [u8],
+    completed: bool,
 }
 
 impl<R> Future for Read<'_, R>
@@ -167,11 +186,20 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        if this.completed {
+            return Poll::Ready(Err(io::Error::other("Read future polled after completion")));
+        }
         let mut read_buf = ReadBuf::new(this.buf);
         match Pin::new(&mut *this.reader).poll_read(cx, &mut read_buf) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
-            Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+            Poll::Ready(Err(err)) => {
+                this.completed = true;
+                Poll::Ready(Err(err))
+            }
+            Poll::Ready(Ok(())) => {
+                this.completed = true;
+                Poll::Ready(Ok(read_buf.filled().len()))
+            }
         }
     }
 }
@@ -180,6 +208,7 @@ where
 pub struct ReadVectored<'a, R: ?Sized> {
     reader: &'a mut R,
     bufs: &'a mut [IoSliceMut<'a>],
+    completed: bool,
 }
 
 impl<R> Future for ReadVectored<'_, R>
@@ -190,7 +219,16 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        Pin::new(&mut *this.reader).poll_read_vectored(cx, this.bufs)
+        if this.completed {
+            return Poll::Ready(Err(io::Error::other(
+                "ReadVectored future polled after completion",
+            )));
+        }
+        let result = Pin::new(&mut *this.reader).poll_read_vectored(cx, this.bufs);
+        if result.is_ready() {
+            this.completed = true;
+        }
+        result
     }
 }
 
@@ -200,6 +238,7 @@ pub struct ReadExact<'a, R: ?Sized> {
     buf: &'a mut [u8],
     pos: usize,
     yield_counter: u8,
+    completed: bool,
 }
 
 impl<R> Future for ReadExact<'_, R>
@@ -210,6 +249,11 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        if this.completed {
+            return Poll::Ready(Err(io::Error::other(
+                "ReadExact future polled after completion",
+            )));
+        }
 
         while this.pos < this.buf.len() {
             if this.yield_counter > 32 {
@@ -225,10 +269,14 @@ where
                     this.yield_counter = 0;
                     return Poll::Pending;
                 }
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Ready(Err(err)) => {
+                    this.completed = true;
+                    return Poll::Ready(Err(err));
+                }
                 Poll::Ready(Ok(())) => {
                     let n = read_buf.filled().len();
                     if n == 0 {
+                        this.completed = true;
                         return Poll::Ready(Err(io::Error::from(io::ErrorKind::UnexpectedEof)));
                     }
                     this.pos += n;
@@ -236,6 +284,7 @@ where
             }
         }
 
+        this.completed = true;
         Poll::Ready(Ok(()))
     }
 }
@@ -246,6 +295,7 @@ pub struct ReadToEnd<'a, R: ?Sized> {
     buf: &'a mut Vec<u8>,
     start_len: usize,
     yield_counter: u8,
+    completed: bool,
 }
 
 impl<R> Future for ReadToEnd<'_, R>
@@ -257,6 +307,11 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         const CHUNK: usize = 8192;
         let this = self.get_mut();
+        if this.completed {
+            return Poll::Ready(Err(io::Error::other(
+                "ReadToEnd future polled after completion",
+            )));
+        }
 
         loop {
             if this.yield_counter > 32 {
@@ -273,10 +328,14 @@ where
                     this.yield_counter = 0;
                     return Poll::Pending;
                 }
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Ready(Err(err)) => {
+                    this.completed = true;
+                    return Poll::Ready(Err(err));
+                }
                 Poll::Ready(Ok(())) => {
                     let n = read_buf.filled().len();
                     if n == 0 {
+                        this.completed = true;
                         return Poll::Ready(Ok(this.buf.len().saturating_sub(this.start_len)));
                     }
                     this.buf.extend_from_slice(read_buf.filled());
@@ -294,6 +353,7 @@ pub struct ReadToString<'a, R: ?Sized> {
     read: usize,
     start_len: usize,
     yield_counter: u8,
+    completed: bool,
 }
 
 impl<R: ?Sized> ReadToString<'_, R> {
@@ -338,6 +398,11 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         const CHUNK: usize = 8192;
         let this = self.get_mut();
+        if this.completed {
+            return Poll::Ready(Err(io::Error::other(
+                "ReadToString future polled after completion",
+            )));
+        }
 
         loop {
             if this.yield_counter > 32 {
@@ -354,10 +419,14 @@ where
                     this.yield_counter = 0;
                     return Poll::Pending;
                 }
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Ready(Err(err)) => {
+                    this.completed = true;
+                    return Poll::Ready(Err(err));
+                }
                 Poll::Ready(Ok(())) => {
                     let n = read_buf.filled().len();
                     if n == 0 {
+                        this.completed = true;
                         if this.pending_utf8.is_empty() {
                             return Poll::Ready(Ok(this.read));
                         }
@@ -370,6 +439,7 @@ where
                     this.read += n;
                     this.pending_utf8.extend_from_slice(read_buf.filled());
                     if let Err(err) = this.push_valid_prefix() {
+                        this.completed = true;
                         this.rollback_utf8_error();
                         return Poll::Ready(Err(err));
                     }
@@ -382,6 +452,7 @@ where
 /// Future for reading a single unsigned byte.
 pub struct ReadU8<'a, R: ?Sized> {
     reader: &'a mut R,
+    completed: bool,
 }
 
 impl<R> Future for ReadU8<'_, R>
@@ -392,12 +463,21 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        if this.completed {
+            return Poll::Ready(Err(io::Error::other(
+                "ReadU8 future polled after completion",
+            )));
+        }
         let mut one = [0u8; 1];
         let mut read_buf = ReadBuf::new(&mut one);
         match Pin::new(&mut *this.reader).poll_read(cx, &mut read_buf) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Ready(Err(err)) => {
+                this.completed = true;
+                Poll::Ready(Err(err))
+            }
             Poll::Ready(Ok(())) => {
+                this.completed = true;
                 if read_buf.filled().is_empty() {
                     Poll::Ready(Err(io::Error::from(io::ErrorKind::UnexpectedEof)))
                 } else {
@@ -411,6 +491,7 @@ where
 /// Future for reading a single signed byte.
 pub struct ReadI8<'a, R: ?Sized> {
     reader: &'a mut R,
+    completed: bool,
 }
 
 impl<R> Future for ReadI8<'_, R>
@@ -421,12 +502,21 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        if this.completed {
+            return Poll::Ready(Err(io::Error::other(
+                "ReadI8 future polled after completion",
+            )));
+        }
         let mut one = [0u8; 1];
         let mut read_buf = ReadBuf::new(&mut one);
         match Pin::new(&mut *this.reader).poll_read(cx, &mut read_buf) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Ready(Err(err)) => {
+                this.completed = true;
+                Poll::Ready(Err(err))
+            }
             Poll::Ready(Ok(())) => {
+                this.completed = true;
                 if read_buf.filled().is_empty() {
                     Poll::Ready(Err(io::Error::from(io::ErrorKind::UnexpectedEof)))
                 } else {
@@ -449,6 +539,7 @@ macro_rules! read_int_future {
             reader: &'a mut R,
             buf: [u8; $size],
             pos: usize,
+            completed: bool,
         }
 
         impl<R> Future for $future<'_, R>
@@ -459,14 +550,24 @@ macro_rules! read_int_future {
 
             fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
                 let this = self.get_mut();
+                if this.completed {
+                    return Poll::Ready(Err(io::Error::other(concat!(
+                        stringify!($future),
+                        " future polled after completion"
+                    ))));
+                }
                 while this.pos < $size {
                     let mut read_buf = ReadBuf::new(&mut this.buf[this.pos..]);
                     match Pin::new(&mut *this.reader).poll_read(cx, &mut read_buf) {
                         Poll::Pending => return Poll::Pending,
-                        Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                        Poll::Ready(Err(err)) => {
+                            this.completed = true;
+                            return Poll::Ready(Err(err));
+                        }
                         Poll::Ready(Ok(())) => {
                             let n = read_buf.filled().len();
                             if n == 0 {
+                                this.completed = true;
                                 return Poll::Ready(Err(io::Error::from(
                                     io::ErrorKind::UnexpectedEof,
                                 )));
@@ -475,6 +576,7 @@ macro_rules! read_int_future {
                         }
                     }
                 }
+                this.completed = true;
                 let convert: fn([u8; $size]) -> $ty = $convert;
                 Poll::Ready(Ok(convert(this.buf)))
             }
