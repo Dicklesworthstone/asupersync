@@ -761,6 +761,7 @@ pub struct GenServerHandle<S: GenServer> {
     task_id: TaskId,
     receiver: oneshot::Receiver<Result<S, JoinError>>,
     inner: std::sync::Weak<parking_lot::RwLock<CxInner>>,
+    completed: bool,
     overflow_policy: CastOverflowPolicy,
 }
 
@@ -1049,7 +1050,14 @@ impl<S: GenServer> GenServerHandle<S> {
     /// Returns true if the server has finished.
     #[must_use]
     pub fn is_finished(&self) -> bool {
-        self.receiver.is_ready()
+        self.completed || self.receiver.is_ready() || self.receiver.is_closed()
+    }
+
+    fn closed_reason(&self) -> CancelReason {
+        self.inner
+            .upgrade()
+            .and_then(|inner| inner.read().cancel_reason.clone())
+            .unwrap_or_else(|| CancelReason::user("join channel closed"))
     }
 
     /// Signals the server to stop gracefully.
@@ -1080,12 +1088,26 @@ impl<S: GenServer> GenServerHandle<S> {
 
     /// Wait for the server to finish and return its final state.
     pub async fn join(&mut self, cx: &Cx) -> Result<S, JoinError> {
-        self.receiver.recv(cx).await.unwrap_or_else(|_| {
-            let reason = cx
-                .cancel_reason()
-                .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
-            Err(JoinError::Cancelled(reason))
-        })
+        if self.completed {
+            return Err(JoinError::PolledAfterCompletion);
+        }
+
+        match self.receiver.recv(cx).await {
+            Ok(result) => {
+                self.completed = true;
+                result
+            }
+            Err(oneshot::RecvError::Closed) => {
+                self.completed = true;
+                Err(JoinError::Cancelled(self.closed_reason()))
+            }
+            Err(oneshot::RecvError::Cancelled) => {
+                let reason = cx
+                    .cancel_reason()
+                    .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
+                Err(JoinError::Cancelled(reason))
+            }
+        }
     }
 }
 
@@ -1576,6 +1598,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             task_id,
             receiver: result_rx,
             inner: inner_weak,
+            completed: false,
             overflow_policy,
         };
 
@@ -1902,6 +1925,7 @@ mod tests {
 
     // ---- Simple Counter GenServer ----
 
+    #[derive(Debug)]
     struct Counter {
         count: u64,
     }
@@ -2416,6 +2440,44 @@ mod tests {
         );
 
         crate::test_complete!("gen_server_handle_join_returns_final_state_after_stop");
+    }
+
+    #[test]
+    fn gen_server_handle_second_join_fails_closed() {
+        init_test("gen_server_handle_second_join_fails_closed");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+
+        let (mut handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, Counter { count: 0 }, 32)
+            .unwrap();
+        let task_id = handle.task_id();
+        runtime.state.store_spawned_task(task_id, stored);
+
+        handle.stop();
+        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.run_until_quiescent();
+        assert!(
+            handle.is_finished(),
+            "stopped server should report finished"
+        );
+
+        let final_state = futures_lite::future::block_on(handle.join(&cx)).expect("first join");
+        assert_eq!(
+            final_state.count, 0,
+            "join should return final server state"
+        );
+
+        let second = futures_lite::future::block_on(handle.join(&cx));
+        assert!(
+            matches!(second, Err(JoinError::PolledAfterCompletion)),
+            "second join must fail closed, got {second:?}"
+        );
+
+        crate::test_complete!("gen_server_handle_second_join_fails_closed");
     }
 
     #[test]

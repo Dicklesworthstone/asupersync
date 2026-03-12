@@ -206,6 +206,7 @@ pub struct ActorHandle<A: Actor> {
     task_id: TaskId,
     receiver: crate::channel::oneshot::Receiver<Result<A, JoinError>>,
     inner: std::sync::Weak<parking_lot::RwLock<CxInner>>,
+    completed: bool,
 }
 
 impl<A: Actor> ActorHandle<A> {
@@ -263,7 +264,14 @@ impl<A: Actor> ActorHandle<A> {
     /// Returns true if the actor has finished.
     #[must_use]
     pub fn is_finished(&self) -> bool {
-        self.receiver.is_ready()
+        self.completed || self.receiver.is_ready() || self.receiver.is_closed()
+    }
+
+    fn closed_reason(&self) -> crate::types::CancelReason {
+        self.inner
+            .upgrade()
+            .and_then(|inner| inner.read().cancel_reason.clone())
+            .unwrap_or_else(|| crate::types::CancelReason::user("join channel closed"))
     }
 
     /// Wait for the actor to finish and return its final state.
@@ -271,16 +279,26 @@ impl<A: Actor> ActorHandle<A> {
     /// Blocks until the actor loop completes (mailbox closed or cancelled),
     /// then returns the actor's final state or a join error.
     pub async fn join(&mut self, cx: &Cx) -> Result<A, JoinError> {
-        self.receiver.recv(cx).await.unwrap_or_else(|_| {
-            // The oneshot was dropped without sending — the actor task was
-            // cancelled or the runtime shut down. Propagate the actual
-            // cancel reason from the Cx if available; fall back to
-            // parent-cancelled since this is typically a scope teardown.
-            let reason = cx
-                .cancel_reason()
-                .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
-            Err(JoinError::Cancelled(reason))
-        })
+        if self.completed {
+            return Err(JoinError::PolledAfterCompletion);
+        }
+
+        match self.receiver.recv(cx).await {
+            Ok(result) => {
+                self.completed = true;
+                result
+            }
+            Err(crate::channel::oneshot::RecvError::Closed) => {
+                self.completed = true;
+                Err(JoinError::Cancelled(self.closed_reason()))
+            }
+            Err(crate::channel::oneshot::RecvError::Cancelled) => {
+                let reason = cx
+                    .cancel_reason()
+                    .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
+                Err(JoinError::Cancelled(reason))
+            }
+        }
     }
 
     /// Request the actor to stop immediately by aborting its task.
@@ -663,6 +681,15 @@ impl<M: Send + 'static> std::fmt::Debug for ActorContext<'_, M> {
 /// The default mailbox capacity for actors.
 pub const DEFAULT_MAILBOX_CAPACITY: usize = 64;
 
+struct OnStopMaskGuard(Arc<parking_lot::RwLock<CxInner>>);
+
+impl Drop for OnStopMaskGuard {
+    fn drop(&mut self) {
+        let mut g = self.0.write();
+        g.mask_depth = g.mask_depth.saturating_sub(1);
+    }
+}
+
 /// Internal: runs the actor message loop.
 ///
 /// This function is the core of the actor runtime. It:
@@ -756,26 +783,13 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
     // Phase 4: Cleanup — mask cancellation so on_stop runs to completion.
     // Without masking, an aborted actor's on_stop could observe a stale
     // cancel_requested=true and bail early via cx.checkpoint().
+
     cx.trace("actor::on_stop");
-    // Drop guard ensures mask_depth is decremented even if on_stop panics,
-    // preventing mask_depth leak across supervised restarts.
-    struct OnStopMaskGuard(Option<Box<dyn FnOnce() + Send>>);
-    impl Drop for OnStopMaskGuard {
-        fn drop(&mut self) {
-            if let Some(f) = self.0.take() {
-                f();
-            }
-        }
-    }
     let inner = cx.inner.clone();
     inner.write().mask_depth += 1;
-    let unmask_inner = inner.clone();
-    let _mask_guard = OnStopMaskGuard(Some(Box::new(move || {
-        let mut g = unmask_inner.write();
-        g.mask_depth = g.mask_depth.saturating_sub(1);
-    })));
+    let mask_guard = OnStopMaskGuard(inner);
     actor.on_stop(&cx).await;
-    drop(_mask_guard);
+    drop(mask_guard);
 
     actor
 }
@@ -895,6 +909,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             task_id,
             receiver: result_rx,
             inner: inner_weak,
+            completed: false,
         };
 
         Ok((handle, stored))
@@ -1004,6 +1019,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             task_id,
             receiver: result_rx,
             inner: inner_weak,
+            completed: false,
         };
 
         Ok((handle, stored))
@@ -2139,6 +2155,38 @@ mod tests {
 
         let dbg = format!("{handle:?}");
         assert!(dbg.contains("ActorHandle"), "{dbg}");
+    }
+
+    #[test]
+    fn actor_handle_second_join_fails_closed() {
+        init_test("actor_handle_second_join_fails_closed");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::for_testing();
+        let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
+
+        let (mut handle, stored) = scope
+            .spawn_actor(&mut runtime.state, &cx, Counter::new(), 32)
+            .unwrap();
+        let task_id = handle.task_id();
+        runtime.state.store_spawned_task(task_id, stored);
+
+        handle.stop();
+        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.run_until_quiescent();
+        assert!(handle.is_finished(), "stopped actor should report finished");
+
+        let final_state = futures_lite::future::block_on(handle.join(&cx)).expect("first join");
+        assert_eq!(final_state.count, 0, "join should return final actor state");
+
+        let second = futures_lite::future::block_on(handle.join(&cx));
+        assert!(
+            matches!(second, Err(JoinError::PolledAfterCompletion)),
+            "second join must fail closed, got {second:?}"
+        );
+
+        crate::test_complete!("actor_handle_second_join_fails_closed");
     }
 
     #[test]

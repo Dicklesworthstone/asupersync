@@ -1095,7 +1095,7 @@ impl<P: Policy> Scope<'_, P> {
                         match h1.join(cx).await {
                             Ok(res) => return Ok(res),
                             Err(JoinError::Panicked(p)) => return Err(JoinError::Panicked(p)),
-                            Err(JoinError::Cancelled(_)) => {}
+                            Err(JoinError::Cancelled(_) | JoinError::PolledAfterCompletion) => {}
                         }
                     } else {
                         // In no-scheduler contexts (e.g. direct unit-test block_on),

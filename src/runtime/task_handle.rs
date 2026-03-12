@@ -16,6 +16,8 @@ pub enum JoinError {
     Cancelled(CancelReason),
     /// The task panicked.
     Panicked(PanicPayload),
+    /// The join future was polled after it had already completed.
+    PolledAfterCompletion,
 }
 
 impl std::fmt::Display for JoinError {
@@ -23,6 +25,7 @@ impl std::fmt::Display for JoinError {
         match self {
             Self::Cancelled(reason) => write!(f, "task was cancelled: {reason}"),
             Self::Panicked(payload) => write!(f, "task panicked: {payload}"),
+            Self::PolledAfterCompletion => write!(f, "join future polled after completion"),
         }
     }
 }
@@ -132,7 +135,8 @@ impl<T> TaskHandle<T> {
         JoinFuture {
             inner: self.receiver.recv_uninterruptible(),
             cx_inner,
-            completed: false,
+            terminal: false,
+            drop_abort_defused: false,
             drop_reason: None,
         }
     }
@@ -153,7 +157,8 @@ impl<T> TaskHandle<T> {
         JoinFuture {
             inner: self.receiver.recv_uninterruptible(),
             cx_inner,
-            completed: false,
+            terminal: false,
+            drop_abort_defused: false,
             drop_reason: Some(reason),
         }
     }
@@ -221,7 +226,8 @@ impl<T> TaskHandle<T> {
 pub struct JoinFuture<'a, T> {
     inner: oneshot::RecvUninterruptibleFuture<'a, Result<T, JoinError>>,
     cx_inner: Weak<RwLock<CxInner>>,
-    completed: bool,
+    terminal: bool,
+    drop_abort_defused: bool,
     drop_reason: Option<CancelReason>,
 }
 
@@ -255,7 +261,7 @@ impl<T> JoinFuture<'_, T> {
 
     /// Prevents drop-triggered abort for internal combinator control flow.
     pub(crate) fn defuse_drop_abort(&mut self) {
-        self.completed = true;
+        self.drop_abort_defused = true;
     }
 }
 
@@ -268,14 +274,17 @@ impl<T> std::future::Future for JoinFuture<'_, T> {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
         let this = &mut *self;
+        if this.terminal {
+            return std::task::Poll::Ready(Err(JoinError::PolledAfterCompletion));
+        }
         // JoinError needs to be mapped if recv fails with RecvError
         match std::pin::Pin::new(&mut this.inner).poll(cx) {
             std::task::Poll::Ready(Ok(res)) => {
-                this.completed = true;
+                this.terminal = true;
                 std::task::Poll::Ready(res)
             }
             std::task::Poll::Ready(Err(crate::channel::oneshot::RecvError::Closed)) => {
-                this.completed = true;
+                this.terminal = true;
                 let reason = this.closed_reason();
                 std::task::Poll::Ready(Err(JoinError::Cancelled(reason)))
             }
@@ -291,7 +300,7 @@ impl<T> Drop for JoinFuture<'_, T> {
     fn drop(&mut self) {
         // Abort the task if we stop waiting for it.
         // This makes TaskHandle::join cancel-safe and race-safe.
-        if !self.completed {
+        if !self.terminal && !self.drop_abort_defused {
             // If a result is already ready, don't stamp a spurious cancel
             // reason when dropping an unpolled join future.
             if self.inner.receiver_finished() {
@@ -511,6 +520,15 @@ mod tests {
             true,
             panicked_text
         );
+
+        let terminal = JoinError::PolledAfterCompletion;
+        let terminal_text = terminal.to_string();
+        crate::assert_with_log!(
+            terminal_text.contains("polled after completion"),
+            "terminal repoll display mentions completion",
+            true,
+            terminal_text
+        );
         crate::test_complete!("join_error_display");
     }
 
@@ -575,6 +593,141 @@ mod tests {
         crate::test_complete!("drop_join_does_not_abort_if_channel_already_closed");
     }
 
+    #[test]
+    fn join_future_repoll_after_success_fails_closed() {
+        init_test("join_future_repoll_after_success_fails_closed");
+        let cx = test_cx();
+        let task_id = TaskId::from_arena(ArenaIndex::new(11, 0));
+        let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        tx.send(&cx, Ok::<i32, JoinError>(7))
+            .expect("send should succeed");
+
+        let mut handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
+        let mut join = Box::pin(handle.join(&cx));
+        let waker = Waker::noop();
+        let mut poll_cx = Context::from_waker(waker);
+
+        let first = join.as_mut().poll(&mut poll_cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(Ok(7))),
+            "first poll yields successful join result",
+            "Poll::Ready(Ok(7))",
+            format!("{first:?}")
+        );
+
+        let second = join.as_mut().poll(&mut poll_cx);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Err(JoinError::PolledAfterCompletion))),
+            "terminal join repoll fails closed",
+            "Poll::Ready(Err(JoinError::PolledAfterCompletion))",
+            format!("{second:?}")
+        );
+        crate::test_complete!("join_future_repoll_after_success_fails_closed");
+    }
+
+    #[test]
+    fn join_future_repoll_after_cancelled_result_fails_closed() {
+        init_test("join_future_repoll_after_cancelled_result_fails_closed");
+        let cx = test_cx();
+        let task_id = TaskId::from_arena(ArenaIndex::new(12, 0));
+        let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        tx.send(
+            &cx,
+            Err::<i32, JoinError>(JoinError::Cancelled(CancelReason::race_loser())),
+        )
+        .expect("send should succeed");
+
+        let mut handle = TaskHandle::new(task_id, rx, std::sync::Weak::new());
+        let mut join = Box::pin(handle.join(&cx));
+        let waker = Waker::noop();
+        let mut poll_cx = Context::from_waker(waker);
+
+        let first = join.as_mut().poll(&mut poll_cx);
+        crate::assert_with_log!(
+            matches!(
+                first,
+                Poll::Ready(Err(JoinError::Cancelled(CancelReason {
+                    kind: CancelKind::RaceLost,
+                    ..
+                })))
+            ),
+            "first poll preserves task cancellation result",
+            "Poll::Ready(Err(JoinError::Cancelled(RaceLost)))",
+            format!("{first:?}")
+        );
+
+        let second = join.as_mut().poll(&mut poll_cx);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Err(JoinError::PolledAfterCompletion))),
+            "cancelled join repoll fails closed",
+            "Poll::Ready(Err(JoinError::PolledAfterCompletion))",
+            format!("{second:?}")
+        );
+        crate::test_complete!("join_future_repoll_after_cancelled_result_fails_closed");
+    }
+
+    #[test]
+    fn join_future_repoll_after_closed_channel_fails_closed() {
+        init_test("join_future_repoll_after_closed_channel_fails_closed");
+        let cx = test_cx();
+        let task_id = TaskId::from_arena(ArenaIndex::new(13, 0));
+        let (tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        drop(tx);
+
+        let mut handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
+        let mut join = Box::pin(handle.join(&cx));
+        let waker = Waker::noop();
+        let mut poll_cx = Context::from_waker(waker);
+
+        let first = join.as_mut().poll(&mut poll_cx);
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(Err(JoinError::Cancelled(_)))),
+            "closed join still maps to cancelled on first poll",
+            "Poll::Ready(Err(JoinError::Cancelled(_)))",
+            format!("{first:?}")
+        );
+
+        let second = join.as_mut().poll(&mut poll_cx);
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(Err(JoinError::PolledAfterCompletion))),
+            "closed join repoll fails closed",
+            "Poll::Ready(Err(JoinError::PolledAfterCompletion))",
+            format!("{second:?}")
+        );
+        crate::test_complete!("join_future_repoll_after_closed_channel_fails_closed");
+    }
+
+    #[test]
+    fn defuse_drop_abort_skips_pending_join_abort() {
+        init_test("defuse_drop_abort_skips_pending_join_abort");
+        let cx = test_cx();
+        let task_id = TaskId::from_arena(ArenaIndex::new(14, 0));
+        let (_tx, rx) = oneshot::channel::<Result<i32, JoinError>>();
+        let mut handle = TaskHandle::new(task_id, rx, std::sync::Arc::downgrade(&cx.inner));
+
+        let mut join = handle.join(&cx);
+        join.defuse_drop_abort();
+        drop(join);
+
+        let (cancel_requested, cancel_reason_is_none) = {
+            let guard = cx.inner.read();
+            (guard.cancel_requested, guard.cancel_reason.is_none())
+        };
+        crate::assert_with_log!(
+            !cancel_requested,
+            "defused pending join drop must not request cancellation",
+            false,
+            cancel_requested
+        );
+        crate::assert_with_log!(
+            cancel_reason_is_none,
+            "defused pending join drop must not stamp cancel reason",
+            true,
+            cancel_reason_is_none
+        );
+        crate::test_complete!("defuse_drop_abort_skips_pending_join_abort");
+    }
+
     // =========================================================================
     // Wave 27: Data-type trait coverage
     // =========================================================================
@@ -591,6 +744,13 @@ mod tests {
         let err = JoinError::Panicked(PanicPayload::new("oops"));
         let dbg = format!("{err:?}");
         assert!(dbg.contains("Panicked"));
+    }
+
+    #[test]
+    fn join_error_debug_polled_after_completion() {
+        let err = JoinError::PolledAfterCompletion;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("PolledAfterCompletion"));
     }
 
     #[test]
