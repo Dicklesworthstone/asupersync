@@ -642,6 +642,17 @@ mod tests {
         }
     }
 
+    /// Serializes tests that spawn threads which may call `wait_for_init_blocking`
+    /// (and thus `run_blocking_wait_hook`), preventing cross-test interference
+    /// through the global `BLOCKING_WAIT_HOOK` static.
+    static BLOCKING_TEST_SERIALIZER: StdMutex<()> = StdMutex::new(());
+
+    fn acquire_blocking_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        BLOCKING_TEST_SERIALIZER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn init_test(name: &str) {
         init_test_logging();
         crate::test_phase!(name);
@@ -752,6 +763,7 @@ mod tests {
     #[test]
     fn set_returns_err_immediately_when_inflight_initializer_running() {
         init_test("set_returns_err_immediately_when_inflight_initializer_running");
+        let _lock = acquire_blocking_test_lock();
         let cell = Arc::new(OnceCell::<u32>::new());
         let gate = Arc::new(std::sync::Barrier::new(2));
 
@@ -1049,6 +1061,7 @@ mod tests {
     #[test]
     fn get_or_init_blocking_retries_after_cancelled_async_init() {
         init_test("get_or_init_blocking_retries_after_cancelled_async_init");
+        let _lock = acquire_blocking_test_lock();
         let cell = Arc::new(OnceCell::<u32>::new());
 
         // Start an async init that will be cancelled.
@@ -1083,6 +1096,7 @@ mod tests {
     #[test]
     fn get_or_init_blocking_does_not_miss_cancel_notify_between_check_and_wait() {
         init_test("get_or_init_blocking_does_not_miss_cancel_notify_between_check_and_wait");
+        let _lock = acquire_blocking_test_lock();
         let cell = Arc::new(OnceCell::<u32>::new());
 
         let (init_started_tx, init_started_rx) = std::sync::mpsc::channel();
@@ -1157,6 +1171,7 @@ mod tests {
     #[test]
     fn get_or_init_blocking_panic_resets_state() {
         init_test("get_or_init_blocking_panic_resets_state");
+        let _lock = acquire_blocking_test_lock();
         let cell = Arc::new(OnceCell::<u32>::new());
 
         let cell_for_panic = Arc::clone(&cell);
@@ -1189,6 +1204,7 @@ mod tests {
     #[test]
     fn wait_for_init_blocking_recovers_from_poisoned_condvar_wait() {
         init_test("wait_for_init_blocking_recovers_from_poisoned_condvar_wait");
+        let _lock = acquire_blocking_test_lock();
         let cell = Arc::new(OnceCell::<u32>::new());
         cell.state.store(INITIALIZING, Ordering::Release);
 
@@ -1224,6 +1240,7 @@ mod tests {
     #[test]
     fn concurrent_init_only_runs_once() {
         init_test("concurrent_init_only_runs_once");
+        let _lock = acquire_blocking_test_lock();
         let cell = Arc::new(OnceCell::<i32>::new());
         let counter = Arc::new(AtomicUsize::new(0));
         let mut handles = Vec::new();
