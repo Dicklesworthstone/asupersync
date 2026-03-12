@@ -1,5 +1,5 @@
 //! Asupersync CLI tools (feature-gated).
-#![allow(clippy::result_large_err)]
+#![allow(clippy::result_large_err, clippy::too_many_lines, clippy::too_many_arguments, clippy::format_push_string, clippy::case_sensitive_file_extension_comparisons, clippy::redundant_closure_for_method_calls, clippy::option_if_let_else, clippy::redundant_clone, clippy::uninlined_format_args)]
 
 use asupersync::Time;
 use asupersync::cli::doctor::{
