@@ -85,7 +85,9 @@ pub use retry::{
     RetryResult, RetryState, calculate_deadline as retry_deadline, calculate_delay,
     make_retry_result, retry, total_delay_budget,
 };
-pub use select::{Either, Select, SelectAll, SelectAllDrain, SelectAllDrainResult};
+pub use select::{
+    Either, Select, SelectAll, SelectAllDrain, SelectAllDrainError, SelectAllDrainResult,
+};
 pub use timeout::{
     TimedError, TimedResult, Timeout, TimeoutConfig, TimeoutError, effective_deadline,
     make_timed_result,

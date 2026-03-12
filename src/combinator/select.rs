@@ -156,6 +156,7 @@ impl<F: Future + Unpin> Future for SelectAll<F> {
 pub struct SelectAllDrain<F> {
     futures: Option<Vec<F>>,
     start_idx: usize,
+    completed: bool,
 }
 
 impl<F> SelectAllDrain<F> {
@@ -169,6 +170,7 @@ impl<F> SelectAllDrain<F> {
         Self {
             futures: Some(futures),
             start_idx: 0,
+            completed: false,
         }
     }
 }
@@ -183,16 +185,41 @@ pub struct SelectAllDrainResult<T, F> {
     pub losers: Vec<F>,
 }
 
+/// Error returned by [`SelectAllDrain`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectAllDrainError {
+    /// The future was polled after already returning a terminal result.
+    PolledAfterCompletion,
+}
+
+impl std::fmt::Display for SelectAllDrainError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PolledAfterCompletion => {
+                write!(f, "select_all_drain future polled after completion")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SelectAllDrainError {}
+
 impl<F: Future + Unpin> Future for SelectAllDrain<F> {
-    type Output = SelectAllDrainResult<F::Output, F>;
+    type Output = Result<SelectAllDrainResult<F::Output, F>, SelectAllDrainError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
+        if this.completed {
+            return Poll::Ready(Err(SelectAllDrainError::PolledAfterCompletion));
+        }
         let start_idx = this.start_idx;
         let mut ready = None;
 
         {
-            let futures = this.futures.as_mut().expect("polled after completion");
+            let Some(futures) = this.futures.as_mut() else {
+                this.completed = true;
+                return Poll::Ready(Err(SelectAllDrainError::PolledAfterCompletion));
+            };
             let len = futures.len();
             if len == 0 {
                 return Poll::Pending;
@@ -209,16 +236,16 @@ impl<F: Future + Unpin> Future for SelectAllDrain<F> {
         }
 
         if let Some((idx, value)) = ready {
-            let mut all = this
-                .futures
-                .take()
-                .expect("futures should be Some if we found a ready value");
+            this.completed = true;
+            let Some(mut all) = this.futures.take() else {
+                return Poll::Ready(Err(SelectAllDrainError::PolledAfterCompletion));
+            };
             all.remove(idx);
-            return Poll::Ready(SelectAllDrainResult {
+            return Poll::Ready(Ok(SelectAllDrainResult {
                 value,
                 winner_index: idx,
                 losers: all,
-            });
+            }));
         }
 
         this.start_idx = this.start_idx.wrapping_add(1);
@@ -555,13 +582,14 @@ mod tests {
 
         let result = poll_once(&mut sel);
         match result {
-            Poll::Ready(r) => {
+            Poll::Ready(Ok(r)) => {
                 assert_eq!(r.value, 10);
                 assert_eq!(r.winner_index, 0);
                 // The first future wins, and because SelectAllDrain short-circuits,
                 // the other futures are never polled and are returned as losers.
                 assert_eq!(r.losers.len(), 2);
             }
+            Poll::Ready(Err(err)) => panic!("unexpected SelectAllDrain error: {err}"),
             Poll::Pending => unreachable!("expected Ready"),
         }
     }
@@ -573,11 +601,12 @@ mod tests {
 
         let result = poll_once(&mut sel);
         match result {
-            Poll::Ready(r) => {
+            Poll::Ready(Ok(r)) => {
                 assert_eq!(r.value, 42);
                 assert_eq!(r.winner_index, 0);
                 assert!(r.losers.is_empty());
             }
+            Poll::Ready(Err(err)) => panic!("unexpected SelectAllDrain error: {err}"),
             Poll::Pending => unreachable!("expected Ready"),
         }
     }
@@ -597,11 +626,12 @@ mod tests {
 
         let result = poll_once(&mut sel);
         match result {
-            Poll::Ready(r) => {
+            Poll::Ready(Ok(r)) => {
                 assert_eq!(r.value, 42);
                 assert_eq!(r.winner_index, 1);
                 assert_eq!(r.losers.len(), 2);
             }
+            Poll::Ready(Err(err)) => panic!("unexpected SelectAllDrain error: {err}"),
             Poll::Pending => unreachable!("expected Ready"),
         }
     }
@@ -668,7 +698,7 @@ mod tests {
 
         let result = poll_once(&mut sel);
         match result {
-            Poll::Ready(r) => {
+            Poll::Ready(Ok(r)) => {
                 assert_eq!(r.value, "done");
                 assert_eq!(r.winner_index, 1);
                 // Both the pending future and the unpolled ready future should be in losers.
@@ -679,6 +709,7 @@ mod tests {
                 assert_eq!(ready1_count.load(Ordering::SeqCst), 1);
                 assert_eq!(ready2_count.load(Ordering::SeqCst), 0);
             }
+            Poll::Ready(Err(err)) => panic!("unexpected SelectAllDrain error: {err}"),
             Poll::Pending => unreachable!("expected Ready"),
         }
     }
@@ -718,13 +749,14 @@ mod tests {
 
         assert!(poll_once(&mut sel).is_pending());
         match poll_once(&mut sel) {
-            Poll::Ready(r) => {
+            Poll::Ready(Ok(r)) => {
                 assert_eq!(r.winner_index, 1);
                 assert_eq!(r.value, 2);
                 assert_eq!(r.losers.len(), 1);
                 assert_eq!(first_polls.load(Ordering::SeqCst), 1);
                 assert_eq!(second_polls.load(Ordering::SeqCst), 2);
             }
+            Poll::Ready(Err(err)) => panic!("unexpected SelectAllDrain error: {err}"),
             Poll::Pending => unreachable!("expected Ready"),
         }
     }
@@ -817,7 +849,7 @@ mod tests {
 
         let result = poll_once(&mut sel);
         match result {
-            Poll::Ready(r) => {
+            Poll::Ready(Ok(r)) => {
                 assert_eq!(r.value, 1);
                 assert_eq!(r.losers.len(), 1);
 
@@ -828,7 +860,44 @@ mod tests {
                 let final_result = poll_once(&mut loser); // 3rd poll
                 assert!(matches!(final_result, Poll::Ready(3)));
             }
+            Poll::Ready(Err(err)) => panic!("unexpected SelectAllDrain error: {err}"),
             Poll::Pending => unreachable!("expected Ready"),
         }
+    }
+
+    #[test]
+    fn test_select_all_drain_second_poll_fails_closed_without_repolling_upstream() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct TrackableFuture {
+            poll_count: Arc<AtomicU32>,
+        }
+        impl Future for TrackableFuture {
+            type Output = u32;
+            fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<u32> {
+                self.poll_count.fetch_add(1, Ordering::SeqCst);
+                Poll::Ready(42)
+            }
+        }
+
+        let count = Arc::new(AtomicU32::new(0));
+        let futures = vec![TrackableFuture {
+            poll_count: Arc::clone(&count),
+        }];
+        let mut sel = SelectAllDrain::new(futures);
+
+        // First poll completes normally.
+        let result = poll_once(&mut sel);
+        assert!(matches!(result, Poll::Ready(Ok(_))));
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+
+        // Second poll must fail closed immediately without touching the (now-gone)
+        // upstream futures.
+        let second = poll_once(&mut sel);
+        assert!(matches!(
+            second,
+            Poll::Ready(Err(SelectAllDrainError::PolledAfterCompletion))
+        ));
+        assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 }
