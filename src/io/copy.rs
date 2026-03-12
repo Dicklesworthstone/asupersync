@@ -79,9 +79,7 @@ where
         let this = self.get_mut();
 
         if this.completed {
-            return Poll::Ready(Err(io::Error::other(
-                "Copy future polled after completion",
-            )));
+            return Poll::Ready(Err(io::Error::other("Copy future polled after completion")));
         }
 
         let mut steps = 0;

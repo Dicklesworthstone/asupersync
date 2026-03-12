@@ -273,14 +273,14 @@ impl<F> TimeoutFuture<F> {
 
     /// Creates a new timeout future with a custom time source.
     ///
-    /// The `time_getter` drives timeout decisions while the sleep itself still
-    /// uses `Sleep::new` so normal polling can register a wake source.
+    /// The `time_getter` is used by both timeout decisions and the underlying
+    /// sleep so they agree on the current time.
     #[must_use]
     pub fn with_time_getter(inner: F, deadline: Time, time_getter: fn() -> Time) -> Self {
         Self {
             state: TimeoutFutureState::Running {
                 inner,
-                sleep: Sleep::new(deadline),
+                sleep: Sleep::with_time_getter(deadline, time_getter),
                 time_getter: Some(time_getter),
             },
         }

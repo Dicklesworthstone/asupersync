@@ -321,7 +321,6 @@ mod tests {
     use std::future::Future;
     use std::future::{pending, ready};
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::{Context, Poll, Waker};
 
     // =========================================================================
@@ -333,7 +332,19 @@ mod tests {
         crate::test_phase!(name);
     }
 
-    static CURRENT_TIME: AtomicU64 = AtomicU64::new(0);
+    // Each test that needs a shared time source should use thread_local!
+    // to avoid races when tests run in parallel.
+    thread_local! {
+        static CURRENT_TIME: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    fn set_current_time(nanos: u64) {
+        CURRENT_TIME.with(|t| t.set(nanos));
+    }
+
+    fn get_current_time() -> u64 {
+        CURRENT_TIME.with(|t| t.get())
+    }
 
     struct CountingFuture {
         count: u32,
@@ -654,12 +665,12 @@ mod tests {
     }
 
     fn test_now() -> Time {
-        Time::from_nanos(CURRENT_TIME.load(Ordering::SeqCst))
+        Time::from_nanos(get_current_time())
     }
 
     #[test]
     fn poll_panics_after_success_completion() {
-        CURRENT_TIME.store(0, Ordering::SeqCst);
+        set_current_time(0);
         let mut t = TimeoutFuture::with_time_getter(ready(42), Time::from_secs(10), test_now);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -675,7 +686,7 @@ mod tests {
 
     #[test]
     fn poll_panics_after_timeout_until_reset() {
-        CURRENT_TIME.store(0, Ordering::SeqCst);
+        set_current_time(0);
         let future = CountingFuture {
             count: 0,
             ready_at: 3,
@@ -686,7 +697,7 @@ mod tests {
 
         assert!(Pin::new(&mut t).poll(&mut cx).is_pending());
 
-        CURRENT_TIME.store(10_000_000_000, Ordering::SeqCst);
+        set_current_time(10_000_000_000);
         let elapsed = Pin::new(&mut t).poll(&mut cx);
         assert!(matches!(elapsed, Poll::Ready(Err(_))));
 
@@ -696,7 +707,7 @@ mod tests {
         panic.expect_err("re-poll after timeout should panic");
 
         t.reset(Time::from_secs(20));
-        CURRENT_TIME.store(12_000_000_000, Ordering::SeqCst);
+        set_current_time(12_000_000_000);
         let resumed = Pin::new(&mut t).poll(&mut cx);
         assert!(matches!(resumed, Poll::Ready(Ok("done"))));
     }
@@ -732,7 +743,6 @@ mod tests {
     #[test]
     fn simulated_timeout_scenario() {
         init_test("simulated_timeout_scenario");
-        CURRENT_TIME.store(0, Ordering::SeqCst);
         // Simulate a scenario where we poll multiple times as time advances
 
         let mut t = TimeoutFuture::new(pending::<i32>(), Time::from_secs(5));
@@ -740,26 +750,19 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         // t=0: pending
-        let now = Time::from_nanos(CURRENT_TIME.load(Ordering::SeqCst));
-        let pending = t.poll_with_time(now, &mut cx).is_pending();
+        let pending = t.poll_with_time(Time::ZERO, &mut cx).is_pending();
         crate::assert_with_log!(pending, "pending at t=0", true, pending);
 
         // t=2: still pending
-        CURRENT_TIME.store(2_000_000_000, Ordering::SeqCst);
-        let now = Time::from_nanos(CURRENT_TIME.load(Ordering::SeqCst));
-        let pending = t.poll_with_time(now, &mut cx).is_pending();
+        let pending = t.poll_with_time(Time::from_secs(2), &mut cx).is_pending();
         crate::assert_with_log!(pending, "pending at t=2", true, pending);
 
         // t=4: still pending
-        CURRENT_TIME.store(4_000_000_000, Ordering::SeqCst);
-        let now = Time::from_nanos(CURRENT_TIME.load(Ordering::SeqCst));
-        let pending = t.poll_with_time(now, &mut cx).is_pending();
+        let pending = t.poll_with_time(Time::from_secs(4), &mut cx).is_pending();
         crate::assert_with_log!(pending, "pending at t=4", true, pending);
 
         // t=5: timeout!
-        CURRENT_TIME.store(5_000_000_000, Ordering::SeqCst);
-        let now = Time::from_nanos(CURRENT_TIME.load(Ordering::SeqCst));
-        let result = t.poll_with_time(now, &mut cx);
+        let result = t.poll_with_time(Time::from_secs(5), &mut cx);
         let elapsed = matches!(result, Poll::Ready(Err(_)));
         crate::assert_with_log!(elapsed, "elapsed at t=5", true, elapsed);
         crate::test_complete!("simulated_timeout_scenario");
