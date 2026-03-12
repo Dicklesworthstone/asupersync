@@ -231,7 +231,10 @@ impl Sse {
     /// allowing clients to resume from where they left off.
     #[must_use]
     pub fn last_event_id(mut self, id: impl Into<String>) -> Self {
-        self.last_event_id = Some(id.into());
+        let id = id.into();
+        if !id.contains('\0') {
+            self.last_event_id = Some(id);
+        }
         self
     }
 
@@ -434,6 +437,16 @@ mod tests {
         // Existing ID should be preserved.
         assert!(body.contains("id:existing"));
         assert!(!body.contains("id:injected"));
+    }
+
+    #[test]
+    fn sse_last_event_id_rejects_null_bytes() {
+        let sse = Sse::new(vec![SseEvent::default().data("event")])
+            .last_event_id("bad\0id");
+        let body = sse.to_body();
+        // Null-byte ID should be silently rejected, matching SseEvent::id() behavior.
+        assert!(!body.contains("id:"), "null-byte ID should not appear in output");
+        assert_eq!(body, "data:event\n\n");
     }
 
     // ================================================================
