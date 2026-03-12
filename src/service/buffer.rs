@@ -81,6 +81,10 @@ impl<S> Layer<S> for BufferLayer {
 /// internal worker that dispatches them to the inner service. This allows
 /// the service to be cloned cheaply — all clones share the same buffer
 /// and worker.
+///
+/// Each successful `poll_ready` reserves capacity for exactly one subsequent
+/// `call` on that handle. Calling without an observed ready window fails
+/// closed with [`BufferError::NotReady`].
 pub struct Buffer<S> {
     shared: Arc<SharedBuffer<S>>,
     /// Tracks whether this clone is holding a slot reserved by `poll_ready`.
@@ -228,6 +232,8 @@ impl<S> fmt::Debug for Buffer<S> {
 /// Error returned by the buffer service.
 #[derive(Debug)]
 pub enum BufferError<E> {
+    /// The caller attempted `call()` without a preceding successful `poll_ready()`.
+    NotReady,
     /// The buffer is full and cannot accept more requests.
     Full,
     /// The buffer has been closed.
@@ -241,6 +247,7 @@ pub enum BufferError<E> {
 impl<E: fmt::Display> fmt::Display for BufferError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::NotReady => write!(f, "poll_ready required before call"),
             Self::Full => write!(f, "buffer full"),
             Self::Closed => write!(f, "buffer closed"),
             Self::PolledAfterCompletion => write!(f, "buffer future polled after completion"),
@@ -252,7 +259,7 @@ impl<E: fmt::Display> fmt::Display for BufferError<E> {
 impl<E: std::error::Error + 'static> std::error::Error for BufferError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Full | Self::Closed | Self::PolledAfterCompletion => None,
+            Self::NotReady | Self::Full | Self::Closed | Self::PolledAfterCompletion => None,
             Self::Inner(e) => Some(e),
         }
     }
@@ -305,6 +312,46 @@ impl<S> Drop for PendingGuard<S> {
             release_capacity_claim(&shared);
         }
     }
+}
+
+/// Registers a waiter unless the buffer has already been closed.
+///
+/// The waiter-list lock is the synchronization point with `close()`: once this
+/// function starts examining or mutating the waiter list, a concurrent close can
+/// only proceed after we either observe closure and fail closed or finish
+/// parking the waker for the eventual wakeup.
+fn register_waker_unless_closed(
+    closed: &Mutex<bool>,
+    wakers: &Mutex<Vec<std::task::Waker>>,
+    waker: &std::task::Waker,
+) -> bool {
+    let mut waiters = wakers.lock();
+    if *closed.lock() {
+        drop(waiters);
+        return false;
+    }
+
+    let inserted = if waiters.iter().any(|existing| existing.will_wake(waker)) {
+        false
+    } else {
+        waiters.push(waker.clone());
+        true
+    };
+
+    if *closed.lock() {
+        if inserted
+            && let Some(index) = waiters
+                .iter()
+                .position(|existing| existing.will_wake(waker))
+        {
+            waiters.swap_remove(index);
+        }
+        drop(waiters);
+        return false;
+    }
+
+    drop(waiters);
+    true
 }
 
 // ─── Buffer Future ──────────────────────────────────────────────────────────
@@ -380,14 +427,16 @@ where
                         return Poll::Ready(Err(BufferError::Closed));
                     }
 
-                    {
-                        // Register the caller before polling the inner service with the
-                        // fanout waker. Otherwise a readiness edge can race with this
-                        // task's registration and be lost.
-                        let mut wakers = shared.inner_wakers.wakers.lock();
-                        if !wakers.iter().any(|w| w.will_wake(cx.waker())) {
-                            wakers.push(cx.waker().clone());
-                        }
+                    // Register the caller before polling the inner service with the
+                    // fanout waker. Otherwise a readiness edge or a concurrent close
+                    // can race with this task's registration and be lost.
+                    if !register_waker_unless_closed(
+                        &shared.closed,
+                        &shared.inner_wakers.wakers,
+                        cx.waker(),
+                    ) {
+                        drop(guard);
+                        return Poll::Ready(Err(BufferError::Closed));
                     }
 
                     let mut inner = shared.inner.lock();
@@ -514,11 +563,14 @@ where
         // with completion/drop paths that decrement pending then wake waiters.
         let mut pending = self.shared.pending.lock();
         if *pending >= self.shared.capacity {
-            let mut wakers = self.shared.ready_wakers.lock();
-            if !wakers.iter().any(|w| w.will_wake(cx.waker())) {
-                wakers.push(cx.waker().clone());
+            if !register_waker_unless_closed(
+                &self.shared.closed,
+                &self.shared.ready_wakers,
+                cx.waker(),
+            ) {
+                drop(pending);
+                return Poll::Ready(Err(BufferError::Closed));
             }
-            drop(wakers);
             drop(pending);
             Poll::Pending
         } else {
@@ -543,15 +595,7 @@ where
             return BufferFuture::waiting(req, self.shared.clone());
         }
 
-        {
-            let mut pending = self.shared.pending.lock();
-            if *pending >= self.shared.capacity {
-                return BufferFuture::error(BufferError::Full);
-            }
-            *pending += 1;
-        }
-
-        BufferFuture::waiting(req, self.shared.clone())
+        BufferFuture::error(BufferError::NotReady)
     }
 }
 
@@ -889,6 +933,9 @@ mod tests {
     #[test]
     fn buffer_error_display() {
         init_test("buffer_error_display");
+        let not_ready: BufferError<&str> = BufferError::NotReady;
+        assert!(format!("{not_ready}").contains("poll_ready"));
+
         let full: BufferError<&str> = BufferError::Full;
         assert!(format!("{full}").contains("buffer full"));
 
@@ -905,6 +952,10 @@ mod tests {
 
     #[test]
     fn buffer_error_debug() {
+        let not_ready: BufferError<&str> = BufferError::NotReady;
+        let dbg = format!("{not_ready:?}");
+        assert!(dbg.contains("NotReady"));
+
         let full: BufferError<&str> = BufferError::Full;
         let dbg = format!("{full:?}");
         assert!(dbg.contains("Full"));
@@ -925,6 +976,9 @@ mod tests {
     #[test]
     fn buffer_error_source() {
         use std::error::Error;
+        let not_ready: BufferError<std::io::Error> = BufferError::NotReady;
+        assert!(not_ready.source().is_none());
+
         let full: BufferError<std::io::Error> = BufferError::Full;
         assert!(full.source().is_none());
 
@@ -1060,6 +1114,23 @@ mod tests {
     }
 
     #[test]
+    fn call_without_poll_ready_fails_closed_and_keeps_capacity_free() {
+        init_test("call_without_poll_ready_fails_closed_and_keeps_capacity_free");
+        let mut svc = Buffer::new(EchoService, 1);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut future = svc.call(5);
+        assert!(matches!(
+            Pin::new(&mut future).poll(&mut cx),
+            Poll::Ready(Err(BufferError::NotReady))
+        ));
+        assert_eq!(svc.pending(), 0);
+        assert!(svc.is_empty());
+        crate::test_complete!("call_without_poll_ready_fails_closed_and_keeps_capacity_free");
+    }
+
+    #[test]
     fn poll_ready_deduplicates_waker_when_full() {
         init_test("poll_ready_deduplicates_waker_when_full");
         let mut svc = Buffer::new(EchoService, 1);
@@ -1136,7 +1207,7 @@ mod tests {
         let mut stolen = thief.call(9);
         assert!(matches!(
             Pin::new(&mut stolen).poll(&mut cx),
-            Poll::Ready(Err(BufferError::Full))
+            Poll::Ready(Err(BufferError::NotReady))
         ));
 
         let mut reserved = ready_holder.call(9);
@@ -1294,6 +1365,58 @@ mod tests {
     }
 
     #[test]
+    fn close_race_during_poll_ready_registration_returns_closed() {
+        init_test("close_race_during_poll_ready_registration_returns_closed");
+        let waiter = Buffer::new(EchoService, 1);
+        *waiter.shared.pending.lock() = 1;
+
+        let shared = waiter.shared.clone();
+        let ready_wakers_guard = shared.ready_wakers.lock();
+        let mut poll_waiter = Buffer {
+            shared: shared.clone(),
+            ready_slot_reserved: false,
+        };
+        let poll_thread = std::thread::spawn(move || {
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            poll_waiter.poll_ready(&mut cx)
+        });
+
+        for _ in 0..1000 {
+            if shared.pending.try_lock().is_none() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(
+            shared.pending.try_lock().is_none(),
+            "poll_ready thread never reached the waiter-registration critical section"
+        );
+
+        let closer = Buffer {
+            shared: shared.clone(),
+            ready_slot_reserved: false,
+        };
+        let close_thread = std::thread::spawn(move || closer.close());
+        for _ in 0..1000 {
+            if *shared.closed.lock() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(*shared.closed.lock(), "close() never set the closed flag");
+
+        drop(ready_wakers_guard);
+
+        let result = poll_thread.join().unwrap();
+        close_thread.join().unwrap();
+
+        assert!(matches!(result, Poll::Ready(Err(BufferError::Closed))));
+        assert!(shared.ready_wakers.lock().is_empty());
+        crate::test_complete!("close_race_during_poll_ready_registration_returns_closed");
+    }
+
+    #[test]
     fn close_wakes_tasks_waiting_for_inner_ready() {
         init_test("close_wakes_tasks_waiting_for_inner_ready");
         let mut svc = Buffer::new(NeverReadyService, 4);
@@ -1379,12 +1502,14 @@ mod tests {
         };
 
         let mut svc = Buffer::new(inner, 10);
+        let mut svc2 = svc.clone();
         let dummy_waker = noop_waker();
         let mut cx_dummy = Context::from_waker(&dummy_waker);
         let _ = svc.poll_ready(&mut cx_dummy);
+        let _ = svc2.poll_ready(&mut cx_dummy);
 
         let mut fut1 = svc.call(1);
-        let mut fut2 = svc.call(2);
+        let mut fut2 = svc2.call(2);
 
         let (waker1, flag1) = flag_waker();
         let mut cx1 = Context::from_waker(&waker1);
@@ -1442,5 +1567,30 @@ mod tests {
         assert!(matches!(result, Poll::Ready(Ok(7))));
 
         crate::test_complete!("buffer_wake_during_poll_ready_is_not_lost");
+    }
+
+    #[test]
+    fn waiter_registration_helper_observes_close_before_parking() {
+        init_test("waiter_registration_helper_observes_close_before_parking");
+        let closed = Arc::new(Mutex::new(false));
+        let wakers = Arc::new(Mutex::new(Vec::new()));
+        let held = wakers.lock();
+
+        let closed_for_thread = closed.clone();
+        let wakers_for_thread = wakers.clone();
+        let handle = std::thread::spawn(move || {
+            let waker = noop_waker();
+            register_waker_unless_closed(&closed_for_thread, &wakers_for_thread, &waker)
+        });
+
+        *closed.lock() = true;
+        drop(held);
+
+        assert!(
+            !handle.join().unwrap(),
+            "registration must fail closed once close wins the race"
+        );
+        assert!(wakers.lock().is_empty());
+        crate::test_complete!("waiter_registration_helper_observes_close_before_parking");
     }
 }

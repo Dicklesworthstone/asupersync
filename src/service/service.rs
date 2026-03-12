@@ -887,6 +887,33 @@ where
     }
 }
 
+/// Error returned by [`ServiceExt::oneshot`].
+#[derive(Debug)]
+pub enum OneshotError<E> {
+    /// The inner service returned an error.
+    Inner(E),
+    /// The future was polled after it had already completed.
+    PolledAfterCompletion,
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for OneshotError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Inner(err) => write!(f, "inner service error: {err}"),
+            Self::PolledAfterCompletion => write!(f, "oneshot future polled after completion"),
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for OneshotError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Inner(err) => Some(err),
+            Self::PolledAfterCompletion => None,
+        }
+    }
+}
+
 /// Future returned by [`ServiceExt::oneshot`].
 pub struct Oneshot<S, Request>
 where
@@ -930,7 +957,7 @@ where
     Request: Unpin,
     S::Future: Unpin,
 {
-    type Output = Result<S::Response, S::Error>;
+    type Output = Result<S::Response, OneshotError<S::Error>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
@@ -947,10 +974,12 @@ where
                         return Poll::Pending;
                     }
                     Poll::Ready(Err(err)) => {
-                        return Poll::Ready(Err(err));
+                        return Poll::Ready(Err(OneshotError::Inner(err)));
                     }
                     Poll::Ready(Ok(())) => {
-                        let req = request.take().expect("Oneshot polled after request taken");
+                        let Some(req) = request.take() else {
+                            return Poll::Ready(Err(OneshotError::PolledAfterCompletion));
+                        };
                         let fut = service.call(req);
                         this.state = OneshotState::Calling { future: fut };
                     }
@@ -960,10 +989,10 @@ where
                     if result.is_pending() {
                         this.state = OneshotState::Calling { future };
                     }
-                    return result;
+                    return result.map_err(OneshotError::Inner);
                 }
                 OneshotState::Done => {
-                    panic!("Oneshot polled after completion");
+                    return Poll::Ready(Err(OneshotError::PolledAfterCompletion));
                 }
             }
         }
@@ -972,8 +1001,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{AsupersyncService, AsupersyncServiceExt, OneshotState, Service, ServiceExt};
+    use super::{
+        AsupersyncService, AsupersyncServiceExt, OneshotError, OneshotState, Service, ServiceExt,
+    };
     use crate::test_utils::run_test_with_cx;
+    use std::cell::Cell;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::pin::Pin;
     use std::sync::Arc;
@@ -990,17 +1022,6 @@ mod tests {
         Arc::new(NoopWaker).into()
     }
 
-    #[allow(clippy::needless_pass_by_value, clippy::option_if_let_else)]
-    fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
-        if let Some(message) = panic.downcast_ref::<&str>() {
-            (*message).to_string()
-        } else if let Some(message) = panic.downcast_ref::<String>() {
-            message.clone()
-        } else {
-            "non-string panic payload".to_string()
-        }
-    }
-
     #[derive(Clone, Debug)]
     struct PanicOnCallService;
 
@@ -1015,6 +1036,94 @@ mod tests {
 
         fn call(&mut self, _req: u32) -> Self::Future {
             panic!("panic during oneshot call construction");
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct EchoU32Service;
+
+    impl Service<u32> for EchoU32Service {
+        type Response = u32;
+        type Error = ();
+        type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: u32) -> Self::Future {
+            std::future::ready(Ok(req))
+        }
+    }
+
+    #[derive(Debug)]
+    struct PendingThenReadyFuture {
+        value: u32,
+        first_poll: bool,
+    }
+
+    impl Future for PendingThenReadyFuture {
+        type Output = Result<u32, ()>;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.first_poll {
+                self.first_poll = false;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            Poll::Ready(Ok(self.value))
+        }
+    }
+
+    #[derive(Debug)]
+    struct PendingThenReadyService {
+        ready_polls: Cell<u8>,
+    }
+
+    impl PendingThenReadyService {
+        fn new() -> Self {
+            Self {
+                ready_polls: Cell::new(0),
+            }
+        }
+    }
+
+    impl Service<u32> for PendingThenReadyService {
+        type Response = u32;
+        type Error = ();
+        type Future = PendingThenReadyFuture;
+
+        fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if self.ready_polls.get() == 0 {
+                self.ready_polls.set(1);
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: u32) -> Self::Future {
+            PendingThenReadyFuture {
+                value: req,
+                first_poll: true,
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct ErrorOnCallService;
+
+    impl Service<u32> for ErrorOnCallService {
+        type Response = u32;
+        type Error = ();
+        type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: u32) -> Self::Future {
+            std::future::ready(Err(()))
         }
     }
 
@@ -1043,6 +1152,56 @@ mod tests {
     }
 
     #[test]
+    fn oneshot_second_poll_fails_closed_after_success() {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = EchoU32Service.oneshot(7);
+
+        assert!(matches!(
+            Pin::new(&mut fut).poll(&mut cx),
+            Poll::Ready(Ok(7))
+        ));
+        assert!(matches!(
+            Pin::new(&mut fut).poll(&mut cx),
+            Poll::Ready(Err(OneshotError::PolledAfterCompletion))
+        ));
+    }
+
+    #[test]
+    fn oneshot_pending_then_completion_then_repoll_fails_closed() {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = PendingThenReadyService::new().oneshot(9);
+
+        assert!(matches!(Pin::new(&mut fut).poll(&mut cx), Poll::Pending));
+        assert!(matches!(Pin::new(&mut fut).poll(&mut cx), Poll::Pending));
+        assert!(matches!(
+            Pin::new(&mut fut).poll(&mut cx),
+            Poll::Ready(Ok(9))
+        ));
+        assert!(matches!(
+            Pin::new(&mut fut).poll(&mut cx),
+            Poll::Ready(Err(OneshotError::PolledAfterCompletion))
+        ));
+    }
+
+    #[test]
+    fn oneshot_repoll_after_inner_error_fails_closed() {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = ErrorOnCallService.oneshot(7);
+
+        assert!(matches!(
+            Pin::new(&mut fut).poll(&mut cx),
+            Poll::Ready(Err(OneshotError::Inner(())))
+        ));
+        assert!(matches!(
+            Pin::new(&mut fut).poll(&mut cx),
+            Poll::Ready(Err(OneshotError::PolledAfterCompletion))
+        ));
+    }
+
+    #[test]
     fn oneshot_call_panic_leaves_terminal_state() {
         let mut fut = PanicOnCallService.oneshot(7);
         let waker = noop_waker();
@@ -1057,14 +1216,26 @@ mod tests {
             "panic path must leave Oneshot in Done state"
         );
 
-        let second_panic = catch_unwind(AssertUnwindSafe(|| {
-            let _ = Pin::new(&mut fut).poll(&mut cx);
-        }));
-        let second_message = panic_message(second_panic.expect_err("second poll should panic"));
         assert!(
-            second_message.contains("Oneshot polled after completion"),
-            "repoll should see the terminal-state invariant, got: {second_message}"
+            matches!(
+                Pin::new(&mut fut).poll(&mut cx),
+                Poll::Ready(Err(OneshotError::PolledAfterCompletion))
+            ),
+            "repoll should fail closed after panic left the future terminal"
         );
+    }
+
+    #[test]
+    fn oneshot_error_display_and_source() {
+        use std::error::Error;
+
+        let inner = OneshotError::Inner(std::io::Error::other("boom"));
+        assert_eq!(format!("{inner}"), "inner service error: boom");
+        assert!(inner.source().is_some());
+
+        let done: OneshotError<std::io::Error> = OneshotError::PolledAfterCompletion;
+        assert_eq!(format!("{done}"), "oneshot future polled after completion");
+        assert!(done.source().is_none());
     }
 
     // ========================================================================

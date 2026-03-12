@@ -139,6 +139,12 @@ pub trait Strategy: fmt::Debug + Send + Sync {
     /// Returns `None` if no backends are available.
     fn pick(&self, loads: &[u64]) -> Option<usize>;
 
+    /// Reconciles strategy topology state with an already-materialized backend set.
+    ///
+    /// This is used during constructor-time initialization, where the balancer
+    /// starts with an existing backend list rather than replaying insert events.
+    fn sync_backend_count(&self, _count: usize) {}
+
     /// Notifies the strategy that a backend was inserted at `index`.
     ///
     /// Strategies with per-backend state can override this to keep their
@@ -331,6 +337,16 @@ impl Strategy for Weighted {
         Some(best_idx)
     }
 
+    fn sync_backend_count(&self, count: usize) {
+        let mut state = self.state.lock();
+        if state.weights.len() < count {
+            state.weights.resize(count, 1);
+        }
+        if state.current_weights.len() < count {
+            state.current_weights.resize(count, 0);
+        }
+    }
+
     fn on_backend_inserted(&self, index: usize) {
         let mut state = self.state.lock();
         let index = index.min(state.weights.len());
@@ -409,18 +425,18 @@ impl<S, T: Strategy> LoadBalancer<S, T> {
     /// Create a new load balancer with the given strategy and backends.
     #[must_use]
     pub fn new(strategy: T, backends: Vec<S>) -> Self {
+        let backends: Vec<_> = backends
+            .into_iter()
+            .map(|s| {
+                Arc::new(Backend {
+                    service: Mutex::new(s),
+                    load: Arc::new(LoadMetric::new()),
+                })
+            })
+            .collect();
+        strategy.sync_backend_count(backends.len());
         Self {
-            backends: Mutex::new(
-                backends
-                    .into_iter()
-                    .map(|s| {
-                        Arc::new(Backend {
-                            service: Mutex::new(s),
-                            load: Arc::new(LoadMetric::new()),
-                        })
-                    })
-                    .collect(),
-            ),
+            backends: Mutex::new(backends),
             strategy,
         }
     }
@@ -1451,6 +1467,26 @@ mod tests {
             .collect();
         assert_eq!(pattern, vec![0, 0, 1, 0]);
         crate::test_complete!("lb_weighted_push_syncs_strategy_state");
+    }
+
+    #[test]
+    fn lb_new_syncs_weighted_strategy_state_for_initial_backends() {
+        init_test("lb_new_syncs_weighted_strategy_state_for_initial_backends");
+        let lb = LoadBalancer::new(
+            Weighted::new(vec![1]),
+            vec!["backend-a".to_string(), "backend-b".to_string()],
+        );
+
+        let loads = lb.loads();
+        let pattern: Vec<_> = (0..4)
+            .map(|_| {
+                lb.strategy()
+                    .pick(&loads)
+                    .expect("weighted strategy should see both constructor backends")
+            })
+            .collect();
+        assert_eq!(pattern, vec![0, 1, 0, 1]);
+        crate::test_complete!("lb_new_syncs_weighted_strategy_state_for_initial_backends");
     }
 
     #[test]
