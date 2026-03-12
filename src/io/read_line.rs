@@ -200,7 +200,12 @@ where
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        assert!(!this.completed, "ReadLine polled after completion");
+        if this.completed {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Other,
+                "ReadLine future polled after completion",
+            )));
+        }
         let mut steps = 0;
 
         loop {
@@ -564,5 +569,30 @@ mod tests {
         crate::assert_with_log!(bytes == 1, "bytes", 1, bytes);
         crate::assert_with_log!(line == "hello\n", "line", "hello\n", line);
         crate::test_complete!("read_line_crlf_is_normalized_after_cancel_and_restart");
+    }
+
+    #[test]
+    fn read_line_repoll_after_completion_fails_closed() {
+        init_test("read_line_repoll_after_completion_fails_closed");
+        let mut reader = BufReader::new(&b"hello\n"[..]);
+        let mut line = String::new();
+        let mut fut = read_line(&mut reader, &mut line);
+        let mut pinned = Pin::new(&mut fut);
+
+        let first = poll_ready(&mut pinned).expect("future did not resolve");
+        assert!(first.is_ok(), "first poll should succeed");
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let second = pinned.as_mut().poll(&mut cx);
+        match second {
+            Poll::Ready(Err(e)) => {
+                let msg = e.to_string();
+                let ok = msg.contains("polled after completion");
+                crate::assert_with_log!(ok, "error message", "polled after completion", msg);
+            }
+            other => panic!("expected Ready(Err), got {other:?}"),
+        }
+        crate::test_complete!("read_line_repoll_after_completion_fails_closed");
     }
 }

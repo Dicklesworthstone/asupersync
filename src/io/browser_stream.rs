@@ -378,13 +378,15 @@ impl AsyncRead for WasmReadableStreamSource {
                 let value = Reflect::get(&result, &JsValue::from_str("value"))
                     .map_err(|err| js_host_io_error(&err, "ReadableStream read result.value"))?;
                 if value.is_null() || value.is_undefined() {
-                    return Poll::Ready(Ok(()));
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
                 }
 
                 self.staged = Uint8Array::new(&value).to_vec();
                 self.staged_offset = 0;
                 if self.staged.is_empty() {
-                    return Poll::Ready(Ok(()));
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
                 }
 
                 let to_copy = self.staged.len().min(buf.remaining());

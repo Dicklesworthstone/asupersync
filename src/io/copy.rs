@@ -78,7 +78,12 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
 
-        assert!(!this.completed, "Copy future polled after completion");
+        if this.completed {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Copy future polled after completion",
+            )));
+        }
 
         let mut steps = 0;
 
@@ -245,7 +250,12 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
 
-        assert!(!this.completed, "CopyBuf future polled after completion");
+        if this.completed {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Other,
+                "CopyBuf future polled after completion",
+            )));
+        }
 
         let mut steps = 0;
 
@@ -380,10 +390,12 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
 
-        assert!(
-            !this.completed,
-            "CopyWithProgress future polled after completion"
-        );
+        if this.completed {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Other,
+                "CopyWithProgress future polled after completion",
+            )));
+        }
 
         let mut steps = 0;
 
@@ -719,10 +731,12 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
 
-        assert!(
-            !this.completed,
-            "CopyBidirectional future polled after completion"
-        );
+        if this.completed {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Other,
+                "CopyBidirectional future polled after completion",
+            )));
+        }
 
         let mut steps = 0;
 
@@ -1159,5 +1173,111 @@ mod tests {
         crate::assert_with_log!(is_pending, "poll result is pending", true, is_pending);
 
         crate::test_complete!("copy_bidirectional_yields_on_fast_streams");
+    }
+
+    // =====================================================================
+    // Fail-closed repoll-after-completion regression tests (asupersync-u20t2)
+    // =====================================================================
+
+    #[test]
+    fn copy_repoll_after_completion_fails_closed() {
+        init_test("copy_repoll_after_completion_fails_closed");
+        let mut reader: &[u8] = b"data";
+        let mut writer = Vec::new();
+        let mut fut = copy(&mut reader, &mut writer);
+        let mut pinned = Pin::new(&mut fut);
+
+        // First poll should complete.
+        let first = poll_ready(&mut pinned).expect("future did not resolve");
+        assert!(first.is_ok(), "first poll should succeed");
+
+        // Second poll should return an error, NOT panic.
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let second = pinned.as_mut().poll(&mut cx);
+        match second {
+            Poll::Ready(Err(e)) => {
+                let msg = e.to_string();
+                let ok = msg.contains("polled after completion");
+                crate::assert_with_log!(ok, "error message", "polled after completion", msg);
+            }
+            other => panic!("expected Ready(Err), got {other:?}"),
+        }
+        crate::test_complete!("copy_repoll_after_completion_fails_closed");
+    }
+
+    #[test]
+    fn copy_buf_repoll_after_completion_fails_closed() {
+        init_test("copy_buf_repoll_after_completion_fails_closed");
+        let mut reader: &[u8] = b"data";
+        let mut writer = Vec::new();
+        let mut fut = copy_buf(&mut reader, &mut writer);
+        let mut pinned = Pin::new(&mut fut);
+
+        let first = poll_ready(&mut pinned).expect("future did not resolve");
+        assert!(first.is_ok(), "first poll should succeed");
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let second = pinned.as_mut().poll(&mut cx);
+        match second {
+            Poll::Ready(Err(e)) => {
+                let msg = e.to_string();
+                let ok = msg.contains("polled after completion");
+                crate::assert_with_log!(ok, "error message", "polled after completion", msg);
+            }
+            other => panic!("expected Ready(Err), got {other:?}"),
+        }
+        crate::test_complete!("copy_buf_repoll_after_completion_fails_closed");
+    }
+
+    #[test]
+    fn copy_with_progress_repoll_after_completion_fails_closed() {
+        init_test("copy_with_progress_repoll_after_completion_fails_closed");
+        let mut reader: &[u8] = b"data";
+        let mut writer = Vec::new();
+        let mut fut = copy_with_progress(&mut reader, &mut writer, |_| {});
+        let mut pinned = Pin::new(&mut fut);
+
+        let first = poll_ready(&mut pinned).expect("future did not resolve");
+        assert!(first.is_ok(), "first poll should succeed");
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let second = pinned.as_mut().poll(&mut cx);
+        match second {
+            Poll::Ready(Err(e)) => {
+                let msg = e.to_string();
+                let ok = msg.contains("polled after completion");
+                crate::assert_with_log!(ok, "error message", "polled after completion", msg);
+            }
+            other => panic!("expected Ready(Err), got {other:?}"),
+        }
+        crate::test_complete!("copy_with_progress_repoll_after_completion_fails_closed");
+    }
+
+    #[test]
+    fn copy_bidirectional_repoll_after_completion_fails_closed() {
+        init_test("copy_bidirectional_repoll_after_completion_fails_closed");
+        let mut a = TestDuplex::new(b"hello");
+        let mut b = TestDuplex::new(b"world");
+        let mut fut = copy_bidirectional(&mut a, &mut b);
+        let mut pinned = Pin::new(&mut fut);
+
+        let first = poll_ready(&mut pinned).expect("future did not resolve");
+        assert!(first.is_ok(), "first poll should succeed");
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let second = pinned.as_mut().poll(&mut cx);
+        match second {
+            Poll::Ready(Err(e)) => {
+                let msg = e.to_string();
+                let ok = msg.contains("polled after completion");
+                crate::assert_with_log!(ok, "error message", "polled after completion", msg);
+            }
+            other => panic!("expected Ready(Err), got {other:?}"),
+        }
+        crate::test_complete!("copy_bidirectional_repoll_after_completion_fails_closed");
     }
 }

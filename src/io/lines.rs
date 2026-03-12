@@ -12,6 +12,7 @@ use std::task::{Context, Poll};
 pub struct Lines<R> {
     reader: R,
     buf: Vec<u8>,
+    completed: bool,
 }
 
 impl<R> Lines<R> {
@@ -20,6 +21,7 @@ impl<R> Lines<R> {
         Self {
             reader,
             buf: Vec::new(),
+            completed: false,
         }
     }
 }
@@ -29,6 +31,9 @@ impl<R: AsyncBufRead + Unpin> Stream for Lines<R> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        if this.completed {
+            return Poll::Ready(None);
+        }
         let mut steps = 0;
 
         loop {
@@ -58,17 +63,24 @@ impl<R: AsyncBufRead + Unpin> Stream for Lines<R> {
             // 2. Poll the reader
             let available = match Pin::new(&mut this.reader).poll_fill_buf(cx) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
+                Poll::Ready(Err(e)) => {
+                    this.completed = true;
+                    return Poll::Ready(Some(Err(e)));
+                }
                 Poll::Ready(Ok(buf)) => buf,
             };
 
             // 3. EOF check
             if available.is_empty() {
                 if this.buf.is_empty() {
+                    this.completed = true;
                     return Poll::Ready(None);
                 }
                 let s = String::from_utf8(mem::take(&mut this.buf))
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+                if s.is_err() {
+                    this.completed = true;
+                }
                 return Poll::Ready(Some(s));
             }
 
@@ -174,5 +186,41 @@ mod tests {
         let done = matches!(poll_next(&mut lines), Poll::Ready(None));
         crate::assert_with_log!(done, "done", true, done);
         crate::test_complete!("lines_incomplete_last");
+    }
+
+    #[test]
+    fn lines_repoll_after_empty_completion_panics() {
+        let data: &[u8] = b"";
+        let reader = BufReader::new(data);
+        let mut lines = Lines::new(reader);
+
+        assert!(matches!(poll_next(&mut lines), Poll::Ready(None)));
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = poll_next(&mut lines);
+        }));
+        let message = panic.expect_err("re-poll after completion should panic");
+        let text = message
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| message.downcast_ref::<String>().map(String::as_str))
+            .expect("unexpected panic payload");
+        assert!(text.contains("Lines polled after completion"));
+    }
+
+    #[test]
+    fn lines_repoll_after_exhausting_non_empty_input_panics() {
+        let data: &[u8] = b"line 1\nline 2";
+        let reader = BufReader::new(data);
+        let mut lines = Lines::new(reader);
+
+        assert!(matches!(poll_next(&mut lines), Poll::Ready(Some(Ok(s))) if s == "line 1"));
+        assert!(matches!(poll_next(&mut lines), Poll::Ready(Some(Ok(s))) if s == "line 2"));
+        assert!(matches!(poll_next(&mut lines), Poll::Ready(None)));
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = poll_next(&mut lines);
+        }));
+        panic.expect_err("re-poll after completion should panic");
     }
 }
