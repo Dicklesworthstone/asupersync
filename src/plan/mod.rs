@@ -897,7 +897,9 @@ mod tests {
         mut right: LeafHandle,
     ) -> Option<&'static str> {
         let winner =
-            crate::combinator::Select::new(Box::pin(left.join(cx)), Box::pin(right.join(cx))).await;
+            crate::combinator::Select::new(Box::pin(left.join(cx)), Box::pin(right.join(cx)))
+                .await
+                .expect("fresh select future should not be repolled");
         match winner {
             crate::combinator::Either::Left(result) => {
                 right.abort_with_reason(crate::types::CancelReason::race_loser());
@@ -998,6 +1000,7 @@ mod tests {
                             Box::pin(join_right),
                         )
                         .await
+                        .expect("fresh select future should not be repolled")
                         {
                             crate::combinator::Either::Left(result) => {
                                 a2_handle

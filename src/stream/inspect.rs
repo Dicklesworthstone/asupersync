@@ -10,11 +10,16 @@ use std::task::{Context, Poll};
 pub struct Inspect<S, F> {
     stream: S,
     f: F,
+    exhausted: bool,
 }
 
 impl<S, F> Inspect<S, F> {
     pub(crate) fn new(stream: S, f: F) -> Self {
-        Self { stream, f }
+        Self {
+            stream,
+            f,
+            exhausted: false,
+        }
     }
 }
 
@@ -27,15 +32,25 @@ where
 
     #[inline]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.exhausted {
+            return Poll::Ready(None);
+        }
+
         let next = Pin::new(&mut self.stream).poll_next(cx);
         if let Poll::Ready(Some(ref item)) = next {
             (self.f)(item);
+        } else if matches!(next, Poll::Ready(None)) {
+            self.exhausted = true;
         }
         next
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.stream.size_hint()
+        if self.exhausted {
+            (0, Some(0))
+        } else {
+            self.stream.size_hint()
+        }
     }
 }
 
@@ -44,7 +59,8 @@ mod tests {
     use super::*;
     use crate::stream::iter;
     use std::sync::Arc;
-    use std::task::{Wake, Waker};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
 
     struct NoopWaker;
     impl Wake for NoopWaker {
@@ -52,6 +68,27 @@ mod tests {
     }
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    #[derive(Debug)]
+    struct EmptyThenPanics {
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl EmptyThenPanics {
+        fn new(polls: Arc<AtomicUsize>) -> Self {
+            Self { polls }
+        }
+    }
+
+    impl Stream for EmptyThenPanics {
+        type Item = i32;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let polls = self.polls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(polls, 0, "inspect inner stream repolled after completion");
+            Poll::Ready(None)
+        }
     }
 
     fn collect_inspect<S: Stream<Item = I> + Unpin, F: FnMut(&I) + Unpin, I>(
@@ -103,5 +140,29 @@ mod tests {
         let mut stream = Inspect::new(iter(vec!['a', 'b', 'c']), |c: &char| order.push(*c));
         let _ = collect_inspect(&mut stream);
         assert_eq!(order, vec!['a', 'b', 'c']);
+    }
+
+    #[test]
+    fn test_inspect_does_not_repoll_exhausted_upstream() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut stream = Inspect::new(EmptyThenPanics::new(Arc::clone(&polls)), |_: &i32| {});
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_inspect_size_hint_after_exhaustion_is_zero() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut stream = Inspect::new(EmptyThenPanics::new(Arc::clone(&polls)), |_: &i32| {});
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(stream.size_hint(), (0, Some(0)));
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
     }
 }

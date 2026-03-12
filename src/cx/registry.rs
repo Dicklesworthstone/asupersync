@@ -409,6 +409,11 @@ pub enum NameLeaseError {
         /// The name that was waited on.
         name: String,
     },
+    /// The permit does not belong to the pending entry's holder/region.
+    PermissionDenied {
+        /// The name that was denied.
+        name: String,
+    },
 }
 
 impl fmt::Display for NameLeaseError {
@@ -424,6 +429,9 @@ impl fmt::Display for NameLeaseError {
             Self::NotFound { name } => write!(f, "name '{name}' not found"),
             Self::WaitBudgetExceeded { name } => {
                 write!(f, "wait budget exceeded for name '{name}'")
+            }
+            Self::PermissionDenied { name } => {
+                write!(f, "permit identity mismatch for name '{name}'")
             }
         }
     }
@@ -775,6 +783,15 @@ impl NameRegistry {
             let _ = permit.abort();
             return Err(NameLeaseError::NotFound { name });
         };
+        // Verify the permit belongs to the same holder/region that reserved it.
+        // Without this check, a permit transferred across tasks could commit
+        // under a different identity, creating split-brain registry state.
+        if permit.holder() != entry.holder || permit.region() != entry.region {
+            // Re-insert the pending entry so the original holder can still commit.
+            self.pending.insert(name.clone(), entry);
+            let _ = permit.abort();
+            return Err(NameLeaseError::PermissionDenied { name });
+        }
         let holder = entry.holder;
         let region = entry.region;
         self.leases.insert(name, entry);

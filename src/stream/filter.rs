@@ -23,12 +23,17 @@ pub struct Filter<S, P> {
     #[pin]
     stream: S,
     predicate: P,
+    exhausted: bool,
 }
 
 impl<S, P> Filter<S, P> {
     /// Creates a new `Filter` stream.
     pub(crate) fn new(stream: S, predicate: P) -> Self {
-        Self { stream, predicate }
+        Self {
+            stream,
+            predicate,
+            exhausted: false,
+        }
     }
 
     /// Returns a reference to the underlying stream.
@@ -57,6 +62,9 @@ where
     #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<S::Item>> {
         let mut this = self.project();
+        if *this.exhausted {
+            return Poll::Ready(None);
+        }
         let mut rejected_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
@@ -70,13 +78,19 @@ where
                         return Poll::Pending;
                     }
                 }
-                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(None) => {
+                    *this.exhausted = true;
+                    return Poll::Ready(None);
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.exhausted {
+            return (0, Some(0));
+        }
         let (_, upper) = self.stream.size_hint();
         // Lower bound is 0 since all items might be filtered
         (0, upper)
@@ -93,12 +107,17 @@ pub struct FilterMap<S, F> {
     #[pin]
     stream: S,
     f: F,
+    exhausted: bool,
 }
 
 impl<S, F> FilterMap<S, F> {
     /// Creates a new `FilterMap` stream.
     pub(crate) fn new(stream: S, f: F) -> Self {
-        Self { stream, f }
+        Self {
+            stream,
+            f,
+            exhausted: false,
+        }
     }
 
     /// Returns a reference to the underlying stream.
@@ -127,6 +146,9 @@ where
     #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<T>> {
         let mut this = self.project();
+        if *this.exhausted {
+            return Poll::Ready(None);
+        }
         let mut rejected_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
@@ -140,13 +162,19 @@ where
                         return Poll::Pending;
                     }
                 }
-                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(None) => {
+                    *this.exhausted = true;
+                    return Poll::Ready(None);
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.exhausted {
+            return (0, Some(0));
+        }
         let (_, upper) = self.stream.size_hint();
         // Lower bound is 0 since all items might be filtered
         (0, upper)
@@ -158,7 +186,7 @@ mod tests {
     use super::*;
     use crate::stream::{StreamExt, iter};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
 
     struct NoopWaker;
@@ -195,6 +223,38 @@ mod tests {
             let item = self.next;
             self.next = self.next.saturating_add(1);
             Poll::Ready(Some(item))
+        }
+    }
+
+    #[derive(Debug)]
+    struct OneThenNoneThenPanics {
+        item: Option<i32>,
+        completed: bool,
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl OneThenNoneThenPanics {
+        fn new(item: i32, polls: Arc<AtomicUsize>) -> Self {
+            Self {
+                item: Some(item),
+                completed: false,
+                polls,
+            }
+        }
+    }
+
+    impl Stream for OneThenNoneThenPanics {
+        type Item = i32;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            assert!(!self.completed, "inner stream repolled after completion");
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            if let Some(item) = self.item.take() {
+                Poll::Ready(Some(item))
+            } else {
+                self.completed = true;
+                Poll::Ready(None)
+            }
         }
     }
 
@@ -599,5 +659,44 @@ mod tests {
         let second = Pin::new(&mut stream).poll_next(&mut cx);
         assert_eq!(second, Poll::Ready(Some(accept_after)));
         crate::test_complete!("filter_map_yields_after_rejection_budget_on_always_ready_stream");
+    }
+
+    #[test]
+    fn filter_does_not_repoll_exhausted_upstream_after_rejected_terminal_pass() {
+        init_test("filter_does_not_repoll_exhausted_upstream_after_rejected_terminal_pass");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut stream = Filter::new(
+            OneThenNoneThenPanics::new(7, Arc::clone(&polls)),
+            |_: &i32| false,
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(stream.size_hint(), (0, Some(0)));
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+        crate::test_complete!(
+            "filter_does_not_repoll_exhausted_upstream_after_rejected_terminal_pass"
+        );
+    }
+
+    #[test]
+    fn filter_map_does_not_repoll_exhausted_upstream_after_rejected_terminal_pass() {
+        init_test("filter_map_does_not_repoll_exhausted_upstream_after_rejected_terminal_pass");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut stream = FilterMap::new(OneThenNoneThenPanics::new(7, Arc::clone(&polls)), |_| {
+            None::<i32>
+        });
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(stream.size_hint(), (0, Some(0)));
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+        crate::test_complete!(
+            "filter_map_does_not_repoll_exhausted_upstream_after_rejected_terminal_pass"
+        );
     }
 }

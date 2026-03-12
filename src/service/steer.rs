@@ -198,9 +198,10 @@ where
                             return Poll::Ready(Err(SteerError::Inner(err)));
                         }
                         Poll::Ready(Ok(())) => {
-                            let req = request
-                                .take()
-                                .expect("SteerFuture polled after request taken");
+                            let Some(req) = request.take() else {
+                                drop(inner);
+                                return Poll::Ready(Err(SteerError::PolledAfterCompletion));
+                            };
                             let future = inner.call(req);
                             drop(inner);
                             this.state = SteerState::Calling { future };
@@ -690,6 +691,30 @@ mod tests {
                 index: 3,
                 service_count: 1
             }))
+        ));
+
+        let second = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(
+            second,
+            Poll::Ready(Err(SteerError::PolledAfterCompletion))
+        ));
+    }
+
+    #[test]
+    fn steer_future_missing_request_fails_closed() {
+        let mut future = SteerFuture {
+            state: SteerState::PollReady {
+                service: Arc::new(Mutex::new(IdService { id: 7 })),
+                request: None,
+            },
+        };
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(
+            first,
+            Poll::Ready(Err(SteerError::PolledAfterCompletion))
         ));
 
         let second = Pin::new(&mut future).poll(&mut cx);

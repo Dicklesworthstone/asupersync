@@ -50,7 +50,9 @@ where
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Acc> {
         let mut this = self.project();
-        assert!(!*this.completed, "Fold polled after completion");
+        if *this.completed {
+            return Poll::Pending;
+        }
         let mut folded_this_poll = 0usize;
         loop {
             match this.stream.as_mut().poll_next(cx) {
@@ -280,8 +282,8 @@ mod tests {
     }
 
     #[test]
-    fn fold_repoll_after_completion_fails_closed_without_repolling_upstream() {
-        init_test("fold_repoll_after_completion_fails_closed_without_repolling_upstream");
+    fn fold_repoll_after_completion_returns_pending_without_repolling_upstream() {
+        init_test("fold_repoll_after_completion_returns_pending_without_repolling_upstream");
         let polls = Arc::new(AtomicUsize::new(0));
         let mut future = Fold::new(
             PollCountingEmptyStream::new(Arc::clone(&polls)),
@@ -305,14 +307,12 @@ mod tests {
             polls.load(Ordering::SeqCst)
         );
 
-        let repoll = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = Pin::new(&mut future).poll(&mut cx);
-        }));
+        let repoll = Pin::new(&mut future).poll(&mut cx);
         crate::assert_with_log!(
-            repoll.is_err(),
-            "repoll panics fail-closed",
-            true,
-            repoll.is_err()
+            repoll == Poll::<usize>::Pending,
+            "repoll returns pending",
+            Poll::<usize>::Pending,
+            repoll
         );
         crate::assert_with_log!(
             polls.load(Ordering::SeqCst) == 1,
@@ -322,7 +322,7 @@ mod tests {
         );
 
         crate::test_complete!(
-            "fold_repoll_after_completion_fails_closed_without_repolling_upstream"
+            "fold_repoll_after_completion_returns_pending_without_repolling_upstream"
         );
     }
 }

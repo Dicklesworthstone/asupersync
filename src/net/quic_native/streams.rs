@@ -470,6 +470,10 @@ pub enum StreamTableError {
     UnknownStream(StreamId),
     /// Stream ID is locally initiated and cannot be accepted as remote.
     InvalidRemoteStream(StreamId),
+    /// Stream is not writable (e.g. remote unidirectional stream).
+    StreamNotWritable(StreamId),
+    /// Stream is not readable (e.g. local unidirectional stream).
+    StreamNotReadable(StreamId),
     /// Stream limit exceeded.
     StreamLimitExceeded {
         /// Direction that hit the limit.
@@ -489,6 +493,8 @@ impl fmt::Display for StreamTableError {
             Self::InvalidRemoteStream(id) => {
                 write!(f, "invalid remote stream id (locally initiated): {}", id.0)
             }
+            Self::StreamNotWritable(id) => write!(f, "stream not writable: {}", id.0),
+            Self::StreamNotReadable(id) => write!(f, "stream not readable: {}", id.0),
             Self::StreamLimitExceeded { direction, limit } => {
                 write!(f, "stream limit exceeded for {direction:?}: {limit}")
             }
@@ -628,6 +634,9 @@ impl StreamTable {
 
     /// Account bytes written to one stream with connection-level flow control.
     pub fn write_stream(&mut self, id: StreamId, len: u64) -> Result<(), StreamTableError> {
+        if id.direction() == StreamDirection::Unidirectional && !id.is_local_for(self.role) {
+            return Err(StreamTableError::StreamNotWritable(id));
+        }
         {
             let stream = self.stream(id)?;
             if let Some(code) = stream.stop_sending_error_code {
@@ -663,6 +672,9 @@ impl StreamTable {
 
     /// Account bytes received on one stream at its current contiguous receive offset.
     pub fn receive_stream(&mut self, id: StreamId, len: u64) -> Result<(), StreamTableError> {
+        if id.direction() == StreamDirection::Unidirectional && id.is_local_for(self.role) {
+            return Err(StreamTableError::StreamNotReadable(id));
+        }
         let offset = self.stream(id)?.recv_offset;
         self.receive_stream_segment(id, offset, len, false)
     }
@@ -675,6 +687,9 @@ impl StreamTable {
         len: u64,
         is_fin: bool,
     ) -> Result<(), StreamTableError> {
+        if id.direction() == StreamDirection::Unidirectional && id.is_local_for(self.role) {
+            return Err(StreamTableError::StreamNotReadable(id));
+        }
         let end = offset
             .checked_add(len)
             .ok_or(QuicStreamError::OffsetOverflow { offset, len })?;
@@ -745,8 +760,10 @@ impl StreamTable {
             let Some(stream) = self.streams.get(&id) else {
                 continue;
             };
-            let writable = id.is_local_for(self.role)
-                && stream.stop_sending_error_code.is_none()
+            let writable = match id.direction() {
+                StreamDirection::Bidirectional => true,
+                StreamDirection::Unidirectional => id.is_local_for(self.role),
+            } && stream.stop_sending_error_code.is_none()
                 && stream.send_credit.remaining() > 0;
             if writable {
                 self.rr_cursor = Some(id);
@@ -1400,6 +1417,30 @@ mod tests {
     }
 
     #[test]
+    fn next_writable_stream_includes_remote_bidi() {
+        let mut tbl = StreamTable::new(StreamRole::Server, 1, 0, 100, 100);
+
+        // Remote client opens a bidi stream
+        let remote_bidi = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 0);
+        tbl.accept_remote_stream(remote_bidi)
+            .expect("accept remote bidi");
+
+        // Server opens a local bidi stream
+        let local_bidi = tbl.open_local_bidi().expect("local bidi");
+
+        let first = tbl
+            .next_writable_stream()
+            .expect("should have writable stream");
+        let second = tbl
+            .next_writable_stream()
+            .expect("should have second writable stream");
+
+        assert_ne!(first, second);
+        assert!(first == remote_bidi || first == local_bidi);
+        assert!(second == remote_bidi || second == local_bidi);
+    }
+
+    #[test]
     fn overlapping_recv_ranges_merge() {
         let mut tbl = StreamTable::new(StreamRole::Server, 0, 0, 200, 200);
         let id = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 0);
@@ -1604,14 +1645,41 @@ mod tests {
     }
 
     #[test]
+    fn stream_read_write_constraints_enforced() {
+        let mut tbl = StreamTable::new(StreamRole::Client, 1, 1, 100, 100);
+
+        // Client-initiated uni stream: Client can write, cannot read.
+        let local_uni = tbl.open_local_uni().expect("open local uni");
+        let err = tbl
+            .receive_stream_segment(local_uni, 0, 10, false)
+            .unwrap_err();
+        assert_eq!(err, StreamTableError::StreamNotReadable(local_uni));
+        tbl.write_stream(local_uni, 10)
+            .expect("can write local uni");
+
+        // Server-initiated uni stream: Client can read, cannot write.
+        let remote_uni = StreamId::local(StreamRole::Server, StreamDirection::Unidirectional, 0);
+        tbl.accept_remote_stream(remote_uni)
+            .expect("accept remote uni");
+        let err = tbl.write_stream(remote_uni, 10).unwrap_err();
+        assert_eq!(err, StreamTableError::StreamNotWritable(remote_uni));
+        tbl.receive_stream_segment(remote_uni, 0, 10, false)
+            .expect("can read remote uni");
+    }
+
+    #[test]
     fn stream_table_error_debug_clone_eq_display() {
         let e1 = StreamTableError::DuplicateStream(StreamId(0));
         let e2 = StreamTableError::UnknownStream(StreamId(1));
         let e3 = StreamTableError::InvalidRemoteStream(StreamId(2));
+        let e4 = StreamTableError::StreamNotWritable(StreamId(3));
+        let e5 = StreamTableError::StreamNotReadable(StreamId(4));
         assert!(format!("{e1:?}").contains("DuplicateStream"));
         assert!(format!("{e1}").contains("duplicate stream"));
         assert!(format!("{e2}").contains("unknown stream"));
         assert!(format!("{e3}").contains("invalid remote stream"));
+        assert!(format!("{e4}").contains("stream not writable"));
+        assert!(format!("{e5}").contains("stream not readable"));
         assert_eq!(e1.clone(), e1);
         assert_ne!(e1, e2);
         let err: &dyn std::error::Error = &e1;

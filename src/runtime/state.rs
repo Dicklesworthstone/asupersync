@@ -832,7 +832,16 @@ impl RuntimeState {
     }
 
     /// Creates a root region and returns its ID.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if a root region already exists (double-init guard).
     pub fn create_root_region(&mut self, budget: Budget) -> RegionId {
+        debug_assert!(
+            self.root_region.is_none(),
+            "create_root_region called twice; previous root: {:?}",
+            self.root_region
+        );
         let id = self.regions.create_root(budget, self.now);
 
         self.root_region = Some(id);

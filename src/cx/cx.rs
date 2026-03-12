@@ -2074,7 +2074,9 @@ impl<Caps> Cx<Caps> {
         if futures.is_empty() {
             return std::future::pending().await;
         }
-        let (res, _) = SelectAll::new(futures).await;
+        let (res, _) = SelectAll::new(futures)
+            .await
+            .map_err(|_| JoinError::PolledAfterCompletion)?;
         Ok(res)
     }
 

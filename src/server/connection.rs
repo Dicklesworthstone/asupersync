@@ -3,7 +3,7 @@
 //! Provides [`ConnectionManager`] for tracking active connections with capacity limits,
 //! and [`ConnectionGuard`] for RAII-based connection deregistration.
 
-use crate::combinator::select::{Either, Select};
+use crate::combinator::select::{Either, Select, SelectError};
 use crate::server::shutdown::{ShutdownPhase, ShutdownSignal};
 use crate::sync::Notify;
 use crate::types::Time;
@@ -295,7 +295,10 @@ impl ConnectionManager {
                 let sleep = self.shutdown_signal.wait_until(deadline);
                 let mut sleep = std::pin::pin!(sleep);
                 match Select::new(notified, sleep.as_mut()).await {
-                    Either::Left(()) | Either::Right(()) => {}
+                    Ok(Either::Left(()) | Either::Right(())) => {}
+                    Err(SelectError::PolledAfterCompletion) => {
+                        unreachable!("fresh select future should not be repolled")
+                    }
                 }
             } else {
                 notified.await;

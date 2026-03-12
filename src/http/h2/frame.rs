@@ -655,6 +655,18 @@ impl SettingsFrame {
                 return Err(H2Error::protocol("SETTINGS_ENABLE_PUSH must be 0 or 1"));
             }
 
+            // RFC 7540 Section 6.5.2: SETTINGS_INITIAL_WINDOW_SIZE MUST be <= 2^31-1
+            if id == 0x4 && value > 0x7fff_ffff {
+                return Err(H2Error::flow_control(
+                    "SETTINGS_INITIAL_WINDOW_SIZE exceeds maximum",
+                ));
+            }
+
+            // RFC 7540 Section 6.5.2: SETTINGS_MAX_FRAME_SIZE MUST be within bounds
+            if id == 0x5 && !(MIN_MAX_FRAME_SIZE..=MAX_FRAME_SIZE).contains(&value) {
+                return Err(H2Error::protocol("SETTINGS_MAX_FRAME_SIZE out of bounds"));
+            }
+
             if let Some(setting) = Setting::from_id_value(id, value) {
                 settings.push(setting);
             }

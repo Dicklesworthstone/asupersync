@@ -8,13 +8,10 @@
 use crate::cx::Cx;
 use crate::signal::{ShutdownController, ShutdownReceiver};
 use crate::sync::Notify;
-use crate::time::{TimerDriverHandle, sleep_until, wall_now};
+use crate::time::{Sleep, TimerDriverHandle, sleep_until, wall_now};
 use crate::types::Time;
-use std::future::poll_fn;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::task::Poll;
 use std::time::Duration;
 
 #[derive(Clone)]
@@ -170,16 +167,14 @@ impl ShutdownSignal {
     }
 
     pub(crate) async fn wait_until(&self, deadline: Time) {
-        let mut sleep = sleep_until(deadline);
-        poll_fn(|cx| {
-            if sleep.poll_with_time(self.current_time()).is_ready() {
-                return Poll::Ready(());
+        match &self.state.time_source {
+            ShutdownTimeSource::Custom(time_getter) => {
+                Sleep::with_time_getter(deadline, *time_getter).await;
             }
-
-            let _ = Pin::new(&mut sleep).poll(cx);
-            Poll::Pending
-        })
-        .await;
+            _ => {
+                sleep_until(deadline).await;
+            }
+        }
     }
 
     /// Returns the current shutdown phase.

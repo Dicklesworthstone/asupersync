@@ -374,35 +374,37 @@ impl Discover for DnsServiceDiscovery {
     type Error = DnsDiscoveryError;
 
     fn poll_discover(&self) -> Result<Vec<Change<SocketAddr>>, DnsDiscoveryError> {
-        let mut state = self.state.lock();
         let now = (self.config.time_getter)();
+        {
+            let mut state = self.state.lock();
+            if !self.needs_resolve(now, &state) {
+                return Ok(Vec::new());
+            }
 
-        if !self.needs_resolve(now, &state) {
-            return Ok(Vec::new());
+            // Anchor the cooldown to the decision point before invoking the
+            // resolver so concurrent readers do not block behind DNS latency.
+            state.last_resolve = Some(now);
         }
 
-        // Perform resolution.
-        let new_addrs = match self.resolve() {
-            Ok(addrs) => {
+        let resolution = self.resolve();
+        let mut state = self.state.lock();
+        let result = match resolution {
+            Ok(new_addrs) => {
                 state.resolve_count += 1;
-                state.last_resolve = Some(now);
-                addrs
+                let changes = dns_changes(&state.current, &new_addrs);
+                state.current = new_addrs;
+                Ok(changes)
             }
             Err(e) => {
                 // Failures participate in the same cooldown as successful
                 // resolutions so callers that poll frequently do not hot-loop
                 // on an unhealthy hostname.
                 state.error_count += 1;
-                state.last_resolve = Some(now);
-                return Err(DnsDiscoveryError::Resolve(e));
+                Err(DnsDiscoveryError::Resolve(e))
             }
         };
-
-        let changes = dns_changes(&state.current, &new_addrs);
-
-        state.current = new_addrs;
         drop(state);
-        Ok(changes)
+        result
     }
 
     fn endpoints(&self) -> Vec<SocketAddr> {
@@ -429,7 +431,8 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::collections::VecDeque;
-    use std::sync::{Arc, Mutex as StdMutex};
+    use std::sync::{Arc, Mutex as StdMutex, mpsc};
+    use std::thread;
 
     thread_local! {
         static TEST_NOW: Cell<u64> = const { Cell::new(0) };
@@ -695,6 +698,61 @@ mod tests {
             ]
         );
         crate::test_complete!("dns_discovery_endpoints_follow_custom_resolver");
+    }
+
+    #[test]
+    fn dns_discovery_custom_resolver_can_reenter_without_deadlock() {
+        init_test("dns_discovery_custom_resolver_can_reenter_without_deadlock");
+        let discovery_handle = Arc::new(StdMutex::new(None::<Arc<DnsServiceDiscovery>>));
+        let discovery_handle_for_resolver = Arc::clone(&discovery_handle);
+        let observed = Arc::new(StdMutex::new(None::<(u64, Vec<SocketAddr>)>));
+        let observed_for_resolver = Arc::clone(&observed);
+        let addrs = socket_set(&["127.0.0.1:80"]);
+
+        let discovery = Arc::new(DnsServiceDiscovery::new(
+            DnsDiscoveryConfig::new("service.test", 80).with_resolver(move |_, _| {
+                let discovery = discovery_handle_for_resolver
+                    .lock()
+                    .expect("discovery handle lock poisoned")
+                    .as_ref()
+                    .cloned()
+                    .expect("discovery handle installed before poll");
+                let snapshot = (discovery.resolve_count(), discovery.endpoints());
+                *observed_for_resolver
+                    .lock()
+                    .expect("observed snapshot lock poisoned") = Some(snapshot);
+                Ok(addrs.clone())
+            }),
+        ));
+        *discovery_handle
+            .lock()
+            .expect("discovery handle lock poisoned") = Some(Arc::clone(&discovery));
+
+        let (tx, rx) = mpsc::channel();
+        let discovery_for_thread = Arc::clone(&discovery);
+        let worker = thread::spawn(move || {
+            let result = discovery_for_thread.poll_discover();
+            tx.send(result)
+                .expect("reentrant resolver test channel should be open");
+        });
+
+        let result = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("poll_discover should not deadlock when the resolver re-enters discovery");
+        worker
+            .join()
+            .expect("reentrant resolver worker should not panic");
+
+        assert_eq!(
+            result.unwrap(),
+            vec![Change::Insert("127.0.0.1:80".parse().unwrap())]
+        );
+        assert_eq!(
+            *observed.lock().expect("observed snapshot lock poisoned"),
+            Some((0, Vec::new()))
+        );
+        assert_eq!(discovery.resolve_count(), 1);
+        crate::test_complete!("dns_discovery_custom_resolver_can_reenter_without_deadlock");
     }
 
     #[test]

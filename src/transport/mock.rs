@@ -265,12 +265,7 @@ impl Delay {
     }
 
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-        if self.sleep.poll_with_time((self.time_getter)()).is_ready() {
-            return Poll::Ready(());
-        }
-
-        let _ = Pin::new(&mut self.sleep).poll(cx);
-        Poll::Pending
+        Pin::new(&mut self.sleep).poll(cx)
     }
 }
 

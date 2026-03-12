@@ -159,9 +159,10 @@ pub struct BrowserStreamConfig {
     /// Maximum total bytes writable to this stream.
     pub max_total_write_bytes: u64,
 
-    /// Whether to allow partial writes (true) or require all-or-nothing (false).
-    /// Partial writes are the norm for `AsyncWrite`; all-or-nothing is for
-    /// message-oriented transports like WebSocket.
+    /// Whether to allow partial writes (true) or fail closed after a short write (false).
+    /// Partial writes are the norm for `AsyncWrite`; when disabled, any committed
+    /// prefix is still surfaced via the returned byte count and the stream is
+    /// moved to `Errored` so later writes cannot silently continue.
     pub allow_partial_writes: bool,
 }
 
@@ -1067,15 +1068,23 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for BrowserWritableStream<W> {
 
         match &result {
             Poll::Ready(Ok(n)) => {
-                if !this.config.allow_partial_writes && *n < to_write {
-                    this.state = BrowserStreamState::Errored;
-                    return Poll::Ready(Err(BrowserStreamError::HostError(format!(
-                        "partial write not permitted by policy: wrote {n} of {to_write} bytes"
-                    ))
-                    .into()));
-                }
                 this.total_written = this.total_written.saturating_add(*n as u64);
                 this.buffered = this.buffered.saturating_add(*n);
+                if !this.config.allow_partial_writes && *n < to_write {
+                    this.state = BrowserStreamState::Errored;
+                    if *n == 0 {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::WriteZero,
+                            format!(
+                                "partial write not permitted by policy: wrote {n} of {to_write} bytes"
+                            ),
+                        )));
+                    }
+
+                    // Surface the committed prefix honestly, then fail closed on
+                    // subsequent writes via the errored state.
+                    return Poll::Ready(Ok(*n));
+                }
             }
             Poll::Ready(Err(_)) => {
                 this.state = BrowserStreamState::Errored;
@@ -1677,7 +1686,7 @@ mod tests {
     }
 
     #[test]
-    fn writable_stream_rejects_partial_write_when_disallowed() {
+    fn writable_stream_partial_write_when_disallowed_surfaces_prefix_and_errors_later() {
         let sink = PartialSink {
             data: Vec::new(),
             max_chunk: 2,
@@ -1691,8 +1700,14 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
 
         let result = Pin::new(&mut stream).poll_write(&mut cx, b"hello");
-        assert!(matches!(result, Poll::Ready(Err(_))));
+        assert!(matches!(result, Poll::Ready(Ok(2))));
         assert_eq!(stream.state(), BrowserStreamState::Errored);
+        assert_eq!(stream.total_written(), 2);
+        assert_eq!(stream.get_ref().data, b"he");
+
+        let retry = Pin::new(&mut stream).poll_write(&mut cx, b"llo");
+        assert!(matches!(retry, Poll::Ready(Err(_))));
+        assert_eq!(stream.get_ref().data, b"he");
     }
 
     // -- BrowserStreamIoCap --

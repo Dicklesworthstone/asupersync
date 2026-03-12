@@ -221,9 +221,14 @@ impl<F: Future + Unpin> TimeoutFuture<F> {
         }
 
         // Register the waker with the underlying sleep future
-        let _ = Pin::new(&mut self.sleep).poll(cx);
-
-        Poll::Pending
+        match Pin::new(&mut self.sleep).poll(cx) {
+            Poll::Ready(()) => {
+                self.completed = true;
+                self.timed_out = true;
+                Poll::Ready(Err(Elapsed::new(self.sleep.deadline())))
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 

@@ -7,7 +7,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use super::ShutdownReceiver;
-use crate::combinator::{Either, Select};
+use crate::combinator::{Either, Select, SelectError};
 use crate::time::{TimeoutFuture, wall_now};
 use crate::tracing_compat::{info, warn};
 use crate::types::Time;
@@ -110,8 +110,11 @@ where
     // cleanup via scope finalizers. If `fut` holds obligations, those are
     // resolved by the enclosing region's close protocol.
     match Select::new(pinned_fut, pinned_shutdown).await {
-        Either::Left(result) => GracefulOutcome::Completed(result),
-        Either::Right(()) => GracefulOutcome::ShutdownSignaled,
+        Ok(Either::Left(result)) => GracefulOutcome::Completed(result),
+        Ok(Either::Right(())) => GracefulOutcome::ShutdownSignaled,
+        Err(SelectError::PolledAfterCompletion) => {
+            unreachable!("fresh select future should not be repolled")
+        }
     }
 }
 
@@ -220,8 +223,8 @@ impl GracefulBuilder {
         let mut shutdown_fut = Box::pin(async { shutdown.wait().await });
 
         match Select::new(fut.as_mut(), shutdown_fut.as_mut()).await {
-            Either::Left(result) => GracefulOutcome::Completed(result),
-            Either::Right(()) => {
+            Ok(Either::Left(result)) => GracefulOutcome::Completed(result),
+            Ok(Either::Right(())) => {
                 if config.log_events {
                     info!(grace_period = ?config.grace_period, "graceful shutdown signaled");
                 }
@@ -257,6 +260,9 @@ impl GracefulBuilder {
                         GracefulOutcome::Completed(result)
                     },
                 )
+            }
+            Err(SelectError::PolledAfterCompletion) => {
+                unreachable!("fresh select future should not be repolled")
             }
         }
     }

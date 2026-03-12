@@ -429,13 +429,19 @@ mod tests {
         );
 
         let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = Pin::new(&mut future).poll(&mut cx);
+            Pin::new(&mut future).poll(&mut cx)
         }));
+        let payload = second.expect_err("repoll after completion must panic");
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(ToString::to_string)
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
         crate::assert_with_log!(
-            second.is_err(),
-            "second poll panics fail-closed",
+            message.contains("Any polled after completion"),
+            "second poll fails closed",
             true,
-            second
+            message.contains("Any polled after completion")
         );
         crate::test_complete!("any_repoll_panics_after_completion");
     }
@@ -456,13 +462,19 @@ mod tests {
         );
 
         let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = Pin::new(&mut future).poll(&mut cx);
+            Pin::new(&mut future).poll(&mut cx)
         }));
+        let payload = second.expect_err("repoll after completion must panic");
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(ToString::to_string)
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
         crate::assert_with_log!(
-            second.is_err(),
-            "second poll panics fail-closed",
+            message.contains("All polled after completion"),
+            "second poll fails closed",
             true,
-            second
+            message.contains("All polled after completion")
         );
         crate::test_complete!("all_repoll_panics_after_completion");
     }

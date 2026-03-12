@@ -799,7 +799,8 @@ impl GlobalProtocol {
                 self.validate_interaction(else_branch, declared, loop_labels, errors);
             }
             Interaction::Loop { label, body } => {
-                if !loop_labels.insert(label.clone()) {
+                let inserted = loop_labels.insert(label.clone());
+                if !inserted {
                     errors.push(ValidationError::DuplicateLoopLabel {
                         label: label.clone(),
                     });
@@ -809,7 +810,11 @@ impl GlobalProtocol {
                 // leak into sibling interactions (e.g. Seq siblings, Choice
                 // branches, Par branches).  Only the body of the Loop should
                 // be able to `continue` to this label.
-                loop_labels.remove(label);
+                // Only remove if we successfully inserted — a duplicate label
+                // must not remove the outer loop's entry.
+                if inserted {
+                    loop_labels.remove(label);
+                }
             }
             Interaction::Continue { label } => {
                 if !loop_labels.contains(label) {

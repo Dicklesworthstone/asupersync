@@ -9,7 +9,7 @@
 //! - `SymbolValidityWindow`: Epoch range for symbol validity
 
 use crate::combinator::{
-    Bulkhead, BulkheadError, CircuitBreaker, CircuitBreakerError, Either, Select,
+    Bulkhead, BulkheadError, CircuitBreaker, CircuitBreakerError, Either, Select, SelectError,
 };
 use crate::error::{Error, ErrorKind};
 use crate::observability::LogEntry;
@@ -1311,7 +1311,8 @@ where
     TS: TimeSource,
     ES: EpochSource,
 {
-    type Output = Either<Result<A::Output, EpochError>, Result<B::Output, EpochError>>;
+    type Output =
+        Result<Either<Result<A::Output, EpochError>, Result<B::Output, EpochError>>, SelectError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         Pin::new(&mut self.inner).poll(cx)
@@ -2258,7 +2259,7 @@ mod tests {
             source,
         );
         let result = block_on(fut);
-        let ok = matches!(result, Either::Left(Ok(1)));
+        let ok = matches!(result, Ok(Either::Left(Ok(1))));
         crate::assert_with_log!(ok, "epoch_select left result", true, ok);
         crate::test_complete!("test_epoch_select_left");
     }

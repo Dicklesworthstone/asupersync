@@ -889,7 +889,11 @@ impl std::fmt::Display for ReplayCommand {
 fn build_command_line(program: &str, args: &[String], env: &[ReplayEnvVar]) -> String {
     let mut parts = Vec::new();
     for var in env {
-        parts.push(format!("{}={}", var.key, shell_escape(&var.value)));
+        parts.push(format!(
+            "{}={}",
+            shell_escape(&var.key),
+            shell_escape(&var.value)
+        ));
     }
     parts.push(program.to_string());
     for arg in args {
@@ -1113,7 +1117,7 @@ impl CrashPackWriter for MemoryCrashPackWriter {
 fn wall_clock_nanos() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos() as u64)
+        .map_or(0, |d| d.as_nanos().min(u128::from(u64::MAX)) as u64)
 }
 
 // =============================================================================

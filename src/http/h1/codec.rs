@@ -326,11 +326,15 @@ fn parse_header_line_bounds(line_bytes: &[u8]) -> Result<(usize, usize, usize), 
     }
 
     let mut value_start = colon + 1;
-    while value_start < line_bytes.len() && line_bytes[value_start].is_ascii_whitespace() {
+    while value_start < line_bytes.len()
+        && (line_bytes[value_start] == b' ' || line_bytes[value_start] == b'\t')
+    {
         value_start += 1;
     }
     let mut value_end = line_bytes.len();
-    while value_end > value_start && line_bytes[value_end - 1].is_ascii_whitespace() {
+    while value_end > value_start
+        && (line_bytes[value_end - 1] == b' ' || line_bytes[value_end - 1] == b'\t')
+    {
         value_end -= 1;
     }
     for &b in &line_bytes[value_start..value_end] {

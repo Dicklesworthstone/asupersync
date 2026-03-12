@@ -46,9 +46,10 @@ where
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<C> {
-        if self.completed {
-            return Poll::Ready(C::default());
-        }
+        assert!(
+            !self.completed,
+            "Collect polled after completion; terminal output cannot be replayed soundly"
+        );
         let mut collected_this_poll = 0usize;
         loop {
             match Pin::new(&mut self.stream).poll_next(cx) {
@@ -75,8 +76,9 @@ mod tests {
     use super::*;
     use crate::stream::iter;
     use std::collections::HashSet;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
 
     struct NoopWaker;
@@ -122,6 +124,43 @@ mod tests {
             }
 
             let item = self.next;
+            self.next += 1;
+            Poll::Ready(Some(item))
+        }
+    }
+
+    #[derive(Debug)]
+    struct PanicOnRepollStream {
+        items: Vec<usize>,
+        next: usize,
+        completed: bool,
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl PanicOnRepollStream {
+        fn new(items: Vec<usize>, polls: Arc<AtomicUsize>) -> Self {
+            Self {
+                items,
+                next: 0,
+                completed: false,
+                polls,
+            }
+        }
+    }
+
+    impl Stream for PanicOnRepollStream {
+        type Item = usize;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            assert!(!self.completed, "inner stream repolled after completion");
+
+            if self.next >= self.items.len() {
+                self.completed = true;
+                return Poll::Ready(None);
+            }
+
+            let item = self.items[self.next];
             self.next += 1;
             Poll::Ready(Some(item))
         }
@@ -254,5 +293,46 @@ mod tests {
             second
         );
         crate::test_complete!("collect_yields_after_budget_on_always_ready_stream");
+    }
+
+    #[test]
+    fn collect_repoll_after_completion_panics_without_repolling_upstream() {
+        init_test("collect_repoll_after_completion_panics_without_repolling_upstream");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut future = Collect::new(
+            PanicOnRepollStream::new(vec![1, 2, 3], Arc::clone(&polls)),
+            Vec::new(),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut future).poll(&mut cx);
+        crate::assert_with_log!(
+            matches!(&first, Poll::Ready(collected) if collected == &vec![1, 2, 3]),
+            "first poll collects terminal output",
+            &vec![1, 2, 3],
+            first
+        );
+        crate::assert_with_log!(
+            polls.load(Ordering::SeqCst) == 4,
+            "upstream polled through terminal completion exactly once",
+            4,
+            polls.load(Ordering::SeqCst)
+        );
+
+        let repoll = catch_unwind(AssertUnwindSafe(|| Pin::new(&mut future).poll(&mut cx)));
+        crate::assert_with_log!(
+            repoll.is_err(),
+            "re-poll after completion must fail closed",
+            true,
+            repoll.is_err()
+        );
+        crate::assert_with_log!(
+            polls.load(Ordering::SeqCst) == 4,
+            "completed collect must not re-poll upstream",
+            4,
+            polls.load(Ordering::SeqCst)
+        );
+        crate::test_complete!("collect_repoll_after_completion_panics_without_repolling_upstream");
     }
 }

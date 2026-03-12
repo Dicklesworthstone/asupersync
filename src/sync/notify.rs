@@ -930,7 +930,11 @@ mod tests {
             // Wait for the main thread to run notify_one and then poll again.
             rx_poll.recv().expect("recv poll signal");
 
-            let second_ready = poll_once(&mut fut).is_ready();
+            let second_ready = if first_ready {
+                true
+            } else {
+                poll_once(&mut fut).is_ready()
+            };
             tx_ready.send(second_ready).expect("send second_ready");
         });
 

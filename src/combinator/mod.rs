@@ -87,6 +87,7 @@ pub use retry::{
 };
 pub use select::{
     Either, Select, SelectAll, SelectAllDrain, SelectAllDrainError, SelectAllDrainResult,
+    SelectAllError, SelectError,
 };
 pub use timeout::{
     TimedError, TimedResult, Timeout, TimeoutConfig, TimeoutError, effective_deadline,

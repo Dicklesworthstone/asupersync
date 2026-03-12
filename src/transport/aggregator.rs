@@ -1241,8 +1241,8 @@ impl ObjectReorderState {
 /// Buffers and reorders symbols to deliver in sequence.
 #[derive(Debug)]
 pub struct SymbolReorderer {
-    /// Per-object reordering state.
-    objects: RwLock<HashMap<ObjectId, ObjectReorderState>>,
+    /// Per-object-and-block reordering state.
+    objects: RwLock<HashMap<(ObjectId, u8), ObjectReorderState>>,
 
     /// Configuration.
     config: ReordererConfig,
@@ -1279,11 +1279,12 @@ impl SymbolReorderer {
         }
 
         let object_id = symbol.object_id();
+        let sbn = symbol.sbn();
         let seq = symbol.esi();
 
         let mut objects = self.objects.write();
         let state = objects
-            .entry(object_id)
+            .entry((object_id, sbn))
             .or_insert_with(ObjectReorderState::new);
 
         let mut ready = Vec::with_capacity(1);
@@ -1411,9 +1412,11 @@ impl SymbolReorderer {
         }
     }
 
-    /// Clears state for an object.
+    /// Clears state for a specific object.
     pub fn clear_object(&self, object_id: ObjectId) {
-        self.objects.write().remove(&object_id);
+        self.objects
+            .write()
+            .retain(|(id, _sbn), _| *id != object_id);
     }
 }
 

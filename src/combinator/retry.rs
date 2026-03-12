@@ -194,7 +194,7 @@ pub fn calculate_delay(policy: &RetryPolicy, attempt: u32, rng: Option<&mut DetR
     }
 
     // Calculate base delay with exponential backoff
-    let exponent = attempt.saturating_sub(1);
+    let exponent = attempt.saturating_sub(1).min(i32::MAX as u32);
     let multiplier_factor = policy.multiplier.powi(exponent as i32);
     let base_nanos = policy.initial_delay.as_nanos() as f64 * multiplier_factor;
 
@@ -263,7 +263,19 @@ pub fn total_delay_budget(policy: &RetryPolicy) -> Duration {
         let delay = calculate_delay(policy, attempt, None);
         // With jitter, actual delay could be up to (1 + jitter) * base
         let max_delay_nanos = clamp_nanos_f64(delay.as_nanos() as f64 * (1.0 + policy.jitter));
-        total = total.saturating_add(Duration::from_nanos(max_delay_nanos));
+        let additional = Duration::from_nanos(max_delay_nanos);
+
+        total = total.saturating_add(additional);
+
+        if delay == policy.max_delay || total == Duration::MAX {
+            let remaining_attempts = policy.max_attempts - attempt;
+            if let Some(rest) = additional.checked_mul(remaining_attempts) {
+                total = total.saturating_add(rest);
+            } else {
+                total = Duration::MAX;
+            }
+            break;
+        }
     }
     total
 }

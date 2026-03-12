@@ -16,6 +16,7 @@ pub struct Then<S, Fut, F> {
     f: F,
     #[pin]
     pending: Option<Fut>,
+    done: bool,
 }
 
 impl<S, Fut, F> Then<S, Fut, F> {
@@ -24,6 +25,7 @@ impl<S, Fut, F> Then<S, Fut, F> {
             stream,
             f,
             pending: None,
+            done: false,
         }
     }
 }
@@ -39,6 +41,9 @@ where
     #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
+        if *this.done {
+            return Poll::Ready(None);
+        }
 
         loop {
             if let Some(fut) = this.pending.as_mut().as_pin_mut() {
@@ -56,13 +61,19 @@ where
                     let fut = (this.f)(item);
                     this.pending.set(Some(fut));
                 }
-                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(None) => {
+                    *this.done = true;
+                    return Poll::Ready(None);
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.done {
+            return (0, Some(0));
+        }
         let (lower, upper) = self.stream.size_hint();
         let pending_len = usize::from(self.pending.is_some());
         (
@@ -77,7 +88,7 @@ mod tests {
     use super::*;
     use crate::stream::iter;
     use std::sync::Arc;
-    use std::task::{Wake, Waker};
+    use std::task::{Context, Poll, Wake, Waker};
 
     struct NoopWaker;
     impl Wake for NoopWaker {
@@ -85,6 +96,24 @@ mod tests {
     }
     fn noop_waker() -> Waker {
         Waker::from(Arc::new(NoopWaker))
+    }
+
+    #[derive(Debug, Default)]
+    struct EmptyThenPanics {
+        completed: bool,
+    }
+
+    impl Stream for EmptyThenPanics {
+        type Item = i32;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            assert!(
+                !self.completed,
+                "then inner stream repolled after completion"
+            );
+            self.completed = true;
+            Poll::Ready(None)
+        }
     }
 
     fn collect_then<S, Fut, F>(stream: Then<S, Fut, F>) -> Vec<Fut::Output>
@@ -135,5 +164,17 @@ mod tests {
         let s = Then::new(iter(vec![42]), |x: i32| async move { x + 1 });
         let items = collect_then(s);
         assert_eq!(items, vec![43]);
+    }
+
+    #[test]
+    fn test_then_does_not_repoll_exhausted_upstream() {
+        let stream = Then::new(EmptyThenPanics::default(), |x: i32| async move { x });
+        let mut stream = std::pin::pin!(stream);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(stream.as_mut().poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(stream.as_mut().poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(stream.size_hint(), (0, Some(0)));
     }
 }

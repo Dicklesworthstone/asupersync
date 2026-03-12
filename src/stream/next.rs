@@ -37,7 +37,9 @@ where
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<S::Item>> {
-        assert!(!self.done, "Next future polled after completion");
+        if self.done {
+            return Poll::Ready(None);
+        }
         let poll = Pin::new(&mut *self.stream).poll_next(cx);
         if poll.is_ready() {
             self.done = true;
@@ -50,7 +52,6 @@ where
 mod tests {
     use super::*;
     use crate::stream::iter;
-    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
@@ -117,7 +118,7 @@ mod tests {
     }
 
     #[test]
-    fn next_repoll_after_ready_some_panics() {
+    fn next_repoll_after_ready_some_returns_none() {
         let mut stream = iter(vec![1i32]);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -128,12 +129,15 @@ mod tests {
             _ => panic!("expected Ready(Some(1))"),
         }
 
-        let repoll = catch_unwind(AssertUnwindSafe(|| Pin::new(&mut future).poll(&mut cx)));
-        assert!(repoll.is_err(), "repoll after completion must panic");
+        let repoll = Pin::new(&mut future).poll(&mut cx);
+        assert!(
+            matches!(repoll, Poll::Ready(None)),
+            "repoll after completion must return None"
+        );
     }
 
     #[test]
-    fn next_repoll_after_ready_none_panics() {
+    fn next_repoll_after_ready_none_returns_none() {
         let mut stream = iter(Vec::<i32>::new());
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -144,7 +148,10 @@ mod tests {
             _ => panic!("expected Ready(None)"),
         }
 
-        let repoll = catch_unwind(AssertUnwindSafe(|| Pin::new(&mut future).poll(&mut cx)));
-        assert!(repoll.is_err(), "repoll after completion must panic");
+        let repoll = Pin::new(&mut future).poll(&mut cx);
+        assert!(
+            matches!(repoll, Poll::Ready(None)),
+            "repoll after completion must return None"
+        );
     }
 }

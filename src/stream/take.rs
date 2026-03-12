@@ -32,7 +32,9 @@ impl<S: Stream> Stream for Take<S> {
     #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
-        assert!(!*this.done, "Take polled after completion");
+        if *this.done {
+            return Poll::Ready(None);
+        }
         if *this.remaining == 0 {
             *this.done = true;
             return Poll::Ready(None);
@@ -97,7 +99,9 @@ where
     #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
-        assert!(!*this.done, "TakeWhile polled after completion");
+        if *this.done {
+            return Poll::Ready(None);
+        }
 
         let next = this.stream.poll_next(cx);
         match next {
@@ -130,7 +134,6 @@ where
 mod tests {
     use super::*;
     use crate::stream::{StreamExt, iter};
-    use std::panic::AssertUnwindSafe;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Wake, Waker};
@@ -300,9 +303,13 @@ mod tests {
         let hint = stream.as_ref().get_ref().size_hint();
         crate::assert_with_log!(hint == (0, Some(0)), "size_hint done", (0, Some(0)), hint);
 
-        let fourth =
-            std::panic::catch_unwind(AssertUnwindSafe(|| stream.as_mut().poll_next(&mut cx)));
-        crate::assert_with_log!(fourth.is_err(), "fourth panics", true, fourth.is_err());
+        let fourth = stream.as_mut().poll_next(&mut cx);
+        crate::assert_with_log!(
+            fourth == Poll::Ready(None),
+            "fourth returns None",
+            Poll::Ready(None::<i32>),
+            fourth
+        );
         crate::test_complete!("test_take_while_done_behavior");
     }
 
@@ -334,8 +341,8 @@ mod tests {
     }
 
     #[test]
-    fn test_take_repoll_after_zero_limit_panics_without_polling_inner() {
-        init_test("test_take_repoll_after_zero_limit_panics_without_polling_inner");
+    fn test_take_repoll_after_zero_limit_returns_none_without_polling_inner() {
+        init_test("test_take_repoll_after_zero_limit_returns_none_without_polling_inner");
         let polls = Arc::new(AtomicUsize::new(0));
         let stream = Take::new(PollCountingEmptyStream::new(Arc::clone(&polls)), 0);
         let mut stream = std::pin::pin!(stream);
@@ -346,21 +353,25 @@ mod tests {
             stream.as_mut().poll_next(&mut cx),
             Poll::Ready(None)
         ));
-        let second =
-            std::panic::catch_unwind(AssertUnwindSafe(|| stream.as_mut().poll_next(&mut cx)));
+        let second = stream.as_mut().poll_next(&mut cx);
 
-        assert!(second.is_err(), "second poll should panic fail-closed");
+        assert!(
+            matches!(second, Poll::Ready(None)),
+            "second poll should return None"
+        );
         assert_eq!(
             polls.load(Ordering::SeqCst),
             0,
             "zero-limit take must not touch the inner stream"
         );
-        crate::test_complete!("test_take_repoll_after_zero_limit_panics_without_polling_inner");
+        crate::test_complete!(
+            "test_take_repoll_after_zero_limit_returns_none_without_polling_inner"
+        );
     }
 
     #[test]
-    fn test_take_repoll_after_inner_completion_panics_without_repolling_inner() {
-        init_test("test_take_repoll_after_inner_completion_panics_without_repolling_inner");
+    fn test_take_repoll_after_inner_completion_returns_none_without_repolling_inner() {
+        init_test("test_take_repoll_after_inner_completion_returns_none_without_repolling_inner");
         let polls = Arc::new(AtomicUsize::new(0));
         let stream = Take::new(PollCountingEmptyStream::new(Arc::clone(&polls)), 1);
         let mut stream = std::pin::pin!(stream);
@@ -377,23 +388,25 @@ mod tests {
             "inner stream should be polled once to discover exhaustion"
         );
 
-        let second =
-            std::panic::catch_unwind(AssertUnwindSafe(|| stream.as_mut().poll_next(&mut cx)));
+        let second = stream.as_mut().poll_next(&mut cx);
 
-        assert!(second.is_err(), "second poll should panic fail-closed");
+        assert!(
+            matches!(second, Poll::Ready(None)),
+            "second poll should return None"
+        );
         assert_eq!(
             polls.load(Ordering::SeqCst),
             1,
             "completed take must not repoll the exhausted inner stream"
         );
         crate::test_complete!(
-            "test_take_repoll_after_inner_completion_panics_without_repolling_inner"
+            "test_take_repoll_after_inner_completion_returns_none_without_repolling_inner"
         );
     }
 
     #[test]
-    fn test_take_while_repoll_after_completion_panics_without_repolling_inner() {
-        init_test("test_take_while_repoll_after_completion_panics_without_repolling_inner");
+    fn test_take_while_repoll_after_completion_returns_none_without_repolling_inner() {
+        init_test("test_take_while_repoll_after_completion_returns_none_without_repolling_inner");
         let polls = Arc::new(AtomicUsize::new(0));
         let stream = TakeWhile::new(
             PollCountingSingleStream::new(3, Arc::clone(&polls)),
@@ -413,17 +426,19 @@ mod tests {
             "predicate-failing item should be observed exactly once"
         );
 
-        let second =
-            std::panic::catch_unwind(AssertUnwindSafe(|| stream.as_mut().poll_next(&mut cx)));
+        let second = stream.as_mut().poll_next(&mut cx);
 
-        assert!(second.is_err(), "second poll should panic fail-closed");
+        assert!(
+            matches!(second, Poll::Ready(None)),
+            "second poll should return None"
+        );
         assert_eq!(
             polls.load(Ordering::SeqCst),
             1,
             "completed take_while must not repoll the inner stream"
         );
         crate::test_complete!(
-            "test_take_while_repoll_after_completion_panics_without_repolling_inner"
+            "test_take_while_repoll_after_completion_returns_none_without_repolling_inner"
         );
     }
 }

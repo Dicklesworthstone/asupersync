@@ -17,12 +17,17 @@ pub struct Map<S, F> {
     #[pin]
     stream: S,
     f: F,
+    exhausted: bool,
 }
 
 impl<S, F> Map<S, F> {
     /// Creates a new `Map` stream.
     pub(crate) fn new(stream: S, f: F) -> Self {
-        Self { stream, f }
+        Self {
+            stream,
+            f,
+            exhausted: false,
+        }
     }
 
     /// Returns a reference to the underlying stream.
@@ -51,15 +56,26 @@ where
     #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<T>> {
         let this = self.project();
+        if *this.exhausted {
+            return Poll::Ready(None);
+        }
+
         match this.stream.poll_next(cx) {
             Poll::Ready(Some(item)) => Poll::Ready(Some((this.f)(item))),
-            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Ready(None) => {
+                *this.exhausted = true;
+                Poll::Ready(None)
+            }
             Poll::Pending => Poll::Pending,
         }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.stream.size_hint()
+        if self.exhausted {
+            (0, Some(0))
+        } else {
+            self.stream.size_hint()
+        }
     }
 }
 
@@ -68,6 +84,7 @@ mod tests {
     use super::*;
     use crate::stream::iter;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Wake, Waker};
 
     struct NoopWaker;
@@ -83,6 +100,27 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[derive(Debug)]
+    struct EmptyThenPanics {
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl EmptyThenPanics {
+        fn new(polls: Arc<AtomicUsize>) -> Self {
+            Self { polls }
+        }
+    }
+
+    impl Stream for EmptyThenPanics {
+        type Item = i32;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let polls = self.polls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(polls, 0, "map inner stream repolled after completion");
+            Poll::Ready(None)
+        }
     }
 
     #[test]
@@ -172,5 +210,33 @@ mod tests {
         let stream = Map::new(iter(vec![1, 2, 3]), double as fn(i32) -> i32);
         let dbg = format!("{stream:?}");
         assert!(dbg.contains("Map"));
+    }
+
+    #[test]
+    fn map_does_not_repoll_exhausted_upstream() {
+        init_test("map_does_not_repoll_exhausted_upstream");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut stream = Map::new(EmptyThenPanics::new(Arc::clone(&polls)), |x: i32| x * 2);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+        crate::test_complete!("map_does_not_repoll_exhausted_upstream");
+    }
+
+    #[test]
+    fn map_size_hint_after_exhaustion_is_zero() {
+        init_test("map_size_hint_after_exhaustion_is_zero");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut stream = Map::new(EmptyThenPanics::new(Arc::clone(&polls)), |x: i32| x * 2);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
+        assert_eq!(stream.size_hint(), (0, Some(0)));
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+        crate::test_complete!("map_size_hint_after_exhaustion_is_zero");
     }
 }

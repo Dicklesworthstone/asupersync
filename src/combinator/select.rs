@@ -11,7 +11,7 @@
 //! Callers MUST drain losers after select completes. The canonical pattern:
 //!
 //! ```text
-//! match Select::new(f1, f2).await {
+//! match Select::new(f1, f2).await.expect("fresh select future") {
 //!     Either::Left(val)  => { cancel(loser); await(loser); val }
 //!     Either::Right(val) => { cancel(loser); await(loser); val }
 //! }
@@ -46,6 +46,23 @@ impl<A, B> Either<A, B> {
     }
 }
 
+/// Error returned by [`Select`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectError {
+    /// The future was polled after already returning a terminal result.
+    PolledAfterCompletion,
+}
+
+impl std::fmt::Display for SelectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PolledAfterCompletion => write!(f, "select future polled after completion"),
+        }
+    }
+}
+
+impl std::error::Error for SelectError {}
+
 /// Future for the `select` combinator.
 ///
 /// # Loser-Drain Warning
@@ -74,30 +91,32 @@ impl<A, B> Select<A, B> {
 }
 
 impl<A: Future + Unpin, B: Future + Unpin> Future for Select<A, B> {
-    type Output = Either<A::Output, B::Output>;
+    type Output = Result<Either<A::Output, B::Output>, SelectError>;
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
-        assert!(!this.completed, "Select polled after completion");
+        if this.completed {
+            return Poll::Ready(Err(SelectError::PolledAfterCompletion));
+        }
 
         if this.poll_a_first {
             if let Poll::Ready(val) = Pin::new(&mut this.a).poll(cx) {
                 this.completed = true;
-                return Poll::Ready(Either::Left(val));
+                return Poll::Ready(Ok(Either::Left(val)));
             }
             if let Poll::Ready(val) = Pin::new(&mut this.b).poll(cx) {
                 this.completed = true;
-                return Poll::Ready(Either::Right(val));
+                return Poll::Ready(Ok(Either::Right(val)));
             }
         } else {
             if let Poll::Ready(val) = Pin::new(&mut this.b).poll(cx) {
                 this.completed = true;
-                return Poll::Ready(Either::Right(val));
+                return Poll::Ready(Ok(Either::Right(val)));
             }
             if let Poll::Ready(val) = Pin::new(&mut this.a).poll(cx) {
                 this.completed = true;
-                return Poll::Ready(Either::Left(val));
+                return Poll::Ready(Ok(Either::Left(val)));
             }
         }
 
@@ -134,12 +153,33 @@ impl<F> SelectAll<F> {
     }
 }
 
+/// Error returned by [`SelectAll`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectAllError {
+    /// The future was polled after already returning a terminal result.
+    PolledAfterCompletion,
+}
+
+impl std::fmt::Display for SelectAllError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PolledAfterCompletion => {
+                write!(f, "select_all future polled after completion")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SelectAllError {}
+
 impl<F: Future + Unpin> Future for SelectAll<F> {
-    type Output = (F::Output, usize);
+    type Output = Result<(F::Output, usize), SelectAllError>;
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        assert!(!self.completed, "SelectAll polled after completion");
+        if self.completed {
+            return Poll::Ready(Err(SelectAllError::PolledAfterCompletion));
+        }
 
         let len = self.futures.len();
         if len == 0 {
@@ -151,7 +191,7 @@ impl<F: Future + Unpin> Future for SelectAll<F> {
             let idx = (start + i) % len;
             if let Poll::Ready(v) = Pin::new(&mut self.futures[idx]).poll(cx) {
                 self.completed = true;
-                return Poll::Ready((v, idx));
+                return Poll::Ready(Ok((v, idx)));
             }
         }
 
@@ -336,7 +376,7 @@ mod tests {
         let mut sel = Select::new(left, right);
 
         let result = poll_once(&mut sel);
-        assert!(matches!(result, Poll::Ready(Either::Left(42))));
+        assert!(matches!(result, Poll::Ready(Ok(Either::Left(42)))));
     }
 
     #[test]
@@ -346,7 +386,7 @@ mod tests {
         let mut sel = Select::new(left, right);
 
         let result = poll_once(&mut sel);
-        assert!(matches!(result, Poll::Ready(Either::Right("hello"))));
+        assert!(matches!(result, Poll::Ready(Ok(Either::Right("hello")))));
     }
 
     #[test]
@@ -357,7 +397,7 @@ mod tests {
         let mut sel = Select::new(left, right);
 
         let result = poll_once(&mut sel);
-        assert!(matches!(result, Poll::Ready(Either::Left(1))));
+        assert!(matches!(result, Poll::Ready(Ok(Either::Left(1)))));
     }
 
     #[test]
@@ -377,7 +417,7 @@ mod tests {
         let mut sel = Select::new(left, right);
 
         let result = poll_once(&mut sel);
-        assert!(matches!(result, Poll::Ready(Either::Left(()))));
+        assert!(matches!(result, Poll::Ready(Ok(Either::Left(())))));
     }
 
     #[test]
@@ -388,7 +428,7 @@ mod tests {
 
         let result = poll_once(&mut sel);
         match result {
-            Poll::Ready(Either::Right(s)) => assert_eq!(s, "done"),
+            Poll::Ready(Ok(Either::Right(s))) => assert_eq!(s, "done"),
             other => unreachable!("expected Right(\"done\"), got {other:?}"),
         }
     }
@@ -404,7 +444,7 @@ mod tests {
         let mut outer = Select::new(inner, c);
 
         let result = poll_once(&mut outer);
-        assert!(matches!(result, Poll::Ready(Either::Right(99))));
+        assert!(matches!(result, Poll::Ready(Ok(Either::Right(99)))));
     }
 
     #[test]
@@ -431,7 +471,7 @@ mod tests {
         {
             let mut sel = Select::new(std::future::ready(42), tracker);
             let result = poll_once(&mut sel);
-            assert!(matches!(result, Poll::Ready(Either::Left(42))));
+            assert!(matches!(result, Poll::Ready(Ok(Either::Left(42)))));
             // sel is dropped here
         }
 
@@ -451,7 +491,7 @@ mod tests {
 
         let result = poll_once(&mut sel);
         // First ready wins (index 0)
-        assert!(matches!(result, Poll::Ready((10, 0))));
+        assert!(matches!(result, Poll::Ready(Ok((10, 0)))));
     }
 
     #[test]
@@ -475,7 +515,7 @@ mod tests {
         let mut sel = SelectAll::new(futures);
 
         let result = poll_once(&mut sel);
-        assert!(matches!(result, Poll::Ready((42, 1))));
+        assert!(matches!(result, Poll::Ready(Ok((42, 1)))));
     }
 
     #[test]
@@ -492,7 +532,7 @@ mod tests {
         let mut sel = SelectAll::new(futures);
 
         let result = poll_once(&mut sel);
-        assert!(matches!(result, Poll::Ready((99, 2))));
+        assert!(matches!(result, Poll::Ready(Ok((99, 2)))));
     }
 
     #[test]
@@ -511,7 +551,7 @@ mod tests {
         let mut sel = SelectAll::new(futures);
 
         let result = poll_once(&mut sel);
-        assert!(matches!(result, Poll::Ready((7, 0))));
+        assert!(matches!(result, Poll::Ready(Ok((7, 0)))));
     }
 
     #[test]
@@ -561,7 +601,7 @@ mod tests {
         let mut sel = SelectAll::new(futures);
 
         let result = poll_once(&mut sel);
-        assert!(matches!(result, Poll::Ready(((), 0))));
+        assert!(matches!(result, Poll::Ready(Ok(((), 0)))));
 
         // Only the first future should have been polled
         assert_eq!(counter.load(Ordering::SeqCst), 1);
@@ -578,7 +618,7 @@ mod tests {
         let mut sel = SelectAll::new(futures);
 
         let result = poll_once(&mut sel);
-        assert!(matches!(result, Poll::Ready((1, 0))));
+        assert!(matches!(result, Poll::Ready(Ok((1, 0)))));
     }
 
     // ========== SelectAllDrain tests ==========
@@ -808,7 +848,7 @@ mod tests {
             };
             let mut sel = Select::new(std::future::ready(42), tracker);
             let result = poll_once(&mut sel);
-            assert!(matches!(result, Poll::Ready(Either::Left(42))));
+            assert!(matches!(result, Poll::Ready(Ok(Either::Left(42)))));
         }
 
         // Loser was dropped (cleanup via Drop) but NOT drained (not polled to completion)
@@ -914,27 +954,31 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Select polled after completion")]
-    fn test_select_panics_on_repoll_after_completion() {
+    fn test_select_repoll_after_completion_fails_closed() {
         let left = std::future::ready(42);
         let right = std::future::pending::<i32>();
         let mut sel = Select::new(left, right);
 
         let result = poll_once(&mut sel);
-        assert!(matches!(result, Poll::Ready(Either::Left(42))));
-        // This second poll should panic
-        let _ = poll_once(&mut sel);
+        assert!(matches!(result, Poll::Ready(Ok(Either::Left(42)))));
+        let result2 = poll_once(&mut sel);
+        assert!(matches!(
+            result2,
+            Poll::Ready(Err(SelectError::PolledAfterCompletion))
+        ));
     }
 
     #[test]
-    #[should_panic(expected = "SelectAll polled after completion")]
-    fn test_select_all_panics_on_repoll_after_completion() {
+    fn test_select_all_repoll_after_completion_fails_closed() {
         let futures = vec![std::future::ready(10)];
         let mut sel = SelectAll::new(futures);
 
         let result = poll_once(&mut sel);
-        assert!(matches!(result, Poll::Ready((10, 0))));
-        // This second poll should panic
-        let _ = poll_once(&mut sel);
+        assert!(matches!(result, Poll::Ready(Ok((10, 0)))));
+        let result2 = poll_once(&mut sel);
+        assert!(matches!(
+            result2,
+            Poll::Ready(Err(SelectAllError::PolledAfterCompletion))
+        ));
     }
 }

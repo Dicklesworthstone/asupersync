@@ -997,7 +997,9 @@ impl<P: Policy> Scope<'_, P> {
             let mut f1 = std::pin::pin!(f1);
             let f2 = h2.join_with_drop_reason(cx, CancelReason::race_loser());
             let mut f2 = std::pin::pin!(f2);
-            Select::new(f1.as_mut(), f2.as_mut()).await
+            Select::new(f1.as_mut(), f2.as_mut())
+                .await
+                .map_err(|_| JoinError::PolledAfterCompletion)?
         };
 
         match winner {
@@ -1076,7 +1078,9 @@ impl<P: Policy> Scope<'_, P> {
             let sleep_fut = crate::time::sleep(now, delay);
             let mut sleep_pinned = std::pin::pin!(sleep_fut);
 
-            let res = Select::new(f1_primary.as_mut(), sleep_pinned.as_mut()).await;
+            let res = Select::new(f1_primary.as_mut(), sleep_pinned.as_mut())
+                .await
+                .map_err(|_| JoinError::PolledAfterCompletion)?;
             if matches!(res, Either::Right(())) {
                 f1_primary.defuse_drop_abort();
             }
@@ -1128,7 +1132,9 @@ impl<P: Policy> Scope<'_, P> {
                     let mut f1_race = std::pin::pin!(f1_race);
                     let f2_race = h2.join_with_drop_reason(cx, CancelReason::race_loser());
                     let mut f2_race = std::pin::pin!(f2_race);
-                    Select::new(f1_race.as_mut(), f2_race.as_mut()).await
+                    Select::new(f1_race.as_mut(), f2_race.as_mut())
+                        .await
+                        .map_err(|_| JoinError::PolledAfterCompletion)?
                 };
 
                 match race_outcome {

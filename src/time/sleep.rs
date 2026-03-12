@@ -402,9 +402,13 @@ impl Future for Sleep {
             || (None, None),
             |current| (current.timer_driver(), current.trace_buffer()),
         );
-        let now = timer_driver
-            .as_ref()
-            .map_or_else(|| self.current_time(), TimerDriverHandle::now);
+        let now = if self.time_getter.is_some() {
+            self.current_time()
+        } else {
+            timer_driver
+                .as_ref()
+                .map_or_else(|| self.current_time(), TimerDriverHandle::now)
+        };
 
         match self.poll_with_time(now) {
             Poll::Ready(()) => {
@@ -425,12 +429,6 @@ impl Future for Sleep {
                 Poll::Ready(())
             }
             Poll::Pending => {
-                // If we have a time getter (custom time source), just return pending.
-                // The caller is responsible for re-polling when time advances.
-                if self.time_getter.is_some() {
-                    return Poll::Pending;
-                }
-
                 let mut state = self.state.lock();
                 let finished_handles = take_finished_fallbacks(&mut state);
                 let waker_changed = !state

@@ -21,7 +21,7 @@
 //! - RFC 8305: Happy Eyeballs Version 2: Better Connectivity Using Concurrency
 //! - RFC 6555: Happy Eyeballs -- Success with Dual-Stack Hosts (superseded by 8305)
 
-use std::future::{Future, poll_fn};
+use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
@@ -390,8 +390,18 @@ impl Future for RaceConnections {
         if poll.is_pending() {
             let this = self.as_mut().get_mut();
             // Preserve wake registration even when timeout decisions use a
-            // manual or virtual clock.
-            let _ = Pin::new(&mut this.timeout_sleep).poll(cx);
+            // manual or virtual clock. If the sleep has actually elapsed,
+            // we must return the timeout now, otherwise we will lose the wakeup
+            // because Sleep::poll does not register a waker when it returns Ready.
+            if Pin::new(&mut this.timeout_sleep).poll(cx).is_ready() {
+                let err = this.last_error.take().unwrap_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "Happy Eyeballs: overall connection timeout",
+                    )
+                });
+                return this.finish(Err(err));
+            }
         }
         poll
     }
@@ -441,16 +451,7 @@ async fn connect_one(
 }
 
 async fn sleep_until_with_time_getter(deadline: Time, time_getter: fn() -> Time) {
-    let mut sleep = Sleep::new(deadline);
-    poll_fn(|cx| {
-        if sleep.poll_with_time(time_getter()).is_ready() {
-            return Poll::Ready(());
-        }
-
-        let _ = Pin::new(&mut sleep).poll(cx);
-        Poll::Pending
-    })
-    .await;
+    Sleep::with_time_getter(deadline, time_getter).await;
 }
 
 async fn future_with_timeout<F>(
@@ -461,8 +462,7 @@ async fn future_with_timeout<F>(
 where
     F: Future + Unpin,
 {
-    let mut timeout = TimeoutFuture::new(future, deadline);
-    poll_fn(|cx| timeout.poll_with_time(time_getter(), cx)).await
+    TimeoutFuture::with_time_getter(future, deadline, time_getter).await
 }
 
 /// Gets the current time, preferring the runtime timer driver over wall clock.

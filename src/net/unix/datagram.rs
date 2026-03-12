@@ -660,8 +660,18 @@ impl UnixDatagram {
     }
 
     fn socket_addr_from_unix_addr(addr: &socket::UnixAddr) -> io::Result<SocketAddr> {
+        fn get_unnamed() -> io::Result<SocketAddr> {
+            static UNNAMED: std::sync::OnceLock<SocketAddr> = std::sync::OnceLock::new();
+            if let Some(addr) = UNNAMED.get() {
+                return Ok(addr.clone());
+            }
+            let addr = net::UnixDatagram::unbound()?.local_addr()?;
+            let _ = UNNAMED.set(addr.clone());
+            Ok(addr)
+        }
+
         if addr.len() as usize <= std::mem::offset_of!(libc::sockaddr_un, sun_path) {
-            return net::UnixDatagram::unbound()?.local_addr();
+            return get_unnamed();
         }
 
         if let Some(path) = addr.path() {
@@ -678,7 +688,7 @@ impl UnixDatagram {
 
         // std does not expose a public constructor for unnamed unix socket
         // addresses, so synthesize one through a temporary unbound socket.
-        net::UnixDatagram::unbound()?.local_addr()
+        get_unnamed()
     }
 
     /// Peeks at incoming data and returns the source address.
