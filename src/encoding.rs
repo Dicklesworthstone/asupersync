@@ -214,9 +214,9 @@ impl EncodingPipeline {
             });
         }
 
-        if self.config.repair_overhead < 1.0 {
+        if !self.config.repair_overhead.is_finite() || self.config.repair_overhead < 1.0 {
             return Err(EncodingError::InvalidConfig {
-                reason: "repair_overhead must be >= 1.0".to_string(),
+                reason: "repair_overhead must be finite and >= 1.0".to_string(),
             });
         }
 
@@ -890,6 +890,34 @@ mod tests {
         // Different blocks should (almost certainly) yield different seeds
         let s3 = seed_for_block(id, 1);
         assert_ne!(s1, s3);
+    }
+
+    #[test]
+    fn repair_overhead_nan_rejected() {
+        let mut pipeline = EncodingPipeline::new(
+            test_config(4, 16, f64::NAN),
+            SymbolPool::new(PoolConfig::default()),
+        );
+        let err = pipeline
+            .encode(ObjectId::new_for_test(100), b"test")
+            .next()
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(err, EncodingError::InvalidConfig { .. }));
+    }
+
+    #[test]
+    fn repair_overhead_infinity_rejected() {
+        let mut pipeline = EncodingPipeline::new(
+            test_config(4, 16, f64::INFINITY),
+            SymbolPool::new(PoolConfig::default()),
+        );
+        let err = pipeline
+            .encode(ObjectId::new_for_test(101), b"test")
+            .next()
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(err, EncodingError::InvalidConfig { .. }));
     }
 
     #[test]
