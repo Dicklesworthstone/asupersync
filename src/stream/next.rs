@@ -14,12 +14,16 @@ use std::task::{Context, Poll};
 #[must_use = "futures do nothing unless polled"]
 pub struct Next<'a, S: ?Sized> {
     stream: &'a mut S,
+    done: bool,
 }
 
 impl<'a, S: ?Sized> Next<'a, S> {
     /// Creates a new `Next` future.
     pub(crate) fn new(stream: &'a mut S) -> Self {
-        Self { stream }
+        Self {
+            stream,
+            done: false,
+        }
     }
 }
 
@@ -33,7 +37,12 @@ where
 
     #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<S::Item>> {
-        Pin::new(&mut *self.stream).poll_next(cx)
+        assert!(!self.done, "Next future polled after completion");
+        let poll = Pin::new(&mut *self.stream).poll_next(cx);
+        if poll.is_ready() {
+            self.done = true;
+        }
+        poll
     }
 }
 
@@ -41,6 +50,7 @@ where
 mod tests {
     use super::*;
     use crate::stream::iter;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::Arc;
     use std::task::{Wake, Waker};
 
@@ -104,5 +114,37 @@ mod tests {
             Poll::Ready(None) => {}
             _ => panic!("expected Ready(None)"),
         }
+    }
+
+    #[test]
+    fn next_repoll_after_ready_some_panics() {
+        let mut stream = iter(vec![1i32]);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut future = Next::new(&mut stream);
+        match Pin::new(&mut future).poll(&mut cx) {
+            Poll::Ready(Some(1)) => {}
+            _ => panic!("expected Ready(Some(1))"),
+        }
+
+        let repoll = catch_unwind(AssertUnwindSafe(|| Pin::new(&mut future).poll(&mut cx)));
+        assert!(repoll.is_err(), "repoll after completion must panic");
+    }
+
+    #[test]
+    fn next_repoll_after_ready_none_panics() {
+        let mut stream = iter(Vec::<i32>::new());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut future = Next::new(&mut stream);
+        match Pin::new(&mut future).poll(&mut cx) {
+            Poll::Ready(None) => {}
+            _ => panic!("expected Ready(None)"),
+        }
+
+        let repoll = catch_unwind(AssertUnwindSafe(|| Pin::new(&mut future).poll(&mut cx)));
+        assert!(repoll.is_err(), "repoll after completion must panic");
     }
 }

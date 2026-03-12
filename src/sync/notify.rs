@@ -177,41 +177,50 @@ impl Notify {
     /// will be delivered to the next task that calls `notified().await`.
     ///
     /// If multiple tasks are waiting, exactly one will be woken.
-    #[allow(clippy::significant_drop_tightening)] // Lock must be held through stored_notifications increment to prevent lost wakeups
     pub fn notify_one(&self) {
-        let mut waiters = self.waiters.lock();
+        let waker_to_wake = {
+            let mut waiters = self.waiters.lock();
 
-        // Find a waiter to notify, starting from the scan cursor.
-        let mut found_waker = None;
-        let start = waiters.scan_start;
-        for i in start..waiters.entries.len() {
-            let entry = &mut waiters.entries[i];
-            if !entry.notified && entry.waker.is_some() {
-                entry.notified = true;
-                found_waker = entry.waker.take();
-                waiters.scan_start = i + 1;
-                break;
+            // Find a waiter to notify, starting from the scan cursor.
+            let mut found_waker = None;
+            let start = waiters.scan_start;
+            for i in start..waiters.entries.len() {
+                let entry = &mut waiters.entries[i];
+                if !entry.notified && entry.waker.is_some() {
+                    entry.notified = true;
+                    found_waker = entry.waker.take();
+                    waiters.scan_start = i + 1;
+                    break;
+                }
             }
-        }
 
-        if let Some(waker) = found_waker {
-            waiters.active -= 1;
-            drop(waiters); // Release lock before waking.
+            if found_waker.is_some() {
+                waiters.active -= 1;
+                drop(waiters);
+                found_waker
+            } else {
+                // If we found nothing, it means there are no active, unnotified waiters
+                // from `start` to the end. We can safely advance `scan_start` to the end
+                // to avoid O(N^2) scans in pathological broadcast then sequential notify workloads.
+                waiters.scan_start = waiters.entries.len();
+
+                // No waiters found, store the notification.
+                //
+                // Important: keep the waiter lock held while incrementing
+                // `stored_notifications` so a waiter can't observe
+                // `stored_notifications == 0`, then register, and miss the stored
+                // notification (lost wakeup).
+                self.stored_notifications.fetch_add(1, Ordering::Release);
+                drop(waiters);
+                None
+            }
+        };
+
+        // Wake outside the lock to avoid executing user waker code while holding
+        // waiter state.
+        if let Some(waker) = waker_to_wake {
             waker.wake();
-            return;
         }
-
-        // If we found nothing, it means there are no active, unnotified waiters
-        // from `start` to the end. We can safely advance `scan_start` to the end
-        // to avoid O(N^2) scans in pathological broadcast then sequential notify workloads.
-        waiters.scan_start = waiters.entries.len();
-
-        // No waiters found, store the notification.
-        //
-        // Important: keep the waiter lock held while incrementing `stored_notifications` so a
-        // waiter can't observe `stored_notifications == 0`, then register, and miss the stored
-        // notification (lost wakeup).
-        self.stored_notifications.fetch_add(1, Ordering::Release);
     }
 
     /// Notifies all waiting tasks.
@@ -522,8 +531,8 @@ impl Drop for Notified<'_> {
 mod tests {
     use super::*;
     use crate::test_utils::init_test_logging;
-    use std::sync::mpsc;
     use std::sync::Arc;
+    use std::sync::mpsc;
     use std::task::Wake;
     use std::thread;
     use std::time::Duration;
