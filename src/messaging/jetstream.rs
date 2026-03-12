@@ -1711,7 +1711,7 @@ mod tests {
         let result = extract_json_string_simple(json, "name");
         assert_eq!(
             result,
-            Some(r#"hello\u0020world"#.to_string()),
+            Some(r"hello\u0020world".to_string()),
             "unicode escape should not truncate"
         );
     }

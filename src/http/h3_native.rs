@@ -993,9 +993,9 @@ fn qpack_decode_string(
         ));
     }
     let (len, extra) = qpack_decode_prefixed_int(first, prefix_len, input)?;
-    let len: usize = len
-        .try_into()
-        .map_err(|_| H3NativeError::InvalidFrame("qpack string length exceeds addressable range"))?;
+    let len: usize = len.try_into().map_err(|_| {
+        H3NativeError::InvalidFrame("qpack string length exceeds addressable range")
+    })?;
     if input.len().saturating_sub(extra) < len {
         return Err(H3NativeError::UnexpectedEof);
     }

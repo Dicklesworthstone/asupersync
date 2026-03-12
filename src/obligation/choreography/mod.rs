@@ -3335,7 +3335,7 @@ mod tests {
                     "a",
                     "go",
                     Interaction::comm("a", "data", "Data", "b")
-                        .then(Interaction::continue_("x"))
+                        .then(Interaction::continue_("main"))
                         .expect("comm interactions accept continuations"),
                     Interaction::comm("a", "done", "Done", "b"),
                 ),

@@ -12,15 +12,15 @@
 
 #![allow(clippy::result_large_err)]
 
+use crate::RejectReason;
 use crate::combinator::retry::RetryPolicy;
 use crate::decoding::{DecodingConfig, DecodingPipeline, SymbolAcceptResult};
 use crate::error::{Error, ErrorKind};
-use crate::security::tag::AuthenticationTag;
 use crate::security::AuthenticatedSymbol;
 use crate::security::SecurityContext;
+use crate::security::tag::AuthenticationTag;
 use crate::types::symbol::{ObjectParams, Symbol};
 use crate::types::{RegionId, Time};
-use crate::RejectReason;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 

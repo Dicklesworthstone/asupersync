@@ -61,10 +61,10 @@
 //! assert!(restored.oracles.obligation_leak.check().is_ok());
 //! ```
 
+use crate::runtime::RuntimeState;
 use crate::runtime::state::{
     ObligationStateSnapshot, RegionStateSnapshot, RuntimeSnapshot, TaskSnapshot, TaskStateSnapshot,
 };
-use crate::runtime::RuntimeState;
 use crate::types::Time;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
