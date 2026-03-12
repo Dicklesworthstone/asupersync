@@ -96,10 +96,8 @@ impl QuicEndpoint {
             .map(|c| rustls::pki_types::CertificateDer::from(c.clone()))
             .collect::<Vec<_>>();
 
-        let private_key = rustls::pki_types::PrivateKeyDer::try_from(
-            private_key_raw.clone(),
-        )
-        .map_err(|e| QuicError::TlsConfig(format!("invalid private key: {e}")))?;
+        let private_key = rustls::pki_types::PrivateKeyDer::try_from(private_key_raw.clone())
+            .map_err(|e| QuicError::TlsConfig(format!("invalid private key: {e}")))?;
 
         let builder = rustls::ServerConfig::builder();
         let builder = match config.client_auth {

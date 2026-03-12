@@ -635,6 +635,12 @@ impl StreamTable {
                     code,
                 }));
             }
+            // RFC 9000 §3.1: after issuing RESET_STREAM, no further STREAM frames.
+            if let Some((code, _)) = stream.send_reset {
+                return Err(StreamTableError::Stream(QuicStreamError::SendStopped {
+                    code,
+                }));
+            }
             stream
                 .send_credit
                 .can_consume(len)
@@ -1452,21 +1458,15 @@ mod tests {
         let s = tbl.stream_mut(id).expect("stream");
         s.write(5).expect("initial write");
         s.reset_send(42, 5).expect("reset");
-        // Direct write on the QuicStream should still succeed because reset_send
-        // does not set stop_sending_error_code; however, the stream has been reset.
-        // Let's verify the send_reset state is set:
         assert_eq!(s.send_reset, Some((42, 5)));
 
-        // write_stream at the table level checks stop_sending but not send_reset.
-        // The QuicStream::write checks stop_sending too.
-        // Verify that even though reset happened, we can still physically write (no stop_sending).
-        // But let's actually test the more useful negative: reset_send + on_stop_sending combo
-        // which represents the full "stream is done" scenario.
-        s.on_stop_sending(42);
-        let err = s.write(1).expect_err("must fail after stop_sending");
+        // RFC 9000 §3.1: after RESET_STREAM, no further STREAM frames.
+        // Stream-level write must reject:
+        let err = s.write(1).expect_err("must fail after reset_send");
         assert_eq!(err, QuicStreamError::SendStopped { code: 42 });
 
-        // Also verify table-level write_stream rejects after stop_sending on a reset stream
+        // Table-level write_stream must also reject after reset_send alone
+        // (without requiring on_stop_sending):
         let err = tbl.write_stream(id, 1).expect_err("table write must fail");
         assert_eq!(
             err,

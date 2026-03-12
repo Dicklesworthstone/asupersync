@@ -259,7 +259,7 @@ impl Delay {
         let deadline = time_getter()
             .saturating_add_nanos(duration.as_nanos().min(u128::from(u64::MAX)) as u64);
         Self {
-            sleep: Sleep::new(deadline),
+            sleep: Sleep::with_time_getter(deadline, time_getter),
             time_getter,
         }
     }

@@ -882,8 +882,6 @@ mod tests {
             &second
         );
 
-
-
         let mut next_future = stream.next();
         let third = Pin::new(&mut next_future).poll(&mut context);
         crate::assert_with_log!(
@@ -1002,8 +1000,6 @@ mod tests {
             &second
         );
 
-
-
         crate::assert_with_log!(set.len() == 2, "set preserved", 2usize, set.len());
         crate::test_complete!("test_collect_to_set_repoll_after_completion_fails_closed");
     }
@@ -1071,7 +1067,9 @@ mod tests {
         let (mut sink, mut stream) = channel(1);
         let cx: Cx = Cx::for_testing();
         future::block_on(async {
-            SymbolSinkExt::send(&mut sink, create_symbol(5)).await.unwrap();
+            SymbolSinkExt::send(&mut sink, create_symbol(5))
+                .await
+                .unwrap();
         });
         cx.set_cancel_requested(true);
 
@@ -1098,7 +1096,6 @@ mod tests {
             true,
             &second
         );
-
 
         cx.set_cancel_requested(false);
         let mut next_future = stream.next_with_cancel(&cx);
@@ -1182,8 +1179,6 @@ mod tests {
             true,
             &second
         );
-
-
 
         let mut next_future = stream.next_with_cancel(&cx);
         let third = Pin::new(&mut next_future).poll(&mut context);
