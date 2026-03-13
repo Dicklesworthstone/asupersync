@@ -56,6 +56,7 @@
 use std::fmt;
 use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 #[cfg(target_arch = "wasm32")]
@@ -98,6 +99,86 @@ pub enum BrowserStreamState {
     Closed,
     /// Stream encountered an error. All subsequent I/O returns the error.
     Errored,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamTerminalState {
+    Open,
+    Closed,
+    Aborted,
+}
+
+#[derive(Debug)]
+struct StreamAccounting {
+    stats: Option<Arc<StreamStats>>,
+    terminal: StreamTerminalState,
+}
+
+impl StreamAccounting {
+    fn new(stats: Option<Arc<StreamStats>>) -> Self {
+        Self {
+            stats,
+            terminal: StreamTerminalState::Open,
+        }
+    }
+
+    fn record_read_bytes(&self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+
+        if let Some(stats) = &self.stats {
+            stats
+                .total_bytes_read
+                .fetch_add(bytes as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn record_written_bytes(&self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+
+        if let Some(stats) = &self.stats {
+            stats
+                .total_bytes_written
+                .fetch_add(bytes as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn mark_closed(&mut self) {
+        if self.terminal != StreamTerminalState::Open {
+            return;
+        }
+
+        if let Some(stats) = &self.stats {
+            stats
+                .streams_closed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.terminal = StreamTerminalState::Closed;
+    }
+
+    fn mark_aborted(&mut self) {
+        if self.terminal != StreamTerminalState::Open {
+            return;
+        }
+
+        if let Some(stats) = &self.stats {
+            stats
+                .streams_aborted
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.terminal = StreamTerminalState::Aborted;
+    }
+}
+
+impl Drop for StreamAccounting {
+    fn drop(&mut self) {
+        if self.terminal == StreamTerminalState::Open {
+            self.mark_aborted();
+        }
+    }
 }
 
 impl fmt::Display for BrowserStreamState {
@@ -651,6 +732,7 @@ pub struct BrowserReadableStream<R> {
     config: BrowserStreamConfig,
     total_read: u64,
     cancel_reason: Option<String>,
+    accounting: StreamAccounting,
 }
 
 impl<R: fmt::Debug> fmt::Debug for BrowserReadableStream<R> {
@@ -661,6 +743,7 @@ impl<R: fmt::Debug> fmt::Debug for BrowserReadableStream<R> {
             .field("config", &self.config)
             .field("total_read", &self.total_read)
             .field("cancel_reason", &self.cancel_reason)
+            .field("accounting", &self.accounting)
             .finish()
     }
 }
@@ -668,12 +751,17 @@ impl<R: fmt::Debug> fmt::Debug for BrowserReadableStream<R> {
 impl<R> BrowserReadableStream<R> {
     /// Creates a new readable stream bridge wrapping the given source.
     pub fn new(source: R, config: BrowserStreamConfig) -> Self {
+        Self::with_stats(source, config, None)
+    }
+
+    fn with_stats(source: R, config: BrowserStreamConfig, stats: Option<Arc<StreamStats>>) -> Self {
         Self {
             source,
             state: BrowserStreamState::Open,
             config,
             total_read: 0,
             cancel_reason: None,
+            accounting: StreamAccounting::new(stats),
         }
     }
 
@@ -701,6 +789,7 @@ impl<R> BrowserReadableStream<R> {
         if self.state == BrowserStreamState::Open || self.state == BrowserStreamState::Closing {
             self.state = BrowserStreamState::Errored;
             self.cancel_reason = Some(reason.into());
+            self.accounting.mark_aborted();
         }
     }
 
@@ -793,6 +882,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for BrowserReadableStream<R> {
 
         if effective_max == 0 {
             this.state = BrowserStreamState::Closed;
+            this.accounting.mark_closed();
             return Poll::Ready(Ok(()));
         }
 
@@ -810,10 +900,14 @@ impl<R: AsyncRead + Unpin> AsyncRead for BrowserReadableStream<R> {
                     this.total_read = this.total_read.saturating_add(n as u64);
                     if n == 0 {
                         this.state = BrowserStreamState::Closed;
+                        this.accounting.mark_closed();
+                    } else {
+                        this.accounting.record_read_bytes(n);
                     }
                 }
                 Poll::Ready(Err(_)) => {
                     this.state = BrowserStreamState::Errored;
+                    this.accounting.mark_aborted();
                 }
                 Poll::Pending => {}
             }
@@ -828,10 +922,14 @@ impl<R: AsyncRead + Unpin> AsyncRead for BrowserReadableStream<R> {
                     this.total_read = this.total_read.saturating_add(n);
                     if n == 0 {
                         this.state = BrowserStreamState::Closed;
+                        this.accounting.mark_closed();
+                    } else {
+                        this.accounting.record_read_bytes(n as usize);
                     }
                 }
                 Poll::Ready(Err(_)) => {
                     this.state = BrowserStreamState::Errored;
+                    this.accounting.mark_aborted();
                 }
                 Poll::Pending => {}
             }
@@ -870,6 +968,7 @@ pub struct BrowserWritableStream<W> {
     total_written: u64,
     buffered: usize,
     abort_reason: Option<String>,
+    accounting: StreamAccounting,
 }
 
 impl<W: fmt::Debug> fmt::Debug for BrowserWritableStream<W> {
@@ -881,6 +980,7 @@ impl<W: fmt::Debug> fmt::Debug for BrowserWritableStream<W> {
             .field("total_written", &self.total_written)
             .field("buffered", &self.buffered)
             .field("abort_reason", &self.abort_reason)
+            .field("accounting", &self.accounting)
             .finish()
     }
 }
@@ -888,6 +988,10 @@ impl<W: fmt::Debug> fmt::Debug for BrowserWritableStream<W> {
 impl<W> BrowserWritableStream<W> {
     /// Creates a new writable stream bridge wrapping the given sink.
     pub fn new(sink: W, config: BrowserStreamConfig) -> Self {
+        Self::with_stats(sink, config, None)
+    }
+
+    fn with_stats(sink: W, config: BrowserStreamConfig, stats: Option<Arc<StreamStats>>) -> Self {
         Self {
             sink,
             state: BrowserStreamState::Open,
@@ -895,6 +999,7 @@ impl<W> BrowserWritableStream<W> {
             total_written: 0,
             buffered: 0,
             abort_reason: None,
+            accounting: StreamAccounting::new(stats),
         }
     }
 
@@ -930,6 +1035,7 @@ impl<W> BrowserWritableStream<W> {
             self.state = BrowserStreamState::Errored;
             self.abort_reason = Some(reason.into());
             self.buffered = 0; // Discard buffered data on abort
+            self.accounting.mark_aborted();
         }
     }
 
@@ -1008,6 +1114,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for BrowserWritableStream<W> {
         // Check write limit
         if this.total_written >= this.config.max_total_write_bytes {
             this.state = BrowserStreamState::Errored;
+            this.accounting.mark_aborted();
             return Poll::Ready(Err(BrowserStreamError::WriteLimitExceeded {
                 written: this.total_written,
                 limit: this.config.max_total_write_bytes,
@@ -1024,6 +1131,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for BrowserWritableStream<W> {
                 }
                 Poll::Ready(Err(e)) => {
                     this.state = BrowserStreamState::Errored;
+                    this.accounting.mark_aborted();
                     return Poll::Ready(Err(e));
                 }
                 Poll::Pending => {
@@ -1045,6 +1153,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for BrowserWritableStream<W> {
 
         if !this.config.allow_partial_writes && buf.len() > budget_remaining {
             this.state = BrowserStreamState::Errored;
+            this.accounting.mark_aborted();
             return Poll::Ready(Err(BrowserStreamError::WriteLimitExceeded {
                 written: this.total_written,
                 limit: this.config.max_total_write_bytes,
@@ -1056,6 +1165,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for BrowserWritableStream<W> {
 
         if to_write == 0 {
             this.state = BrowserStreamState::Errored;
+            this.accounting.mark_aborted();
             return Poll::Ready(Err(BrowserStreamError::WriteLimitExceeded {
                 written: this.total_written,
                 limit: this.config.max_total_write_bytes,
@@ -1070,8 +1180,10 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for BrowserWritableStream<W> {
             Poll::Ready(Ok(n)) => {
                 this.total_written = this.total_written.saturating_add(*n as u64);
                 this.buffered = this.buffered.saturating_add(*n);
+                this.accounting.record_written_bytes(*n);
                 if !this.config.allow_partial_writes && *n < to_write {
                     this.state = BrowserStreamState::Errored;
+                    this.accounting.mark_aborted();
                     if *n == 0 {
                         return Poll::Ready(Err(io::Error::new(
                             io::ErrorKind::WriteZero,
@@ -1088,6 +1200,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for BrowserWritableStream<W> {
             }
             Poll::Ready(Err(_)) => {
                 this.state = BrowserStreamState::Errored;
+                this.accounting.mark_aborted();
             }
             Poll::Pending => {}
         }
@@ -1106,6 +1219,9 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for BrowserWritableStream<W> {
         let result = Pin::new(&mut this.sink).poll_flush(cx);
         if matches!(&result, Poll::Ready(Ok(()))) {
             this.buffered = 0;
+        } else if matches!(&result, Poll::Ready(Err(_))) {
+            this.state = BrowserStreamState::Errored;
+            this.accounting.mark_aborted();
         }
         result
     }
@@ -1128,6 +1244,10 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for BrowserWritableStream<W> {
         if matches!(&result, Poll::Ready(Ok(()))) {
             this.state = BrowserStreamState::Closed;
             this.buffered = 0;
+            this.accounting.mark_closed();
+        } else if matches!(&result, Poll::Ready(Err(_))) {
+            this.state = BrowserStreamState::Errored;
+            this.accounting.mark_aborted();
         }
         result
     }
@@ -1143,7 +1263,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for BrowserWritableStream<W> {
 /// (backpressure strategy, size limits).
 pub struct BrowserStreamIoCap {
     config: BrowserStreamConfig,
-    stats: StreamStats,
+    stats: Arc<StreamStats>,
 }
 
 /// Stream operation statistics.
@@ -1176,7 +1296,7 @@ impl BrowserStreamIoCap {
     pub fn new(config: BrowserStreamConfig) -> Self {
         Self {
             config,
-            stats: StreamStats::default(),
+            stats: Arc::new(StreamStats::default()),
         }
     }
 
@@ -1216,13 +1336,17 @@ impl BrowserStreamIoCap {
     /// Wraps a source in a readable browser stream bridge using this capability policy.
     pub fn open_readable<R>(&self, source: R) -> BrowserReadableStream<R> {
         self.record_open();
-        BrowserReadableStream::new(source, self.config.clone())
+        BrowserReadableStream::with_stats(
+            source,
+            self.config.clone(),
+            Some(Arc::clone(&self.stats)),
+        )
     }
 
     /// Wraps a sink in a writable browser stream bridge using this capability policy.
     pub fn open_writable<W>(&self, sink: W) -> BrowserWritableStream<W> {
         self.record_open();
-        BrowserWritableStream::new(sink, self.config.clone())
+        BrowserWritableStream::with_stats(sink, self.config.clone(), Some(Arc::clone(&self.stats)))
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1232,7 +1356,12 @@ impl BrowserStreamIoCap {
         stream: &ReadableStream,
     ) -> Result<BrowserReadableStream<WasmReadableStreamSource>, BrowserStreamError> {
         self.record_open();
-        BrowserReadableStream::from_web_readable_stream(stream, self.config.clone())
+        let source = WasmReadableStreamSource::new(stream)?;
+        Ok(BrowserReadableStream::with_stats(
+            source,
+            self.config.clone(),
+            Some(Arc::clone(&self.stats)),
+        ))
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1242,7 +1371,12 @@ impl BrowserStreamIoCap {
         stream: &WritableStream,
     ) -> Result<BrowserWritableStream<WasmWritableStreamSink>, BrowserStreamError> {
         self.record_open();
-        BrowserWritableStream::from_web_writable_stream(stream, self.config.clone())
+        let sink = WasmWritableStreamSink::new(stream)?;
+        Ok(BrowserWritableStream::with_stats(
+            sink,
+            self.config.clone(),
+            Some(Arc::clone(&self.stats)),
+        ))
     }
 }
 
@@ -1757,6 +1891,102 @@ mod tests {
                 .streams_opened
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
+        );
+    }
+
+    #[test]
+    fn stream_io_cap_readable_bridge_updates_bytes_and_close_stats() {
+        let cap = BrowserStreamIoCap::new(BrowserStreamConfig::default());
+        let mut reader = cap.open_readable(Cursor::new(b"abc".to_vec()));
+        let waker = futures_task_noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut buf = [0u8; 8];
+        let mut read_buf = ReadBuf::new(&mut buf);
+        let result = Pin::new(&mut reader).poll_read(&mut cx, &mut read_buf);
+        assert!(matches!(result, Poll::Ready(Ok(()))));
+        assert_eq!(read_buf.filled(), b"abc");
+
+        let mut eof_buf = [0u8; 8];
+        let mut eof_read_buf = ReadBuf::new(&mut eof_buf);
+        let eof = Pin::new(&mut reader).poll_read(&mut cx, &mut eof_read_buf);
+        assert!(matches!(eof, Poll::Ready(Ok(()))));
+        assert_eq!(reader.state(), BrowserStreamState::Closed);
+
+        let stats = cap.stream_stats();
+        assert_eq!(
+            stats
+                .total_bytes_read
+                .load(std::sync::atomic::Ordering::Relaxed),
+            3
+        );
+        assert_eq!(
+            stats
+                .streams_closed
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            stats
+                .streams_aborted
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
+    fn stream_io_cap_writable_bridge_updates_bytes_and_close_stats() {
+        let cap = BrowserStreamIoCap::new(BrowserStreamConfig::default());
+        let mut writer = cap.open_writable(MemSink::default());
+        let waker = futures_task_noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let wrote = Pin::new(&mut writer).poll_write(&mut cx, b"hello");
+        assert!(matches!(wrote, Poll::Ready(Ok(5))));
+        let shutdown = Pin::new(&mut writer).poll_shutdown(&mut cx);
+        assert!(matches!(shutdown, Poll::Ready(Ok(()))));
+        assert_eq!(writer.state(), BrowserStreamState::Closed);
+
+        let stats = cap.stream_stats();
+        assert_eq!(
+            stats
+                .total_bytes_written
+                .load(std::sync::atomic::Ordering::Relaxed),
+            5
+        );
+        assert_eq!(
+            stats
+                .streams_closed
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            stats
+                .streams_aborted
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
+    fn stream_io_cap_records_abort_from_bridge_abort_path() {
+        let cap = BrowserStreamIoCap::new(BrowserStreamConfig::default());
+        let mut writer = cap.open_writable(MemSink::default());
+
+        writer.abort("route change");
+
+        let stats = cap.stream_stats();
+        assert_eq!(
+            stats
+                .streams_aborted
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            stats
+                .streams_closed
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
         );
     }
 
