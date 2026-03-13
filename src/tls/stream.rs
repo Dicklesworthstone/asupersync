@@ -25,7 +25,7 @@ enum TlsState {
     Handshaking,
     /// TLS session is established.
     Ready,
-    /// Shutdown initiated.
+    /// Local write-side shutdown initiated; reads may continue until peer close.
     ShuttingDown,
     /// Connection is closed.
     Closed,
@@ -46,6 +46,7 @@ pub struct TlsStream<IO> {
     io: IO,
     conn: TlsConnection,
     state: TlsState,
+    read_closed: bool,
 }
 
 /// Fallback `TlsStream` when TLS is disabled.
@@ -157,6 +158,7 @@ impl<IO> TlsStream<IO> {
             io,
             conn: TlsConnection::Client(conn),
             state: TlsState::Handshaking,
+            read_closed: false,
         }
     }
 
@@ -166,6 +168,7 @@ impl<IO> TlsStream<IO> {
             io,
             conn: TlsConnection::Server(conn),
             state: TlsState::Handshaking,
+            read_closed: false,
         }
     }
 
@@ -207,6 +210,13 @@ impl<IO> TlsStream<IO> {
     /// Check if the connection is closed.
     pub fn is_closed(&self) -> bool {
         self.state == TlsState::Closed
+    }
+
+    fn note_read_eof(&mut self) {
+        self.read_closed = true;
+        if self.state == TlsState::ShuttingDown {
+            self.state = TlsState::Closed;
+        }
     }
 }
 
@@ -384,9 +394,14 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
             }
         }
 
-        self.state = TlsState::Closed;
-        #[cfg(feature = "tracing-integration")]
-        debug!("TLS shutdown complete");
+        if self.read_closed {
+            self.state = TlsState::Closed;
+            #[cfg(feature = "tracing-integration")]
+            debug!("TLS shutdown complete");
+        } else {
+            #[cfg(feature = "tracing-integration")]
+            debug!("TLS close_notify flushed; awaiting peer EOF");
+        }
         Poll::Ready(Ok(()))
     }
 }
@@ -402,7 +417,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
             return Poll::Ready(Ok(()));
         }
 
-        if self.state == TlsState::Closed {
+        if self.read_closed || self.state == TlsState::Closed {
             return Poll::Ready(Ok(()));
         }
 
@@ -429,7 +444,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
                         return Poll::Ready(Ok(()));
                     }
                     // Reader EOF: no more plaintext can arrive.
-                    self.state = TlsState::Closed;
+                    self.note_read_eof();
                     return Poll::Ready(Ok(()));
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
@@ -440,7 +455,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
             match self.poll_read_tls(cx) {
                 Poll::Ready(Ok(0)) => {
                     // EOF - mark as closed
-                    self.state = TlsState::Closed;
+                    self.note_read_eof();
                     return Poll::Ready(Ok(()));
                 }
                 Poll::Ready(Ok(_)) => {
@@ -467,10 +482,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        if self.state == TlsState::Closed {
+        if self.state == TlsState::ShuttingDown || self.state == TlsState::Closed {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
-                "TLS session closed",
+                "TLS write side closed",
             )));
         }
 
@@ -551,8 +566,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.state == TlsState::Closed {
+            return Pin::new(&mut self.io).poll_shutdown(cx);
+        }
+
         // Send close_notify if not already done
-        if self.state != TlsState::ShuttingDown && self.state != TlsState::Closed {
+        if self.state != TlsState::ShuttingDown {
             self.state = TlsState::ShuttingDown;
             self.conn.send_close_notify();
         }
@@ -567,10 +586,17 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
             }
         }
 
-        self.state = TlsState::Closed;
-
-        // Shutdown underlying IO
-        Pin::new(&mut self.io).poll_shutdown(cx)
+        // Shutdown underlying IO. Reads may continue until the peer closes.
+        match Pin::new(&mut self.io).poll_shutdown(cx) {
+            Poll::Ready(Ok(())) => {
+                if self.read_closed {
+                    self.state = TlsState::Closed;
+                }
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 

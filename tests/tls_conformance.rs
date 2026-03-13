@@ -360,11 +360,22 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
             test_section!("client close");
             client.shutdown().await.unwrap();
-            assert!(client.is_closed());
+            assert!(!client.is_closed());
+
+            let mut server_eof = Vec::new();
+            let n = server.read_to_end(&mut server_eof).await.unwrap();
+            assert_eq!(n, 0, "peer close_notify should surface as EOF");
+            assert!(server_eof.is_empty());
 
             test_section!("server close");
             server.shutdown().await.unwrap();
             assert!(server.is_closed());
+
+            let mut client_eof = Vec::new();
+            let n = client.read_to_end(&mut client_eof).await.unwrap();
+            assert_eq!(n, 0, "peer close_notify should surface as EOF");
+            assert!(client_eof.is_empty());
+            assert!(client.is_closed());
         });
 
         test_complete!("tls_close_notify_shutdowns_streams");
@@ -408,6 +419,44 @@ W7n9v0wIyo4e/O0DO2fczXZD
         });
 
         test_complete!("tls_close_notify_causes_peer_eof_read");
+    }
+
+    #[test]
+    fn local_shutdown_preserves_read_side_until_peer_eof() {
+        init_test_logging();
+        test_phase!("tls_local_shutdown_preserves_read_side_until_peer_eof");
+
+        let (client, server) = handshake_pair(make_connector(), make_acceptor(), 6283);
+        let mut client = client.unwrap();
+        let mut server = server.unwrap();
+
+        futures_lite::future::block_on(async {
+            client.shutdown().await.unwrap();
+            assert!(
+                !client.is_closed(),
+                "local close_notify must not tombstone the read side"
+            );
+
+            server.write_all(b"pong").await.unwrap();
+            server.flush().await.unwrap();
+
+            let mut buf = [0u8; 4];
+            client.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"pong");
+
+            server.shutdown().await.unwrap();
+
+            let mut tail = Vec::new();
+            let n = client.read_to_end(&mut tail).await.unwrap();
+            assert_eq!(
+                n, 0,
+                "peer close_notify should finish the remaining read side"
+            );
+            assert!(tail.is_empty());
+            assert!(client.is_closed());
+        });
+
+        test_complete!("tls_local_shutdown_preserves_read_side_until_peer_eof");
     }
 
     // -----------------------------------------------------------------------
