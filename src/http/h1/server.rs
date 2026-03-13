@@ -10,7 +10,7 @@ use crate::cx::Cx;
 use crate::http::h1::codec::{Http1Codec, HttpError};
 use crate::http::h1::types::{Request, Response, Version, default_reason};
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use crate::server::shutdown::ShutdownSignal;
+use crate::server::shutdown::{ShutdownPhase, ShutdownSignal};
 use crate::stream::Stream;
 use crate::time::{timeout, wall_now};
 use std::future::{Future, poll_fn};
@@ -411,8 +411,37 @@ where
 
             state.phase = ConnectionPhase::Processing;
 
-            // Process request through handler
-            let mut resp = (self.handler)(req).await;
+            // Process request through handler.
+            // Race against ForceClosing so slow handlers don't block shutdown.
+            let mut resp = if let Some(signal) = &self.shutdown_signal {
+                let mut handler_fut = std::pin::pin!((self.handler)(req));
+                let mut force_close_fut =
+                    std::pin::pin!(signal.wait_for_phase(ShutdownPhase::ForceClosing));
+
+                let result = poll_fn(|cx| {
+                    // If already force-closing, bail immediately
+                    if signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8 {
+                        return Poll::Ready(None);
+                    }
+                    // Check if force-close arrived
+                    if force_close_fut.as_mut().poll(cx).is_ready() {
+                        return Poll::Ready(None);
+                    }
+                    // Drive the handler
+                    handler_fut.as_mut().poll(cx).map(Some)
+                })
+                .await;
+
+                if let Some(resp) = result {
+                    resp
+                } else {
+                    // Force-close interrupted the handler
+                    state.phase = ConnectionPhase::Closing;
+                    break;
+                }
+            } else {
+                (self.handler)(req).await
+            };
 
             let close_after =
                 finalize_response_persistence(request_version, &mut resp, close_after);

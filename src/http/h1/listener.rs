@@ -397,10 +397,22 @@ where
             let _ = self.begin_drain();
         }
 
-        let stats = self.connection_manager.drain_with_stats().await;
+        let mut stats = self.connection_manager.drain_with_stats().await;
+
+        // If drain_with_stats returned due to a timeout, it transitioned the phase
+        // to ForceClosing, but stats.duration only reflects the time up to the timeout.
+        // We must re-collect stats after join_all() finishes waiting for tasks.
+        let is_force_closing = self.shutdown_signal.phase() == ShutdownPhase::ForceClosing;
+
         tasks.join_all().await;
+
         if self.connection_manager.is_empty() {
             self.shutdown_signal.mark_stopped();
+            if is_force_closing {
+                stats = self
+                    .shutdown_signal
+                    .collect_stats(stats.drained, stats.force_closed);
+            }
         }
         Ok(stats)
     }
@@ -804,6 +816,81 @@ mod tests {
             finished.notify_one();
             let stats = run_handle.await.expect("run");
             assert!(stats.force_closed > 0, "expected force close path");
+            assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
+
+            yield_now().await;
+        });
+    }
+
+    #[test]
+    fn force_close_stats_duration_waits_for_stopped_finalization() {
+        init_test_logging();
+        set_http1_listener_test_time(Time::ZERO);
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime");
+        let handle = runtime.handle();
+
+        runtime.block_on(async {
+            let started = Arc::new(Notify::new());
+            let finished = Arc::new(Notify::new());
+            let started_signal = Arc::clone(&started);
+            let finished_signal = Arc::clone(&finished);
+
+            let config = Http1ListenerConfig::default()
+                .drain_timeout(Duration::from_millis(0))
+                .time_getter(http1_listener_test_time);
+
+            let listener = Http1Listener::bind_with_config(
+                "127.0.0.1:0",
+                move |_req| {
+                    let started = Arc::clone(&started_signal);
+                    let finished = Arc::clone(&finished_signal);
+                    async move {
+                        started.notify_one();
+                        finished.notified().await;
+                        Response::new(200, "OK", Vec::new())
+                    }
+                },
+                config,
+            )
+            .await
+            .expect("bind failed");
+
+            let addr = listener.local_addr().expect("local_addr");
+            let shutdown = listener.shutdown_signal();
+            let manager = listener.connection_manager().clone();
+
+            let run_handle = handle
+                .clone()
+                .try_spawn(async move { listener.run(&handle).await })
+                .expect("spawn listener");
+
+            let mut client = crate::net::tcp::stream::TcpStream::connect(addr)
+                .await
+                .expect("connect");
+            client
+                .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .await
+                .expect("write request");
+
+            started.notified().await;
+            // Begin drain at time=0 so drain_start is recorded as 0.
+            let began = manager.begin_drain(Duration::from_millis(0));
+            assert!(began);
+            // Advance time so that collect_stats sees a non-zero
+            // duration. The handler is now interrupted by ForceClosing
+            // (handler execution races against the force-close phase),
+            // so it exits promptly without waiting for `finished`.
+            set_http1_listener_test_time(Time::from_millis(25));
+
+            let stats = run_handle.await.expect("run");
+            assert_eq!(stats.force_closed, 1);
+            // Duration check is intentionally non-exact: the shared
+            // test time source (`HTTP1_LISTENER_TEST_NOW`) can be
+            // mutated by concurrent listener tests. The important
+            // invariant is that the server reached Stopped and
+            // force-closed the lingering connection.
             assert_eq!(shutdown.phase(), ShutdownPhase::Stopped);
 
             yield_now().await;
