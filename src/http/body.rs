@@ -597,9 +597,16 @@ where
 pub struct Limited<B> {
     inner: B,
     remaining: u64,
-    // After an oversized frame trips the limit once, fail closed on any
-    // further poll instead of continuing to drive the inner body.
-    limit_exceeded: bool,
+    // After a terminal result, stop polling the inner body again. Clean EOF
+    // stays idempotent, while terminal failures fail closed on repoll.
+    state: LimitedState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LimitedState {
+    Open,
+    Completed,
+    Failed,
 }
 
 impl<B> Limited<B> {
@@ -608,7 +615,7 @@ impl<B> Limited<B> {
         Self {
             inner,
             remaining: limit,
-            limit_exceeded: false,
+            state: LimitedState::Open,
         }
     }
 }
@@ -637,32 +644,45 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let this = &mut *self;
-        if this.limit_exceeded {
-            return Poll::Ready(Some(Err(LimitedError::PolledAfterCompletion)));
+        match this.state {
+            LimitedState::Completed => return Poll::Ready(None),
+            LimitedState::Failed => {
+                return Poll::Ready(Some(Err(LimitedError::PolledAfterCompletion)));
+            }
+            LimitedState::Open => {}
         }
         match Pin::new(&mut this.inner).poll_frame(cx) {
             Poll::Ready(Some(Ok(frame))) => {
                 if let Some(data) = frame.data_ref() {
                     let len = data.remaining() as u64;
                     if len > this.remaining {
-                        this.limit_exceeded = true;
+                        this.state = LimitedState::Failed;
                         return Poll::Ready(Some(Err(LimitedError::LengthLimit)));
                     }
                     this.remaining -= len;
                 }
                 Poll::Ready(Some(Ok(frame)))
             }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(LimitedError::Inner(e)))),
-            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Ready(Some(Err(e))) => {
+                this.state = LimitedState::Failed;
+                Poll::Ready(Some(Err(LimitedError::Inner(e))))
+            }
+            Poll::Ready(None) => {
+                this.state = LimitedState::Completed;
+                Poll::Ready(None)
+            }
             Poll::Pending => Poll::Pending,
         }
     }
 
     fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
+        self.state != LimitedState::Open || self.inner.is_end_stream()
     }
 
     fn size_hint(&self) -> SizeHint {
+        if self.state != LimitedState::Open {
+            return SizeHint::with_exact(0);
+        }
         let inner = self.inner.size_hint();
         let mut hint = SizeHint::new();
         hint.set_lower(inner.lower().min(self.remaining));
@@ -680,7 +700,7 @@ where
 pub enum LimitedError<E> {
     /// The length limit was exceeded.
     LengthLimit,
-    /// This body was polled after a terminal length-limit violation.
+    /// This body was polled after a terminal failure.
     PolledAfterCompletion,
     /// An error from the inner body.
     Inner(E),
@@ -1243,5 +1263,88 @@ mod tests {
             second,
             Poll::Ready(Some(Err(LimitedError::PolledAfterCompletion)))
         ));
+    }
+
+    #[derive(Debug)]
+    struct ErrorThenPanicBody {
+        first_poll: bool,
+    }
+
+    impl ErrorThenPanicBody {
+        fn new() -> Self {
+            Self { first_poll: true }
+        }
+    }
+
+    impl Body for ErrorThenPanicBody {
+        type Data = BytesCursor;
+        type Error = std::io::Error;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            if self.first_poll {
+                self.first_poll = false;
+                return Poll::Ready(Some(Err(std::io::Error::other("boom"))));
+            }
+
+            panic!("Limited polled inner body after terminal inner error");
+        }
+    }
+
+    #[test]
+    fn limited_body_fail_closes_after_terminal_inner_error() {
+        let inner = ErrorThenPanicBody::new();
+        let mut limited = Limited::new(inner, 16);
+
+        let first = poll_body(&mut limited);
+        assert!(matches!(
+            first,
+            Poll::Ready(Some(Err(LimitedError::Inner(_))))
+        ));
+
+        let second = poll_body(&mut limited);
+        assert!(matches!(
+            second,
+            Poll::Ready(Some(Err(LimitedError::PolledAfterCompletion)))
+        ));
+    }
+
+    #[derive(Debug)]
+    struct EofThenPanicBody {
+        first_poll: bool,
+    }
+
+    impl EofThenPanicBody {
+        fn new() -> Self {
+            Self { first_poll: true }
+        }
+    }
+
+    impl Body for EofThenPanicBody {
+        type Data = BytesCursor;
+        type Error = Infallible;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            if self.first_poll {
+                self.first_poll = false;
+                return Poll::Ready(None);
+            }
+
+            panic!("Limited polled inner body after terminal completion");
+        }
+    }
+
+    #[test]
+    fn limited_body_does_not_repoll_completed_inner_body() {
+        let inner = EofThenPanicBody::new();
+        let mut limited = Limited::new(inner, 16);
+
+        assert!(matches!(poll_body(&mut limited), Poll::Ready(None)));
+        assert!(matches!(poll_body(&mut limited), Poll::Ready(None)));
     }
 }
