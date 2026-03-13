@@ -662,7 +662,7 @@ impl Scenario {
             }
             CancellationStrategy::Probabilistic => {
                 if let Some(p) = cancel.probability {
-                    if !(0.0..=1.0).contains(&p) {
+                    if !p.is_finite() || !(0.0..=1.0).contains(&p) {
                         errors.push(ValidationError {
                             field: "cancellation.probability".into(),
                             message: format!("probability must be in [0.0, 1.0], got {p}"),
