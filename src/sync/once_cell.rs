@@ -168,12 +168,9 @@ impl<T> OnceCell<T> {
 
     /// Sets the value if not already initialized.
     ///
-    /// Returns `Err(value)` if the cell is already initialized.
-    ///
-    /// If another thread/task is currently initializing the cell, this call
-    /// waits for that attempt to finish:
-    /// - if it succeeds, returns `Err(value)` (cell already initialized);
-    /// - if it is cancelled and the cell returns to `UNINIT`, retries setting.
+    /// Returns `Err(value)` if the cell is already initialized or if another
+    /// thread/task is currently initializing the cell. This ensures the method
+    /// never blocks the OS thread, avoiding deadlocks in async contexts.
     pub fn set(&self, value: T) -> Result<(), T> {
         loop {
             match self.state.compare_exchange_weak(
@@ -188,16 +185,7 @@ impl<T> OnceCell<T> {
                     self.transition_out_of_initializing(INITIALIZED);
                     return Ok(());
                 }
-                Err(INITIALIZED) => return Err(value),
-                Err(INITIALIZING) => {
-                    // Another thread/task is initializing. Wait for it.
-                    self.wait_for_init_blocking();
-                    if self.is_initialized() {
-                        return Err(value);
-                    }
-                    // The initializer was cancelled — state is back to UNINIT.
-                    // Loop to retry setting.
-                }
+                Err(INITIALIZED | INITIALIZING) => return Err(value),
                 Err(UNINIT) => {} // Spurious failure, try again
                 Err(_) => unreachable!("invalid state"),
             }
