@@ -80,7 +80,9 @@ where
             }
 
             match future.as_mut().poll(poll_cx) {
-                Poll::Ready(CancelResult::Completed(value) | CancelResult::CancellationIgnored(value)) => Poll::Ready(Some(value)),
+                Poll::Ready(
+                    CancelResult::Completed(value) | CancelResult::CancellationIgnored(value),
+                ) => Poll::Ready(Some(value)),
                 Poll::Ready(CancelResult::Cancelled) => Poll::Ready(None),
                 Poll::Pending => Poll::Pending,
             }

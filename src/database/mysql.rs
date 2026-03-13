@@ -1721,7 +1721,7 @@ impl MySqlConnection {
         // either a 0x00 or 0xFE header byte.  The 0xFE case with a
         // non-empty info string (len ≥ 9) passes through is_eof_packet,
         // so we must check for it explicitly here.
-        if deprecate_eof && matches!(data.first(), Some(&0x00) | Some(&0xFE)) {
+        if deprecate_eof && matches!(data.first(), Some(&0x00 | &0xFE)) {
             return match Self::parse_text_row(data, columns) {
                 Ok(values) => Ok(Some(values)),
                 Err(row_err) => {

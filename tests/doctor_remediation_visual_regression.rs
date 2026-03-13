@@ -921,7 +921,10 @@ fn state_reducer_preview_to_approved() {
         "checkpoint_rollback_ready",
         "checkpoint_apply_authorization",
     ];
-    let approved: Vec<String> = checkpoints.iter().map(std::string::ToString::to_string).collect();
+    let approved: Vec<String> = checkpoints
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
 
     // All checkpoints approved => transition allowed
     let all_approved = checkpoints

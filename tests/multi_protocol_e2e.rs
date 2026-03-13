@@ -447,9 +447,18 @@ fn e2e_multi_timer_driven_timeouts() {
 
     test_section!("create_regions_per_protocol");
     let base_root = runtime.state.create_root_region(Budget::INFINITE);
-    let http_region = runtime.state.create_child_region(base_root, Budget::INFINITE).unwrap();
-    let grpc_region = runtime.state.create_child_region(base_root, Budget::INFINITE).unwrap();
-    let ws_region = runtime.state.create_child_region(base_root, Budget::INFINITE).unwrap();
+    let http_region = runtime
+        .state
+        .create_child_region(base_root, Budget::INFINITE)
+        .unwrap();
+    let grpc_region = runtime
+        .state
+        .create_child_region(base_root, Budget::INFINITE)
+        .unwrap();
+    let ws_region = runtime
+        .state
+        .create_child_region(base_root, Budget::INFINITE)
+        .unwrap();
 
     let counter = Arc::new(AtomicUsize::new(0));
 
@@ -532,7 +541,10 @@ fn e2e_multi_graceful_shutdown() {
     test_section!("spawn_protocol_regions");
     let base_root = runtime.state.create_root_region(Budget::INFINITE);
     for proto_idx in 0..n_protocols {
-        let root = runtime.state.create_child_region(base_root, Budget::INFINITE).unwrap();
+        let root = runtime
+            .state
+            .create_child_region(base_root, Budget::INFINITE)
+            .unwrap();
         regions.push(root);
 
         // Each protocol has multiple tasks

@@ -439,7 +439,7 @@ impl<T> CrashSender<T> {
                     .stats
                     .sends_rejected
                     .fetch_add(1, Ordering::Relaxed);
-                
+
                 let action = if actually_crashed {
                     "crash_after_sends"
                 } else {
@@ -467,7 +467,7 @@ impl<T> CrashSender<T> {
                     .stats
                     .sends_rejected
                     .fetch_add(1, Ordering::Relaxed);
-                
+
                 let action = if actually_crashed {
                     "crash_probabilistic"
                 } else {
