@@ -652,6 +652,18 @@ impl TaskRecord {
         if self.state.is_terminal() {
             return false;
         }
+        let outcome = match (&self.state, outcome) {
+            (
+                TaskState::CancelRequested { reason, .. }
+                | TaskState::Cancelling { reason, .. }
+                | TaskState::Finalizing { reason, .. },
+                Outcome::Ok(()) | Outcome::Err(_),
+            ) => Outcome::Cancelled(reason.clone()),
+            (_, outcome) => outcome,
+        };
+        if matches!(outcome, Outcome::Cancelled(_)) && self.cancel_epoch == 0 {
+            self.cancel_epoch = 1;
+        }
         #[cfg(feature = "tracing-integration")]
         {
             let prev_state = self.state_name();
@@ -1176,6 +1188,147 @@ mod tests {
         let terminal = t.state.is_terminal();
         crate::assert_with_log!(terminal, "terminal", true, terminal);
         crate::test_complete!("complete_with_error_outcome");
+    }
+
+    #[test]
+    fn complete_cancelled_without_prior_request_still_emits_witness() {
+        init_test("complete_cancelled_without_prior_request_still_emits_witness");
+        let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
+        let _ = t.start_running();
+
+        let completed = t.complete(Outcome::Cancelled(CancelReason::timeout()));
+        crate::assert_with_log!(completed, "complete cancelled", true, completed);
+
+        let witness = t.cancel_witness().expect("completed cancel witness");
+        crate::assert_with_log!(witness.epoch == 1, "epoch initialized", 1, witness.epoch);
+        crate::assert_with_log!(
+            witness.phase == CancelPhase::Completed,
+            "phase completed",
+            CancelPhase::Completed,
+            witness.phase
+        );
+        CancelWitness::validate_transition(None, &witness)
+            .expect("terminal cancelled witness is self-consistent");
+
+        crate::test_complete!("complete_cancelled_without_prior_request_still_emits_witness");
+    }
+
+    #[test]
+    fn complete_ok_after_cancel_request_becomes_cancelled() {
+        init_test("complete_ok_after_cancel_request_becomes_cancelled");
+        let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
+        let requested = t.request_cancel(CancelReason::timeout());
+        crate::assert_with_log!(requested, "request_cancel", true, requested);
+
+        let completed = t.complete(Outcome::Ok(()));
+        crate::assert_with_log!(completed, "complete ok", true, completed);
+
+        match &t.state {
+            TaskState::Completed(Outcome::Cancelled(reason)) => {
+                crate::assert_with_log!(
+                    reason.kind == crate::types::CancelKind::Timeout,
+                    "cancel reason preserved",
+                    crate::types::CancelKind::Timeout,
+                    reason.kind
+                );
+            }
+            other => panic!("expected Completed(Cancelled), got {other:?}"),
+        }
+
+        let witness = t
+            .cancel_witness()
+            .expect("cancel witness after coerced completion");
+        crate::assert_with_log!(
+            witness.phase == CancelPhase::Completed,
+            "phase completed",
+            CancelPhase::Completed,
+            witness.phase
+        );
+        crate::test_complete!("complete_ok_after_cancel_request_becomes_cancelled");
+    }
+
+    #[test]
+    fn complete_err_after_cancel_request_becomes_cancelled() {
+        init_test("complete_err_after_cancel_request_becomes_cancelled");
+        let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
+        let requested = t.request_cancel(CancelReason::timeout());
+        crate::assert_with_log!(requested, "request_cancel", true, requested);
+
+        let err = Error::new(ErrorKind::User);
+        let completed = t.complete(Outcome::Err(err));
+        crate::assert_with_log!(completed, "complete err", true, completed);
+
+        match &t.state {
+            TaskState::Completed(Outcome::Cancelled(reason)) => {
+                crate::assert_with_log!(
+                    reason.kind == crate::types::CancelKind::Timeout,
+                    "cancel reason preserved",
+                    crate::types::CancelKind::Timeout,
+                    reason.kind
+                );
+            }
+            other => panic!("expected Completed(Cancelled), got {other:?}"),
+        }
+
+        let witness = t
+            .cancel_witness()
+            .expect("cancel witness after coerced completion");
+        crate::assert_with_log!(
+            witness.phase == CancelPhase::Completed,
+            "phase completed",
+            CancelPhase::Completed,
+            witness.phase
+        );
+        crate::test_complete!("complete_err_after_cancel_request_becomes_cancelled");
+    }
+
+    #[test]
+    fn complete_ok_during_cancellation_cleanup_becomes_cancelled() {
+        init_test("complete_ok_during_cancellation_cleanup_becomes_cancelled");
+        let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
+        let _ = t.request_cancel(CancelReason::timeout());
+        let _ = t.acknowledge_cancel();
+
+        let completed = t.complete(Outcome::Ok(()));
+        crate::assert_with_log!(completed, "complete ok", true, completed);
+        let cancelled = matches!(t.state, TaskState::Completed(Outcome::Cancelled(_)));
+        crate::assert_with_log!(cancelled, "completed cancelled", true, cancelled);
+
+        let witness = t
+            .cancel_witness()
+            .expect("cancel witness during cleanup completion");
+        crate::assert_with_log!(
+            witness.phase == CancelPhase::Completed,
+            "phase completed",
+            CancelPhase::Completed,
+            witness.phase
+        );
+        crate::test_complete!("complete_ok_during_cancellation_cleanup_becomes_cancelled");
+    }
+
+    #[test]
+    fn complete_ok_during_finalization_becomes_cancelled() {
+        init_test("complete_ok_during_finalization_becomes_cancelled");
+        let mut t = TaskRecord::new(task(), region(), Budget::INFINITE);
+        let _ = t.request_cancel(CancelReason::timeout());
+        let _ = t.acknowledge_cancel();
+        let _ = t.cleanup_done();
+
+        let completed = t.complete(Outcome::Ok(()));
+        crate::assert_with_log!(completed, "complete ok", true, completed);
+        let cancelled = matches!(t.state, TaskState::Completed(Outcome::Cancelled(_)));
+        crate::assert_with_log!(cancelled, "completed cancelled", true, cancelled);
+
+        let witness = t
+            .cancel_witness()
+            .expect("cancel witness during finalization completion");
+        crate::assert_with_log!(
+            witness.phase == CancelPhase::Completed,
+            "phase completed",
+            CancelPhase::Completed,
+            witness.phase
+        );
+        crate::test_complete!("complete_ok_during_finalization_becomes_cancelled");
     }
 
     #[test]
