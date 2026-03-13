@@ -1317,7 +1317,7 @@ impl SymbolReorderer {
             #[allow(clippy::cast_sign_loss)]
             let gap = diff as u64;
             let seq_unwrapped = state.next_expected + gap;
-            
+
             if gap <= u64::from(self.config.max_sequence_gap)
                 && state.buffer.len() < self.config.max_buffer_per_object
             {

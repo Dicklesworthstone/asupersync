@@ -962,7 +962,9 @@ fn spawn_lab_timeout(
     duration: Duration,
 ) -> (TaskId, TaskHandle<BTreeSet<String>>) {
     let future = async move {
-        if let Ok(result) = crate::time::timeout(crate::types::Time::ZERO, duration, child_handle.join()).await {
+        if let Ok(result) =
+            crate::time::timeout(crate::types::Time::ZERO, duration, child_handle.join()).await
+        {
             result
         } else {
             child_handle.abort_with_reason(CancelReason::timeout());
