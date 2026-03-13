@@ -370,10 +370,23 @@ impl<R> Chan<R, End> {
 impl<R, S> Drop for Chan<R, S> {
     fn drop(&mut self) {
         if !self.closed {
-            // In a production build, this would log + metric rather than panic.
+            // If the thread is already panicking, we don't want to double-panic and abort.
+            if std::thread::panicking() {
+                return;
+            }
+
+            // In a production build, this logs rather than panics.
+            #[cfg(debug_assertions)]
             panic!(
                 "SESSION LEAKED: channel {} ({}) dropped without reaching End state",
                 self.channel_id, self.obligation_kind,
+            );
+
+            #[cfg(not(debug_assertions))]
+            crate::tracing_compat::error!(
+                channel_id = %self.channel_id,
+                obligation_kind = %self.obligation_kind,
+                "SESSION LEAKED: dropped without reaching End state"
             );
         }
     }

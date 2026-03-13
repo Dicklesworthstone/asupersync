@@ -526,6 +526,11 @@ impl Drop for SymbolicObligation {
         if !self.resolved && self.is_pending() {
             self.mark_leaked();
 
+            // If the thread is already panicking, we don't want to double-panic and abort.
+            if std::thread::panicking() {
+                return;
+            }
+
             #[cfg(debug_assertions)]
             panic!(
                 "SymbolicObligation leaked: {:?} for object {} was dropped without resolution",
