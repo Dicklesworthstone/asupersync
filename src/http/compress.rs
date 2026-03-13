@@ -674,8 +674,9 @@ mod tests {
             ContentEncoding::Identity,
         ];
         let best = negotiate_encoding("gzip;q=0, *;q=0.5", supported);
-        // gzip is explicitly rejected, deflate and identity get wildcard q=0.5
-        assert_eq!(best, Some(ContentEncoding::Deflate));
+        // gzip is explicitly rejected, deflate gets wildcard q=0.5, and
+        // identity remains implicitly acceptable at q=1.0.
+        assert_eq!(best, Some(ContentEncoding::Identity));
     }
 
     #[test]
