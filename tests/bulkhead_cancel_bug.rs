@@ -6,13 +6,15 @@ use asupersync::types::Time;
 #[test]
 fn test_cancel_head_of_line_blocking() {
     let bh = Bulkhead::new(BulkheadPolicy {
-        max_concurrent: 3,
+        max_concurrent: 10,
         max_queue: 10,
         ..Default::default()
     });
     let now = Time::from_millis(0);
 
-    // Queue is empty, available is 3.
+    // Consume 7 permits, leaving 3 available
+    let _p = bh.try_acquire(7).unwrap();
+
     // Try to enqueue A wanting 5 (will block)
     let a_id = bh.enqueue(5, now).unwrap();
 
@@ -29,15 +31,9 @@ fn test_cancel_head_of_line_blocking() {
     bh.cancel_entry(a_id, now);
 
     // B should now be granted! Because A was blocking it, and now A is gone.
-    // BUT we must check if `cancel_entry` internally processed the queue.
-    // Check entry B
-    let _b_status = bh.check_entry(b_id, now);
-
-    // Actually `check_entry` calls `process_queue`!
-    // Let's see: `check_entry` calls `process_queue_inner`!
-    // Ah. If `check_entry` calls `process_queue`, then B will be granted when someone calls `check_entry(b_id)`.
-
-    // But what if no one calls `check_entry` immediately?
-    // Wait, the caller of B is waiting on an async Future?
-    // `Bulkhead` itself doesn't have an async `Acquire` future in this file. It just has `enqueue` and `check_entry`.
+    let b_status = bh.check_entry(b_id, now).unwrap();
+    assert!(
+        b_status.is_some(),
+        "B should be granted after A is cancelled"
+    );
 }

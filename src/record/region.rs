@@ -84,9 +84,11 @@ impl RegionState {
         matches!(self, Self::Open)
     }
 
-    /// Returns true if the region can accept new tasks or children.
+    /// Returns true if the region can admit same-region cleanup work.
     ///
-    /// This is true for Open (normal execution) and Finalizing (cleanup).
+    /// This is true for Open (normal execution) and Finalizing (cleanup that
+    /// stays within the region, such as tasks or obligation bookkeeping).
+    /// Child-region creation remains `Open`-only via [`Self::can_spawn`].
     /// It is false for Closing and Draining phases.
     #[must_use]
     pub const fn can_accept_work(self) -> bool {
@@ -111,14 +113,15 @@ impl RegionState {
 /// # Concurrency-Safety Argument
 ///
 /// Every admission path (`add_task`, `add_child`, `try_reserve_obligation`,
-/// `heap_alloc`) follows an **optimistic double-check locking** pattern:
+/// `heap_alloc`) follows an optimistic state check before mutating:
 ///
-/// 1. **Fast-path reject** — atomic `state.load(Acquire)` checks
-///    `can_accept_work()`.  If false, return `Closed` without locking.
+/// 1. **Fast-path reject** — atomic `state.load(Acquire)` checks the relevant
+///    admission predicate (`can_accept_work()` for tasks/obligations,
+///    `can_spawn()` for children). If false, return `Closed` without locking.
 /// 2. **Acquire write lock** — `inner.write()` serialises all mutations.
 /// 3. **Re-check state** — a second `state.load(Acquire)` under the lock
 ///    guards against a concurrent `begin_close` that landed between steps
-///    1 and 2.  Because `begin_close` transitions the atomic *before*
+///    1 and 2. Because `begin_close` transitions the atomic before
 ///    acquiring the inner lock, the re-check is linearisable.
 /// 4. **Check limit** — under the same write guard, compare the live count
 ///    against the configured `Option<usize>` limit.
@@ -134,10 +137,11 @@ impl RegionState {
 /// - **No lost removes**: `remove_task`/`remove_child`/`resolve_obligation`
 ///   acquire the write lock before mutating, so removes are sequenced
 ///   with respect to additions.
-/// - **No stale-close admission**: the double-check on `can_accept_work()`
-///   prevents a task from being added to a region that has already
-///   begun closing, even if the optimistic read passed before the
-///   state transition.
+/// - **No stale-close admission**: the double-check on the admission
+///   predicate prevents work from being added to a region that has already
+///   begun closing, even if the optimistic read passed before the state
+///   transition. Finalizing only keeps same-region cleanup admission open;
+///   it does not reopen child-region creation.
 /// - **`resolve_obligation` uses `saturating_sub`**: so an unpaired
 ///   resolve (e.g. from a double-drop) bottoms out at zero rather
 ///   than wrapping.
@@ -475,6 +479,9 @@ impl RegionRecord {
     ///
     /// Returns `Ok(())` if the child was added or already present, or an
     /// admission error if the region is closed or at capacity.
+    ///
+    /// Child regions are only admitted while the parent is `Open`. Once close
+    /// begins, cleanup must stay within the existing region tree.
     pub fn add_child(&self, child: RegionId) -> Result<(), AdmissionError> {
         // Optimistic check (atomic)
         if !self.state.load().can_spawn() {
@@ -1478,8 +1485,9 @@ mod tests {
     // =========================================================================
 
     // --- Closed-region rejection ---
-    // Admission must fail with `AdmissionError::Closed` for every non-Open
-    // state except Finalizing (which is allowed by `can_accept_work`).
+    // Admission must fail with `AdmissionError::Closed` for Closing,
+    // Draining, and Closed. Finalizing keeps same-region cleanup admission
+    // open for tasks/obligations, but still rejects new child regions.
 
     #[test]
     fn admission_rejected_when_closing() {
@@ -1509,7 +1517,7 @@ mod tests {
 
     #[test]
     fn admission_allowed_when_finalizing() {
-        // Finalizing regions accept work (cleanup tasks spawned by finalizers).
+        // Finalizing regions accept same-region cleanup work.
         let region = RegionRecord::new(test_region_id(), None, Budget::default());
         region.begin_close(None);
         assert!(region.begin_finalize()); // skip Draining
@@ -1517,6 +1525,18 @@ mod tests {
 
         let task = TaskId::from_arena(ArenaIndex::new(1, 0));
         assert!(region.add_task(task).is_ok());
+        assert!(region.try_reserve_obligation().is_ok());
+    }
+
+    #[test]
+    fn child_admission_rejected_when_finalizing() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        region.begin_close(None);
+        assert!(region.begin_finalize()); // skip Draining
+        assert_eq!(region.state(), RegionState::Finalizing);
+
+        let child = RegionId::from_arena(ArenaIndex::new(1, 0));
+        assert_eq!(region.add_child(child), Err(AdmissionError::Closed));
     }
 
     #[test]
