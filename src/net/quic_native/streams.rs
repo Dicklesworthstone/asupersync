@@ -763,7 +763,8 @@ impl StreamTable {
             let writable = match id.direction() {
                 StreamDirection::Bidirectional => true,
                 StreamDirection::Unidirectional => id.is_local_for(self.role),
-            } && stream.stop_sending_error_code.is_none()
+            } && stream.send_reset.is_none()
+                && stream.stop_sending_error_code.is_none()
                 && stream.send_credit.remaining() > 0;
             if writable {
                 self.rr_cursor = Some(id);
@@ -1413,6 +1414,31 @@ mod tests {
         assert_eq!(tbl.next_writable_stream(), Some(s1));
 
         // Another round should again skip s2
+        assert_eq!(tbl.next_writable_stream(), Some(s3));
+    }
+
+    #[test]
+    fn next_writable_stream_skips_send_reset() {
+        let mut tbl = StreamTable::new(StreamRole::Client, 3, 0, 100, 100);
+        let s1 = tbl.open_local_bidi().expect("s1");
+        let s2 = tbl.open_local_bidi().expect("s2");
+        let s3 = tbl.open_local_bidi().expect("s3");
+
+        // Advance cursor to s1
+        assert_eq!(tbl.next_writable_stream(), Some(s1));
+
+        // Write some data to s2 then reset it
+        tbl.write_stream(s2, 5).expect("write s2");
+        tbl.stream_mut(s2)
+            .expect("stream")
+            .reset_send(42, 5)
+            .expect("reset");
+
+        // Next should skip s2 (reset) and return s3
+        assert_eq!(tbl.next_writable_stream(), Some(s3));
+
+        // Wrap around skips s2 again
+        assert_eq!(tbl.next_writable_stream(), Some(s1));
         assert_eq!(tbl.next_writable_stream(), Some(s3));
     }
 
