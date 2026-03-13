@@ -379,8 +379,10 @@ impl DistributedRegionRecord {
         Ok(transition)
     }
 
-    /// Marks a replica as lost and potentially degrades the region.
+    /// Marks a replica as lost and potentially degrades or closes the region.
     pub fn replica_lost(&mut self, replica_id: &str, now: Time) -> Result<StateTransition, Error> {
+        self.ensure_replica_mutation_allowed("mark replica lost")?;
+
         // Mark the replica as unavailable.
         let replica = self
             .replicas
@@ -394,13 +396,18 @@ impl DistributedRegionRecord {
 
         let healthy = self.healthy_replicas();
 
-        // If we're Active and lost quorum, degrade.
+        // If we're Active and lost quorum, either degrade into read-only mode
+        // or begin closing immediately when degraded operation is disallowed.
         if self.state == DistributedRegionState::Active && healthy < self.config.min_quorum {
             let transition = self.record_transition(
-                DistributedRegionState::Degraded,
-                TransitionReason::ReplicaLost {
-                    replica_id: replica_id.to_string(),
+                if self.config.allow_degraded {
+                    DistributedRegionState::Degraded
+                } else {
+                    DistributedRegionState::Closing
+                },
+                TransitionReason::QuorumLost {
                     remaining: healthy,
+                    required: self.config.min_quorum,
                 },
                 now,
             );
@@ -438,6 +445,11 @@ impl DistributedRegionRecord {
         now: Time,
     ) -> Result<StateTransition, Error> {
         self.validate_transition(DistributedRegionState::Active)?;
+
+        let healthy = self.healthy_replicas();
+        if healthy < self.config.min_quorum {
+            return Err(Error::quorum_not_reached(healthy, self.config.min_quorum));
+        }
 
         let duration_ms = self.transitions.back().map_or(0, |last| {
             now.as_nanos().saturating_sub(last.timestamp.as_nanos()) / 1_000_000
@@ -513,6 +525,7 @@ impl DistributedRegionRecord {
 
     /// Adds a replica to the region.
     pub fn add_replica(&mut self, info: ReplicaInfo) -> Result<(), Error> {
+        self.ensure_replica_mutation_allowed("add replica")?;
         if self.replicas.iter().any(|r| r.id == info.id) {
             return Err(Error::new(ErrorKind::Internal)
                 .with_message(format!("replica {} already exists", info.id)));
@@ -522,7 +535,8 @@ impl DistributedRegionRecord {
     }
 
     /// Removes a replica from the region.
-    pub fn remove_replica(&mut self, replica_id: &str) -> Result<ReplicaInfo, Error> {
+    pub fn remove_replica(&mut self, replica_id: &str, now: Time) -> Result<ReplicaInfo, Error> {
+        self.ensure_replica_mutation_allowed("remove replica")?;
         let pos = self
             .replicas
             .iter()
@@ -531,7 +545,9 @@ impl DistributedRegionRecord {
                 Error::new(ErrorKind::Internal)
                     .with_message(format!("replica {replica_id} not found"))
             })?;
-        Ok(self.replicas.remove(pos))
+        let removed = self.replicas.remove(pos);
+        self.reconcile_quorum_loss(now);
+        Ok(removed)
     }
 
     /// Updates replica status based on heartbeat.
@@ -541,6 +557,7 @@ impl DistributedRegionRecord {
         status: ReplicaStatus,
         now: Time,
     ) -> Result<(), Error> {
+        self.ensure_replica_mutation_allowed("update replica status")?;
         let replica = self
             .replicas
             .iter_mut()
@@ -553,6 +570,7 @@ impl DistributedRegionRecord {
         if status == ReplicaStatus::Healthy {
             replica.last_heartbeat = now;
         }
+        self.reconcile_quorum_loss(now);
         Ok(())
     }
 
@@ -568,6 +586,35 @@ impl DistributedRegionRecord {
             );
         }
         Ok(())
+    }
+
+    fn ensure_replica_mutation_allowed(&self, operation: &str) -> Result<(), Error> {
+        if self.state.is_terminal() {
+            return Err(Error::new(ErrorKind::InvalidStateTransition)
+                .with_message(format!("cannot {operation} in {} region", self.state)));
+        }
+        Ok(())
+    }
+
+    fn reconcile_quorum_loss(&mut self, now: Time) {
+        if self.state != DistributedRegionState::Active || self.has_quorum() {
+            return;
+        }
+
+        let healthy = self.healthy_replicas();
+        let next_state = if self.config.allow_degraded {
+            DistributedRegionState::Degraded
+        } else {
+            DistributedRegionState::Closing
+        };
+        let _ = self.record_transition(
+            next_state,
+            TransitionReason::QuorumLost {
+                remaining: healthy,
+                required: self.config.min_quorum,
+            },
+            now,
+        );
     }
 
     fn record_transition(
@@ -763,10 +810,28 @@ mod tests {
         assert_eq!(transition.to, DistributedRegionState::Recovering);
         assert_eq!(region.state, DistributedRegionState::Recovering);
 
+        region
+            .update_replica_status("r2", ReplicaStatus::Healthy, Time::from_secs(14))
+            .unwrap();
+
         // Complete recovery.
         let transition = region.complete_recovery(42, Time::from_secs(15)).unwrap();
         assert_eq!(transition.to, DistributedRegionState::Active);
         assert_eq!(region.state, DistributedRegionState::Active);
+    }
+
+    #[test]
+    fn complete_recovery_requires_quorum() {
+        let mut region = create_degraded_region();
+
+        region
+            .trigger_recovery("operator", Time::from_secs(10))
+            .unwrap();
+
+        let result = region.complete_recovery(42, Time::from_secs(15));
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::QuorumNotReached);
+        assert_eq!(region.state, DistributedRegionState::Recovering);
     }
 
     #[test]
@@ -847,7 +912,7 @@ mod tests {
     #[test]
     fn remove_unknown_replica_error() {
         let mut region = create_active_region();
-        let result = region.remove_replica("nonexistent");
+        let result = region.remove_replica("nonexistent", Time::from_secs(7));
         assert!(result.is_err());
     }
 
@@ -905,14 +970,105 @@ mod tests {
 
         let r1 = region.replicas.iter().find(|r| r.id == "r1").unwrap();
         assert_eq!(r1.status, ReplicaStatus::Suspect);
+        assert_eq!(region.state, DistributedRegionState::Degraded);
+    }
+
+    #[test]
+    fn quorum_loss_closes_when_degraded_mode_disabled() {
+        let config = DistributedRegionConfig {
+            min_quorum: 2,
+            replication_factor: 3,
+            allow_degraded: false,
+            ..Default::default()
+        };
+        let mut region = DistributedRegionRecord::new(
+            RegionId::new_ephemeral(),
+            config,
+            None,
+            Budget::default(),
+        );
+
+        region.add_replica(ReplicaInfo::new("r1", "addr1")).unwrap();
+        region.add_replica(ReplicaInfo::new("r2", "addr2")).unwrap();
+        region.add_replica(ReplicaInfo::new("r3", "addr3")).unwrap();
+        region.activate(Time::from_secs(0)).unwrap();
+
+        let first_loss = region.replica_lost("r1", Time::from_secs(5));
+        assert!(first_loss.is_err());
+        assert_eq!(region.state, DistributedRegionState::Active);
+
+        let transition = region.replica_lost("r2", Time::from_secs(6)).unwrap();
+        assert_eq!(transition.to, DistributedRegionState::Closing);
+        assert_eq!(
+            transition.reason,
+            TransitionReason::QuorumLost {
+                remaining: 1,
+                required: 2,
+            }
+        );
+        assert_eq!(region.state, DistributedRegionState::Closing);
     }
 
     #[test]
     fn remove_replica() {
         let mut region = create_active_region();
-        let removed = region.remove_replica("r2").unwrap();
+        let removed = region.remove_replica("r2", Time::from_secs(6)).unwrap();
         assert_eq!(removed.id, "r2");
         assert_eq!(region.replicas.len(), 1);
+        assert_eq!(region.state, DistributedRegionState::Degraded);
+    }
+
+    #[test]
+    fn remove_replica_closes_when_degraded_mode_disabled() {
+        let config = DistributedRegionConfig {
+            min_quorum: 2,
+            replication_factor: 3,
+            allow_degraded: false,
+            ..Default::default()
+        };
+        let mut region = DistributedRegionRecord::new(
+            RegionId::new_ephemeral(),
+            config,
+            None,
+            Budget::default(),
+        );
+        region.add_replica(ReplicaInfo::new("r1", "addr1")).unwrap();
+        region.add_replica(ReplicaInfo::new("r2", "addr2")).unwrap();
+        region.activate(Time::from_secs(0)).unwrap();
+
+        let removed = region.remove_replica("r2", Time::from_secs(6)).unwrap();
+        assert_eq!(removed.id, "r2");
+        assert_eq!(region.state, DistributedRegionState::Closing);
+    }
+
+    #[test]
+    fn closed_region_rejects_replica_mutations() {
+        let mut region = create_active_region();
+        region
+            .begin_close(
+                TransitionReason::UserClose { reason: None },
+                Time::from_secs(10),
+            )
+            .unwrap();
+        region.complete_close(Time::from_secs(11)).unwrap();
+
+        let add_err = region
+            .add_replica(ReplicaInfo::new("r3", "addr3"))
+            .unwrap_err();
+        assert_eq!(add_err.kind(), ErrorKind::InvalidStateTransition);
+
+        let update_err = region
+            .update_replica_status("r1", ReplicaStatus::Suspect, Time::from_secs(12))
+            .unwrap_err();
+        assert_eq!(update_err.kind(), ErrorKind::InvalidStateTransition);
+
+        let remove_err = region
+            .remove_replica("r1", Time::from_secs(13))
+            .unwrap_err();
+        assert_eq!(remove_err.kind(), ErrorKind::InvalidStateTransition);
+
+        let lost_err = region.replica_lost("r1", Time::from_secs(14)).unwrap_err();
+        assert_eq!(lost_err.kind(), ErrorKind::InvalidStateTransition);
     }
 
     // =========================================================================

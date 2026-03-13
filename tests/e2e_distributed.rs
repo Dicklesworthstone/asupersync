@@ -515,6 +515,11 @@ fn e2e_quorum_loss_and_recovery() {
         .trigger_recovery("admin", Time::from_secs(20))
         .unwrap();
 
+    record
+        .update_replica_status("r1", ReplicaStatus::Healthy, Time::from_secs(25))
+        .unwrap();
+    assert!(record.has_quorum());
+
     test_section!("Complete recovery");
     let _ = record.complete_recovery(8, Time::from_secs(30)).unwrap();
     assert!(record.state.can_write());

@@ -161,6 +161,11 @@ fn quorum_loss_degrades_then_recovers() {
         .unwrap();
     assert_eq!(t3.to, DistributedRegionState::Recovering);
 
+    record
+        .update_replica_status("r1", ReplicaStatus::Healthy, Time::from_secs(25))
+        .unwrap();
+    assert!(record.has_quorum());
+
     // Complete recovery.
     let t4 = record.complete_recovery(10, Time::from_secs(30)).unwrap();
     assert_eq!(t4.to, DistributedRegionState::Active);
