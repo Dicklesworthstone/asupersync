@@ -278,13 +278,15 @@ impl DecodingPipeline {
                 });
             }
         }
-        self.object_id = Some(params.object_id);
-        self.object_size = Some(params.object_size);
-        self.block_plans = Some(plan_blocks(
+        let plans = plan_blocks(
             params.object_size as usize,
             usize::from(params.symbol_size),
             self.config.max_block_size,
-        )?);
+        )?;
+        validate_object_params_layout(params, &plans)?;
+        self.object_id = Some(params.object_id);
+        self.object_size = Some(params.object_size);
+        self.block_plans = Some(plans);
         self.configure_block_k();
         Ok(())
     }
@@ -413,16 +415,7 @@ impl DecodingPipeline {
         let blocks_total = self.block_plans.as_ref().map(Vec::len);
         let symbols_received = self.symbols.len();
         let symbols_needed_estimate = self.block_plans.as_ref().map_or(0, |plans| {
-            plans
-                .iter()
-                .map(|plan| {
-                    required_symbols(
-                        u16::try_from(plan.k).unwrap_or(u16::MAX),
-                        self.config.repair_overhead,
-                        self.config.min_overhead,
-                    )
-                })
-                .sum()
+            sum_required_symbols(plans, self.config.repair_overhead, self.config.min_overhead)
         });
 
         DecodingProgress {
@@ -469,16 +462,8 @@ impl DecodingPipeline {
         };
         if !self.is_complete() {
             let received = self.symbols.len();
-            let needed = plans
-                .iter()
-                .map(|plan| {
-                    required_symbols(
-                        u16::try_from(plan.k).unwrap_or(u16::MAX),
-                        self.config.repair_overhead,
-                        self.config.min_overhead,
-                    )
-                })
-                .sum();
+            let needed =
+                sum_required_symbols(plans, self.config.repair_overhead, self.config.min_overhead);
             return Err(DecodingError::InsufficientSymbols { received, needed });
         }
 
@@ -647,13 +632,64 @@ fn plan_blocks(
     Ok(blocks)
 }
 
+fn validate_object_params_layout(
+    params: ObjectParams,
+    plans: &[BlockPlan],
+) -> Result<(), DecodingError> {
+    let declared_blocks = usize::from(params.source_blocks);
+    let declared_k = usize::from(params.symbols_per_block);
+
+    if plans.is_empty() {
+        if declared_blocks == 0 && declared_k == 0 {
+            return Ok(());
+        }
+        if declared_blocks == 1 {
+            return Ok(());
+        }
+        return Err(DecodingError::InconsistentMetadata {
+            sbn: 0,
+            details: format!(
+                "object params layout mismatch: empty object expects either 0 blocks / 0 symbols-per-block or a single empty sentinel block, got {declared_blocks} block(s) with {declared_k} symbols/block"
+            ),
+        });
+    }
+
+    let expected_blocks = plans.len();
+    if declared_blocks != expected_blocks {
+        return Err(DecodingError::InconsistentMetadata {
+            sbn: 0,
+            details: format!(
+                "object params block count mismatch: expected {expected_blocks}, got {declared_blocks}"
+            ),
+        });
+    }
+
+    let expected_k = plans.iter().map(|plan| plan.k).max().unwrap_or(0);
+    if declared_k != expected_k {
+        return Err(DecodingError::InconsistentMetadata {
+            sbn: 0,
+            details: format!(
+                "object params symbols_per_block mismatch: expected {expected_k}, got {declared_k}"
+            ),
+        });
+    }
+
+    Ok(())
+}
+
 fn required_symbols(k: u16, overhead: f64, min_overhead: usize) -> usize {
     if k == 0 {
         return 0;
     }
     let raw = (f64::from(k) * overhead).ceil();
     let minimum_threshold = usize::from(k).saturating_add(min_overhead);
-    if !raw.is_finite() || raw.is_sign_negative() {
+    if raw.is_nan() {
+        return minimum_threshold;
+    }
+    if raw.is_sign_positive() && !raw.is_finite() {
+        return usize::MAX;
+    }
+    if raw.is_sign_negative() {
         return minimum_threshold;
     }
     #[allow(clippy::cast_sign_loss)]
@@ -661,6 +697,16 @@ fn required_symbols(k: u16, overhead: f64, min_overhead: usize) -> usize {
     // `overhead` already encodes the total-symbol target; `min_overhead` is a
     // floor on extra symbols beyond K, not an additional increment on top.
     factor_threshold.max(minimum_threshold)
+}
+
+fn sum_required_symbols(plans: &[BlockPlan], overhead: f64, min_overhead: usize) -> usize {
+    plans.iter().fold(0usize, |acc, plan| {
+        acc.saturating_add(required_symbols(
+            u16::try_from(plan.k).unwrap_or(u16::MAX),
+            overhead,
+            min_overhead,
+        ))
+    })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1295,6 +1341,8 @@ mod tests {
         assert_eq!(required_symbols(10, 1.05, 3), 13);
         assert_eq!(required_symbols(10, 1.5, 1), 15);
         assert_eq!(required_symbols(10, 0.5, 0), 10);
+        assert_eq!(required_symbols(10, f64::NAN, 3), 13);
+        assert_eq!(required_symbols(10, f64::INFINITY, 3), usize::MAX);
     }
 
     // ---- BlockStateKind ----
@@ -1362,6 +1410,111 @@ mod tests {
         pipeline
             .set_object_params(ObjectParams::new(oid, 512, config.symbol_size, 1, 2))
             .expect("second with same id should succeed");
+    }
+
+    #[test]
+    fn pipeline_set_object_params_rejects_declared_block_count_drift() {
+        let config = encoding_config();
+        let object_id = ObjectId::new_for_test(104);
+
+        let mut pipeline = DecodingPipeline::new(DecodingConfig {
+            symbol_size: config.symbol_size,
+            max_block_size: config.max_block_size,
+            ..DecodingConfig::default()
+        });
+        let err = pipeline
+            .set_object_params(ObjectParams::new(object_id, 1536, config.symbol_size, 1, 4))
+            .unwrap_err();
+        assert!(matches!(err, DecodingError::InconsistentMetadata { .. }));
+        assert!(
+            err.to_string().contains("block count mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn pipeline_set_object_params_rejects_total_k_metadata_for_multi_block_object() {
+        let config = encoding_config();
+        let object_id = ObjectId::new_for_test(105);
+
+        let mut pipeline = DecodingPipeline::new(DecodingConfig {
+            symbol_size: config.symbol_size,
+            max_block_size: config.max_block_size,
+            ..DecodingConfig::default()
+        });
+        let err = pipeline
+            .set_object_params(ObjectParams::new(object_id, 2048, config.symbol_size, 2, 8))
+            .unwrap_err();
+        assert!(matches!(err, DecodingError::InconsistentMetadata { .. }));
+        assert!(
+            err.to_string().contains("symbols_per_block mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn pipeline_set_object_params_failure_does_not_latch_object_identity() {
+        let config = encoding_config();
+        let invalid_object_id = ObjectId::new_for_test(106);
+        let valid_object_id = ObjectId::new_for_test(107);
+
+        let mut pipeline = DecodingPipeline::new(DecodingConfig {
+            symbol_size: config.symbol_size,
+            max_block_size: config.max_block_size,
+            ..DecodingConfig::default()
+        });
+        let err = pipeline
+            .set_object_params(ObjectParams::new(
+                invalid_object_id,
+                2048,
+                config.symbol_size,
+                2,
+                8,
+            ))
+            .unwrap_err();
+        assert!(matches!(err, DecodingError::InconsistentMetadata { .. }));
+
+        pipeline
+            .set_object_params(ObjectParams::new(
+                valid_object_id,
+                512,
+                config.symbol_size,
+                1,
+                2,
+            ))
+            .expect("failed set_object_params must not poison object identity");
+    }
+
+    #[test]
+    fn pipeline_set_object_params_accepts_empty_object_single_block_sentinel_metadata() {
+        let config = encoding_config();
+        let object_id = ObjectId::new_for_test(108);
+
+        let mut pipeline = DecodingPipeline::new(DecodingConfig {
+            symbol_size: config.symbol_size,
+            max_block_size: config.max_block_size,
+            ..DecodingConfig::default()
+        });
+        pipeline
+            .set_object_params(ObjectParams::new(
+                object_id,
+                0,
+                config.symbol_size,
+                1,
+                config
+                    .max_block_size
+                    .div_ceil(usize::from(config.symbol_size))
+                    .try_into()
+                    .expect("sentinel block K should fit in u16"),
+            ))
+            .expect("empty object sentinel metadata should be accepted");
+
+        assert!(pipeline.is_complete());
+        assert_eq!(pipeline.progress().blocks_total, Some(0));
+        assert_eq!(
+            pipeline.into_data().expect("empty object should decode"),
+            Vec::<u8>::new()
+        );
     }
 
     // ---- Gap tests ----
@@ -1499,6 +1652,38 @@ mod tests {
         crate::test_complete!(
             "progress_symbols_needed_estimate_does_not_double_count_min_overhead"
         );
+    }
+
+    #[test]
+    fn progress_symbols_needed_estimate_saturates_for_infinite_overhead() {
+        init_test("progress_symbols_needed_estimate_saturates_for_infinite_overhead");
+        let object_id = ObjectId::new_for_test(1021);
+        let symbol_size = 256u16;
+        let data_len = 2048usize;
+
+        let mut pipeline = DecodingPipeline::new(DecodingConfig {
+            symbol_size,
+            max_block_size: 1024,
+            repair_overhead: f64::INFINITY,
+            min_overhead: 0,
+            max_buffered_symbols: 0,
+            block_timeout: Duration::from_secs(30),
+            verify_auth: false,
+        });
+        pipeline
+            .set_object_params(ObjectParams::new(
+                object_id,
+                data_len as u64,
+                symbol_size,
+                2,
+                4,
+            ))
+            .expect("set params");
+
+        let progress = pipeline.progress();
+        assert_eq!(progress.blocks_total, Some(2));
+        assert_eq!(progress.symbols_needed_estimate, usize::MAX);
+        crate::test_complete!("progress_symbols_needed_estimate_saturates_for_infinite_overhead");
     }
 
     #[test]
@@ -1790,12 +1975,12 @@ mod tests {
         // Compute block plan matching what the encoder does
         let symbol_size = usize::from(config.symbol_size);
         let num_blocks = data.len().div_ceil(config.max_block_size);
-        let mut total_k: u16 = 0;
+        let mut full_block_k: u16 = 0;
         for b in 0..num_blocks {
             let block_start = b * config.max_block_size;
             let block_len = usize::min(config.max_block_size, data.len() - block_start);
             let k = block_len.div_ceil(symbol_size) as u16;
-            total_k += k;
+            full_block_k = full_block_k.max(k);
         }
         decoder
             .set_object_params(ObjectParams::new(
@@ -1803,7 +1988,7 @@ mod tests {
                 data.len() as u64,
                 config.symbol_size,
                 num_blocks as u8,
-                total_k,
+                full_block_k,
             ))
             .expect("set params");
 

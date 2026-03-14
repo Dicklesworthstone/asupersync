@@ -7,7 +7,7 @@
 
 use crate::config::EncodingConfig;
 use crate::error::{Error, ErrorKind};
-use crate::raptorq::systematic::SystematicEncoder;
+use crate::raptorq::systematic::{SystematicEncoder, SystematicParamError, SystematicParams};
 use crate::types::resource::{PoolExhausted, SymbolPool};
 use crate::types::{ObjectId, Symbol, SymbolId, SymbolKind};
 use std::cmp::min;
@@ -254,6 +254,7 @@ impl EncodingPipeline {
         while offset < data.len() {
             let len = min(self.config.max_block_size, data.len() - offset);
             let k = len.div_ceil(symbol_size);
+            validate_source_block_k(len, symbol_size, k)?;
             blocks.push(BlockPlan {
                 sbn,
                 start: offset,
@@ -289,6 +290,25 @@ impl EncodingPipeline {
             Ok(vec![0_u8; symbol_size])
         }
     }
+}
+
+fn validate_source_block_k(
+    block_len: usize,
+    symbol_size: usize,
+    k: usize,
+) -> Result<(), EncodingError> {
+    SystematicParams::try_for_source_block(k, symbol_size)
+        .map(|_| ())
+        .map_err(|err| match err {
+        SystematicParamError::UnsupportedSourceBlockSize {
+            requested,
+            max_supported,
+        } => EncodingError::InvalidConfig {
+            reason: format!(
+                "block of {block_len} bytes with symbol_size {symbol_size} requires unsupported source block K={requested}; supported range is 1..={max_supported}"
+            ),
+        },
+    })
 }
 
 /// Iterator over encoded symbols.
@@ -719,6 +739,29 @@ mod tests {
             let expected = encoder.repair_symbol(esi);
             assert_eq!(sym.symbol().data(), expected.as_slice());
         }
+    }
+
+    #[test]
+    fn test_rejects_block_above_systematic_k_limit_before_emission() {
+        let mut pipeline = EncodingPipeline::new(
+            test_config(8, 451_232, 1.1),
+            SymbolPool::new(PoolConfig::default()),
+        );
+        let data = vec![0u8; 451_232];
+
+        let err = pipeline
+            .encode_with_repair(ObjectId::new_for_test(12), &data, 1)
+            .next()
+            .expect("iterator should yield planning error")
+            .unwrap_err();
+
+        assert!(matches!(err, EncodingError::InvalidConfig { .. }));
+        assert!(
+            err.to_string().contains("unsupported source block K=56404"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(pipeline.stats().source_symbols, 0);
+        assert_eq!(pipeline.stats().repair_symbols, 0);
     }
 
     // ========================================================================
