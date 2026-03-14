@@ -272,6 +272,28 @@ impl<T: Clone> FaultSender<T> {
     /// messages are delivered (eventual delivery guarantee).
     #[allow(clippy::significant_drop_tightening)]
     pub async fn flush(&self, cx: &Cx) -> Result<(), SendError<()>> {
+        struct FlushGuard<'a, T> {
+            buffer: &'a parking_lot::Mutex<Vec<T>>,
+            pending: Option<std::vec::IntoIter<T>>,
+            current: Option<T>,
+        }
+
+        impl<T> Drop for FlushGuard<'_, T> {
+            fn drop(&mut self) {
+                let mut to_restore = Vec::new();
+                if let Some(msg) = self.current.take() {
+                    to_restore.push(msg);
+                }
+                if let Some(pending) = self.pending.take() {
+                    to_restore.extend(pending);
+                }
+                if !to_restore.is_empty() {
+                    let mut buf = self.buffer.lock();
+                    buf.extend(to_restore);
+                }
+            }
+        }
+
         let mut messages = {
             let mut buffer = self.reorder_buffer.lock();
             // Replace with a freshly pre-sized buffer so subsequent sends keep a
@@ -301,28 +323,43 @@ impl<T: Clone> FaultSender<T> {
 
         self.stat_reorder_flushes.fetch_add(1, Ordering::Relaxed);
 
-        let mut pending = messages.into_iter();
-        while let Some(msg) = pending.next() {
-            match self.inner.send(cx, msg).await {
+        let mut guard = FlushGuard {
+            buffer: &self.reorder_buffer,
+            pending: Some(messages.into_iter()),
+            current: None,
+        };
+
+        while let Some(msg) = guard.pending.as_mut().unwrap().next() {
+            guard.current = Some(msg);
+
+            let permit = match self.inner.reserve(cx).await {
+                Ok(p) => p,
+                Err(err) => {
+                    // The Drop guard will restore `current` and `pending` to the buffer.
+                    match err {
+                        SendError::Disconnected(()) => return Err(SendError::Disconnected(())),
+                        SendError::Cancelled(()) => return Err(SendError::Cancelled(())),
+                        SendError::Full(()) => return Err(SendError::Full(())),
+                    }
+                }
+            };
+
+            let msg = guard.current.take().unwrap();
+            match permit.try_send(msg) {
                 Ok(()) => self.record_sent(),
                 Err(err) => {
-                    // Preserve undelivered messages for eventual delivery after
-                    // the caller resolves backpressure/disconnect conditions.
-                    let mut buffer = self.reorder_buffer.lock();
+                    // Receiver disconnected while we were sending
                     match err {
                         SendError::Disconnected(value) => {
-                            buffer.push(value);
-                            buffer.extend(pending);
+                            guard.current = Some(value);
                             return Err(SendError::Disconnected(()));
                         }
                         SendError::Cancelled(value) => {
-                            buffer.push(value);
-                            buffer.extend(pending);
+                            guard.current = Some(value);
                             return Err(SendError::Cancelled(()));
                         }
                         SendError::Full(value) => {
-                            buffer.push(value);
-                            buffer.extend(pending);
+                            guard.current = Some(value);
                             return Err(SendError::Full(()));
                         }
                     }
@@ -330,6 +367,7 @@ impl<T: Clone> FaultSender<T> {
             }
         }
 
+        guard.pending = None;
         Ok(())
     }
 
