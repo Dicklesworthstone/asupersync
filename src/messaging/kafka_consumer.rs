@@ -354,6 +354,7 @@ impl KafkaConsumer {
             if tpo.topic.trim().is_empty() {
                 return Err(KafkaError::Config("topic cannot be empty".to_string()));
             }
+            validate_partition_number(tpo.partition)?;
             if !state.subscribed_topics.contains(&tpo.topic) {
                 return Err(KafkaError::InvalidTopic(tpo.topic.clone()));
             }
@@ -362,7 +363,14 @@ impl KafkaConsumer {
                     "rebalance offsets must be non-negative".to_string(),
                 ));
             }
-            normalized.insert((tpo.topic.clone(), tpo.partition), tpo.offset);
+            if normalized
+                .insert((tpo.topic.clone(), tpo.partition), tpo.offset)
+                .is_some()
+            {
+                return Err(KafkaError::Config(
+                    "duplicate topic/partition entry in rebalance batch".to_string(),
+                ));
+            }
         }
         let previous_assignments = state.assigned_partitions.clone();
         let next_assignments: BTreeSet<(String, i32)> = normalized.keys().cloned().collect();
@@ -443,14 +451,14 @@ impl KafkaConsumer {
         if self.closed.load(Ordering::Acquire) {
             return Err(KafkaError::Config("consumer is closed".to_string()));
         }
+        let mut normalized = BTreeMap::new();
         for tpo in offsets {
+            validate_partition_number(tpo.partition)?;
             if !state.subscribed_topics.contains(&tpo.topic) {
                 return Err(KafkaError::InvalidTopic(tpo.topic.clone()));
             }
-            if !state
-                .assigned_partitions
-                .contains(&(tpo.topic.clone(), tpo.partition))
-            {
+            let key = (tpo.topic.clone(), tpo.partition);
+            if !state.assigned_partitions.contains(&key) {
                 return Err(KafkaError::Config(
                     "partition is not assigned to this consumer".to_string(),
                 ));
@@ -460,20 +468,21 @@ impl KafkaConsumer {
                     "offsets must be non-negative".to_string(),
                 ));
             }
-            if let Some(previous) = state
-                .committed_offsets
-                .get(&(tpo.topic.clone(), tpo.partition))
+            if let Some(previous) = state.committed_offsets.get(&key)
                 && tpo.offset < *previous
             {
                 return Err(KafkaError::Config(
                     "offset commit regression is not allowed".to_string(),
                 ));
             }
+            if normalized.insert(key, tpo.offset).is_some() {
+                return Err(KafkaError::Config(
+                    "duplicate topic/partition entry in commit batch".to_string(),
+                ));
+            }
         }
-        for tpo in offsets {
-            state
-                .committed_offsets
-                .insert((tpo.topic.clone(), tpo.partition), tpo.offset);
+        for (key, offset) in normalized {
+            state.committed_offsets.insert(key, offset);
         }
         drop(state);
         Ok(())
@@ -485,6 +494,7 @@ impl KafkaConsumer {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
         self.ensure_open()?;
 
+        validate_partition_number(tpo.partition)?;
         if tpo.offset < 0 {
             return Err(KafkaError::Config(
                 "seek offset must be non-negative".to_string(),
@@ -609,6 +619,16 @@ impl KafkaConsumer {
         } else {
             Ok(())
         }
+    }
+}
+
+fn validate_partition_number(partition: i32) -> Result<(), KafkaError> {
+    if partition < 0 {
+        Err(KafkaError::Config(
+            "partition must be non-negative".to_string(),
+        ))
+    } else {
+        Ok(())
     }
 }
 
@@ -1033,6 +1053,60 @@ mod tests {
     }
 
     #[test]
+    fn consumer_rebalance_rejects_duplicate_partition_entries() {
+        run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+            consumer
+                .subscribe(&cx, &["orders", "payments"])
+                .await
+                .unwrap();
+
+            let err = consumer
+                .rebalance(
+                    &cx,
+                    &[
+                        TopicPartitionOffset::new("orders", 1, 10),
+                        TopicPartitionOffset::new("orders", 1, 25),
+                    ],
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(err, KafkaError::Config(msg) if msg.contains("duplicate")));
+            assert_eq!(
+                consumer.assigned_partitions(),
+                vec![("orders".to_string(), 0), ("payments".to_string(), 0)]
+            );
+            assert_eq!(consumer.rebalance_generation(), 0);
+            assert!(consumer.last_revoked_partitions().is_empty());
+            assert_eq!(consumer.position("orders", 1), None);
+        });
+    }
+
+    #[test]
+    fn consumer_rebalance_rejects_negative_partition_numbers() {
+        run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+            consumer
+                .subscribe(&cx, &["orders", "payments"])
+                .await
+                .unwrap();
+
+            let err = consumer
+                .rebalance(&cx, &[TopicPartitionOffset::new("orders", -1, 10)])
+                .await
+                .unwrap_err();
+            assert!(matches!(err, KafkaError::Config(msg) if msg.contains("non-negative")));
+            assert_eq!(
+                consumer.assigned_partitions(),
+                vec![("orders".to_string(), 0), ("payments".to_string(), 0)]
+            );
+            assert_eq!(consumer.rebalance_generation(), 0);
+            assert!(consumer.last_revoked_partitions().is_empty());
+            assert_eq!(consumer.position("orders", -1), None);
+        });
+    }
+
+    #[test]
     fn consumer_commit_rejects_unassigned_partitions_and_regression() {
         run_test_with_cx(|cx| async move {
             let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
@@ -1053,6 +1127,49 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(matches!(regression, KafkaError::Config(msg) if msg.contains("regression")));
+        });
+    }
+
+    #[test]
+    fn consumer_commit_rejects_duplicate_partition_entries_in_single_batch() {
+        run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+            consumer.subscribe(&cx, &["orders"]).await.unwrap();
+
+            let err = consumer
+                .commit_offsets(
+                    &cx,
+                    &[
+                        TopicPartitionOffset::new("orders", 0, 8),
+                        TopicPartitionOffset::new("orders", 0, 7),
+                    ],
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(err, KafkaError::Config(msg) if msg.contains("duplicate")));
+            assert_eq!(consumer.committed_offset("orders", 0), None);
+        });
+    }
+
+    #[test]
+    fn consumer_commit_and_seek_reject_negative_partition_numbers() {
+        run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(ConsumerConfig::default()).unwrap();
+            consumer.subscribe(&cx, &["orders"]).await.unwrap();
+
+            let commit_err = consumer
+                .commit_offsets(&cx, &[TopicPartitionOffset::new("orders", -1, 8)])
+                .await
+                .unwrap_err();
+            assert!(matches!(commit_err, KafkaError::Config(msg) if msg.contains("non-negative")));
+            assert_eq!(consumer.committed_offset("orders", -1), None);
+
+            let seek_err = consumer
+                .seek(&cx, &TopicPartitionOffset::new("orders", -1, 42))
+                .await
+                .unwrap_err();
+            assert!(matches!(seek_err, KafkaError::Config(msg) if msg.contains("non-negative")));
+            assert_eq!(consumer.position("orders", -1), None);
         });
     }
 
