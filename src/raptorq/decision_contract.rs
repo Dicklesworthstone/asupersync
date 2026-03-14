@@ -223,7 +223,11 @@ impl RaptorQDecisionContract {
             uncertainty_score,
             deterministic_fallback_triggered: outcome.fallback_active,
             deterministic_fallback_reason: if outcome.fallback_active {
-                fallback_reason
+                if fallback_reason == "none" {
+                    "conservative_fallback_reason_unclassified"
+                } else {
+                    fallback_reason
+                }
             } else {
                 "none"
             },
@@ -627,6 +631,32 @@ mod tests {
         assert_eq!(
             telemetry.deterministic_fallback_reason,
             "policy_budget_exhausted"
+        );
+    }
+
+    #[test]
+    fn policy_fallback_never_reports_none_reason() {
+        let telemetry = evaluate_governance(&GovernanceSnapshot {
+            n_rows: 48,
+            n_cols: 32,
+            density_permille: 10,
+            rank_deficit_permille: 0,
+            inactivation_pressure_permille: 600,
+            overhead_ratio_permille: 0,
+            budget_exhausted: false,
+            baseline_loss: 100,
+            high_support_loss: 800,
+            block_schur_loss: 900,
+        });
+
+        assert!(
+            telemetry.deterministic_fallback_triggered,
+            "e-process breach should activate fallback"
+        );
+        assert_eq!(telemetry.chosen_action, "fallback");
+        assert_eq!(
+            telemetry.deterministic_fallback_reason, "conservative_fallback_reason_unclassified",
+            "fallback-active telemetry must never report reason=none"
         );
     }
 

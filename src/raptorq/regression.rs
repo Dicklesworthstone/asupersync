@@ -231,8 +231,11 @@ impl RegressionMonitor {
                     (Some(cr.threshold), !cr.conforming, cr.calibration_n)
                 });
 
-            // Feed violation signal to e-process.
-            if let Some(ep) = self.e_processes.get_mut(metric.as_str()) {
+            // Do not consume e-process evidence budget before the conformal
+            // envelope is active for this metric.
+            if threshold.is_some()
+                && let Some(ep) = self.e_processes.get_mut(metric.as_str())
+            {
                 ep.observe(exceeds_threshold);
             }
 
@@ -431,6 +434,12 @@ mod tests {
             RegressionVerdict::Calibrating,
             "should be calibrating before min samples"
         );
+        for metric in TRACKED_METRICS {
+            assert!(
+                (monitor.e_value(metric).expect("tracked metric") - 1.0).abs() < f64::EPSILON,
+                "pre-calibration check should not mutate e-value for {metric}"
+            );
+        }
     }
 
     #[test]
@@ -537,6 +546,41 @@ mod tests {
         );
         assert!(monitor.any_regressed());
         assert!(!monitor.regressed_metrics().is_empty());
+    }
+
+    #[test]
+    fn pre_calibration_checks_do_not_dilute_later_regression_evidence() {
+        let mut clean = RegressionMonitor::new();
+        let mut with_prechecks = RegressionMonitor::new();
+
+        for _ in 0..(MIN_CALIBRATION_SAMPLES / 2) {
+            let stats = make_baseline_stats(10, 3);
+            let report = with_prechecks.check(&stats);
+            assert_eq!(report.overall_verdict, RegressionVerdict::Calibrating);
+        }
+
+        for i in 0..(MIN_CALIBRATION_SAMPLES + 5) {
+            let stats = make_baseline_stats(10 + i % 2, 3);
+            clean.calibrate(&stats);
+            with_prechecks.calibrate(&stats);
+        }
+
+        let anomaly = make_baseline_stats(1_000, 100);
+        let clean_report = clean.check(&anomaly);
+        let prechecked_report = with_prechecks.check(&anomaly);
+
+        assert_eq!(
+            clean_report.overall_verdict, prechecked_report.overall_verdict,
+            "pre-calibration checks should not change the first live verdict"
+        );
+        for metric in TRACKED_METRICS {
+            let clean_e = clean.e_value(metric).expect("tracked metric");
+            let prechecked_e = with_prechecks.e_value(metric).expect("tracked metric");
+            assert!(
+                (clean_e - prechecked_e).abs() < f64::EPSILON,
+                "pre-calibration checks should not dilute e-process evidence for {metric}: clean={clean_e}, prechecked={prechecked_e}"
+            );
+        }
     }
 
     #[test]
