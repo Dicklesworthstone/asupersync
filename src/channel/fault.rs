@@ -218,6 +218,9 @@ impl<T: Clone> FaultSender<T> {
         if self.inner.is_closed() {
             return Err(SendError::Disconnected(value));
         }
+        if cx.checkpoint().is_err() {
+            return Err(SendError::Cancelled(value));
+        }
 
         let should_reorder;
         let should_duplicate;
@@ -255,11 +258,11 @@ impl<T: Clone> FaultSender<T> {
         self.inner.send(cx, value).await?;
         self.record_sent();
 
-        // Send duplicate if triggered.
+        // Send duplicate if triggered — only record evidence after successful delivery.
         if let Some(dup) = duplicate {
-            self.record_duplication();
-            // Best-effort: ignore errors (channel may be full/closed).
-            let _ = self.inner.send(cx, dup).await;
+            if self.inner.send(cx, dup).await.is_ok() {
+                self.record_duplication();
+            }
         }
 
         Ok(())
@@ -314,20 +317,14 @@ impl<T: Clone> FaultSender<T> {
             shuffle_vec(&mut messages, &mut rng);
         }
 
-        emit_fault_evidence(
-            &*self.evidence_sink,
-            self.next_evidence_ts(),
-            "reorder_flush",
-            &format!("buffer_size_{}", messages.len()),
-        );
-
-        self.stat_reorder_flushes.fetch_add(1, Ordering::Relaxed);
+        let flush_context = format!("buffer_size_{}", messages.len());
 
         let mut guard = FlushGuard {
             buffer: &self.reorder_buffer,
             pending: Some(messages.into_iter()),
             current: None,
         };
+        let mut flush_recorded = false;
 
         while let Some(msg) = guard.pending.as_mut().unwrap().next() {
             guard.current = Some(msg);
@@ -346,7 +343,19 @@ impl<T: Clone> FaultSender<T> {
 
             let msg = guard.current.take().unwrap();
             match permit.try_send(msg) {
-                Ok(()) => self.record_sent(),
+                Ok(()) => {
+                    if !flush_recorded {
+                        emit_fault_evidence(
+                            &*self.evidence_sink,
+                            self.next_evidence_ts(),
+                            "reorder_flush",
+                            &flush_context,
+                        );
+                        self.stat_reorder_flushes.fetch_add(1, Ordering::Relaxed);
+                        flush_recorded = true;
+                    }
+                    self.record_sent();
+                }
                 Err(err) => {
                     // Receiver disconnected while we were sending
                     match err {
@@ -847,23 +856,18 @@ mod tests {
     }
 
     #[test]
-    fn auto_flush_cancelled_keeps_message_buffered_without_erroring_send() {
+    fn cancelled_send_returns_error_without_buffering() {
         let sink: Arc<dyn EvidenceSink> = Arc::new(CollectorSink::new());
         let config = FaultChannelConfig::new(42).with_reorder(1.0, 1);
         let (fault_tx, mut rx) = fault_channel::<u32>(8, config, sink);
         let cancelled_cx = test_cx();
         cancelled_cx.set_cancel_requested(true);
-        let healthy_cx = test_cx();
 
-        // Auto-flush fails due cancellation and re-queues the message.
-        // send() should still report acceptance into the fault buffer.
-        block_on(fault_tx.send(&cancelled_cx, 2))
-            .expect("send accepted into fault buffer despite cancelled auto-flush");
-        assert_eq!(fault_tx.buffered_count(), 1);
-
-        block_on(fault_tx.flush(&healthy_cx)).expect("flush buffered message");
+        // Cancelled Cx fails fast — message is not buffered.
+        let send_result = block_on(fault_tx.send(&cancelled_cx, 2));
+        assert!(matches!(send_result, Err(SendError::Cancelled(2))));
         assert_eq!(fault_tx.buffered_count(), 0);
-        assert_eq!(rx.try_recv().expect("received buffered value"), 2);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
@@ -906,6 +910,64 @@ mod tests {
         let entries = collector.entries();
         let timestamps: Vec<u64> = entries.iter().map(|entry| entry.ts_unix_ms).collect();
         assert_eq!(timestamps, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn duplication_evidence_only_recorded_after_successful_delivery() {
+        let collector = Arc::new(CollectorSink::new());
+        let sink: Arc<dyn EvidenceSink> = collector.clone();
+        // Duplication enabled, reorder disabled so duplication path is taken.
+        let config = FaultChannelConfig::new(42).with_duplication(1.0);
+        let (fault_tx, rx) = fault_channel::<u32>(8, config, sink);
+        let cx = test_cx();
+
+        // Send one message (original + dup both succeed).
+        block_on(fault_tx.send(&cx, 1)).expect("send");
+        let stats = fault_tx.stats();
+        assert_eq!(stats.messages_duplicated, 1);
+
+        // Drop receiver, then send again. Original succeeds but dup fails.
+        drop(rx);
+        // Original send also fails now since receiver is dropped.
+        let _ = block_on(fault_tx.send(&cx, 2));
+
+        let stats = fault_tx.stats();
+        // Duplication count should not increment when the dup delivery fails.
+        assert_eq!(
+            stats.messages_duplicated, 1,
+            "duplication evidence must not be recorded when delivery fails"
+        );
+    }
+
+    #[test]
+    fn flush_evidence_only_recorded_after_first_delivery() {
+        let collector = Arc::new(CollectorSink::new());
+        let sink: Arc<dyn EvidenceSink> = collector.clone();
+        let config = FaultChannelConfig::new(42).with_reorder(1.0, 8);
+        let (fault_tx, rx) = fault_channel::<u32>(8, config, sink);
+        let cx = test_cx();
+
+        block_on(fault_tx.send(&cx, 1)).expect("buffer send");
+        block_on(fault_tx.send(&cx, 2)).expect("buffer send");
+        assert_eq!(fault_tx.buffered_count(), 2);
+
+        drop(rx);
+        let flush_result = block_on(fault_tx.flush(&cx));
+        assert!(matches!(flush_result, Err(SendError::Disconnected(()))));
+
+        let stats = fault_tx.stats();
+        assert_eq!(
+            stats.reorder_flushes, 0,
+            "flush evidence must not be recorded when no message was delivered"
+        );
+
+        let entries = collector.entries();
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.action != "inject_reorder_flush"),
+            "no reorder_flush evidence when flush delivered nothing: {entries:?}"
+        );
     }
 
     // =========================================================================
