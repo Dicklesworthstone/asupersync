@@ -650,7 +650,7 @@ impl SharedLabHandle {
                 if cx.checkpoint().is_err() {
                     return BTreeSet::new();
                 }
-                lab_yield_once().await;
+                crate::time::sleep(cx.now(), std::time::Duration::from_millis(10)).await;
             }
         }
     }
@@ -810,7 +810,7 @@ fn execute_plan_in_lab_core(
         );
     }
 
-    let _steps = runtime.run_until_quiescent();
+    let _steps = runtime.run_with_auto_advance().steps;
     crate::tracing_compat::trace!(
         "plan fixtures first run finished in {} steps (quiescent={})",
         _steps,
@@ -828,7 +828,7 @@ fn execute_plan_in_lab_core(
                 }
             }
         }
-        runtime.run_until_quiescent();
+        runtime.run_with_auto_advance();
         attempts += 1;
     }
     if !runtime.is_quiescent() {
