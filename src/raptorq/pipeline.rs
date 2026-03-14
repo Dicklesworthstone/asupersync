@@ -13,6 +13,7 @@ use crate::encoding::{EncodingPipeline, max_object_size};
 use crate::error::{Error, ErrorKind};
 use crate::observability::Metrics;
 use crate::security::{AuthenticatedSymbol, SecurityContext};
+use crate::transport::error::StreamError;
 use crate::transport::sink::SymbolSink;
 use crate::transport::stream::SymbolStream;
 use crate::types::resource::{PoolConfig, SymbolPool};
@@ -345,6 +346,27 @@ fn usize_to_u32_saturating(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
+fn map_stream_error(error: StreamError) -> Error {
+    let message = error.to_string();
+    let kind = match error {
+        StreamError::Closed | StreamError::PolledAfterCompletion => ErrorKind::StreamEnded,
+        StreamError::Reset => ErrorKind::ConnectionLost,
+        StreamError::Timeout => ErrorKind::ThresholdTimeout,
+        StreamError::AuthenticationFailed { .. } => ErrorKind::CorruptedSymbol,
+        StreamError::ProtocolError { .. } => ErrorKind::ProtocolError,
+        StreamError::Io { source } => match source.kind() {
+            std::io::ErrorKind::TimedOut => ErrorKind::ThresholdTimeout,
+            std::io::ErrorKind::ConnectionRefused => ErrorKind::ConnectionRefused,
+            std::io::ErrorKind::InvalidData | std::io::ErrorKind::InvalidInput => {
+                ErrorKind::ProtocolError
+            }
+            _ => ErrorKind::ConnectionLost,
+        },
+        StreamError::Cancelled => ErrorKind::Cancelled,
+    };
+    Error::new(kind).with_message(message)
+}
+
 /// Synchronous single-poll for sending a symbol.
 #[allow(clippy::result_large_err)]
 fn poll_send_blocking<T: SymbolSink + Unpin>(
@@ -393,9 +415,7 @@ fn poll_next_blocking<S: SymbolStream + Unpin>(
 
     match Pin::new(stream).poll_next(&mut ctx) {
         Poll::Ready(Some(Ok(sym))) => Ok(Some(sym)),
-        Poll::Ready(Some(Err(e))) => {
-            Err(Error::new(ErrorKind::StreamEnded).with_message(e.to_string()))
-        }
+        Poll::Ready(Some(Err(e))) => Err(map_stream_error(e)),
         Poll::Ready(None) => Ok(None),
         Poll::Pending => Err(Error::new(ErrorKind::SinkRejected)
             .with_message("source stream not ready (sync context)")),
@@ -552,6 +572,27 @@ mod tests {
     }
 
     impl Unpin for PendingStream {}
+
+    struct ErrorStream {
+        error: Option<StreamError>,
+    }
+
+    impl ErrorStream {
+        fn new(error: StreamError) -> Self {
+            Self { error: Some(error) }
+        }
+    }
+
+    impl SymbolStream for ErrorStream {
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
+            Poll::Ready(self.error.take().map(Err))
+        }
+    }
+
+    impl Unpin for ErrorStream {}
 
     fn params_for(
         object_id: ObjectId,
@@ -868,7 +909,7 @@ mod tests {
         let stream = VecStream::new(vec![]);
         let mut receiver = RaptorQReceiver::new(RaptorQConfig::default(), stream, None, None);
 
-        let params = params_for(ObjectId::new_for_test(5), 128, 256, 4);
+        let params = params_for(ObjectId::new_for_test(5), 128, 256, 1);
         let result = receiver.receive_object(&cx, &params);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), ErrorKind::InsufficientSymbols);
@@ -880,10 +921,86 @@ mod tests {
         let stream = PendingStream;
         let mut receiver = RaptorQReceiver::new(RaptorQConfig::default(), stream, None, None);
 
-        let params = params_for(ObjectId::new_for_test(12), 128, 256, 4);
+        let params = params_for(ObjectId::new_for_test(12), 128, 256, 1);
         let result = receiver.receive_object(&cx, &params);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), ErrorKind::SinkRejected);
+    }
+
+    #[test]
+    fn test_receive_object_stream_auth_failure_maps_to_corrupted_symbol() {
+        let cx: Cx = Cx::for_testing();
+        let stream = ErrorStream::new(StreamError::AuthenticationFailed {
+            reason: "bad tag".to_string(),
+        });
+        let mut receiver = RaptorQReceiver::new(RaptorQConfig::default(), stream, None, None);
+
+        let params = params_for(ObjectId::new_for_test(40), 128, 256, 1);
+        let err = receiver
+            .receive_object(&cx, &params)
+            .expect_err("auth failure must fail closed");
+
+        assert_eq!(err.kind(), ErrorKind::CorruptedSymbol);
+        assert!(err.to_string().contains("bad tag"));
+    }
+
+    #[test]
+    fn test_receive_object_stream_protocol_error_preserves_protocol_kind() {
+        let cx: Cx = Cx::for_testing();
+        let stream = ErrorStream::new(StreamError::ProtocolError {
+            details: "frame mismatch".to_string(),
+        });
+        let mut receiver = RaptorQReceiver::new(RaptorQConfig::default(), stream, None, None);
+
+        let params = params_for(ObjectId::new_for_test(41), 128, 256, 1);
+        let err = receiver
+            .receive_object(&cx, &params)
+            .expect_err("protocol failures must not be flattened");
+
+        assert_eq!(err.kind(), ErrorKind::ProtocolError);
+        assert!(err.to_string().contains("frame mismatch"));
+    }
+
+    #[test]
+    fn test_receive_object_stream_reset_maps_to_connection_lost() {
+        let cx: Cx = Cx::for_testing();
+        let stream = ErrorStream::new(StreamError::Reset);
+        let mut receiver = RaptorQReceiver::new(RaptorQConfig::default(), stream, None, None);
+
+        let params = params_for(ObjectId::new_for_test(42), 128, 256, 1);
+        let err = receiver
+            .receive_object(&cx, &params)
+            .expect_err("reset must surface as connection loss");
+
+        assert_eq!(err.kind(), ErrorKind::ConnectionLost);
+    }
+
+    #[test]
+    fn test_receive_object_stream_timeout_maps_to_threshold_timeout() {
+        let cx: Cx = Cx::for_testing();
+        let stream = ErrorStream::new(StreamError::Timeout);
+        let mut receiver = RaptorQReceiver::new(RaptorQConfig::default(), stream, None, None);
+
+        let params = params_for(ObjectId::new_for_test(43), 128, 256, 1);
+        let err = receiver
+            .receive_object(&cx, &params)
+            .expect_err("timeout must remain distinguishable from stream end");
+
+        assert_eq!(err.kind(), ErrorKind::ThresholdTimeout);
+    }
+
+    #[test]
+    fn test_receive_object_stream_cancelled_preserves_cancelled_kind() {
+        let cx: Cx = Cx::for_testing();
+        let stream = ErrorStream::new(StreamError::Cancelled);
+        let mut receiver = RaptorQReceiver::new(RaptorQConfig::default(), stream, None, None);
+
+        let params = params_for(ObjectId::new_for_test(44), 128, 256, 1);
+        let err = receiver
+            .receive_object(&cx, &params)
+            .expect_err("stream cancellation must stay cancelled");
+
+        assert_eq!(err.kind(), ErrorKind::Cancelled);
     }
 
     #[test]
@@ -893,7 +1010,7 @@ mod tests {
 
         let stream = VecStream::new(vec![]);
         let mut receiver = RaptorQReceiver::new(RaptorQConfig::default(), stream, None, None);
-        let params = params_for(ObjectId::new_for_test(6), 256, 256, 4);
+        let params = params_for(ObjectId::new_for_test(6), 256, 256, 1);
         let result = receiver.receive_object(&cx, &params);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), ErrorKind::Cancelled);

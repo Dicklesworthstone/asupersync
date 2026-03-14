@@ -555,6 +555,39 @@ fn validate_dual_policy_bit_exactness(scenario: &Gf256DualPolicyScenario, c_val:
         addmul_b_actual, addmul_b_expected,
         "{addmul_ctx} mismatch on lane_b"
     );
+
+    let mut addmul_c1_a_actual =
+        deterministic_bytes(scenario.lane_a_len, scenario.seed ^ 0x5005_0005);
+    let mut addmul_c1_b_actual =
+        deterministic_bytes(scenario.lane_b_len, scenario.seed ^ 0x6006_0006);
+    let mut addmul_c1_a_expected = addmul_c1_a_actual.clone();
+    let mut addmul_c1_b_expected = addmul_c1_b_actual.clone();
+    gf256_addmul_slices2(
+        &mut addmul_c1_a_actual,
+        &src_a,
+        &mut addmul_c1_b_actual,
+        &src_b,
+        Gf256::ONE,
+    );
+    gf256_add_slice(&mut addmul_c1_a_expected, &src_a);
+    gf256_add_slice(&mut addmul_c1_b_expected, &src_b);
+    let addmul_c1_ctx = format!(
+        "dual_policy_addmul_c1 scenario={} seed={} lane_a={} lane_b={} artifact_path={} repro_cmd='{}'",
+        scenario.scenario_id,
+        scenario.seed,
+        scenario.lane_a_len,
+        scenario.lane_b_len,
+        TRACK_E_ARTIFACT_PATH,
+        TRACK_E_POLICY_PROBE_REPRO_CMD
+    );
+    assert_eq!(
+        addmul_c1_a_actual, addmul_c1_a_expected,
+        "{addmul_c1_ctx} mismatch on lane_a"
+    );
+    assert_eq!(
+        addmul_c1_b_actual, addmul_c1_b_expected,
+        "{addmul_c1_ctx} mismatch on lane_b"
+    );
 }
 
 // ============================================================================
@@ -863,6 +896,47 @@ fn bench_gf256_dual_policy(c: &mut Criterion) {
                         std::hint::black_box(&mut dst_b),
                         std::hint::black_box(&src_b),
                         std::hint::black_box(c_val),
+                    );
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("addmul_slices2_c1_auto", &label),
+            &scenario,
+            |b, _| {
+                let mut dst_a =
+                    deterministic_bytes(scenario.lane_a_len, scenario.seed ^ 0x5005_0005);
+                let mut dst_b =
+                    deterministic_bytes(scenario.lane_b_len, scenario.seed ^ 0x6006_0006);
+                b.iter(|| {
+                    gf256_addmul_slices2(
+                        std::hint::black_box(&mut dst_a),
+                        std::hint::black_box(&src_a),
+                        std::hint::black_box(&mut dst_b),
+                        std::hint::black_box(&src_b),
+                        std::hint::black_box(Gf256::ONE),
+                    );
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("addmul_slices2_c1_sequential_baseline", &label),
+            &scenario,
+            |b, _| {
+                let mut dst_a =
+                    deterministic_bytes(scenario.lane_a_len, scenario.seed ^ 0x5005_0005);
+                let mut dst_b =
+                    deterministic_bytes(scenario.lane_b_len, scenario.seed ^ 0x6006_0006);
+                b.iter(|| {
+                    gf256_add_slice(
+                        std::hint::black_box(&mut dst_a),
+                        std::hint::black_box(&src_a),
+                    );
+                    gf256_add_slice(
+                        std::hint::black_box(&mut dst_b),
+                        std::hint::black_box(&src_b),
                     );
                 });
             },
