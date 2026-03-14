@@ -924,6 +924,38 @@ mod tests {
     }
 
     #[test]
+    fn collector_can_decode_uses_total_object_symbols_for_multi_block_objects() {
+        let mut collector = RecoveryCollector::new(RecoveryConfig::default());
+        collector.object_params = Some(ObjectParams::new(
+            ObjectId::new_for_test(1),
+            2560,
+            128,
+            2,
+            10,
+        ));
+
+        for i in 0..19 {
+            collector.add_collected(make_collected_symbol(i));
+        }
+        assert!(!collector.can_decode());
+
+        collector.add_collected(make_collected_symbol(19));
+        assert!(collector.can_decode());
+    }
+
+    #[test]
+    fn collector_reset_for_attempt_uses_total_object_symbols() {
+        let params = ObjectParams::new(ObjectId::new_for_test(1), 2560, 128, 2, 10);
+        let mut collector = RecoveryCollector::new(RecoveryConfig::default());
+
+        collector.reset_for_attempt(params);
+
+        assert_eq!(collector.progress().symbols_needed, 20);
+        assert_eq!(collector.progress().symbols_collected, 0);
+        assert_eq!(collector.progress().phase, RecoveryPhase::Collecting);
+    }
+
+    #[test]
     fn collector_cancel() {
         let mut collector = RecoveryCollector::new(RecoveryConfig::default());
         assert!(!collector.cancelled);
@@ -990,6 +1022,24 @@ mod tests {
         let result = decoder.decode(&params);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), ErrorKind::InsufficientSymbols);
+    }
+
+    #[test]
+    fn decoder_rejects_insufficient_symbols_for_multi_block_object() {
+        let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
+        let params = ObjectParams::new(ObjectId::new_for_test(1), 2560, 128, 2, 10);
+
+        for i in 0..19 {
+            let sym = AuthenticatedSymbol::new_verified(
+                Symbol::new_for_test(1, 0, i, &[0u8; 128]),
+                AuthenticationTag::zero(),
+            );
+            decoder.add_symbol(&sym).unwrap();
+        }
+
+        let err = decoder.decode(&params).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InsufficientSymbols);
+        assert!(err.to_string().contains("20"));
     }
 
     #[test]
@@ -1076,6 +1126,14 @@ mod tests {
         let params = ObjectParams::new(ObjectId::new_for_test(1), 1000, 128, 1, 10);
 
         assert_eq!(decoder.symbols_needed(&params), 10);
+    }
+
+    #[test]
+    fn decoder_symbols_needed_uses_total_object_symbols_for_multi_block_objects() {
+        let decoder = StateDecoder::new(RecoveryDecodingConfig::default());
+        let params = ObjectParams::new(ObjectId::new_for_test(1), 2560, 128, 2, 10);
+
+        assert_eq!(decoder.symbols_needed(&params), 20);
     }
 
     // =====================================================================

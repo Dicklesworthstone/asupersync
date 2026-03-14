@@ -578,7 +578,10 @@ impl RegionBridge {
         let local_changed = self.local.begin_close(reason);
 
         let distributed_transition = if let Some(ref mut dist) = self.distributed {
-            Some(dist.begin_close(transition_reason, now)?)
+            match dist.state {
+                DistributedRegionState::Closing | DistributedRegionState::Closed => None,
+                _ => Some(dist.begin_close(transition_reason, now)?),
+            }
         } else {
             None
         };
@@ -617,7 +620,10 @@ impl RegionBridge {
         let local_changed = self.local.complete_close();
 
         let distributed_transition = if let Some(ref mut dist) = self.distributed {
-            Some(dist.complete_close(now)?)
+            match dist.state {
+                DistributedRegionState::Closed => None,
+                _ => Some(dist.complete_close(now)?),
+            }
         } else {
             None
         };
@@ -1470,6 +1476,21 @@ mod tests {
     }
 
     #[test]
+    fn double_close_distributed() {
+        let mut bridge = create_distributed_bridge();
+
+        let result1 = bridge.begin_close(None, Time::from_secs(0)).unwrap();
+        assert!(result1.local_changed);
+        assert!(result1.distributed_transition.is_some());
+        assert_eq!(result1.effective_state, EffectiveState::Closing);
+
+        let result2 = bridge.begin_close(None, Time::from_secs(1)).unwrap();
+        assert!(!result2.local_changed);
+        assert!(result2.distributed_transition.is_none());
+        assert_eq!(result2.effective_state, EffectiveState::Closing);
+    }
+
+    #[test]
     fn double_complete_close_local() {
         let mut bridge = create_local_bridge();
         bridge.begin_close(None, Time::from_secs(0)).unwrap();
@@ -1483,6 +1504,24 @@ mod tests {
         // Second complete_close — already closed, no change.
         let result2 = bridge.complete_close(Time::from_secs(2)).unwrap();
         assert!(!result2.local_changed);
+    }
+
+    #[test]
+    fn double_complete_close_distributed() {
+        let mut bridge = create_distributed_bridge();
+        bridge.begin_close(None, Time::from_secs(0)).unwrap();
+        bridge.begin_drain().unwrap();
+        bridge.begin_finalize().unwrap();
+
+        let result1 = bridge.complete_close(Time::from_secs(1)).unwrap();
+        assert!(result1.local_changed);
+        assert!(result1.distributed_transition.is_some());
+        assert_eq!(result1.effective_state, EffectiveState::Closed);
+
+        let result2 = bridge.complete_close(Time::from_secs(2)).unwrap();
+        assert!(!result2.local_changed);
+        assert!(result2.distributed_transition.is_none());
+        assert_eq!(result2.effective_state, EffectiveState::Closed);
     }
 
     #[test]
