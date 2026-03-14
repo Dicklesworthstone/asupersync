@@ -198,10 +198,8 @@ fn replay_log_context(replay_ref: &str, scenario_id: &str, seed: u64, outcome: &
         seed,
         &format!("fixture_ref={REPLAY_FIXTURE_REF}"),
         replay_ref,
-        outcome,
-    )
-    .with_repro_command(
         "rch exec -- cargo test --test raptorq_perf_invariants seed_sweep_structured_logging -- --nocapture",
+        outcome,
     )
     .with_artifact_path(REPLAY_CATALOG_ARTIFACT_PATH)
     .to_context_string()
@@ -820,10 +818,8 @@ fn seed_sweep_structured_logging() {
                     seed,
                     &format!("k={k},symbol_size={symbol_size},loss_pct={loss_pct}"),
                     REPLAY_SEED_SWEEP_ID,
-                    "ok",
-                )
-                .with_repro_command(
                     "rch exec -- cargo test --test raptorq_perf_invariants seed_sweep_structured_logging -- --nocapture",
+                    "ok",
                 )
                 .with_decode_stats(UnitDecodeStats {
                     k,
@@ -882,10 +878,8 @@ fn seed_sweep_structured_logging() {
                     seed,
                     &format!("k={k},symbol_size={symbol_size},loss_pct={loss_pct}"),
                     REPLAY_SEED_SWEEP_ID,
-                    "decode_failure",
-                )
-                .with_repro_command(
                     "rch exec -- cargo test --test raptorq_perf_invariants seed_sweep_structured_logging -- --nocapture",
+                    "decode_failure",
                 )
                 .with_decode_stats(UnitDecodeStats {
                     k,
@@ -4257,10 +4251,8 @@ fn unit_log_schema_contract() {
         5042,
         "k=16,symbol_size=32,loss_pct=25",
         REPLAY_SEED_SWEEP_ID,
-        "ok",
-    )
-    .with_repro_command(
         "rch exec -- cargo test --test raptorq_perf_invariants seed_sweep_structured_logging -- --nocapture",
+        "ok",
     )
     .with_decode_stats(UnitDecodeStats {
         k: 16,
@@ -4316,10 +4308,8 @@ fn unit_log_schema_contract_failure_entry() {
         5099,
         "k=16,symbol_size=32,loss_pct=38",
         REPLAY_SEED_SWEEP_ID,
-        "decode_failure",
-    )
-    .with_repro_command(
         "rch exec -- cargo test --test raptorq_perf_invariants seed_sweep_structured_logging -- --nocapture",
+        "decode_failure",
     );
 
     let json = entry.to_json().expect("serialize");

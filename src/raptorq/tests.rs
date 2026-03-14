@@ -92,9 +92,15 @@ fn builder_failure_context(
     parameter_set: &str,
     replay_ref: &str,
 ) -> String {
-    UnitLogEntry::new(scenario_id, seed, parameter_set, replay_ref, "pending")
-        .with_repro_command("rch exec -- cargo test --lib raptorq::tests -- --nocapture")
-        .to_context_string()
+    UnitLogEntry::new(
+        scenario_id,
+        seed,
+        parameter_set,
+        replay_ref,
+        "rch exec -- cargo test --lib raptorq::tests -- --nocapture",
+        "pending",
+    )
+    .to_context_string()
 }
 
 // =========================================================================
@@ -266,6 +272,49 @@ fn sender_allows_small_symbol_size_payloads_that_fit_byte_limit() {
     assert!(
         outcome.symbols_sent >= outcome.source_symbols,
         "{context} expected source symbols to be transmitted"
+    );
+}
+
+#[test]
+fn sender_rejects_block_above_systematic_k_limit_before_transmitting_symbols() {
+    let seed = 0u64;
+    let cx: Cx = Cx::for_testing();
+    let sink = VecSink::new();
+    let mut config = RaptorQConfig::default();
+    config.encoding.symbol_size = 8;
+    config.encoding.max_block_size = 451_232;
+    config.encoding.repair_overhead = 1.1;
+    let replay_ref = "replay:rq-u-builder-unsupported-source-block-k-v1";
+    let context = builder_failure_context(
+        "RQ-U-BUILDER-UNSUPPORTED-SOURCE-BLOCK-K",
+        seed,
+        "symbol_size=8,max_block_size=451232,data_len=451232",
+        replay_ref,
+    );
+    let mut sender = RaptorQSenderBuilder::new()
+        .config(config)
+        .transport(sink)
+        .build()
+        .unwrap_or_else(|err| panic!("{context} sender build should succeed; got {err:?}"));
+
+    let data = vec![0u8; 451_232];
+    let err = sender
+        .send_object(&cx, ObjectId::new_for_test(101), &data)
+        .err()
+        .unwrap_or_else(|| panic!("{context} expected unsupported-source-block error"));
+
+    assert_eq!(
+        err.kind(),
+        ErrorKind::InvalidEncodingParams,
+        "{context} expected invalid encoding params error kind"
+    );
+    assert!(
+        err.to_string().contains("unsupported source block K=56404"),
+        "{context} expected unsupported-source-block details, got {err}"
+    );
+    assert!(
+        sender.transport_mut().symbols.is_empty(),
+        "{context} expected no symbols to be transmitted before the planning error"
     );
 }
 
@@ -543,11 +592,15 @@ mod conformance {
         parameter_set: &str,
         replay_ref: &str,
     ) -> String {
-        UnitLogEntry::new(scenario_id, seed, parameter_set, replay_ref, "pending")
-            .with_repro_command(
-                "rch exec -- cargo test --lib raptorq::tests::conformance -- --nocapture",
-            )
-            .to_context_string()
+        UnitLogEntry::new(
+            scenario_id,
+            seed,
+            parameter_set,
+            replay_ref,
+            "rch exec -- cargo test --lib raptorq::tests::conformance -- --nocapture",
+            "pending",
+        )
+        .to_context_string()
     }
 
     /// Known vector: small block (K=4, symbol_size=16, seed=42)
@@ -832,11 +885,15 @@ mod property_tests {
         parameter_set: &str,
         replay_ref: &str,
     ) -> String {
-        UnitLogEntry::new(scenario_id, seed, parameter_set, replay_ref, "pending")
-            .with_repro_command(
-                "rch exec -- cargo test --lib raptorq::tests::property_tests -- --nocapture",
-            )
-            .to_context_string()
+        UnitLogEntry::new(
+            scenario_id,
+            seed,
+            parameter_set,
+            replay_ref,
+            "rch exec -- cargo test --lib raptorq::tests::property_tests -- --nocapture",
+            "pending",
+        )
+        .to_context_string()
     }
 
     /// Property: roundtrip with all symbols succeeds for known-good parameters.
@@ -1167,9 +1224,9 @@ mod fuzz {
                 config.k, config.symbol_size, config.overhead_percent, config.drop_percent
             ),
             replay_ref,
+            "rch exec -- cargo test --lib raptorq::tests::fuzz -- --nocapture",
             "pending",
         )
-        .with_repro_command("rch exec -- cargo test --lib raptorq::tests::fuzz -- --nocapture")
         .to_context_string()
     }
 
@@ -1460,10 +1517,8 @@ mod edge_cases {
             seed,
             &format!("k={k},symbol_size={symbol_size}"),
             replay_ref,
-            "pending",
-        )
-        .with_repro_command(
             "rch exec -- cargo test --lib raptorq::tests::edge_cases -- --nocapture",
+            "pending",
         )
         .to_context_string()
     }
@@ -1878,11 +1933,15 @@ mod failure_modes {
         parameter_set: &str,
         replay_ref: &str,
     ) -> String {
-        UnitLogEntry::new(scenario_id, seed, parameter_set, replay_ref, "pending")
-            .with_repro_command(
-                "rch exec -- cargo test --lib raptorq::tests::failure_modes -- --nocapture",
-            )
-            .to_context_string()
+        UnitLogEntry::new(
+            scenario_id,
+            seed,
+            parameter_set,
+            replay_ref,
+            "rch exec -- cargo test --lib raptorq::tests::failure_modes -- --nocapture",
+            "pending",
+        )
+        .to_context_string()
     }
 
     /// Corruption injection: flip a bit in a source symbol after encoding,
@@ -2196,11 +2255,15 @@ mod encoder_invariants {
         parameter_set: &str,
         replay_ref: &str,
     ) -> String {
-        UnitLogEntry::new(scenario_id, seed, parameter_set, replay_ref, "pending")
-            .with_repro_command(
-                "rch exec -- cargo test --lib raptorq::tests::encoder_invariants -- --nocapture",
-            )
-            .to_context_string()
+        UnitLogEntry::new(
+            scenario_id,
+            seed,
+            parameter_set,
+            replay_ref,
+            "rch exec -- cargo test --lib raptorq::tests::encoder_invariants -- --nocapture",
+            "pending",
+        )
+        .to_context_string()
     }
 
     /// repair_symbol_into produces identical output to repair_symbol.

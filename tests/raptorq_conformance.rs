@@ -222,8 +222,8 @@ fn contiguous_burst_drop_first_half_of_source_contract() {
     // Mirror the exact failure_modes received-symbol shape here as well,
     // including direct source rows for the surviving half.
     let mut received = decoder.constraint_symbols();
-    for i in (k / 2)..k {
-        received.push(ReceivedSymbol::source(i as u32, source[i].clone()));
+    for (i, sym) in source.iter().enumerate().take(k).skip(k / 2) {
+        received.push(ReceivedSymbol::source(i as u32, sym.clone()));
     }
     for esi in (k as u32)..((k + l * 2) as u32) {
         let (cols, coefs) = decoder.repair_equation(esi);
@@ -1366,10 +1366,15 @@ mod pipeline_e2e {
         let phase_markers = report["phase_markers"]
             .as_array()
             .expect("phase markers array");
+        let actual_phase_markers = phase_markers
+            .iter()
+            .map(serde_json::Value::as_str)
+            .collect::<Option<Vec<_>>>()
+            .expect("phase markers strings");
         assert_eq!(
-            phase_markers.len(),
-            5,
-            "expected five deterministic phase markers"
+            actual_phase_markers.as_slice(),
+            asupersync::raptorq::test_log_schema::REQUIRED_PHASE_MARKERS,
+            "unexpected deterministic phase markers"
         );
     }
 
@@ -1794,9 +1799,9 @@ mod differential_harness {
                 case.seed,
                 &parameter_set,
                 DIFF_REPLAY_REF,
+                DIFF_REPRO_COMMAND,
                 outcome,
             )
-            .with_repro_command(DIFF_REPRO_COMMAND)
             .with_artifact_path(DIFF_ARTIFACT_PATH)
             .with_decode_stats(decode_stats);
             let log_json = log_entry
@@ -1899,9 +1904,15 @@ mod metamorphic_property {
         repro_command: &str,
         decode_stats: Option<UnitDecodeStats>,
     ) -> String {
-        let mut entry = UnitLogEntry::new(scenario_id, seed, parameter_set, D4_REPLAY_REF, outcome)
-            .with_repro_command(repro_command)
-            .with_artifact_path(D4_ARTIFACT_PATH);
+        let mut entry = UnitLogEntry::new(
+            scenario_id,
+            seed,
+            parameter_set,
+            D4_REPLAY_REF,
+            repro_command,
+            outcome,
+        )
+        .with_artifact_path(D4_ARTIFACT_PATH);
         if let Some(stats) = decode_stats {
             entry = entry.with_decode_stats(stats);
         }
@@ -2840,9 +2851,9 @@ mod stress_soak_e2e {
                 aggregate.max_inactivated
             ),
             profile.replay_ref(),
+            D8_REPRO_COMMAND,
             outcome,
         )
-        .with_repro_command(D8_REPRO_COMMAND)
         .with_artifact_path(D8_ARTIFACT_PATH);
 
         if let Some(stats) = input.last_decode {

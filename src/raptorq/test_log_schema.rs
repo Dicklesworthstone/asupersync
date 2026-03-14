@@ -279,26 +279,29 @@ impl UnitLogEntry {
         seed: u64,
         parameter_set: &str,
         replay_ref: &str,
+        repro_command: &str,
         outcome: &str,
     ) -> Self {
+        let repro_command = repro_command.trim();
+        assert!(
+            !repro_command.is_empty(),
+            "UnitLogEntry::new requires a non-empty repro command"
+        );
+        assert!(
+            repro_command.contains("rch exec --"),
+            "UnitLogEntry::new requires an rch-backed repro command"
+        );
         Self {
             schema_version: UNIT_LOG_SCHEMA_VERSION.to_string(),
             scenario_id: scenario_id.to_string(),
             seed,
             parameter_set: parameter_set.to_string(),
             replay_ref: replay_ref.to_string(),
-            repro_command: String::new(),
+            repro_command: repro_command.to_string(),
             outcome: outcome.to_string(),
             artifact_path: None,
             decode_stats: None,
         }
-    }
-
-    /// Set the repro command.
-    #[must_use]
-    pub fn with_repro_command(mut self, cmd: &str) -> Self {
-        self.repro_command = cmd.to_string();
-        self
     }
 
     /// Set the artifact path.
@@ -352,6 +355,7 @@ impl UnitLogEntry {
 ///
 /// Returns a list of violations. An empty list means the entry is valid.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn validate_e2e_log_json(json: &str) -> Vec<String> {
     let mut violations = Vec::new();
 
@@ -418,6 +422,20 @@ pub fn validate_e2e_log_json(json: &str) -> Vec<String> {
                     REQUIRED_PHASE_MARKERS.len(),
                     markers.len()
                 ));
+            }
+            match markers
+                .iter()
+                .map(serde_json::Value::as_str)
+                .collect::<Option<Vec<_>>>()
+            {
+                Some(actual) => {
+                    if actual.as_slice() != REQUIRED_PHASE_MARKERS {
+                        violations.push(format!(
+                            "phase_markers mismatch: expected {REQUIRED_PHASE_MARKERS:?}, got {actual:?}",
+                        ));
+                    }
+                }
+                None => violations.push("phase_markers must be an array of strings".to_string()),
             }
         }
         None => violations.push("missing required field: phase_markers".to_string()),
@@ -508,9 +526,13 @@ pub fn validate_unit_log_json(json: &str) -> Vec<String> {
         violations.push("missing required field: seed".to_string());
     }
 
-    // Repro command must be present (can be empty for builder tests, but should exist)
-    if value.get("repro_command").is_none() {
-        violations.push("missing required field: repro_command".to_string());
+    // Repro command must be present and use rch like the E2E contract.
+    match value.get("repro_command").and_then(|v| v.as_str()) {
+        Some("") => violations.push("required field 'repro_command' is empty".to_string()),
+        Some(cmd) if !cmd.contains("rch exec --") => violations
+            .push("repro_command must include 'rch exec --' for remote execution".to_string()),
+        Some(_) => {}
+        None => violations.push("missing required field: repro_command".to_string()),
     }
 
     // Outcome must be a recognized value
@@ -572,6 +594,51 @@ fn value_missing_or_null(parent: &serde_json::Value, field: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn valid_e2e_log_value() -> serde_json::Value {
+        json!({
+            "schema_version": E2E_LOG_SCHEMA_VERSION,
+            "scenario": "test",
+            "scenario_id": "RQ-E2E-TEST",
+            "replay_id": "replay:test-v1",
+            "profile": "fast",
+            "unit_sentinel": "test::fn",
+            "assertion_id": "E2E-TEST",
+            "run_id": "run-1",
+            "repro_command": "rch exec -- cargo test",
+            "phase_markers": REQUIRED_PHASE_MARKERS,
+            "config": {
+                "symbol_size": 64,
+                "seed": 42,
+                "block_k": 16,
+                "data_len": 1024,
+                "max_block_size": 1024,
+                "repair_overhead": 1.0,
+                "min_overhead": 0,
+                "block_count": 1
+            },
+            "loss": {"kind": "none", "drop_count": 0, "keep_count": 16},
+            "symbols": {
+                "generated": {"total": 16, "source": 16, "repair": 0},
+                "received": {"total": 16, "source": 16, "repair": 0}
+            },
+            "outcome": {"success": true, "decoded_bytes": 1024},
+            "proof": {
+                "hash": 123,
+                "summary_bytes": 100,
+                "outcome": "success",
+                "received_total": 16,
+                "received_source": 16,
+                "received_repair": 0,
+                "peeling_solved": 16,
+                "inactivated": 0,
+                "pivots": 0,
+                "row_ops": 0,
+                "equations_used": 16
+            }
+        })
+    }
 
     #[test]
     fn unit_log_entry_roundtrip() {
@@ -580,10 +647,8 @@ mod tests {
             42,
             "symbol_size=256,data_len=1024",
             "replay:rq-u-builder-send-transmit-v1",
+            "rch exec -- cargo test --lib raptorq::test_log_schema::tests::unit_log_entry_roundtrip -- --nocapture",
             "ok",
-        )
-        .with_repro_command(
-            "rch exec -- cargo test --lib raptorq::tests::sender_encodes_and_transmits -- --nocapture",
         );
 
         let json = entry.to_json().expect("serialize");
@@ -600,9 +665,9 @@ mod tests {
             99,
             "k=8,symbol_size=32",
             "replay:rq-u-test-v1",
+            "rch exec -- cargo test --lib raptorq::test_log_schema::tests::unit_log_entry_context_string -- --nocapture",
             "ok",
-        )
-        .with_repro_command("rch exec -- cargo test foo");
+        );
 
         let ctx = entry.to_context_string();
         assert!(ctx.contains("scenario_id=RQ-U-TEST"));
@@ -617,15 +682,38 @@ mod tests {
             1000,
             "k=16,symbol_size=32",
             "replay:rq-u-roundtrip-v1",
+            "rch exec -- cargo test --lib raptorq::test_log_schema::tests::validate_unit_log_valid -- --nocapture",
             "ok",
-        )
-        .with_repro_command("rch exec -- cargo test roundtrip");
+        );
 
         let json = entry.to_json().expect("serialize");
         let violations = validate_unit_log_json(&json);
         assert!(
             violations.is_empty(),
             "unexpected violations: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn unit_log_entry_constructor_emits_schema_valid_repro_command() {
+        let entry = UnitLogEntry::new(
+            "RQ-U-CONSTRUCTOR-REPRO",
+            777,
+            "k=8,symbol_size=32",
+            "replay:rq-u-constructor-repro-v1",
+            "rch exec -- cargo test --lib raptorq::test_log_schema::tests::unit_log_entry_constructor_emits_schema_valid_repro_command -- --nocapture",
+            "ok",
+        );
+
+        let json = entry.to_json().expect("serialize");
+        let violations = validate_unit_log_json(&json);
+        assert!(
+            violations.is_empty(),
+            "constructor-built entry should satisfy schema contract: {violations:?}"
+        );
+        assert_eq!(
+            entry.repro_command,
+            "rch exec -- cargo test --lib raptorq::test_log_schema::tests::unit_log_entry_constructor_emits_schema_valid_repro_command -- --nocapture"
         );
     }
 
@@ -651,13 +739,36 @@ mod tests {
             "seed": 42,
             "parameter_set": "k=8",
             "replay_ref": "replay:test-v1",
-            "repro_command": "cargo test",
+            "repro_command": "rch exec -- cargo test --lib raptorq::tests::unit_log_wrong_schema_version -- --nocapture",
             "outcome": "ok"
         }"#;
         let violations = validate_unit_log_json(json);
         assert!(
             violations.iter().any(|v| v.contains("schema_version")),
             "should flag wrong schema version"
+        );
+    }
+
+    #[test]
+    fn validate_unit_log_requires_rch_exec_repro_command() {
+        let entry = UnitLogEntry {
+            schema_version: UNIT_LOG_SCHEMA_VERSION.to_string(),
+            scenario_id: "RQ-U-TEST".to_string(),
+            seed: 42,
+            parameter_set: "k=8".to_string(),
+            replay_ref: "replay:test-v1".to_string(),
+            repro_command: "cargo test -p asupersync --lib".to_string(),
+            outcome: "ok".to_string(),
+            artifact_path: None,
+            decode_stats: None,
+        };
+        let json = entry.to_json().expect("serialize");
+        let violations = validate_unit_log_json(&json);
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("repro_command must include 'rch exec --'")),
+            "should enforce rch-backed repro commands: {violations:?}"
         );
     }
 
@@ -669,7 +780,9 @@ mod tests {
             seed: 42,
             parameter_set: "k=8".to_string(),
             replay_ref: "replay:test-v1".to_string(),
-            repro_command: "cargo test".to_string(),
+            repro_command:
+                "rch exec -- cargo test --lib raptorq::tests::validate_unit_log_bad_outcome -- --nocapture"
+                    .to_string(),
             outcome: "unknown_outcome".to_string(),
             artifact_path: None,
             decode_stats: None,
@@ -722,6 +835,62 @@ mod tests {
         assert!(
             violations.iter().any(|v| v.contains("invalid profile")),
             "should flag invalid profile: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn validate_e2e_log_rejects_out_of_order_phase_markers() {
+        let mut entry = valid_e2e_log_value();
+        entry["phase_markers"] = json!(["loss", "encode", "decode", "proof", "report"]);
+
+        let violations = validate_e2e_log_json(&entry.to_string());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("phase_markers mismatch")),
+            "should reject out-of-order markers: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn validate_e2e_log_rejects_duplicate_phase_markers() {
+        let mut entry = valid_e2e_log_value();
+        entry["phase_markers"] = json!(["encode", "loss", "decode", "decode", "report"]);
+
+        let violations = validate_e2e_log_json(&entry.to_string());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("phase_markers mismatch")),
+            "should reject duplicate markers: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn validate_e2e_log_rejects_unexpected_phase_markers() {
+        let mut entry = valid_e2e_log_value();
+        entry["phase_markers"] = json!(["encode", "loss", "decode", "finalize", "report"]);
+
+        let violations = validate_e2e_log_json(&entry.to_string());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("phase_markers mismatch")),
+            "should reject unexpected marker names: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn validate_e2e_log_rejects_non_string_phase_markers() {
+        let mut entry = valid_e2e_log_value();
+        entry["phase_markers"] = json!(["encode", "loss", "decode", 7, "report"]);
+
+        let violations = validate_e2e_log_json(&entry.to_string());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("phase_markers must be an array of strings")),
+            "should reject non-string markers: {violations:?}"
         );
     }
 
@@ -800,10 +969,8 @@ mod tests {
             5042,
             "k=16,symbol_size=32",
             "replay:rq-u-seed-sweep-structured-v1",
-            "ok",
-        )
-        .with_repro_command(
             "rch exec -- cargo test --test raptorq_perf_invariants seed_sweep_structured_logging -- --nocapture",
+            "ok",
         )
         .with_decode_stats(UnitDecodeStats {
             k: 16,

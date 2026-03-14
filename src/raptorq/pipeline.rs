@@ -127,8 +127,7 @@ impl<T: SymbolSink + Unpin> RaptorQSender<T> {
         for encoded_result in symbol_iter {
             cx.checkpoint()?;
 
-            let encoded_sym = encoded_result
-                .map_err(|e| Error::new(ErrorKind::EncodingFailed).with_message(e.to_string()))?;
+            let encoded_sym = encoded_result.map_err(Error::from)?;
             let symbol = encoded_sym.into_symbol();
             let auth_symbol = self.sign(symbol);
 

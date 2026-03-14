@@ -2587,9 +2587,9 @@ mod tests {
             seed,
             parameter_set,
             "replay:rq-track-c-decoder-unit-v1",
+            repro_command,
             outcome,
         )
-        .with_repro_command(repro_command)
         .with_artifact_path("artifacts/raptorq_track_c_decoder_unit_v1.json");
         if let Some(stats) = stats {
             entry = entry.with_decode_stats(stats);
