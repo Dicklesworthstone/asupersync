@@ -868,16 +868,26 @@ fn object_params_for_payload(
     symbol_size: u16,
     max_block_size: usize,
 ) -> ObjectParams {
-    let max_block_size = max_block_size.max(usize::from(symbol_size));
-    let blocks = (payload_len as usize).div_ceil(max_block_size).max(1);
-    let symbols_per_block = max_block_size.div_ceil(usize::from(symbol_size));
+    let symbol_size = usize::from(symbol_size);
+    let max_block_size = max_block_size.max(symbol_size);
+    let payload_len = payload_len as usize;
+    let blocks = payload_len.div_ceil(max_block_size).max(1);
+    // `ObjectParams.symbols_per_block` is the maximum per-block K, not the
+    // configured byte capacity of a full block. For a single partial block,
+    // deriving K from `max_block_size` overstates the declared layout and
+    // poisons decode metadata validation.
+    let symbols_per_block = if payload_len == 0 {
+        0
+    } else {
+        payload_len.min(max_block_size).div_ceil(symbol_size)
+    };
     // Saturate to prevent silent truncation on extreme configurations.
     let blocks = blocks.min(u8::MAX as usize) as u8;
     let symbols_per_block = symbols_per_block.min(u16::MAX as usize) as u16;
     ObjectParams::new(
         object_id,
-        payload_len,
-        symbol_size,
+        payload_len as u64,
+        symbol_size as u16,
         blocks,
         symbols_per_block,
     )
@@ -980,6 +990,50 @@ mod tests {
 
         let decoded_value = decoder.decode(symbols).expect("decode");
         assert_eq!(value, decoded_value);
+    }
+
+    #[test]
+    fn object_params_for_small_payload_uses_actual_single_block_k() {
+        let params = object_params_for_payload(ObjectId::new_for_test(7), 8, 37, 512);
+
+        assert_eq!(params.source_blocks, 1);
+        assert_eq!(params.symbols_per_block, 1);
+    }
+
+    #[test]
+    #[allow(clippy::similar_names)]
+    fn typed_decoder_accepts_small_single_block_payload_with_large_max_block_size() {
+        let value: u64 = 42;
+
+        let mut encoder = TypedEncoder::with_config(
+            EncodingConfig {
+                symbol_size: 64,
+                max_block_size: 512,
+                repair_overhead: 1.05,
+                encoding_parallelism: 1,
+                decoding_parallelism: 1,
+            },
+            SerializationFormat::Bincode,
+        );
+
+        let mut decoder = TypedDecoder::with_config(
+            DecodingConfig {
+                symbol_size: 64,
+                max_block_size: 512,
+                repair_overhead: 1.05,
+                min_overhead: 0,
+                max_buffered_symbols: 0,
+                block_timeout: std::time::Duration::from_secs(1),
+                verify_auth: false,
+            },
+            SerializationFormat::Bincode,
+        );
+
+        let symbols = encoder
+            .encode(ObjectId::new_for_test(9), &value)
+            .expect("encode");
+        let decoded = decoder.decode(symbols).expect("decode");
+        assert_eq!(decoded, value);
     }
 
     #[test]
