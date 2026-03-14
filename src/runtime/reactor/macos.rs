@@ -434,15 +434,20 @@ mod kqueue_impl {
         fn deregister(&self, token: Token) -> io::Result<()> {
             let mut regs = self.registrations.lock();
             let info = regs
-                .remove(&token)
+                .get(&token)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "token not registered"))?;
+            let raw_fd = info.raw_fd;
+            let interest = info.interest;
+            // Distinguish target-fd-closed cleanup from a broken kqueue fd so
+            // hard delete failures preserve bookkeeping for retry paths.
+            let fd_still_valid = unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } != -1;
 
             // Build kevents to delete filters
             let mut kevents = Vec::with_capacity(2);
 
-            if info.interest.is_readable() {
+            if interest.is_readable() {
                 kevents.push(libc::kevent {
-                    ident: info.raw_fd as usize,
+                    ident: raw_fd as usize,
                     filter: libc::EVFILT_READ,
                     flags: libc::EV_DELETE,
                     fflags: 0,
@@ -451,9 +456,9 @@ mod kqueue_impl {
                 });
             }
 
-            if info.interest.is_writable() {
+            if interest.is_writable() {
                 kevents.push(libc::kevent {
-                    ident: info.raw_fd as usize,
+                    ident: raw_fd as usize,
                     filter: libc::EVFILT_WRITE,
                     flags: libc::EV_DELETE,
                     fflags: 0,
@@ -462,10 +467,10 @@ mod kqueue_impl {
                 });
             }
 
-            // Remove from kqueue
+            // Only drop bookkeeping once the delete definitely succeeded or the
+            // target fd itself is already gone.
             if !kevents.is_empty() {
-                // Note: We ignore errors here because the fd might already be closed
-                unsafe {
+                let ret = unsafe {
                     libc::kevent(
                         self.kq_fd,
                         kevents.as_ptr(),
@@ -473,10 +478,25 @@ mod kqueue_impl {
                         std::ptr::null_mut(),
                         0,
                         std::ptr::null(),
-                    );
+                    )
+                };
+                if ret < 0 {
+                    let err = io::Error::last_os_error();
+                    return match err.raw_os_error() {
+                        Some(libc::ENOENT) => {
+                            regs.remove(&token);
+                            Ok(())
+                        }
+                        Some(libc::EBADF) if !fd_still_valid => {
+                            regs.remove(&token);
+                            Ok(())
+                        }
+                        _ => Err(err),
+                    };
                 }
             }
 
+            regs.remove(&token);
             Ok(())
         }
 
@@ -796,6 +816,65 @@ mod tests {
             kind
         );
         crate::test_complete!("kqueue_deregister_not_found");
+    }
+
+    #[test]
+    fn deregister_hard_delete_failure_preserves_bookkeeping_for_retry() {
+        init_test("kqueue_deregister_hard_delete_failure_preserves_bookkeeping_for_retry");
+        let reactor = KqueueReactor::new().expect("failed to create reactor");
+        let (sock1, _sock2) = UnixStream::pair().expect("failed to create unix stream pair");
+
+        let token = Token::new(78);
+        reactor
+            .register(&sock1, token, Interest::READABLE)
+            .expect("register failed");
+
+        let saved_kq_fd = unsafe { libc::dup(reactor.kq_fd) };
+        crate::assert_with_log!(saved_kq_fd >= 0, "dup kqueue fd", true, saved_kq_fd >= 0);
+        let close_result = unsafe { libc::close(reactor.kq_fd) };
+        crate::assert_with_log!(close_result == 0, "close kqueue fd", 0, close_result);
+
+        let err = reactor
+            .deregister(token)
+            .expect_err("deregister should fail when kqueue fd is closed");
+        let errno = err
+            .raw_os_error()
+            .expect("closed kqueue failure should preserve errno");
+        crate::assert_with_log!(
+            errno == libc::EBADF,
+            "closed kqueue reports EBADF",
+            libc::EBADF,
+            errno
+        );
+        crate::assert_with_log!(
+            reactor.registration_count() == 1,
+            "registration kept after hard delete failure",
+            1usize,
+            reactor.registration_count()
+        );
+
+        let restore_result = unsafe { libc::dup2(saved_kq_fd, reactor.kq_fd) };
+        crate::assert_with_log!(
+            restore_result == reactor.kq_fd,
+            "restore kqueue fd",
+            reactor.kq_fd,
+            restore_result
+        );
+        let saved_close = unsafe { libc::close(saved_kq_fd) };
+        crate::assert_with_log!(saved_close == 0, "close saved kqueue fd", 0, saved_close);
+
+        reactor
+            .deregister(token)
+            .expect("retry deregister after kqueue restore failed");
+        crate::assert_with_log!(
+            reactor.registration_count() == 0,
+            "registration removed after successful retry",
+            0usize,
+            reactor.registration_count()
+        );
+        crate::test_complete!(
+            "kqueue_deregister_hard_delete_failure_preserves_bookkeeping_for_retry"
+        );
     }
 
     #[test]

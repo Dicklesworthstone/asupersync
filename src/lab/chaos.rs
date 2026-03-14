@@ -373,7 +373,7 @@ impl ChaosConfig {
     pub fn is_enabled(&self) -> bool {
         self.cancel_probability > 0.0
             || self.delay_probability > 0.0
-            || self.io_error_probability > 0.0
+            || (self.io_error_probability > 0.0 && !self.io_error_kinds.is_empty())
             || self.wakeup_storm_probability > 0.0
             || self.budget_exhaust_probability > 0.0
     }
@@ -388,7 +388,7 @@ impl ChaosConfig {
         if self.delay_probability > 0.0 {
             parts.push(format!("delay:{:.1}%", self.delay_probability * 100.0));
         }
-        if self.io_error_probability > 0.0 {
+        if self.io_error_probability > 0.0 && !self.io_error_kinds.is_empty() {
             parts.push(format!("io_err:{:.1}%", self.io_error_probability * 100.0));
         }
         if self.wakeup_storm_probability > 0.0 {
@@ -502,6 +502,9 @@ impl ChaosRng {
     /// Checks if I/O error should be injected based on config.
     #[must_use]
     pub fn should_inject_io_error(&mut self, config: &ChaosConfig) -> bool {
+        if config.io_error_kinds.is_empty() {
+            return false;
+        }
         self.should_inject(config.io_error_probability)
     }
 
@@ -830,7 +833,8 @@ mod tests {
     fn config_summary() {
         let config = ChaosConfig::new(42)
             .with_cancel_probability(0.1)
-            .with_io_error_probability(0.05);
+            .with_io_error_probability(0.05)
+            .with_io_error_kinds(vec![std::io::ErrorKind::ConnectionReset]);
         let summary = config.summary();
         assert!(summary.contains("cancel:10.0%"));
         assert!(summary.contains("io_err:5.0%"));
@@ -919,6 +923,28 @@ mod tests {
             assert!(
                 kind == io::ErrorKind::ConnectionReset || kind == io::ErrorKind::TimedOut,
                 "Unexpected error kind: {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn io_error_probability_without_kinds_is_effectively_disabled() {
+        let config = ChaosConfig::new(42).with_io_error_probability(1.0);
+        assert!(
+            !config.is_enabled(),
+            "io-error chaos without error kinds should not report enabled"
+        );
+        assert_eq!(config.summary(), "off");
+
+        let mut rng = config.rng();
+        for _ in 0..32 {
+            assert!(
+                !rng.should_inject_io_error(&config),
+                "io-error chaos without kinds must never inject"
+            );
+            assert!(
+                rng.next_io_error_kind(&config).is_none(),
+                "io-error chaos without kinds must not fabricate an error kind"
             );
         }
     }
