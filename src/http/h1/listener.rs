@@ -545,16 +545,17 @@ mod tests {
     use crate::sync::Notify;
     use crate::test_utils::init_test_logging;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicU64;
 
-    static HTTP1_LISTENER_TEST_NOW: AtomicU64 = AtomicU64::new(0);
+    thread_local! {
+        static HTTP1_LISTENER_TEST_NOW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
 
     fn set_http1_listener_test_time(time: Time) {
-        HTTP1_LISTENER_TEST_NOW.store(time.as_nanos(), Ordering::Relaxed);
+        HTTP1_LISTENER_TEST_NOW.with(|now| now.set(time.as_nanos()));
     }
 
     fn http1_listener_test_time() -> Time {
-        Time::from_nanos(HTTP1_LISTENER_TEST_NOW.load(Ordering::Relaxed))
+        HTTP1_LISTENER_TEST_NOW.with(|now| Time::from_nanos(now.get()))
     }
 
     #[test]

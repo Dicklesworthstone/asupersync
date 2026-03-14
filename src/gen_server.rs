@@ -2330,7 +2330,7 @@ mod tests {
             server.has_log_collector,
             "gen server child cx must inherit observability collector state",
         );
-        assert_eq!(server.remote_origin.as_deref(), Some("origin-test"));
+        assert_eq!(server.remote_origin.as_deref(), Some("Node(origin-test)"));
         assert!(
             server.logical_tick_advanced,
             "gen server child cx must inherit a live logical clock",
