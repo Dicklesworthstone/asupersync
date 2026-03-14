@@ -413,7 +413,17 @@ where
     pub async fn send(&mut self, cx: &Cx, msg: Message) -> Result<(), WsError> {
         // Check cancellation
         if cx.is_cancel_requested() {
-            let _ = self.initiate_close(CloseReason::going_away()).await;
+            let timeout_duration = self.close_handshake.close_timeout();
+            let current_time = || {
+                cx.timer_driver()
+                    .map_or_else(crate::time::wall_now, |driver| driver.now())
+            };
+            let _ = crate::time::timeout(
+                current_time(),
+                timeout_duration,
+                self.initiate_close(CloseReason::going_away()),
+            )
+            .await;
             return Err(WsError::Io(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "cancelled",
@@ -450,6 +460,17 @@ where
         loop {
             // Check cancellation
             if cx.is_cancel_requested() {
+                let timeout_duration = self.close_handshake.close_timeout();
+                let current_time = || {
+                    cx.timer_driver()
+                        .map_or_else(crate::time::wall_now, |driver| driver.now())
+                };
+                let _ = crate::time::timeout(
+                    current_time(),
+                    timeout_duration,
+                    self.initiate_close(CloseReason::going_away()),
+                )
+                .await;
                 return Err(WsError::Io(io::Error::new(
                     io::ErrorKind::Interrupted,
                     "cancelled",
