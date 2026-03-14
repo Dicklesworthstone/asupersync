@@ -137,6 +137,8 @@ impl Default for HealthCheckResponse {
 pub struct HealthService {
     /// Service statuses.
     statuses: Arc<RwLock<HashMap<String, ServingStatus>>>,
+    /// Number of active reporters per service.
+    reporter_counts: Arc<RwLock<HashMap<String, usize>>>,
     /// Monotonic version counter, bumped on every status change.
     version: Arc<AtomicU64>,
 }
@@ -147,6 +149,7 @@ impl HealthService {
     pub fn new() -> Self {
         Self {
             statuses: Arc::new(RwLock::new(HashMap::new())),
+            reporter_counts: Arc::new(RwLock::new(HashMap::new())),
             version: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -231,6 +234,27 @@ impl HealthService {
         } else {
             self.get_status(service)
                 .unwrap_or(ServingStatus::ServiceUnknown)
+        }
+    }
+
+    fn acquire_reporter(&self, service: &str) {
+        let mut reporter_counts = self.reporter_counts.write();
+        *reporter_counts.entry(service.to_string()).or_insert(0) += 1;
+    }
+
+    fn release_reporter(&self, service: &str) -> bool {
+        let mut reporter_counts = self.reporter_counts.write();
+        match reporter_counts.entry(service.to_string()) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if *entry.get() > 1 {
+                    *entry.get_mut() -= 1;
+                    false
+                } else {
+                    entry.remove();
+                    true
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(_) => false,
         }
     }
 
@@ -376,9 +400,11 @@ impl HealthReporter {
     /// Create a new health reporter for a service.
     #[must_use]
     pub fn new(service: HealthService, service_name: impl Into<String>) -> Self {
+        let service_name = service_name.into();
+        service.acquire_reporter(&service_name);
         Self {
             service,
-            service_name: service_name.into(),
+            service_name,
         }
     }
 
@@ -405,8 +431,10 @@ impl HealthReporter {
 
 impl Drop for HealthReporter {
     fn drop(&mut self) {
-        // Clear the service status when the reporter is dropped
-        self.service.clear_status(&self.service_name);
+        // Only the final reporter for a service clears the shared status.
+        if self.service.release_reporter(&self.service_name) {
+            self.service.clear_status(&self.service_name);
+        }
     }
 }
 
@@ -806,6 +834,48 @@ mod tests {
         let none = service.get_status("my.Service").is_none();
         crate::assert_with_log!(none, "cleared on drop", true, none);
         crate::test_complete!("health_reporter");
+    }
+
+    #[test]
+    fn health_reporter_only_final_drop_clears_shared_service_status() {
+        init_test("health_reporter_only_final_drop_clears_shared_service_status");
+        let service = HealthService::new();
+        let reporter_a = HealthReporter::new(service.clone(), "shared.Service");
+        let reporter_b = HealthReporter::new(service.clone(), "shared.Service");
+
+        reporter_a.set_serving();
+        let version_after_set = service.version();
+
+        drop(reporter_a);
+        crate::assert_with_log!(
+            service.get_status("shared.Service") == Some(ServingStatus::Serving),
+            "first drop preserves shared registration",
+            Some(ServingStatus::Serving),
+            service.get_status("shared.Service")
+        );
+        crate::assert_with_log!(
+            service.version() == version_after_set,
+            "non-final drop does not clear or bump version",
+            version_after_set,
+            service.version()
+        );
+
+        reporter_b.set_not_serving();
+        crate::assert_with_log!(
+            service.get_status("shared.Service") == Some(ServingStatus::NotServing),
+            "remaining reporter still controls shared service state",
+            Some(ServingStatus::NotServing),
+            service.get_status("shared.Service")
+        );
+
+        drop(reporter_b);
+        crate::assert_with_log!(
+            service.get_status("shared.Service").is_none(),
+            "final drop clears shared registration",
+            true,
+            service.get_status("shared.Service").is_none()
+        );
+        crate::test_complete!("health_reporter_only_final_drop_clears_shared_service_status");
     }
 
     #[test]
