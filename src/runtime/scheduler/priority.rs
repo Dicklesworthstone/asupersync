@@ -545,10 +545,13 @@ impl Scheduler {
     /// Pop a task from the cancel lane using deterministic RNG tie-breaking.
     #[inline]
     pub fn pop_cancel_with_rng(&mut self, rng_hint: u64) -> Option<(TaskId, DispatchLane)> {
-        let entry =
-            Self::pop_entry_with_rng(&mut self.cancel_lane, rng_hint, &mut self.scratch_entries)?;
-        self.scheduled.remove(entry.task);
-        Some((entry.task, DispatchLane::Cancel))
+        loop {
+            let entry =
+                Self::pop_entry_with_rng(&mut self.cancel_lane, rng_hint, &mut self.scratch_entries)?;
+            if self.scheduled.remove(entry.task) {
+                return Some((entry.task, DispatchLane::Cancel));
+            }
+        }
     }
 
     /// Pop a task from timed or ready lanes (excluding cancel lane).
@@ -818,15 +821,18 @@ impl Scheduler {
     #[inline]
     #[must_use]
     pub fn pop_timed_only_with_hint(&mut self, rng_hint: u64, now: Time) -> Option<TaskId> {
-        let earliest = self.timed_lane.peek()?;
-        if earliest.deadline > now {
-            return None;
+        loop {
+            let earliest = self.timed_lane.peek()?;
+            if earliest.deadline > now {
+                return None;
+            }
+            let entry =
+                Self::pop_timed_with_rng(&mut self.timed_lane, rng_hint, &mut self.scratch_timed)
+                    .expect("timed_lane peeked non-empty");
+            if self.scheduled.remove(entry.task) {
+                return Some(entry.task);
+            }
         }
-        let entry =
-            Self::pop_timed_with_rng(&mut self.timed_lane, rng_hint, &mut self.scratch_timed)
-                .expect("timed_lane peeked non-empty");
-        self.scheduled.remove(entry.task);
-        Some(entry.task)
     }
 
     /// Pops only from the ready lane.
@@ -836,9 +842,10 @@ impl Scheduler {
     #[inline]
     #[must_use]
     pub fn pop_ready_only(&mut self) -> Option<TaskId> {
-        if let Some(entry) = self.ready_lane.pop() {
-            self.scheduled.remove(entry.task);
-            return Some(entry.task);
+        while let Some(entry) = self.ready_lane.pop() {
+            if self.scheduled.remove(entry.task) {
+                return Some(entry.task);
+            }
         }
         None
     }
@@ -847,10 +854,13 @@ impl Scheduler {
     #[inline]
     #[must_use]
     pub fn pop_ready_only_with_hint(&mut self, rng_hint: u64) -> Option<TaskId> {
-        let entry =
-            Self::pop_entry_with_rng(&mut self.ready_lane, rng_hint, &mut self.scratch_entries)?;
-        self.scheduled.remove(entry.task);
-        Some(entry.task)
+        loop {
+            let entry =
+                Self::pop_entry_with_rng(&mut self.ready_lane, rng_hint, &mut self.scratch_entries)?;
+            if self.scheduled.remove(entry.task) {
+                return Some(entry.task);
+            }
+        }
     }
 
     /// Checks all local lanes in priority order (cancel > timed > ready)
@@ -862,31 +872,38 @@ impl Scheduler {
     #[must_use]
     pub fn pop_any_lane_with_hint(&mut self, rng_hint: u64, now: Time) -> Option<(u8, TaskId)> {
         // Cancel lane first (highest priority).
-        if let Some(entry) =
+        while let Some(entry) =
             Self::pop_entry_with_rng(&mut self.cancel_lane, rng_hint, &mut self.scratch_entries)
         {
-            self.scheduled.remove(entry.task);
-            return Some((0, entry.task));
+            if self.scheduled.remove(entry.task) {
+                return Some((0, entry.task));
+            }
         }
         // Timed lane (EDF, only if deadline is due).
-        if let Some(earliest) = self.timed_lane.peek() {
+        while let Some(earliest) = self.timed_lane.peek() {
             if earliest.deadline <= now {
                 if let Some(entry) = Self::pop_timed_with_rng(
                     &mut self.timed_lane,
                     rng_hint,
                     &mut self.scratch_timed,
                 ) {
-                    self.scheduled.remove(entry.task);
-                    return Some((1, entry.task));
+                    if self.scheduled.remove(entry.task) {
+                        return Some((1, entry.task));
+                    }
+                } else {
+                    break;
                 }
+            } else {
+                break;
             }
         }
         // Ready lane.
-        if let Some(entry) =
+        while let Some(entry) =
             Self::pop_entry_with_rng(&mut self.ready_lane, rng_hint, &mut self.scratch_entries)
         {
-            self.scheduled.remove(entry.task);
-            return Some((2, entry.task));
+            if self.scheduled.remove(entry.task) {
+                return Some((2, entry.task));
+            }
         }
         None
     }
