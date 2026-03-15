@@ -379,6 +379,100 @@ impl<T> RwLock<T> {
         }
     }
 
+    #[inline]
+    fn abandon_read_waiter(&self, waiter_id: &mut Option<u64>) {
+        let Some(waiter_id) = waiter_id.take() else {
+            return;
+        };
+
+        let writer_waker = {
+            let mut state = self.state.lock();
+            if let Some(pos) = state.reader_waiters.iter().position(|w| w.id == waiter_id) {
+                state.reader_waiters.remove(pos);
+                None
+            } else {
+                // We were granted the lock but never took the guard.
+                state.readers = state.readers.saturating_sub(1);
+                if state.readers == 0 && state.writer_waiters > 0 {
+                    let waker = Self::pop_writer_waiter(&mut state);
+                    if waker.is_some() {
+                        state.writer_active = true;
+                    }
+                    waker
+                } else {
+                    None
+                }
+            }
+        };
+
+        if let Some(waker) = writer_waker {
+            waker.wake();
+        }
+    }
+
+    #[inline]
+    fn abandon_write_waiter(&self, waiter_id: &mut Option<u64>, counted: &mut bool) {
+        if !*counted {
+            return;
+        }
+
+        let waiter_id = waiter_id.take();
+        let (writer_waker, reader_wakers) = {
+            let mut state = self.state.lock();
+            let result = if let Some(waiter_id) = waiter_id {
+                if let Some(pos) = state.writer_queue.iter().position(|w| w.id == waiter_id) {
+                    state.writer_queue.remove(pos);
+                    state.writer_waiters = state.writer_waiters.saturating_sub(1);
+                    if state.writer_waiters == 0 && !state.writer_active {
+                        let wakers = Self::drain_reader_waiters(&mut state);
+                        state.readers += wakers.len();
+                        (None, wakers)
+                    } else {
+                        (None, SmallVec::<[Waker; 4]>::new())
+                    }
+                } else {
+                    // We were granted the lock but never took the guard.
+                    state.writer_waiters = state.writer_waiters.saturating_sub(1);
+                    state.writer_active = false;
+
+                    let wake_writer = Self::should_wake_writer(&state);
+                    if wake_writer {
+                        let waker = Self::pop_writer_waiter(&mut state);
+                        if waker.is_some() {
+                            state.writer_active = true;
+                        }
+                        (waker, SmallVec::<[Waker; 4]>::new())
+                    } else {
+                        let wakers = Self::drain_reader_waiters(&mut state);
+                        state.readers += wakers.len();
+                        (None, wakers)
+                    }
+                }
+            } else {
+                // We incremented writer_waiters but never enqueued successfully.
+                state.writer_waiters = state.writer_waiters.saturating_sub(1);
+                if state.writer_waiters == 0 && !state.writer_active {
+                    let wakers = Self::drain_reader_waiters(&mut state);
+                    state.readers += wakers.len();
+                    (None, wakers)
+                } else {
+                    (None, SmallVec::<[Waker; 4]>::new())
+                }
+            };
+            drop(state);
+            result
+        };
+
+        *counted = false;
+
+        if let Some(waker) = writer_waker {
+            waker.wake();
+        }
+        for waker in reader_wakers {
+            waker.wake();
+        }
+    }
+
     #[cfg(test)]
     fn debug_state(&self) -> State {
         self.state.lock().clone()
@@ -405,6 +499,7 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
             return Poll::Ready(Err(RwLockError::PolledAfterCompletion));
         }
         if this.cx.checkpoint().is_err() {
+            this.lock.abandon_read_waiter(&mut this.waiter_id);
             this.completed = true;
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
@@ -412,6 +507,8 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
         let mut state = this.lock.state.lock();
 
         if this.lock.is_poisoned() {
+            drop(state);
+            this.lock.abandon_read_waiter(&mut this.waiter_id);
             this.completed = true;
             return Poll::Ready(Err(RwLockError::Poisoned));
         }
@@ -453,25 +550,7 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
 
 impl<T> Drop for ReadFuture<'_, '_, T> {
     fn drop(&mut self) {
-        if let Some(waiter_id) = self.waiter_id {
-            let mut state = self.lock.state.lock();
-            if let Some(pos) = state.reader_waiters.iter().position(|w| w.id == waiter_id) {
-                state.reader_waiters.remove(pos);
-            } else {
-                // We were granted the lock but dropped before taking it!
-                state.readers = state.readers.saturating_sub(1);
-                if state.readers == 0 && state.writer_waiters > 0 {
-                    let waker = RwLock::<T>::pop_writer_waiter(&mut state);
-                    if waker.is_some() {
-                        state.writer_active = true;
-                    }
-                    drop(state);
-                    if let Some(waker) = waker {
-                        waker.wake();
-                    }
-                }
-            }
-        }
+        self.lock.abandon_read_waiter(&mut self.waiter_id);
     }
 }
 
@@ -494,6 +573,8 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
             return Poll::Ready(Err(RwLockError::PolledAfterCompletion));
         }
         if this.cx.checkpoint().is_err() {
+            this.lock
+                .abandon_write_waiter(&mut this.waiter_id, &mut this.counted);
             this.completed = true;
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
@@ -501,6 +582,9 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
         let mut state = this.lock.state.lock();
 
         if this.lock.is_poisoned() {
+            drop(state);
+            this.lock
+                .abandon_write_waiter(&mut this.waiter_id, &mut this.counted);
             this.completed = true;
             return Poll::Ready(Err(RwLockError::Poisoned));
         }
@@ -557,59 +641,8 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
 
 impl<T> Drop for WriteFuture<'_, '_, T> {
     fn drop(&mut self) {
-        if !self.counted {
-            return;
-        }
-
-        let mut writer_waker = None;
-        let mut reader_wakers: SmallVec<[Waker; 4]> = SmallVec::new();
-        let mut state = self.lock.state.lock();
-
-        if let Some(waiter_id) = self.waiter_id {
-            if let Some(pos) = state.writer_queue.iter().position(|w| w.id == waiter_id) {
-                state.writer_queue.remove(pos);
-                state.writer_waiters = state.writer_waiters.saturating_sub(1);
-                if state.writer_waiters == 0 && !state.writer_active {
-                    let wakers = RwLock::<T>::drain_reader_waiters(&mut state);
-                    state.readers += wakers.len();
-                    reader_wakers = wakers;
-                }
-            } else {
-                // We were granted the lock but dropped before taking it!
-                state.writer_waiters = state.writer_waiters.saturating_sub(1);
-                state.writer_active = false;
-
-                let wake_writer = RwLock::<T>::should_wake_writer(&state);
-
-                if wake_writer {
-                    writer_waker = RwLock::<T>::pop_writer_waiter(&mut state);
-                    if writer_waker.is_some() {
-                        state.writer_active = true;
-                    }
-                } else {
-                    let wakers = RwLock::<T>::drain_reader_waiters(&mut state);
-                    state.readers += wakers.len();
-                    reader_wakers = wakers;
-                }
-            }
-        } else {
-            // We incremented writer_waiters but never got a waiter_id (e.g. panic during push_back)
-            state.writer_waiters = state.writer_waiters.saturating_sub(1);
-            if state.writer_waiters == 0 && !state.writer_active {
-                let wakers = RwLock::<T>::drain_reader_waiters(&mut state);
-                state.readers += wakers.len();
-                reader_wakers = wakers;
-            }
-        }
-
-        drop(state);
-
-        if let Some(waker) = writer_waker {
-            waker.wake();
-        }
-        for waker in reader_wakers {
-            waker.wake();
-        }
+        self.lock
+            .abandon_write_waiter(&mut self.waiter_id, &mut self.counted);
     }
 }
 
@@ -826,6 +859,7 @@ impl<T> Future for OwnedReadFuture<'_, T> {
             return Poll::Ready(Err(RwLockError::PolledAfterCompletion));
         }
         if this.cx.checkpoint().is_err() {
+            this.lock.abandon_read_waiter(&mut this.waiter_id);
             this.completed = true;
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
@@ -833,6 +867,8 @@ impl<T> Future for OwnedReadFuture<'_, T> {
         let mut state = this.lock.state.lock();
 
         if this.lock.is_poisoned() {
+            drop(state);
+            this.lock.abandon_read_waiter(&mut this.waiter_id);
             this.completed = true;
             return Poll::Ready(Err(RwLockError::Poisoned));
         }
@@ -878,25 +914,7 @@ impl<T> Future for OwnedReadFuture<'_, T> {
 
 impl<T> Drop for OwnedReadFuture<'_, T> {
     fn drop(&mut self) {
-        if let Some(waiter_id) = self.waiter_id {
-            let mut state = self.lock.state.lock();
-            if let Some(pos) = state.reader_waiters.iter().position(|w| w.id == waiter_id) {
-                state.reader_waiters.remove(pos);
-            } else {
-                // We were granted the lock but dropped before taking it!
-                state.readers = state.readers.saturating_sub(1);
-                if state.readers == 0 && state.writer_waiters > 0 {
-                    let waker = RwLock::<T>::pop_writer_waiter(&mut state);
-                    if waker.is_some() {
-                        state.writer_active = true;
-                    }
-                    drop(state);
-                    if let Some(waker) = waker {
-                        waker.wake();
-                    }
-                }
-            }
-        }
+        self.lock.abandon_read_waiter(&mut self.waiter_id);
     }
 }
 
@@ -920,6 +938,8 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
         }
 
         if this.cx.checkpoint().is_err() {
+            this.lock
+                .abandon_write_waiter(&mut this.waiter_id, &mut this.counted);
             this.completed = true;
             return Poll::Ready(Err(RwLockError::Cancelled));
         }
@@ -927,6 +947,9 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
         let mut state = this.lock.state.lock();
 
         if this.lock.is_poisoned() {
+            drop(state);
+            this.lock
+                .abandon_write_waiter(&mut this.waiter_id, &mut this.counted);
             this.completed = true;
             return Poll::Ready(Err(RwLockError::Poisoned));
         }
@@ -987,59 +1010,8 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
 
 impl<T> Drop for OwnedWriteFuture<'_, T> {
     fn drop(&mut self) {
-        if !self.counted {
-            return;
-        }
-
-        let mut writer_waker = None;
-        let mut reader_wakers: SmallVec<[Waker; 4]> = SmallVec::new();
-        let mut state = self.lock.state.lock();
-
-        if let Some(waiter_id) = self.waiter_id {
-            if let Some(pos) = state.writer_queue.iter().position(|w| w.id == waiter_id) {
-                state.writer_queue.remove(pos);
-                state.writer_waiters = state.writer_waiters.saturating_sub(1);
-                if state.writer_waiters == 0 && !state.writer_active {
-                    let wakers = RwLock::<T>::drain_reader_waiters(&mut state);
-                    state.readers += wakers.len();
-                    reader_wakers = wakers;
-                }
-            } else {
-                // We were granted the lock but dropped before taking it!
-                state.writer_waiters = state.writer_waiters.saturating_sub(1);
-                state.writer_active = false;
-
-                let wake_writer = RwLock::<T>::should_wake_writer(&state);
-
-                if wake_writer {
-                    writer_waker = RwLock::<T>::pop_writer_waiter(&mut state);
-                    if writer_waker.is_some() {
-                        state.writer_active = true;
-                    }
-                } else {
-                    let wakers = RwLock::<T>::drain_reader_waiters(&mut state);
-                    state.readers += wakers.len();
-                    reader_wakers = wakers;
-                }
-            }
-        } else {
-            // We incremented writer_waiters but never got a waiter_id (e.g. panic during push_back)
-            state.writer_waiters = state.writer_waiters.saturating_sub(1);
-            if state.writer_waiters == 0 && !state.writer_active {
-                let wakers = RwLock::<T>::drain_reader_waiters(&mut state);
-                state.readers += wakers.len();
-                reader_wakers = wakers;
-            }
-        }
-
-        drop(state);
-
-        if let Some(waker) = writer_waker {
-            waker.wake();
-        }
-        for waker in reader_wakers {
-            waker.wake();
-        }
+        self.lock
+            .abandon_write_waiter(&mut self.waiter_id, &mut self.counted);
     }
 }
 
@@ -1088,9 +1060,13 @@ mod tests {
     }
 
     fn test_cx() -> Cx {
+        test_cx_with_slot(0)
+    }
+
+    fn test_cx_with_slot(slot: u32) -> Cx {
         Cx::new(
-            crate::types::RegionId::from_arena(ArenaIndex::new(0, 0)),
-            crate::types::TaskId::from_arena(ArenaIndex::new(0, 0)),
+            crate::types::RegionId::from_arena(ArenaIndex::new(0, slot)),
+            crate::types::TaskId::from_arena(ArenaIndex::new(0, slot)),
             crate::types::Budget::INFINITE,
         )
     }
@@ -1224,6 +1200,57 @@ mod tests {
     }
 
     #[test]
+    fn cancel_queued_write_waiter_cleans_state_before_drop() {
+        init_test("cancel_queued_write_waiter_cleans_state_before_drop");
+        let cx = test_cx();
+        let cancel_cx = test_cx_with_slot(10);
+        let lock = RwLock::new(42_u32);
+
+        let read_guard = read_blocking(&lock, &cx);
+
+        let mut write_fut = lock.write(&cancel_cx);
+        let write_pending = poll_once(&mut write_fut).is_none();
+        crate::assert_with_log!(write_pending, "write waiter pending", true, write_pending);
+
+        let mut read_fut = lock.read(&cx);
+        let read_pending = poll_once(&mut read_fut).is_none();
+        crate::assert_with_log!(
+            read_pending,
+            "reader blocked by queued writer",
+            true,
+            read_pending
+        );
+
+        cancel_cx.set_cancel_requested(true);
+        let cancelled = matches!(poll_once(&mut write_fut), Some(Err(RwLockError::Cancelled)));
+        crate::assert_with_log!(cancelled, "write waiter cancelled", true, cancelled);
+
+        let state = lock.debug_state();
+        crate::assert_with_log!(
+            state.writer_waiters == 0 && state.writer_queue.is_empty(),
+            "write waiter removed without drop",
+            true,
+            state.writer_waiters == 0 && state.writer_queue.is_empty()
+        );
+
+        let read_result = poll_once(&mut read_fut);
+        let reader_acquired = matches!(read_result, Some(Ok(_)));
+        crate::assert_with_log!(
+            reader_acquired,
+            "reader unblocked before cancelled writer future is dropped",
+            true,
+            reader_acquired
+        );
+
+        if let Some(Ok(guard)) = read_result {
+            drop(guard);
+        }
+        drop(read_guard);
+        drop(write_fut);
+        crate::test_complete!("cancel_queued_write_waiter_cleans_state_before_drop");
+    }
+
+    #[test]
     fn test_rwlock_try_read_success() {
         init_test("test_rwlock_try_read_success");
         let lock = RwLock::new(42_u32);
@@ -1277,6 +1304,53 @@ mod tests {
             waiters == 0 && writer_count == 0
         );
         crate::test_complete!("test_rwlock_cancel_during_write_wait");
+    }
+
+    #[test]
+    fn cancel_pregranted_read_waiter_wakes_writer_before_drop() {
+        init_test("cancel_pregranted_read_waiter_wakes_writer_before_drop");
+        let cx = test_cx();
+        let cancel_cx = test_cx_with_slot(11);
+        let lock = RwLock::new(0_u32);
+
+        let active_writer = write_blocking(&lock, &cx);
+
+        let mut read_fut = lock.read(&cancel_cx);
+        let read_pending = poll_once(&mut read_fut).is_none();
+        crate::assert_with_log!(read_pending, "reader queued", true, read_pending);
+
+        let mut writer_fut = lock.write(&cx);
+        let writer_pending = poll_once(&mut writer_fut).is_none();
+        crate::assert_with_log!(writer_pending, "writer queued", true, writer_pending);
+
+        drop(active_writer);
+
+        cancel_cx.set_cancel_requested(true);
+        let cancelled = matches!(poll_once(&mut read_fut), Some(Err(RwLockError::Cancelled)));
+        crate::assert_with_log!(cancelled, "pre-granted reader cancelled", true, cancelled);
+
+        let state = lock.debug_state();
+        crate::assert_with_log!(
+            state.readers == 0 && state.reader_waiters.is_empty() && state.writer_active,
+            "pre-granted reader cleanup forwarded turn to writer",
+            true,
+            state.readers == 0 && state.reader_waiters.is_empty() && state.writer_active
+        );
+
+        let writer_result = poll_once(&mut writer_fut);
+        let writer_acquired = matches!(writer_result, Some(Ok(_)));
+        crate::assert_with_log!(
+            writer_acquired,
+            "writer acquires before cancelled reader future is dropped",
+            true,
+            writer_acquired
+        );
+
+        if let Some(Ok(guard)) = writer_result {
+            drop(guard);
+        }
+        drop(read_fut);
+        crate::test_complete!("cancel_pregranted_read_waiter_wakes_writer_before_drop");
     }
 
     #[test]
@@ -1722,6 +1796,110 @@ mod tests {
             *read_guard
         );
         crate::test_complete!("test_owned_write_guard_basic");
+    }
+
+    #[test]
+    fn owned_cancel_queued_read_waiter_cleans_state_before_drop() {
+        init_test("owned_cancel_queued_read_waiter_cleans_state_before_drop");
+        let cx = test_cx();
+        let cancel_cx = test_cx_with_slot(12);
+        let lock = StdArc::new(RwLock::new(0_u32));
+
+        let active_writer = write_blocking(lock.as_ref(), &cx);
+
+        let mut read_fut = OwnedRwLockReadGuard::read(StdArc::clone(&lock), &cancel_cx);
+        let read_pending = poll_once(&mut read_fut).is_none();
+        crate::assert_with_log!(read_pending, "owned reader queued", true, read_pending);
+
+        let mut writer_fut = OwnedRwLockWriteGuard::write(StdArc::clone(&lock), &cx);
+        let writer_pending = poll_once(&mut writer_fut).is_none();
+        crate::assert_with_log!(writer_pending, "owned writer queued", true, writer_pending);
+
+        cancel_cx.set_cancel_requested(true);
+        let cancelled = matches!(poll_once(&mut read_fut), Some(Err(RwLockError::Cancelled)));
+        crate::assert_with_log!(cancelled, "owned reader cancelled", true, cancelled);
+
+        let state = lock.debug_state();
+        crate::assert_with_log!(
+            state.reader_waiters.is_empty(),
+            "owned reader waiter removed without drop",
+            true,
+            state.reader_waiters.is_empty()
+        );
+
+        drop(active_writer);
+
+        let writer_result = poll_once(&mut writer_fut);
+        let writer_acquired = matches!(writer_result, Some(Ok(_)));
+        crate::assert_with_log!(
+            writer_acquired,
+            "owned writer acquires before cancelled reader future is dropped",
+            true,
+            writer_acquired
+        );
+
+        if let Some(Ok(guard)) = writer_result {
+            drop(guard);
+        }
+        drop(read_fut);
+        crate::test_complete!("owned_cancel_queued_read_waiter_cleans_state_before_drop");
+    }
+
+    #[test]
+    fn owned_cancel_pregranted_write_waiter_unblocks_readers_before_drop() {
+        init_test("owned_cancel_pregranted_write_waiter_unblocks_readers_before_drop");
+        let cx = test_cx();
+        let cancel_cx = test_cx_with_slot(13);
+        let lock = StdArc::new(RwLock::new(42_u32));
+
+        let read_guard = read_blocking(lock.as_ref(), &cx);
+
+        let mut write_fut = OwnedRwLockWriteGuard::write(StdArc::clone(&lock), &cancel_cx);
+        let write_pending = poll_once(&mut write_fut).is_none();
+        crate::assert_with_log!(write_pending, "owned writer queued", true, write_pending);
+
+        let mut read_fut = OwnedRwLockReadGuard::read(StdArc::clone(&lock), &cx);
+        let read_pending = poll_once(&mut read_fut).is_none();
+        crate::assert_with_log!(
+            read_pending,
+            "owned reader blocked by queued writer",
+            true,
+            read_pending
+        );
+
+        drop(read_guard);
+
+        cancel_cx.set_cancel_requested(true);
+        let cancelled = matches!(poll_once(&mut write_fut), Some(Err(RwLockError::Cancelled)));
+        crate::assert_with_log!(
+            cancelled,
+            "pre-granted owned writer cancelled",
+            true,
+            cancelled
+        );
+
+        let state = lock.debug_state();
+        crate::assert_with_log!(
+            !state.writer_active && state.writer_waiters == 0,
+            "pre-granted owned writer cleanup released writer slot",
+            true,
+            !state.writer_active && state.writer_waiters == 0
+        );
+
+        let read_result = poll_once(&mut read_fut);
+        let reader_acquired = matches!(read_result, Some(Ok(_)));
+        crate::assert_with_log!(
+            reader_acquired,
+            "owned reader acquires before cancelled writer future is dropped",
+            true,
+            reader_acquired
+        );
+
+        if let Some(Ok(guard)) = read_result {
+            drop(guard);
+        }
+        drop(write_fut);
+        crate::test_complete!("owned_cancel_pregranted_write_waiter_unblocks_readers_before_drop");
     }
 
     #[test]
