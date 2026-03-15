@@ -212,7 +212,7 @@ pub struct CollectionMetrics {
     pub symbols_requested: u64,
     /// Symbols successfully received.
     pub symbols_received: u64,
-    /// Duplicate symbols (same ESI, skipped).
+    /// Duplicate symbols (same `(SBN, ESI)`, skipped).
     pub symbols_duplicate: u64,
     /// Corrupt symbols rejected.
     pub symbols_corrupt: u64,
@@ -232,13 +232,13 @@ pub struct CollectionMetrics {
 
 /// Collects symbols from distributed replicas.
 ///
-/// Handles deduplication by ESI, progress tracking, and optional
+/// Handles deduplication by `(SBN, ESI)`, progress tracking, and optional
 /// verification. Use [`add_collected`](Self::add_collected) to feed
 /// symbols synchronously (e.g. in tests).
 pub struct RecoveryCollector {
     config: RecoveryConfig,
     collected: Vec<CollectedSymbol>,
-    esi_to_idx: HashMap<u32, usize>,
+    symbol_to_idx: HashMap<(u8, u32), usize>,
     /// Object parameters from metadata (set once known).
     pub object_params: Option<ObjectParams>,
     progress: RecoveryProgress,
@@ -254,7 +254,7 @@ impl RecoveryCollector {
         Self {
             config,
             collected: Vec::with_capacity(64),
-            esi_to_idx: HashMap::with_capacity(64),
+            symbol_to_idx: HashMap::with_capacity(64),
             object_params: None,
             progress: RecoveryProgress {
                 started_at: Time::ZERO,
@@ -298,7 +298,7 @@ impl RecoveryCollector {
     /// Clears per-attempt collection state so the collector can be reused.
     fn reset_for_attempt(&mut self, params: ObjectParams) {
         self.collected.clear();
-        self.esi_to_idx.clear();
+        self.symbol_to_idx.clear();
         self.object_params = Some(params);
         self.progress.symbols_needed = params.min_symbols_for_decode();
         self.progress.symbols_collected = 0;
@@ -308,17 +308,17 @@ impl RecoveryCollector {
         self.metrics = CollectionMetrics::default();
     }
 
-    /// Adds a collected symbol, deduplicating by ESI.
+    /// Adds a collected symbol, deduplicating by `(SBN, ESI)`.
     ///
-    /// If an existing symbol for the same ESI is found but is unverified,
+    /// If an existing symbol for the same `(SBN, ESI)` is found but is unverified,
     /// and the new symbol is verified, the existing symbol is replaced.
     ///
-    /// Returns `true` if the symbol was accepted (new ESI or replaced unverified),
+    /// Returns `true` if the symbol was accepted (new `(SBN, ESI)` or replaced unverified),
     /// `false` if duplicate/rejected.
     #[inline]
     pub fn add_collected(&mut self, cs: CollectedSymbol) -> bool {
-        let esi = cs.symbol.esi();
-        if let Some(&idx) = self.esi_to_idx.get(&esi) {
+        let symbol_key = (cs.symbol.sbn(), cs.symbol.esi());
+        if let Some(&idx) = self.symbol_to_idx.get(&symbol_key) {
             // O(1) lookup for upgrade path: replace unverified with verified.
             // This prevents a poisoning attack where a bad peer sends unverified garbage first.
             if !self.collected[idx].verified && cs.verified {
@@ -329,7 +329,7 @@ impl RecoveryCollector {
             return false;
         }
         let idx = self.collected.len();
-        self.esi_to_idx.insert(esi, idx);
+        self.symbol_to_idx.insert(symbol_key, idx);
         self.metrics.symbols_received += 1;
         self.progress.symbols_collected += 1;
         self.collected.push(cs);
@@ -366,7 +366,7 @@ impl std::fmt::Debug for RecoveryCollector {
         f.debug_struct("RecoveryCollector")
             .field("config", &self.config)
             .field("collected", &self.collected.len())
-            .field("esi_to_idx", &self.esi_to_idx.len())
+            .field("symbol_to_idx", &self.symbol_to_idx.len())
             .field("object_params", &self.object_params)
             .field("phase", &self.progress.phase)
             .field("metrics", &self.metrics)
@@ -433,7 +433,7 @@ pub struct StateDecoder {
     config: RecoveryDecodingConfig,
     decoder_state: DecoderState,
     symbols: Vec<AuthenticatedSymbol>,
-    seen_esi: HashSet<u32>,
+    seen_symbols: HashSet<(u8, u32)>,
 }
 
 #[inline]
@@ -452,17 +452,17 @@ impl StateDecoder {
                 needed: 0,
             },
             symbols: Vec::with_capacity(64),
-            seen_esi: HashSet::with_capacity(64),
+            seen_symbols: HashSet::with_capacity(64),
         }
     }
 
-    /// Adds a symbol to the decoder, deduplicating by ESI.
+    /// Adds a symbol to the decoder, deduplicating by `(SBN, ESI)`.
     pub fn add_symbol(&mut self, auth_symbol: &AuthenticatedSymbol) -> Result<(), Error> {
-        let esi = auth_symbol.symbol().esi();
-        if self.seen_esi.contains(&esi) {
+        let symbol_key = (auth_symbol.symbol().sbn(), auth_symbol.symbol().esi());
+        if self.seen_symbols.contains(&symbol_key) {
             return Ok(()); // Skip duplicates silently
         }
-        self.seen_esi.insert(esi);
+        self.seen_symbols.insert(symbol_key);
         self.symbols.push(auth_symbol.clone());
 
         // Update state
@@ -494,7 +494,7 @@ impl StateDecoder {
     /// Clears the decoder state for reuse.
     pub fn reset(&mut self) {
         self.symbols.clear();
-        self.seen_esi.clear();
+        self.seen_symbols.clear();
         self.decoder_state = DecoderState::Accumulating {
             received: 0,
             needed: 0,
@@ -519,13 +519,11 @@ impl StateDecoder {
 
         let config = DecodingConfig {
             symbol_size: params.symbol_size,
-            max_block_size: usize::try_from(params.object_size).unwrap_or(usize::MAX),
+            max_block_size: usize::from(params.symbols_per_block) * usize::from(params.symbol_size),
             repair_overhead: 1.0,
             min_overhead: 0,
             max_buffered_symbols: 0,
             block_timeout: Duration::from_secs(30),
-            // Respect the integrity verification setting from recovery config.
-            // If verify_integrity is true, the pipeline will validate auth tags.
             verify_auth: self.config.verify_integrity,
         };
         let mut pipeline = if self.config.verify_integrity {
@@ -588,7 +586,7 @@ impl std::fmt::Debug for StateDecoder {
         f.debug_struct("StateDecoder")
             .field("config", &self.config)
             .field("symbols", &self.symbols.len())
-            .field("seen_esi", &self.seen_esi.len())
+            .field("seen_symbols", &self.seen_symbols.len())
             .field("state", &self.decoder_state)
             .finish()
     }
@@ -868,7 +866,7 @@ mod tests {
         let mut collector = RecoveryCollector::new(RecoveryConfig::default());
 
         let sym1 = Symbol::new_for_test(1, 0, 5, &[1, 2, 3]);
-        let sym2 = Symbol::new_for_test(1, 0, 5, &[1, 2, 3]); // Same ESI
+        let sym2 = Symbol::new_for_test(1, 0, 5, &[1, 2, 3]); // Same block + ESI
 
         let added1 = collector.add_collected(CollectedSymbol {
             symbol: sym1,
@@ -890,6 +888,22 @@ mod tests {
 
         assert_eq!(collector.symbols().len(), 1);
         assert_eq!(collector.metrics.symbols_duplicate, 1);
+    }
+
+    #[test]
+    fn collector_accepts_same_esi_on_different_blocks() {
+        let mut collector = RecoveryCollector::new(RecoveryConfig::default());
+        collector.object_params =
+            Some(ObjectParams::new(ObjectId::new_for_test(1), 512, 128, 2, 2));
+
+        assert!(collector.add_collected(make_collected_symbol_with_block(0, 0)));
+        assert!(collector.add_collected(make_collected_symbol_with_block(0, 1)));
+        assert!(collector.add_collected(make_collected_symbol_with_block(1, 0)));
+        assert!(collector.add_collected(make_collected_symbol_with_block(1, 1)));
+
+        assert_eq!(collector.symbols().len(), 4);
+        assert_eq!(collector.metrics.symbols_duplicate, 0);
+        assert!(collector.can_decode());
     }
 
     #[test]
@@ -1002,6 +1016,25 @@ mod tests {
         decoder.add_symbol(&sym).unwrap(); // duplicate
 
         assert_eq!(decoder.symbols_received(), 1);
+    }
+
+    #[test]
+    fn decoder_accepts_same_esi_on_different_blocks() {
+        let mut decoder = StateDecoder::new(RecoveryDecodingConfig::default());
+
+        let block0 = AuthenticatedSymbol::new_verified(
+            Symbol::new_for_test(1, 0, 0, &[1, 2, 3]),
+            AuthenticationTag::zero(),
+        );
+        let block1 = AuthenticatedSymbol::new_verified(
+            Symbol::new_for_test(1, 1, 0, &[4, 5, 6]),
+            AuthenticationTag::zero(),
+        );
+
+        decoder.add_symbol(&block0).unwrap();
+        decoder.add_symbol(&block1).unwrap();
+
+        assert_eq!(decoder.symbols_received(), 2);
     }
 
     #[test]
@@ -1269,8 +1302,13 @@ mod tests {
         // Provide only 2 symbols (need 10).
         let symbols: Vec<CollectedSymbol> = (0..2).map(make_collected_symbol).collect();
 
-        let mut orchestrator =
-            RecoveryOrchestrator::new(RecoveryConfig::default(), RecoveryDecodingConfig::default());
+        let mut orchestrator = RecoveryOrchestrator::new(
+            RecoveryConfig::default(),
+            RecoveryDecodingConfig {
+                verify_integrity: false,
+                ..Default::default()
+            },
+        );
 
         let result = orchestrator.recover_from_symbols(
             &trigger,
@@ -1394,9 +1432,35 @@ mod tests {
         enc.encode(snapshot, Time::ZERO).unwrap()
     }
 
+    fn encode_multi_block_test_snapshot(snapshot: &RegionSnapshot) -> EncodedState {
+        let config = EncodingConfig {
+            symbol_size: 16,
+            min_repair_symbols: 0,
+            max_source_blocks: 2,
+            ..Default::default()
+        };
+        let mut enc = StateEncoder::new(config, DetRng::new(42));
+        let encoded = enc.encode(snapshot, Time::ZERO).unwrap();
+        assert!(
+            encoded.params.source_blocks > 1,
+            "test snapshot should span multiple source blocks"
+        );
+        encoded
+    }
+
     fn make_collected_symbol(esi: u32) -> CollectedSymbol {
         CollectedSymbol {
             symbol: Symbol::new_for_test(1, 0, esi, &[0u8; 128]),
+            tag: AuthenticationTag::zero(),
+            source_replica: "r1".to_string(),
+            collected_at: Time::ZERO,
+            verified: false,
+        }
+    }
+
+    fn make_collected_symbol_with_block(sbn: u8, esi: u32) -> CollectedSymbol {
+        CollectedSymbol {
+            symbol: Symbol::new_for_test(1, sbn, esi, &[0u8; 128]),
             tag: AuthenticationTag::zero(),
             source_replica: "r1".to_string(),
             collected_at: Time::ZERO,
@@ -1426,7 +1490,7 @@ mod tests {
 
     #[test]
     fn collector_duplicate_esi_from_same_replica() {
-        // Two symbols with same ESI from the SAME replica — second rejected.
+        // Two symbols with the same block + ESI from the SAME replica — second rejected.
         let mut collector = RecoveryCollector::new(RecoveryConfig::default());
 
         let sym1 = CollectedSymbol {
@@ -1598,7 +1662,7 @@ mod tests {
         assert_eq!(decoder.symbols_received(), 0);
         assert!(!decoder.can_decode());
 
-        // Reuse — same ESI should be accepted again after reset
+        // Reuse — the same block + ESI should be accepted again after reset
         let auth = AuthenticatedSymbol::new_verified(sym, AuthenticationTag::zero());
         decoder.add_symbol(&auth).unwrap();
         assert_eq!(decoder.symbols_received(), 1);
@@ -1720,6 +1784,46 @@ mod tests {
         );
         assert!(second.is_err());
         assert_eq!(orchestrator.attempt, 2);
+    }
+
+    #[test]
+    fn collector_preserves_multi_block_source_symbols_with_repeated_esi_values() {
+        let snapshot = create_test_snapshot();
+        let encoded = encode_multi_block_test_snapshot(&snapshot);
+        let symbols: Vec<CollectedSymbol> = encoded
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.kind().is_source())
+            .map(|symbol| CollectedSymbol {
+                symbol: symbol.clone(),
+                tag: AuthenticationTag::zero(),
+                source_replica: "r1".to_string(),
+                collected_at: Time::ZERO,
+                verified: false,
+            })
+            .collect();
+
+        let mut seen_esi = HashSet::new();
+        assert!(
+            symbols
+                .iter()
+                .any(|symbol| !seen_esi.insert(symbol.symbol.esi())),
+            "multi-block fixture should reuse ESI values across blocks"
+        );
+
+        let mut collector = RecoveryCollector::new(RecoveryConfig::default());
+        collector.object_params = Some(encoded.params);
+
+        for symbol in &symbols {
+            assert!(
+                collector.add_collected(symbol.clone()),
+                "collector should preserve distinct (SBN, ESI) symbols"
+            );
+        }
+
+        assert_eq!(collector.symbols().len(), symbols.len());
+        assert_eq!(collector.metrics.symbols_duplicate, 0);
+        assert!(collector.can_decode());
     }
 
     #[test]
@@ -1855,7 +1959,7 @@ mod tests {
     // B6 Invariant Tests (asupersync-3narc.2.6)
     // =====================================================================
 
-    /// Invariant: an unverified symbol can be upgraded to verified for the same ESI.
+    /// Invariant: an unverified symbol can be upgraded to verified for the same `(SBN, ESI)`.
     /// This prevents a poisoning attack where a malicious peer sends unverified
     /// garbage for a given ESI first, blocking legitimate verified symbols.
     #[test]
@@ -1873,7 +1977,7 @@ mod tests {
         assert!(collector.add_collected(unverified));
         assert!(!collector.symbols()[0].verified);
 
-        // Now add the same ESI but verified — should replace.
+        // Now add the same block + ESI but verified — should replace.
         let verified = CollectedSymbol {
             symbol: Symbol::new_for_test(1, 0, esi, &[1, 2, 3]),
             tag: AuthenticationTag::zero(),
@@ -1883,7 +1987,7 @@ mod tests {
         };
         assert!(
             collector.add_collected(verified),
-            "verified symbol must replace unverified for same ESI"
+            "verified symbol must replace unverified for same block + ESI"
         );
         assert_eq!(collector.symbols().len(), 1);
         assert!(
@@ -1894,7 +1998,7 @@ mod tests {
     }
 
     /// Invariant: a verified symbol is NOT replaced by an unverified symbol
-    /// for the same ESI — this would be a downgrade.
+    /// for the same `(SBN, ESI)` — this would be a downgrade.
     #[test]
     fn collector_rejects_downgrade_verified_to_unverified() {
         let mut collector = RecoveryCollector::new(RecoveryConfig::default());
@@ -1924,8 +2028,8 @@ mod tests {
         assert_eq!(collector.symbols()[0].source_replica, "r1");
     }
 
-    /// Invariant: same ESI from two different replicas — second is rejected
-    /// as a duplicate regardless of source (dedup is ESI-based, not replica-based).
+    /// Invariant: the same `(SBN, ESI)` from two different replicas — second is rejected
+    /// as a duplicate regardless of source (dedup is symbol-ordinal-based, not replica-based).
     #[test]
     fn collector_same_esi_different_replicas_is_duplicate() {
         let mut collector = RecoveryCollector::new(RecoveryConfig::default());
@@ -1948,7 +2052,7 @@ mod tests {
         assert!(collector.add_collected(from_r1));
         assert!(
             !collector.add_collected(from_r2),
-            "same ESI from different replica must be rejected as duplicate"
+            "same block + ESI from different replica must be rejected as duplicate"
         );
         assert_eq!(collector.symbols().len(), 1);
         assert_eq!(collector.metrics.symbols_duplicate, 1);
