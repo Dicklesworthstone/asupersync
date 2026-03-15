@@ -131,7 +131,7 @@ Current closure-readiness status (2026-03-05 refresh):
 - `asupersync-3ltrv`: `closed`
 - `asupersync-n5fk6`: `closed`
 - `asupersync-2zu9p`: `closed`
-- `asupersync-36m6p`: still `in_progress`
+- `asupersync-36m6p`: still `open`
 
 `ready_to_close` remains `false` because `asupersync-36m6p` has not yet reached
 `closed`.

@@ -409,7 +409,7 @@
         "bead_id": "asupersync-36m6p",
         "name": "E5 high-confidence p95/p99 comparator corpus",
         "required_status": "closed",
-        "current_status": "in_progress",
+        "current_status": "open",
         "evidence_refs": [
           "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
           "thread:coord-2026-02-19"
