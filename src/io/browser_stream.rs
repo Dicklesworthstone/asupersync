@@ -53,16 +53,23 @@
 //! - `poll_write` is cancel-safe (returns bytes written)
 //! - `poll_flush`/`poll_shutdown` are cancel-safe (can retry)
 
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::task::{Context, Poll};
 
 #[cfg(target_arch = "wasm32")]
-use js_sys::{Reflect, Uint8Array};
+use js_sys::{ArrayBuffer, Reflect, Uint8Array};
+#[cfg(target_arch = "wasm32")]
+use std::cell::RefCell;
 #[cfg(target_arch = "wasm32")]
 use std::future::Future;
+#[cfg(target_arch = "wasm32")]
+use std::rc::Rc;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
@@ -71,10 +78,14 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 #[cfg(target_arch = "wasm32")]
 use web_sys::{
-    ReadableStream, ReadableStreamDefaultReader, WritableStream, WritableStreamDefaultWriter,
+    BroadcastChannel, MessageChannel, MessageEvent, MessagePort, ReadableStream,
+    ReadableStreamDefaultReader, WritableStream, WritableStreamDefaultWriter,
 };
 
-use crate::io::cap::{IoCap, IoCapabilities, IoStats};
+use crate::io::cap::{
+    BrowserHostApiIoCap, HostApiIoCap, HostApiPolicyError, HostApiRequest, HostApiSurface, IoCap,
+    IoCapabilities, IoStats,
+};
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 // ============================================================================
@@ -871,14 +882,14 @@ impl<R: AsyncRead + Unpin> AsyncRead for BrowserReadableStream<R> {
         }
 
         // Compute per-read cap: min(buf remaining, chunk limit, budget remaining)
-        let remaining = buf.remaining();
-        let budget_remaining = (this
+        let remaining = buf.remaining() as u64;
+        let budget_remaining = this
             .config
             .max_total_read_bytes
-            .saturating_sub(this.total_read)) as usize;
+            .saturating_sub(this.total_read);
         let effective_max = remaining
-            .min(this.config.max_read_chunk)
-            .min(budget_remaining);
+            .min(this.config.max_read_chunk as u64)
+            .min(budget_remaining) as usize;
 
         if effective_max == 0 {
             this.state = BrowserStreamState::Closed;
@@ -890,7 +901,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for BrowserReadableStream<R> {
         // buffer so the source cannot overshoot our limit. This branch is only
         // taken when we are near the total-byte budget or when max_read_chunk
         // is smaller than the caller's buffer — the common case goes direct.
-        if effective_max < remaining {
+        if effective_max < remaining as usize {
             let mut tmp_buf = ReadBuf::new(&mut buf.unfilled()[..effective_max]);
             let result = Pin::new(&mut this.source).poll_read(cx, &mut tmp_buf);
             match &result {
@@ -1145,13 +1156,13 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for BrowserWritableStream<W> {
         let budget_remaining = this
             .config
             .max_total_write_bytes
-            .saturating_sub(this.total_written) as usize;
+            .saturating_sub(this.total_written);
 
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
         }
 
-        if !this.config.allow_partial_writes && buf.len() > budget_remaining {
+        if !this.config.allow_partial_writes && (buf.len() as u64) > budget_remaining {
             this.state = BrowserStreamState::Errored;
             this.accounting.mark_aborted();
             return Poll::Ready(Err(BrowserStreamError::WriteLimitExceeded {
@@ -1161,7 +1172,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for BrowserWritableStream<W> {
             .into()));
         }
 
-        let to_write = buf.len().min(budget_remaining);
+        let to_write = (buf.len() as u64).min(budget_remaining) as usize;
 
         if to_write == 0 {
             this.state = BrowserStreamState::Errored;
@@ -1420,12 +1431,789 @@ impl IoCap for BrowserStreamIoCap {
 }
 
 // ============================================================================
+// Browser-native messaging wrappers
+// ============================================================================
+
+/// Browser-native message payload supported by the wrapper types in this module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrowserMessagePayload {
+    /// UTF-8 text payload.
+    Text(String),
+    /// Raw byte payload.
+    Bytes(Vec<u8>),
+}
+
+/// State of a browser-native messaging wrapper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserMessageState {
+    /// Wrapper is open and can send/receive.
+    Open,
+    /// Wrapper was explicitly closed.
+    Closed,
+    /// Wrapper observed a host-side error.
+    Errored,
+}
+
+/// Error returned by browser-native messaging wrapper operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrowserMessageError {
+    /// Host API policy denied access to the messaging surface.
+    Policy(HostApiPolicyError),
+    /// Wrapper or peer is already closed.
+    Closed,
+    /// Wrapper was explicitly aborted or cancelled.
+    Aborted(String),
+    /// Host side returned an operation error.
+    HostError(String),
+    /// Incoming payload type was outside the supported wrapper contract.
+    UnsupportedPayloadType,
+}
+
+impl fmt::Display for BrowserMessageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Policy(error) => write!(f, "{error}"),
+            Self::Closed => f.write_str("browser message wrapper is closed"),
+            Self::Aborted(reason) => write!(f, "browser message wrapper aborted: {reason}"),
+            Self::HostError(message) => write!(f, "browser host messaging error: {message}"),
+            Self::UnsupportedPayloadType => f.write_str("unsupported browser message payload type"),
+        }
+    }
+}
+
+impl std::error::Error for BrowserMessageError {}
+
+impl From<HostApiPolicyError> for BrowserMessageError {
+    fn from(error: HostApiPolicyError) -> Self {
+        Self::Policy(error)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum QueuedBrowserMessage {
+    Payload(BrowserMessagePayload),
+    Error(BrowserMessageError),
+}
+
+fn authorize_message_channel_surface(cap: &dyn HostApiIoCap) -> Result<(), BrowserMessageError> {
+    cap.authorize(&HostApiRequest::new(HostApiSurface::MessageChannel))
+        .map_err(BrowserMessageError::Policy)
+}
+
+fn authorize_degraded_message_channel_surface(
+    cap: &dyn HostApiIoCap,
+) -> Result<(), BrowserMessageError> {
+    cap.authorize(&HostApiRequest::new(HostApiSurface::MessageChannel).with_degraded_mode())
+        .map_err(BrowserMessageError::Policy)
+}
+
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+#[derive(Debug)]
+struct InMemoryMessagePortState {
+    inbox: Arc<Mutex<VecDeque<QueuedBrowserMessage>>>,
+    peer_inbox: Arc<Mutex<VecDeque<QueuedBrowserMessage>>>,
+    local_closed: Arc<AtomicBool>,
+    peer_closed: Arc<AtomicBool>,
+}
+
+impl InMemoryMessagePortState {
+    fn pair() -> (Self, Self) {
+        let left_inbox = Arc::new(Mutex::new(VecDeque::new()));
+        let right_inbox = Arc::new(Mutex::new(VecDeque::new()));
+        let left_closed = Arc::new(AtomicBool::new(false));
+        let right_closed = Arc::new(AtomicBool::new(false));
+
+        (
+            Self {
+                inbox: Arc::clone(&left_inbox),
+                peer_inbox: Arc::clone(&right_inbox),
+                local_closed: Arc::clone(&left_closed),
+                peer_closed: Arc::clone(&right_closed),
+            },
+            Self {
+                inbox: right_inbox,
+                peer_inbox: left_inbox,
+                local_closed: right_closed,
+                peer_closed: left_closed,
+            },
+        )
+    }
+
+    fn send(&self, message: &BrowserMessagePayload) -> Result<(), BrowserMessageError> {
+        if self.local_closed.load(Ordering::Acquire) || self.peer_closed.load(Ordering::Acquire) {
+            return Err(BrowserMessageError::Closed);
+        }
+        lock_or_recover(&self.peer_inbox).push_back(QueuedBrowserMessage::Payload(message.clone()));
+        Ok(())
+    }
+
+    fn try_recv(&self) -> Option<QueuedBrowserMessage> {
+        lock_or_recover(&self.inbox).pop_front()
+    }
+
+    fn close(&self) {
+        self.local_closed.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+struct WasmMessagePortState {
+    port: MessagePort,
+    inbox: Rc<RefCell<VecDeque<QueuedBrowserMessage>>>,
+    on_message: wasm_bindgen::closure::Closure<dyn FnMut(MessageEvent)>,
+    on_message_error: wasm_bindgen::closure::Closure<dyn FnMut(MessageEvent)>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WasmMessagePortState {
+    fn new(port: &MessagePort) -> Self {
+        let inbox = Rc::new(RefCell::new(VecDeque::new()));
+
+        let inbox_for_message = Rc::clone(&inbox);
+        let on_message =
+            wasm_bindgen::closure::Closure::wrap(Box::new(move |event: MessageEvent| {
+                let entry = decode_message_event(event)
+                    .map_or_else(QueuedBrowserMessage::Error, QueuedBrowserMessage::Payload);
+                inbox_for_message.borrow_mut().push_back(entry);
+            }) as Box<dyn FnMut(MessageEvent)>);
+
+        let inbox_for_error = Rc::clone(&inbox);
+        let on_message_error =
+            wasm_bindgen::closure::Closure::wrap(Box::new(move |_event: MessageEvent| {
+                inbox_for_error
+                    .borrow_mut()
+                    .push_back(QueuedBrowserMessage::Error(BrowserMessageError::HostError(
+                        "browser messageerror event".to_owned(),
+                    )));
+            }) as Box<dyn FnMut(MessageEvent)>);
+
+        port.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+        port.set_onmessageerror(Some(on_message_error.as_ref().unchecked_ref()));
+        port.start();
+
+        Self {
+            port: port.clone(),
+            inbox,
+            on_message,
+            on_message_error,
+        }
+    }
+
+    fn send(&self, message: &BrowserMessagePayload) -> Result<(), BrowserMessageError> {
+        let value = js_value_from_message_payload(message);
+        self.port
+            .post_message(&value)
+            .map_err(|err| browser_message_host_error(&err, "MessagePort.postMessage"))
+    }
+
+    fn try_recv(&self) -> Option<QueuedBrowserMessage> {
+        self.inbox.borrow_mut().pop_front()
+    }
+
+    fn close(&self) {
+        self.port.set_onmessage(None);
+        self.port.set_onmessageerror(None);
+        self.port.close();
+    }
+}
+
+enum BrowserMessagePortBackend {
+    InMemory(InMemoryMessagePortState),
+    #[cfg(target_arch = "wasm32")]
+    Host(WasmMessagePortState),
+}
+
+/// Explicit wrapper around a browser-native `MessagePort`.
+///
+/// This models the browser host messaging surface directly. It is not an
+/// asupersync task/channel primitive, and it does not imply worker-runtime
+/// support outside the explicit browser host capability boundary.
+pub struct BrowserMessagePort {
+    state: BrowserMessageState,
+    terminal_error: Option<BrowserMessageError>,
+    backend: BrowserMessagePortBackend,
+}
+
+impl fmt::Debug for BrowserMessagePort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BrowserMessagePort")
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BrowserMessagePort {
+    fn from_in_memory(state: InMemoryMessagePortState) -> Self {
+        Self {
+            state: BrowserMessageState::Open,
+            terminal_error: None,
+            backend: BrowserMessagePortBackend::InMemory(state),
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn from_host(port: &MessagePort) -> Self {
+        Self {
+            state: BrowserMessageState::Open,
+            terminal_error: None,
+            backend: BrowserMessagePortBackend::Host(WasmMessagePortState::new(port)),
+        }
+    }
+
+    /// Wrap an existing browser `MessagePort` after explicit authority checks.
+    #[cfg(target_arch = "wasm32")]
+    pub fn from_web_message_port(
+        cap: &dyn HostApiIoCap,
+        port: &MessagePort,
+    ) -> Result<Self, BrowserMessageError> {
+        authorize_message_channel_surface(cap)?;
+        Ok(Self::from_host(port))
+    }
+
+    /// Returns the current wrapper state.
+    #[must_use]
+    pub fn state(&self) -> BrowserMessageState {
+        self.state
+    }
+
+    /// Returns the terminal error, if the wrapper has entered `Errored`.
+    #[must_use]
+    pub fn error(&self) -> Option<&BrowserMessageError> {
+        self.terminal_error.as_ref()
+    }
+
+    /// Aborts the wrapped message port and records a stable terminal error.
+    pub fn abort(&mut self, reason: impl Into<String>) {
+        let error = BrowserMessageError::Aborted(reason.into());
+        self.fail(error);
+    }
+
+    /// Sends a payload through the wrapped message port.
+    pub fn send(&mut self, message: &BrowserMessagePayload) -> Result<(), BrowserMessageError> {
+        match self.state {
+            BrowserMessageState::Closed => return Err(BrowserMessageError::Closed),
+            BrowserMessageState::Errored => return Err(self.current_error()),
+            BrowserMessageState::Open => {}
+        }
+
+        let result = match &self.backend {
+            BrowserMessagePortBackend::InMemory(state) => state.send(message),
+            #[cfg(target_arch = "wasm32")]
+            BrowserMessagePortBackend::Host(state) => state.send(message),
+        };
+
+        if let Err(error) = &result {
+            match error {
+                BrowserMessageError::Closed => {
+                    self.close_backend();
+                    self.state = BrowserMessageState::Closed;
+                }
+                _ => self.fail(error.clone()),
+            }
+        }
+
+        result
+    }
+
+    /// Attempts to receive one queued payload without blocking.
+    pub fn try_recv(&mut self) -> Result<Option<BrowserMessagePayload>, BrowserMessageError> {
+        match self.state {
+            BrowserMessageState::Closed => return Err(BrowserMessageError::Closed),
+            BrowserMessageState::Errored => return Err(self.current_error()),
+            BrowserMessageState::Open => {}
+        }
+
+        let next = match &self.backend {
+            BrowserMessagePortBackend::InMemory(state) => state.try_recv(),
+            #[cfg(target_arch = "wasm32")]
+            BrowserMessagePortBackend::Host(state) => state.try_recv(),
+        };
+
+        match next {
+            Some(QueuedBrowserMessage::Payload(payload)) => Ok(Some(payload)),
+            Some(QueuedBrowserMessage::Error(error)) => {
+                self.fail(error.clone());
+                Err(error)
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Closes the wrapped message port.
+    pub fn close(&mut self) {
+        if self.state == BrowserMessageState::Closed {
+            return;
+        }
+        self.close_backend();
+        if self.state != BrowserMessageState::Errored {
+            self.state = BrowserMessageState::Closed;
+        }
+    }
+
+    fn fail(&mut self, error: BrowserMessageError) {
+        if self.state == BrowserMessageState::Errored {
+            return;
+        }
+        self.close_backend();
+        self.terminal_error = Some(error);
+        self.state = BrowserMessageState::Errored;
+    }
+
+    fn current_error(&self) -> BrowserMessageError {
+        self.terminal_error.clone().unwrap_or_else(|| {
+            BrowserMessageError::HostError("browser message wrapper is errored".to_owned())
+        })
+    }
+
+    fn close_backend(&self) {
+        match &self.backend {
+            BrowserMessagePortBackend::InMemory(state) => state.close(),
+            #[cfg(target_arch = "wasm32")]
+            BrowserMessagePortBackend::Host(state) => state.close(),
+        }
+    }
+}
+
+impl Drop for BrowserMessagePort {
+    fn drop(&mut self) {
+        if self.state != BrowserMessageState::Closed {
+            self.close_backend();
+        }
+    }
+}
+
+/// Explicit wrapper around a browser-native `MessageChannel`.
+#[derive(Debug)]
+pub struct BrowserMessageChannelPair {
+    left: BrowserMessagePort,
+    right: BrowserMessagePort,
+}
+
+/// Alias for the explicit browser-native `MessageChannel` wrapper pair.
+pub type BrowserMessageChannel = BrowserMessageChannelPair;
+
+impl BrowserMessageChannelPair {
+    /// Creates a new explicit browser-native message channel pair.
+    pub fn open(cap: &dyn HostApiIoCap) -> Result<Self, BrowserMessageError> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            authorize_message_channel_surface(cap)?;
+            let channel = MessageChannel::new()
+                .map_err(|err| browser_message_host_error(&err, "MessageChannel::new"))?;
+            return Ok(Self {
+                left: BrowserMessagePort::from_host(&channel.port1()),
+                right: BrowserMessagePort::from_host(&channel.port2()),
+            });
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            authorize_degraded_message_channel_surface(cap)?;
+            let (left, right) = InMemoryMessagePortState::pair();
+            Ok(Self {
+                left: BrowserMessagePort::from_in_memory(left),
+                right: BrowserMessagePort::from_in_memory(right),
+            })
+        }
+    }
+
+    /// Splits the pair into its two explicit message-port wrappers.
+    #[must_use]
+    pub fn split(self) -> (BrowserMessagePort, BrowserMessagePort) {
+        (self.left, self.right)
+    }
+}
+
+impl BrowserHostApiIoCap {
+    /// Opens an explicit browser-native message-channel wrapper pair.
+    pub fn open_message_channel(&self) -> Result<BrowserMessageChannelPair, BrowserMessageError> {
+        BrowserMessageChannelPair::open(self)
+    }
+
+    /// Opens an explicit browser-native broadcast-channel wrapper.
+    pub fn open_broadcast_channel(
+        &self,
+        name: impl Into<String>,
+    ) -> Result<BrowserBroadcastChannel, BrowserMessageError> {
+        BrowserBroadcastChannel::open(self, name)
+    }
+
+    /// Wraps an existing browser-native `MessagePort`.
+    #[cfg(target_arch = "wasm32")]
+    pub fn wrap_message_port(
+        &self,
+        port: &MessagePort,
+    ) -> Result<BrowserMessagePort, BrowserMessageError> {
+        BrowserMessagePort::from_web_message_port(self, port)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct InMemoryBroadcastSubscriber {
+    id: u64,
+    inbox: Arc<Mutex<VecDeque<QueuedBrowserMessage>>>,
+    closed: Arc<AtomicBool>,
+}
+
+static NEXT_IN_MEMORY_BROADCAST_ID: AtomicU64 = AtomicU64::new(1);
+
+fn in_memory_broadcast_registry()
+-> &'static Mutex<BTreeMap<String, Vec<InMemoryBroadcastSubscriber>>> {
+    static REGISTRY: OnceLock<Mutex<BTreeMap<String, Vec<InMemoryBroadcastSubscriber>>>> =
+        OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+#[derive(Debug)]
+struct InMemoryBroadcastChannelState {
+    name: String,
+    id: u64,
+    inbox: Arc<Mutex<VecDeque<QueuedBrowserMessage>>>,
+    closed: Arc<AtomicBool>,
+}
+
+impl InMemoryBroadcastChannelState {
+    fn open(name: impl Into<String>) -> Self {
+        let name = name.into();
+        let id = NEXT_IN_MEMORY_BROADCAST_ID.fetch_add(1, Ordering::Relaxed);
+        let inbox = Arc::new(Mutex::new(VecDeque::new()));
+        let closed = Arc::new(AtomicBool::new(false));
+        let subscriber = InMemoryBroadcastSubscriber {
+            id,
+            inbox: Arc::clone(&inbox),
+            closed: Arc::clone(&closed),
+        };
+        lock_or_recover(in_memory_broadcast_registry())
+            .entry(name.clone())
+            .or_default()
+            .push(subscriber);
+        Self {
+            name,
+            id,
+            inbox,
+            closed,
+        }
+    }
+
+    fn send(&self, message: &BrowserMessagePayload) -> Result<(), BrowserMessageError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(BrowserMessageError::Closed);
+        }
+
+        let mut registry = lock_or_recover(in_memory_broadcast_registry());
+        if let Some(subscribers) = registry.get_mut(&self.name) {
+            subscribers.retain(|subscriber| !subscriber.closed.load(Ordering::Acquire));
+            for subscriber in subscribers.iter() {
+                if subscriber.id == self.id {
+                    continue;
+                }
+                lock_or_recover(&subscriber.inbox)
+                    .push_back(QueuedBrowserMessage::Payload(message.clone()));
+            }
+        }
+        drop(registry);
+        Ok(())
+    }
+
+    fn try_recv(&self) -> Option<QueuedBrowserMessage> {
+        lock_or_recover(&self.inbox).pop_front()
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        let mut registry = lock_or_recover(in_memory_broadcast_registry());
+        if let Some(subscribers) = registry.get_mut(&self.name) {
+            subscribers.retain(|subscriber| {
+                subscriber.id != self.id && !subscriber.closed.load(Ordering::Acquire)
+            });
+            if subscribers.is_empty() {
+                registry.remove(&self.name);
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+struct WasmBroadcastChannelState {
+    channel: BroadcastChannel,
+    inbox: Rc<RefCell<VecDeque<QueuedBrowserMessage>>>,
+    on_message: wasm_bindgen::closure::Closure<dyn FnMut(MessageEvent)>,
+    on_message_error: wasm_bindgen::closure::Closure<dyn FnMut(MessageEvent)>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WasmBroadcastChannelState {
+    fn open(name: &str) -> Result<Self, BrowserMessageError> {
+        let channel = BroadcastChannel::new(name)
+            .map_err(|err| browser_message_host_error(&err, "BroadcastChannel::new"))?;
+        let inbox = Rc::new(RefCell::new(VecDeque::new()));
+
+        let inbox_for_message = Rc::clone(&inbox);
+        let on_message =
+            wasm_bindgen::closure::Closure::wrap(Box::new(move |event: MessageEvent| {
+                let entry = decode_message_event(event)
+                    .map_or_else(QueuedBrowserMessage::Error, QueuedBrowserMessage::Payload);
+                inbox_for_message.borrow_mut().push_back(entry);
+            }) as Box<dyn FnMut(MessageEvent)>);
+
+        let inbox_for_error = Rc::clone(&inbox);
+        let on_message_error =
+            wasm_bindgen::closure::Closure::wrap(Box::new(move |_event: MessageEvent| {
+                inbox_for_error
+                    .borrow_mut()
+                    .push_back(QueuedBrowserMessage::Error(BrowserMessageError::HostError(
+                        "broadcast channel messageerror event".to_owned(),
+                    )));
+            }) as Box<dyn FnMut(MessageEvent)>);
+
+        channel.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+        channel.set_onmessageerror(Some(on_message_error.as_ref().unchecked_ref()));
+
+        Ok(Self {
+            channel,
+            inbox,
+            on_message,
+            on_message_error,
+        })
+    }
+
+    fn send(&self, message: &BrowserMessagePayload) -> Result<(), BrowserMessageError> {
+        let value = js_value_from_message_payload(message);
+        self.channel
+            .post_message(&value)
+            .map_err(|err| browser_message_host_error(&err, "BroadcastChannel.postMessage"))
+    }
+
+    fn try_recv(&self) -> Option<QueuedBrowserMessage> {
+        self.inbox.borrow_mut().pop_front()
+    }
+
+    fn close(&self) {
+        self.channel.set_onmessage(None);
+        self.channel.set_onmessageerror(None);
+        self.channel.close();
+    }
+}
+
+enum BrowserBroadcastChannelBackend {
+    InMemory(InMemoryBroadcastChannelState),
+    #[cfg(target_arch = "wasm32")]
+    Host(WasmBroadcastChannelState),
+}
+
+/// Explicit wrapper around a browser-native `BroadcastChannel`.
+///
+/// This is an explicit browser host messaging surface, not a worker-runtime
+/// abstraction and not a bridge-only adapter for unsupported runtimes.
+pub struct BrowserBroadcastChannel {
+    state: BrowserMessageState,
+    name: String,
+    terminal_error: Option<BrowserMessageError>,
+    backend: BrowserBroadcastChannelBackend,
+}
+
+impl fmt::Debug for BrowserBroadcastChannel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BrowserBroadcastChannel")
+            .field("state", &self.state)
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BrowserBroadcastChannel {
+    /// Opens a browser-native broadcast channel wrapper after explicit authority checks.
+    pub fn open(
+        cap: &dyn HostApiIoCap,
+        name: impl Into<String>,
+    ) -> Result<Self, BrowserMessageError> {
+        let name = name.into();
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            authorize_message_channel_surface(cap)?;
+            let backend = WasmBroadcastChannelState::open(&name)?;
+            return Ok(Self {
+                state: BrowserMessageState::Open,
+                name,
+                terminal_error: None,
+                backend: BrowserBroadcastChannelBackend::Host(backend),
+            });
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            authorize_degraded_message_channel_surface(cap)?;
+            Ok(Self {
+                state: BrowserMessageState::Open,
+                name: name.clone(),
+                terminal_error: None,
+                backend: BrowserBroadcastChannelBackend::InMemory(
+                    InMemoryBroadcastChannelState::open(name),
+                ),
+            })
+        }
+    }
+
+    /// Returns the current wrapper state.
+    #[must_use]
+    pub fn state(&self) -> BrowserMessageState {
+        self.state
+    }
+
+    /// Returns the logical broadcast-channel name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the terminal error, if the wrapper has entered `Errored`.
+    #[must_use]
+    pub fn error(&self) -> Option<&BrowserMessageError> {
+        self.terminal_error.as_ref()
+    }
+
+    /// Aborts the wrapped broadcast channel and records a stable terminal error.
+    pub fn abort(&mut self, reason: impl Into<String>) {
+        let error = BrowserMessageError::Aborted(reason.into());
+        self.fail(error);
+    }
+
+    /// Sends a payload to the wrapped broadcast channel.
+    pub fn send(&mut self, message: &BrowserMessagePayload) -> Result<(), BrowserMessageError> {
+        match self.state {
+            BrowserMessageState::Closed => return Err(BrowserMessageError::Closed),
+            BrowserMessageState::Errored => return Err(self.current_error()),
+            BrowserMessageState::Open => {}
+        }
+
+        let result = match &self.backend {
+            BrowserBroadcastChannelBackend::InMemory(state) => state.send(message),
+            #[cfg(target_arch = "wasm32")]
+            BrowserBroadcastChannelBackend::Host(state) => state.send(message),
+        };
+
+        if let Err(error) = &result {
+            match error {
+                BrowserMessageError::Closed => {
+                    self.close_backend();
+                    self.state = BrowserMessageState::Closed;
+                }
+                _ => self.fail(error.clone()),
+            }
+        }
+
+        result
+    }
+
+    /// Attempts to receive one queued broadcast payload without blocking.
+    pub fn try_recv(&mut self) -> Result<Option<BrowserMessagePayload>, BrowserMessageError> {
+        match self.state {
+            BrowserMessageState::Closed => return Err(BrowserMessageError::Closed),
+            BrowserMessageState::Errored => return Err(self.current_error()),
+            BrowserMessageState::Open => {}
+        }
+
+        let next = match &self.backend {
+            BrowserBroadcastChannelBackend::InMemory(state) => state.try_recv(),
+            #[cfg(target_arch = "wasm32")]
+            BrowserBroadcastChannelBackend::Host(state) => state.try_recv(),
+        };
+
+        match next {
+            Some(QueuedBrowserMessage::Payload(payload)) => Ok(Some(payload)),
+            Some(QueuedBrowserMessage::Error(error)) => {
+                self.fail(error.clone());
+                Err(error)
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Closes the wrapped broadcast channel.
+    pub fn close(&mut self) {
+        if self.state == BrowserMessageState::Closed {
+            return;
+        }
+        self.close_backend();
+        if self.state != BrowserMessageState::Errored {
+            self.state = BrowserMessageState::Closed;
+        }
+    }
+
+    fn fail(&mut self, error: BrowserMessageError) {
+        if self.state == BrowserMessageState::Errored {
+            return;
+        }
+        self.close_backend();
+        self.terminal_error = Some(error);
+        self.state = BrowserMessageState::Errored;
+    }
+
+    fn current_error(&self) -> BrowserMessageError {
+        self.terminal_error.clone().unwrap_or_else(|| {
+            BrowserMessageError::HostError("browser broadcast wrapper is errored".to_owned())
+        })
+    }
+
+    fn close_backend(&self) {
+        match &self.backend {
+            BrowserBroadcastChannelBackend::InMemory(state) => state.close(),
+            #[cfg(target_arch = "wasm32")]
+            BrowserBroadcastChannelBackend::Host(state) => state.close(),
+        }
+    }
+}
+
+impl Drop for BrowserBroadcastChannel {
+    fn drop(&mut self) {
+        if self.state != BrowserMessageState::Closed {
+            self.close_backend();
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn browser_message_host_error(err: &JsValue, op: &str) -> BrowserMessageError {
+    BrowserMessageError::HostError(js_host_io_error(err, op).to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn js_value_from_message_payload(message: &BrowserMessagePayload) -> JsValue {
+    match message {
+        BrowserMessagePayload::Text(text) => JsValue::from_str(text),
+        BrowserMessagePayload::Bytes(bytes) => Uint8Array::from(bytes.as_slice()).into(),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn decode_message_event(event: MessageEvent) -> Result<BrowserMessagePayload, BrowserMessageError> {
+    let data = event.data();
+    if let Some(text) = data.as_string() {
+        return Ok(BrowserMessagePayload::Text(text));
+    }
+    if data.is_instance_of::<Uint8Array>() || data.is_instance_of::<ArrayBuffer>() {
+        return Ok(BrowserMessagePayload::Bytes(
+            Uint8Array::new(&data).to_vec(),
+        ));
+    }
+    Err(BrowserMessageError::UnsupportedPayloadType)
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io::cap::HostApiAuthority;
     use std::io::Cursor;
 
     // A simple in-memory AsyncWrite for testing
@@ -1481,6 +2269,22 @@ mod tests {
         fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
             Poll::Ready(Ok(()))
         }
+    }
+
+    fn strict_message_host_cap() -> BrowserHostApiIoCap {
+        BrowserHostApiIoCap::new(
+            HostApiAuthority::deny_all().grant_surface(HostApiSurface::MessageChannel),
+            true,
+        )
+    }
+
+    fn degraded_message_host_cap() -> BrowserHostApiIoCap {
+        BrowserHostApiIoCap::new(
+            HostApiAuthority::deny_all()
+                .grant_surface(HostApiSurface::MessageChannel)
+                .with_degraded_mode_allowed(),
+            true,
+        )
     }
 
     // -- BrowserStreamState --
@@ -1987,6 +2791,99 @@ mod tests {
                 .streams_closed
                 .load(std::sync::atomic::Ordering::Relaxed),
             0
+        );
+    }
+
+    // -- Browser-native messaging wrappers --
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_message_channel_wrapper_requires_degraded_mode_grant() {
+        let error = strict_message_host_cap()
+            .open_message_channel()
+            .expect_err("native fallback should require degraded-mode authority");
+        assert_eq!(
+            error,
+            BrowserMessageError::Policy(HostApiPolicyError::DegradedModeDenied(
+                HostApiSurface::MessageChannel
+            ))
+        );
+    }
+
+    #[test]
+    fn message_channel_wrapper_transfers_payloads_and_close_rejects_operations() {
+        let channel = degraded_message_host_cap()
+            .open_message_channel()
+            .expect("message channel wrapper should open");
+        let (mut left, mut right) = channel.split();
+
+        left.send(&BrowserMessagePayload::Text("hello".to_owned()))
+            .expect("send should succeed");
+        assert_eq!(
+            right.try_recv().expect("receive should succeed"),
+            Some(BrowserMessagePayload::Text("hello".to_owned()))
+        );
+
+        right.close();
+        assert_eq!(right.state(), BrowserMessageState::Closed);
+        assert_eq!(
+            left.send(&BrowserMessagePayload::Bytes(vec![1, 2, 3])),
+            Err(BrowserMessageError::Closed)
+        );
+    }
+
+    #[test]
+    fn message_port_abort_marks_errored_and_rejects_subsequent_operations() {
+        let channel = degraded_message_host_cap()
+            .open_message_channel()
+            .expect("message channel wrapper should open");
+        let (mut left, mut right) = channel.split();
+
+        left.abort("route change");
+        assert_eq!(left.state(), BrowserMessageState::Errored);
+        assert_eq!(
+            left.error(),
+            Some(&BrowserMessageError::Aborted("route change".to_owned()))
+        );
+        assert_eq!(
+            left.send(&BrowserMessagePayload::Text("late".to_owned())),
+            Err(BrowserMessageError::Aborted("route change".to_owned()))
+        );
+        assert_eq!(
+            left.try_recv(),
+            Err(BrowserMessageError::Aborted("route change".to_owned()))
+        );
+        assert_eq!(
+            right.send(&BrowserMessagePayload::Text("peer".to_owned())),
+            Err(BrowserMessageError::Closed)
+        );
+    }
+
+    #[test]
+    fn broadcast_channel_wrapper_delivers_payloads_and_abort_is_sticky() {
+        let cap = degraded_message_host_cap();
+        let mut sender = cap
+            .open_broadcast_channel("browser-stream-tests")
+            .expect("broadcast channel wrapper should open");
+        let mut receiver = cap
+            .open_broadcast_channel("browser-stream-tests")
+            .expect("broadcast channel wrapper should open");
+
+        sender
+            .send(&BrowserMessagePayload::Bytes(vec![9, 8, 7]))
+            .expect("broadcast send should succeed");
+        assert_eq!(
+            receiver
+                .try_recv()
+                .expect("broadcast receive should succeed"),
+            Some(BrowserMessagePayload::Bytes(vec![9, 8, 7]))
+        );
+
+        sender.abort("page hidden");
+        assert_eq!(sender.state(), BrowserMessageState::Errored);
+        assert_eq!(
+            sender.send(&BrowserMessagePayload::Text("late".to_owned())),
+            Err(BrowserMessageError::Aborted("page hidden".to_owned()))
         );
     }
 

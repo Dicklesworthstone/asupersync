@@ -11,10 +11,21 @@ use crate::io::cap::{
 };
 #[cfg(target_arch = "wasm32")]
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+#[cfg(target_arch = "wasm32")]
+use js_sys::{Array, Promise, Uint8Array};
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 #[cfg(target_arch = "wasm32")]
-use web_sys::Storage;
+use wasm_bindgen::{JsCast, JsValue, closure::Closure};
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_futures::JsFuture;
+#[cfg(target_arch = "wasm32")]
+use web_sys::{
+    Event, IdbDatabase, IdbFactory, IdbObjectStore, IdbOpenDbRequest, IdbRequest, IdbTransaction,
+    IdbTransactionMode, Storage, WorkerGlobalScope,
+};
 
 /// Error returned by browser storage operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,6 +149,44 @@ pub trait StorageHostBackend: std::fmt::Debug + Send + Sync {
     fn clear_namespace(&self, namespace: &str) -> Result<usize, String>;
 }
 
+/// Boxed future type for async browser host backends on wasm targets.
+#[cfg(target_arch = "wasm32")]
+pub type StorageHostFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + 'a>>;
+
+/// Boxed future type for async browser host backends on native targets.
+///
+/// Native clippy lanes require these adapter futures to remain `Send` so the
+/// storage seam stays compatible with multithreaded executors used by tests and
+/// host-only validation.
+#[cfg(not(target_arch = "wasm32"))]
+pub type StorageHostFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
+
+/// Async host-backed browser storage implementation contract.
+///
+/// This is required for browser-native backends such as IndexedDB whose host
+/// APIs are inherently asynchronous.
+pub trait AsyncStorageHostBackend: std::fmt::Debug + Send + Sync {
+    /// Writes a value for the given namespace/key.
+    fn set<'a>(
+        &'a self,
+        namespace: &'a str,
+        key: &'a str,
+        value: &'a [u8],
+    ) -> StorageHostFuture<'a, ()>;
+    /// Reads a value for the given namespace/key.
+    fn get<'a>(
+        &'a self,
+        namespace: &'a str,
+        key: &'a str,
+    ) -> StorageHostFuture<'a, Option<Vec<u8>>>;
+    /// Deletes a key and returns whether a value existed.
+    fn delete<'a>(&'a self, namespace: &'a str, key: &'a str) -> StorageHostFuture<'a, bool>;
+    /// Lists keys in a namespace.
+    fn list_keys<'a>(&'a self, namespace: &'a str) -> StorageHostFuture<'a, Vec<String>>;
+    /// Clears a namespace and returns removed entry count.
+    fn clear_namespace<'a>(&'a self, namespace: &'a str) -> StorageHostFuture<'a, usize>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct StorageKey {
     backend: StorageBackend,
@@ -158,6 +207,7 @@ pub struct BrowserStorageAdapter {
     entries: BTreeMap<StorageKey, Vec<u8>>,
     list_snapshot: BTreeMap<StorageNamespaceKey, Vec<String>>,
     host_backends: BTreeMap<StorageBackend, Arc<dyn StorageHostBackend>>,
+    async_host_backends: BTreeMap<StorageBackend, Arc<dyn AsyncStorageHostBackend>>,
     unavailable_backends: BTreeMap<StorageBackend, bool>,
     used_bytes: usize,
     events: Vec<StorageEvent>,
@@ -172,6 +222,7 @@ impl BrowserStorageAdapter {
             entries: BTreeMap::new(),
             list_snapshot: BTreeMap::new(),
             host_backends: BTreeMap::new(),
+            async_host_backends: BTreeMap::new(),
             unavailable_backends: BTreeMap::new(),
             used_bytes: 0,
             events: Vec::new(),
@@ -214,6 +265,15 @@ impl BrowserStorageAdapter {
         self.host_backends.insert(backend, host_backend);
     }
 
+    /// Registers an async host-backed implementation for a specific storage backend.
+    pub fn register_async_host_backend(
+        &mut self,
+        backend: StorageBackend,
+        host_backend: Arc<dyn AsyncStorageHostBackend>,
+    ) {
+        self.async_host_backends.insert(backend, host_backend);
+    }
+
     /// Registers the default wasm `localStorage` host backend.
     #[cfg(target_arch = "wasm32")]
     pub fn register_wasm_local_storage_backend(&mut self) {
@@ -221,6 +281,12 @@ impl BrowserStorageAdapter {
             StorageBackend::LocalStorage,
             Arc::new(LocalStorageHostBackend),
         );
+    }
+
+    /// Registers the default wasm `IndexedDB` host backend.
+    #[cfg(target_arch = "wasm32")]
+    pub fn register_wasm_indexed_db_backend(&mut self) {
+        self.register_async_host_backend(StorageBackend::IndexedDb, Arc::new(IndexedDbHostBackend));
     }
 
     /// Removes any registered host-backed implementation for `backend`.
@@ -231,10 +297,24 @@ impl BrowserStorageAdapter {
         self.host_backends.remove(&backend)
     }
 
+    /// Removes any registered async host-backed implementation for `backend`.
+    pub fn unregister_async_host_backend(
+        &mut self,
+        backend: StorageBackend,
+    ) -> Option<Arc<dyn AsyncStorageHostBackend>> {
+        self.async_host_backends.remove(&backend)
+    }
+
     /// Returns whether a host-backed implementation is registered for `backend`.
     #[must_use]
     pub fn has_host_backend(&self, backend: StorageBackend) -> bool {
         self.host_backends.contains_key(&backend)
+    }
+
+    /// Returns whether an async host-backed implementation is registered for `backend`.
+    #[must_use]
+    pub fn has_async_host_backend(&self, backend: StorageBackend) -> bool {
+        self.async_host_backends.contains_key(&backend)
     }
 
     /// Configures deterministic availability for a backend.
@@ -280,6 +360,9 @@ impl BrowserStorageAdapter {
         let key = key.into();
         let request = StorageRequest::set(backend, namespace.clone(), key.clone(), value.len());
         self.authorize_and_record(&request)?;
+        if self.async_host_backend(backend).is_some() {
+            return self.sync_backend_requires_async(&request);
+        }
 
         let quota = self.cap.quota_policy();
         let storage_key = StorageKey {
@@ -341,6 +424,9 @@ impl BrowserStorageAdapter {
         let key = key.into();
         let request = StorageRequest::get(backend, namespace.clone(), key.clone());
         self.authorize_and_record(&request)?;
+        if self.async_host_backend(backend).is_some() {
+            return self.sync_backend_requires_async(&request);
+        }
 
         let storage_key = StorageKey {
             backend,
@@ -370,6 +456,9 @@ impl BrowserStorageAdapter {
         let key = key.into();
         let request = StorageRequest::delete(backend, namespace.clone(), key.clone());
         self.authorize_and_record(&request)?;
+        if self.async_host_backend(backend).is_some() {
+            return self.sync_backend_requires_async(&request);
+        }
 
         let storage_key = StorageKey {
             backend,
@@ -406,6 +495,9 @@ impl BrowserStorageAdapter {
         let namespace = namespace.into();
         let request = StorageRequest::list_keys(backend, namespace.clone());
         self.authorize_and_record(&request)?;
+        if self.async_host_backend(backend).is_some() {
+            return self.sync_backend_requires_async(&request);
+        }
 
         if let Some(host_backend) = self.host_backend(backend) {
             if self.cap.consistency_policy() == StorageConsistencyPolicy::ImmediateReadAfterWrite {
@@ -456,6 +548,9 @@ impl BrowserStorageAdapter {
         let namespace = namespace.into();
         let request = StorageRequest::clear_namespace(backend, namespace.clone());
         self.authorize_and_record(&request)?;
+        if self.async_host_backend(backend).is_some() {
+            return self.sync_backend_requires_async(&request);
+        }
 
         if let Some(host_backend) = self.host_backend(backend) {
             let removed_count = match host_backend.clear_namespace(&namespace) {
@@ -484,6 +579,162 @@ impl BrowserStorageAdapter {
             }
         }
 
+        Ok(removed_count)
+    }
+
+    /// Stores a value under `(backend, namespace, key)` using async host backends when needed.
+    #[allow(clippy::future_not_send)]
+    pub async fn set_async(
+        &mut self,
+        backend: StorageBackend,
+        namespace: impl Into<String>,
+        key: impl Into<String>,
+        value: Vec<u8>,
+    ) -> Result<(), BrowserStorageError> {
+        let namespace = namespace.into();
+        let key = key.into();
+        let request = StorageRequest::set(backend, namespace.clone(), key.clone(), value.len());
+        self.authorize_and_record(&request)?;
+
+        let Some(host_backend) = self.async_host_backend(backend) else {
+            return self.set(backend, namespace, key, value);
+        };
+
+        let storage_key = StorageKey {
+            backend,
+            namespace: namespace.clone(),
+            key: key.clone(),
+        };
+        let projected_bytes = self.project_set_quota(&request, &storage_key, value.len())?;
+        if let Err(message) = host_backend.set(&namespace, &key, &value).await {
+            return self.host_backend_error(&request, message);
+        }
+        self.used_bytes = projected_bytes;
+        self.entries.insert(storage_key, value);
+        Ok(())
+    }
+
+    /// Reads a value by `(backend, namespace, key)` using async host backends when needed.
+    #[allow(clippy::future_not_send)]
+    pub async fn get_async(
+        &mut self,
+        backend: StorageBackend,
+        namespace: impl Into<String>,
+        key: impl Into<String>,
+    ) -> Result<Option<Vec<u8>>, BrowserStorageError> {
+        let namespace = namespace.into();
+        let key = key.into();
+        let request = StorageRequest::get(backend, namespace.clone(), key.clone());
+        self.authorize_and_record(&request)?;
+
+        let Some(host_backend) = self.async_host_backend(backend) else {
+            return self.get(backend, namespace, key);
+        };
+
+        let storage_key = StorageKey {
+            backend,
+            namespace,
+            key,
+        };
+        let value = match host_backend
+            .get(&storage_key.namespace, &storage_key.key)
+            .await
+        {
+            Ok(value) => value,
+            Err(message) => return self.host_backend_error(&request, message),
+        };
+        self.sync_entry_cache(&storage_key, value.as_ref());
+        Ok(value)
+    }
+
+    /// Deletes a single key using async host backends when needed.
+    #[allow(clippy::future_not_send)]
+    pub async fn delete_async(
+        &mut self,
+        backend: StorageBackend,
+        namespace: impl Into<String>,
+        key: impl Into<String>,
+    ) -> Result<bool, BrowserStorageError> {
+        let namespace = namespace.into();
+        let key = key.into();
+        let request = StorageRequest::delete(backend, namespace.clone(), key.clone());
+        self.authorize_and_record(&request)?;
+
+        let Some(host_backend) = self.async_host_backend(backend) else {
+            return self.delete(backend, namespace, key);
+        };
+
+        let storage_key = StorageKey {
+            backend,
+            namespace: namespace.clone(),
+            key: key.clone(),
+        };
+        let deleted = match host_backend.delete(&namespace, &key).await {
+            Ok(deleted) => deleted,
+            Err(message) => return self.host_backend_error(&request, message),
+        };
+        self.remove_cached_entry(&storage_key);
+        Ok(deleted)
+    }
+
+    /// Lists keys in deterministic sorted order for a namespace using async host backends when needed.
+    #[allow(clippy::future_not_send)]
+    pub async fn list_keys_async(
+        &mut self,
+        backend: StorageBackend,
+        namespace: impl Into<String>,
+    ) -> Result<Vec<String>, BrowserStorageError> {
+        let namespace = namespace.into();
+        let request = StorageRequest::list_keys(backend, namespace.clone());
+        self.authorize_and_record(&request)?;
+
+        let Some(host_backend) = self.async_host_backend(backend) else {
+            return self.list_keys(backend, namespace);
+        };
+
+        if self.cap.consistency_policy() == StorageConsistencyPolicy::ImmediateReadAfterWrite {
+            return self
+                .async_host_backend_list_keys(&request, &*host_backend, &namespace)
+                .await;
+        }
+
+        let namespace_key = StorageNamespaceKey {
+            backend,
+            namespace: namespace.clone(),
+        };
+        let visible = self
+            .list_snapshot
+            .get(&namespace_key)
+            .cloned()
+            .unwrap_or_default();
+
+        let next = self
+            .async_host_backend_list_keys(&request, &*host_backend, &namespace)
+            .await?;
+        self.list_snapshot.insert(namespace_key, next);
+        Ok(visible)
+    }
+
+    /// Clears all keys in a namespace using async host backends when needed.
+    #[allow(clippy::future_not_send)]
+    pub async fn clear_namespace_async(
+        &mut self,
+        backend: StorageBackend,
+        namespace: impl Into<String>,
+    ) -> Result<usize, BrowserStorageError> {
+        let namespace = namespace.into();
+        let request = StorageRequest::clear_namespace(backend, namespace.clone());
+        self.authorize_and_record(&request)?;
+
+        let Some(host_backend) = self.async_host_backend(backend) else {
+            return self.clear_namespace(backend, namespace);
+        };
+
+        let removed_count = match host_backend.clear_namespace(&namespace).await {
+            Ok(removed_count) => removed_count,
+            Err(message) => return self.host_backend_error(&request, message),
+        };
+        self.remove_cached_namespace(backend, &namespace);
         Ok(removed_count)
     }
 
@@ -553,6 +804,23 @@ impl BrowserStorageAdapter {
         self.host_backends.get(&backend).cloned()
     }
 
+    fn async_host_backend(
+        &self,
+        backend: StorageBackend,
+    ) -> Option<Arc<dyn AsyncStorageHostBackend>> {
+        self.async_host_backends.get(&backend).cloned()
+    }
+
+    fn sync_backend_requires_async<T>(
+        &mut self,
+        request: &StorageRequest,
+    ) -> Result<T, BrowserStorageError> {
+        self.host_backend_error(
+            request,
+            "backend requires async browser storage adapter methods".to_owned(),
+        )
+    }
+
     fn host_backend_list_keys(
         &mut self,
         request: &StorageRequest,
@@ -566,6 +834,63 @@ impl BrowserStorageAdapter {
         keys.sort();
         keys.dedup();
         Ok(keys)
+    }
+
+    #[allow(clippy::future_not_send)]
+    async fn async_host_backend_list_keys(
+        &mut self,
+        request: &StorageRequest,
+        backend: &dyn AsyncStorageHostBackend,
+        namespace: &str,
+    ) -> Result<Vec<String>, BrowserStorageError> {
+        let mut keys = match backend.list_keys(namespace).await {
+            Ok(keys) => keys,
+            Err(message) => return self.host_backend_error(request, message),
+        };
+        keys.sort();
+        keys.dedup();
+        Ok(keys)
+    }
+
+    fn project_set_quota(
+        &mut self,
+        request: &StorageRequest,
+        storage_key: &StorageKey,
+        value_len: usize,
+    ) -> Result<usize, BrowserStorageError> {
+        let quota = self.cap.quota_policy();
+        let new_entry_size = entry_size(&storage_key.namespace, &storage_key.key, value_len);
+        let old_entry_size = self.entries.get(storage_key).map_or(0, |old| {
+            entry_size(&storage_key.namespace, &storage_key.key, old.len())
+        });
+
+        let projected_entries = if self.entries.contains_key(storage_key) {
+            self.entries.len()
+        } else {
+            self.entries.len() + 1
+        };
+        if projected_entries > quota.max_entries {
+            return self.policy_error(
+                request,
+                StoragePolicyError::EntryCountExceeded {
+                    projected: projected_entries,
+                    limit: quota.max_entries,
+                },
+            );
+        }
+
+        let projected_bytes = self.used_bytes - old_entry_size + new_entry_size;
+        if projected_bytes > quota.max_total_bytes {
+            return self.policy_error(
+                request,
+                StoragePolicyError::QuotaExceeded {
+                    projected_bytes,
+                    limit_bytes: quota.max_total_bytes,
+                },
+            );
+        }
+
+        Ok(projected_bytes)
     }
 
     fn sync_entry_cache(&mut self, storage_key: &StorageKey, value: Option<&Vec<u8>>) {
@@ -795,6 +1120,363 @@ impl StorageHostBackend for LocalStorageHostBackend {
     }
 }
 
+/// WASM host backend that persists values in browser `IndexedDB`.
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Default)]
+pub struct IndexedDbHostBackend;
+
+#[cfg(target_arch = "wasm32")]
+impl IndexedDbHostBackend {
+    const DB_NAME: &'static str = "asupersync_storage_v1";
+    const STORE_NAME: &'static str = "entries";
+    const KEY_PREFIX: &'static str = "asupersync:indexeddb:v1:";
+    const DB_VERSION: u32 = 1;
+
+    fn key_prefix(namespace: &str) -> String {
+        let encoded_namespace = URL_SAFE_NO_PAD.encode(namespace.as_bytes());
+        format!("{}{encoded_namespace}:", Self::KEY_PREFIX)
+    }
+
+    fn encode_storage_key(namespace: &str, key: &str) -> String {
+        let mut prefixed = Self::key_prefix(namespace);
+        prefixed.push_str(&URL_SAFE_NO_PAD.encode(key.as_bytes()));
+        prefixed
+    }
+
+    fn decode_storage_key(full_key: &str, namespace: &str) -> Option<String> {
+        let prefix = Self::key_prefix(namespace);
+        full_key.strip_prefix(&prefix).and_then(|encoded| {
+            URL_SAFE_NO_PAD
+                .decode(encoded)
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+        })
+    }
+
+    fn factory() -> Result<IdbFactory, String> {
+        if let Some(window) = web_sys::window() {
+            return window
+                .indexed_db()
+                .map_err(|error| format!("failed to access IndexedDB from Window: {error:?}"))?
+                .ok_or_else(|| "IndexedDB is unavailable on Window".to_owned());
+        }
+
+        if let Ok(worker) = js_sys::global().dyn_into::<WorkerGlobalScope>() {
+            return worker
+                .indexed_db()
+                .map_err(|error| {
+                    format!("failed to access IndexedDB from WorkerGlobalScope: {error:?}")
+                })?
+                .ok_or_else(|| "IndexedDB is unavailable in WorkerGlobalScope".to_owned());
+        }
+
+        Err("window or WorkerGlobalScope IndexedDB host is unavailable".to_owned())
+    }
+
+    async fn database(&self) -> Result<IdbDatabase, String> {
+        let request = Self::factory()?
+            .open_with_u32(Self::DB_NAME, Self::DB_VERSION)
+            .map_err(|error| format!("failed to open IndexedDB database: {error:?}"))?;
+
+        let upgrade_request = request.clone();
+        let on_upgrade = Closure::once_into_js(move |_event: Event| {
+            if let Ok(result) = upgrade_request.result() {
+                if let Ok(db) = result.dyn_into::<IdbDatabase>() {
+                    let _ = db.create_object_store(IndexedDbHostBackend::STORE_NAME);
+                }
+            }
+        });
+        request.set_onupgradeneeded(Some(on_upgrade.unchecked_ref()));
+
+        let value = await_open_request(&request).await?;
+        value
+            .dyn_into::<IdbDatabase>()
+            .map_err(|value| format!("IndexedDB open did not return a database: {value:?}"))
+    }
+
+    async fn store(
+        &self,
+        mode: IdbTransactionMode,
+    ) -> Result<(IdbDatabase, IdbTransaction, IdbObjectStore), String> {
+        let database = self.database().await?;
+        let transaction = database
+            .transaction_with_str_and_mode(Self::STORE_NAME, mode)
+            .map_err(|error| format!("failed to open IndexedDB transaction: {error:?}"))?;
+        let store = transaction
+            .object_store(Self::STORE_NAME)
+            .map_err(|error| format!("failed to open IndexedDB object store: {error:?}"))?;
+        Ok((database, transaction, store))
+    }
+
+    fn decode_binary_value(value: JsValue) -> Result<Option<Vec<u8>>, String> {
+        if value.is_undefined() || value.is_null() {
+            return Ok(None);
+        }
+        if value.is_instance_of::<Uint8Array>() || value.is_instance_of::<js_sys::ArrayBuffer>() {
+            return Ok(Some(Uint8Array::new(&value).to_vec()));
+        }
+        Err(format!(
+            "IndexedDB returned a non-binary payload for browser storage: {value:?}"
+        ))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl AsyncStorageHostBackend for IndexedDbHostBackend {
+    fn set<'a>(
+        &'a self,
+        namespace: &'a str,
+        key: &'a str,
+        value: &'a [u8],
+    ) -> StorageHostFuture<'a, ()> {
+        Box::pin(async move {
+            let (_database, transaction, store) = self.store(IdbTransactionMode::Readwrite).await?;
+            let storage_key = Self::encode_storage_key(namespace, key);
+            let payload = Uint8Array::from(value);
+            let request = store
+                .put_with_key(&payload.into(), &JsValue::from_str(&storage_key))
+                .map_err(|error| format!("IndexedDB put failed to start: {error:?}"))?;
+            let _ = await_request(&request).await?;
+            await_transaction(&transaction).await
+        })
+    }
+
+    fn get<'a>(
+        &'a self,
+        namespace: &'a str,
+        key: &'a str,
+    ) -> StorageHostFuture<'a, Option<Vec<u8>>> {
+        Box::pin(async move {
+            let (_database, _transaction, store) = self.store(IdbTransactionMode::Readonly).await?;
+            let storage_key = Self::encode_storage_key(namespace, key);
+            let request = store
+                .get(&JsValue::from_str(&storage_key))
+                .map_err(|error| format!("IndexedDB get failed to start: {error:?}"))?;
+            let value = await_request(&request).await?;
+            Self::decode_binary_value(value)
+        })
+    }
+
+    fn delete<'a>(&'a self, namespace: &'a str, key: &'a str) -> StorageHostFuture<'a, bool> {
+        Box::pin(async move {
+            let (_database, transaction, store) = self.store(IdbTransactionMode::Readwrite).await?;
+            let storage_key = Self::encode_storage_key(namespace, key);
+            let existing_request = store
+                .get(&JsValue::from_str(&storage_key))
+                .map_err(|error| format!("IndexedDB existence check failed to start: {error:?}"))?;
+            let existed = !await_request(&existing_request).await?.is_undefined();
+            let delete_request = store
+                .delete(&JsValue::from_str(&storage_key))
+                .map_err(|error| format!("IndexedDB delete failed to start: {error:?}"))?;
+            let _ = await_request(&delete_request).await?;
+            await_transaction(&transaction).await?;
+            Ok(existed)
+        })
+    }
+
+    fn list_keys<'a>(&'a self, namespace: &'a str) -> StorageHostFuture<'a, Vec<String>> {
+        Box::pin(async move {
+            let (_database, _transaction, store) = self.store(IdbTransactionMode::Readonly).await?;
+            let request = store
+                .get_all_keys()
+                .map_err(|error| format!("IndexedDB get_all_keys failed to start: {error:?}"))?;
+            let result = await_request(&request).await?;
+            let mut keys = Vec::new();
+            for value in Array::from(&result).iter() {
+                if let Some(full_key) = value.as_string() {
+                    if let Some(decoded) = Self::decode_storage_key(&full_key, namespace) {
+                        keys.push(decoded);
+                    }
+                }
+            }
+            keys.sort();
+            keys.dedup();
+            Ok(keys)
+        })
+    }
+
+    fn clear_namespace<'a>(&'a self, namespace: &'a str) -> StorageHostFuture<'a, usize> {
+        Box::pin(async move {
+            let keys = self.list_keys(namespace).await?;
+            if keys.is_empty() {
+                return Ok(0);
+            }
+            let (_database, transaction, store) = self.store(IdbTransactionMode::Readwrite).await?;
+            for key in &keys {
+                let storage_key = Self::encode_storage_key(namespace, key);
+                let request = store
+                    .delete(&JsValue::from_str(&storage_key))
+                    .map_err(|error| {
+                        format!(
+                            "IndexedDB delete failed to start during clear_namespace: {error:?}"
+                        )
+                    })?;
+                let _ = await_request(&request).await?;
+            }
+            await_transaction(&transaction).await?;
+            Ok(keys.len())
+        })
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn clear_idb_request_handlers(request: &IdbRequest) {
+    request.set_onsuccess(None);
+    request.set_onerror(None);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn clear_idb_open_request_handlers(request: &IdbOpenDbRequest) {
+    request.set_onsuccess(None);
+    request.set_onerror(None);
+    request.set_onblocked(None);
+    request.set_onupgradeneeded(None);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn clear_idb_transaction_handlers(transaction: &IdbTransaction) {
+    transaction.set_oncomplete(None);
+    transaction.set_onerror(None);
+    transaction.set_onabort(None);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn indexed_db_error_message(value: &JsValue) -> String {
+    value.as_string().unwrap_or_else(|| format!("{value:?}"))
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn await_request(request: &IdbRequest) -> Result<JsValue, String> {
+    let request = request.clone();
+    let promise = Promise::new(&mut move |resolve, reject| {
+        let success_request = request.clone();
+        let success_cleanup = request.clone();
+        let resolve_success = resolve.clone();
+        let reject_success = reject.clone();
+        let on_success = Closure::once_into_js(move |_event: Event| {
+            clear_idb_request_handlers(&success_cleanup);
+            match success_request.result() {
+                Ok(value) => {
+                    let _ = resolve_success.call1(&JsValue::UNDEFINED, &value);
+                }
+                Err(error) => {
+                    let _ = reject_success.call1(&JsValue::UNDEFINED, &error);
+                }
+            }
+        });
+        request.set_onsuccess(Some(on_success.unchecked_ref()));
+
+        let error_request = request.clone();
+        let error_cleanup = request.clone();
+        let reject_error = reject.clone();
+        let on_error = Closure::once_into_js(move |_event: Event| {
+            clear_idb_request_handlers(&error_cleanup);
+            let error = error_request
+                .error()
+                .map(JsValue::from)
+                .unwrap_or_else(|_| JsValue::from_str("IndexedDB request failed"));
+            let _ = reject_error.call1(&JsValue::UNDEFINED, &error);
+        });
+        request.set_onerror(Some(on_error.unchecked_ref()));
+    });
+
+    JsFuture::from(promise)
+        .await
+        .map_err(|error| indexed_db_error_message(&error))
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn await_open_request(request: &IdbOpenDbRequest) -> Result<JsValue, String> {
+    let request = request.clone();
+    let promise = Promise::new(&mut move |resolve, reject| {
+        let success_request = request.clone();
+        let success_cleanup = request.clone();
+        let resolve_success = resolve.clone();
+        let reject_success = reject.clone();
+        let on_success = Closure::once_into_js(move |_event: Event| {
+            clear_idb_open_request_handlers(&success_cleanup);
+            match success_request.result() {
+                Ok(value) => {
+                    let _ = resolve_success.call1(&JsValue::UNDEFINED, &value);
+                }
+                Err(error) => {
+                    let _ = reject_success.call1(&JsValue::UNDEFINED, &error);
+                }
+            }
+        });
+        request.set_onsuccess(Some(on_success.unchecked_ref()));
+
+        let error_request = request.clone();
+        let error_cleanup = request.clone();
+        let reject_error = reject.clone();
+        let on_error = Closure::once_into_js(move |_event: Event| {
+            clear_idb_open_request_handlers(&error_cleanup);
+            let error = error_request
+                .error()
+                .map(JsValue::from)
+                .unwrap_or_else(|_| JsValue::from_str("IndexedDB open failed"));
+            let _ = reject_error.call1(&JsValue::UNDEFINED, &error);
+        });
+        request.set_onerror(Some(on_error.unchecked_ref()));
+
+        let blocked_cleanup = request.clone();
+        let reject_blocked = reject.clone();
+        let on_blocked = Closure::once_into_js(move |_event: Event| {
+            clear_idb_open_request_handlers(&blocked_cleanup);
+            let _ = reject_blocked.call1(
+                &JsValue::UNDEFINED,
+                &JsValue::from_str("IndexedDB open blocked by another connection"),
+            );
+        });
+        request.set_onblocked(Some(on_blocked.unchecked_ref()));
+    });
+
+    JsFuture::from(promise)
+        .await
+        .map_err(|error| indexed_db_error_message(&error))
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn await_transaction(transaction: &IdbTransaction) -> Result<(), String> {
+    let transaction = transaction.clone();
+    let promise = Promise::new(&mut move |resolve, reject| {
+        let complete_cleanup = transaction.clone();
+        let resolve_complete = resolve.clone();
+        let on_complete = Closure::once_into_js(move |_event: Event| {
+            clear_idb_transaction_handlers(&complete_cleanup);
+            let _ = resolve_complete.call0(&JsValue::UNDEFINED);
+        });
+        transaction.set_oncomplete(Some(on_complete.unchecked_ref()));
+
+        let error_cleanup = transaction.clone();
+        let reject_error = reject.clone();
+        let on_error = Closure::once_into_js(move |_event: Event| {
+            clear_idb_transaction_handlers(&error_cleanup);
+            let _ = reject_error.call1(
+                &JsValue::UNDEFINED,
+                &JsValue::from_str("IndexedDB transaction failed"),
+            );
+        });
+        transaction.set_onerror(Some(on_error.unchecked_ref()));
+
+        let abort_cleanup = transaction.clone();
+        let reject_abort = reject.clone();
+        let on_abort = Closure::once_into_js(move |_event: Event| {
+            clear_idb_transaction_handlers(&abort_cleanup);
+            let _ = reject_abort.call1(
+                &JsValue::UNDEFINED,
+                &JsValue::from_str("IndexedDB transaction aborted"),
+            );
+        });
+        transaction.set_onabort(Some(on_abort.unchecked_ref()));
+    });
+
+    JsFuture::from(promise)
+        .await
+        .map(|_| ())
+        .map_err(|error| indexed_db_error_message(&error))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -879,6 +1561,81 @@ mod tests {
 
         fn clear_namespace(&self, _namespace: &str) -> Result<usize, String> {
             Err("simulated host backend clear failure".to_owned())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct MockAsyncHostBackend {
+        entries: Mutex<BTreeMap<(String, String), Vec<u8>>>,
+    }
+
+    impl AsyncStorageHostBackend for MockAsyncHostBackend {
+        fn set<'a>(
+            &'a self,
+            namespace: &'a str,
+            key: &'a str,
+            value: &'a [u8],
+        ) -> StorageHostFuture<'a, ()> {
+            Box::pin(async move {
+                self.entries
+                    .lock()
+                    .expect("async host backend lock poisoned")
+                    .insert((namespace.to_owned(), key.to_owned()), value.to_vec());
+                Ok(())
+            })
+        }
+
+        fn get<'a>(
+            &'a self,
+            namespace: &'a str,
+            key: &'a str,
+        ) -> StorageHostFuture<'a, Option<Vec<u8>>> {
+            Box::pin(async move {
+                Ok(self
+                    .entries
+                    .lock()
+                    .expect("async host backend lock poisoned")
+                    .get(&(namespace.to_owned(), key.to_owned()))
+                    .cloned())
+            })
+        }
+
+        fn delete<'a>(&'a self, namespace: &'a str, key: &'a str) -> StorageHostFuture<'a, bool> {
+            Box::pin(async move {
+                Ok(self
+                    .entries
+                    .lock()
+                    .expect("async host backend lock poisoned")
+                    .remove(&(namespace.to_owned(), key.to_owned()))
+                    .is_some())
+            })
+        }
+
+        fn list_keys<'a>(&'a self, namespace: &'a str) -> StorageHostFuture<'a, Vec<String>> {
+            Box::pin(async move {
+                let mut keys: Vec<String> = self
+                    .entries
+                    .lock()
+                    .expect("async host backend lock poisoned")
+                    .keys()
+                    .filter(|(candidate_namespace, _)| candidate_namespace == namespace)
+                    .map(|(_, key)| key.clone())
+                    .collect();
+                keys.sort();
+                Ok(keys)
+            })
+        }
+
+        fn clear_namespace<'a>(&'a self, namespace: &'a str) -> StorageHostFuture<'a, usize> {
+            Box::pin(async move {
+                let mut entries = self
+                    .entries
+                    .lock()
+                    .expect("async host backend lock poisoned");
+                let initial_len = entries.len();
+                entries.retain(|(candidate_namespace, _), _| candidate_namespace != namespace);
+                Ok(initial_len.saturating_sub(entries.len()))
+            })
         }
     }
 
@@ -1270,5 +2027,152 @@ mod tests {
         let event = adapter.events().last().expect("event should exist");
         assert_eq!(event.outcome, StorageEventOutcome::Denied);
         assert_eq!(event.reason_code, StorageEventReasonCode::HostBackendError);
+    }
+
+    #[test]
+    fn sync_methods_fail_closed_for_async_only_backends() {
+        let mut adapter = BrowserStorageAdapter::new(storage_cap_with_defaults());
+        adapter.register_async_host_backend(
+            StorageBackend::IndexedDb,
+            Arc::new(MockAsyncHostBackend::default()),
+        );
+
+        let result = adapter.set(
+            StorageBackend::IndexedDb,
+            "cache:user:42",
+            "profile",
+            b"v1".to_vec(),
+        );
+        assert!(matches!(
+            result,
+            Err(BrowserStorageError::HostBackend {
+                backend: StorageBackend::IndexedDb,
+                operation: StorageOperation::Set,
+                message,
+            }) if message.contains("requires async browser storage adapter methods")
+        ));
+        assert_eq!(adapter.entry_count(), 0);
+    }
+
+    #[test]
+    fn async_host_backend_round_trip_is_deterministic() {
+        let async_backend = Arc::new(MockAsyncHostBackend::default());
+        let mut adapter = BrowserStorageAdapter::new(storage_cap_with_defaults());
+        adapter.register_async_host_backend(StorageBackend::IndexedDb, async_backend.clone());
+
+        futures_lite::future::block_on(async {
+            adapter
+                .set_async(
+                    StorageBackend::IndexedDb,
+                    "cache:user:11",
+                    "profile",
+                    b"v1".to_vec(),
+                )
+                .await
+                .expect("async set should succeed");
+
+            assert_eq!(
+                async_backend
+                    .get("cache:user:11", "profile")
+                    .await
+                    .expect("async host get should succeed"),
+                Some(b"v1".to_vec())
+            );
+            assert_eq!(
+                adapter
+                    .get_async(StorageBackend::IndexedDb, "cache:user:11", "profile")
+                    .await
+                    .expect("async get should succeed"),
+                Some(b"v1".to_vec())
+            );
+            assert_eq!(
+                adapter
+                    .list_keys_async(StorageBackend::IndexedDb, "cache:user:11")
+                    .await
+                    .expect("async list should succeed"),
+                vec!["profile".to_owned()]
+            );
+            assert!(
+                adapter
+                    .delete_async(StorageBackend::IndexedDb, "cache:user:11", "profile")
+                    .await
+                    .expect("async delete should succeed")
+            );
+            assert_eq!(
+                adapter
+                    .get_async(StorageBackend::IndexedDb, "cache:user:11", "profile")
+                    .await
+                    .expect("async get should succeed"),
+                None
+            );
+        });
+    }
+
+    #[test]
+    fn async_host_backend_eventual_list_is_stale_then_converges() {
+        let cap = BrowserStorageIoCap::new(
+            StorageAuthority::deny_all()
+                .grant_backend(StorageBackend::IndexedDb)
+                .grant_namespace("cache:*")
+                .grant_operation(StorageOperation::Get)
+                .grant_operation(StorageOperation::Set)
+                .grant_operation(StorageOperation::Delete)
+                .grant_operation(StorageOperation::ListKeys),
+            StorageQuotaPolicy::default(),
+            StorageConsistencyPolicy::ReadAfterWriteEventualList,
+            StorageRedactionPolicy::default(),
+        );
+        let mut adapter = BrowserStorageAdapter::new(cap);
+        adapter.register_async_host_backend(
+            StorageBackend::IndexedDb,
+            Arc::new(MockAsyncHostBackend::default()),
+        );
+
+        futures_lite::future::block_on(async {
+            adapter
+                .set_async(
+                    StorageBackend::IndexedDb,
+                    "cache:user:13",
+                    "profile",
+                    b"v2".to_vec(),
+                )
+                .await
+                .expect("async set should succeed");
+
+            assert_eq!(
+                adapter
+                    .list_keys_async(StorageBackend::IndexedDb, "cache:user:13")
+                    .await
+                    .expect("first async list should succeed"),
+                Vec::<String>::new()
+            );
+            assert_eq!(
+                adapter
+                    .list_keys_async(StorageBackend::IndexedDb, "cache:user:13")
+                    .await
+                    .expect("second async list should converge"),
+                vec!["profile".to_owned()]
+            );
+
+            adapter
+                .delete_async(StorageBackend::IndexedDb, "cache:user:13", "profile")
+                .await
+                .expect("async delete should succeed");
+
+            assert_eq!(
+                adapter
+                    .list_keys_async(StorageBackend::IndexedDb, "cache:user:13")
+                    .await
+                    .expect("first post-delete async list should be stale"),
+                vec!["profile".to_owned()]
+            );
+            assert_eq!(
+                adapter
+                    .list_keys_async(StorageBackend::IndexedDb, "cache:user:13")
+                    .await
+                    .expect("second post-delete async list should converge"),
+                Vec::<String>::new()
+            );
+        });
     }
 }

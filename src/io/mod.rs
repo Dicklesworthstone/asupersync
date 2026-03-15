@@ -78,7 +78,9 @@ pub use browser_storage::{
     BrowserStorageAdapter, BrowserStorageError, StorageEvent, StorageEventOutcome,
 };
 pub use browser_stream::{
-    BackpressureStrategy, BrowserReadableStream, BrowserStreamConfig, BrowserStreamError,
+    BackpressureStrategy, BrowserBroadcastChannel, BrowserMessageChannel,
+    BrowserMessageChannelPair, BrowserMessageError, BrowserMessagePayload, BrowserMessagePort,
+    BrowserMessageState, BrowserReadableStream, BrowserStreamConfig, BrowserStreamError,
     BrowserStreamIoCap, BrowserStreamState, BrowserWritableStream, StreamStats,
 };
 #[cfg(target_arch = "wasm32")]
