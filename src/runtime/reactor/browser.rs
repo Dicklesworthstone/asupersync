@@ -38,10 +38,19 @@
 
 use super::{Events, Interest, Reactor, Source, Token};
 use parking_lot::{Mutex, MutexGuard};
+#[cfg(target_arch = "wasm32")]
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::io;
+use std::sync::Arc;
+#[cfg(target_arch = "wasm32")]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::{JsCast, closure::Closure};
+#[cfg(target_arch = "wasm32")]
+use web_sys::{BroadcastChannel, MessageEvent, MessagePort};
 
 /// Browser reactor configuration.
 #[derive(Debug, Clone)]
@@ -78,16 +87,157 @@ impl Default for BrowserReactorConfig {
 /// ```
 #[derive(Debug)]
 pub struct BrowserReactor {
+    inner: Arc<BrowserReactorInner>,
+    #[cfg(target_arch = "wasm32")]
+    reactor_id: u64,
+}
+
+#[derive(Debug)]
+struct BrowserReactorInner {
     config: BrowserReactorConfig,
     registrations: Mutex<BTreeMap<Token, Interest>>,
     pending_events: Mutex<Vec<super::Event>>,
     wake_pending: AtomicBool,
 }
 
-impl BrowserReactor {
-    /// Creates a new browser reactor with the given configuration.
-    #[must_use]
-    pub fn new(config: BrowserReactorConfig) -> Self {
+#[cfg(any(test, target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrowserHostBindingKind {
+    MessagePort,
+    BroadcastChannel,
+}
+
+#[cfg(any(test, target_arch = "wasm32"))]
+impl BrowserHostBindingKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::MessagePort => "MessagePort",
+            Self::BroadcastChannel => "BroadcastChannel",
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+static NEXT_BROWSER_REACTOR_ID: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static BROWSER_HOST_BINDINGS: RefCell<BTreeMap<(u64, Token), BrowserHostBinding>> =
+        RefCell::new(BTreeMap::new());
+}
+
+#[cfg(target_arch = "wasm32")]
+enum BrowserHostBinding {
+    MessagePort(MessagePortBinding),
+    BroadcastChannel(BroadcastChannelBinding),
+}
+
+#[cfg(target_arch = "wasm32")]
+impl BrowserHostBinding {
+    fn kind(&self) -> BrowserHostBindingKind {
+        match self {
+            Self::MessagePort(_) => BrowserHostBindingKind::MessagePort,
+            Self::BroadcastChannel(_) => BrowserHostBindingKind::BroadcastChannel,
+        }
+    }
+
+    fn attach(&self) {
+        match self {
+            Self::MessagePort(binding) => binding.attach(),
+            Self::BroadcastChannel(binding) => binding.attach(),
+        }
+    }
+
+    fn detach(self) {
+        match self {
+            Self::MessagePort(binding) => binding.detach(),
+            Self::BroadcastChannel(binding) => binding.detach(),
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+struct MessagePortBinding {
+    port: MessagePort,
+    on_message: Closure<dyn FnMut(MessageEvent)>,
+    on_message_error: Closure<dyn FnMut(MessageEvent)>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl MessagePortBinding {
+    fn new(inner: Arc<BrowserReactorInner>, token: Token, port: &MessagePort) -> Self {
+        let readable_inner = Arc::clone(&inner);
+        let on_message = Closure::wrap(Box::new(move |_event: MessageEvent| {
+            let _ = readable_inner.notify_ready(token, Interest::READABLE);
+        }) as Box<dyn FnMut(MessageEvent)>);
+
+        let error_inner = Arc::clone(&inner);
+        let on_message_error = Closure::wrap(Box::new(move |_event: MessageEvent| {
+            let _ = error_inner.notify_ready(token, Interest::ERROR);
+        }) as Box<dyn FnMut(MessageEvent)>);
+
+        Self {
+            port: port.clone(),
+            on_message,
+            on_message_error,
+        }
+    }
+
+    fn attach(&self) {
+        self.port
+            .set_onmessage(Some(self.on_message.as_ref().unchecked_ref()));
+        self.port
+            .set_onmessageerror(Some(self.on_message_error.as_ref().unchecked_ref()));
+    }
+
+    fn detach(self) {
+        self.port.set_onmessage(None);
+        self.port.set_onmessageerror(None);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+struct BroadcastChannelBinding {
+    channel: BroadcastChannel,
+    on_message: Closure<dyn FnMut(MessageEvent)>,
+    on_message_error: Closure<dyn FnMut(MessageEvent)>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl BroadcastChannelBinding {
+    fn new(inner: Arc<BrowserReactorInner>, token: Token, channel: &BroadcastChannel) -> Self {
+        let readable_inner = Arc::clone(&inner);
+        let on_message = Closure::wrap(Box::new(move |_event: MessageEvent| {
+            let _ = readable_inner.notify_ready(token, Interest::READABLE);
+        }) as Box<dyn FnMut(MessageEvent)>);
+
+        let error_inner = Arc::clone(&inner);
+        let on_message_error = Closure::wrap(Box::new(move |_event: MessageEvent| {
+            let _ = error_inner.notify_ready(token, Interest::ERROR);
+        }) as Box<dyn FnMut(MessageEvent)>);
+
+        Self {
+            channel: channel.clone(),
+            on_message,
+            on_message_error,
+        }
+    }
+
+    fn attach(&self) {
+        self.channel
+            .set_onmessage(Some(self.on_message.as_ref().unchecked_ref()));
+        self.channel
+            .set_onmessageerror(Some(self.on_message_error.as_ref().unchecked_ref()));
+    }
+
+    fn detach(self) {
+        self.channel.set_onmessage(None);
+        self.channel.set_onmessageerror(None);
+    }
+}
+
+impl BrowserReactorInner {
+    fn new(config: BrowserReactorConfig) -> Self {
         Self {
             config,
             registrations: Mutex::new(BTreeMap::new()),
@@ -120,36 +270,36 @@ impl BrowserReactor {
     /// Returns `Ok(true)` when an event is queued or coalesced, and `Ok(false)`
     /// when the token is unknown or the readiness does not intersect the
     /// token's registered interest.
-    pub fn notify_ready(&self, token: Token, ready: Interest) -> io::Result<bool> {
+    fn notify_ready(&self, token: Token, ready: Interest) -> bool {
         let registrations = self.registrations_mut();
         let Some(interest) = registrations.get(&token).copied() else {
-            return Ok(false);
+            return false;
         };
         let effective = ready & interest & Self::readiness_mask();
 
         if effective.is_empty() {
-            return Ok(false);
+            return false;
         }
 
         // Keep registration lookup and queue insertion atomic under the same
         // lock order used by modify()/deregister() so host callbacks cannot
         // enqueue stale readiness after a concurrent interest change/remove.
         let mut pending = self.pending_events_mut();
-        if self.config.coalesce_wakes
-            && let Some(existing) = pending.iter_mut().find(|event| event.token == token)
-        {
-            existing.ready |= effective;
-            drop(pending);
-            drop(registrations);
-            self.wake_pending.store(true, Ordering::Release);
-            return Ok(true);
+        if self.config.coalesce_wakes {
+            if let Some(existing) = pending.iter_mut().find(|event| event.token == token) {
+                existing.ready |= effective;
+                drop(pending);
+                drop(registrations);
+                self.wake_pending.store(true, Ordering::Release);
+                return true;
+            }
         }
 
         pending.push(super::Event::new(token, effective));
         drop(pending);
         drop(registrations);
         self.wake_pending.store(true, Ordering::Release);
-        Ok(true)
+        true
     }
 
     #[cfg(test)]
@@ -174,14 +324,14 @@ impl BrowserReactor {
         continue_after_interest.wait();
 
         let mut pending = self.pending_events_mut();
-        if self.config.coalesce_wakes
-            && let Some(existing) = pending.iter_mut().find(|event| event.token == token)
-        {
-            existing.ready |= effective;
-            drop(pending);
-            drop(registrations);
-            self.wake_pending.store(true, Ordering::Release);
-            return true;
+        if self.config.coalesce_wakes {
+            if let Some(existing) = pending.iter_mut().find(|event| event.token == token) {
+                existing.ready |= effective;
+                drop(pending);
+                drop(registrations);
+                self.wake_pending.store(true, Ordering::Release);
+                return true;
+            }
         }
 
         pending.push(super::Event::new(token, effective));
@@ -190,19 +340,8 @@ impl BrowserReactor {
         self.wake_pending.store(true, Ordering::Release);
         true
     }
-}
 
-impl Default for BrowserReactor {
-    fn default() -> Self {
-        Self::new(BrowserReactorConfig::default())
-    }
-}
-
-impl Reactor for BrowserReactor {
-    fn register(&self, _source: &dyn Source, token: Token, interest: Interest) -> io::Result<()> {
-        // TODO(umelq.7.x): Wire to browser event listener registration.
-        // Current scaffold keeps deterministic token bookkeeping so runtime
-        // semantics match native backends even before wasm host bindings land.
+    fn register(&self, token: Token, interest: Interest) -> io::Result<()> {
         let mut registrations = self.registrations_mut();
         if registrations.contains_key(&token) {
             return Err(io::Error::new(
@@ -216,7 +355,6 @@ impl Reactor for BrowserReactor {
     }
 
     fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
-        // TODO(umelq.7.x): Update browser event listener interest.
         let mut registrations = self.registrations_mut();
         let slot = registrations.get_mut(&token).ok_or_else(|| {
             io::Error::new(
@@ -243,7 +381,6 @@ impl Reactor for BrowserReactor {
     }
 
     fn deregister(&self, token: Token) -> io::Result<()> {
-        // TODO(umelq.7.x): Remove browser event listener.
         let removed = self.registrations_mut().remove(&token);
         if removed.is_none() {
             return Err(io::Error::new(
@@ -262,15 +399,13 @@ impl Reactor for BrowserReactor {
         Ok(())
     }
 
-    fn poll(&self, events: &mut Events, _timeout: Option<Duration>) -> io::Result<usize> {
-        // Browser poll is always non-blocking and drains events queued by
-        // notify_ready() and future host callback integrations.
+    fn poll(&self, events: &mut Events) -> usize {
         events.clear();
 
         let mut pending = self.pending_events_mut();
         if pending.is_empty() {
             self.wake_pending.store(false, Ordering::Release);
-            return Ok(0);
+            return 0;
         }
 
         let batch_limit = if self.config.max_events_per_poll == 0 {
@@ -286,7 +421,241 @@ impl Reactor for BrowserReactor {
         let still_pending = !pending.is_empty();
         drop(pending);
         self.wake_pending.store(still_pending, Ordering::Release);
-        Ok(n)
+        n
+    }
+
+    fn wake(&self) {
+        let still_pending = !self.pending_events_mut().is_empty();
+        self.wake_pending.store(still_pending, Ordering::Release);
+    }
+
+    fn registration_count(&self) -> usize {
+        self.registrations.lock().len()
+    }
+}
+
+impl BrowserReactor {
+    /// Creates a new browser reactor with the given configuration.
+    #[must_use]
+    pub fn new(config: BrowserReactorConfig) -> Self {
+        Self {
+            inner: Arc::new(BrowserReactorInner::new(config)),
+            #[cfg(target_arch = "wasm32")]
+            reactor_id: NEXT_BROWSER_REACTOR_ID.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn message_source_interest_mask() -> Interest {
+        Interest::READABLE | Interest::ERROR
+    }
+
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn validate_message_source_interest(
+        kind: BrowserHostBindingKind,
+        interest: Interest,
+    ) -> io::Result<()> {
+        let unsupported = interest & !Self::message_source_interest_mask();
+        if interest.is_empty() || !unsupported.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{} sources only support READABLE and ERROR interests, got {interest:?}",
+                    kind.label()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Enqueue readiness discovered by browser host callbacks.
+    ///
+    /// Host bridges (fetch completion, WebSocket events, stream callbacks)
+    /// should call this to deliver token readiness into the reactor queue.
+    ///
+    /// Returns `Ok(true)` when an event is queued or coalesced, and `Ok(false)`
+    /// when the token is unknown or the readiness does not intersect the
+    /// token's registered interest.
+    pub fn notify_ready(&self, token: Token, ready: Interest) -> io::Result<bool> {
+        Ok(self.inner.notify_ready(token, ready))
+    }
+
+    #[cfg(test)]
+    fn notify_ready_with_barriers(
+        &self,
+        token: Token,
+        ready: Interest,
+        after_interest: &std::sync::Barrier,
+        continue_after_interest: &std::sync::Barrier,
+    ) -> bool {
+        self.inner
+            .notify_ready_with_barriers(token, ready, after_interest, continue_after_interest)
+    }
+
+    #[cfg(test)]
+    fn wake_pending(&self) -> bool {
+        self.inner.wake_pending.load(Ordering::Acquire)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn host_binding_key(&self, token: Token) -> (u64, Token) {
+        (self.reactor_id, token)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn install_host_binding(&self, token: Token, binding: BrowserHostBinding) -> io::Result<()> {
+        BROWSER_HOST_BINDINGS.with(|bindings| {
+            let mut bindings = bindings.borrow_mut();
+            let key = self.host_binding_key(token);
+            if bindings.contains_key(&key) {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("token {token:?} already has a browser host binding"),
+                ));
+            }
+            binding.attach();
+            bindings.insert(key, binding);
+            Ok(())
+        })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn remove_host_binding(&self, token: Token) {
+        let binding = BROWSER_HOST_BINDINGS
+            .with(|bindings| bindings.borrow_mut().remove(&self.host_binding_key(token)));
+        if let Some(binding) = binding {
+            binding.detach();
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn host_binding_kind(&self, token: Token) -> Option<BrowserHostBindingKind> {
+        BROWSER_HOST_BINDINGS.with(|bindings| {
+            bindings
+                .borrow()
+                .get(&self.host_binding_key(token))
+                .map(BrowserHostBinding::kind)
+        })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn remove_all_host_bindings(&self) {
+        let keys = BROWSER_HOST_BINDINGS.with(|bindings| {
+            bindings
+                .borrow()
+                .keys()
+                .copied()
+                .filter(|(reactor_id, _)| *reactor_id == self.reactor_id)
+                .collect::<Vec<_>>()
+        });
+        for key in keys {
+            let binding = BROWSER_HOST_BINDINGS.with(|bindings| bindings.borrow_mut().remove(&key));
+            if let Some(binding) = binding {
+                binding.detach();
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn register_message_binding(
+        &self,
+        token: Token,
+        interest: Interest,
+        kind: BrowserHostBindingKind,
+        binding: BrowserHostBinding,
+    ) -> io::Result<()> {
+        Self::validate_message_source_interest(kind, interest)?;
+        self.inner.register(token, interest)?;
+        if let Err(err) = self.install_host_binding(token, binding) {
+            let _ = self.inner.deregister(token);
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    /// Register a [`MessagePort`] with real browser host listener wiring.
+    ///
+    /// This explicitly claims the port's `onmessage` and `onmessageerror`
+    /// handlers for the lifetime of the registration. Supported interests are
+    /// limited to `READABLE` and `ERROR`.
+    #[cfg(target_arch = "wasm32")]
+    pub fn register_message_port(
+        &self,
+        port: &MessagePort,
+        token: Token,
+        interest: Interest,
+    ) -> io::Result<()> {
+        self.register_message_binding(
+            token,
+            interest,
+            BrowserHostBindingKind::MessagePort,
+            BrowserHostBinding::MessagePort(MessagePortBinding::new(
+                Arc::clone(&self.inner),
+                token,
+                port,
+            )),
+        )
+    }
+
+    /// Register a [`BroadcastChannel`] with real browser host listener wiring.
+    ///
+    /// This explicitly claims the channel's `onmessage` and `onmessageerror`
+    /// handlers for the lifetime of the registration. Supported interests are
+    /// limited to `READABLE` and `ERROR`.
+    #[cfg(target_arch = "wasm32")]
+    pub fn register_broadcast_channel(
+        &self,
+        channel: &BroadcastChannel,
+        token: Token,
+        interest: Interest,
+    ) -> io::Result<()> {
+        self.register_message_binding(
+            token,
+            interest,
+            BrowserHostBindingKind::BroadcastChannel,
+            BrowserHostBinding::BroadcastChannel(BroadcastChannelBinding::new(
+                Arc::clone(&self.inner),
+                token,
+                channel,
+            )),
+        )
+    }
+}
+
+impl Default for BrowserReactor {
+    fn default() -> Self {
+        Self::new(BrowserReactorConfig::default())
+    }
+}
+
+impl Reactor for BrowserReactor {
+    fn register(&self, _source: &dyn Source, token: Token, interest: Interest) -> io::Result<()> {
+        // Generic browser registrations keep deterministic token bookkeeping.
+        // Concrete message-based host sources can opt into real listener wiring
+        // through register_message_port()/register_broadcast_channel().
+        self.inner.register(token, interest)
+    }
+
+    fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(kind) = self.host_binding_kind(token) {
+            Self::validate_message_source_interest(kind, interest)?;
+        }
+
+        self.inner.modify(token, interest)
+    }
+
+    fn deregister(&self, token: Token) -> io::Result<()> {
+        self.inner.deregister(token)?;
+        #[cfg(target_arch = "wasm32")]
+        self.remove_host_binding(token);
+        Ok(())
+    }
+
+    fn poll(&self, events: &mut Events, _timeout: Option<Duration>) -> io::Result<usize> {
+        // Browser poll is always non-blocking and drains events queued by
+        // notify_ready() and host callback integrations.
+        Ok(self.inner.poll(events))
     }
 
     fn wake(&self) -> io::Result<()> {
@@ -294,13 +663,19 @@ impl Reactor for BrowserReactor {
         // token readiness. Host integrations publish actual readiness via
         // notify_ready(); wake only preserves the existing pending/not-pending
         // state so runtime nudges do not turn into false I/O events.
-        let still_pending = !self.pending_events_mut().is_empty();
-        self.wake_pending.store(still_pending, Ordering::Release);
+        self.inner.wake();
         Ok(())
     }
 
     fn registration_count(&self) -> usize {
-        self.registrations.lock().len()
+        self.inner.registration_count()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Drop for BrowserReactor {
+    fn drop(&mut self) {
+        self.remove_all_host_bindings();
     }
 }
 
@@ -384,6 +759,35 @@ mod tests {
     }
 
     #[test]
+    fn browser_reactor_message_port_interest_validation_accepts_readable_and_error() {
+        BrowserReactor::validate_message_source_interest(
+            BrowserHostBindingKind::MessagePort,
+            Interest::READABLE | Interest::ERROR,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn browser_reactor_message_port_interest_validation_rejects_empty_interest() {
+        let err = BrowserReactor::validate_message_source_interest(
+            BrowserHostBindingKind::MessagePort,
+            Interest::empty(),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn browser_reactor_broadcast_channel_interest_validation_rejects_writable_flags() {
+        let err = BrowserReactor::validate_message_source_interest(
+            BrowserHostBindingKind::BroadcastChannel,
+            Interest::READABLE | Interest::WRITABLE,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
     fn browser_reactor_deregister_unknown_returns_not_found() {
         let reactor = BrowserReactor::default();
         let err = reactor.deregister(Token::new(99)).unwrap_err();
@@ -395,19 +799,13 @@ mod tests {
     fn browser_reactor_wake_flag_tracks_pending_host_readiness_only() {
         let reactor = BrowserReactor::default();
         let source = TestFdSource;
-        assert!(
-            !reactor
-                .wake_pending
-                .load(std::sync::atomic::Ordering::Acquire)
-        );
+        assert!(!reactor.wake_pending());
 
         // Wake with no registrations should NOT leave wake_pending set
         // because there is still no queued host readiness.
         reactor.wake().unwrap();
         assert!(
-            !reactor
-                .wake_pending
-                .load(std::sync::atomic::Ordering::Acquire),
+            !reactor.wake_pending(),
             "wake with empty registry must keep wake_pending clear"
         );
 
@@ -417,9 +815,7 @@ mod tests {
             .unwrap();
         reactor.wake().unwrap();
         assert!(
-            !reactor
-                .wake_pending
-                .load(std::sync::atomic::Ordering::Acquire),
+            !reactor.wake_pending(),
             "wake must not mark readiness pending without host events"
         );
 
@@ -429,21 +825,14 @@ mod tests {
                 .unwrap()
         );
         assert!(
-            reactor
-                .wake_pending
-                .load(std::sync::atomic::Ordering::Acquire),
+            reactor.wake_pending(),
             "host readiness should mark wake_pending"
         );
 
         // Poll clears the flag.
         let mut events = Events::with_capacity(4);
         reactor.poll(&mut events, None).unwrap();
-        assert!(
-            !reactor
-                .wake_pending
-                .load(std::sync::atomic::Ordering::Acquire),
-            "poll must clear wake_pending"
-        );
+        assert!(!reactor.wake_pending(), "poll must clear wake_pending");
     }
 
     #[test]
@@ -564,9 +953,7 @@ mod tests {
         // Wake with no registrations.
         reactor.wake().unwrap();
         assert!(
-            !reactor
-                .wake_pending
-                .load(std::sync::atomic::Ordering::Acquire),
+            !reactor.wake_pending(),
             "wake_pending must stay clear when no host readiness exists"
         );
 
@@ -577,9 +964,7 @@ mod tests {
             .unwrap();
         reactor.wake().unwrap();
         assert!(
-            !reactor
-                .wake_pending
-                .load(std::sync::atomic::Ordering::Acquire),
+            !reactor.wake_pending(),
             "registered tokens alone must not mark readiness pending"
         );
 

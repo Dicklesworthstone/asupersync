@@ -30,6 +30,7 @@ use wasm_bindgen_futures::{JsFuture, spawn_local};
 #[cfg(target_arch = "wasm32")]
 use web_sys::{
     AbortController, BinaryType, CloseEvent, Event, MessageEvent, RequestInit, Response, WebSocket,
+    WorkerGlobalScope,
 };
 
 thread_local! {
@@ -326,17 +327,23 @@ fn finalize_fetch_outcome(handle: WasmHandleRef, outcome: WasmAbiOutcomeEnvelope
 }
 
 #[cfg(target_arch = "wasm32")]
+fn host_fetch_with_str_and_init(url: &str, init: &RequestInit) -> Result<js_sys::Promise, String> {
+    if let Some(window) = web_sys::window() {
+        return Ok(window.fetch_with_str_and_init(url, init));
+    }
+
+    if let Ok(worker) = js_sys::global().dyn_into::<WorkerGlobalScope>() {
+        return Ok(worker.fetch_with_str_and_init(url, init));
+    }
+
+    Err("window or WorkerGlobalScope fetch host is not available in this host context".to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
 async fn run_browser_fetch(
     request: WasmFetchRequest,
     signal: web_sys::AbortSignal,
 ) -> WasmAbiOutcomeEnvelope {
-    let Some(window) = web_sys::window() else {
-        return fetch_error_outcome(
-            "window is not available in this host context".to_string(),
-            WasmAbiRecoverability::Permanent,
-        );
-    };
-
     let init = RequestInit::new();
     init.set_method(&request.method);
     init.set_signal(Some(&signal));
@@ -345,7 +352,12 @@ async fn run_browser_fetch(
         init.set_body(&body.into());
     }
 
-    let fetch_promise = window.fetch_with_str_and_init(&request.url, &init);
+    let fetch_promise = match host_fetch_with_str_and_init(&request.url, &init) {
+        Ok(fetch_promise) => fetch_promise,
+        Err(message) => {
+            return fetch_error_outcome(message, WasmAbiRecoverability::Permanent);
+        }
+    };
     match JsFuture::from(fetch_promise).await {
         Ok(response_value) => {
             let status = response_value

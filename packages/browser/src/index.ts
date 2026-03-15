@@ -163,6 +163,8 @@ export interface BrowserRuntimeSupportDiagnostics {
 export const BROWSER_UNSUPPORTED_RUNTIME_CODE =
   "ASUPERSYNC_BROWSER_UNSUPPORTED_RUNTIME";
 
+const DEDICATED_WORKER_GLOBAL_SCOPE_TAG = "[object DedicatedWorkerGlobalScope]";
+
 function browserCapabilitySnapshot(
   globalObject: Record<string, unknown> | undefined,
 ): BrowserCapabilitySnapshot {
@@ -176,6 +178,16 @@ function browserCapabilitySnapshot(
   };
 }
 
+function isDedicatedWorkerGlobal(
+  globalObject: Record<string, unknown> | undefined,
+): boolean {
+  return (
+    globalObject !== undefined &&
+    Object.prototype.toString.call(globalObject) ===
+      DEDICATED_WORKER_GLOBAL_SCOPE_TAG
+  );
+}
+
 export function detectBrowserRuntimeSupport(
   globalObject:
     | Record<string, unknown>
@@ -185,7 +197,7 @@ export function detectBrowserRuntimeSupport(
 ): BrowserRuntimeSupportDiagnostics {
   const capabilities = browserCapabilitySnapshot(globalObject);
   const sharedGuidance = [
-    "Load @asupersync/browser only in client-hydrated browser boundaries.",
+    "Load @asupersync/browser only in browser main-thread or dedicated-worker boundaries.",
     "For Next.js server or edge code, prefer @asupersync/next bridge-only adapters instead of direct BrowserRuntime creation.",
   ];
 
@@ -201,15 +213,18 @@ export function detectBrowserRuntimeSupport(
     };
   }
 
-  if (!capabilities.hasWindow || !capabilities.hasDocument) {
+  if (
+    (!capabilities.hasWindow || !capabilities.hasDocument) &&
+    !isDedicatedWorkerGlobal(globalObject)
+  ) {
     return {
       supported: false,
       packageName: "@asupersync/browser",
       reason: "missing_browser_dom",
       message:
-        "@asupersync/browser direct runtime APIs are unsupported outside a real browser window/document environment.",
+        "@asupersync/browser direct runtime APIs are unsupported outside a browser main-thread or dedicated worker environment.",
       guidance: [
-        "Move BrowserRuntime creation behind a browser-only entrypoint.",
+        "Move BrowserRuntime creation into a browser main-thread entrypoint or a dedicated worker bootstrap module.",
         ...sharedGuidance,
       ],
       capabilities,
