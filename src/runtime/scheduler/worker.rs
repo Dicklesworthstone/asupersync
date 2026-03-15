@@ -9,7 +9,7 @@ use crate::runtime::scheduler::stealing;
 use crate::sync::ContendedMutex;
 use crate::time::TimerDriverHandle;
 use crate::trace::{TraceBufferHandle, TraceEvent};
-use crate::tracing_compat::{error, trace};
+use crate::tracing_compat::trace;
 use crate::types::{TaskId, Time};
 use crate::util::DetRng;
 use std::cell::Cell;
@@ -261,15 +261,11 @@ impl Worker {
                                             record.wake_state.clear();
                                             if let Some((waker, _)) = &record.cached_waker {
                                                 foreign_wakers.push(waker.clone());
-                                            } else {
-                                                error!(
-                                                    ?waiter,
-                                                    worker_id = _worker_id,
-                                                    current_worker = self.worker.id,
-                                                    "panic path: pinned local waiter has invalid worker id, wake skipped"
-                                                ); // We consumed `notify()` above; clear the wake bit so a
-                                                // future valid wake is not permanently dedup-suppressed.
                                             }
+                                            // No cached waker: task hasn't been polled yet.
+                                            // Clear notified state so the next proper wake
+                                            // (via the task's waker on its owning worker)
+                                            // is not dedup-suppressed.
                                         }
                                         None => local_waiters.push(waiter),
                                     }
@@ -454,16 +450,11 @@ impl Worker {
                                         record.wake_state.clear();
                                         if let Some((waker, _)) = &record.cached_waker {
                                             foreign_wakers.push(waker.clone());
-                                        } else {
-                                            error!(
-                                                ?waiter,
-                                                worker_id = _worker_id,
-                                                current_worker = self.id,
-                                                "ready path: pinned local waiter has foreign worker id, wake skipped"
-                                            );
-                                            // We consumed `notify()` above; clear the wake bit so a
-                                            // future valid wake is not permanently dedup-suppressed.
                                         }
+                                        // No cached waker: task hasn't been polled yet.
+                                        // Clear notified state so the next proper wake
+                                        // (via the task's waker on its owning worker)
+                                        // is not dedup-suppressed.
                                     }
                                     None => local_waiters.push(waiter),
                                 }
