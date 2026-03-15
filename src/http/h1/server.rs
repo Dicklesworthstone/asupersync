@@ -16,7 +16,7 @@ use crate::time::{timeout, wall_now};
 use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::task::Poll;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 /// Configuration for HTTP/1.1 server connections.
@@ -115,7 +115,10 @@ pub enum ConnectionPhase {
 
 #[derive(Debug)]
 enum ReadOutcome {
-    Read(Option<Result<Request, HttpError>>),
+    Read {
+        item: Option<Result<Request, HttpError>>,
+        continue_sent: bool,
+    },
     ExpectationRejected,
     Shutdown,
 }
@@ -125,6 +128,14 @@ enum ExpectationAction {
     None,
     Continue,
     Reject,
+}
+
+type ShutdownWaitFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+
+#[derive(Debug)]
+enum ExpectationStep {
+    ContinueLoop,
+    Return(Poll<ReadOutcome>),
 }
 
 impl ConnectionState {
@@ -224,84 +235,48 @@ where
         let read_future = Box::pin(async {
             let mut pending_expectation_flush = None;
             let mut handled_expectation = false;
-            let mut shutdown_fut = self.shutdown_signal.as_ref().map(|signal| {
-                Box::pin(signal.wait_for_phase(crate::server::shutdown::ShutdownPhase::Draining))
-            });
+            let mut shutdown_fut: Option<ShutdownWaitFuture<'_>> =
+                self.shutdown_signal.as_ref().map(|signal| {
+                    Box::pin(
+                        signal.wait_for_phase(crate::server::shutdown::ShutdownPhase::Draining),
+                    ) as ShutdownWaitFuture<'_>
+                });
 
             poll_fn(|cx| {
                 loop {
-                    if Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-                        return Poll::Ready(ReadOutcome::Shutdown);
-                    }
-                    if self
-                        .shutdown_signal
-                        .as_ref()
-                        .is_some_and(ShutdownSignal::is_shutting_down)
-                    {
-                        return Poll::Ready(ReadOutcome::Shutdown);
-                    }
-                    if shutdown_fut
-                        .as_mut()
-                        .is_some_and(|future| future.as_mut().poll(cx).is_ready())
-                    {
+                    if self.should_stop_reading(cx, shutdown_fut.as_mut()) {
                         return Poll::Ready(ReadOutcome::Shutdown);
                     }
 
-                    if let Some(action) = pending_expectation_flush {
-                        match framed.poll_flush(cx).map_err(HttpError::Io) {
-                            Poll::Pending => return Poll::Pending,
-                            Poll::Ready(Err(err)) => {
-                                return Poll::Ready(ReadOutcome::Read(Some(Err(err))));
-                            }
-                            Poll::Ready(Ok(())) => {
-                                pending_expectation_flush = None;
-                                if action == ExpectationAction::Reject {
-                                    return Poll::Ready(ReadOutcome::ExpectationRejected);
-                                }
-                            }
-                        }
+                    if let Some(outcome) = poll_pending_expectation_flush(
+                        cx,
+                        framed,
+                        &mut pending_expectation_flush,
+                        handled_expectation,
+                    ) {
+                        return outcome;
                     }
 
                     match Pin::new(&mut *framed).poll_next(cx) {
-                        Poll::Ready(item) => return Poll::Ready(ReadOutcome::Read(item)),
+                        Poll::Ready(item) => {
+                            return Poll::Ready(ReadOutcome::Read {
+                                item,
+                                continue_sent: handled_expectation,
+                            });
+                        }
                         Poll::Pending => {}
                     }
 
-                    if !handled_expectation {
-                        let preview =
-                            match preview_request_head(framed.codec(), framed.read_buffer()) {
-                                Ok(preview) => preview,
-                                Err(err) => return Poll::Ready(ReadOutcome::Read(Some(Err(err)))),
-                            };
-
-                        if let Some(preview) = preview {
-                            let action =
-                                classify_expectation_from_parts(preview.version, &preview.headers);
-                            if action != ExpectationAction::None
-                                && request_expects_body_headers(&preview.headers)
-                            {
-                                let response = expectation_response(preview.version, action)
-                                    .expect("expectation action should build a response");
-                                if let Err(err) = framed.send(response) {
-                                    return Poll::Ready(ReadOutcome::Read(Some(Err(err))));
-                                }
-                                handled_expectation = true;
-
-                                match framed.poll_flush(cx).map_err(HttpError::Io) {
-                                    Poll::Pending => {
-                                        pending_expectation_flush = Some(action);
-                                        return Poll::Pending;
-                                    }
-                                    Poll::Ready(Err(err)) => {
-                                        return Poll::Ready(ReadOutcome::Read(Some(Err(err))));
-                                    }
-                                    Poll::Ready(Ok(())) => {
-                                        if action == ExpectationAction::Reject {
-                                            return Poll::Ready(ReadOutcome::ExpectationRejected);
-                                        }
-                                        continue;
-                                    }
-                                }
+                    if let Some(step) = poll_request_expectation(
+                        cx,
+                        framed,
+                        &mut pending_expectation_flush,
+                        &mut handled_expectation,
+                    ) {
+                        match step {
+                            ExpectationStep::ContinueLoop => continue,
+                            ExpectationStep::Return(outcome) => {
+                                return outcome;
                             }
                         }
                     }
@@ -320,6 +295,21 @@ where
         } else {
             Some(read_future.await)
         }
+    }
+
+    fn should_stop_reading(
+        &self,
+        cx: &mut Context<'_>,
+        mut shutdown_fut: Option<&mut ShutdownWaitFuture<'_>>,
+    ) -> bool {
+        Cx::current().is_some_and(|current| current.checkpoint().is_err())
+            || self
+                .shutdown_signal
+                .as_ref()
+                .is_some_and(ShutdownSignal::is_shutting_down)
+            || shutdown_fut
+                .as_mut()
+                .is_some_and(|future| future.as_mut().poll(cx).is_ready())
     }
 
     /// Serve a single connection, processing requests until the connection
@@ -395,7 +385,7 @@ where
                 break;
             };
 
-            let req = match read_outcome {
+            let (req, continue_sent) = match read_outcome {
                 ReadOutcome::ExpectationRejected => {
                     state.requests_served += 1;
                     state.last_request_at = Cx::current()
@@ -408,7 +398,10 @@ where
                     state.phase = ConnectionPhase::Closing;
                     break;
                 }
-                ReadOutcome::Read(r) => r,
+                ReadOutcome::Read {
+                    item,
+                    continue_sent,
+                } => (item, continue_sent),
             };
 
             // Read next request
@@ -445,6 +438,25 @@ where
                     .map_or_else(wall_now, |timer| timer.now());
                 state.phase = ConnectionPhase::Closing;
                 break;
+            }
+            if expectation_action == ExpectationAction::Continue
+                && request_expects_body(&req)
+                && !continue_sent
+            {
+                state.phase = ConnectionPhase::Writing;
+                let interim = expectation_response(req.version, ExpectationAction::Continue)
+                    .expect("continue expectation should build a response");
+                framed.send(interim)?;
+                poll_fn(|cx| {
+                    if Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                        return Poll::Ready(Err(HttpError::Io(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "connection cancelled",
+                        ))));
+                    }
+                    framed.poll_flush(cx).map_err(HttpError::Io)
+                })
+                .await?;
             }
 
             // Determine if we should close after this request
@@ -526,6 +538,93 @@ where
 
         Ok(state)
     }
+}
+
+fn read_error(err: HttpError, continue_sent: bool) -> ReadOutcome {
+    ReadOutcome::Read {
+        item: Some(Err(err)),
+        continue_sent,
+    }
+}
+
+fn poll_pending_expectation_flush<T>(
+    cx: &mut Context<'_>,
+    framed: &mut Framed<T, Http1Codec>,
+    pending_expectation_flush: &mut Option<ExpectationAction>,
+    continue_sent: bool,
+) -> Option<Poll<ReadOutcome>>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    let action = (*pending_expectation_flush)?;
+    match framed.poll_flush(cx).map_err(HttpError::Io) {
+        Poll::Pending => Some(Poll::Pending),
+        Poll::Ready(Err(err)) => Some(Poll::Ready(read_error(err, continue_sent))),
+        Poll::Ready(Ok(())) => {
+            *pending_expectation_flush = None;
+            if action == ExpectationAction::Reject {
+                Some(Poll::Ready(ReadOutcome::ExpectationRejected))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn poll_request_expectation<T>(
+    cx: &mut Context<'_>,
+    framed: &mut Framed<T, Http1Codec>,
+    pending_expectation_flush: &mut Option<ExpectationAction>,
+    handled_expectation: &mut bool,
+) -> Option<ExpectationStep>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    if *handled_expectation {
+        return None;
+    }
+
+    let preview = match preview_request_head(framed.codec(), framed.read_buffer()) {
+        Ok(preview) => preview,
+        Err(err) => {
+            return Some(ExpectationStep::Return(Poll::Ready(read_error(
+                err,
+                *handled_expectation,
+            ))));
+        }
+    }?;
+
+    let action = classify_expectation_from_parts(preview.version, &preview.headers);
+    if action == ExpectationAction::None || !request_expects_body_headers(&preview.headers) {
+        return None;
+    }
+
+    let response = expectation_response(preview.version, action)
+        .expect("expectation action should build a response");
+    if let Err(err) = framed.send(response) {
+        return Some(ExpectationStep::Return(Poll::Ready(read_error(
+            err,
+            *handled_expectation,
+        ))));
+    }
+    *handled_expectation = true;
+
+    Some(match framed.poll_flush(cx).map_err(HttpError::Io) {
+        Poll::Pending => {
+            *pending_expectation_flush = Some(action);
+            ExpectationStep::Return(Poll::Pending)
+        }
+        Poll::Ready(Err(err)) => {
+            ExpectationStep::Return(Poll::Ready(read_error(err, *handled_expectation)))
+        }
+        Poll::Ready(Ok(())) => {
+            if action == ExpectationAction::Reject {
+                ExpectationStep::Return(Poll::Ready(ReadOutcome::ExpectationRejected))
+            } else {
+                ExpectationStep::ContinueLoop
+            }
+        }
+    })
 }
 
 fn classify_expectation(req: &Request) -> ExpectationAction {
@@ -1279,6 +1378,39 @@ mod tests {
         let state = runtime
             .block_on(async { server.serve(io).await })
             .expect("serve expect-continue request");
+
+        assert_eq!(state.requests_served, 1);
+        assert_eq!(&*seen_body.lock().unwrap(), b"hello");
+
+        let written = String::from_utf8(written.lock().unwrap().clone())
+            .expect("response should be valid utf8");
+        assert!(written.starts_with("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\n"));
+        assert!(written.contains("Content-Length: 4\r\n"));
+    }
+
+    #[test]
+    fn serve_expect_continue_when_body_arrives_eagerly() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let seen_body = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"POST /upload HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello".to_vec(),
+            Arc::clone(&written),
+        );
+        let seen_body_for_handler = Arc::clone(&seen_body);
+        let server = Http1Server::new(move |req| {
+            let seen_body_for_handler = Arc::clone(&seen_body_for_handler);
+            async move {
+                *seen_body_for_handler.lock().unwrap() = req.body.clone();
+                Response::new(200, "OK", b"done")
+            }
+        });
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let state = runtime
+            .block_on(async { server.serve(io).await })
+            .expect("serve eager expect-continue request");
 
         assert_eq!(state.requests_served, 1);
         assert_eq!(&*seen_body.lock().unwrap(), b"hello");

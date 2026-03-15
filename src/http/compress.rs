@@ -84,16 +84,19 @@ fn parse_accept_encoding(header: &str) -> Vec<QualityValue> {
             let mut pieces = part.splitn(2, ';');
             let encoding = pieces.next()?.trim().to_ascii_lowercase();
 
-            let quality = pieces
-                .next()
-                .and_then(|q_part| {
-                    let q_part = q_part.trim();
-                    q_part
-                        .strip_prefix("q=")
-                        .or_else(|| q_part.strip_prefix("Q="))
-                })
-                .and_then(|q_str| q_str.trim().parse::<f32>().ok())
-                .unwrap_or(1.0);
+            let quality = if let Some(q_part) = pieces.next() {
+                let q_part = q_part.trim();
+                let q_str = q_part
+                    .strip_prefix("q=")
+                    .or_else(|| q_part.strip_prefix("Q="))?;
+                let q = q_str.trim().parse::<f32>().ok()?;
+                if !q.is_finite() || !(0.0..=1.0).contains(&q) {
+                    return None;
+                }
+                q
+            } else {
+                1.0
+            };
 
             Some(QualityValue { encoding, quality })
         })
@@ -337,30 +340,40 @@ impl Compressor for GzipCompressor {
 pub struct GzipDecompressor {
     max_size: Option<usize>,
     total: usize,
+    decoder: flate2::write::GzDecoder<Vec<u8>>,
 }
 
 #[cfg(feature = "compression")]
 impl GzipDecompressor {
     /// Create a new gzip decompressor with an optional size limit.
     #[must_use]
-    pub const fn new(max_size: Option<usize>) -> Self {
-        Self { max_size, total: 0 }
+    pub fn new(max_size: Option<usize>) -> Self {
+        Self {
+            max_size,
+            total: 0,
+            decoder: flate2::write::GzDecoder::new(Vec::new()),
+        }
     }
 }
 
 #[cfg(feature = "compression")]
 impl Decompressor for GzipDecompressor {
     fn decompress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
-        use io::Read;
-        let mut decoder = flate2::read::GzDecoder::new(input);
-        let mut buf = Vec::new();
-        decoder.read_to_end(&mut buf)?;
+        use io::Write;
+        self.decoder.write_all(input)?;
+        self.decoder.flush()?;
+        let buf = std::mem::take(self.decoder.get_mut());
         update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
         output.extend_from_slice(&buf);
         Ok(())
     }
 
-    fn finish(&mut self, _output: &mut Vec<u8>) -> io::Result<()> {
+    fn finish(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
+        let mut dummy = flate2::write::GzDecoder::new(Vec::new());
+        std::mem::swap(&mut self.decoder, &mut dummy);
+        let buf = dummy.finish()?;
+        update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
+        output.extend_from_slice(&buf);
         Ok(())
     }
 
@@ -438,30 +451,40 @@ impl Compressor for DeflateCompressor {
 pub struct DeflateDecompressor {
     max_size: Option<usize>,
     total: usize,
+    decoder: flate2::write::DeflateDecoder<Vec<u8>>,
 }
 
 #[cfg(feature = "compression")]
 impl DeflateDecompressor {
     /// Create a new deflate decompressor with an optional size limit.
     #[must_use]
-    pub const fn new(max_size: Option<usize>) -> Self {
-        Self { max_size, total: 0 }
+    pub fn new(max_size: Option<usize>) -> Self {
+        Self {
+            max_size,
+            total: 0,
+            decoder: flate2::write::DeflateDecoder::new(Vec::new()),
+        }
     }
 }
 
 #[cfg(feature = "compression")]
 impl Decompressor for DeflateDecompressor {
     fn decompress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
-        use io::Read;
-        let mut decoder = flate2::read::DeflateDecoder::new(input);
-        let mut buf = Vec::new();
-        decoder.read_to_end(&mut buf)?;
+        use io::Write;
+        self.decoder.write_all(input)?;
+        self.decoder.flush()?;
+        let buf = std::mem::take(self.decoder.get_mut());
         update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
         output.extend_from_slice(&buf);
         Ok(())
     }
 
-    fn finish(&mut self, _output: &mut Vec<u8>) -> io::Result<()> {
+    fn finish(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
+        let mut dummy = flate2::write::DeflateDecoder::new(Vec::new());
+        std::mem::swap(&mut self.decoder, &mut dummy);
+        let buf = dummy.finish()?;
+        update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
+        output.extend_from_slice(&buf);
         Ok(())
     }
 
@@ -633,6 +656,15 @@ mod tests {
         assert_quality(parsed[0].quality, 0.8);
         assert_eq!(parsed[1].encoding, "br");
         assert_quality(parsed[1].quality, 1.0);
+    }
+
+    #[test]
+    fn parse_accept_encoding_rejects_malformed_q() {
+        let parsed =
+            parse_accept_encoding("gzip;q=1.5, deflate;q=-0.1, br;q=abc, identity;q=NaN, *;q=1.0");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].encoding, "*");
+        assert_quality(parsed[0].quality, 1.0);
     }
 
     // ====================================================================
@@ -953,6 +985,26 @@ mod tests {
 
     #[cfg(feature = "compression")]
     #[test]
+    fn gzip_decompressor_state_across_chunks() {
+        let input = b"Hello, World! Here is some data to compress and decompress in chunks.";
+        let mut compressor = GzipCompressor::new();
+        let mut compressed = Vec::new();
+        compressor.compress(input, &mut compressed).unwrap();
+        compressor.finish(&mut compressed).unwrap();
+
+        let mut decompressor = GzipDecompressor::new(None);
+        let mut decompressed = Vec::new();
+
+        for chunk in compressed.chunks(5) {
+            decompressor.decompress(chunk, &mut decompressed).unwrap();
+        }
+        decompressor.finish(&mut decompressed).unwrap();
+
+        assert_eq!(decompressed, input);
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
     fn gzip_compress_decompress_roundtrip() {
         let input = b"Hello, World! This is a test of gzip compression.";
         let mut comp = GzipCompressor::new();
@@ -1018,6 +1070,7 @@ mod tests {
         let mut dec = GzipDecompressor {
             max_size: None,
             total: usize::MAX,
+            decoder: flate2::write::GzDecoder::new(Vec::new()),
         };
         let mut decompressed = Vec::new();
         let result = dec.decompress(&compressed, &mut decompressed);
@@ -1029,6 +1082,26 @@ mod tests {
     // ====================================================================
     // Deflate compressor/decompressor tests
     // ====================================================================
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn deflate_decompressor_state_across_chunks() {
+        let input = b"Hello, World! Here is some data to compress and decompress in chunks.";
+        let mut compressor = DeflateCompressor::new();
+        let mut compressed = Vec::new();
+        compressor.compress(input, &mut compressed).unwrap();
+        compressor.finish(&mut compressed).unwrap();
+
+        let mut decompressor = DeflateDecompressor::new(None);
+        let mut decompressed = Vec::new();
+
+        for chunk in compressed.chunks(5) {
+            decompressor.decompress(chunk, &mut decompressed).unwrap();
+        }
+        decompressor.finish(&mut decompressed).unwrap();
+
+        assert_eq!(decompressed, input);
+    }
 
     #[cfg(feature = "compression")]
     #[test]
@@ -1095,6 +1168,7 @@ mod tests {
         let mut dec = DeflateDecompressor {
             max_size: None,
             total: usize::MAX,
+            decoder: flate2::write::DeflateDecoder::new(Vec::new()),
         };
         let mut decompressed = Vec::new();
         let result = dec.decompress(&compressed, &mut decompressed);
