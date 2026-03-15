@@ -1,6 +1,6 @@
 {
   "name": "@asupersync/browser",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "High-level Browser Edition SDK surface for Asupersync.",
   "homepage": "https://github.com/Dicklesworthstone/asupersync#readme",
   "bugs": {

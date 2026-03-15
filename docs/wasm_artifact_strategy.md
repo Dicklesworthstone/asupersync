@@ -74,7 +74,7 @@ description = "WASM/JS bindings for the Asupersync async runtime (Browser Editio
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-asupersync = { version = "0.2.7", path = "..", default-features = false, features = ["wasm-browser-prod"] }
+asupersync = { version = "0.2.8", path = "..", default-features = false, features = ["wasm-browser-prod"] }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = [

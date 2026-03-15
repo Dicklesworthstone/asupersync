@@ -123,7 +123,7 @@ evidence-packs/
   "schema_version": "evidence-pack-v1",
   "pack_id": "EP-20260304-001",
   "created_at": "2026-03-04T12:00:00Z",
-  "asupersync_version": "0.2.7",
+  "asupersync_version": "0.2.8",
   "tokio_baseline_version": "1.43.0",
   "campaigns": ["VC-01", "VC-02", "VC-03"],
   "benchmarks": ["BM-01", "BM-02"],

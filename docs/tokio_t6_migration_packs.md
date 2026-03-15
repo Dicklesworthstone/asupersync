@@ -13,7 +13,7 @@
 
 Before migrating, ensure:
 
-1. `asupersync` is added to `Cargo.toml` (minimum version: `0.2.7`)
+1. `asupersync` is added to `Cargo.toml` (minimum version: `0.2.8`)
 2. Enable the required feature flags for your backends
 3. For incremental migration, add `asupersync-tokio-compat` with relevant features
 

@@ -12,7 +12,7 @@
 
 Before migrating, ensure:
 
-1. `asupersync` is added to `Cargo.toml` (minimum version: `0.2.7`)
+1. `asupersync` is added to `Cargo.toml` (minimum version: `0.2.8`)
 2. Remove `tokio` from `[dependencies]` once migration is complete
 3. If using the compatibility crate for incremental migration, add `asupersync-tokio-compat` with relevant features
 
