@@ -140,14 +140,14 @@
 {"file":"src/tls/stream.rs","lines":649,"batch":336,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/web/compress.rs","lines":481,"batch":336,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/web/security.rs","lines":401,"batch":336,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
-{"file":"src/cli/doctor/mod.rs","lines":21716,"batch":341,"date":"2026-03-13","agent":"SapphireHill","verdict":"FIXED","bugs":4,"notes":"4 bugs: parse_package_name, sanitize_line, pending_ack_count, NaN cancellation"}
+{"file":"src/cli/doctor/mod.rs","lines":21716,"batch":341,"date":"2026-03-13","agent":"SapphireHill","verdict":"FIXED","bugs":3,"notes":"3 bugs: parse_package_name, sanitize_line, pending_ack_count"}
 {"file":"src/lab/chaos.rs","lines":0,"batch":341,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/lab/scenario_runner.rs","lines":0,"batch":341,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/lab/snapshot_restore.rs","lines":0,"batch":341,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/lab/spork_harness.rs","lines":0,"batch":341,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/net/quic_native/forensic_log.rs","lines":0,"batch":341,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/plan/rewrite.rs","lines":0,"batch":341,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
-{"file":"src/scenario.rs","lines":0,"batch":341,"date":"2026-03-13","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 LOW: NaN cancellation probability passes validator"}
+{"file":"src/lab/scenario.rs","lines":0,"batch":341,"date":"2026-03-13","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 LOW: NaN cancellation probability passes validator"}
 {"file":"src/combinator/retry.rs","lines":0,"batch":346,"date":"2026-03-13","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 LOW bug"}
 {"file":"src/http/h3_native.rs","lines":0,"batch":346,"date":"2026-03-13","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM bug"}
 {"file":"src/net/quic_native/streams.rs","lines":0,"batch":346,"date":"2026-03-13","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"1 MEDIUM: next_writable_stream missing send_reset check"}
@@ -157,7 +157,7 @@
 {"file":"src/codec/lines.rs","lines":0,"batch":347,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/combinator/mod.rs","lines":0,"batch":347,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/combinator/select.rs","lines":0,"batch":347,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
-{"file":"src/combinator/timeout_future.rs","lines":0,"batch":347,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/time/timeout_future.rs","lines":0,"batch":347,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/cx/cx.rs","lines":0,"batch":347,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/cx/registry.rs","lines":0,"batch":347,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/cx/scope.rs","lines":0,"batch":347,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
@@ -178,7 +178,7 @@
 {"file":"src/net/unix/datagram.rs","lines":0,"batch":347,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/obligation/choreography/mod.rs","lines":0,"batch":347,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/plan/mod.rs","lines":0,"batch":347,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
-{"file":"src/reconnect.rs","lines":0,"batch":347,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/service/reconnect.rs","lines":0,"batch":347,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/runtime/state.rs","lines":0,"batch":347,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/runtime/yield_now.rs","lines":0,"batch":347,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/server/connection.rs","lines":0,"batch":347,"date":"2026-03-13","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
@@ -521,7 +521,7 @@
 {"file":"src/runtime/reactor/epoll.rs","lines":0,"batch":369,"date":"2026-03-14","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/runtime/reactor/kqueue.rs","lines":0,"batch":369,"date":"2026-03-14","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/runtime/reactor/macos.rs","lines":0,"batch":369,"date":"2026-03-14","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
-{"file":"src/snapshot.rs","lines":0,"batch":369,"date":"2026-03-14","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
+{"file":"src/distributed/snapshot.rs","lines":0,"batch":369,"date":"2026-03-14","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/types/outcome.rs","lines":0,"batch":369,"date":"2026-03-14","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/types/symbol_set.rs","lines":0,"batch":369,"date":"2026-03-14","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
 {"file":"src/app.rs","lines":0,"batch":370,"date":"2026-03-14","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":""}
