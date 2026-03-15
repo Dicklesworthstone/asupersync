@@ -125,15 +125,38 @@ where
 
         // Phase 2: Await the response future with Cx installed on each poll,
         // and support cancellation.
-        let result = crate::runtime::with_tokio_context(cx, || async move {
-            response_future.await.map_err(BridgeError::Service)
-        })
-        .await;
-
-        match result {
-            Some(res) => res,
-            None => Err(BridgeError::Cancelled),
+        if cx.is_cancel_requested() {
+            return Err(BridgeError::Cancelled);
         }
+
+        let mut response_future = std::pin::pin!(crate::cancel::CancelAware::new(
+            response_future,
+            crate::CancellationMode::BestEffort,
+        ));
+
+        std::future::poll_fn(move |task_cx| {
+            let _cx_guard = asupersync::Cx::set_current(Some(cx.clone()));
+
+            if cx.is_cancel_requested() {
+                response_future.as_mut().request_cancel();
+            }
+
+            match response_future.as_mut().poll(task_cx) {
+                Poll::Ready(crate::cancel::CancelResult::Completed(Ok(response)))
+                | Poll::Ready(crate::cancel::CancelResult::CancellationIgnored(Ok(response))) => {
+                    Poll::Ready(Ok(response))
+                }
+                Poll::Ready(crate::cancel::CancelResult::Completed(Err(err)))
+                | Poll::Ready(crate::cancel::CancelResult::CancellationIgnored(Err(err))) => {
+                    Poll::Ready(Err(BridgeError::Service(err)))
+                }
+                Poll::Ready(crate::cancel::CancelResult::Cancelled) => {
+                    Poll::Ready(Err(BridgeError::Cancelled))
+                }
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await
     }
 }
 
