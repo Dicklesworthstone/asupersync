@@ -390,14 +390,16 @@ impl CloseHandshake {
                 self.state = CloseState::CloseReceived;
                 self.peer_reason = Some(reason);
 
-                // Echo peer code as-is when present, including custom valid
-                // application codes in 3000..=4999.
-                let response_code = if frame.payload.len() >= 2 {
-                    u16::from_be_bytes([frame.payload[0], frame.payload[1]])
+                // Echo the peer's wire payload shape: reflect their status code
+                // verbatim when present, but keep the response body empty if the
+                // peer closed without a status code.
+                let response = if frame.payload.len() >= 2 {
+                    let response_code = u16::from_be_bytes([frame.payload[0], frame.payload[1]]);
+                    Frame::close(Some(response_code), None)
                 } else {
-                    u16::from(CloseCode::Normal)
+                    Frame::close(None, None)
                 };
-                Ok(Some(Frame::close(Some(response_code), None)))
+                Ok(Some(response))
             }
             CloseState::CloseSent => {
                 // We sent close, peer is responding - handshake complete
@@ -634,6 +636,19 @@ mod tests {
         assert_eq!(response.opcode, Opcode::Close);
         assert_eq!(&response.payload[..2], &3001u16.to_be_bytes());
         assert_eq!(handshake.peer_reason().unwrap().wire_code(), Some(3001));
+        assert_eq!(handshake.state(), CloseState::CloseReceived);
+    }
+
+    #[test]
+    fn handshake_receive_empty_close_keeps_response_payload_empty() {
+        let mut handshake = CloseHandshake::new();
+        let close_frame = Frame::close(None, None);
+
+        let response = handshake.receive_close(&close_frame).unwrap().unwrap();
+
+        assert_eq!(response.opcode, Opcode::Close);
+        assert!(response.payload.is_empty());
+        assert_eq!(handshake.peer_reason(), Some(&CloseReason::empty()));
         assert_eq!(handshake.state(), CloseState::CloseReceived);
     }
 

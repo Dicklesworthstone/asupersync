@@ -488,9 +488,12 @@ impl<'a> RecvStream<'a> {
     /// Create a new datagram stream with the given buffer size.
     #[must_use]
     pub fn new(socket: &'a mut UdpSocket, buf_size: usize) -> Self {
+        // A zero-length UDP receive buffer can consume and discard a queued
+        // datagram while yielding an empty payload. Clamp to one byte so
+        // callers never silently drop the entire datagram body by accident.
         Self {
             socket,
-            buf: vec![0u8; buf_size],
+            buf: vec![0u8; buf_size.max(1)],
         }
     }
 }
@@ -616,6 +619,21 @@ mod tests {
             let mut stream = server.recv_stream(32);
             let item = stream.next().await.unwrap().unwrap();
             assert_eq!(item.0, b"stream");
+        });
+    }
+
+    #[test]
+    fn udp_recv_stream_zero_buffer_does_not_drop_nonempty_datagram() {
+        future::block_on(async {
+            let mut server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let server_addr = server.local_addr().unwrap();
+            let mut client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+            client.send_to(b"stream", server_addr).await.unwrap();
+
+            let mut stream = server.recv_stream(0);
+            let item = stream.next().await.unwrap().unwrap();
+            assert_eq!(item.0, b"s");
         });
     }
 
