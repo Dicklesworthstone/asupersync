@@ -409,6 +409,14 @@ impl CompatReader {
             .map_err(TraceFileError::Io)?;
         let len = u32::from_le_bytes(len_bytes) as usize;
 
+        if len > MAX_EVENT_SIZE {
+            return Err(TraceFileError::OversizedField {
+                field: "event",
+                actual: len as u64,
+                max: MAX_EVENT_SIZE as u64,
+            });
+        }
+
         // Read event data
         let mut event_bytes = vec![0u8; len];
         self.reader.read_exact(&mut event_bytes)?;
