@@ -205,7 +205,7 @@ proptest! {
     /// LAW: INFINITE is identity for combine
     ///
     /// a.combine(INFINITE) == a (for deadline, quotas, and priority)
-    /// Note: priority uses min, so min(a.priority, INFINITE.priority=255) == a.priority
+    /// Note: priority uses max, so max(a.priority, INFINITE.priority=0) == a.priority
     #[test]
     fn budget_infinite_is_identity_for_deadline_and_quotas(a in arb_budget()) {
         init_test_logging();
@@ -221,7 +221,7 @@ proptest! {
         // Cost quota: min with None = a's quota
         prop_assert_eq!(result.cost_quota, a.cost_quota);
 
-        // Priority: min with 255 (INFINITE default)
+        // Priority: max with 0 (INFINITE default)
         prop_assert_eq!(result.priority, a.priority);
     }
 

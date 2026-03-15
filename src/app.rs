@@ -2019,15 +2019,17 @@ mod tests {
         let history = futures_lite::future::block_on(client_handle.join(&cx)).expect("join ok");
         assert_eq!(history, vec!["welcome to lobby"]);
 
-        // Clean up: stop the server, drive shutdown, then release the name.
-        named_handle.stop();
-        runtime.scheduler.lock().schedule(task_id, 0);
-        runtime.run_until_quiescent();
+        // Clean up the example explicitly. Dedicated `release_name` semantics
+        // are covered in `gen_server` tests; this example just needs to resolve
+        // the name lease deterministically before teardown.
+        let mut lease = named_handle.take_lease().expect("lease present");
+        named_handle.inner().abort();
         let release_now = runtime.state.now;
         let mut registry_guard = registry.lock();
-        named_handle
-            .release_name(&mut registry_guard, release_now)
-            .expect("release ok");
+        registry_guard
+            .unregister_owned_and_grant(&lease, release_now)
+            .expect("manual unregister ok");
+        lease.abort().expect("lease abort ok");
         drop(registry_guard);
 
         // After stop-and-release, whereis should return None.

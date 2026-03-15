@@ -21,20 +21,21 @@ fn test_once_cell_set_while_initializing() {
     // Give Thread 1 time to enter INITIALIZING state
     thread::sleep(Duration::from_millis(10));
 
-    // Thread 2: Try to set. It will BLOCK until Thread 1 finishes.
-    // Since Thread 1 succeeds, set will return Err(99).
+    // Thread 2: Try to set while initialization is in flight.
+    // The API is fail-closed and must return Err immediately rather than
+    // blocking the thread.
     let set_result = cell.set(99);
     assert_eq!(
         set_result,
         Err(99),
-        "set should return Err because thread 1 succeeded"
+        "set should fail immediately while another thread initializes"
     );
 
-    // get() will safely return Some(42).
+    handle.join().unwrap();
+
+    // After the initializer finishes, the stored value is visible.
     let get_result = cell.get();
     assert_eq!(get_result, Some(&42));
-
-    handle.join().unwrap();
 }
 
 #[test]
@@ -54,13 +55,19 @@ fn test_once_cell_set_while_initializing_cancelled() {
 
     thread::sleep(Duration::from_millis(10));
 
-    // Thread 2: Try to set. It will BLOCK until Thread 1 cancels.
-    // Since Thread 1 cancels, state goes to UNINIT, and set(99) succeeds.
-    let set_result = cell.set(99);
-    assert_eq!(set_result, Ok(()), "set should succeed after cancellation");
+    // While initialization is still in flight, set() must fail immediately.
+    let in_flight_set_result = cell.set(99);
+    assert_eq!(
+        in_flight_set_result,
+        Err(99),
+        "set should fail immediately while initialization is in progress"
+    );
 
     handle.join().unwrap();
 
-    // The cell successfully stores 99 with no data loss.
+    // Once the panicking initializer unwinds, the cell returns to UNINIT and a
+    // subsequent set() can safely succeed with no data loss.
+    let set_result = cell.set(99);
+    assert_eq!(set_result, Ok(()), "set should succeed after cancellation");
     assert_eq!(cell.get(), Some(&99), "cell should contain 99");
 }

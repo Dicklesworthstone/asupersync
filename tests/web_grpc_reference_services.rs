@@ -806,8 +806,9 @@ fn t59_ref_26_immediate_shutdown() {
 
     test_section!("trigger_immediate_skips_drain");
     signal.trigger_immediate();
-    assert!(signal.is_stopped());
-    assert_eq!(signal.phase(), ShutdownPhase::Stopped);
+    assert!(signal.is_shutting_down());
+    assert!(!signal.is_stopped());
+    assert_eq!(signal.phase(), ShutdownPhase::ForceClosing);
 
     test_complete!("t59_ref_26_immediate_shutdown");
 }

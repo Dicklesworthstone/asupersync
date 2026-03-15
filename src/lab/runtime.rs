@@ -2207,7 +2207,13 @@ impl LabScheduler {
     /// Returns true if no tasks are currently scheduled.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.scheduled.is_empty()
+        let empty = self.scheduled.is_empty();
+        if !empty {
+            let len = self.scheduled.len();
+            let tasks = &self.scheduled;
+            println!("DEBUG: LabScheduler is not empty! len={len} tasks={tasks:?}");
+        }
+        empty
     }
 
     /// Returns the configured cancel streak limit for lab scheduling.
@@ -2266,6 +2272,7 @@ impl LabScheduler {
         let mut remaining = count;
         if self.scheduled.insert(task) {
             let worker = self.assign_worker(task);
+            println!("DEBUG: LabScheduler::schedule assigning to worker {worker}");
             self.workers[worker].schedule(task, priority);
             remaining = remaining.saturating_sub(1);
         }
@@ -2290,6 +2297,7 @@ impl LabScheduler {
     pub fn schedule_cancel(&mut self, task: TaskId, priority: u8) {
         if self.scheduled.insert(task) {
             let worker = self.assign_worker(task);
+            println!("DEBUG: LabScheduler::schedule assigning to worker {worker}");
             self.workers[worker].schedule_cancel(task, priority);
             return;
         }
@@ -2307,6 +2315,7 @@ impl LabScheduler {
         }
 
         let worker = self.assign_worker(task);
+        println!("DEBUG: LabScheduler::schedule assigning to worker {worker}");
         self.workers[worker].schedule_timed(task, deadline);
     }
 
@@ -2421,6 +2430,10 @@ struct TaskWaker {
 
 impl Wake for TaskWaker {
     fn wake(self: Arc<Self>) {
+        println!(
+            "DEBUG: TaskWaker::wake for {task_id:?}",
+            task_id = self.task_id
+        );
         self.scheduler.lock().schedule(self.task_id, self.priority);
     }
 }
@@ -4039,7 +4052,8 @@ mod tests {
         let harness = crate::lab::SporkAppHarness::with_seed(42, app).unwrap();
         let report = harness.run_to_report().unwrap();
 
-        println!("REPORT JSON: {:#?}", report.to_json());
+        let report_json = report.to_json();
+        println!("REPORT JSON: {report_json:#?}");
 
         // Empty app should pass.
         assert!(report.passed());

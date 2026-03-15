@@ -25,7 +25,6 @@ use asupersync::runtime::{global_alloc_count, yield_now};
 use asupersync::test_logging::TestHarness;
 use asupersync::trace::replayer::TraceReplayer;
 use asupersync::types::{Budget, CancelKind, CancelReason, Outcome, RegionId, TaskId, Time};
-use asupersync::util::ArenaIndex;
 use common::*;
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -41,20 +40,9 @@ fn init_test(test_name: &str) {
 
 /// Create a child region under the given parent.
 fn create_child_region(state: &mut RuntimeState, parent: RegionId) -> RegionId {
-    use asupersync::record::region::RegionRecord;
-    let idx = state.regions.insert(RegionRecord::new(
-        RegionId::from_arena(ArenaIndex::new(0, 0)),
-        Some(parent),
-        Budget::INFINITE,
-    ));
-    let id = RegionId::from_arena(idx);
-    state.region_mut(id).expect("region missing").id = id;
     state
-        .region_mut(parent)
-        .expect("parent missing")
-        .add_child(id)
-        .expect("add child");
-    id
+        .create_child_region(parent, Budget::INFINITE)
+        .expect("create child region")
 }
 
 fn cancel_region(runtime: &mut LabRuntime, region: RegionId, reason: &CancelReason) -> usize {
@@ -230,13 +218,14 @@ fn e2e_cancel_region_drains_tasks() {
 fn e2e_cancellation_storm() {
     init_test("e2e_cancellation_storm");
     let mut runtime = LabRuntime::new(LabConfig::new(999).worker_count(4));
+    let root = runtime.state.create_root_region(Budget::INFINITE);
 
     let n_regions = 20;
     let n_tasks_per_region = 5;
     let total_spawned = Arc::new(AtomicUsize::new(0));
 
     for i in 0..n_regions {
-        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let region = create_child_region(&mut runtime.state, root);
 
         for _ in 0..n_tasks_per_region {
             let ts = total_spawned.clone();
@@ -654,9 +643,10 @@ fn e2e_timer_storm() {
 fn e2e_multiple_regions_all_quiesce() {
     init_test("e2e_multiple_regions_all_quiesce");
     let mut runtime = LabRuntime::new(LabConfig::default());
-    let region_a = runtime.state.create_root_region(Budget::INFINITE);
-    let region_b = runtime.state.create_root_region(Budget::INFINITE);
-    let region_c = runtime.state.create_root_region(Budget::INFINITE);
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    let region_a = create_child_region(&mut runtime.state, root);
+    let region_b = create_child_region(&mut runtime.state, root);
+    let region_c = create_child_region(&mut runtime.state, root);
 
     let order = Arc::new(Mutex::new(Vec::new()));
 
@@ -737,12 +727,13 @@ fn stress_many_tasks_single_region() {
 fn stress_many_regions_few_tasks() {
     init_test("stress_many_regions_few_tasks");
     let mut runtime = LabRuntime::new(LabConfig::new(54321));
+    let root = runtime.state.create_root_region(Budget::INFINITE);
 
     let n_regions = 100;
     let counter = Arc::new(AtomicUsize::new(0));
 
     for _ in 0..n_regions {
-        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let region = create_child_region(&mut runtime.state, root);
 
         let c = counter.clone();
         let (task_id, _) = runtime
@@ -1182,15 +1173,17 @@ fn e2e_complex_workload_quiescence() {
 
     harness.enter_phase("setup");
     let mut runtime = LabRuntime::new(LabConfig::new(7777).worker_count(4));
+    let runtime_root = runtime.state.create_root_region(Budget::INFINITE);
     harness.exit_phase();
 
     harness.enter_phase("spawn_complex_tree");
     let total = Arc::new(AtomicUsize::new(0));
     let expected_tasks = 60;
 
-    // Create 3 root regions, each with 2 children, each with 10 tasks
+    // Create 3 sibling regions under the runtime root, each with 2 children,
+    // each with 10 tasks.
     for _ in 0..3 {
-        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let root = create_child_region(&mut runtime.state, runtime_root);
         for _ in 0..2 {
             let child = create_child_region(&mut runtime.state, root);
             for _ in 0..10 {
@@ -1414,6 +1407,7 @@ fn e2e_concurrent_cancel_reasons() {
 
     test_section!("setup");
     let mut runtime = LabRuntime::new(LabConfig::new(0xCC).worker_count(4));
+    let root = runtime.state.create_root_region(Budget::INFINITE);
     let n_regions = 30;
     let completed = Arc::new(AtomicUsize::new(0));
 
@@ -1429,7 +1423,7 @@ fn e2e_concurrent_cancel_reasons() {
     test_section!("spawn_regions_and_tasks");
     let mut region_ids = Vec::new();
     for _ in 0..n_regions {
-        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let region = create_child_region(&mut runtime.state, root);
         region_ids.push(region);
 
         for _ in 0..3 {
@@ -1483,6 +1477,7 @@ fn e2e_cancel_with_timer_interleave() {
 
     test_section!("setup");
     let mut runtime = LabRuntime::new(LabConfig::new(0xD1_E0).worker_count(2));
+    let root = runtime.state.create_root_region(Budget::INFINITE);
     let completed = Arc::new(AtomicUsize::new(0));
     let cancelled_count = Arc::new(AtomicUsize::new(0));
 
@@ -1491,13 +1486,13 @@ fn e2e_cancel_with_timer_interleave() {
     let tasks_per_wave = 10;
 
     for wave in 0..n_waves {
-        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let wave_region = create_child_region(&mut runtime.state, root);
 
         for _ in 0..tasks_per_wave {
             let c = completed.clone();
             let (task_id, _) = runtime
                 .state
-                .create_task(root, Budget::INFINITE, async move {
+                .create_task(wave_region, Budget::INFINITE, async move {
                     c.fetch_add(1, Ordering::SeqCst);
                 })
                 .expect("create task");
@@ -1511,7 +1506,7 @@ fn e2e_cancel_with_timer_interleave() {
         if wave % 2 == 0 {
             runtime
                 .state
-                .cancel_request(root, &CancelReason::timeout(), None);
+                .cancel_request(wave_region, &CancelReason::timeout(), None);
             cancelled_count.fetch_add(1, Ordering::SeqCst);
             tracing::info!(wave = wave, "cancelled wave");
         }
@@ -1551,13 +1546,14 @@ fn e2e_race_loser_drain() {
 
     test_section!("setup");
     let mut runtime = LabRuntime::new(LabConfig::new(0xEACE).worker_count(4));
+    let root = runtime.state.create_root_region(Budget::INFINITE);
     let winner_completed = Arc::new(AtomicUsize::new(0));
     let n_races = 10;
 
     test_section!("run_races");
     for race_idx in 0..n_races {
-        let region_a = runtime.state.create_root_region(Budget::INFINITE);
-        let region_b = runtime.state.create_root_region(Budget::INFINITE);
+        let region_a = create_child_region(&mut runtime.state, root);
+        let region_b = create_child_region(&mut runtime.state, root);
 
         // Spawn "racer" tasks in both regions
         let w = winner_completed.clone();
@@ -1676,12 +1672,13 @@ fn e2e_deterministic_cancel_storm() {
     let config = LabConfig::new(0x5DEB).worker_count(4);
 
     asupersync::lab::assert_deterministic(config, |runtime| {
+        let root = runtime.state.create_root_region(Budget::INFINITE);
         let n_regions = 15;
         let counter = Arc::new(AtomicUsize::new(0));
 
         for i in 0..n_regions {
-            let root = runtime.state.create_root_region(Budget::INFINITE);
-            let child = create_child_region(&mut runtime.state, root);
+            let region = create_child_region(&mut runtime.state, root);
+            let child = create_child_region(&mut runtime.state, region);
 
             for _ in 0..4 {
                 let c = counter.clone();
@@ -1698,7 +1695,7 @@ fn e2e_deterministic_cancel_storm() {
             if i % 3 == 0 {
                 runtime
                     .state
-                    .cancel_request(root, &CancelReason::user("storm"), None);
+                    .cancel_request(region, &CancelReason::user("storm"), None);
             }
         }
 
