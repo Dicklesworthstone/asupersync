@@ -650,7 +650,10 @@ impl SharedLabHandle {
                 if cx.checkpoint().is_err() {
                     return BTreeSet::new();
                 }
-                crate::time::sleep(cx.now(), std::time::Duration::from_millis(10)).await;
+                let now = cx
+                    .timer_driver()
+                    .map_or_else(crate::time::wall_now, |driver| driver.now());
+                crate::time::sleep(now, std::time::Duration::from_millis(10)).await;
             }
         }
     }
