@@ -18,6 +18,8 @@ use crate::cx::Cx;
 use crate::messaging::kafka::KafkaError;
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -265,6 +267,8 @@ pub struct KafkaConsumer {
     config: ConsumerConfig,
     state: Mutex<ConsumerState>,
     closed: AtomicBool,
+    #[cfg(test)]
+    rebalance_after_open_hook: Mutex<Option<Arc<RebalanceAfterOpenHook>>>,
 }
 
 #[derive(Debug, Default)]
@@ -277,6 +281,23 @@ struct ConsumerState {
     last_revoked_partitions: BTreeSet<(String, i32)>,
 }
 
+#[cfg(test)]
+#[derive(Debug)]
+struct RebalanceAfterOpenHook {
+    arrived: std::sync::Barrier,
+    release: std::sync::Barrier,
+}
+
+#[cfg(test)]
+impl RebalanceAfterOpenHook {
+    fn new() -> Self {
+        Self {
+            arrived: std::sync::Barrier::new(2),
+            release: std::sync::Barrier::new(2),
+        }
+    }
+}
+
 impl KafkaConsumer {
     /// Create a new Kafka consumer.
     pub fn new(config: ConsumerConfig) -> Result<Self, KafkaError> {
@@ -285,7 +306,14 @@ impl KafkaConsumer {
             config,
             state: Mutex::new(ConsumerState::default()),
             closed: AtomicBool::new(false),
+            #[cfg(test)]
+            rebalance_after_open_hook: Mutex::new(None),
         })
+    }
+
+    #[cfg(test)]
+    fn install_rebalance_after_open_hook(&self, hook: Arc<RebalanceAfterOpenHook>) {
+        *self.rebalance_after_open_hook.lock() = Some(hook);
     }
 
     /// Subscribe to a set of topics.
@@ -339,11 +367,23 @@ impl KafkaConsumer {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
         self.ensure_open()?;
 
+        #[cfg(test)]
+        let rebalance_after_open_hook = self.rebalance_after_open_hook.lock().clone();
+        #[cfg(test)]
+        if let Some(hook) = rebalance_after_open_hook {
+            hook.arrived.wait();
+            hook.release.wait();
+        }
+
         let mut normalized = BTreeMap::new();
         // Hold the lock across validation and mutation to prevent TOCTOU
         // races where subscribed_topics could change between validation
         // and the state update below.
         let mut state = self.state.lock();
+        // Re-check closed under lock to prevent TOCTOU race with close().
+        if self.closed.load(Ordering::Acquire) {
+            return Err(KafkaError::Config("consumer is closed".to_string()));
+        }
         if state.subscribed_topics.is_empty() {
             return Err(KafkaError::Config(
                 "consumer has no active topic subscription".to_string(),
@@ -636,6 +676,7 @@ fn validate_partition_number(partition: i32) -> Result<(), KafkaError> {
 mod tests {
     use super::*;
     use crate::test_utils::run_test_with_cx;
+    use std::sync::Arc;
 
     #[test]
     fn test_config_defaults() {
@@ -1078,6 +1119,42 @@ mod tests {
             );
             assert_eq!(consumer.rebalance_generation(), 0);
             assert!(consumer.last_revoked_partitions().is_empty());
+            assert_eq!(consumer.position("orders", 1), None);
+        });
+    }
+
+    #[test]
+    fn consumer_rebalance_rejects_close_race_after_open() {
+        run_test_with_cx(|cx| async move {
+            let consumer = Arc::new(KafkaConsumer::new(ConsumerConfig::default()).unwrap());
+            consumer.subscribe(&cx, &["orders"]).await.unwrap();
+
+            let hook = Arc::new(RebalanceAfterOpenHook::new());
+            consumer.install_rebalance_after_open_hook(Arc::clone(&hook));
+
+            let rebalance_consumer = Arc::clone(&consumer);
+            let rebalance_cx = cx.clone();
+            let handle = std::thread::spawn(move || {
+                futures_lite::future::block_on(
+                    rebalance_consumer
+                        .rebalance(&rebalance_cx, &[TopicPartitionOffset::new("orders", 1, 10)]),
+                )
+            });
+
+            hook.arrived.wait();
+            consumer.closed.store(true, Ordering::Release);
+            hook.release.wait();
+
+            let err = handle
+                .join()
+                .expect("rebalance thread panicked")
+                .unwrap_err();
+            assert!(matches!(err, KafkaError::Config(msg) if msg.contains("closed")));
+            assert_eq!(consumer.rebalance_generation(), 0);
+            assert_eq!(
+                consumer.assigned_partitions(),
+                vec![("orders".to_string(), 0)]
+            );
             assert_eq!(consumer.position("orders", 1), None);
         });
     }
