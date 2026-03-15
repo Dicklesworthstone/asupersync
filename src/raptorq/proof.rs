@@ -95,6 +95,15 @@ fn recovered_source_hash(source: &[Vec<u8>]) -> u64 {
     hasher.finish()
 }
 
+fn received_esi_multiset_hash(mut symbols: Vec<(u32, bool)>) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    symbols.sort_unstable();
+    let mut hasher = DetHasher::default();
+    symbols.hash(&mut hasher);
+    hasher.finish()
+}
+
 // ============================================================================
 // Replay verification
 // ============================================================================
@@ -231,6 +240,13 @@ fn compare_proofs(expected: &DecodeProof, actual: &DecodeProof) -> Result<(), Re
             act_recv.repair_count,
         ));
     }
+    if exp_recv.esi_multiset_hash != act_recv.esi_multiset_hash {
+        return Err(mismatch(
+            "received.esi_multiset_hash",
+            exp_recv.esi_multiset_hash,
+            act_recv.esi_multiset_hash,
+        ));
+    }
     if exp_recv.truncated != act_recv.truncated {
         return Err(mismatch(
             "received.truncated",
@@ -357,6 +373,11 @@ pub struct ReceivedSummary {
     pub source_count: usize,
     /// Number of repair symbols received.
     pub repair_count: usize,
+    /// Deterministic hash of the full received ESI/source multiset.
+    ///
+    /// This binds replay verification to entries that fall outside the bounded
+    /// preview list once `esis` is truncated.
+    pub esi_multiset_hash: u64,
     /// ESIs of received symbols (sorted, truncated to MAX_RECEIVED_SYMBOLS).
     pub esis: Vec<u32>,
     /// True if ESI list was truncated.
@@ -374,6 +395,7 @@ impl ReceivedSummary {
         let mut repair_count = 0;
         let mut total = 0usize;
         let mut esis_heap: BinaryHeap<u32> = BinaryHeap::new();
+        let mut all_symbols: Vec<(u32, bool)> = Vec::new();
 
         for (esi, is_source) in symbols {
             total += 1;
@@ -382,6 +404,7 @@ impl ReceivedSummary {
             } else {
                 repair_count += 1;
             }
+            all_symbols.push((esi, is_source));
             if esis_heap.len() < MAX_RECEIVED_SYMBOLS {
                 esis_heap.push(esi);
                 continue;
@@ -395,12 +418,14 @@ impl ReceivedSummary {
         }
 
         let truncated = total > MAX_RECEIVED_SYMBOLS;
+        let esi_multiset_hash = received_esi_multiset_hash(all_symbols);
         let mut esis = esis_heap.into_vec();
         esis.sort_unstable();
         Self {
             total,
             source_count,
             repair_count,
+            esi_multiset_hash,
             esis,
             truncated,
         }
@@ -766,6 +791,7 @@ mod tests {
             total: 15,
             source_count: 10,
             repair_count: 5,
+            esi_multiset_hash: 123,
             esis: (0..15).collect(),
             truncated: false,
         });
@@ -796,6 +822,7 @@ mod tests {
             total: 5,
             source_count: 5,
             repair_count: 0,
+            esi_multiset_hash: 456,
             esis: (0..5).collect(),
             truncated: false,
         });
@@ -828,6 +855,31 @@ mod tests {
     }
 
     #[test]
+    fn received_summary_hash_changes_when_high_esis_change_beyond_preview() {
+        let total = MAX_RECEIVED_SYMBOLS as u32 + 8;
+        let original = ReceivedSummary::from_received((0..total).map(|esi| (esi, esi < 8)));
+        let mutated = ReceivedSummary::from_received(
+            (0..(total - 1))
+                .map(|esi| (esi, esi < 8))
+                .chain(std::iter::once((u32::MAX - 7, false))),
+        );
+
+        assert_eq!(original.total, mutated.total);
+        assert_eq!(original.source_count, mutated.source_count);
+        assert_eq!(original.repair_count, mutated.repair_count);
+        assert_eq!(
+            original.esis, mutated.esis,
+            "preview ESIs should stay identical when only higher truncated ESIs differ"
+        );
+        assert!(original.truncated);
+        assert!(mutated.truncated);
+        assert_ne!(
+            original.esi_multiset_hash, mutated.esi_multiset_hash,
+            "full multiset hash must distinguish divergence beyond the preview window"
+        );
+    }
+
+    #[test]
     fn content_hash_deterministic() {
         let config = make_test_config();
         let recovered = make_test_recovered(&config);
@@ -839,6 +891,7 @@ mod tests {
                 total: 15,
                 source_count: 10,
                 repair_count: 5,
+                esi_multiset_hash: 999,
                 esis: (0..15).collect(),
                 truncated: false,
             });
@@ -911,6 +964,7 @@ mod tests {
             total: 10,
             source_count: 7,
             repair_count: 3,
+            esi_multiset_hash: 789,
             esis: vec![0, 1, 2],
             truncated: false,
         };
@@ -1115,6 +1169,7 @@ mod tests {
             total: 10,
             source_count: 10,
             repair_count: 0,
+            esi_multiset_hash: 321,
             esis: (0..10).collect(),
             truncated: false,
         });
@@ -1254,5 +1309,79 @@ mod tests {
             .replay_and_verify(&mutated_received)
             .expect_err("payload-divergent replay must fail verification");
         assert!(err.to_string().contains("source_payload_hash"));
+    }
+
+    #[test]
+    fn replay_verification_rejects_high_esi_divergence_when_received_preview_truncates() {
+        let k = 8;
+        let symbol_size = 32;
+        let seed = 321u64;
+        let repair_count = MAX_RECEIVED_SYMBOLS as u32 + 32;
+
+        let source: Vec<Vec<u8>> = (0..k)
+            .map(|i| {
+                (0..symbol_size)
+                    .map(|j| ((i * 37 + j * 17 + 9) % 256) as u8)
+                    .collect()
+            })
+            .collect();
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+        let mut original_received = decoder.constraint_symbols();
+        for (i, data) in source.iter().enumerate() {
+            original_received.push(ReceivedSymbol::source(i as u32, data.clone()));
+        }
+        for offset in 0..repair_count {
+            let esi = k as u32 + offset;
+            let (cols, coefs) = decoder.repair_equation(esi);
+            let repair_data = encoder.repair_symbol(esi);
+            original_received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        let mut mutated_received = original_received.clone();
+        let replaced_esi = k as u32 + repair_count - 1;
+        let replacement_esi = replaced_esi + 10_000;
+        let (replacement_cols, replacement_coefs) = decoder.repair_equation(replacement_esi);
+        let replacement_data = encoder.repair_symbol(replacement_esi);
+        let replacement = ReceivedSymbol::repair(
+            replacement_esi,
+            replacement_cols,
+            replacement_coefs,
+            replacement_data,
+        );
+        let replaced_symbol = mutated_received
+            .last_mut()
+            .expect("repair-heavy test input must contain a trailing repair symbol");
+        assert_eq!(replaced_symbol.esi, replaced_esi);
+        *replaced_symbol = replacement;
+
+        let object_id = ObjectId::new_for_test(9090);
+        let proof = decoder
+            .decode_with_proof(&original_received, object_id, 0)
+            .expect("original decode should succeed")
+            .proof;
+        let mutated_result = decoder
+            .decode_with_proof(&mutated_received, object_id, 0)
+            .expect("mutated decode should still succeed with enough symbols");
+        assert_eq!(mutated_result.result.source, source);
+
+        let original_summary =
+            ReceivedSummary::from_received(original_received.iter().map(|s| (s.esi, s.is_source)));
+        let mutated_summary =
+            ReceivedSummary::from_received(mutated_received.iter().map(|s| (s.esi, s.is_source)));
+        assert_eq!(
+            original_summary.esis, mutated_summary.esis,
+            "preview ESIs should not expose the high-ESI divergence"
+        );
+        assert_ne!(
+            original_summary.esi_multiset_hash, mutated_summary.esi_multiset_hash,
+            "full multiset binding must distinguish the mutated higher ESI"
+        );
+
+        let err = proof
+            .replay_and_verify(&mutated_received)
+            .expect_err("truncated received-summary replay must reject higher-ESI divergence");
+        assert!(err.to_string().contains("received.esi_multiset_hash"));
     }
 }
