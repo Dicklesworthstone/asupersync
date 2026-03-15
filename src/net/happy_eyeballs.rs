@@ -173,7 +173,7 @@ pub(crate) async fn connect_with_time_getter(
 
     // Single address: skip the racing machinery entirely
     if addrs.len() == 1 {
-        return connect_one(addrs[0], config.connect_timeout, time_getter).await;
+        return connect_single(addrs[0], config, time_getter).await;
     }
 
     // Sort addresses: interleave IPv6 and IPv4 while preserving each
@@ -182,6 +182,57 @@ pub(crate) async fn connect_with_time_getter(
 
     // Race connections with staggered starts
     connect_racing(&sorted_addrs, config, time_getter).await
+}
+
+async fn connect_single(
+    addr: SocketAddr,
+    config: &HappyEyeballsConfig,
+    time_getter: fn() -> Time,
+) -> io::Result<TcpStream> {
+    connect_single_with_connector(
+        addr,
+        config.connect_timeout,
+        config.overall_timeout,
+        time_getter,
+        connect_one,
+    )
+    .await
+}
+
+async fn connect_single_with_connector<Fut, Connector>(
+    addr: SocketAddr,
+    connect_timeout: Duration,
+    overall_timeout: Duration,
+    time_getter: fn() -> Time,
+    connector: Connector,
+) -> io::Result<TcpStream>
+where
+    Fut: Future<Output = io::Result<TcpStream>> + 'static,
+    Connector: FnOnce(SocketAddr, Duration, fn() -> Time) -> Fut,
+{
+    if overall_timeout.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            OVERALL_CONNECTION_TIMEOUT_MSG,
+        ));
+    }
+
+    let overall_deadline =
+        time_getter().saturating_add_nanos(duration_to_nanos_saturating(overall_timeout));
+
+    match future_with_timeout(
+        Box::pin(connector(addr, connect_timeout, time_getter)),
+        overall_deadline,
+        time_getter,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_elapsed) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            OVERALL_CONNECTION_TIMEOUT_MSG,
+        )),
+    }
 }
 
 /// Races connection attempts with staggered starts.
@@ -262,6 +313,7 @@ fn compute_stagger_delay(config: &HappyEyeballsConfig, index: usize) -> Duration
 type ConnectFuture = Pin<Box<dyn Future<Output = io::Result<TcpStream>> + Send>>;
 const RACE_CONNECTIONS_POLLED_AFTER_COMPLETION: &str =
     "Happy Eyeballs RaceConnections polled after completion";
+const OVERALL_CONNECTION_TIMEOUT_MSG: &str = "Happy Eyeballs: overall connection timeout";
 
 /// Future that races multiple connection attempts, returning the first success.
 ///
@@ -319,10 +371,7 @@ impl RaceConnections {
         // Check overall timeout first
         if self.timeout_sleep.poll_with_time(now).is_ready() {
             let err = self.last_error.take().unwrap_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "Happy Eyeballs: overall connection timeout",
-                )
+                io::Error::new(io::ErrorKind::TimedOut, OVERALL_CONNECTION_TIMEOUT_MSG)
             });
             return self.finish(Err(err));
         }
@@ -395,10 +444,7 @@ impl Future for RaceConnections {
             // because Sleep::poll does not register a waker when it returns Ready.
             if Pin::new(&mut this.timeout_sleep).poll(cx).is_ready() {
                 let err = this.last_error.take().unwrap_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "Happy Eyeballs: overall connection timeout",
-                    )
+                    io::Error::new(io::ErrorKind::TimedOut, OVERALL_CONNECTION_TIMEOUT_MSG)
                 });
                 return this.finish(Err(err));
             }
@@ -841,6 +887,49 @@ mod tests {
             Poll::Ready(Err(_))
         ));
         crate::test_complete!("future_with_timeout_honors_custom_clock");
+    }
+
+    #[test]
+    fn single_address_fast_path_honors_overall_timeout() {
+        static TEST_NOW: AtomicU64 = AtomicU64::new(0);
+
+        fn test_time() -> Time {
+            Time::from_nanos(TEST_NOW.load(Ordering::SeqCst))
+        }
+
+        async fn pending_connector(
+            _addr: SocketAddr,
+            _timeout: Duration,
+            _time_getter: fn() -> Time,
+        ) -> io::Result<TcpStream> {
+            pending::<io::Result<TcpStream>>().await
+        }
+
+        init_test("single_address_fast_path_honors_overall_timeout");
+
+        TEST_NOW.store(1_000, Ordering::SeqCst);
+        let addr: SocketAddr = "127.0.0.1:80".parse().unwrap();
+        let mut future = Box::pin(connect_single_with_connector(
+            addr,
+            Duration::from_secs(5),
+            Duration::from_nanos(500),
+            test_time,
+            pending_connector,
+        ));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(Future::poll(future.as_mut(), &mut cx).is_pending());
+
+        TEST_NOW.store(2_000, Ordering::SeqCst);
+        let result = Future::poll(future.as_mut(), &mut cx);
+        assert!(matches!(
+            result,
+            Poll::Ready(Err(err))
+                if err.kind() == io::ErrorKind::TimedOut
+                    && err.to_string() == OVERALL_CONNECTION_TIMEOUT_MSG
+        ));
+        crate::test_complete!("single_address_fast_path_honors_overall_timeout");
     }
 
     // =======================================================================
