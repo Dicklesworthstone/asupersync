@@ -12,8 +12,11 @@
 [![License: MIT+Rider](https://img.shields.io/badge/License-MIT%2BOpenAI%2FAnthropic%20Rider-blue.svg)](./LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-nightly-orange.svg)](https://www.rust-lang.org/)
 [![Status: Active Development](https://img.shields.io/badge/Status-Active%20Development-brightgreen)](https://github.com/Dicklesworthstone/asupersync)
+[![Live Demo](https://img.shields.io/badge/Live_Demo-WASM_Interactive-blueviolet)](https://dicklesworthstone.github.io/asupersync/asupersync_web_demo.html)
 
 **Spec-first, cancel-correct, capability-secure async for Rust**
+
+<h3><a href="https://dicklesworthstone.github.io/asupersync/asupersync_web_demo.html">Try the Live Interactive WASM Demo</a></h3>
 
 <h3>Quick Install</h3>
 
@@ -1327,9 +1330,17 @@ applications via `wasm-bindgen`.
   The shipped direct-runtime lane today supports a real browser
   `window` + `document` + `WebAssembly` environment and dedicated workers when
   the required worker Web APIs are present.
+- **Capability-gated browser transports**: shipped browser networking uses
+  `fetch`, `WebSocket`, and an explicit WebTransport datagram lane when the
+  host exposes `globalThis.WebTransport` over HTTPS.
 - **Framework adapters on the browser main thread**: `@asupersync/react` and
   `@asupersync/next` remain client-rendered browser adapters layered on top of
   the same Browser Edition runtime boundary.
+- **Rust repo/browser-build surface**: `asupersync` supports the
+  canonical `wasm-browser-*` profile set, and the repository ships
+  `asupersync-browser-core` plus `asupersync-wasm` for the JS ABI/package
+  boundary. That is real Rust-side browser infrastructure, but it is not yet a
+  stable external Rust consumer runtime lane.
 - **Core invariants preserved**: no orphan tasks, cancel-correctness,
   obligation accounting, and region-close-implies-quiescence all hold in
   the browser runtime.
@@ -1338,10 +1349,12 @@ applications via `wasm-bindgen`.
 
 ### What does not work yet
 
-- **Rust-to-WASM compilation**: writing async Rust code that uses
-  Asupersync's `Cx`/scopes/combinators and compiling it to wasm32 is
-  architecturally feasible (the semantic core is target-agnostic) but
-  is not yet promoted as a supported public API lane.
+- **Public Rust-authored Browser Edition runtime lane**: external Rust
+  consumers do not yet have a supported browser-runtime bootstrap API.
+  Today the Rust-facing wasm support is limited to semantic-core/browser-profile
+  validation plus the internal binding crates
+  (`asupersync-browser-core`, `asupersync-wasm`) that feed the shipped JS/TS
+  packages.
 - **Service worker / shared worker direct runtime**: the shipped browser
   package does not expose these as direct-runtime lanes yet. Keep them on
   explicit message/data boundaries until a worker-specific host contract is
@@ -1351,14 +1364,14 @@ applications via `wasm-bindgen`.
   but this requires cross-origin isolation headers that many deployments
   cannot enable.
 - **Raw TCP/UDP, filesystem, process/signal**: these native-only surfaces
-  are `cfg`-gated out on `wasm32`. Browser networking uses `fetch` and
-  `WebSocket` APIs instead.
+  are `cfg`-gated out on `wasm32`. Browser networking uses `fetch`,
+  `WebSocket`, and capability-gated `WebTransport` datagrams instead.
 
 ### Quick start
 
 ```bash
 rustup target add wasm32-unknown-unknown
-# Verify the core compiles for browser
+# Verify the semantic core closes under a browser profile
 cargo check --target wasm32-unknown-unknown \
   --no-default-features --features wasm-browser-dev
 ```
@@ -1369,7 +1382,8 @@ cargo check --target wasm32-unknown-unknown \
 ```
 
 See [`docs/WASM.md`](./docs/WASM.md) for the full Browser Edition guide,
-architecture diagrams, crate map, and known limitations.
+architecture diagrams, crate map, the current Rust-authored browser contract,
+and known limitations.
 
 ---
 
@@ -1391,7 +1405,7 @@ architecture diagrams, crate map, and known limitations.
 | Formal methods (Lean coverage artifacts + TLA+ export) | ✅ Implemented |
 | Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread and dedicated-worker consumers (single-threaded, event-loop-driven) |
 | Service worker / shared worker direct runtime | Deferred; not yet shipped |
-| Rust-to-WASM compilation path | Feasible, but not yet a public supported lane |
+| Rust-to-WASM compilation path | Feasible, but not yet a public supported lane; current Rust support is profile validation plus binding/package infrastructure |
 
 ### What Asupersync Doesn't Do
 
@@ -1464,8 +1478,8 @@ Open an issue at https://github.com/Dicklesworthstone/asupersync/issues
 | [`asupersync_v4_formal_semantics.md`](./asupersync_v4_formal_semantics.md) | **Operational Semantics**: Small-step rules, TLA+ sketch |
 | [`asupersync_v4_api_skeleton.rs`](./asupersync_v4_api_skeleton.rs) | **API Skeleton**: Rust types and signatures |
 | [`docs/integration.md`](./docs/integration.md) | **Integration Docs**: Architecture, API orientation, tutorials, Browser Edition docs IA/navigation contract, support matrix, and fail-closed boundary guidance |
-| [`docs/WASM.md`](./docs/WASM.md) | **Browser Edition Overview**: what works today (browser main thread + dedicated-worker `@asupersync/browser`), what remains deferred (service/shared worker direct runtime, Rust-to-WASM public lane), architectural boundary, runtime model, known limitations, and future phases |
-| [`docs/wasm_quickstart_migration.md`](./docs/wasm_quickstart_migration.md) | **Browser Quickstart + Migration**: deterministic onboarding commands, migration anti-pattern map, deferred-surface fallback guidance |
+| [`docs/WASM.md`](./docs/WASM.md) | **Browser Edition Overview**: what works today (browser main thread + dedicated-worker `@asupersync/browser`), what remains deferred (service/shared worker direct runtime, Rust-to-WASM public lane), architectural boundary, current Rust-authored browser contract, runtime model, known limitations, and future phases |
+| [`docs/wasm_quickstart_migration.md`](./docs/wasm_quickstart_migration.md) | **Browser Quickstart + Migration**: deterministic onboarding commands, Rust-authored browser status snapshot, migration anti-pattern map, and deferred-surface fallback guidance |
 | [`docs/wasm_canonical_examples.md`](./docs/wasm_canonical_examples.md) | **Browser Canonical Examples**: vanilla/TypeScript/React/Next scenario catalog with deterministic repro commands and artifact pointers |
 | [`docs/wasm_troubleshooting_compendium.md`](./docs/wasm_troubleshooting_compendium.md) | **Browser Troubleshooting Cookbook**: unsupported-runtime recovery paths, failure recipes, and deterministic verification commands |
 | [`docs/wasm_dx_error_taxonomy.md`](./docs/wasm_dx_error_taxonomy.md) | **Browser DX Error Taxonomy**: package error codes, diagnostics fields, recoverability classes, and actionable guidance |
