@@ -298,7 +298,8 @@ impl TraceMonoid {
     /// Exact trace equivalence check via structural comparison of Foata layers.
     ///
     /// This is more expensive than [`Self::equivalent`] but has no false positives.
-    /// Compares layer-by-layer using deterministic event sort keys.
+    /// Compares semantic event payloads layer-by-layer while still ignoring
+    /// non-semantic envelope fields such as sequence numbers and timestamps.
     #[must_use]
     pub fn equivalent_exact(&self, other: &Self) -> bool {
         if self.canonical.depth() != other.canonical.depth() {
@@ -314,7 +315,7 @@ impl TraceMonoid {
                 return false;
             }
             for (ea, eb) in la.iter().zip(lb.iter()) {
-                if event_sort_key(ea) != event_sort_key(eb) {
+                if !semantically_equal_event(ea, eb) {
                     return false;
                 }
             }
@@ -594,6 +595,11 @@ fn event_cmp(a: &TraceEvent, b: &TraceEvent) -> Ordering {
     event_sort_key(a).cmp(&event_sort_key(b))
 }
 
+/// Equality on the semantic content of a trace event.
+fn semantically_equal_event(a: &TraceEvent, b: &TraceEvent) -> bool {
+    a.version == b.version && a.kind == b.kind && a.data == b.data
+}
+
 /// Hash key for fingerprinting. Must agree with `event_sort_key` ordering:
 /// events with the same sort key produce the same hash key.
 fn event_hash_key(event: &TraceEvent) -> (u8, u64, u64, u64) {
@@ -605,7 +611,7 @@ mod tests {
     use super::*;
     use crate::monitor::DownReason;
     use crate::record::ObligationKind;
-    use crate::types::{ObligationId, RegionId, TaskId, Time};
+    use crate::types::{CancelReason, ObligationId, RegionId, TaskId, Time};
 
     fn tid(n: u32) -> TaskId {
         TaskId::new_for_test(n, 0)
@@ -1097,6 +1103,29 @@ mod tests {
         // Fingerprint-only equivalence says "equal", but PartialEq must remain exact.
         assert!(ma.equivalent(&spoof));
         assert_ne!(ma, spoof);
+    }
+
+    #[test]
+    fn exact_equivalence_distinguishes_region_cancel_reason_payload() {
+        let trace_a = [TraceEvent::region_cancelled(
+            1,
+            Time::ZERO,
+            rid(1),
+            CancelReason::shutdown(),
+        )];
+        let trace_b = [TraceEvent::region_cancelled(
+            1,
+            Time::ZERO,
+            rid(1),
+            CancelReason::timeout(),
+        )];
+
+        let ma = TraceMonoid::from_events(&trace_a);
+        let mb = TraceMonoid::from_events(&trace_b);
+
+        assert!(ma.equivalent(&mb));
+        assert!(!ma.equivalent_exact(&mb));
+        assert_ne!(ma, mb);
     }
 
     #[test]
