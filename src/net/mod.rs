@@ -51,6 +51,8 @@ mod udp;
 pub mod unix;
 /// WebSocket protocol implementation (RFC 6455).
 pub mod websocket;
+/// MessagePort-based coordination utilities for browser worker runtimes.
+pub mod worker_channel;
 
 pub use happy_eyeballs::{HappyEyeballsConfig, connect as happy_eyeballs_connect};
 #[cfg(all(feature = "quic-compat", not(feature = "quic")))]
