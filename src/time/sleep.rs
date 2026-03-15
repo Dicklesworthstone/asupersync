@@ -369,6 +369,13 @@ impl Sleep {
         self.time_getter.map_or_else(wall_now, |getter| getter())
     }
 
+    /// Returns whether this sleep uses a custom time source.
+    #[inline]
+    #[must_use]
+    pub const fn has_custom_time_getter(&self) -> bool {
+        self.time_getter.is_some()
+    }
+
     /// Polls this sleep with an explicit time value.
     ///
     /// This is useful when you want to control the time source manually

@@ -326,8 +326,17 @@ impl<F> TimeoutFuture<F> {
                         if sleep.poll_with_time(now).is_ready() {
                             Poll::Ready(Err(TimeoutError::Elapsed(Elapsed::new(sleep.deadline()))))
                         } else {
-                            // Register the waker with the underlying sleep future
-                            let _ = Pin::new(&mut sleep).poll(cx);
+                            // Preserve wake registration only when the sleep
+                            // uses the same time source as the explicit `now`
+                            // or an ambient timer driver is available. Falling
+                            // back to wall clock here can spuriously expire a
+                            // manual-time poll.
+                            let has_ambient_timer = crate::cx::Cx::current()
+                                .and_then(|current| current.timer_driver())
+                                .is_some();
+                            if time_getter.is_some() || has_ambient_timer {
+                                let _ = Pin::new(&mut sleep).poll(cx);
+                            }
                             self.state = TimeoutFutureState::Running {
                                 inner,
                                 sleep,

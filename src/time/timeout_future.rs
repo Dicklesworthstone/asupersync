@@ -216,15 +216,25 @@ impl<F: Future + Unpin> TimeoutFuture<F> {
             return Poll::Ready(Err(Elapsed::new(self.sleep.deadline())));
         }
 
-        // Register the waker with the underlying sleep future
-        match Pin::new(&mut self.sleep).poll(cx) {
-            Poll::Ready(()) => {
-                self.completed = true;
-                self.timed_out = true;
-                Poll::Ready(Err(Elapsed::new(self.sleep.deadline())))
+        // Preserve wake registration only when the underlying sleep can use
+        // the same time domain as the explicit `now`. Falling back to a
+        // wall-clock sleep here makes manual/virtual-time polls observe an
+        // unrelated clock and can spuriously expire after long test suites.
+        let has_ambient_timer = crate::cx::Cx::current()
+            .and_then(|current| current.timer_driver())
+            .is_some();
+        if self.sleep.has_custom_time_getter() || has_ambient_timer {
+            match Pin::new(&mut self.sleep).poll(cx) {
+                Poll::Ready(()) => {
+                    self.completed = true;
+                    self.timed_out = true;
+                    return Poll::Ready(Err(Elapsed::new(self.sleep.deadline())));
+                }
+                Poll::Pending => {}
             }
-            Poll::Pending => Poll::Pending,
         }
+
+        Poll::Pending
     }
 }
 
@@ -639,11 +649,12 @@ mod tests {
 
     #[test]
     fn poll_with_time_returns_elapsed_after_timeout_until_reset() {
+        set_current_time(0);
         let future = CountingFuture {
             count: 0,
             ready_at: 3,
         };
-        let mut t = TimeoutFuture::new(future, Time::from_secs(5));
+        let mut t = TimeoutFuture::with_time_getter(future, Time::from_secs(5), test_now);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
@@ -738,9 +749,10 @@ mod tests {
     #[test]
     fn simulated_timeout_scenario() {
         init_test("simulated_timeout_scenario");
+        set_current_time(0);
         // Simulate a scenario where we poll multiple times as time advances
 
-        let mut t = TimeoutFuture::new(pending::<i32>(), Time::from_secs(5));
+        let mut t = TimeoutFuture::with_time_getter(pending::<i32>(), Time::from_secs(5), test_now);
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
