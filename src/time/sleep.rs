@@ -313,8 +313,7 @@ impl Sleep {
             let trace = Cx::current().and_then(|current| current.trace_buffer());
             if let Some(trace) = trace.as_ref() {
                 let now = driver.now();
-                let seq = trace.next_seq();
-                trace.push_event(TraceEvent::timer_cancelled(seq, now, handle.id()));
+                trace.record_event(|seq| TraceEvent::timer_cancelled(seq, now, handle.id()));
             }
             let _ = driver.cancel(&handle);
         }
@@ -351,8 +350,7 @@ impl Sleep {
             let trace = Cx::current().and_then(|current| current.trace_buffer());
             if let Some(trace) = trace.as_ref() {
                 let now = driver.now();
-                let seq = trace.next_seq();
-                trace.push_event(TraceEvent::timer_cancelled(seq, now, handle.id()));
+                trace.record_event(|seq| TraceEvent::timer_cancelled(seq, now, handle.id()));
             }
             let _ = driver.cancel(&handle);
         }
@@ -426,8 +424,7 @@ impl Future for Sleep {
                 };
                 if let Some(handle) = handle {
                     if let Some(trace) = trace.as_ref() {
-                        let seq = trace.next_seq();
-                        trace.push_event(TraceEvent::timer_fired(seq, now, handle.id()));
+                        trace.record_event(|seq| TraceEvent::timer_fired(seq, now, handle.id()));
                     }
                     if let Some(driver) = driver.or_else(|| timer_driver.clone()) {
                         let _ = driver.cancel(&handle);
@@ -470,12 +467,9 @@ impl Future for Sleep {
                         let old_handle = state.timer_handle.take();
                         if let (Some(prev_driver), Some(handle)) = (old_driver, old_handle) {
                             if let Some(trace) = trace.as_ref() {
-                                let seq = trace.next_seq();
-                                trace.push_event(TraceEvent::timer_cancelled(
-                                    seq,
-                                    prev_driver.now(),
-                                    handle.id(),
-                                ));
+                                trace.record_event(|seq| {
+                                    TraceEvent::timer_cancelled(seq, prev_driver.now(), handle.id())
+                                });
                             }
                             let _ = prev_driver.cancel(&handle);
                         }
@@ -489,13 +483,9 @@ impl Future for Sleep {
                         // Register new timer
                         let handle = timer.register(self.deadline, cx.waker().clone());
                         if let Some(trace) = trace.as_ref() {
-                            let seq = trace.next_seq();
-                            trace.push_event(TraceEvent::timer_scheduled(
-                                seq,
-                                now,
-                                handle.id(),
-                                self.deadline,
-                            ));
+                            trace.record_event(|seq| {
+                                TraceEvent::timer_scheduled(seq, now, handle.id(), self.deadline)
+                            });
                         }
                         state.timer_handle = Some(handle);
                     } else if waker_changed {
@@ -505,15 +495,17 @@ impl Future for Sleep {
                             let new_handle =
                                 timer.update(&handle, self.deadline, cx.waker().clone());
                             if let Some(trace) = trace.as_ref() {
-                                let seq = trace.next_seq();
-                                trace.push_event(TraceEvent::timer_cancelled(seq, now, old_id));
-                                let seq = trace.next_seq();
-                                trace.push_event(TraceEvent::timer_scheduled(
-                                    seq,
-                                    now,
-                                    new_handle.id(),
-                                    self.deadline,
-                                ));
+                                trace.record_event(|seq| {
+                                    TraceEvent::timer_cancelled(seq, now, old_id)
+                                });
+                                trace.record_event(|seq| {
+                                    TraceEvent::timer_scheduled(
+                                        seq,
+                                        now,
+                                        new_handle.id(),
+                                        self.deadline,
+                                    )
+                                });
                             }
                             state.timer_handle = Some(new_handle);
                         }
@@ -523,12 +515,13 @@ impl Future for Sleep {
                     if let Some(prev_driver) = state.timer_driver.take() {
                         if let Some(old_handle) = state.timer_handle.take() {
                             if let Some(trace) = trace.as_ref() {
-                                let seq = trace.next_seq();
-                                trace.push_event(TraceEvent::timer_cancelled(
-                                    seq,
-                                    prev_driver.now(),
-                                    old_handle.id(),
-                                ));
+                                trace.record_event(|seq| {
+                                    TraceEvent::timer_cancelled(
+                                        seq,
+                                        prev_driver.now(),
+                                        old_handle.id(),
+                                    )
+                                });
                             }
                             let _ = prev_driver.cancel(&old_handle);
                         }
@@ -619,8 +612,7 @@ impl Drop for Sleep {
             let trace = Cx::current().and_then(|current| current.trace_buffer());
             if let Some(trace) = trace.as_ref() {
                 let now = driver.now();
-                let seq = trace.next_seq();
-                trace.push_event(TraceEvent::timer_cancelled(seq, now, handle.id()));
+                trace.record_event(|seq| TraceEvent::timer_cancelled(seq, now, handle.id()));
             }
             let _ = driver.cancel(&handle);
         }

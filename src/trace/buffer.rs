@@ -134,17 +134,43 @@ impl TraceBufferHandle {
     }
 
     /// Allocates and returns the next trace sequence number.
+    ///
+    /// Callers that are about to push onto this shared handle should prefer
+    /// [`record_event`](Self::record_event) so sequence allocation and buffer
+    /// insertion cannot be interleaved by another producer.
     #[must_use]
     pub fn next_seq(&self) -> u64 {
         self.inner.next_seq.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Pushes a trace event into the buffer.
+    /// Pushes a pre-built trace event into the buffer.
+    ///
+    /// This preserves the event's existing sequence number. Callers that need
+    /// a fresh sequence number from this handle should prefer
+    /// [`record_event`](Self::record_event).
     pub fn push_event(&self, event: TraceEvent) {
         {
             let mut buffer = self.inner.buffer.lock();
             buffer.push(event);
         }
+        self.inner.total_pushed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Builds and pushes a trace event while holding the buffer lock.
+    ///
+    /// This keeps sequence allocation and insertion serialized so concurrent
+    /// producers cannot insert seq `N + 1` ahead of seq `N`.
+    ///
+    /// The builder runs while the buffer lock is held, so it should stay
+    /// lightweight and must not re-enter the same trace handle.
+    pub fn record_event<F>(&self, build: F)
+    where
+        F: FnOnce(u64) -> TraceEvent,
+    {
+        let mut buffer = self.inner.buffer.lock();
+        let seq = self.inner.next_seq.fetch_add(1, Ordering::Relaxed);
+        buffer.push(build(seq));
+        drop(buffer);
         self.inner.total_pushed.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -356,5 +382,41 @@ mod tests {
         assert_eq!(snap.len(), 2);
         assert_eq!(snap[0].seq, 2);
         assert_eq!(snap[1].seq, 3);
+    }
+
+    #[test]
+    fn trace_buffer_handle_record_event_serializes_seq_and_insertion() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::thread;
+        use std::time::Duration;
+
+        let handle = Arc::new(TraceBufferHandle::new(8));
+        let slow_started = Arc::new(AtomicBool::new(false));
+
+        let slow_handle = Arc::clone(&handle);
+        let slow_started_flag = Arc::clone(&slow_started);
+        let slow = thread::spawn(move || {
+            slow_handle.record_event(|seq| {
+                slow_started_flag.store(true, Ordering::Release);
+                thread::sleep(Duration::from_millis(25));
+                make_event(seq)
+            });
+        });
+
+        while !slow_started.load(Ordering::Acquire) {
+            thread::yield_now();
+        }
+
+        let fast_handle = Arc::clone(&handle);
+        let fast = thread::spawn(move || {
+            fast_handle.record_event(make_event);
+        });
+
+        slow.join().expect("slow trace recorder thread");
+        fast.join().expect("fast trace recorder thread");
+
+        let seqs: Vec<_> = handle.snapshot().iter().map(|event| event.seq).collect();
+        assert_eq!(seqs, vec![0, 1]);
     }
 }

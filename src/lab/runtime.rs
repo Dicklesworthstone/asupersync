@@ -1712,21 +1712,13 @@ impl LabRuntime {
             let token = event.token.0;
             let interest = interest.unwrap_or(event.ready);
             if seen.insert(token) {
-                let seq = state.next_trace_seq();
-                state.trace.push_event(TraceEvent::io_requested(
-                    seq,
-                    now,
-                    token as u64,
-                    interest.bits(),
-                ));
+                state.record_trace_event(|seq| {
+                    TraceEvent::io_requested(seq, now, token as u64, interest.bits())
+                });
             }
-            let seq = state.next_trace_seq();
-            state.trace.push_event(TraceEvent::io_ready(
-                seq,
-                now,
-                token as u64,
-                event.ready.bits(),
-            ));
+            state.record_trace_event(|seq| {
+                TraceEvent::io_ready(seq, now, token as u64, event.ready.bits())
+            });
             recorder.record_io_ready(
                 token as u64,
                 event.is_readable(),
@@ -1909,17 +1901,18 @@ impl LabRuntime {
         }
 
         // Emit trace event
-        let seq = self.state.next_trace_seq();
-        self.state.trace.push_event(TraceEvent::new(
-            seq,
-            self.virtual_time,
-            TraceEventKind::ChaosInjection,
-            TraceData::Chaos {
-                kind: "cancel".to_string(),
-                task: Some(task_id),
-                detail: "chaos-injected cancellation".to_string(),
-            },
-        ));
+        self.state.record_trace_event(|seq| {
+            TraceEvent::new(
+                seq,
+                self.virtual_time,
+                TraceEventKind::ChaosInjection,
+                TraceData::Chaos {
+                    kind: "cancel".to_string(),
+                    task: Some(task_id),
+                    detail: "chaos-injected cancellation".to_string(),
+                },
+            )
+        });
     }
 
     /// Injects budget exhaustion for a task.
@@ -1938,17 +1931,18 @@ impl LabRuntime {
         }
 
         // Emit trace event
-        let seq = self.state.next_trace_seq();
-        self.state.trace.push_event(TraceEvent::new(
-            seq,
-            self.virtual_time,
-            TraceEventKind::ChaosInjection,
-            TraceData::Chaos {
-                kind: "budget_exhaust".to_string(),
-                task: Some(task_id),
-                detail: "chaos-injected budget exhaustion".to_string(),
-            },
-        ));
+        self.state.record_trace_event(|seq| {
+            TraceEvent::new(
+                seq,
+                self.virtual_time,
+                TraceEventKind::ChaosInjection,
+                TraceData::Chaos {
+                    kind: "budget_exhaust".to_string(),
+                    task: Some(task_id),
+                    detail: "chaos-injected budget exhaustion".to_string(),
+                },
+            )
+        });
     }
 
     /// Injects spurious wakeups for a task.
@@ -1963,17 +1957,18 @@ impl LabRuntime {
         drop(sched);
 
         // Emit trace event
-        let seq = self.state.next_trace_seq();
-        self.state.trace.push_event(TraceEvent::new(
-            seq,
-            self.virtual_time,
-            TraceEventKind::ChaosInjection,
-            TraceData::Chaos {
-                kind: "wakeup_storm".to_string(),
-                task: Some(task_id),
-                detail: format!("chaos-injected {count} spurious wakeups"),
-            },
-        ));
+        self.state.record_trace_event(|seq| {
+            TraceEvent::new(
+                seq,
+                self.virtual_time,
+                TraceEventKind::ChaosInjection,
+                TraceData::Chaos {
+                    kind: "wakeup_storm".to_string(),
+                    task: Some(task_id),
+                    detail: format!("chaos-injected {count} spurious wakeups"),
+                },
+            )
+        });
     }
 
     /// Public wrapper for `step()` for use in tests.
@@ -2138,18 +2133,19 @@ impl LabRuntime {
                 }
             }
 
-            let seq = self.state.next_trace_seq();
-            self.state.trace.push_event(TraceEvent::new(
-                seq,
-                self.virtual_time,
-                TraceEventKind::FuturelockDetected,
-                TraceData::Futurelock {
-                    task,
-                    region,
-                    idle_steps,
-                    held: held_kinds,
-                },
-            ));
+            self.state.record_trace_event(|seq| {
+                TraceEvent::new(
+                    seq,
+                    self.virtual_time,
+                    TraceEventKind::FuturelockDetected,
+                    TraceData::Futurelock {
+                        task,
+                        region,
+                        idle_steps,
+                        held: held_kinds,
+                    },
+                )
+            });
 
             assert!(
                 !self.config.panic_on_futurelock,
@@ -2209,9 +2205,6 @@ impl LabScheduler {
     pub fn is_empty(&self) -> bool {
         let empty = self.scheduled.is_empty();
         if !empty {
-            let len = self.scheduled.len();
-            let tasks = &self.scheduled;
-            println!("DEBUG: LabScheduler is not empty! len={len} tasks={tasks:?}");
         }
         empty
     }
@@ -2272,7 +2265,6 @@ impl LabScheduler {
         let mut remaining = count;
         if self.scheduled.insert(task) {
             let worker = self.assign_worker(task);
-            println!("DEBUG: LabScheduler::schedule assigning to worker {worker}");
             self.workers[worker].schedule(task, priority);
             remaining = remaining.saturating_sub(1);
         }
@@ -2297,7 +2289,6 @@ impl LabScheduler {
     pub fn schedule_cancel(&mut self, task: TaskId, priority: u8) {
         if self.scheduled.insert(task) {
             let worker = self.assign_worker(task);
-            println!("DEBUG: LabScheduler::schedule assigning to worker {worker}");
             self.workers[worker].schedule_cancel(task, priority);
             return;
         }
@@ -2315,7 +2306,6 @@ impl LabScheduler {
         }
 
         let worker = self.assign_worker(task);
-        println!("DEBUG: LabScheduler::schedule assigning to worker {worker}");
         self.workers[worker].schedule_timed(task, deadline);
     }
 
@@ -2430,10 +2420,6 @@ struct TaskWaker {
 
 impl Wake for TaskWaker {
     fn wake(self: Arc<Self>) {
-        println!(
-            "DEBUG: TaskWaker::wake for {task_id:?}",
-            task_id = self.task_id
-        );
         self.scheduler.lock().schedule(self.task_id, self.priority);
     }
 }
@@ -4051,9 +4037,6 @@ mod tests {
         let app = crate::app::AppSpec::new("verdict_test");
         let harness = crate::lab::SporkAppHarness::with_seed(42, app).unwrap();
         let report = harness.run_to_report().unwrap();
-
-        let report_json = report.to_json();
-        println!("REPORT JSON: {report_json:#?}");
 
         // Empty app should pass.
         assert!(report.passed());

@@ -1464,9 +1464,10 @@ impl<Caps> Cx<Caps> {
             .timer_driver
             .as_ref()
             .map_or_else(wall_clock_now, TimerDriverHandle::now);
-        let seq = trace.next_seq();
         let logical_time = self.logical_tick();
-        trace.push_event(TraceEvent::user_trace(seq, now, message).with_logical_time(logical_time));
+        trace.record_event(move |seq| {
+            TraceEvent::user_trace(seq, now, message).with_logical_time(logical_time)
+        });
     }
 
     /// Logs a trace-level message with structured key-value fields.
@@ -1497,9 +1498,10 @@ impl<Caps> Cx<Caps> {
             .timer_driver
             .as_ref()
             .map_or_else(wall_clock_now, TimerDriverHandle::now);
-        let seq = trace.next_seq();
         let logical_time = self.logical_tick();
-        trace.push_event(TraceEvent::user_trace(seq, now, message).with_logical_time(logical_time));
+        trace.record_event(move |seq| {
+            TraceEvent::user_trace(seq, now, message).with_logical_time(logical_time)
+        });
     }
 
     /// Enters a named span, returning a guard that ends the span on drop.

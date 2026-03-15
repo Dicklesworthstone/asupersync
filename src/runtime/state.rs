@@ -25,7 +25,7 @@ use crate::runtime::stored_task::StoredTask;
 use crate::runtime::task_handle::JoinError;
 use crate::runtime::{BlockingPoolHandle, ObligationTable, RegionTable, TaskTable};
 use crate::time::TimerDriverHandle;
-use crate::trace::distributed::LogicalClockMode;
+use crate::trace::distributed::{LogicalClockMode, LogicalTime};
 use crate::trace::event::{TraceData, TraceEventKind};
 use crate::trace::{TraceBufferHandle, TraceEvent};
 use crate::tracing_compat::{debug, debug_span, trace, trace_span};
@@ -845,9 +845,7 @@ impl RuntimeState {
         let id = self.regions.create_root(budget, self.now);
 
         self.root_region = Some(id);
-        let seq = self.next_trace_seq();
-        self.trace
-            .push_event(TraceEvent::region_created(seq, self.now, id, None));
+        self.record_trace_event(|seq| TraceEvent::region_created(seq, self.now, id, None));
         self.metrics.region_created(id, None);
         id
     }
@@ -863,9 +861,7 @@ impl RuntimeState {
     ) -> Result<RegionId, RegionCreateError> {
         let id = self.regions.create_child(parent, budget, self.now)?;
 
-        let seq = self.next_trace_seq();
-        self.trace
-            .push_event(TraceEvent::region_created(seq, self.now, id, Some(parent)));
+        self.record_trace_event(|seq| TraceEvent::region_created(seq, self.now, id, Some(parent)));
         self.metrics.region_created(id, Some(parent));
         Ok(id)
     }
@@ -1037,29 +1033,45 @@ impl RuntimeState {
         Ok((task_id, handle))
     }
 
-    fn attach_logical_time_for_task(&self, task_id: TaskId, event: TraceEvent) -> TraceEvent {
-        let Some(record) = self.task(task_id) else {
-            return event;
-        };
-        let Some(cx) = record.cx.as_ref() else {
-            return event;
-        };
-        event.with_logical_time(cx.logical_tick())
+    fn logical_time_for_task(&self, task_id: TaskId) -> Option<LogicalTime> {
+        let record = self.task(task_id)?;
+        let cx = record.cx.as_ref()?;
+        Some(cx.logical_tick())
+    }
+
+    pub(crate) fn record_trace_event<F>(&self, build: F)
+    where
+        F: FnOnce(u64) -> TraceEvent,
+    {
+        self.trace.record_event(build);
+    }
+
+    fn record_task_trace_event<F>(&self, task_id: TaskId, build: F)
+    where
+        F: FnOnce(u64) -> TraceEvent,
+    {
+        let logical_time = self.logical_time_for_task(task_id);
+        self.trace.record_event(move |seq| {
+            let event = build(seq);
+            if let Some(logical_time) = logical_time {
+                event.with_logical_time(logical_time)
+            } else {
+                event
+            }
+        });
     }
 
     pub(crate) fn record_task_spawn(&self, task_id: TaskId, region: RegionId) {
-        let seq = self.next_trace_seq();
-        let event = TraceEvent::spawn(seq, self.now, task_id, region);
-        self.trace
-            .push_event(self.attach_logical_time_for_task(task_id, event));
+        self.record_task_trace_event(task_id, |seq| {
+            TraceEvent::spawn(seq, self.now, task_id, region)
+        });
         self.metrics.task_spawned(region, task_id);
     }
 
     fn record_task_complete(&self, task: &TaskRecord) {
-        let seq = self.next_trace_seq();
-        let event = TraceEvent::complete(seq, self.now, task.id, task.owner);
-        self.trace
-            .push_event(self.attach_logical_time_for_task(task.id, event));
+        self.record_task_trace_event(task.id, |seq| {
+            TraceEvent::complete(seq, self.now, task.id, task.owner)
+        });
 
         let duration = Duration::from_nanos(self.now.duration_since(task.created_at()));
         let outcome_kind = match &task.state {
@@ -1292,11 +1304,9 @@ impl RuntimeState {
             "obligation reserved"
         );
 
-        let seq = self.next_trace_seq();
-        let event =
-            TraceEvent::obligation_reserve(seq, self.now, obligation_id, holder, region, kind);
-        self.trace
-            .push_event(self.attach_logical_time_for_task(holder, event));
+        self.record_task_trace_event(holder, |seq| {
+            TraceEvent::obligation_reserve(seq, self.now, obligation_id, holder, region, kind)
+        });
         self.metrics.obligation_created(region);
 
         Ok(obligation_id)
@@ -1327,18 +1337,17 @@ impl RuntimeState {
             "obligation committed"
         );
 
-        let seq = self.next_trace_seq();
-        let event = TraceEvent::obligation_commit(
-            seq,
-            self.now,
-            info.id,
-            info.holder,
-            info.region,
-            info.kind,
-            info.duration,
-        );
-        self.trace
-            .push_event(self.attach_logical_time_for_task(info.holder, event));
+        self.record_task_trace_event(info.holder, |seq| {
+            TraceEvent::obligation_commit(
+                seq,
+                self.now,
+                info.id,
+                info.holder,
+                info.region,
+                info.kind,
+                info.duration,
+            )
+        });
         self.metrics.obligation_discharged(info.region);
 
         if let Some(region_record) = self.regions.get(info.region.arena_index()) {
@@ -1381,19 +1390,18 @@ impl RuntimeState {
             "obligation aborted"
         );
 
-        let seq = self.next_trace_seq();
-        let event = TraceEvent::obligation_abort(
-            seq,
-            self.now,
-            info.id,
-            info.holder,
-            info.region,
-            info.kind,
-            info.duration,
-            info.reason,
-        );
-        self.trace
-            .push_event(self.attach_logical_time_for_task(info.holder, event));
+        self.record_task_trace_event(info.holder, |seq| {
+            TraceEvent::obligation_abort(
+                seq,
+                self.now,
+                info.id,
+                info.holder,
+                info.region,
+                info.kind,
+                info.duration,
+                info.reason,
+            )
+        });
         self.metrics.obligation_discharged(info.region);
 
         if let Some(region_record) = self.regions.get(info.region.arena_index()) {
@@ -1412,18 +1420,17 @@ impl RuntimeState {
     pub fn mark_obligation_leaked(&mut self, obligation: ObligationId) -> Result<u64, Error> {
         let info = self.obligations.mark_leaked(obligation, self.now)?;
 
-        let seq = self.next_trace_seq();
-        let event = TraceEvent::obligation_leak(
-            seq,
-            self.now,
-            info.id,
-            info.holder,
-            info.region,
-            info.kind,
-            info.duration,
-        );
-        self.trace
-            .push_event(self.attach_logical_time_for_task(info.holder, event));
+        self.record_task_trace_event(info.holder, |seq| {
+            TraceEvent::obligation_leak(
+                seq,
+                self.now,
+                info.id,
+                info.holder,
+                info.region,
+                info.kind,
+                info.duration,
+            )
+        });
         self.metrics.obligation_leaked(info.region);
         if self.obligation_leak_response != ObligationLeakResponse::Silent {
             let span = crate::tracing_compat::error_span!(
@@ -1507,12 +1514,6 @@ impl RuntimeState {
     #[inline]
     pub fn store_spawned_task(&mut self, task_id: TaskId, stored: StoredTask) {
         self.tasks.store_spawned_task(task_id, stored);
-    }
-
-    /// Returns the next trace sequence number and increments it.
-    #[must_use]
-    pub fn next_trace_seq(&self) -> u64 {
-        self.trace.next_seq()
     }
 
     /// Counts live tasks.
@@ -1610,11 +1611,9 @@ impl RuntimeState {
                 (newly_cancelled, is_cancelling)
             };
             if newly_cancelled {
-                let seq = self.trace.next_seq();
-                let event =
-                    TraceEvent::cancel_request(seq, self.now, task_id, region, reason.clone());
-                self.trace
-                    .push_event(self.attach_logical_time_for_task(task_id, event));
+                self.record_task_trace_event(task_id, |seq| {
+                    TraceEvent::cancel_request(seq, self.now, task_id, region, reason.clone())
+                });
             }
             if newly_cancelled || is_cancelling {
                 tasks_to_cancel.push((task_id, budget.priority));
@@ -1723,13 +1722,9 @@ impl RuntimeState {
             // Store this region's reason for child chain building
             region_reasons.insert(rid, region_reason.clone());
 
-            let seq = self.next_trace_seq();
-            self.trace.push_event(TraceEvent::region_cancelled(
-                seq,
-                self.now,
-                rid,
-                region_reason.clone(),
-            ));
+            self.record_trace_event(|seq| {
+                TraceEvent::region_cancelled(seq, self.now, rid, region_reason.clone())
+            });
             self.metrics.cancellation_requested(rid, region_reason.kind);
 
             if let Some(_parent) = node.parent {
@@ -1766,16 +1761,17 @@ impl RuntimeState {
                 // Try to transition to Closing with the reason.
                 // If already Closing/Draining/etc., strengthen the reason instead.
                 if region.begin_close(Some(region_reason.clone())) {
-                    let seq = self.next_trace_seq();
-                    self.trace.push_event(TraceEvent::new(
-                        seq,
-                        self.now,
-                        TraceEventKind::RegionCloseBegin,
-                        TraceData::Region {
-                            region: rid,
-                            parent: node.parent,
-                        },
-                    ));
+                    self.record_trace_event(|seq| {
+                        TraceEvent::new(
+                            seq,
+                            self.now,
+                            TraceEventKind::RegionCloseBegin,
+                            TraceData::Region {
+                                region: rid,
+                                parent: node.parent,
+                            },
+                        )
+                    });
                 } else {
                     region.strengthen_cancel_reason(region_reason);
                 }
@@ -1807,16 +1803,15 @@ impl RuntimeState {
                     let already_cancelling = task.state.is_cancelling();
                     let _cancel_kind = task.cancel_reason().map(|r| r.kind);
                     if newly_cancelled {
-                        let seq = self.trace.next_seq();
-                        let event = TraceEvent::cancel_request(
-                            seq,
-                            self.now,
-                            task_id,
-                            rid,
-                            task_reason.clone(),
-                        );
-                        self.trace
-                            .push_event(self.attach_logical_time_for_task(task_id, event));
+                        self.record_task_trace_event(task_id, |seq| {
+                            TraceEvent::cancel_request(
+                                seq,
+                                self.now,
+                                task_id,
+                                rid,
+                                task_reason.clone(),
+                            )
+                        });
                     }
                     let span = trace_span!(
                         "cancel_propagate_task",
@@ -2357,16 +2352,17 @@ impl RuntimeState {
                             }
                             // Emit RegionCloseComplete trace event (pairs
                             // with RegionCloseBegin emitted in cancel_request).
-                            let seq = self.next_trace_seq();
-                            self.trace.push_event(TraceEvent::new(
-                                seq,
-                                self.now,
-                                TraceEventKind::RegionCloseComplete,
-                                TraceData::Region {
-                                    region: region_id,
-                                    parent,
-                                },
-                            ));
+                            self.record_trace_event(|seq| {
+                                TraceEvent::new(
+                                    seq,
+                                    self.now,
+                                    TraceEventKind::RegionCloseComplete,
+                                    TraceData::Region {
+                                        region: region_id,
+                                        parent,
+                                    },
+                                )
+                            });
 
                             // Emit region_closed metric with lifetime.
                             if let Some(region) = self.regions.get(region_id.arena_index()) {
