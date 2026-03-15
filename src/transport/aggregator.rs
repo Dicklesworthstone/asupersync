@@ -1339,6 +1339,7 @@ impl SymbolReorderer {
                 state.next_expected = seq_unwrapped.wrapping_add(1);
                 state.last_delivery = now;
                 ready.push(symbol);
+                self.in_order_deliveries.fetch_add(1, Ordering::Relaxed);
             }
             // else: buffer full, drop the symbol
         }
