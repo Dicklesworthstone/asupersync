@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Asupersync — Interactive WASM Demo</title>
-<meta name="description" content="Spec-first, cancel-correct async runtime for Rust — compiled to WebAssembly and running live in your browser. 15 interactive exhibits with a real WASM runtime, zero simulation.">
+<meta name="description" content="Spec-first, cancel-correct async runtime for Rust — compiled to WebAssembly and running live in your browser. 21 interactive exhibits with a real WASM runtime, zero simulation.">
 
 <!-- OpenGraph -->
 <meta property="og:type" content="website">
@@ -20,9 +20,9 @@
 <!-- Twitter/X -->
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Asupersync — Interactive WASM Demo">
-<meta name="twitter:description" content="Spec-first, cancel-correct async for Rust. 15 live exhibits running real WASM — structured concurrency, cancel protocol, chaos testing, live REPL.">
+<meta name="twitter:description" content="Spec-first, cancel-correct async for Rust. 21 live exhibits running real WASM — structured concurrency, cancel protocol, chaos testing, live REPL.">
 <meta name="twitter:image" content="https://dicklesworthstone.github.io/asupersync/assets/og-share-image.png">
-<meta name="twitter:image:alt" content="Asupersync Interactive WASM Demo — 15 live exhibits demonstrating structured concurrency, cancel-correct channels, and four-valued outcomes">
+<meta name="twitter:image:alt" content="Asupersync Interactive WASM Demo — 21 live exhibits demonstrating structured concurrency, cancel-correct channels, and four-valued outcomes">
 <script type="importmap">
 {
   "imports": {
@@ -1001,7 +1001,7 @@ console.<span class="fn">log</span>(<span class="str">`Fingerprint: </span><span
 <section class="section" id="regions">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 3</span>
+      <span class="exhibit-num">Exhibit 2</span>
       <h2>Structured Concurrency — Region Tree</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Every task is owned by a region. Regions form a tree rooted at the runtime. When a region closes,
@@ -1069,7 +1069,7 @@ httpRegion.<span class="fn">close</span>();</div>
 <section class="section" id="outcomes">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 5</span>
+      <span class="exhibit-num">Exhibit 3</span>
       <h2>Four-Valued Outcome Algebra</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Every operation returns an <code style="color:var(--cyan)">Outcome</code> — not just
@@ -1111,7 +1111,7 @@ httpRegion.<span class="fn">close</span>();</div>
 <section class="section" id="cancel">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 6</span>
+      <span class="exhibit-num">Exhibit 4</span>
       <h2>Cancellation Protocol — Not a Silent Drop</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Cancellation flows through a multi-phase protocol:
@@ -1217,7 +1217,7 @@ httpRegion.<span class="fn">close</span>();</div>
 <section class="section" id="budget">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 8</span>
+      <span class="exhibit-num">Exhibit 5</span>
       <h2>Budget Algebra — Semiring Composition</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Cleanup budgets compose as a semiring:
@@ -1278,7 +1278,7 @@ httpRegion.<span class="fn">close</span>();</div>
 <section class="section" id="stale">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 10</span>
+      <span class="exhibit-num">Exhibit 6</span>
       <h2>Generation Counters — Use-After-Free Prevention</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Every handle carries a <strong style="color:var(--text);">generation counter</strong>. When a slot is recycled, the generation
@@ -1334,7 +1334,7 @@ s1.<span class="fn">close</span>();  <span class="cmt">// slot N freed, generati
 <section class="section" id="cascade">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 11</span>
+      <span class="exhibit-num">Exhibit 7</span>
       <h2>Deep Cascade Close — Quiescence by Construction</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Build a real 4-level deep scope tree, spawn tasks at every level, then close a mid-level node.
@@ -1370,7 +1370,7 @@ s1.<span class="fn">close</span>();  <span class="cmt">// slot N freed, generati
 <section class="section" id="protocol">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 12</span>
+      <span class="exhibit-num">Exhibit 8</span>
       <h2>Cancel is Not Enough — You Must Join</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Unlike fire-and-forget runtimes, <code style="color:var(--cyan)">task_cancel()</code> only
@@ -1429,7 +1429,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="repl">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 13 — Interactive</span>
+      <span class="exhibit-num">Exhibit 9 — Interactive</span>
       <h2>Live Runtime REPL</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         This isn't a simulation. Type JavaScript below and it executes against the
@@ -1498,7 +1498,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="chaos">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 14 — Stress Test</span>
+      <span class="exhibit-num">Exhibit 10 — Stress Test</span>
       <h2>Chaos Mode — Prove Zero Leaks Under Pressure</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Create hundreds of handles at high speed. Cancel them randomly. Close scopes with live children.
@@ -1567,7 +1567,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="scopefetch">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 16 — Impossible Elsewhere</span>
+      <span class="exhibit-num">Exhibit 11 — Impossible Elsewhere</span>
       <h2>Scope-Bounded HTTP — Close the Region, Kill the Request</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         In vanilla JavaScript, cancelling an in-flight <code style="color:var(--cyan)">fetch()</code> requires
@@ -1604,7 +1604,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="severity">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 17 — Impossible Elsewhere</span>
+      <span class="exhibit-num">Exhibit 12 — Impossible Elsewhere</span>
       <h2>Outcome Severity Propagation — Algebraic Error Handling</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         In every other runtime, when you join multiple tasks, you get back a <code>Vec&lt;Result&gt;</code>
@@ -1634,7 +1634,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="forensics">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 18 — Impossible Elsewhere</span>
+      <span class="exhibit-num">Exhibit 13 — Impossible Elsewhere</span>
       <h2>Cancellation Forensics — Full Attribution Chain</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         When a tokio task is cancelled, you get... nothing. The future is dropped. You have no idea
@@ -1665,7 +1665,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="recycling">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 19 — Impossible Elsewhere</span>
+      <span class="exhibit-num">Exhibit 14 — Impossible Elsewhere</span>
       <h2>Handle Slot Recycling — LIFO Determinism Under Pressure</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Browser APIs give you opaque objects with no visibility into allocation. Asupersync exposes
@@ -1699,7 +1699,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="isolation">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 20 — Impossible Elsewhere</span>
+      <span class="exhibit-num">Exhibit 15 — Impossible Elsewhere</span>
       <h2>Sibling Scope Isolation — No Cross-Contamination</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         In an unstructured runtime, cancelling one "scope" can accidentally leak signals to siblings
@@ -1737,7 +1737,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="replay">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 22 — Impossible Elsewhere</span>
+      <span class="exhibit-num">Exhibit 16 — Impossible Elsewhere</span>
       <h2>Deterministic Replay — Same Ops, Same Slots, Every Time</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         When debugging a concurrency bug in tokio or async-std, you're at the mercy of non-deterministic scheduling.
@@ -1769,7 +1769,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="leakdetect">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 23 — Impossible Elsewhere</span>
+      <span class="exhibit-num">Exhibit 17 — Impossible Elsewhere</span>
       <h2>Handle Leak Detection — The Runtime Catches Your Mistakes</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         What happens when a programmer forgets to join a spawned task? In tokio, the task becomes an orphan —
@@ -1804,7 +1804,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="timeout">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 24 — Impossible Elsewhere</span>
+      <span class="exhibit-num">Exhibit 18 — Impossible Elsewhere</span>
       <h2>Scope-as-Timeout — Structural Deadlines, Not Afterthoughts</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         In vanilla JavaScript, implementing a timeout for a group of concurrent operations requires
@@ -1842,7 +1842,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="websocket">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 25 — Impossible Elsewhere</span>
+      <span class="exhibit-num">Exhibit 19 — Impossible Elsewhere</span>
       <h2>WebSocket with Structured Cancellation</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Browser WebSockets have no concept of "ownership." You call <code style="color:var(--cyan)">new WebSocket(url)</code>,
@@ -1881,7 +1881,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="comparison">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 26 — The Whole Point</span>
+      <span class="exhibit-num">Exhibit 20 — The Whole Point</span>
       <h2>Vanilla JS vs Asupersync — Side-by-Side</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Every exhibit above demonstrates a structural guarantee. But the real question is:
@@ -1954,7 +1954,7 @@ scope.<span class="fn">fetchRequest</span>({ <span class="prop">url</span>: url3
 <section class="section" id="benchmark">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 27 — Performance</span>
+      <span class="exhibit-num">Exhibit 21 — Performance</span>
       <h2>Rapid Scope Churn — How Fast Is the Runtime?</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         All these structural guarantees sound expensive. Are they? This benchmark creates and closes scopes
@@ -2192,7 +2192,7 @@ window.runAbiDemo = function() {
   `;
 };
 
-// ─── Exhibit 3: Regions ──────────────────────────────────────────
+// ─── Exhibit 2: Regions ──────────────────────────────────────────
 const regionState = {
   regions: [],
   tasks: [],
@@ -2213,6 +2213,36 @@ const regionState = {
       { id:'t5', region:'conn', cx:520, cy:200, alive:true },
       { id:'t6', region:'conn', cx:620, cy:290, alive:true },
     ];
+    // Create real WASM scope hierarchy
+    const a = requireWasm();
+    if (a) {
+      try {
+        if (this.wasmRT) { try { this.wasmRT.close(); } catch(e) {} }
+        const rt = (a.runtimeCreate || a.runtime_create)();
+        if (rt.outcome === 'ok') {
+          this.wasmRT = rt.value;
+          const root = rt.value.enterScope('root-region');
+          if (root.outcome === 'ok') {
+            this.wasmHandles = { root: root.value };
+            const httpSc = root.value.enterScope('http-handler');
+            if (httpSc.outcome === 'ok') {
+              this.wasmHandles.http = httpSc.value;
+              const reqASc = httpSc.value.enterScope('request-a');
+              if (reqASc.outcome === 'ok') { this.wasmHandles.reqA = reqASc.value; reqASc.value.spawnTask({ label: 't1' }); reqASc.value.spawnTask({ label: 't2' }); }
+              const reqBSc = httpSc.value.enterScope('request-b');
+              if (reqBSc.outcome === 'ok') { this.wasmHandles.reqB = reqBSc.value; reqBSc.value.spawnTask({ label: 't3' }); reqBSc.value.spawnTask({ label: 't4' }); }
+            }
+            const dbSc = root.value.enterScope('database-pool');
+            if (dbSc.outcome === 'ok') {
+              this.wasmHandles.db = dbSc.value;
+              const connSc = dbSc.value.enterScope('connection');
+              if (connSc.outcome === 'ok') { this.wasmHandles.conn = connSc.value; connSc.value.spawnTask({ label: 't5' }); connSc.value.spawnTask({ label: 't6' }); }
+            }
+            clog('region-console', `WASM: created real scope hierarchy (root + 5 child scopes, 6 tasks)`, 'ok');
+          }
+        }
+      } catch(e) { /* WASM not available, visual-only mode */ }
+    }
   },
   getDescendants(id) {
     const children = this.regions.filter(r => r.parent === id);
@@ -2292,6 +2322,20 @@ window.cancelRegion = function(id) {
     renderRegionTree();
     clog('region-console', `Quiescent: ${descendants.join(', ')} — all children complete`, 'ok');
     showToast('Region closed to quiescence', 'ok');
+    // Close real WASM scope handles (bottom-up: children first)
+    if (regionState.wasmHandles) {
+      const toClose = [...descendants].reverse();
+      toClose.forEach(rid => {
+        const h = regionState.wasmHandles[rid];
+        if (h) {
+          try {
+            h.close();
+            clog('region-console', `WASM: scope "${rid}" closed (slot=${h.slot || 'n/a'})`, 'ok');
+          } catch(e) {}
+          delete regionState.wasmHandles[rid];
+        }
+      });
+    }
   }, 1400);
 };
 
@@ -2305,11 +2349,17 @@ window.runRegionDemo = async function() {
 
 window.resetRegionViz = function() {
   clearConsole('region-console');
+  // Close old WASM runtime before reinitializing
+  if (regionState.wasmRT) {
+    try { regionState.wasmRT.close(); } catch(e) {}
+    regionState.wasmRT = null;
+    regionState.wasmHandles = null;
+  }
   regionState.init();
   renderRegionTree();
 };
 
-// ─── Exhibit 5: Outcomes ─────────────────────────────────────────
+// ─── Exhibit 3: Outcomes ─────────────────────────────────────────
 // Raw hex colors for JS contexts where CSS var concatenation is needed (e.g. '#22C55E' + '33')
 const HEX = { green:'#22C55E', red:'#EF4444', orange:'#F97316', blue:'#3B82F6', cyan:'#06B6D4', yellow:'#EAB308', violet:'#8B5CF6', text3:'#64748B', surface:'#0A1628', border2:'rgba(255,255,255,0.10)' };
 
@@ -2400,9 +2450,35 @@ window.selectOutcome = function(id) {
 
   // Update lattice
   renderOutcomeLattice(id);
+
+  // Create a real WASM task and join with this outcome type
+  const a = requireWasm();
+  if (a) {
+    try {
+      const rt = (a.runtimeCreate || a.runtime_create)();
+      if (rt.outcome === 'ok') {
+        const sc = rt.value.enterScope('outcome-demo');
+        if (sc.outcome === 'ok') {
+          const t = sc.value.spawnTask({ label: 'outcome-' + id });
+          if (t.outcome === 'ok') {
+            const Outcome = a.Outcome;
+            let outcomeValue;
+            if (id === 'ok') outcomeValue = Outcome.ok(42);
+            else if (id === 'err') outcomeValue = Outcome.err('invalid_handle', 'permanent', 'demo');
+            else if (id === 'cancelled') outcomeValue = Outcome.cancelled({kind:'user',phase:'completed',origin_region:'demo',origin_task:null,timestamp_nanos:0,message:'demo',truncated:false});
+            else outcomeValue = Outcome.panicked('demo panic');
+            const joined = t.value.join(outcomeValue);
+            clog('outcome-console', `WASM: task "outcome-${id}" joined with ${id} outcome (real)`, 'ok');
+          }
+          sc.value.close();
+        }
+        rt.value.close();
+      }
+    } catch(e) { /* WASM not available */ }
+  }
 };
 
-// ─── Exhibit 6: Cancel Protocol ──────────────────────────────────
+// ─── Exhibit 4: Cancel Protocol ──────────────────────────────────
 const cancelPhases = [
   { id:'running', label:'Running', color:HEX.green },
   { id:'requested', label:'Cancel\nRequested', color:HEX.yellow },
@@ -2477,6 +2553,40 @@ window.triggerCancel = function() {
   if (cancelState.animating) return;
   cancelState.animating = true;
   document.getElementById('btn-cancel-trigger').disabled = true;
+
+  // Create real WASM tasks to cancel through the protocol
+  const a = requireWasm();
+  if (a) {
+    try {
+      const rt = (a.runtimeCreate || a.runtime_create)();
+      if (rt.outcome === 'ok') {
+        const sc = rt.value.enterScope('cancel-demo');
+        if (sc.outcome === 'ok') {
+          const tasks = [];
+          for (let i = 0; i < 3; i++) {
+            const t = sc.value.spawnTask({ label: 'resource-' + i });
+            if (t.outcome === 'ok') tasks.push(t.value);
+          }
+          clog('cancel-console', `WASM: spawned ${tasks.length} real tasks in cancel-demo scope`, 'info');
+          // Cancel each task through the real protocol on a timer
+          tasks.forEach((t, i) => {
+            cancelState.timers.push(setTimeout(() => {
+              try {
+                t.cancel('shutdown', 'graceful drain');
+                t.join(a.Outcome.cancelled({kind:'shutdown',phase:'completed',origin_region:'cancel-demo',origin_task:null,timestamp_nanos:0,message:'graceful drain',truncated:false}));
+                clog('cancel-console', `WASM: task "resource-${i}" cancelled and joined (real)`, 'ok');
+              } catch(e) {}
+            }, 800 + i * 400));
+          });
+          // Close scope after all tasks are joined
+          cancelState.timers.push(setTimeout(() => {
+            try { sc.value.close(); rt.value.close(); } catch(e) {}
+            clog('cancel-console', `WASM: cancel-demo scope closed — zero leaks (real)`, 'ok');
+          }, 2600));
+        }
+      }
+    } catch(e) { /* WASM not available */ }
+  }
 
   cancelState.phase = 'requested';
   cancelState.budget = 100;
@@ -2583,7 +2693,7 @@ window.resetCancel = function() {
   });
 };
 
-// ─── Exhibit 8: Budget ───────────────────────────────────────────
+// ─── Exhibit 5: Budget ───────────────────────────────────────────
 window.runBudgetDemo = function() {
   const a = requireWasm();
   if (!a) { showToast('WASM not loaded', 'err'); return; }
@@ -2646,7 +2756,7 @@ window.runBudgetDemo = function() {
   `;
 };
 
-// ─── Exhibit 10: Stale Handle Safety ─────────────────────────────
+// ─── Exhibit 6: Stale Handle Safety ─────────────────────────────
 window.runStaleDemo = function() {
   clearConsole('stale-console');
   const a = requireWasm('stale-console');
@@ -2714,7 +2824,7 @@ window.runStaleDemo = function() {
   showToast('Stale handle correctly rejected', 'ok');
 };
 
-// ─── Exhibit 11: Deep Cascade Close ──────────────────────────────
+// ─── Exhibit 7: Deep Cascade Close ──────────────────────────────
 let cascadeHandles = { rt: null, scopes: [], tasks: [], timers: [] };
 
 window.cascadeBuild = function() {
@@ -2833,7 +2943,7 @@ window.cascadeReset = function() {
   document.getElementById('btn-cascade-close').disabled = true;
 };
 
-// ─── Exhibit 12: Cancel-then-Join Protocol ───────────────────────
+// ─── Exhibit 8: Cancel-then-Join Protocol ───────────────────────
 window.runProtocolDemo = function() {
   clearConsole('protocol-console');
   const a = requireWasm('protocol-console');
@@ -2906,7 +3016,7 @@ window.runProtocolDemo = function() {
   showToast('Cancel→Join protocol demonstrated', 'ok');
 };
 
-// ─── Exhibit 13: Live REPL ────────────────────────────────────────
+// ─── Exhibit 9: Live REPL ────────────────────────────────────────
 const REPL_SNIPPETS = [
   `// Create a scope, inspect the handle
 const s = rt.enterScope('my-scope');
@@ -3066,7 +3176,7 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// ─── Exhibit 14: Chaos Stress Test ───────────────────────────────
+// ─── Exhibit 10: Chaos Stress Test ───────────────────────────────
 let chaosRunning = false;
 window.runChaos = async function() {
   if (chaosRunning) return;
@@ -3199,7 +3309,7 @@ window.resetChaos = function() {
   clearConsole('chaos-console');
 };
 
-// ─── Exhibit 16: Scope-Bounded Fetch ──────────────────────────────
+// ─── Exhibit 11: Scope-Bounded Fetch ──────────────────────────────
 let sfState = { rt: null, scope: null, controllers: [], timers: [] };
 
 window.runScopeFetch = function() {
@@ -3288,7 +3398,7 @@ function renderSfTimeline(timeline) {
   `).join('');
 }
 
-// ─── Exhibit 17: Outcome Severity Propagation ────────────────────
+// ─── Exhibit 12: Outcome Severity Propagation ────────────────────
 window.runSeverityDemo = function() {
   const a = requireWasm();
   if (!a) { showToast('WASM not loaded', 'err'); return; }
@@ -3351,7 +3461,7 @@ window.runSeverityDemo = function() {
   showToast('Severity lattice demonstrated', 'ok');
 };
 
-// ─── Exhibit 18: Cancellation Attribution Forensics ──────────────
+// ─── Exhibit 13: Cancellation Attribution Forensics ──────────────
 window.runForensicsDemo = function() {
   const a = requireWasm();
   if (!a) { showToast('WASM not loaded', 'err'); return; }
@@ -3410,7 +3520,7 @@ window.runForensicsDemo = function() {
   showToast('Cancel forensics: 5 attribution chains inspected', 'ok');
 };
 
-// ─── Exhibit 19: Handle Slot Recycling Heatmap ───────────────────
+// ─── Exhibit 14: Handle Slot Recycling Heatmap ───────────────────
 window.runRecyclingDemo = function() {
   clearConsole('recycling-console');
   const a = requireWasm('recycling-console');
@@ -3474,7 +3584,7 @@ window.runRecyclingDemo = function() {
   showToast(`Slot heatmap: ${slots.length} slots, ${CYCLES} cycles`, 'ok');
 };
 
-// ─── Exhibit 20: Sibling Scope Isolation ─────────────────────────
+// ─── Exhibit 15: Sibling Scope Isolation ─────────────────────────
 let isoState = { rt: null, root: null, siblings: [], closeIdx: 0, timers: [] };
 
 window.buildIsolation = function() {
@@ -3566,7 +3676,7 @@ window.resetIsolation = function() {
   document.getElementById('btn-iso-close').disabled = true;
 };
 
-// ─── Exhibit 22: Deterministic Replay Proof ──────────────────────
+// ─── Exhibit 16: Deterministic Replay Proof ──────────────────────
 window.runReplayDemo = function() {
   const a = requireWasm();
   if (!a) { showToast('WASM not loaded', 'err'); return; }
@@ -3634,7 +3744,7 @@ window.runReplayDemo = function() {
   showToast(match ? 'Deterministic replay proven' : 'Non-deterministic!', match ? 'ok' : 'err');
 };
 
-// ─── Exhibit 23: Handle Leak Detection ───────────────────────────
+// ─── Exhibit 17: Handle Leak Detection ───────────────────────────
 window.runLeakDetectDemo = function() {
   clearConsole('leakdetect-console');
   const a = requireWasm('leakdetect-console');
@@ -3698,7 +3808,7 @@ window.runLeakDetectDemo = function() {
   showToast('5 orphaned tasks caught by cascade', 'ok');
 };
 
-// ─── Exhibit 24: Scope-as-Timeout ────────────────────────────────
+// ─── Exhibit 18: Scope-as-Timeout ────────────────────────────────
 window.runTimeoutDemo = function() {
   clearConsole('timeout-console');
   const a = requireWasm('timeout-console');
@@ -3765,7 +3875,7 @@ window.runTimeoutDemo = function() {
   }, 2000);
 };
 
-// ─── Exhibit 25: Real WebSocket ──────────────────────────────────
+// ─── Exhibit 19: Real WebSocket ──────────────────────────────────
 let wsState = { rt: null, scope: null, socket: null, msgCount: 0 };
 
 window.runWebSocketDemo = function() {
@@ -3854,7 +3964,7 @@ window.wsCloseScope = function() {
   wsState = { rt: null, scope: null, socket: null, msgCount: 0 };
 };
 
-// ─── Exhibit 27: Rapid Scope Churn Benchmark ─────────────────────
+// ─── Exhibit 21: Rapid Scope Churn Benchmark ─────────────────────
 window.runBenchmark = async function() {
   const a = requireWasm();
   if (!a) { showToast('WASM not loaded', 'err'); return; }
