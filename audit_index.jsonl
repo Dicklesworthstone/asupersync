@@ -912,3 +912,5 @@
 {"file":"src/types/symbol.rs","lines":0,"batch":386,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: source_blocks u8->u16 for 256-block boundary, test verifies"}
 {"file":"src/types/typed_symbol.rs","lines":0,"batch":386,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: object_params_for_payload preserves 256-block boundary"}
 {"file":"src/decoding.rs","lines":0,"batch":386,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: set_object_params test for 256-block boundary, cast updated"}
+{"file":"asupersync-browser-core/src/lib.rs","lines":0,"batch":386,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: websocket close/cancel state-loss fix — &mut borrow, re-insert on failure, reason validation, deferred closed flag"}
+{"file":"asupersync-browser-core/tests/abi_exports.rs","lines":0,"batch":386,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: two comprehensive tests for close/cancel failure state preservation"}
