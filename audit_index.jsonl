@@ -885,3 +885,9 @@
 {"file":"src/encoding.rs","lines":0,"batch":385,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~15, all changes SOUND"}
 {"file":"src/raptorq/rfc6330.rs","lines":0,"batch":385,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit HEAD~15, all changes SOUND"}
 {"file":"src/encoding.rs","lines":1043,"batch":385,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"deep re-audit: config validation ordering, block splitting, repair generation, seed determinism — all correct"}
+{"file":"src/runtime/reactor/browser.rs","lines":0,"batch":384,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit worktree: oneshot disarm semantics, coalesce for oneshot, consistent lock ordering"}
+{"file":"src/types/symbol.rs","lines":0,"batch":384,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit worktree: source_blocks u8->u16 for 256-block representation"}
+{"file":"src/net/worker_channel.rs","lines":0,"batch":384,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit worktree: BootstrapFailed worker_id tracking, session reset identity checks"}
+{"file":"src/raptorq/rfc6330.rs","lines":0,"batch":384,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit worktree: canonical P1 assertion in tuple() and tuple_indices()"}
+{"file":"src/raptorq/rfc6330.rs","lines":743,"batch":385,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"deep re-audit: overflow-safe prime search, RFC tuple generation, PI walk termination proof, golden vectors — all correct"}
+{"file":"src/stream/forward.rs","lines":298,"batch":385,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"deep audit: spin loop correctly replaced with async send, cancel-safe, cooperative budget, comprehensive tests"}
