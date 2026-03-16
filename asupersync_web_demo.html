@@ -791,6 +791,144 @@ input[type="text"]:focus, select:focus, textarea:focus {
   outline-offset: 2px;
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+   MOBILE LAYOUT — comprehensive overrides for < 768px
+   ═══════════════════════════════════════════════════════════════════ */
+@media (max-width: 768px) {
+  /* Tighter container padding */
+  .container { padding: 0 16px; }
+
+  /* Smaller section spacing */
+  .section { padding: 48px 0; }
+
+  /* Hero adjustments */
+  .hero { min-height: 85vh; padding-top: 56px; }
+  .hero h1 { font-size: 1.75rem; }
+  .hero .subtitle { font-size: 0.95rem; margin-top: 12px; }
+  .hero-content { padding: 0 16px; }
+
+  /* Cards & viz: tighter padding */
+  .card { padding: 20px; border-radius: 16px; }
+  .card-sm { padding: 14px; }
+  .viz { padding: 16px; border-radius: 16px; min-height: 140px; }
+  .viz-title { font-size: 12px; margin-bottom: 12px; }
+
+  /* Exhibit badge */
+  .exhibit-num { font-size: 10px; padding: 4px 10px; margin-bottom: 12px; }
+
+  /* Section headings */
+  h2 { font-size: 1.25rem; }
+  .section h2 + .text-muted { font-size: 13px; padding-left: 12px; border-left-width: 2px; }
+
+  /* Code blocks: prevent horizontal overflow */
+  .code-block { border-radius: 10px; }
+  .code-header { padding: 8px 12px; font-size: 11px; }
+  .code-header .actions { gap: 4px; }
+  .code-body { padding: 12px 14px; font-size: 11.5px; line-height: 1.55; }
+
+  /* Console: tighter */
+  .console { max-height: 200px; font-size: 12px; }
+  .console-header { padding: 6px 12px; font-size: 10px; }
+  .console-body { padding: 8px 12px; }
+
+  /* Tables: horizontal scroll wrapper */
+  .handle-table { font-size: 11px; }
+  .handle-table th, .handle-table td { padding: 6px 8px; }
+
+  /* SVGs: ensure they scroll horizontally if needed */
+  #region-tree-container { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  #region-svg { min-width: 700px; }
+
+  /* Cancel SM: stack vertically on very small screens */
+  #cancel-svg { min-width: 650px; }
+
+  /* Outcome cards: 2 columns on mobile */
+  .outcome-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .outcome-card { padding: 14px; min-height: 70px; }
+  .outcome-card .oc-icon { font-size: 16px; margin-bottom: 4px; }
+  .outcome-card .oc-title { font-size: 14px; }
+  .outcome-card .oc-desc { font-size: 11px; }
+
+  /* Comparison grid (Tokio vs Asupersync) */
+  #comparison-grid { grid-template-columns: 1fr !important; }
+
+  /* Resource rows */
+  .resource-row { font-size: 12px; padding: 6px 10px; }
+
+  /* Callout boxes */
+  .callout-contrast { font-size: 12px; padding: 12px 14px; }
+
+  /* Progress bars */
+  .progress-track { height: 6px; }
+
+  /* REPL: smaller textarea */
+  #repl-input { min-height: 180px !important; font-size: 12px !important; padding: 12px 14px !important; }
+
+  /* Chaos test metrics */
+  #chaos-metrics { grid-template-columns: repeat(3, 1fr) !important; gap: 8px; }
+  #chaos-metrics .card-sm { padding: 8px; }
+  #chaos-metrics [style*="font-size:24px"] { font-size: 18px !important; }
+  #chaos-metrics [style*="font-size:10px"] { font-size: 9px !important; }
+
+  /* Scope timeout: smaller countdown */
+  #timeout-result [style*="font-size:48px"] { font-size: 36px !important; }
+
+  /* Benchmark: smaller headline */
+  #benchmark-result [style*="font-size:48px"] { font-size: 32px !important; }
+  #benchmark-result [style*="grid-template-columns:1fr 1fr 1fr"] { grid-template-columns: 1fr !important; gap: 8px; }
+
+  /* Two-phase account boxes */
+  .tx-account { min-width: 100px; padding: 12px 14px; }
+  .tx-account .tx-balance { font-size: 22px; }
+
+  /* Recycling heatmap: smaller cells */
+  #recycling-result [style*="width:52px"] { width: 40px !important; }
+
+  /* Sibling isolation grid */
+  #isolation-result [style*="grid-template-columns"] { grid-template-columns: 1fr 1fr !important; }
+
+  /* Leak detection grid */
+  #leakdetect-result [style*="grid-template-columns:repeat(5"] { grid-template-columns: repeat(3, 1fr) !important; }
+
+  /* Replay comparison tables */
+  #replay-result > div[style*="grid-template-columns:1fr 1fr"] { grid-template-columns: 1fr !important; }
+
+  /* Code comparison (Exhibit 20): already handled by grid-2 collapse */
+
+  /* Forensics cards */
+  #forensics-result [style*="grid-template-columns:100px"] { grid-template-columns: 80px 1fr !important; }
+
+  /* WebSocket state */
+  #websocket-result [style*="gap:16px"] { flex-direction: column !important; gap: 8px !important; }
+
+  /* Back to top: smaller on mobile */
+  .btn-top { width: 38px; height: 38px; bottom: 16px; left: 16px; }
+
+  /* Toast: full width */
+  .toast { font-size: 12px; padding: 10px 16px; }
+
+  /* Glow orbs: smaller to reduce GPU pressure */
+  .hero-bg .glow-ring-1 { filter: blur(50px); }
+  .hero-bg .glow-ring-2 { filter: blur(60px); }
+  .hero-bg .glow-ring-3 { filter: blur(70px); }
+  .hero-bg .glow-orb-1, .hero-bg .glow-orb-2 { display: none; }
+
+  /* Snippet buttons in REPL */
+  #repl-input + div, [style*="margin-bottom: 12px; display: flex; flex-wrap: wrap; gap: 6px"] {
+    gap: 4px !important;
+  }
+}
+
+/* Extra small screens (iPhone SE, etc.) */
+@media (max-width: 380px) {
+  .container { padding: 0 12px; }
+  h2 { font-size: 1.1rem; }
+  .code-body { font-size: 11px; }
+  .outcome-grid { grid-template-columns: 1fr; }
+  #chaos-metrics { grid-template-columns: repeat(2, 1fr) !important; }
+  .btn-sm { font-size: 11px; padding: 6px 10px; }
+}
+
 /* ── Scroll offset for fixed nav ───────────────────────────────── */
 .section[id] { scroll-margin-top: 72px; }
 
@@ -1185,9 +1323,11 @@ httpRegion.<span class="fn">close</span>();</div>
           </div>
         </div>
 
-        <svg id="cancel-svg" viewBox="0 0 760 70" style="max-height: 70px;" role="img" aria-label="Cancel protocol state machine: Running, Cancel Requested, Draining, Finalizing, Completed">
+        <div style="overflow-x:auto;-webkit-overflow-scrolling:touch;">
+        <svg id="cancel-svg" viewBox="0 0 760 70" style="max-height: 70px; min-width:650px;" role="img" aria-label="Cancel protocol state machine: Running, Cancel Requested, Draining, Finalizing, Completed">
           <!-- State machine nodes rendered by JS -->
         </svg>
+        </div>
 
         <!-- Budget bar -->
         <div style="margin-top: 20px;">
