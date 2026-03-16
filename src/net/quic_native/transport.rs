@@ -474,23 +474,34 @@ impl QuicTransportMachine {
     }
 
     /// Start draining with a timeout window.
+    ///
+    /// Idempotent: if already draining, preserves the original deadline.
     pub fn start_draining(
         &mut self,
         now_micros: u64,
         drain_timeout_micros: u64,
     ) -> Result<(), TransportError> {
+        if self.state == QuicConnectionState::Draining {
+            return Ok(());
+        }
         self.transition(QuicConnectionState::Draining)?;
         self.drain_deadline_micros = Some(now_micros.saturating_add(drain_timeout_micros));
         Ok(())
     }
 
     /// Start draining and record application close code.
+    ///
+    /// Idempotent: if already draining, preserves the original deadline
+    /// and close code.
     pub fn start_draining_with_code(
         &mut self,
         now_micros: u64,
         drain_timeout_micros: u64,
         code: u64,
     ) -> Result<(), TransportError> {
+        if self.state == QuicConnectionState::Draining {
+            return Ok(());
+        }
         self.start_draining(now_micros, drain_timeout_micros)?;
         self.close_code = Some(code);
         Ok(())
@@ -1443,5 +1454,57 @@ mod tests {
             None,
             "close_code should remain None after poll to Closed"
         );
+    }
+
+    #[test]
+    fn repeated_start_draining_preserves_original_deadline() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().unwrap();
+        t.on_established().unwrap();
+
+        // First drain: deadline = 1000 + 5000 = 6000
+        t.start_draining(1_000, 5_000).unwrap();
+        assert_eq!(t.state(), QuicConnectionState::Draining);
+
+        // Second drain call with a later now and shorter timeout.
+        // If not idempotent, this would reset deadline to 4000 + 1000 = 5000.
+        t.start_draining(4_000, 1_000).unwrap();
+        assert_eq!(t.state(), QuicConnectionState::Draining);
+
+        // At time 5500, original deadline (6000) should still be in effect.
+        t.poll(5_500);
+        assert_eq!(
+            t.state(),
+            QuicConnectionState::Draining,
+            "original deadline must be preserved; connection should still be draining"
+        );
+
+        // At time 6000, original deadline expires.
+        t.poll(6_000);
+        assert_eq!(t.state(), QuicConnectionState::Closed);
+    }
+
+    #[test]
+    fn repeated_start_draining_with_code_preserves_original_code_and_deadline() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().unwrap();
+        t.on_established().unwrap();
+
+        t.start_draining_with_code(1_000, 5_000, 42).unwrap();
+        assert_eq!(t.close_code(), Some(42));
+
+        // Second call with different code. Must not overwrite.
+        t.start_draining_with_code(2_000, 500, 99).unwrap();
+        assert_eq!(
+            t.close_code(),
+            Some(42),
+            "original close code must be preserved across repeated drain calls"
+        );
+
+        // Original deadline (6000) still in effect.
+        t.poll(5_500);
+        assert_eq!(t.state(), QuicConnectionState::Draining);
+        t.poll(6_000);
+        assert_eq!(t.state(), QuicConnectionState::Closed);
     }
 }

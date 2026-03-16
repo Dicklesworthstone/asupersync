@@ -213,9 +213,12 @@ impl CircuitBreaker {
     }
 
     fn reset(&self) {
-        self.state
-            .store(CircuitState::Closed as u8, Ordering::Release);
-        self.failures.store(0, Ordering::Relaxed);
+        // Use CAS instead of unconditional store to avoid overwriting a
+        // concurrent HalfOpen→Open transition from record_failure.
+        if self.transition(CircuitState::HalfOpen, CircuitState::Closed) {
+            self.failures.store(0, Ordering::Relaxed);
+            self.consecutive_successes.store(0, Ordering::Relaxed);
+        }
     }
 }
 
@@ -266,6 +269,30 @@ mod tests {
     }
 
     // --- wave 78 trait coverage ---
+
+    #[test]
+    fn reset_does_not_overwrite_concurrent_open() {
+        // Regression: reset() used unconditional store(Closed) which could
+        // silently overwrite a concurrent HalfOpen→Open from record_failure.
+        let cb = CircuitBreaker::new(1, Duration::from_secs(1));
+        let t0 = Time::from_secs(100);
+        let t1 = Time::from_secs(102);
+
+        cb.record_failure(t0); // Open
+        assert!(cb.should_try(t1)); // HalfOpen
+
+        // Simulate the race: record_failure transitions HalfOpen→Open first
+        cb.record_failure(t1);
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        // Now call reset — should NOT overwrite Open with Closed
+        cb.reset();
+        assert_eq!(
+            cb.state(),
+            CircuitState::Open,
+            "reset must not overwrite concurrent HalfOpen→Open transition"
+        );
+    }
 
     #[test]
     fn circuit_state_debug_clone_copy_eq() {
