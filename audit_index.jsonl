@@ -640,3 +640,149 @@
 {"file":"src/observability/collector.rs","lines":190,"batch":382,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Ring-buffer log collector behind Arc<Mutex>, correct eviction and level filtering"}
 {"file":"src/http/h2/error.rs","lines":417,"batch":382,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"H2 error codes with RFC 7540-compliant wildcard mapping for unknown codes to InternalError"}
 {"file":"src/transport/error.rs","lines":160,"batch":382,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"thiserror-derived error enums with correct From impls"}
+{"file":"src/net/worker_channel.rs","lines":1746,"batch":376,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit db37baf8: session mgmt, replay hash, tighter state machine, inbound seq validation"}
+{"file":"src/transport/stream.rs","lines":0,"batch":376,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit db37baf8: exhaustion tracking for MapStream/FilterStream/TimeoutStream"}
+{"file":"src/observability/entry.rs","lines":0,"batch":376,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit db37baf8: field dedup, reserved JSON namespacing, priority insert"}
+{"file":"src/trace/file.rs","lines":0,"batch":376,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit db37baf8: metadata state machine (Pending/Written/Corrupt)"}
+{"file":"src/combinator/bracket.rs","lines":0,"batch":376,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit db37baf8: drop use_fut before release to prevent lock ordering deadlock"}
+{"file":"src/combinator/timeout.rs","lines":0,"batch":376,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit db37baf8: use cx.now() in timeout macro"}
+{"file":"src/cx/cx.rs","lines":0,"batch":376,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit db37baf8: new Cx::now() method"}
+{"file":"src/distributed/encoding.rs","lines":0,"batch":376,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit db37baf8: formatting only"}
+{"file":"src/channel/mpsc.rs","lines":0,"batch":376,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit db37baf8: test cleanup (counting_waker helper)"}
+{"file":"src/net/websocket/split.rs","lines":0,"batch":376,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit db37baf8: pending_pong_flush cancel-safety fix"}
+{"file":"src/lab/conformal.rs","lines":0,"batch":376,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit db37baf8: removed dead nonconformity_scores field"}
+{"file":"src/web/request_region.rs","lines":0,"batch":376,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit db37baf8: doc comment fix for run_sync"}
+{"file":"src/bin/asupersync.rs","lines":0,"batch":376,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit db37baf8: error handling for new TraceFileError variants"}
+{"file":"src/lab/runtime.rs","lines":0,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit b4715705..71fe7bf0: removed debug stub in is_empty()"}
+{"file":"src/runtime/scheduler/worker.rs","lines":0,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: replaced misleading error logs with design-intent comments for no-cached-waker case"}
+{"file":"src/transport/aggregator.rs","lines":0,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: added in_order_deliveries counter for gap-skip symbol delivery"}
+{"file":"src/types/symbol.rs","lines":0,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit: total_source_symbols now computes from object_size/symbol_size instead of blocks*per_block"}
+{"file":"src/net/quic/error.rs","lines":236,"batch":378,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"QUIC error types with Quinn wrapping, is_recoverable/is_connection_error classification"}
+{"file":"src/channel/deadlock_test.rs","lines":36,"batch":378,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Regression test: dropping receiver with queued msg holding last sender"}
+{"file":"src/channel/watch_leak_test.rs","lines":54,"batch":378,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Standalone test binary for watch waiter leak after changed() future drop"}
+{"file":"src/sync/rwlock_lost_wakeup_test.rs","lines":77,"batch":378,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Regression test: dropping blocked writer wakes queued reader"}
+{"file":"src/http/h1/obs_text_test.rs","lines":16,"batch":378,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Standalone test for HTTP/1.1 codec obs-text (0xFF) handling"}
+{"file":"src/plan/fixtures.rs","lines":2259,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Test fixture generation, dynamic equivalence oracle, lab execution helpers"}
+{"file":"src/transport/tests.rs","lines":2115,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Transport layer tests: channel, stream, multipath, reorderer, cancel, fairness"}
+{"file":"src/trace/mod.rs","lines":314,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module re-exports + trace normalization convenience APIs"}
+{"file":"src/cli/mod.rs","lines":252,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"CLI module re-exports and prelude"}
+{"file":"src/net/quic/error.rs","lines":236,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"QUIC error types with proper From impls"}
+{"file":"src/net/sys/windows.rs","lines":177,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Windows named-pipe impl"}
+{"file":"src/lab/mod.rs","lines":147,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Lab module re-exports"}
+{"file":"src/runtime/scheduler/mod.rs","lines":142,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Scheduler re-exports, worker count clamping"}
+{"file":"src/sync/rwlock_lost_wakeup_test.rs","lines":77,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"RwLock wakeup test with CountWaker"}
+{"file":"src/channel/mpsc_lost_wakeup_test.rs","lines":61,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"MPSC wakeup test verifying B woken after A dropped"}
+{"file":"src/channel/watch_leak_test.rs","lines":54,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Watch channel exploration binary"}
+{"file":"src/channel/deadlock_test.rs","lines":36,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Deadlock exploration test"}
+{"file":"src/bin/test_notify.rs","lines":37,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Notify test binary"}
+{"file":"src/http/h1/obs_text_test.rs","lines":16,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"HTTP/1.1 obs-text codec test binary"}
+{"file":"src/net/mod.rs","lines":101,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Net module re-exports with feature gates"}
+{"file":"src/grpc/mod.rs","lines":94,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"gRPC module re-exports"}
+{"file":"src/obligation/mod.rs","lines":82,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Obligation module re-exports"}
+{"file":"src/web/mod.rs","lines":79,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Web module re-exports"}
+{"file":"src/types/mod.rs","lines":78,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Types module re-exports"}
+{"file":"src/signal/mod.rs","lines":75,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Signal module re-exports"}
+{"file":"src/http/mod.rs","lines":71,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"HTTP module re-exports"}
+{"file":"src/time/mod.rs","lines":67,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Time module re-exports"}
+{"file":"src/net/websocket/mod.rs","lines":63,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"WebSocket module re-exports"}
+{"file":"src/service/mod.rs","lines":62,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Service module re-exports"}
+{"file":"src/sync/mod.rs","lines":60,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Sync module re-exports"}
+{"file":"src/cx/mod.rs","lines":60,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cx module re-exports"}
+{"file":"src/net/unix/mod.rs","lines":58,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Unix module re-exports"}
+{"file":"src/channel/mod.rs","lines":57,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Channel module re-exports"}
+{"file":"src/net/quic/mod.rs","lines":55,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"QUIC module re-exports"}
+{"file":"src/database/mod.rs","lines":51,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Database module re-exports"}
+{"file":"src/raptorq/mod.rs","lines":43,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"RaptorQ module re-exports"}
+{"file":"src/net/dns/mod.rs","lines":43,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"DNS module re-exports"}
+{"file":"src/http/h1/mod.rs","lines":40,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"HTTP/1.1 module re-exports"}
+{"file":"src/trace/distributed/mod.rs","lines":37,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Distributed trace module re-exports"}
+{"file":"src/record/mod.rs","lines":32,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Record module re-exports"}
+{"file":"src/bytes/mod.rs","lines":32,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Bytes module re-exports"}
+{"file":"src/http/h2/mod.rs","lines":27,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"HTTP/2 module re-exports"}
+{"file":"src/messaging/mod.rs","lines":25,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Messaging module re-exports"}
+{"file":"src/http/h3/mod.rs","lines":24,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"HTTP/3 module re-exports"}
+{"file":"src/bytes/buf/mod.rs","lines":24,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Buf traits module re-exports"}
+{"file":"src/util/mod.rs","lines":23,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Util module re-exports"}
+{"file":"src/net/tcp/mod.rs","lines":23,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"TCP module re-exports with wasm32 helper"}
+{"file":"src/cancel/mod.rs","lines":21,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Cancel module re-exports"}
+{"file":"src/net/sys/mod.rs","lines":16,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Platform-specific networking stubs"}
+{"file":"src/lab/network/mod.rs","lines":14,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Network simulation module re-exports"}
+{"file":"src/runtime/reactor/linux.rs","lines":7,"batch":376,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Linux reactor aliases (dead file - no mod declaration)"}
+{"file":"src/bin/test_notify.rs","lines":37,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"manual Notify regression driver"}
+{"file":"src/bytes/buf/mod.rs","lines":24,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/bytes/mod.rs","lines":32,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/cancel/mod.rs","lines":21,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/channel/deadlock_test.rs","lines":36,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"regression test for drop-under-lock deadlock"}
+{"file":"src/channel/mod.rs","lines":57,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod declarations and re-exports"}
+{"file":"src/channel/mpsc_lost_wakeup_test.rs","lines":61,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"lost-wakeup regression test"}
+{"file":"src/channel/watch_leak_test.rs","lines":54,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"vestigial debug file, track drops immediately but no assertion failure"}
+{"file":"src/channel/watch_test_bug.rs","lines":17,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"send-without-receivers regression test"}
+{"file":"src/cx/mod.rs","lines":60,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/database/mod.rs","lines":51,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/grpc/mod.rs","lines":94,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/http/h1/mod.rs","lines":40,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/http/h1/obs_text_test.rs","lines":16,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"manual obs-text smoke test"}
+{"file":"src/http/h2/mod.rs","lines":27,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/http/h3/mod.rs","lines":24,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/http/mod.rs","lines":71,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/lab/mod.rs","lines":147,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports with feature-gated items"}
+{"file":"src/lab/network/mod.rs","lines":14,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/messaging/mod.rs","lines":25,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/net/dns/mod.rs","lines":43,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/net/mod.rs","lines":101,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/net/quic/mod.rs","lines":55,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/net/sys/mod.rs","lines":16,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/net/tcp/mod.rs","lines":23,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/net/unix/mod.rs","lines":58,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/net/websocket/mod.rs","lines":63,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/obligation/mod.rs","lines":82,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/raptorq/mod.rs","lines":43,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/record/mod.rs","lines":32,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/runtime/reactor/linux.rs","lines":7,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"orphan file (no mod declaration), latent wrong use path (io_uring vs uring) - known dead code"}
+{"file":"src/service/mod.rs","lines":62,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/signal/mod.rs","lines":75,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/sync/mod.rs","lines":60,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/sync/rwlock_lost_wakeup_test.rs","lines":77,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"rwlock lost-wakeup regression test"}
+{"file":"src/sync/rwlock_test_bug.rs","lines":60,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"standalone rwlock regression driver"}
+{"file":"src/time/mod.rs","lines":67,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/trace/distributed/mod.rs","lines":37,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/types/mod.rs","lines":78,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/util/mod.rs","lines":23,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/web/mod.rs","lines":79,"batch":377,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"mod re-exports only"}
+{"file":"src/transport/tests.rs","lines":2115,"batch":378,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Comprehensive transport integration tests: channel, dedup, backpressure, routing, dispatch strategies"}
+{"file":"src/plan/fixtures.rs","lines":2259,"batch":378,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Plan DAG test fixtures (16 fixtures for rewrite/certification testing). Skimmed - pure test data."}
+{"file":"src/net/sys/windows.rs","lines":178,"batch":378,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Windows named pipe client with path validation. cfg(windows) gated."}
+{"file":"src/channel/mpsc_lost_wakeup_test.rs","lines":62,"batch":378,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Lost wakeup regression test: dropping reserve_a must wake queued reserve_b"}
+{"file":"src/bin/test_notify.rs","lines":38,"batch":378,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Standalone test binary for sync::Notify notify_one/notify_waiters behavior"}
+{"file":"src/runtime/reactor/linux.rs","lines":7,"batch":378,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Dead file - no mod declaration. 7 lines, stub only."}
+{"file":"src/bytes/buf/mod.rs","lines":24,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/bytes/mod.rs","lines":32,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/cancel/mod.rs","lines":21,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/channel/mod.rs","lines":57,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/cli/mod.rs","lines":252,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations + test module with CLI integration tests"}
+{"file":"src/cx/mod.rs","lines":60,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/database/mod.rs","lines":51,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/grpc/mod.rs","lines":94,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/http/h1/mod.rs","lines":40,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/http/h2/mod.rs","lines":27,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/http/h3/mod.rs","lines":24,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/http/mod.rs","lines":71,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/lab/mod.rs","lines":147,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/lab/network/mod.rs","lines":14,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/messaging/mod.rs","lines":25,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/net/dns/mod.rs","lines":43,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations with re-exports"}
+{"file":"src/net/mod.rs","lines":101,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/net/quic/mod.rs","lines":55,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/net/sys/mod.rs","lines":16,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/net/tcp/mod.rs","lines":23,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations + browser_tcp_unsupported() wasm stub"}
+{"file":"src/net/unix/mod.rs","lines":58,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/net/websocket/mod.rs","lines":63,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/obligation/mod.rs","lines":82,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/raptorq/mod.rs","lines":43,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/record/mod.rs","lines":32,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/runtime/scheduler/mod.rs","lines":142,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations + WorkStealingScheduler with worker count clamping"}
+{"file":"src/service/mod.rs","lines":62,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/signal/mod.rs","lines":75,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/sync/mod.rs","lines":60,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/time/mod.rs","lines":67,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Module declarations only"}
+{"file":"src/grpc/health.rs","lines":0,"batch":380,"date":"2026-03-15","agent":"QuietBasin","verdict":"FIXED","bugs":1,"notes":"HealthWatcher missed transient same-final-state flips; added per-service watch versions and regressions for named-service and server-level round trips"}
