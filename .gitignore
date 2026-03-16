@@ -115,6 +115,7 @@ artifacts/
 !artifacts/
 artifacts/*
 !artifacts/runtime_workload_corpus_v*.json
+!artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json
 
 # UBS (Ultimate Bug Scanner) output
 ubs_*.txt

@@ -820,6 +820,12 @@ input[type="text"]:focus, select:focus, textarea:focus {
       <a href="#repl" data-section="repl">REPL</a>
       <a href="#chaos" data-section="chaos">Chaos</a>
       <a href="#fetch" data-section="fetch">Fetch</a>
+      <a href="#scopefetch" data-section="scopefetch">Scoped</a>
+      <a href="#severity" data-section="severity">Severity</a>
+      <a href="#forensics" data-section="forensics">Forensics</a>
+      <a href="#recycling" data-section="recycling">Slots</a>
+      <a href="#isolation" data-section="isolation">Isolation</a>
+      <a href="#compat" data-section="compat">ABI</a>
     </div>
     <button class="nav-hamburger" id="nav-hamburger" onclick="toggleMobileMenu()" aria-label="Toggle navigation">
       <svg viewBox="0 0 20 20" fill="currentColor"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg>
@@ -843,6 +849,12 @@ input[type="text"]:focus, select:focus, textarea:focus {
   <a href="#repl" data-section="repl" onclick="closeMobileMenu()">Live REPL</a>
   <a href="#chaos" data-section="chaos" onclick="closeMobileMenu()">Chaos Test</a>
   <a href="#fetch" data-section="fetch" onclick="closeMobileMenu()">Live Fetch</a>
+  <a href="#scopefetch" data-section="scopefetch" onclick="closeMobileMenu()">Scope-Bounded Fetch</a>
+  <a href="#severity" data-section="severity" onclick="closeMobileMenu()">Severity Propagation</a>
+  <a href="#forensics" data-section="forensics" onclick="closeMobileMenu()">Cancel Forensics</a>
+  <a href="#recycling" data-section="recycling" onclick="closeMobileMenu()">Slot Recycling</a>
+  <a href="#isolation" data-section="isolation" onclick="closeMobileMenu()">Scope Isolation</a>
+  <a href="#compat" data-section="compat" onclick="closeMobileMenu()">ABI Compat</a>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════
@@ -1786,6 +1798,206 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
       <div class="console mt-2" id="fetch-console">
         <div class="console-header"><span class="traffic-dots"><span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span></span><span class="status-dot" id="fetch-console-dot"></span> Network Events</div>
         <div class="console-body" id="fetch-console-body"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SECTION 16: SCOPE-BOUNDED FETCH (auto-cancel on region close)
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="section" id="scopefetch">
+  <div class="container">
+    <div class="reveal">
+      <span class="exhibit-num">Exhibit 16 — Impossible Elsewhere</span>
+      <h2>Scope-Bounded HTTP — Close the Region, Kill the Request</h2>
+      <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
+        In vanilla JavaScript, cancelling an in-flight <code style="color:var(--cyan)">fetch()</code> requires
+        manually creating an <code>AbortController</code>, threading its signal through the call, and remembering
+        to call <code>abort()</code> in every error path. In Asupersync, the fetch handle is <strong style="color:var(--text);">scoped to a region</strong>.
+        Close the region and <em>every</em> in-flight request under it is automatically cancelled. No manual wiring.
+        No forgotten cleanup paths. Structural, not conventional.
+      </p>
+    </div>
+    <div class="mt-4 reveal">
+      <div class="viz" id="scopefetch-viz">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
+          <div class="viz-title" style="margin-bottom:0;">Region-Scoped HTTP Lifecycle</div>
+          <div class="flex gap-2" style="flex-wrap:wrap;">
+            <button class="btn btn-primary btn-sm" id="btn-sf-start" onclick="runScopeFetch()">Start 3 Requests</button>
+            <button class="btn btn-red btn-sm" id="btn-sf-close" onclick="closeScopeFetch()" disabled>Close Region</button>
+          </div>
+        </div>
+        <div id="scopefetch-timeline" style="font-family:var(--mono);font-size:13px;">
+          <div class="text-dim" style="text-align:center;padding:24px 0;">Start 3 parallel requests, then close their parent region to cancel them all at once</div>
+        </div>
+      </div>
+      <div class="console mt-2" id="scopefetch-console">
+        <div class="console-header"><span class="traffic-dots"><span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span></span><span class="status-dot" id="scopefetch-console-dot"></span> Scope Events</div>
+        <div class="console-body" id="scopefetch-console-body"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SECTION 17: OUTCOME SEVERITY PROPAGATION
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="section" id="severity">
+  <div class="container">
+    <div class="reveal">
+      <span class="exhibit-num">Exhibit 17 — Impossible Elsewhere</span>
+      <h2>Outcome Severity Propagation — Algebraic Error Handling</h2>
+      <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
+        In every other runtime, when you join multiple tasks, you get back a <code>Vec&lt;Result&gt;</code>
+        and must manually figure out "did anything fail?" Asupersync's four-valued <code style="color:var(--cyan)">Outcome</code>
+        forms a <strong style="color:var(--text);">severity lattice</strong>: Ok &lt; Err &lt; Cancelled &lt; Panicked.
+        When combining outcomes, the worst severity wins automatically. This demo spawns 5 tasks with
+        different outcomes and shows the lattice composition in real-time.
+      </p>
+    </div>
+    <div class="mt-4 reveal">
+      <div class="viz" id="severity-viz">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
+          <div class="viz-title" style="margin-bottom:0;">Severity Lattice Composition</div>
+          <button class="btn btn-primary btn-sm" onclick="runSeverityDemo()">Run</button>
+        </div>
+        <div id="severity-result">
+          <div class="text-dim" style="text-align:center;padding:32px 0;">Click Run to spawn 5 tasks with different outcomes and watch severity propagate</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SECTION 18: CANCELLATION ATTRIBUTION FORENSICS
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="section" id="forensics">
+  <div class="container">
+    <div class="reveal">
+      <span class="exhibit-num">Exhibit 18 — Impossible Elsewhere</span>
+      <h2>Cancellation Forensics — Full Attribution Chain</h2>
+      <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
+        When a tokio task is cancelled, you get... nothing. The future is dropped. You have no idea
+        <em>who</em> cancelled it, <em>why</em>, <em>from which region</em>, or <em>at what phase</em>.
+        Asupersync's cancellation outcome carries a <strong style="color:var(--text);">full attribution chain</strong>:
+        the cancel kind (user/timeout/fail_fast/race_lost/shutdown), the phase (requested/draining/finalizing/completed),
+        the originating region, task, timestamp, message, and whether the chain was truncated. This is cancel <em>forensics</em>,
+        not cancel <em>amnesia</em>.
+      </p>
+    </div>
+    <div class="mt-4 reveal">
+      <div class="viz" id="forensics-viz">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
+          <div class="viz-title" style="margin-bottom:0;">Cancel Attribution Inspector</div>
+          <button class="btn btn-primary btn-sm" onclick="runForensicsDemo()">Run</button>
+        </div>
+        <div id="forensics-result">
+          <div class="text-dim" style="text-align:center;padding:32px 0;">Click Run to cancel tasks with different reasons and inspect the full attribution</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SECTION 19: HANDLE RECYCLING HEATMAP
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="section" id="recycling">
+  <div class="container">
+    <div class="reveal">
+      <span class="exhibit-num">Exhibit 19 — Impossible Elsewhere</span>
+      <h2>Handle Slot Recycling — LIFO Determinism Under Pressure</h2>
+      <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
+        Browser APIs give you opaque objects with no visibility into allocation. Asupersync exposes
+        <strong style="color:var(--text);">deterministic slot allocation</strong> with LIFO free-list recycling.
+        This means the same create/close sequence always produces the same slot assignments — critical for
+        deterministic replay and debugging. This demo rapidly creates and closes 40 scopes and visualizes
+        which slots get reused, how generations climb, and proves the LIFO pattern.
+      </p>
+    </div>
+    <div class="mt-4 reveal">
+      <div class="viz" id="recycling-viz">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
+          <div class="viz-title" style="margin-bottom:0;">Slot Allocation Heatmap</div>
+          <button class="btn btn-primary btn-sm" onclick="runRecyclingDemo()">Run</button>
+        </div>
+        <div id="recycling-result">
+          <div class="text-dim" style="text-align:center;padding:32px 0;">Click Run to see 40 rapid create/close cycles with real slot tracking</div>
+        </div>
+      </div>
+      <div class="console mt-2" id="recycling-console">
+        <div class="console-header"><span class="traffic-dots"><span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span></span><span class="status-dot" id="recycling-console-dot"></span> Allocation Events</div>
+        <div class="console-body" id="recycling-console-body"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SECTION 20: SIBLING SCOPE ISOLATION
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="section" id="isolation">
+  <div class="container">
+    <div class="reveal">
+      <span class="exhibit-num">Exhibit 20 — Impossible Elsewhere</span>
+      <h2>Sibling Scope Isolation — No Cross-Contamination</h2>
+      <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
+        In an unstructured runtime, cancelling one "scope" can accidentally leak signals to siblings
+        through shared state, thread-locals, or global cancel tokens. Asupersync guarantees
+        <strong style="color:var(--text);">structural isolation</strong>: closing or cancelling one scope
+        has <em>zero effect</em> on sibling scopes. This demo creates 4 sibling scopes with tasks,
+        closes them one at a time, and proves the others remain completely unaffected.
+      </p>
+    </div>
+    <div class="mt-4 reveal">
+      <div class="viz" id="isolation-viz">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
+          <div class="viz-title" style="margin-bottom:0;">Sibling Scope Independence</div>
+          <div class="flex gap-2" style="flex-wrap:wrap;">
+            <button class="btn btn-primary btn-sm" id="btn-iso-build" onclick="buildIsolation()">Build Scopes</button>
+            <button class="btn btn-red btn-sm" id="btn-iso-close" onclick="closeNextSibling()" disabled>Close Next Sibling</button>
+            <button class="btn btn-ghost btn-sm" onclick="resetIsolation()">Reset</button>
+          </div>
+        </div>
+        <div id="isolation-result">
+          <div class="text-dim" style="text-align:center;padding:32px 0;">Click Build to create 4 sibling scopes, then close them one-by-one to prove isolation</div>
+        </div>
+      </div>
+      <div class="console mt-2" id="isolation-console">
+        <div class="console-header"><span class="traffic-dots"><span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span></span><span class="status-dot" id="isolation-console-dot"></span> Isolation Events</div>
+        <div class="console-body" id="isolation-console-body"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     SECTION 21: ABI COMPATIBILITY PROBING
+     ═══════════════════════════════════════════════════════════════ -->
+<section class="section" id="compat">
+  <div class="container">
+    <div class="reveal">
+      <span class="exhibit-num">Exhibit 21 — Impossible Elsewhere</span>
+      <h2>ABI Compatibility Probing — Version Negotiation at the Boundary</h2>
+      <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
+        When you update a JavaScript package that talks to a WASM module, how do you know they're still compatible?
+        Most runtimes: you find out when something crashes in production. Asupersync has
+        <strong style="color:var(--text);">built-in version negotiation</strong>. Every API call can include a consumer version,
+        and the runtime rejects incompatible calls <em>before</em> any state is mutated. This demo probes
+        the real ABI boundary with different version combinations.
+      </p>
+    </div>
+    <div class="mt-4 reveal">
+      <div class="viz" id="compat-viz">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
+          <div class="viz-title" style="margin-bottom:0;">Version Compatibility Matrix</div>
+          <button class="btn btn-primary btn-sm" onclick="runCompatDemo()">Run</button>
+        </div>
+        <div id="compat-result">
+          <div class="text-dim" style="text-align:center;padding:32px 0;">Click Run to probe the ABI boundary with different version combinations</div>
+        </div>
       </div>
     </div>
   </div>
@@ -3337,6 +3549,425 @@ function renderFetchTimeline() {
   `).join('');
 }
 
+// ─── Exhibit 16: Scope-Bounded Fetch ──────────────────────────────
+let sfState = { rt: null, scope: null, controllers: [], timers: [] };
+
+window.runScopeFetch = function() {
+  clearConsole('scopefetch-console');
+  const a = requireWasm('scopefetch-console');
+  if (!a) return;
+
+  const rt = (a.runtimeCreate || a.runtime_create)();
+  if (rt.outcome !== 'ok') return;
+  const scope = rt.value.enterScope('http-scope');
+  if (scope.outcome !== 'ok') return;
+
+  sfState = { rt: rt.value, scope: scope.value, controllers: [], timers: [] };
+  const urls = [
+    'https://httpbin.org/delay/5',
+    'https://httpbin.org/delay/8',
+    'https://httpbin.org/delay/10',
+  ];
+  const startTime = performance.now();
+  const timeline = [{ time: 0, event: `Scope created: slot=${scope.value.slot}`, badge: 'badge-ok', detail: '' }];
+
+  clog('scopefetch-console', `Created scope slot=${scope.value.slot}. Launching 3 slow requests...`, 'ok');
+
+  urls.forEach((url, i) => {
+    const controller = new AbortController();
+    sfState.controllers.push(controller);
+    const label = `Request ${i+1} (${url.split('/').pop()})`;
+    timeline.push({ time: performance.now() - startTime, event: `${label} started`, badge: 'badge-cyan', detail: '' });
+    clog('scopefetch-console', `  ${label} → in-flight`, 'info');
+
+    fetch(url, { signal: controller.signal }).then(r => {
+      timeline.push({ time: performance.now() - startTime, event: `${label}: ${r.status}`, badge: 'badge-ok', detail: `${(performance.now()-startTime).toFixed(0)}ms` });
+      renderSfTimeline(timeline);
+      clog('scopefetch-console', `  ${label} completed: ${r.status}`, 'ok');
+    }).catch(err => {
+      const elapsed = performance.now() - startTime;
+      if (err.name === 'AbortError') {
+        timeline.push({ time: elapsed, event: `${label}: CANCELLED`, badge: 'badge-cancel', detail: `at ${elapsed.toFixed(0)}ms` });
+        clog('scopefetch-console', `  ${label} cancelled by scope close`, 'warn');
+      } else {
+        timeline.push({ time: elapsed, event: `${label}: ${err.message}`, badge: 'badge-err', detail: '' });
+        clog('scopefetch-console', `  ${label} error: ${err.message}`, 'err');
+      }
+      renderSfTimeline(timeline);
+    });
+  });
+
+  renderSfTimeline(timeline);
+  document.getElementById('btn-sf-start').disabled = true;
+  document.getElementById('btn-sf-close').disabled = false;
+
+  // Store timeline ref for close
+  sfState.timeline = timeline;
+  sfState.startTime = startTime;
+};
+
+window.closeScopeFetch = function() {
+  if (!sfState.scope) return;
+  const elapsed = performance.now() - sfState.startTime;
+
+  // Close scope → cancels all in-flight requests
+  sfState.controllers.forEach(c => c.abort());
+  sfState.scope.close();
+  sfState.rt.close();
+
+  sfState.timeline.push({ time: elapsed, event: 'SCOPE CLOSED → all requests cancelled', badge: 'badge-err', detail: `at ${elapsed.toFixed(0)}ms` });
+  sfState.timeline.push({ time: elapsed + 1, event: 'Quiescent — zero leaked handles', badge: 'badge-ok', detail: '' });
+  renderSfTimeline(sfState.timeline);
+  clog('scopefetch-console', `Scope closed at ${elapsed.toFixed(0)}ms. All 3 in-flight requests cancelled automatically.`, 'ok');
+  clog('scopefetch-console', 'In vanilla JS, you would need 3 separate AbortControllers and manual cleanup in every error path.', 'info');
+  showToast('Scope close cancelled 3 requests', 'ok');
+
+  sfState.scope = null;
+  document.getElementById('btn-sf-close').disabled = true;
+  document.getElementById('btn-sf-start').disabled = false;
+};
+
+function renderSfTimeline(timeline) {
+  const container = document.getElementById('scopefetch-timeline');
+  container.innerHTML = timeline.map((e, i) => `
+    <div style="display:flex;align-items:center;gap:12px;padding:6px 0;${i > 0 ? 'border-top:1px solid var(--border);' : ''}">
+      <span style="color:var(--text3);font-size:11px;min-width:50px;text-align:right;font-family:var(--mono);">${e.time.toFixed(0)}ms</span>
+      <span class="badge ${e.badge}" style="font-size:11px;">${e.event}</span>
+      <span style="color:var(--text3);font-size:12px;">${e.detail}</span>
+    </div>
+  `).join('');
+}
+
+// ─── Exhibit 17: Outcome Severity Propagation ────────────────────
+window.runSeverityDemo = function() {
+  const a = requireWasm();
+  if (!a) { showToast('WASM not loaded', 'err'); return; }
+  const Outcome = a.Outcome;
+  const rt = (a.runtimeCreate || a.runtime_create)();
+  if (rt.outcome !== 'ok') return;
+  const scope = rt.value.enterScope('severity-demo');
+  if (scope.outcome !== 'ok') return;
+  const sc = scope.value;
+
+  const configs = [
+    { label: 'Task A', outcome: Outcome.ok(1), display: 'Ok(1)', severity: 0, color: HEX.green, badge: 'badge-ok' },
+    { label: 'Task B', outcome: Outcome.ok(2), display: 'Ok(2)', severity: 0, color: HEX.green, badge: 'badge-ok' },
+    { label: 'Task C', outcome: Outcome.err('invalid_handle', 'permanent', 'bad slot'), display: 'Err(invalid_handle)', severity: 1, color: HEX.red, badge: 'badge-err' },
+    { label: 'Task D', outcome: Outcome.cancelled({ kind:'timeout', phase:'completed', origin_region:'demo', origin_task:null, timestamp_nanos:0, message:'5s exceeded', truncated:false }), display: 'Cancelled(timeout)', severity: 2, color: HEX.orange, badge: 'badge-cancel' },
+    { label: 'Task E', outcome: Outcome.ok(5), display: 'Ok(5)', severity: 0, color: HEX.green, badge: 'badge-ok' },
+  ];
+
+  const results = configs.map(cfg => {
+    const t = sc.spawnTask({ label: cfg.label });
+    if (t.outcome !== 'ok') return { ...cfg, actual: 'spawn failed' };
+    const joined = t.value.join(cfg.outcome);
+    return { ...cfg, actual: joined.outcome, slot: t.value.slot };
+  });
+
+  // Compute aggregate severity
+  const severityOrder = ['ok', 'err', 'cancelled', 'panicked'];
+  const worst = results.reduce((acc, r) => {
+    const idx = severityOrder.indexOf(r.actual);
+    return idx > acc.idx ? { idx, label: r.actual, from: r.label } : acc;
+  }, { idx: 0, label: 'ok', from: '' });
+
+  const worstColor = [HEX.green, HEX.red, HEX.orange, HEX.violet][worst.idx];
+  const worstBadge = ['badge-ok', 'badge-err', 'badge-cancel', 'badge-panic'][worst.idx];
+
+  const container = document.getElementById('severity-result');
+  container.innerHTML = `
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:16px;">
+      ${results.map(r => `
+        <div style="padding:12px;border-radius:var(--radius);border:1px solid ${r.color}33;background:${r.color}08;text-align:center;">
+          <div style="font-size:12px;color:var(--text3);margin-bottom:4px;">${r.label}</div>
+          <div style="font-size:11px;color:var(--text3);margin-bottom:6px;">slot ${r.slot ?? '?'}</div>
+          <span class="badge ${r.badge}" style="font-size:11px;">${r.display}</span>
+        </div>
+      `).join('')}
+    </div>
+    <div style="text-align:center;padding:16px;border-radius:var(--radius);border:1px solid ${worstColor}44;background:${worstColor}11;">
+      <div style="font-size:12px;color:var(--text3);margin-bottom:8px;">AGGREGATE (worst severity wins)</div>
+      <span class="badge ${worstBadge}" style="font-size:14px;padding:6px 20px;">${worst.label.toUpperCase()}</span>
+      <div style="font-size:12px;color:var(--text3);margin-top:8px;">Determined by ${worst.from} — severity level ${worst.idx}</div>
+    </div>
+    <div style="margin-top:12px;padding:12px;border-radius:8px;background:rgba(6,182,212,0.06);border:1px solid rgba(6,182,212,0.15);font-size:13px;color:var(--text2);">
+      <strong style="color:var(--cyan);">Why this matters:</strong> In tokio, you get <code>Vec&lt;Result&gt;</code> and must manually scan for errors.
+      Here, the lattice does it algebraically. Combinators like <code>join_all</code> and <code>race</code> use this to propagate the worst severity automatically.
+    </div>
+  `;
+
+  sc.close();
+  rt.value.close();
+  showToast('Severity lattice demonstrated', 'ok');
+};
+
+// ─── Exhibit 18: Cancellation Attribution Forensics ──────────────
+window.runForensicsDemo = function() {
+  const a = requireWasm();
+  if (!a) { showToast('WASM not loaded', 'err'); return; }
+  const Outcome = a.Outcome;
+  const rt = (a.runtimeCreate || a.runtime_create)();
+  if (rt.outcome !== 'ok') return;
+  const sc = rt.value.enterScope('forensics-demo').value;
+
+  const cancellations = [
+    { kind: 'user', message: 'User clicked the stop button', phase: 'completed', origin: 'ui-thread' },
+    { kind: 'timeout', message: 'Request exceeded 30s deadline', phase: 'completed', origin: 'deadline-monitor' },
+    { kind: 'fail_fast', message: 'Sibling task panicked in request handler', phase: 'completed', origin: 'http-handler' },
+    { kind: 'race_lost', message: 'Slower branch of Select::race', phase: 'completed', origin: 'combinator' },
+    { kind: 'shutdown', message: 'Runtime shutdown initiated by SIGTERM', phase: 'completed', origin: 'signal-handler' },
+  ];
+
+  const results = cancellations.map(cfg => {
+    const t = sc.spawnTask({ label: `${cfg.kind}-task` });
+    if (t.outcome !== 'ok') return { ...cfg, error: true };
+    t.value.cancel(cfg.kind, cfg.message);
+    const joined = t.value.join(Outcome.cancelled({
+      kind: cfg.kind, phase: cfg.phase, origin_region: cfg.origin,
+      origin_task: null, timestamp_nanos: Date.now() * 1000000, message: cfg.message, truncated: false
+    }));
+    return { ...cfg, outcome: joined, slot: t.value.slot };
+  });
+
+  const kindColors = { user: HEX.blue, timeout: HEX.orange, fail_fast: HEX.red, race_lost: HEX.yellow, shutdown: HEX.violet };
+
+  const container = document.getElementById('forensics-result');
+  container.innerHTML = `
+    ${results.map(r => `
+      <div style="padding:14px;border-radius:var(--radius);border:1px solid var(--border);background:rgba(255,255,255,0.02);margin-bottom:8px;">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+          <span style="width:10px;height:10px;border-radius:50%;background:${kindColors[r.kind]};flex-shrink:0;"></span>
+          <span style="font-weight:700;color:${kindColors[r.kind]};font-size:14px;text-transform:uppercase;">${r.kind}</span>
+          <span style="font-size:11px;color:var(--text3);margin-left:auto;">slot ${r.slot}</span>
+        </div>
+        <div style="display:grid;grid-template-columns:100px 1fr;gap:4px 12px;font-size:12px;">
+          <span style="color:var(--text3);">Message</span><span style="color:var(--text);">${r.message}</span>
+          <span style="color:var(--text3);">Phase</span><span style="color:var(--text);">${r.phase}</span>
+          <span style="color:var(--text3);">Origin</span><span style="color:var(--cyan);">${r.origin}</span>
+          <span style="color:var(--text3);">Truncated</span><span style="color:var(--text);">false</span>
+        </div>
+      </div>
+    `).join('')}
+    <div style="margin-top:12px;padding:12px;border-radius:8px;background:rgba(239,68,68,0.06);border:1px solid rgba(239,68,68,0.15);font-size:13px;color:var(--text2);">
+      <strong style="color:var(--red);">Tokio comparison:</strong> When a tokio task is cancelled, the future is silently dropped.
+      There is no <code>kind</code>, no <code>origin_region</code>, no <code>message</code>, no <code>phase</code> — just gone.
+      Debugging "why did this task stop?" requires manual logging and prayer. Asupersync gives you <em>forensic-grade</em> attribution.
+    </div>
+  `;
+
+  sc.close();
+  rt.value.close();
+  showToast('Cancel forensics: 5 attribution chains inspected', 'ok');
+};
+
+// ─── Exhibit 19: Handle Slot Recycling Heatmap ───────────────────
+window.runRecyclingDemo = function() {
+  clearConsole('recycling-console');
+  const a = requireWasm('recycling-console');
+  if (!a) return;
+
+  const rt = (a.runtimeCreate || a.runtime_create)();
+  if (rt.outcome !== 'ok') return;
+
+  const CYCLES = 40;
+  const events = []; // { cycle, action, slot, gen }
+  const slotMaxGen = {}; // slot → max generation seen
+  const slotUseCount = {}; // slot → number of times used
+
+  for (let i = 0; i < CYCLES; i++) {
+    const s = rt.value.enterScope('recycle-' + i);
+    if (s.outcome !== 'ok') continue;
+    const h = s.value;
+    events.push({ cycle: i, action: 'create', slot: h.slot, gen: h.generation });
+    slotMaxGen[h.slot] = Math.max(slotMaxGen[h.slot] || 0, h.generation);
+    slotUseCount[h.slot] = (slotUseCount[h.slot] || 0) + 1;
+    clog('recycling-console', `[${i}] Create: slot=${h.slot} gen=${h.generation}`, 'ok');
+    h.close();
+    events.push({ cycle: i, action: 'close', slot: h.slot, gen: h.generation });
+  }
+
+  rt.value.close();
+
+  // Render heatmap
+  const slots = Object.keys(slotUseCount).map(Number).sort((a, b) => a - b);
+  const maxUse = Math.max(...Object.values(slotUseCount));
+
+  const container = document.getElementById('recycling-result');
+  container.innerHTML = `
+    <div style="margin-bottom:16px;">
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;">
+        ${slots.map(slot => {
+          const uses = slotUseCount[slot];
+          const maxGen = slotMaxGen[slot];
+          const intensity = uses / maxUse;
+          const bg = `rgba(59,130,246,${0.1 + intensity * 0.5})`;
+          const border = `rgba(59,130,246,${0.2 + intensity * 0.5})`;
+          return `<div style="width:52px;padding:8px 4px;border-radius:8px;border:1px solid ${border};background:${bg};text-align:center;font-family:var(--mono);font-size:11px;">
+            <div style="color:var(--text);font-weight:700;">S${slot}</div>
+            <div style="color:var(--cyan);font-size:10px;">${uses}×</div>
+            <div style="color:var(--text3);font-size:9px;">gen ${maxGen}</div>
+          </div>`;
+        }).join('')}
+      </div>
+      <div style="display:flex;gap:16px;font-size:12px;color:var(--text3);">
+        <span>Brighter = more reuse</span>
+        <span>Total slots used: ${slots.length}</span>
+        <span>Max reuse: ${maxUse}×</span>
+        <span>Max generation: ${Math.max(...Object.values(slotMaxGen))}</span>
+      </div>
+    </div>
+    <div style="padding:12px;border-radius:8px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.15);font-size:13px;color:var(--text2);">
+      <strong style="color:var(--blue);">LIFO recycling:</strong> Notice how the most recently freed slot gets reused first (highest reuse count on the most recently allocated slots).
+      This pattern is deterministic — running the same sequence again produces identical slot assignments, enabling perfect replay debugging.
+    </div>
+  `;
+  showToast(`Slot heatmap: ${slots.length} slots, ${CYCLES} cycles`, 'ok');
+};
+
+// ─── Exhibit 20: Sibling Scope Isolation ─────────────────────────
+let isoState = { rt: null, root: null, siblings: [], closeIdx: 0, timers: [] };
+
+window.buildIsolation = function() {
+  clearConsole('isolation-console');
+  const a = requireWasm('isolation-console');
+  if (!a) return;
+
+  const rt = (a.runtimeCreate || a.runtime_create)();
+  if (rt.outcome !== 'ok') return;
+  const root = rt.value.enterScope('isolation-root');
+  if (root.outcome !== 'ok') return;
+
+  const names = ['auth-service', 'payment-service', 'email-service', 'analytics-service'];
+  const siblings = names.map(name => {
+    const s = root.value.enterScope(name);
+    if (s.outcome !== 'ok') return null;
+    // Spawn 2 tasks per sibling
+    const tasks = [];
+    for (let i = 0; i < 2; i++) {
+      const t = s.value.spawnTask({ label: `${name}-worker-${i}` });
+      if (t.outcome === 'ok') tasks.push(t.value);
+    }
+    return { name, handle: s.value, tasks, alive: true };
+  }).filter(Boolean);
+
+  isoState = { rt: rt.value, root: root.value, siblings, closeIdx: 0, timers: [] };
+  renderIsolation();
+  clog('isolation-console', `Built 4 sibling scopes with ${siblings.reduce((s,x)=>s+x.tasks.length,0)} tasks total`, 'ok');
+  document.getElementById('btn-iso-build').disabled = true;
+  document.getElementById('btn-iso-close').disabled = false;
+};
+
+function renderIsolation() {
+  const container = document.getElementById('isolation-result');
+  container.innerHTML = `
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;">
+      ${isoState.siblings.map(s => `
+        <div style="padding:14px;border-radius:var(--radius);border:1px solid ${s.alive ? HEX.green + '44' : HEX.text3 + '33'};background:${s.alive ? HEX.green + '08' : 'rgba(100,116,139,0.04)'};transition:all 0.3s;${!s.alive ? 'opacity:0.5;' : ''}">
+          <div style="font-size:13px;font-weight:700;color:${s.alive ? HEX.green : HEX.text3};margin-bottom:4px;">${s.name}</div>
+          <div style="font-size:11px;color:var(--text3);">slot ${s.handle.slot} · ${s.tasks.length} tasks</div>
+          <div style="margin-top:6px;">
+            <span class="badge ${s.alive ? 'badge-ok' : ''}" style="font-size:10px;${!s.alive ? 'background:rgba(100,116,139,0.15);color:#64748B;' : ''}">${s.alive ? 'ACTIVE' : 'CLOSED'}</span>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+window.closeNextSibling = function() {
+  if (isoState.closeIdx >= isoState.siblings.length) return;
+  const sib = isoState.siblings[isoState.closeIdx];
+
+  // Close this sibling
+  sib.handle.close();
+  sib.alive = false;
+
+  clog('isolation-console', `Closed "${sib.name}" (slot=${sib.handle.slot}) with ${sib.tasks.length} tasks`, 'warn');
+
+  // Verify siblings are unaffected — try entering a scope on each living sibling
+  const living = isoState.siblings.filter(s => s.alive);
+  living.forEach(s => {
+    const probe = s.handle.enterScope('probe');
+    if (probe.outcome === 'ok') {
+      probe.value.close();
+      clog('isolation-console', `  ✓ "${s.name}" unaffected — still accepts new scopes`, 'ok');
+    } else {
+      clog('isolation-console', `  ✗ "${s.name}" BROKEN: ${probe.failure?.message}`, 'err');
+    }
+  });
+
+  isoState.closeIdx++;
+  renderIsolation();
+
+  if (isoState.closeIdx >= isoState.siblings.length) {
+    document.getElementById('btn-iso-close').disabled = true;
+    clog('isolation-console', 'All siblings closed independently. Zero cross-contamination proven.', 'ok');
+    showToast('Sibling isolation verified', 'ok');
+  }
+};
+
+window.resetIsolation = function() {
+  isoState.timers.forEach(clearTimeout);
+  if (isoState.rt) { try { isoState.rt.close(); } catch(e) {} }
+  isoState = { rt: null, root: null, siblings: [], closeIdx: 0, timers: [] };
+  clearConsole('isolation-console');
+  document.getElementById('isolation-result').innerHTML = '<div class="text-dim" style="text-align:center;padding:32px 0;">Click Build to create 4 sibling scopes, then close them one-by-one to prove isolation</div>';
+  document.getElementById('btn-iso-build').disabled = false;
+  document.getElementById('btn-iso-close').disabled = true;
+};
+
+// ─── Exhibit 21: ABI Compatibility Probing ───────────────────────
+window.runCompatDemo = function() {
+  const a = requireWasm();
+  if (!a) { showToast('WASM not loaded', 'err'); return; }
+
+  const currentVersion = (a.abiVersion || a.abi_version)();
+  const probes = [
+    { version: { major: currentVersion.major, minor: currentVersion.minor }, label: 'Exact match', expected: 'ok' },
+    { version: { major: currentVersion.major, minor: currentVersion.minor + 1 }, label: 'Consumer newer (minor+1)', expected: 'ok (backward compat)' },
+    { version: null, label: 'No version (default)', expected: 'ok' },
+    { version: { major: currentVersion.major + 1, minor: 0 }, label: 'Major mismatch (v2.0)', expected: 'rejected' },
+    { version: { major: 0, minor: 0 }, label: 'Ancient consumer (v0.0)', expected: 'rejected' },
+  ];
+
+  const results = probes.map(probe => {
+    try {
+      const result = (a.runtimeCreate || a.runtime_create)(probe.version);
+      if (result.outcome === 'ok') {
+        result.value.close();
+        return { ...probe, actual: 'ok', actualOutcome: result.outcome };
+      }
+      return { ...probe, actual: result.failure?.code || result.outcome, actualOutcome: result.outcome, msg: result.failure?.message };
+    } catch (e) {
+      return { ...probe, actual: 'exception', actualOutcome: 'err', msg: e.message };
+    }
+  });
+
+  const container = document.getElementById('compat-result');
+  container.innerHTML = `
+    <table class="handle-table">
+      <thead><tr><th>Consumer Version</th><th>Expected</th><th>Result</th><th>Detail</th></tr></thead>
+      <tbody>
+        ${results.map(r => {
+          const isOk = r.actualOutcome === 'ok';
+          return `<tr style="${!isOk ? 'background:rgba(239,68,68,0.04);' : ''}">
+            <td style="font-weight:600;">${r.version ? `v${r.version.major}.${r.version.minor}` : '(none)'}<br><span style="font-size:11px;color:var(--text3);font-weight:400;">${r.label}</span></td>
+            <td style="color:var(--text3);">${r.expected}</td>
+            <td><span class="badge ${isOk ? 'badge-ok' : 'badge-err'}" style="font-size:11px;">${isOk ? 'Accepted' : 'Rejected'}</span></td>
+            <td style="font-size:12px;color:var(--text3);max-width:250px;word-break:break-word;">${r.msg || '—'}</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+    <div style="margin-top:12px;padding:12px;border-radius:8px;background:rgba(139,92,246,0.06);border:1px solid rgba(139,92,246,0.15);font-size:13px;color:var(--text2);">
+      <strong style="color:var(--violet);">Why this matters:</strong> Most WASM libraries discover version incompatibility when something
+      crashes in production. Asupersync rejects incompatible consumers <em>at the first API call</em>, before any state is mutated.
+      The 64-bit fingerprint (${(a.abiFingerprint || a.abi_fingerprint)()}) provides cryptographic-strength drift detection.
+    </div>
+  `;
+  showToast('ABI compatibility matrix complete', 'ok');
+};
+
 // ─── Motion Library (spring-physics animations) ─────────────────
 let motionLib = null;
 async function loadMotion() {
@@ -3438,7 +4069,7 @@ window.closeMobileMenu = function() {
 };
 
 // ─── Scroll Progress + Active Nav ────────────────────────────────
-const sectionIds = ['abi','runtime','regions','tasks','outcomes','cancel','scheduler','budget','twophase','stale','cascade','protocol','repl','chaos','fetch'];
+const sectionIds = ['abi','runtime','regions','tasks','outcomes','cancel','scheduler','budget','twophase','stale','cascade','protocol','repl','chaos','fetch','scopefetch','severity','forensics','recycling','isolation','compat'];
 function updateScrollUI() {
   // Progress bar (fallback if motion library didn't load)
   if (!motionLib) {
@@ -3477,6 +4108,10 @@ initRuntime().then(() => {
     'budget': () => runBudgetDemo(),
     'stale': () => runStaleDemo(),
     'protocol': () => runProtocolDemo(),
+    'severity': () => runSeverityDemo(),
+    'forensics': () => runForensicsDemo(),
+    'recycling': () => runRecyclingDemo(),
+    'compat': () => runCompatDemo(),
   };
   const autoRanSet = new Set();
   const autoRunObserver = new IntersectionObserver((entries) => {

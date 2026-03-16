@@ -95,7 +95,7 @@ Current artifact summary (`coverage_summary` in JSON):
 
 Closure blockers for `asupersync-3ltrv`:
 
-1. **E5 PARTIAL** — `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` keeps `ready_for_e5_closure = false`, `acceptance_criterion_4_status = not_met`, and `scope_sufficiency = insufficient`. The current narrowed high-confidence packet is useful guardrail evidence, but broader multi-scenario or raw-sample comparator evidence is still required before `asupersync-36m6p` can be treated as closure-complete for G3. That future broader refresh must publish a new artifact/schema version rather than silently repurposing this narrowed `highconf_v1` packet.
+1. **E5 PARTIAL** — `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` keeps `ready_for_e5_closure = false`, `acceptance_criterion_4_status = not_met`, and `scope_sufficiency = insufficient`. `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json` now widens the checked-in evidence surface to the broader `RQ-E-GF256-DUAL-*` corpus and records targeted uplift for the current x86 default contract, but its `confidence_contract = short_window_directional_not_closure_grade`, so raw-sample or longer-window multi-scenario evidence is still required before `asupersync-36m6p` can be treated as closure-complete for G3. Any future closure attempt must publish a new artifact/schema version rather than silently repurposing the narrowed `highconf_v1` packet.
 
 `F7` and `F8` remain resolved and are no longer current blockers.
 
@@ -188,3 +188,13 @@ Recent evidence alignment updates (2026-03-12):
   - `acceptance_criterion_4_status = not_met`
   - `scope_sufficiency = insufficient`
 - `coverage_summary.closure_blocker_levers` therefore returns to `[E5]` on the present frontier, while `F7` and `F8` remain resolved historical non-blockers.
+
+Recent evidence alignment updates (2026-03-15):
+
+- Published `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json` as the separately versioned broader Track-E packet for the `RQ-E-GF256-DUAL-*` corpus already anchored by `simd_policy_ablation_2026_03_04`.
+- The new packet keeps the broader refresh machine-checkable instead of prose-only:
+  - `schema_version = raptorq-track-e-gf256-multiscenario-refresh-v2`
+  - `evidence_role = broader_multiscenario_directional_refresh`
+  - `scope_contract = same_target_multi_scenario_directional_corpus`
+  - `confidence_contract = short_window_directional_not_closure_grade`
+- This packet complements rather than replaces `highconf_v1`: the narrowed guardrail still owns `ready_for_e5_closure = false`, while the broader refresh records the seven-scenario directional corpus, the selected `candidate_addmul_window_only` default, and the remaining blocker that closure-grade raw-sample or longer-window multi-scenario evidence is still missing.

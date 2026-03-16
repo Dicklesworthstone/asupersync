@@ -328,6 +328,43 @@ intentionally a narrowed single-scenario guardrail packet. Any broader
 multi-scenario high-confidence refresh must publish a new artifact/schema
 version rather than silently mutating this `highconf_v1` contract in place.
 
+### E5 Broader Multi-Scenario Directional Refresh (`asupersync-36m6p`, 2026-03-15)
+
+`artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json` is the new
+versioned broader packet for the seven-scenario `RQ-E-GF256-DUAL-*` corpus
+already anchored in `artifacts/raptorq_track_e_gf256_bench_v1.json` under
+`simd_policy_ablation_2026_03_04`.
+
+- `schema_version = raptorq-track-e-gf256-multiscenario-refresh-v2`
+- `evidence_role = broader_multiscenario_directional_refresh`
+- `scope_contract = same_target_multi_scenario_directional_corpus`
+- `confidence_contract = short_window_directional_not_closure_grade`
+- `successor_policy = requires_new_artifact_version_for_raw_sample_or_longer_window_closure_attempt`
+- scenario scope widens to `RQ-E-GF256-DUAL-001..007`
+- selected candidate remains `candidate_addmul_window_only`
+- canonical current x86 default contract remains:
+  - `mul_window = unchanged: disabled (mul_min_total > mul_max_total)`
+  - `addmul_window = 24576..32768 total bytes`
+  - `addmul_min_lane = 8192`
+
+Interpretation: this broader packet complements rather than replaces
+`highconf_v1`. The narrowed guardrail still owns the live closure-status check
+(`ready_for_e5_closure = false`), while `multiscenario_refresh_v2` proves that
+broader scenario coverage and targeted addmul uplift now exist in artifact
+form. That is useful scope expansion, but it is still short-window directional
+evidence, not closure-grade tail proof.
+
+Closure consequence:
+
+- `artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json` remains the
+  negative-evidence guardrail for the current not-ready state
+- `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json` records the
+  broader corpus and the current x86 default contract without claiming AC#4
+  closure
+- a future closure attempt still needs raw-sample or longer-window
+  multi-scenario evidence and must publish a new artifact/schema version rather
+  than mutating either checked-in packet in place
+
 ## Calibration Checklist for Closure
 
 Before closing `bd-3v1cs`, run this checklist and record evidence paths in bead comments:

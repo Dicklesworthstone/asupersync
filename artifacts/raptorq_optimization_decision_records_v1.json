@@ -3,7 +3,7 @@
   "artifact_id": "raptorq_optimization_decision_records_v1",
   "track_bead_id": "asupersync-3ltrv",
   "external_ref": "bd-7toum",
-  "generated_at_utc": "2026-03-05T21:20:00Z",
+  "generated_at_utc": "2026-03-15T20:31:41Z",
   "governance_rules": {
     "required_fields": [
       "decision_id",
@@ -130,8 +130,9 @@
           "2026-02-20 eighth E5 slice started high-confidence p95/p99 corpus generation targeting artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json (coord thread msg #1487).",
           "2026-02-20 ninth E5 status update captured transient unrelated retry.rs compile-frontier breakage during high-confidence reruns (coord msgs #1493/#1504).",
           "2026-02-20 follow-up compile verification (`rch exec -- cargo check -p asupersync --lib`) exited 0.",
-      "2026-02-20 tenth E5 slice published artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json; the current checked-in packet keeps `ready_for_e5_closure=false` / `acceptance_criterion_4_status=not_met` on the narrowed high-confidence corpus.",
-          "2026-03-05 E5 support slice made the command-surface split explicit: manifest-level comparator/rollback `command_bundle` remains `gf256_primitives`, while probe-only `repro_command` remains `gf256_dual_policy` (agent-mail asupersync-36m6p #4585)."
+          "2026-02-20 tenth E5 slice published artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json; the current checked-in packet keeps `ready_for_e5_closure=false` / `acceptance_criterion_4_status=not_met` on the narrowed high-confidence corpus.",
+          "2026-03-05 E5 support slice made the command-surface split explicit: manifest-level comparator/rollback `command_bundle` remains `gf256_primitives`, while probe-only `repro_command` remains `gf256_dual_policy` (agent-mail asupersync-36m6p #4585).",
+          "2026-03-15 E5 broader refresh published artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json so the seven-scenario `RQ-E-GF256-DUAL-*` directional corpus and current x86 default contract are versioned separately from the narrowed `highconf_v1` guardrail."
         ]
       },
       "risk_class": "high",
@@ -167,7 +168,8 @@
           "agent-mail thread coord-2026-02-19 msgs #1493/#1504 (transient retry.rs compile-frontier blockage and active remediation while high-confidence run proceeds)",
           "asupersync-36m6p comment #1894 (high-confidence p95/p99 closure artifact + headline)",
           "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
-      "agent-mail thread asupersync-3ltrv msg #1542 and coord thread msg #1543 (E5 high-confidence publication confirmation; earlier closure-ready wording is superseded by the checked-in closure_assessment block)"
+          "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json",
+          "agent-mail thread asupersync-3ltrv msg #1542 and coord thread msg #1543 (E5 high-confidence publication confirmation; earlier closure-ready wording is superseded by the checked-in closure_assessment block)"
         ]
       },
       "fallback_plan": {
@@ -207,7 +209,8 @@
           "asupersync-36m6p comment #1863",
           "artifacts/raptorq_track_e_gf256_p95p99_v1.json",
           "asupersync-36m6p comment #1894",
-          "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json"
+          "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
+          "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json"
         ],
         "bench_repro_commands": [
           "rch exec -- cargo bench --bench raptorq_benchmark -- gf256_primitives",
@@ -236,15 +239,17 @@
           "Environment reproducibility metadata (target_arch/target_os/target_env/target_endian/target_pointer_width_bits) is now included in manifest snapshots and emitted in policy logs.",
           "The manifest-level comparator/rollback `command_bundle` is intentionally distinct from the probe-level `repro_command` surface and is now tracked explicitly in this artifact.",
           "Directional p95/p99 summaries are now attached via artifacts/raptorq_track_e_gf256_p95p99_v1.json.",
-      "High-confidence p95/p99 corpus is published at artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json and currently encodes `ready_for_e5_closure=false`, `acceptance_criterion_4_status=not_met`, and `scope_sufficiency=insufficient`.",
+          "High-confidence p95/p99 corpus is published at artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json and currently encodes `ready_for_e5_closure=false`, `acceptance_criterion_4_status=not_met`, and `scope_sufficiency=insufficient`.",
+          "Broader multi-scenario directional refresh is now published at artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json; it complements rather than replaces the narrowed highconf_v1 guardrail.",
+          "The broader refresh widens scenario coverage to `RQ-E-GF256-DUAL-*`, preserves the canonical current x86 default contract, and explicitly remains `short_window_directional_not_closure_grade`.",
           "High-confidence headline (overall proxy p95/p99 time, us): baseline 9.0743/9.0743, auto 9.3392/9.3392, rollback 9.9333/9.9333.",
           "Transient compile-frontier interruption noted in coord msgs #1493/#1504 has follow-up green check evidence (`rch exec -- cargo check -p asupersync --lib` exit 0).",
           "High-confidence closure slice is intentionally narrowed to RQ-E-GF256-005 and uses conservative interval-endpoint proxies; limitations are explicitly documented in the artifact."
         ],
-    "pending_blockers": [
-      "Current high-confidence packet (artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json) still records `ready_for_e5_closure=false`, `acceptance_criterion_4_status=not_met`, and `scope_sufficiency=insufficient`.",
-      "Broader multi-scenario or raw-sample comparator evidence is still required before G3 can treat E5 as closure-complete."
-    ]
+        "pending_blockers": [
+          "Current high-confidence guardrail packet (artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json) still records `ready_for_e5_closure=false`, `acceptance_criterion_4_status=not_met`, and `scope_sufficiency=insufficient`.",
+          "Broader multi-scenario directional refresh (artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json) is now published, but it explicitly remains `short_window_directional_not_closure_grade`; raw-sample or longer-window multi-scenario evidence is still required before G3 can treat E5 as closure-complete."
+        ]
       },
       "deterministic_replay": {
         "seed": 424242,
@@ -683,7 +688,7 @@
       "E5"
     ],
     "closure_blockers": [
-      "E5 PARTIAL: artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json still reports `ready_for_e5_closure=false`, `acceptance_criterion_4_status=not_met`, and `scope_sufficiency=insufficient`; broader multi-scenario or raw-sample evidence is still required."
+      "E5 PARTIAL: artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json still reports `ready_for_e5_closure=false`, `acceptance_criterion_4_status=not_met`, and `scope_sufficiency=insufficient`; artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json now covers the broader `RQ-E-GF256-DUAL-*` corpus but remains `short_window_directional_not_closure_grade`, so raw-sample or longer-window evidence is still required."
     ]
   }
 }

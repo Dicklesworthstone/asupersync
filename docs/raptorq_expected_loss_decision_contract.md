@@ -126,12 +126,12 @@ Current dependency set in the artifact:
 3. `asupersync-n5fk6` (F7 final closure evidence in G3 cards) must be `closed`
 4. `asupersync-2zu9p` (F8 implementation + closure evidence) must be `closed`
 
-Current closure-readiness status (2026-03-05 refresh):
+Current closure-readiness status (2026-03-15 refresh):
 
 - `asupersync-3ltrv`: `closed`
 - `asupersync-n5fk6`: `closed`
 - `asupersync-2zu9p`: `closed`
-- `asupersync-36m6p`: still `open`
+- `asupersync-36m6p`: `in_progress`
 
 `ready_to_close` remains `false` because `asupersync-36m6p` has not yet reached
 `closed`.

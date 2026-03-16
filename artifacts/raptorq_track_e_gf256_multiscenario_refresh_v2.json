@@ -1,0 +1,113 @@
+{
+  "schema_version": "raptorq-track-e-gf256-multiscenario-refresh-v2",
+  "artifact_id": "raptorq_track_e_gf256_multiscenario_refresh_v2",
+  "generated_at_utc": "2026-03-15T20:31:41Z",
+  "track_bead_id": "asupersync-36m6p",
+  "external_ref": "bd-3g5em",
+  "evidence_role": "broader_multiscenario_directional_refresh",
+  "scope_contract": "same_target_multi_scenario_directional_corpus",
+  "confidence_contract": "short_window_directional_not_closure_grade",
+  "successor_policy": "requires_new_artifact_version_for_raw_sample_or_longer_window_closure_attempt",
+  "source_artifacts": [
+    "artifacts/raptorq_track_e_gf256_bench_v1.json",
+    "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json"
+  ],
+  "source_logs": [
+    "/tmp/e5_dual_baseline_20260304.log",
+    "/tmp/e5_dual_candidate1_20260304.log",
+    "/tmp/e5_dual_candidate2_20260304.log",
+    "rch exec stdout: high-confidence single-scenario guardrail publication (sample-size 60)"
+  ],
+  "methodology": {
+    "benchmark": "raptorq_benchmark",
+    "runner": "rch exec",
+    "bench_filter": "RQ-E-GF256-DUAL",
+    "scenario_family": "RQ-E-GF256-DUAL-*",
+    "scenario_scope": [
+      "RQ-E-GF256-DUAL-001",
+      "RQ-E-GF256-DUAL-002",
+      "RQ-E-GF256-DUAL-003",
+      "RQ-E-GF256-DUAL-004",
+      "RQ-E-GF256-DUAL-005",
+      "RQ-E-GF256-DUAL-006",
+      "RQ-E-GF256-DUAL-007"
+    ],
+    "criterion_settings": {
+      "sample_size": 20,
+      "warm_up_time_seconds": 0.1,
+      "measurement_time_seconds": 0.12
+    },
+    "comparison_strategy": "same target dir comparator corpus; baseline then candidate overrides",
+    "value_contract": "scenario-level median delta capture from same-session short-window Criterion corpus",
+    "commands": [
+      "rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-20260304-dual; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL --sample-size 20 --warm-up-time 0.1 --measurement-time 0.12'",
+      "rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-20260304-dual; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL=24576 ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL=32768 ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE=8192 cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL --sample-size 20 --warm-up-time 0.1 --measurement-time 0.12'",
+      "rch exec -- bash -lc 'set -euo pipefail; export CARGO_TARGET_DIR=/tmp/rch-e5-20260304-dual; ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL=24576 ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL=30720 ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL=24576 ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL=30720 ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_LANE=8192 cargo bench --bench raptorq_benchmark --features simd-intrinsics -- RQ-E-GF256-DUAL --sample-size 20 --warm-up-time 0.1 --measurement-time 0.12'"
+    ]
+  },
+  "candidate_results": [
+    {
+      "id": "candidate_addmul_window_only",
+      "selected": true,
+      "average_delta_vs_baseline_pct": {
+        "mul_slices2_auto": 0.3048,
+        "addmul_slices2_auto": -3.3759
+      },
+      "targeted_large_lane_deltas_pct": {
+        "addmul_slices2_auto_RQ-E-GF256-DUAL-004": -6.1424,
+        "addmul_slices2_auto_RQ-E-GF256-DUAL-005": -14.4411,
+        "addmul_slices2_auto_RQ-E-GF256-DUAL-006": -6.3938,
+        "targeted_addmul_auto_average": -8.9924
+      },
+      "summary": "Best candidate in this corpus: material addmul auto uplift on balanced large-lane scenarios, while mul auto remained near neutral."
+    },
+    {
+      "id": "candidate_mul_and_addmul_windows",
+      "selected": false,
+      "average_delta_vs_baseline_pct": {
+        "mul_slices2_auto": 2.0837,
+        "addmul_slices2_auto": -4.6978
+      },
+      "targeted_large_lane_deltas_pct": {
+        "mul_slices2_auto_average_RQ-E-GF256-DUAL-004_to_006": 2.2087,
+        "targeted_addmul_auto_average_RQ-E-GF256-DUAL-004_to_006": -11.2318
+      },
+      "summary": "Addmul improved but mul auto regressed; rejected for default rollout."
+    }
+  ],
+  "current_contract_summary": {
+    "canonical_default_contract_packet": "simd_policy_ablation_2026_03_04",
+    "selected_candidate_id": "candidate_addmul_window_only",
+    "selected_profile_defaults": "update x86 addmul auto window",
+    "mul_window": "unchanged: disabled (mul_min_total > mul_max_total)",
+    "addmul_window": "24576..32768 total bytes",
+    "addmul_min_lane": 8192
+  },
+  "closure_assessment": {
+    "ready_for_e5_closure": false,
+    "acceptance_criterion_4_status": "not_met",
+    "broader_scope_demonstrated": true,
+    "directional_material_uplift_demonstrated": true,
+    "closure_grade_material_uplift_demonstrated": false,
+    "tail_coverage_status": "directional_short_window_only",
+    "linked_guardrail_artifact": "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
+    "linked_guardrail_ready_for_e5_closure": false,
+    "summary": "This packet expands Track-E from the narrowed highconf_v1 guardrail to the seven-scenario RQ-E-GF256-DUAL-* corpus and confirms targeted addmul uplift for the current x86 defaults, but it remains short-window directional evidence and therefore cannot close AC#4.",
+    "blocking_requirements": [
+      "Publish a closure-grade broader refresh with raw-sample percentiles or a longer-window equivalent across the multi-scenario SIMD-active corpus.",
+      "Demonstrate materially better auto p95/p99 tails than baseline on the broader closure-critical scenarios, not just targeted median uplift on DUAL-004/005/006.",
+      "Keep highconf_v1 as the narrowed negative-evidence guardrail until the broader closure-grade packet flips ready_for_e5_closure."
+    ]
+  },
+  "findings": [
+    "The 2026-03-04 broader corpus shows the selected candidate (`candidate_addmul_window_only`) achieving targeted addmul median deltas of -6.1424%, -14.4411%, and -6.3938% on RQ-E-GF256-DUAL-004/005/006 (average -8.9924%).",
+    "The canonical current x86 default contract remains mul auto disabled with addmul window 24576..32768 and addmul_min_lane = 8192.",
+    "This packet widens scope beyond the single-scenario highconf_v1 guardrail but remains directional evidence rather than closure-grade tail proof."
+  ],
+  "limitations": [
+    "This packet records same-session short-window Criterion medians from RQ-E-GF256-DUAL-* rather than raw-sample percentile distributions.",
+    "It does not replace artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json, which remains the narrowed closure-status guardrail for ready_for_e5_closure = false.",
+    "The broader corpus confirms targeted median uplift and better scope coverage, but it does not yet demonstrate closure-grade overall p95/p99 improvement across the multi-scenario closure frontier.",
+    "Any raw-sample or longer-window multi-scenario closure attempt must publish a new artifact/schema version rather than mutating this v2 packet in place."
+  ]
+}
