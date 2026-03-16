@@ -1156,8 +1156,12 @@ pub fn run_lab_dynamic_equivalence(
         } else {
             execute_plan_in_lab(seed, &optimized_dag)
         };
-        // Only compare dynamic results if both DAGs were executed
-        let ok = orig_has_fan_in || opt_has_fan_in || orig_labels == opt_labels;
+        // Only compare dynamic results if both DAGs were executed.
+        // When exactly one DAG has fan-in, comparison is meaningless
+        // (one side is empty, the other has real results).
+        let both_skipped = orig_has_fan_in && opt_has_fan_in;
+        let both_executed = !orig_has_fan_in && !opt_has_fan_in;
+        let ok = both_skipped || (both_executed && orig_labels == opt_labels);
         if !ok {
             all_dynamic_ok = false;
         }
@@ -1429,8 +1433,12 @@ pub fn run_e2e_pipeline(
     } else {
         execute_plan_in_lab_traced(42, &optimized_dag)
     };
+    // When exactly one DAG has fan-in, one side is empty and the other has
+    // real execution results — comparing them is meaningless.
+    let both_skipped = orig_has_fan_in && opt_has_fan_in;
+    let both_executed = !orig_has_fan_in && !opt_has_fan_in;
     let dynamic_outcomes_equivalent =
-        orig_has_fan_in || opt_has_fan_in || dynamic_original_labels == dynamic_optimized_labels;
+        both_skipped || (both_executed && dynamic_original_labels == dynamic_optimized_labels);
 
     E2ePipelineReport {
         fixture_name: fixture.name,
