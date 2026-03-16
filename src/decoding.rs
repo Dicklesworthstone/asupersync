@@ -222,6 +222,7 @@ enum BlockDecodingState {
 pub struct DecodingPipeline {
     config: DecodingConfig,
     symbols: SymbolSet,
+    accepted_symbols_total: usize,
     blocks: HashMap<u8, BlockDecoder>,
     completed_blocks: HashSet<u8>,
     object_id: Option<ObjectId>,
@@ -242,6 +243,7 @@ impl DecodingPipeline {
         Self {
             config,
             symbols: SymbolSet::with_config(threshold),
+            accepted_symbols_total: 0,
             blocks: HashMap::new(),
             completed_blocks: HashSet::new(),
             object_id: None,
@@ -360,6 +362,7 @@ impl DecodingPipeline {
                 block_progress,
                 threshold_reached,
             } => {
+                self.accepted_symbols_total = self.accepted_symbols_total.saturating_add(1);
                 if block_progress.k.is_none() {
                     self.configure_block_k();
                 }
@@ -413,7 +416,7 @@ impl DecodingPipeline {
     #[must_use]
     pub fn progress(&self) -> DecodingProgress {
         let blocks_total = self.block_plans.as_ref().map(Vec::len);
-        let symbols_received = self.symbols.len();
+        let symbols_received = self.accepted_symbols_total;
         let symbols_needed_estimate = self.block_plans.as_ref().map_or(0, |plans| {
             sum_required_symbols(plans, self.config.repair_overhead, self.config.min_overhead)
         });
@@ -461,7 +464,7 @@ impl DecodingPipeline {
             });
         };
         if !self.is_complete() {
-            let received = self.symbols.len();
+            let received = self.accepted_symbols_total;
             let needed =
                 sum_required_symbols(plans, self.config.repair_overhead, self.config.min_overhead);
             return Err(DecodingError::InsufficientSymbols { received, needed });
@@ -2012,6 +2015,73 @@ mod tests {
             decoded_data.len()
         );
         crate::test_complete!("multi_block_roundtrip");
+    }
+
+    #[test]
+    fn multi_block_progress_retains_cumulative_symbols_after_block_completion() {
+        init_test("multi_block_progress_retains_cumulative_symbols_after_block_completion");
+        let config = crate::config::EncodingConfig {
+            symbol_size: 256,
+            max_block_size: 1024,
+            repair_overhead: 1.05,
+            encoding_parallelism: 1,
+            decoding_parallelism: 1,
+        };
+        let mut encoder = EncodingPipeline::new(config.clone(), pool());
+        let object_id = ObjectId::new_for_test(111);
+        let data: Vec<u8> = (0u32..2048).map(|i| (i % 251) as u8).collect();
+
+        let mut block_zero_symbols: Vec<Symbol> = encoder
+            .encode_with_repair(object_id, &data, 0)
+            .map(|res| res.expect("encode").into_symbol())
+            .filter(|symbol| symbol.sbn() == 0)
+            .collect();
+        block_zero_symbols.sort_by_key(Symbol::esi);
+        assert_eq!(block_zero_symbols.len(), 4);
+
+        let mut decoder = DecodingPipeline::new(DecodingConfig {
+            symbol_size: config.symbol_size,
+            max_block_size: config.max_block_size,
+            repair_overhead: 1.0,
+            min_overhead: 0,
+            max_buffered_symbols: 0,
+            block_timeout: Duration::from_secs(30),
+            verify_auth: false,
+        });
+        decoder
+            .set_object_params(ObjectParams::new(
+                object_id,
+                data.len() as u64,
+                config.symbol_size,
+                2,
+                4,
+            ))
+            .expect("set params");
+
+        for symbol in block_zero_symbols {
+            let auth = AuthenticatedSymbol::from_parts(
+                symbol,
+                crate::security::tag::AuthenticationTag::zero(),
+            );
+            let _ = decoder.feed(auth).expect("feed");
+        }
+
+        assert_eq!(decoder.progress().blocks_complete, 1);
+        assert_eq!(decoder.progress().blocks_total, Some(2));
+        assert_eq!(decoder.progress().symbols_received, 4);
+        assert_eq!(decoder.progress().symbols_needed_estimate, 8);
+
+        let err = decoder.into_data().expect_err("block one is still missing");
+        assert!(matches!(
+            err,
+            DecodingError::InsufficientSymbols {
+                received: 4,
+                needed: 8
+            }
+        ));
+        crate::test_complete!(
+            "multi_block_progress_retains_cumulative_symbols_after_block_completion"
+        );
     }
 
     #[test]
