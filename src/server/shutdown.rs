@@ -14,6 +14,24 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
+#[cfg(test)]
+thread_local! {
+    static TRIGGER_IMMEDIATE_PRE_PHASE_HOOK:
+        std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn run_trigger_immediate_pre_phase_hook() {
+    TRIGGER_IMMEDIATE_PRE_PHASE_HOOK.with(|hook| {
+        if let Some(mut hook) = hook.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_trigger_immediate_pre_phase_hook() {}
+
 #[derive(Clone)]
 enum ShutdownTimeSource {
     WallClock,
@@ -355,9 +373,10 @@ impl ShutdownSignal {
                 .store(now.as_nanos(), Ordering::Release);
             self.state.has_drain_start.store(true, Ordering::Release);
         }
+        run_trigger_immediate_pre_phase_hook();
         self.state
             .phase
-            .store(ShutdownPhase::ForceClosing as u8, Ordering::Release);
+            .fetch_max(ShutdownPhase::ForceClosing as u8, Ordering::AcqRel);
         self.state.controller.shutdown();
         self.state.phase_notify.notify_waiters();
     }
@@ -400,6 +419,12 @@ mod tests {
 
     fn test_time() -> Time {
         Time::from_nanos(TEST_NOW.load(Ordering::Relaxed))
+    }
+
+    fn set_trigger_immediate_pre_phase_hook(hook: Option<Box<dyn FnMut()>>) {
+        TRIGGER_IMMEDIATE_PRE_PHASE_HOOK.with(|slot| {
+            *slot.borrow_mut() = hook;
+        });
     }
 
     #[test]
@@ -674,6 +699,34 @@ mod tests {
             signal.phase()
         );
         crate::test_complete!("trigger_immediate_does_not_regress_stopped_phase");
+    }
+
+    #[test]
+    fn trigger_immediate_preserves_stopped_phase_under_interleaved_mark_stopped() {
+        init_test("trigger_immediate_preserves_stopped_phase_under_interleaved_mark_stopped");
+        let signal = ShutdownSignal::new();
+        let hook_signal = signal.clone();
+        set_trigger_immediate_pre_phase_hook(Some(Box::new(move || {
+            hook_signal.mark_stopped();
+        })));
+
+        signal.trigger_immediate();
+
+        crate::assert_with_log!(
+            signal.phase() == ShutdownPhase::Stopped,
+            "interleaved mark_stopped keeps terminal phase",
+            ShutdownPhase::Stopped,
+            signal.phase()
+        );
+        crate::assert_with_log!(
+            signal.is_stopped(),
+            "signal remains stopped after interleaving",
+            true,
+            signal.is_stopped()
+        );
+        crate::test_complete!(
+            "trigger_immediate_preserves_stopped_phase_under_interleaved_mark_stopped"
+        );
     }
 
     #[test]
