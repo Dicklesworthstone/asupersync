@@ -1934,25 +1934,24 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
   <div class="container">
     <div class="reveal">
       <span class="exhibit-num">Exhibit 16 — Unique to Asupersync</span>
-      <h2>Deterministic Replay — Same Ops, Same Slots, Every Time</h2>
+      <h2>LIFO Slot Recycling — Deterministic by Construction</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        When debugging a concurrency bug in tokio or async-std, you're at the mercy of non-deterministic scheduling.
-        Run the same test twice and you get different behavior. Asupersync's handle allocator uses a
-        <strong style="color:var(--text);">deterministic LIFO free-list</strong> — the same sequence of
-        create/close operations always produces the same <em>relative</em> allocation pattern.
-        This demo runs the same 13-operation sequence (create 5, close 3, create 5 more) twice
-        in separate runtimes and compares the slot offset patterns. The LIFO reuse order is identical
-        every time — which slots get recycled and in what order is fully deterministic.
+        Tokio's internal task IDs are opaque and non-deterministic — re-running the same test produces different
+        IDs, making trace replay impossible. Asupersync's handle allocator uses a
+        <strong style="color:var(--text);">deterministic LIFO free-list</strong>: when slots are freed,
+        the most recently freed slot is reused first. This demo creates 4 scopes, frees them in order,
+        then creates 4 new scopes and verifies they reuse slots in <strong style="color:var(--text);">exact reverse order</strong>.
+        This deterministic pattern means you can record a handle allocation trace and replay it identically.
       </p>
     </div>
     <div class="mt-4 reveal">
       <div class="viz" id="replay-viz">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
-          <div class="viz-title" style="margin-bottom:0;">Deterministic Allocation Proof</div>
-          <button class="btn btn-primary btn-sm" onclick="runReplayDemo()">Run Twice &amp; Compare</button>
+          <div class="viz-title" style="margin-bottom:0;">LIFO Recycling Proof</div>
+          <button class="btn btn-primary btn-sm" onclick="runReplayDemo()">Run Test</button>
         </div>
         <div id="replay-result">
-          <div class="text-dim" style="text-align:center;padding:32px 0;">Runs the same 15 operations twice and compares every slot assignment</div>
+          <div class="text-dim" style="text-align:center;padding:32px 0;">Creates scopes, frees them, then verifies reuse follows LIFO order</div>
         </div>
       </div>
     </div>
@@ -3950,74 +3949,82 @@ window.runReplayDemo = function() {
   const a = requireWasm();
   if (!a) { showToast('WASM not loaded', 'err'); return; }
 
-  // The WASM handle table is global (shared across runtimes), so absolute slot
-  // numbers differ between runs. What's deterministic is the RELATIVE allocation
-  // pattern: which offsets get reused, in what order, with what generation deltas.
-  // We normalize by subtracting each run's first-allocated slot to get offsets.
-  function runSequence() {
-    const rt = (a.runtimeCreate || a.runtime_create)();
-    if (rt.outcome !== 'ok') return null;
-    const results = [];
-    const scopes = [];
-    let baseSlot = -1;
-    // Create 5 scopes
-    for (let i = 0; i < 5; i++) {
-      const s = rt.value.enterScope('s' + i);
-      if (s.outcome === 'ok') {
-        if (baseSlot < 0) baseSlot = s.value.slot;
-        results.push({ op: 'create', label: 's' + i, slot: s.value.slot - baseSlot, gen: s.value.generation });
-        scopes.push(s.value);
-      }
+  // Demonstrate LIFO recycling determinism: within a single runtime,
+  // the free-list recycles slots in LIFO order. We create scopes, close them,
+  // then create new ones and verify they reuse the most-recently-freed slots first.
+  const rt = (a.runtimeCreate || a.runtime_create)();
+  if (rt.outcome !== 'ok') return;
+
+  const events = [];
+
+  // Phase 1: Create 4 scopes, record their slots
+  const scopes = [];
+  for (let i = 0; i < 4; i++) {
+    const s = rt.value.enterScope('scope-' + i);
+    if (s.outcome === 'ok') {
+      scopes.push(s.value);
+      events.push({ phase: 'create', label: 'scope-' + i, slot: s.value.slot, gen: s.value.generation });
     }
-    // Close first 3 (frees slots for reuse)
-    for (let i = 0; i < 3; i++) {
-      scopes[i].close();
-      results.push({ op: 'close', label: 's' + i, slot: scopes[i].slot - baseSlot });
-    }
-    // Create 5 more (should reuse freed slots in LIFO order)
-    for (let i = 5; i < 10; i++) {
-      const s = rt.value.enterScope('s' + i);
-      if (s.outcome === 'ok') {
-        results.push({ op: 'create', label: 's' + i, slot: s.value.slot - baseSlot, gen: s.value.generation });
-        s.value.close();
-      }
-    }
-    rt.value.close();
-    return { results, baseSlot };
   }
 
-  const r1 = runSequence();
-  const r2 = runSequence();
-  const run1 = r1.results;
-  const run2 = r2.results;
-  // Compare the normalized patterns (relative slot offsets + generation deltas)
-  const pattern1 = run1.map(r => r.op + ':' + r.slot);
-  const pattern2 = run2.map(r => r.op + ':' + r.slot);
-  const match = JSON.stringify(pattern1) === JSON.stringify(pattern2);
+  // Phase 2: Close them in order (0, 1, 2, 3) — pushes to free list in this order
+  const freedSlots = [];
+  for (let i = 0; i < scopes.length; i++) {
+    freedSlots.push(scopes[i].slot);
+    scopes[i].close();
+    events.push({ phase: 'free', label: 'scope-' + i, slot: scopes[i].slot, gen: scopes[i].generation });
+  }
+
+  // Phase 3: Create 4 new scopes — LIFO means last-freed slot is reused first
+  const reusedSlots = [];
+  for (let i = 0; i < 4; i++) {
+    const s = rt.value.enterScope('reuse-' + i);
+    if (s.outcome === 'ok') {
+      reusedSlots.push(s.value.slot);
+      events.push({ phase: 'reuse', label: 'reuse-' + i, slot: s.value.slot, gen: s.value.generation });
+      s.value.close();
+    }
+  }
+
+  rt.value.close();
+
+  // Verify LIFO: reused order should be reverse of freed order
+  const expectedLIFO = [...freedSlots].reverse();
+  const isLIFO = JSON.stringify(reusedSlots) === JSON.stringify(expectedLIFO);
 
   renderWithEntrance('replay-result', `
-    <div class="result-grid-2" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
-      ${[{label:'Run 1 (base slot '+r1.baseSlot+')', data:run1},{label:'Run 2 (base slot '+r2.baseSlot+')', data:run2}].map(run => `
-        <div>
-          <div style="font-size:12px;font-weight:700;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.06em;">${run.label}</div>
-          <table class="handle-table" style="font-size:11px;">
-            <thead><tr><th>Op</th><th>Label</th><th>Offset</th></tr></thead>
-            <tbody>${run.data.map(r => `
-              <tr><td style="color:${r.op==='create'?HEX.green:HEX.text3};">${r.op}</td><td>${r.label}</td><td style="color:var(--cyan);font-weight:700;">${r.op==='create'?'+':'-'}${r.slot}</td></tr>
-            `).join('')}</tbody>
-          </table>
-        </div>
-      `).join('')}
+    <div style="margin-bottom:16px;">
+      <table class="handle-table" style="font-size:11px;">
+        <thead><tr><th>Phase</th><th>Label</th><th>Slot</th><th>Gen</th></tr></thead>
+        <tbody>${events.map(e => `
+          <tr>
+            <td style="color:${e.phase==='create'?HEX.green:e.phase==='free'?HEX.red:HEX.cyan};font-weight:600;">${e.phase}</td>
+            <td>${e.label}</td>
+            <td style="color:var(--cyan);font-weight:700;">${e.slot}</td>
+            <td>${e.gen}</td>
+          </tr>
+        `).join('')}</tbody>
+      </table>
     </div>
-    <div style="text-align:center;padding:16px;border-radius:var(--radius);border:1px solid ${match?HEX.green+'44':HEX.red+'44'};background:${match?HEX.green+'08':HEX.red+'08'};">
-      <span style="font-size:24px;">${match ? '✓' : '✗'}</span>
-      <div style="font-size:16px;font-weight:700;color:${match?HEX.green:HEX.red};margin-top:4px;">${match ? 'IDENTICAL — Same relative allocation pattern' : 'MISMATCH — Different allocation pattern'}</div>
-      <div style="font-size:12px;color:var(--text3);margin-top:4px;">${run1.length} operations compared (slot offsets relative to each run's base)</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+      <div style="padding:12px;border-radius:var(--radius);border:1px solid var(--border);background:rgba(255,255,255,0.02);">
+        <div style="font-size:11px;color:var(--text3);text-transform:uppercase;margin-bottom:4px;">Freed order</div>
+        <div style="font-family:var(--mono);font-size:14px;color:${HEX.red};">${freedSlots.join(' → ')}</div>
+      </div>
+      <div style="padding:12px;border-radius:var(--radius);border:1px solid var(--border);background:rgba(255,255,255,0.02);">
+        <div style="font-size:11px;color:var(--text3);text-transform:uppercase;margin-bottom:4px;">Reused order (should be reversed)</div>
+        <div style="font-family:var(--mono);font-size:14px;color:${HEX.cyan};">${reusedSlots.join(' → ')}</div>
+      </div>
+    </div>
+    <div style="text-align:center;padding:16px;border-radius:var(--radius);border:1px solid ${isLIFO?HEX.green+'44':HEX.red+'44'};background:${isLIFO?HEX.green+'08':HEX.red+'08'};">
+      <span style="font-size:24px;">${isLIFO ? '✓' : '✗'}</span>
+      <div style="font-size:16px;font-weight:700;color:${isLIFO?HEX.green:HEX.red};margin-top:4px;">${isLIFO ? 'LIFO CONFIRMED — Last freed = first reused' : 'Unexpected allocation order'}</div>
+      <div style="font-size:12px;color:var(--text3);margin-top:4px;">Expected: ${expectedLIFO.join(' → ')} | Got: ${reusedSlots.join(' → ')}</div>
     </div>
     <div style="margin-top:12px;padding:12px;border-radius:8px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.15);font-size:13px;color:var(--text2);">
-      <strong style="color:var(--blue);">Why this matters:</strong> Deterministic allocation means you can record a failing test's handle sequence,
-      replay it on a different machine, and get <em>exactly the same behavior</em>. In tokio, re-running a concurrent test produces different
-      task scheduling, making Heisenbugs nearly impossible to reproduce.
+      <strong style="color:var(--blue);">Why this matters:</strong> LIFO free-list recycling means the allocation pattern is fully deterministic
+      given the same sequence of operations. Record a failing test's handle operations, replay them on a different machine,
+      and the same slots get assigned in the same order. In tokio, task IDs are opaque and non-deterministic.
     </div>
   `);
   // REVELATION beat: spring pop on the verdict
@@ -4025,7 +4032,7 @@ window.runReplayDemo = function() {
     const verdict = document.querySelector('#replay-result [style*="font-size:24px"]');
     if (verdict) motionLib.animate(verdict, { scale: [0, 1.2, 1] }, { type: 'spring', stiffness: 400, damping: 20 });
   }
-  showToast(match ? 'Deterministic replay proven' : 'Non-deterministic!', match ? 'ok' : 'err');
+  showToast(isLIFO ? 'LIFO allocation confirmed' : 'Unexpected order', isLIFO ? 'ok' : 'err');
 };
 
 // ─── Exhibit 17: Handle Leak Detection ───────────────────────────
