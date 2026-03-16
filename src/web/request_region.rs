@@ -115,14 +115,14 @@ impl<'a> RequestRegion<'a> {
         }
     }
 
-    /// Execute an async handler within this request region.
+    /// Execute a synchronous handler within this request region.
     ///
-    /// This is the async counterpart to [`run`](Self::run). The future is
-    /// polled to completion within the region. Cancellation is checked at
-    /// each checkpoint boundary.
+    /// This is an alternative to [`run`](Self::run) for handlers that return a
+    /// `Result<Response, Error>`. The handler executes synchronously inside the
+    /// capability context. On any exit path, the region is closed and cleanup
+    /// occurs.
     ///
-    /// For Phase 0 (synchronous execution), use [`run`](Self::run) instead.
-    /// This method exists to establish the async API surface for Phase 1+.
+    /// The async counterpart will be introduced in Phase 1+.
     #[inline]
     #[allow(clippy::result_large_err)]
     pub fn run_sync<F>(self, handler: F) -> RegionOutcome

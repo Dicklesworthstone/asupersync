@@ -1876,30 +1876,15 @@ mod tests {
 
         // Queue A.
         let mut reserve_a = Box::pin(tx.reserve(&cx));
-        let waker_a = Waker::noop();
+        let waker_a = noop_waker();
         let mut ctx_a = Context::from_waker(&waker_a);
         assert!(reserve_a.as_mut().poll(&mut ctx_a).is_pending());
 
         // Queue B.
         let mut reserve_b = Box::pin(tx.reserve(&cx));
 
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        struct CountWaker(Arc<AtomicUsize>);
-
-        impl std::task::Wake for CountWaker {
-            fn wake(self: Arc<Self>) {
-                self.0.fetch_add(1, Ordering::Relaxed);
-            }
-
-            fn wake_by_ref(self: &Arc<Self>) {
-                self.0.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-
         let wake_count_b = Arc::new(AtomicUsize::new(0));
-        let reserve_waker_b = Waker::from(Arc::new(CountWaker(Arc::clone(&wake_count_b))));
+        let reserve_waker_b = counting_waker(Arc::clone(&wake_count_b));
         let mut ctx_b = Context::from_waker(&reserve_waker_b);
         assert!(reserve_b.as_mut().poll(&mut ctx_b).is_pending());
 

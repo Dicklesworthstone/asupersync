@@ -119,7 +119,11 @@ pub trait SymbolStreamExt: SymbolStream {
         Self: Sized,
         F: FnMut(AuthenticatedSymbol) -> AuthenticatedSymbol + Send + Unpin,
     {
-        MapStream { inner: self, f }
+        MapStream {
+            inner: self,
+            f,
+            exhausted: false,
+        }
     }
 
     /// Filter symbols.
@@ -128,7 +132,11 @@ pub trait SymbolStreamExt: SymbolStream {
         Self: Sized,
         F: FnMut(&AuthenticatedSymbol) -> bool,
     {
-        FilterStream { inner: self, f }
+        FilterStream {
+            inner: self,
+            f,
+            exhausted: false,
+        }
     }
 
     /// Take only symbols for a specific block.
@@ -141,7 +149,11 @@ pub trait SymbolStreamExt: SymbolStream {
         Self: Sized + 'static,
     {
         let f = Box::new(move |s: &AuthenticatedSymbol| s.symbol().sbn() == sbn);
-        FilterStream { inner: self, f }
+        FilterStream {
+            inner: self,
+            f,
+            exhausted: false,
+        }
     }
 
     /// Timeout on symbol reception.
@@ -293,6 +305,7 @@ impl<S: SymbolStream + Unpin + ?Sized> Future for NextWithCancelFuture<'_, S> {
 pub struct MapStream<S, F> {
     inner: S,
     f: F,
+    exhausted: bool,
 }
 
 impl<S, F> SymbolStream for MapStream<S, F>
@@ -305,10 +318,29 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
         let this = self.get_mut();
+        if this.exhausted {
+            return Poll::Ready(None);
+        }
         match Pin::new(&mut this.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(s))) => Poll::Ready(Some(Ok((this.f)(s)))),
+            Poll::Ready(None) => {
+                this.exhausted = true;
+                Poll::Ready(None)
+            }
             other => other,
         }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.exhausted {
+            (0, Some(0))
+        } else {
+            self.inner.size_hint()
+        }
+    }
+
+    fn is_exhausted(&self) -> bool {
+        self.exhausted || self.inner.is_exhausted()
     }
 }
 
@@ -316,6 +348,7 @@ where
 pub struct FilterStream<S, F> {
     inner: S,
     f: F,
+    exhausted: bool,
 }
 
 impl<S, F> SymbolStream for FilterStream<S, F>
@@ -328,6 +361,9 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
         let this = self.get_mut();
+        if this.exhausted {
+            return Poll::Ready(None);
+        }
         let mut rejected = 0usize;
         loop {
             match Pin::new(&mut this.inner).poll_next(cx) {
@@ -341,9 +377,25 @@ where
                         return Poll::Pending;
                     }
                 }
+                Poll::Ready(None) => {
+                    this.exhausted = true;
+                    return Poll::Ready(None);
+                }
                 other => return other,
             }
         }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.exhausted {
+            return (0, Some(0));
+        }
+        let (_, upper) = self.inner.size_hint();
+        (0, upper)
+    }
+
+    fn is_exhausted(&self) -> bool {
+        self.exhausted || self.inner.is_exhausted()
     }
 }
 
@@ -589,6 +641,7 @@ pub struct TimeoutStream<S> {
     duration: Duration,
     sleep: Sleep,
     time_getter: fn() -> Time,
+    exhausted: bool,
 }
 
 impl<S> TimeoutStream<S> {
@@ -604,6 +657,7 @@ impl<S> TimeoutStream<S> {
             duration,
             sleep: Sleep::new(deadline),
             time_getter: wall_clock_now,
+            exhausted: false,
         }
     }
 
@@ -621,6 +675,7 @@ impl<S> TimeoutStream<S> {
             duration,
             sleep,
             time_getter,
+            exhausted: false,
         }
     }
 
@@ -635,12 +690,19 @@ impl<S: SymbolStream + Unpin> SymbolStream for TimeoutStream<S> {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
+        if self.exhausted {
+            return Poll::Ready(None);
+        }
+
         match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(Some(item)) => {
                 self.reset_timer();
                 return Poll::Ready(Some(item));
             }
-            Poll::Ready(None) => return Poll::Ready(None),
+            Poll::Ready(None) => {
+                self.exhausted = true;
+                return Poll::Ready(None);
+            }
             Poll::Pending => {}
         }
 
@@ -655,6 +717,18 @@ impl<S: SymbolStream + Unpin> SymbolStream for TimeoutStream<S> {
             }
             Poll::Pending => Poll::Pending,
         }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.is_exhausted() {
+            return (0, Some(0));
+        }
+        let (lower, _) = self.inner.size_hint();
+        (lower, None)
+    }
+
+    fn is_exhausted(&self) -> bool {
+        self.exhausted || self.inner.is_exhausted()
     }
 }
 
@@ -833,6 +907,35 @@ mod tests {
 
         fn is_exhausted(&self) -> bool {
             self.index >= self.items.len()
+        }
+    }
+
+    struct EmptyThenPanics {
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl EmptyThenPanics {
+        fn new(polls: Arc<AtomicUsize>) -> Self {
+            Self { polls }
+        }
+    }
+
+    impl SymbolStream for EmptyThenPanics {
+        fn poll_next(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<AuthenticatedSymbol, StreamError>>> {
+            let polls = self.polls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(polls, 0, "inner stream repolled after exhaustion");
+            Poll::Ready(None)
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (0, Some(0))
+        }
+
+        fn is_exhausted(&self) -> bool {
+            self.polls.load(Ordering::SeqCst) > 0
         }
     }
 
@@ -1264,6 +1367,69 @@ mod tests {
     }
 
     #[test]
+    fn test_map_stream_tracks_size_hint_and_exhaustion() {
+        init_test("test_map_stream_tracks_size_hint_and_exhaustion");
+        let stream = ExhaustedStream::new(vec![create_symbol(1), create_symbol(2)]);
+        let mut mapped = stream.map(|symbol| symbol);
+
+        let initial_hint = mapped.size_hint();
+        crate::assert_with_log!(
+            initial_hint == (2, Some(2)),
+            "initial hint delegates to inner",
+            (2, Some(2)),
+            initial_hint
+        );
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        while let Poll::Ready(Some(_)) = Pin::new(&mut mapped).poll_next(&mut context) {}
+
+        let exhausted = mapped.is_exhausted();
+        let final_hint = mapped.size_hint();
+        crate::assert_with_log!(exhausted, "mapped exhausted", true, exhausted);
+        crate::assert_with_log!(
+            final_hint == (0, Some(0)),
+            "mapped hint drops to zero after exhaustion",
+            (0, Some(0)),
+            final_hint
+        );
+        crate::test_complete!("test_map_stream_tracks_size_hint_and_exhaustion");
+    }
+
+    #[test]
+    fn test_map_stream_does_not_repoll_inner_after_exhaustion() {
+        init_test("test_map_stream_does_not_repoll_inner_after_exhaustion");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let inner = EmptyThenPanics::new(Arc::clone(&polls));
+        let mut mapped = inner.map(|symbol| symbol);
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut mapped).poll_next(&mut context);
+        let second = Pin::new(&mut mapped).poll_next(&mut context);
+
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(None)),
+            "first poll exhausts mapped stream",
+            true,
+            matches!(first, Poll::Ready(None))
+        );
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(None)),
+            "second poll stays exhausted without repolling inner",
+            true,
+            matches!(second, Poll::Ready(None))
+        );
+        crate::assert_with_log!(
+            polls.load(Ordering::SeqCst) == 1,
+            "inner polled once",
+            1usize,
+            polls.load(Ordering::SeqCst)
+        );
+        crate::test_complete!("test_map_stream_does_not_repoll_inner_after_exhaustion");
+    }
+
+    #[test]
     fn test_filter_stream_skips_and_passes() {
         init_test("test_filter_stream_skips_and_passes");
         let stream = VecStream::new(vec![create_symbol(1), create_symbol(2), create_symbol(3)]);
@@ -1301,6 +1467,69 @@ mod tests {
         );
 
         crate::test_complete!("test_filter_stream_propagates_error");
+    }
+
+    #[test]
+    fn test_filter_stream_tracks_size_hint_and_exhaustion() {
+        init_test("test_filter_stream_tracks_size_hint_and_exhaustion");
+        let stream = ExhaustedStream::new(vec![create_symbol(1), create_symbol(2)]);
+        let mut filtered = stream.filter(|symbol| symbol.symbol().id().esi() > 0);
+
+        let initial_hint = filtered.size_hint();
+        crate::assert_with_log!(
+            initial_hint == (0, Some(2)),
+            "filter preserves only the upper bound before exhaustion",
+            (0, Some(2)),
+            initial_hint
+        );
+
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+        while let Poll::Ready(Some(_)) = Pin::new(&mut filtered).poll_next(&mut context) {}
+
+        let exhausted = filtered.is_exhausted();
+        let final_hint = filtered.size_hint();
+        crate::assert_with_log!(exhausted, "filtered exhausted", true, exhausted);
+        crate::assert_with_log!(
+            final_hint == (0, Some(0)),
+            "filtered hint drops to zero after exhaustion",
+            (0, Some(0)),
+            final_hint
+        );
+        crate::test_complete!("test_filter_stream_tracks_size_hint_and_exhaustion");
+    }
+
+    #[test]
+    fn test_filter_stream_does_not_repoll_inner_after_exhaustion() {
+        init_test("test_filter_stream_does_not_repoll_inner_after_exhaustion");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let inner = EmptyThenPanics::new(Arc::clone(&polls));
+        let mut filtered = inner.filter(|_symbol| true);
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut filtered).poll_next(&mut context);
+        let second = Pin::new(&mut filtered).poll_next(&mut context);
+
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(None)),
+            "first poll exhausts filtered stream",
+            true,
+            matches!(first, Poll::Ready(None))
+        );
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(None)),
+            "second poll stays exhausted without repolling inner",
+            true,
+            matches!(second, Poll::Ready(None))
+        );
+        crate::assert_with_log!(
+            polls.load(Ordering::SeqCst) == 1,
+            "inner polled once",
+            1usize,
+            polls.load(Ordering::SeqCst)
+        );
+        crate::test_complete!("test_filter_stream_does_not_repoll_inner_after_exhaustion");
     }
 
     #[test]
@@ -1768,6 +1997,48 @@ mod tests {
         );
 
         crate::test_complete!("test_timeout_stream_duration_max_saturates_deadline");
+    }
+
+    #[test]
+    fn test_timeout_stream_tracks_exhaustion_without_repolling_inner() {
+        init_test("test_timeout_stream_tracks_exhaustion_without_repolling_inner");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let inner = EmptyThenPanics::new(Arc::clone(&polls));
+        let mut timed = TimeoutStream::new(inner, Duration::from_nanos(10));
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut timed).poll_next(&mut context);
+        let second = Pin::new(&mut timed).poll_next(&mut context);
+        let exhausted = timed.is_exhausted();
+        let hint = timed.size_hint();
+
+        crate::assert_with_log!(
+            matches!(first, Poll::Ready(None)),
+            "first poll exhausts timeout stream when inner is done",
+            true,
+            matches!(first, Poll::Ready(None))
+        );
+        crate::assert_with_log!(
+            matches!(second, Poll::Ready(None)),
+            "second poll stays exhausted without repolling inner",
+            true,
+            matches!(second, Poll::Ready(None))
+        );
+        crate::assert_with_log!(exhausted, "timeout stream exhausted", true, exhausted);
+        crate::assert_with_log!(
+            hint == (0, Some(0)),
+            "timeout hint zero after exhaustion",
+            (0, Some(0)),
+            hint
+        );
+        crate::assert_with_log!(
+            polls.load(Ordering::SeqCst) == 1,
+            "inner polled once",
+            1usize,
+            polls.load(Ordering::SeqCst)
+        );
+        crate::test_complete!("test_timeout_stream_tracks_exhaustion_without_repolling_inner");
     }
 
     /// Regression test for lost-wakeup race in ChannelStream::poll_next.

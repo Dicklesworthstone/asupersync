@@ -11,6 +11,7 @@ use core::fmt::Write;
 
 /// Maximum number of fields in a log entry (to bound memory).
 const MAX_FIELDS: usize = 16;
+const RESERVED_JSON_FIELDS: [&str; 4] = ["level", "timestamp_ns", "message", "target"];
 
 /// A structured log entry with message, level, and contextual fields.
 ///
@@ -83,14 +84,12 @@ impl LogEntry {
 
     /// Adds a structured field to the entry.
     ///
-    /// Fields are key-value pairs that provide context. If the maximum
-    /// number of fields is reached, additional fields are ignored.
+    /// Fields are key-value pairs that provide context. Re-adding an existing
+    /// key updates its value in place. If the maximum number of distinct fields
+    /// is reached, additional keys are ignored.
     #[must_use]
-    pub fn with_field(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        if self.fields.len() < MAX_FIELDS {
-            self.fields.push((key.into(), value.into()));
-        }
-        self
+    pub fn with_field(self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.insert_field(key, value, false)
     }
 
     /// Sets the timestamp for the entry.
@@ -108,22 +107,25 @@ impl LogEntry {
     }
 
     /// Adds diagnostic context fields to the entry.
+    ///
+    /// Core context fields are prioritized over pre-existing arbitrary fields so
+    /// correlation identifiers survive the field budget enforced on each entry.
     #[must_use]
     pub fn with_context(mut self, ctx: &DiagnosticContext) -> Self {
+        for (k, v) in ctx.custom_fields() {
+            self = self.insert_field(k, v, true);
+        }
         if let Some(task_id) = ctx.task_id() {
-            self = self.with_field("task_id", task_id.to_string());
+            self = self.insert_field("task_id", task_id.to_string(), true);
         }
         if let Some(region_id) = ctx.region_id() {
-            self = self.with_field("region_id", region_id.to_string());
+            self = self.insert_field("region_id", region_id.to_string(), true);
         }
         if let Some(span_id) = ctx.span_id() {
-            self = self.with_field("span_id", span_id.to_string());
+            self = self.insert_field("span_id", span_id.to_string(), true);
         }
         if let Some(parent_span_id) = ctx.parent_span_id() {
-            self = self.with_field("parent_span_id", parent_span_id.to_string());
-        }
-        for (k, v) in ctx.custom_fields() {
-            self = self.with_field(k, v);
+            self = self.insert_field("parent_span_id", parent_span_id.to_string(), true);
         }
         self
     }
@@ -212,6 +214,9 @@ impl LogEntry {
 
         for (k, v) in &self.fields {
             s.push_str(",\"");
+            if RESERVED_JSON_FIELDS.contains(&k.as_str()) {
+                s.push_str("field.");
+            }
             push_json_escaped(&mut s, k);
             s.push_str("\":\"");
             push_json_escaped(&mut s, v);
@@ -220,6 +225,39 @@ impl LogEntry {
 
         s.push('}');
         s
+    }
+
+    fn insert_field(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+        prioritize: bool,
+    ) -> Self {
+        let key = key.into();
+        let value = value.into();
+
+        if let Some((_, existing_value)) = self
+            .fields
+            .iter_mut()
+            .find(|(existing_key, _)| existing_key == &key)
+        {
+            *existing_value = value;
+            return self;
+        }
+
+        if self.fields.len() < MAX_FIELDS {
+            self.fields.push((key, value));
+            return self;
+        }
+
+        if prioritize && !self.fields.is_empty() {
+            self.fields.rotate_left(1);
+            if let Some(slot) = self.fields.last_mut() {
+                *slot = (key, value);
+            }
+        }
+
+        self
     }
 }
 
@@ -350,6 +388,39 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_field_updates_existing_value() {
+        let entry = LogEntry::info("test")
+            .with_field("attempt", "1")
+            .with_field("attempt", "2");
+
+        assert_eq!(entry.field_count(), 1);
+        assert_eq!(entry.get_field("attempt"), Some("2"));
+        let fields: Vec<_> = entry.fields().collect();
+        assert_eq!(fields, vec![("attempt", "2")]);
+    }
+
+    #[test]
+    fn json_reserved_field_names_are_namespaced() {
+        let entry = LogEntry::info("real message")
+            .with_target("real-target")
+            .with_field("message", "field message")
+            .with_field("level", "field level")
+            .with_field("target", "field target")
+            .with_field("timestamp_ns", "field timestamp");
+
+        let json = entry.format_json();
+
+        assert_eq!(json.matches("\"message\":").count(), 1);
+        assert_eq!(json.matches("\"level\":").count(), 1);
+        assert_eq!(json.matches("\"target\":").count(), 1);
+        assert_eq!(json.matches("\"timestamp_ns\":").count(), 1);
+        assert!(json.contains("\"field.message\":\"field message\""));
+        assert!(json.contains("\"field.level\":\"field level\""));
+        assert!(json.contains("\"field.target\":\"field target\""));
+        assert!(json.contains("\"field.timestamp_ns\":\"field timestamp\""));
+    }
+
+    #[test]
     fn fields_iterator() {
         let entry = LogEntry::info("test")
             .with_field("a", "1")
@@ -377,6 +448,71 @@ mod tests {
         assert_eq!(entry.get_field("region_id"), Some("R2"));
         assert!(entry.get_field("span_id").is_some());
         assert_eq!(entry.get_field("request_id"), Some("abc123"));
+    }
+
+    #[test]
+    fn entry_with_context_overrides_conflicting_fields() {
+        let ctx = DiagnosticContext::new()
+            .with_custom("request_id", "ctx-request")
+            .with_custom("span.name", "ctx-span");
+
+        let entry = LogEntry::info("hello")
+            .with_field("request_id", "user-request")
+            .with_field("span.name", "user-span")
+            .with_context(&ctx);
+
+        assert_eq!(entry.get_field("request_id"), Some("ctx-request"));
+        assert_eq!(entry.get_field("span.name"), Some("ctx-span"));
+        assert_eq!(
+            entry.format_json().matches("\"request_id\":").count(),
+            1,
+            "request_id should only appear once in JSON output"
+        );
+    }
+
+    #[test]
+    fn entry_with_context_preserves_context_when_field_budget_is_full() {
+        use crate::observability::SpanId;
+
+        let mut entry = LogEntry::info("hello");
+        for i in 0..MAX_FIELDS {
+            entry = entry.with_field(format!("key{i}"), format!("value{i}"));
+        }
+
+        let ctx = DiagnosticContext::new()
+            .with_span_id(SpanId::new())
+            .with_custom("request_id", "abc123");
+
+        let entry = entry.with_context(&ctx);
+
+        assert_eq!(entry.field_count(), MAX_FIELDS);
+        assert!(entry.get_field("span_id").is_some());
+        assert_eq!(entry.get_field("request_id"), Some("abc123"));
+        assert_eq!(entry.get_field("key0"), None);
+        assert_eq!(entry.get_field("key1"), None);
+    }
+
+    #[test]
+    fn entry_with_context_preserves_core_ids_when_context_overflows_budget() {
+        use crate::observability::SpanId;
+        use crate::types::{RegionId, TaskId};
+        use crate::util::ArenaIndex;
+
+        let mut ctx = DiagnosticContext::new()
+            .with_task_id(TaskId::from_arena(ArenaIndex::new(7, 0)))
+            .with_region_id(RegionId::from_arena(ArenaIndex::new(8, 0)))
+            .with_span_id(SpanId::new());
+
+        for i in 0..MAX_FIELDS {
+            ctx = ctx.with_custom(format!("custom{i}"), format!("value{i}"));
+        }
+
+        let entry = LogEntry::info("hello").with_context(&ctx);
+
+        assert_eq!(entry.field_count(), MAX_FIELDS);
+        assert_eq!(entry.get_field("task_id"), Some("T7"));
+        assert_eq!(entry.get_field("region_id"), Some("R8"));
+        assert!(entry.get_field("span_id").is_some());
     }
 
     #[test]

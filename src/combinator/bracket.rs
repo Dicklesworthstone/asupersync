@@ -280,36 +280,37 @@ where
         // Determine the release future to drive:
         // - Using phase: resource acquired but use not complete; construct release future.
         // - Releasing phase: release already started but not complete; drive existing future.
-        let release_fut: Option<Pin<Box<RF>>> = match &self.state.phase {
-            BracketPhase::Acquiring(_) | BracketPhase::Using(_) => {
-                // Cancel before release starts: construct the release future
-                // from the saved resource clone if one exists.
-                if let (Some(release_fn), Some(resource)) = (
-                    self.state.release_fn.take(),
-                    self.state.resource_for_release.take(),
-                ) {
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        release_fn(resource)
-                    })) {
-                        Ok(fut) => Some(Box::pin(fut)),
-                        Err(payload) => {
-                            release_panic = Some(payload);
-                            None
+        // We replace the phase with Done so that `use_fut` is dropped BEFORE the release
+        // future is created and polled. This ensures resources (like locks) held by
+        // the use phase are released before the cleanup phase attempts to run.
+        let release_fut: Option<Pin<Box<RF>>> =
+            match std::mem::replace(&mut self.state.phase, BracketPhase::Done) {
+                BracketPhase::Acquiring(_) | BracketPhase::Using(_) => {
+                    // Cancel before release starts: construct the release future
+                    // from the saved resource clone if one exists.
+                    if let (Some(release_fn), Some(resource)) = (
+                        self.state.release_fn.take(),
+                        self.state.resource_for_release.take(),
+                    ) {
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            release_fn(resource)
+                        })) {
+                            Ok(fut) => Some(Box::pin(fut)),
+                            Err(payload) => {
+                                release_panic = Some(payload);
+                                None
+                            }
                         }
+                    } else {
+                        None
                     }
-                } else {
-                    None
                 }
-            }
-            BracketPhase::Releasing(_) => {
-                // Cancel during release: extract the in-progress release future.
-                match std::mem::replace(&mut self.state.phase, BracketPhase::Done) {
-                    BracketPhase::Releasing(fut) => Some(fut),
-                    _ => unreachable!(),
+                BracketPhase::Releasing(fut) => {
+                    // Cancel during release: extract the in-progress release future.
+                    Some(fut)
                 }
-            }
-            BracketPhase::Done => None,
-        };
+                BracketPhase::Done => None,
+            };
 
         if let Some(payload) = release_panic {
             if !std::thread::panicking() {

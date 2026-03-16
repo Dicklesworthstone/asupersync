@@ -248,6 +248,36 @@ pub struct RecoveryCollector {
 }
 
 impl RecoveryCollector {
+    fn required_symbols_for_decode(&self, params: &ObjectParams) -> usize {
+        params
+            .min_symbols_for_decode()
+            .saturating_add(self.config.min_symbols) as usize
+    }
+
+    fn block_symbol_requirements(params: &ObjectParams) -> Vec<usize> {
+        if params.object_size == 0 || params.symbol_size == 0 || params.source_blocks == 0 {
+            return Vec::new();
+        }
+
+        let symbol_size = u64::from(params.symbol_size);
+        let max_block_size = u64::from(params.symbols_per_block) * symbol_size;
+        if max_block_size == 0 {
+            return Vec::new();
+        }
+
+        let mut requirements = Vec::with_capacity(usize::from(params.source_blocks));
+        for block in 0..params.source_blocks {
+            let start = u64::from(block) * max_block_size;
+            if start >= params.object_size {
+                break;
+            }
+            let remaining = params.object_size - start;
+            let block_size = remaining.min(max_block_size);
+            requirements.push(block_size.div_ceil(symbol_size) as usize);
+        }
+        requirements
+    }
+
     /// Creates a new collector with the given configuration.
     #[must_use]
     pub fn new(config: RecoveryConfig) -> Self {
@@ -287,7 +317,27 @@ impl RecoveryCollector {
         let Some(params) = &self.object_params else {
             return false;
         };
-        self.collected.len() >= params.min_symbols_for_decode() as usize
+        if self.collected.len() < self.required_symbols_for_decode(params) {
+            return false;
+        }
+
+        let block_requirements = Self::block_symbol_requirements(params);
+        if block_requirements.is_empty() {
+            return true;
+        }
+
+        let mut block_counts = vec![0usize; block_requirements.len()];
+        for collected in &self.collected {
+            let block = usize::from(collected.symbol.sbn());
+            if let Some(count) = block_counts.get_mut(block) {
+                *count += 1;
+            }
+        }
+
+        block_counts
+            .iter()
+            .zip(block_requirements.iter())
+            .all(|(have, need)| *have >= *need)
     }
 
     /// Cancels the ongoing collection.
@@ -299,8 +349,9 @@ impl RecoveryCollector {
     fn reset_for_attempt(&mut self, params: ObjectParams) {
         self.collected.clear();
         self.symbol_to_idx.clear();
+        let symbols_needed = self.required_symbols_for_decode(&params) as u32;
         self.object_params = Some(params);
-        self.progress.symbols_needed = params.min_symbols_for_decode();
+        self.progress.symbols_needed = symbols_needed;
         self.progress.symbols_collected = 0;
         self.progress.replicas_queried = 0;
         self.progress.replicas_responded = 0;
@@ -923,17 +974,17 @@ mod tests {
             1000,
             128,
             1,
-            10, // K = 10
+            10, // declared max symbols_per_block; actual threshold is ceil(1000 / 128) = 8
         ));
 
-        // Add 9 symbols (not enough).
-        for i in 0..9 {
+        // Add 7 symbols (not enough for a 1000-byte object at 128 bytes/symbol).
+        for i in 0..7 {
             collector.add_collected(make_collected_symbol(i));
         }
         assert!(!collector.can_decode());
 
-        // Add 10th (enough).
-        collector.add_collected(make_collected_symbol(9));
+        // Add 8th (enough).
+        collector.add_collected(make_collected_symbol(7));
         assert!(collector.can_decode());
     }
 
@@ -948,12 +999,15 @@ mod tests {
             10,
         ));
 
-        for i in 0..19 {
-            collector.add_collected(make_collected_symbol(i));
+        for i in 0..10 {
+            collector.add_collected(make_collected_symbol_with_block(0, i));
+        }
+        for i in 0..9 {
+            collector.add_collected(make_collected_symbol_with_block(1, i));
         }
         assert!(!collector.can_decode());
 
-        collector.add_collected(make_collected_symbol(19));
+        collector.add_collected(make_collected_symbol_with_block(1, 9));
         assert!(collector.can_decode());
     }
 
@@ -967,6 +1021,42 @@ mod tests {
         assert_eq!(collector.progress().symbols_needed, 20);
         assert_eq!(collector.progress().symbols_collected, 0);
         assert_eq!(collector.progress().phase, RecoveryPhase::Collecting);
+    }
+
+    #[test]
+    fn collector_reset_for_attempt_includes_configured_extra_symbols() {
+        let config = RecoveryConfig {
+            min_symbols: 2,
+            ..RecoveryConfig::default()
+        };
+        let params = ObjectParams::new(ObjectId::new_for_test(1), 1280, 128, 1, 10);
+        let mut collector = RecoveryCollector::new(config);
+
+        collector.reset_for_attempt(params);
+
+        assert_eq!(collector.progress().symbols_needed, 12);
+    }
+
+    #[test]
+    fn collector_respects_configured_extra_symbol_threshold() {
+        let config = RecoveryConfig {
+            min_symbols: 2,
+            ..RecoveryConfig::default()
+        };
+        let mut collector = RecoveryCollector::new(config);
+        let params = ObjectParams::new(ObjectId::new_for_test(1), 1280, 128, 1, 10);
+        collector.object_params = Some(params);
+
+        for i in 0..10 {
+            collector.add_collected(make_collected_symbol(i));
+        }
+        assert!(!collector.can_decode());
+
+        collector.add_collected(make_collected_symbol(10));
+        assert!(!collector.can_decode());
+
+        collector.add_collected(make_collected_symbol(11));
+        assert!(collector.can_decode());
     }
 
     #[test]
@@ -1158,7 +1248,7 @@ mod tests {
         let decoder = StateDecoder::new(RecoveryDecodingConfig::default());
         let params = ObjectParams::new(ObjectId::new_for_test(1), 1000, 128, 1, 10);
 
-        assert_eq!(decoder.symbols_needed(&params), 10);
+        assert_eq!(decoder.symbols_needed(&params), 8);
     }
 
     #[test]

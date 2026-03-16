@@ -623,16 +623,11 @@ pub struct ThresholdCheck {
 struct MetricCalibration {
     /// Raw observations for direct upper-bound thresholding.
     values: Vec<f64>,
-    /// Nonconformity scores for two-sided mode (|value - median|).
-    nonconformity_scores: Vec<f64>,
 }
 
 impl MetricCalibration {
     fn new() -> Self {
-        Self {
-            values: Vec::new(),
-            nonconformity_scores: Vec::new(),
-        }
+        Self { values: Vec::new() }
     }
 
     fn n(&self) -> usize {
@@ -743,19 +738,7 @@ impl HealthThresholdCalibrator {
             .entry(metric.to_string())
             .or_insert_with(MetricCalibration::new);
 
-        // For two-sided mode, compute nonconformity before adding this value.
-        if self.config.mode == ThresholdMode::TwoSided && !cal.values.is_empty() {
-            let median = cal.median();
-            cal.nonconformity_scores.push((value - median).abs());
-        }
-
         cal.values.push(value);
-
-        // Recompute nonconformity scores if this is the first observation
-        // (for two-sided, the first observation has score 0 by definition).
-        if self.config.mode == ThresholdMode::TwoSided && cal.values.len() == 1 {
-            cal.nonconformity_scores.push(0.0);
-        }
 
         self.n_calibration += 1;
     }

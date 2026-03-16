@@ -1270,6 +1270,20 @@ impl<Caps> Cx<Caps> {
         self.inner.read().checkpoint_state.clone()
     }
 
+    /// Returns the current physical time according to the configured timer driver,
+    /// or the wall clock if no timer driver is available.
+    #[must_use]
+    pub fn now(&self) -> Time
+    where
+        Caps: cap::HasTime,
+    {
+        self.handles
+            .timer_driver
+            .as_ref()
+            .map_or_else(wall_clock_now, TimerDriverHandle::now)
+    }
+
+    /// Internal: returns current time for checkpointing.
     fn current_checkpoint_time(&self) -> Time {
         self.handles
             .timer_driver

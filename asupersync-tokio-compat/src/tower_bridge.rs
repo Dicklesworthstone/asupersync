@@ -104,7 +104,7 @@ where
         // poll_ready loop to ensure exclusive access to the service and prevent
         // waker overwrites from concurrent callers.
         let mut request = Some(request);
-        let mut svc_guard = self
+        let mut svc = self
             .inner
             .lock(cx)
             .await
@@ -113,19 +113,19 @@ where
         let response_future = std::future::poll_fn(|task_cx| {
             let _cx_guard = asupersync::Cx::set_current(Some(cx.clone()));
 
-            match svc_guard.poll_ready(task_cx) {
+            match svc.poll_ready(task_cx) {
                 Poll::Ready(Ok(())) => {
                     // SAFETY: request is Some until first Ready, and poll_fn
                     // stops polling after the first Ready return.
                     let req = request.take().expect("request already consumed");
-                    Poll::Ready(Ok(svc_guard.call(req)))
+                    Poll::Ready(Ok(svc.call(req)))
                 }
                 Poll::Ready(Err(e)) => Poll::Ready(Err(BridgeError::Readiness(e))),
                 Poll::Pending => Poll::Pending,
             }
         })
         .await?;
-        drop(svc_guard);
+        drop(svc);
 
         // Phase 2: Await the response future with Cx installed on each poll,
         // and support cancellation.

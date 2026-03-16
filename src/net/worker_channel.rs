@@ -35,6 +35,52 @@ pub const WORKER_PROTOCOL_VERSION: u32 = 1;
 /// Maximum payload size in bytes (256 KiB, matching policy).
 pub const MAX_PAYLOAD_BYTES: usize = 262_144;
 
+/// Payload ownership mode across the non-SAB worker boundary.
+///
+/// The concrete v1 envelope only ships structured-clone semantics for owned
+/// byte payloads. The enum exists so policy, diagnostics, and later browser
+/// wiring can describe transfer rules without implying SharedArrayBuffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerPayloadTransfer {
+    /// Structured-clone the payload across the `postMessage` boundary.
+    StructuredClone,
+    /// Transfer ownership of an `ArrayBuffer`-backed payload.
+    TransferArrayBuffer,
+}
+
+#[must_use]
+fn replay_hash(
+    message_id: u64,
+    seq_no: u64,
+    decision_seq: u64,
+    seed: u64,
+    issued_at_turn: u64,
+    op: &WorkerOp,
+) -> u64 {
+    let mut hash = message_id
+        .wrapping_mul(0x9E37_79B1_85EB_CA87)
+        .wrapping_add(seq_no.rotate_left(13))
+        ^ decision_seq.rotate_left(23)
+        ^ seed.rotate_left(29)
+        ^ issued_at_turn.rotate_left(47);
+    for byte in serde_json::to_vec(op).unwrap_or_default() {
+        hash = hash.rotate_left(5) ^ u64::from(byte);
+        hash = hash.wrapping_mul(0x100_0000_01B3);
+    }
+    hash
+}
+
+fn validate_payload_size(size: usize) -> Result<(), WorkerChannelError> {
+    if size > MAX_PAYLOAD_BYTES {
+        return Err(WorkerChannelError::PayloadTooLarge {
+            size,
+            max: MAX_PAYLOAD_BYTES,
+        });
+    }
+    Ok(())
+}
+
 // ─── Envelope ────────────────────────────────────────────────────────
 
 /// A typed coordination message exchanged between main thread and worker.
@@ -49,10 +95,14 @@ pub struct WorkerEnvelope {
     pub message_id: u64,
     /// Monotonically increasing sequence number per sender.
     pub seq_no: u64,
+    /// Deterministic decision sequence used for replay parity.
+    pub decision_seq: u64,
     /// Deterministic RNG seed for replay (propagated from parent Cx).
     pub seed: u64,
     /// Host turn ID at message creation (for deterministic scheduling).
     pub issued_at_turn: u64,
+    /// Stable replay digest for cross-runtime policy checks.
+    pub replay_hash: u64,
     /// The coordination operation.
     pub op: WorkerOp,
 }
@@ -61,12 +111,27 @@ impl WorkerEnvelope {
     /// Create a new envelope with the given operation and sequence metadata.
     #[must_use]
     pub fn new(message_id: u64, seq_no: u64, seed: u64, issued_at_turn: u64, op: WorkerOp) -> Self {
+        Self::new_with_decision_seq(message_id, seq_no, seq_no, seed, issued_at_turn, op)
+    }
+
+    /// Create a new envelope with explicit transport and decision sequence counters.
+    #[must_use]
+    pub fn new_with_decision_seq(
+        message_id: u64,
+        seq_no: u64,
+        decision_seq: u64,
+        seed: u64,
+        issued_at_turn: u64,
+        op: WorkerOp,
+    ) -> Self {
         Self {
             version: WORKER_PROTOCOL_VERSION,
             message_id,
             seq_no,
+            decision_seq,
             seed,
             issued_at_turn,
+            replay_hash: replay_hash(message_id, seq_no, decision_seq, seed, issued_at_turn, &op),
             op,
         }
     }
@@ -79,13 +144,27 @@ impl WorkerEnvelope {
                 actual: self.version,
             });
         }
-        if let WorkerOp::SpawnJob(ref req) = self.op {
-            if req.payload.len() > MAX_PAYLOAD_BYTES {
-                return Err(WorkerChannelError::PayloadTooLarge {
-                    size: req.payload.len(),
-                    max: MAX_PAYLOAD_BYTES,
-                });
-            }
+        let expected_replay_hash = replay_hash(
+            self.message_id,
+            self.seq_no,
+            self.decision_seq,
+            self.seed,
+            self.issued_at_turn,
+            &self.op,
+        );
+        if self.replay_hash != expected_replay_hash {
+            return Err(WorkerChannelError::ReplayHashMismatch {
+                expected: expected_replay_hash,
+                actual: self.replay_hash,
+            });
+        }
+        match &self.op {
+            WorkerOp::SpawnJob(req) => validate_payload_size(req.payload.len())?,
+            WorkerOp::JobCompleted(JobResult {
+                outcome: JobOutcome::Ok { payload },
+                ..
+            }) => validate_payload_size(payload.len())?,
+            _ => {}
         }
         Ok(())
     }
@@ -116,6 +195,13 @@ pub enum WorkerOp {
     // ── Work dispatch ────────────────────────────────────────────
     /// Main → worker: spawn a new job inside the worker runtime.
     SpawnJob(SpawnJobRequest),
+    /// Main → worker: request an explicit status snapshot for an in-flight job.
+    PollStatus {
+        /// Job identifier whose state should be reported.
+        job_id: u64,
+    },
+    /// Worker → main: current state for an in-flight job.
+    StatusSnapshot(JobStatusSnapshot),
     /// Worker → main: job completed with a result.
     JobCompleted(JobResult),
 
@@ -128,11 +214,30 @@ pub enum WorkerOp {
         reason: String,
     },
     /// Worker → main: cancellation acknowledged, entering drain phase.
-    CancelAcknowledged { job_id: u64 },
+    CancelAcknowledged {
+        /// Job identifier whose cancellation request was acknowledged.
+        job_id: u64,
+    },
+    /// Main → worker: execute bounded drain for a cancelled job.
+    DrainJob {
+        /// Job identifier whose drain phase should execute.
+        job_id: u64,
+    },
     /// Worker → main: drain phase completed.
-    DrainCompleted { job_id: u64 },
+    DrainCompleted {
+        /// Job identifier whose drain phase completed.
+        job_id: u64,
+    },
+    /// Main → worker: execute bounded finalize after drain completion.
+    FinalizeJob {
+        /// Job identifier whose finalize phase should execute.
+        job_id: u64,
+    },
     /// Worker → main: finalize phase completed.
-    FinalizeCompleted { job_id: u64 },
+    FinalizeCompleted {
+        /// Job identifier whose finalize phase completed.
+        job_id: u64,
+    },
 
     // ── Shutdown ─────────────────────────────────────────────────
     /// Main → worker: request graceful shutdown of the worker runtime.
@@ -161,6 +266,35 @@ pub struct SpawnJobRequest {
     pub obligation_id: u64,
     /// Serialized job payload (must respect MAX_PAYLOAD_BYTES).
     pub payload: Vec<u8>,
+}
+
+impl SpawnJobRequest {
+    /// The concrete v1 non-SAB transport always uses structured-cloned owned bytes.
+    #[must_use]
+    pub fn payload_transfer(&self) -> WorkerPayloadTransfer {
+        WorkerPayloadTransfer::StructuredClone
+    }
+
+    /// Whether the request owns the payload it is sending across the boundary.
+    #[must_use]
+    pub fn owned_payload(&self) -> bool {
+        true
+    }
+}
+
+/// Explicit non-terminal status report for `poll_status` requests.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct JobStatusSnapshot {
+    /// Job identifier being reported.
+    pub job_id: u64,
+    /// Current worker-observed non-terminal lifecycle state.
+    ///
+    /// Terminal outcomes must use [`WorkerOp::JobCompleted`] or
+    /// [`WorkerOp::FinalizeCompleted`] so the coordinator does not lose the
+    /// completion semantics attached to those messages.
+    pub state: JobState,
+    /// Optional human-readable detail for diagnostics.
+    pub detail: Option<String>,
 }
 
 /// The result of a completed job.
@@ -200,6 +334,17 @@ pub enum JobOutcome {
     },
 }
 
+impl JobOutcome {
+    /// The concrete v1 result path uses structured-cloned owned bytes.
+    #[must_use]
+    pub fn payload_transfer(&self) -> Option<WorkerPayloadTransfer> {
+        match self {
+            Self::Ok { .. } => Some(WorkerPayloadTransfer::StructuredClone),
+            Self::Err { .. } | Self::Cancelled { .. } | Self::Panicked { .. } => None,
+        }
+    }
+}
+
 /// A structured diagnostic event from the worker.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DiagnosticEvent {
@@ -233,6 +378,9 @@ pub enum DiagnosticLevel {
 /// Created → Queued → Running → Completed
 ///                      ↓
 ///                CancelRequested → Draining → Finalizing → Completed
+///
+/// Any non-terminal state may also transition to `Failed` if the worker
+/// session dies or is replaced before the job reaches a terminal outcome.
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum JobState {
@@ -270,23 +418,26 @@ impl fmt::Display for JobState {
 }
 
 impl JobState {
+    /// Whether this state is terminal.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed)
+    }
+
     /// Check whether the given transition is valid.
     #[must_use]
     pub fn can_transition_to(self, next: Self) -> bool {
         matches!(
             (self, next),
-            (Self::Created, Self::Queued)
-                | (Self::Queued, Self::Running)
-                | (Self::Queued, Self::Completed)
-                | (Self::Queued, Self::Failed)
-                | (Self::Running, Self::Completed)
-                | (Self::Running, Self::CancelRequested)
-                | (Self::Running, Self::Failed)
-                | (Self::CancelRequested, Self::Draining)
-                | (Self::CancelRequested, Self::Completed)
-                | (Self::Draining, Self::Finalizing)
-                | (Self::Draining, Self::Completed)
-                | (Self::Finalizing, Self::Completed)
+            (Self::Created, Self::Queued | Self::Failed)
+                | (Self::Queued, Self::Running | Self::Completed | Self::Failed)
+                | (
+                    Self::Running,
+                    Self::Completed | Self::CancelRequested | Self::Failed,
+                )
+                | (Self::CancelRequested, Self::Draining | Self::Failed)
+                | (Self::Draining, Self::Finalizing | Self::Failed)
+                | (Self::Finalizing, Self::Completed | Self::Failed)
         )
     }
 }
@@ -345,6 +496,8 @@ pub struct WorkerCoordinator {
     outbox: VecDeque<WorkerEnvelope>,
     /// Monotonically increasing sequence number.
     next_seq: u64,
+    /// Monotonically increasing deterministic decision sequence.
+    next_decision_seq: u64,
     /// Monotonically increasing message ID.
     next_message_id: u64,
     /// Active tracked jobs by job_id.
@@ -353,6 +506,10 @@ pub struct WorkerCoordinator {
     seed: u64,
     /// Current host turn ID.
     turn: u64,
+    /// Highest inbound worker sequence accepted by this coordinator session.
+    last_inbound_seq_no: u64,
+    /// Worker runtime instance currently associated with the inbound session.
+    active_worker_id: Option<String>,
     /// Whether the worker has reported bootstrap readiness.
     worker_ready: bool,
     /// Whether a shutdown has been requested.
@@ -366,10 +523,13 @@ impl WorkerCoordinator {
         Self {
             outbox: VecDeque::new(),
             next_seq: 1,
+            next_decision_seq: 1,
             next_message_id: 1,
             jobs: std::collections::BTreeMap::new(),
             seed,
             turn: 0,
+            last_inbound_seq_no: 0,
+            active_worker_id: None,
             worker_ready: false,
             shutdown_requested: false,
         }
@@ -416,12 +576,7 @@ impl WorkerCoordinator {
         if self.shutdown_requested {
             return Err(WorkerChannelError::ShutdownInProgress);
         }
-        if payload.len() > MAX_PAYLOAD_BYTES {
-            return Err(WorkerChannelError::PayloadTooLarge {
-                size: payload.len(),
-                max: MAX_PAYLOAD_BYTES,
-            });
-        }
+        validate_payload_size(payload.len())?;
         if self.jobs.contains_key(&job_id) {
             return Err(WorkerChannelError::DuplicateJobId(job_id));
         }
@@ -452,11 +607,15 @@ impl WorkerCoordinator {
             job.transition_to(JobState::CancelRequested)?;
         }
 
-        let envelope = self.make_envelope(WorkerOp::CancelJob { job_id, reason });
-        // Safe: we validated job_id exists above and never remove during this method.
-        self.jobs.get_mut(&job_id).unwrap().last_seq_no = envelope.seq_no;
-        self.outbox.push_back(envelope);
-        Ok(())
+        self.enqueue_job_message(job_id, WorkerOp::CancelJob { job_id, reason })
+    }
+
+    /// Enqueue an explicit poll-status message for an in-flight job.
+    pub fn poll_status(&mut self, job_id: u64) -> Result<(), WorkerChannelError> {
+        if !self.jobs.contains_key(&job_id) {
+            return Err(WorkerChannelError::UnknownJobId(job_id));
+        }
+        self.enqueue_job_message(job_id, WorkerOp::PollStatus { job_id })
     }
 
     /// Enqueue a shutdown message.
@@ -473,37 +632,75 @@ impl WorkerCoordinator {
     /// Process an inbound message from the worker.
     pub fn handle_inbound(&mut self, envelope: &WorkerEnvelope) -> Result<(), WorkerChannelError> {
         envelope.validate()?;
+        if self.should_reset_inbound_session(&envelope.op) {
+            self.fail_nonterminal_jobs();
+            self.reset_inbound_session();
+        }
+        self.validate_inbound_sequence(envelope.seq_no)?;
+        self.record_inbound_sequence(envelope.seq_no);
         match &envelope.op {
-            WorkerOp::BootstrapReady { .. } => {
+            WorkerOp::BootstrapReady { worker_id } => {
+                self.active_worker_id = Some(worker_id.clone());
                 self.worker_ready = true;
+                self.shutdown_requested = false;
                 Ok(())
             }
             WorkerOp::BootstrapFailed { reason } => {
+                self.fail_nonterminal_jobs();
+                self.active_worker_id = None;
+                self.worker_ready = false;
+                self.shutdown_requested = false;
                 Err(WorkerChannelError::BootstrapFailed(reason.clone()))
+            }
+            WorkerOp::StatusSnapshot(snapshot) => {
+                if snapshot.state.is_terminal() {
+                    return Err(WorkerChannelError::TerminalStatusSnapshot {
+                        job_id: snapshot.job_id,
+                        state: snapshot.state,
+                    });
+                }
+                let job = self
+                    .jobs
+                    .get_mut(&snapshot.job_id)
+                    .ok_or(WorkerChannelError::UnknownJobId(snapshot.job_id))?;
+                if job.state != snapshot.state {
+                    job.transition_to(snapshot.state)?;
+                }
+                Ok(())
             }
             WorkerOp::JobCompleted(result) => {
                 let job = self
                     .jobs
                     .get_mut(&result.job_id)
                     .ok_or(WorkerChannelError::UnknownJobId(result.job_id))?;
+                if !matches!(job.state, JobState::Queued | JobState::Running) {
+                    return Err(WorkerChannelError::UnexpectedCompletionPhase {
+                        job_id: result.job_id,
+                        state: job.state,
+                    });
+                }
                 job.transition_to(JobState::Completed)?;
                 Ok(())
             }
             WorkerOp::CancelAcknowledged { job_id } => {
-                let job = self
-                    .jobs
-                    .get_mut(job_id)
-                    .ok_or(WorkerChannelError::UnknownJobId(*job_id))?;
-                job.transition_to(JobState::Draining)?;
-                Ok(())
+                {
+                    let job = self
+                        .jobs
+                        .get_mut(job_id)
+                        .ok_or(WorkerChannelError::UnknownJobId(*job_id))?;
+                    job.transition_to(JobState::Draining)?;
+                }
+                self.enqueue_job_message(*job_id, WorkerOp::DrainJob { job_id: *job_id })
             }
             WorkerOp::DrainCompleted { job_id } => {
-                let job = self
-                    .jobs
-                    .get_mut(job_id)
-                    .ok_or(WorkerChannelError::UnknownJobId(*job_id))?;
-                job.transition_to(JobState::Finalizing)?;
-                Ok(())
+                {
+                    let job = self
+                        .jobs
+                        .get_mut(job_id)
+                        .ok_or(WorkerChannelError::UnknownJobId(*job_id))?;
+                    job.transition_to(JobState::Finalizing)?;
+                }
+                self.enqueue_job_message(*job_id, WorkerOp::FinalizeJob { job_id: *job_id })
             }
             WorkerOp::FinalizeCompleted { job_id } => {
                 let job = self
@@ -514,13 +711,19 @@ impl WorkerCoordinator {
                 Ok(())
             }
             WorkerOp::ShutdownCompleted => {
+                self.fail_nonterminal_jobs();
+                self.active_worker_id = None;
                 self.shutdown_requested = false;
+                self.worker_ready = false;
                 Ok(())
             }
             WorkerOp::Diagnostic(_) => Ok(()),
             // Main-to-worker ops should not be inbound
             WorkerOp::SpawnJob(_)
+            | WorkerOp::PollStatus { .. }
             | WorkerOp::CancelJob { .. }
+            | WorkerOp::DrainJob { .. }
+            | WorkerOp::FinalizeJob { .. }
             | WorkerOp::ShutdownWorker { .. } => Err(WorkerChannelError::UnexpectedDirection {
                 op: format!("{:?}", std::mem::discriminant(&envelope.op)),
             }),
@@ -539,12 +742,63 @@ impl WorkerCoordinator {
         self.jobs.get(&job_id).map(|j| j.state)
     }
 
+    fn enqueue_job_message(&mut self, job_id: u64, op: WorkerOp) -> Result<(), WorkerChannelError> {
+        if !self.jobs.contains_key(&job_id) {
+            return Err(WorkerChannelError::UnknownJobId(job_id));
+        }
+        let envelope = self.make_envelope(op);
+        if let Some(job) = self.jobs.get_mut(&job_id) {
+            job.last_seq_no = envelope.seq_no;
+        }
+        self.outbox.push_back(envelope);
+        Ok(())
+    }
+
+    fn should_reset_inbound_session(&self, op: &WorkerOp) -> bool {
+        match op {
+            WorkerOp::BootstrapReady { worker_id } => {
+                !self.worker_ready || self.active_worker_id.as_deref() != Some(worker_id.as_str())
+            }
+            WorkerOp::BootstrapFailed { .. } => !self.worker_ready,
+            _ => false,
+        }
+    }
+
+    fn fail_nonterminal_jobs(&mut self) {
+        for job in self.jobs.values_mut() {
+            if job.state.is_terminal() {
+                continue;
+            }
+            let _ = job.transition_to(JobState::Failed);
+        }
+    }
+
+    fn reset_inbound_session(&mut self) {
+        self.last_inbound_seq_no = 0;
+    }
+
+    fn validate_inbound_sequence(&self, seq_no: u64) -> Result<(), WorkerChannelError> {
+        if seq_no <= self.last_inbound_seq_no {
+            return Err(WorkerChannelError::InboundSequenceNotFresh {
+                last_seen: self.last_inbound_seq_no,
+                actual: seq_no,
+            });
+        }
+        Ok(())
+    }
+
+    fn record_inbound_sequence(&mut self, seq_no: u64) {
+        self.last_inbound_seq_no = seq_no;
+    }
+
     fn make_envelope(&mut self, op: WorkerOp) -> WorkerEnvelope {
         let msg_id = self.next_message_id;
         let seq = self.next_seq;
+        let decision_seq = self.next_decision_seq;
         self.next_message_id += 1;
         self.next_seq += 1;
-        WorkerEnvelope::new(msg_id, seq, self.seed, self.turn, op)
+        self.next_decision_seq += 1;
+        WorkerEnvelope::new_with_decision_seq(msg_id, seq, decision_seq, self.seed, self.turn, op)
     }
 }
 
@@ -554,14 +808,55 @@ impl WorkerCoordinator {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerChannelError {
     /// Protocol version mismatch.
-    VersionMismatch { expected: u32, actual: u32 },
+    VersionMismatch {
+        /// Protocol version expected by the receiver.
+        expected: u32,
+        /// Protocol version provided by the sender.
+        actual: u32,
+    },
+    /// Replay digest does not match the envelope metadata.
+    ReplayHashMismatch {
+        /// Expected replay digest for the envelope metadata.
+        expected: u64,
+        /// Actual replay digest carried by the envelope.
+        actual: u64,
+    },
+    /// Inbound worker sequence repeated or regressed relative to coordinator state.
+    InboundSequenceNotFresh {
+        /// Highest inbound sequence previously observed by this coordinator.
+        last_seen: u64,
+        /// Sequence number carried by the rejected envelope.
+        actual: u64,
+    },
     /// Payload exceeds maximum size.
-    PayloadTooLarge { size: usize, max: usize },
+    PayloadTooLarge {
+        /// Serialized payload size in bytes.
+        size: usize,
+        /// Maximum payload size in bytes permitted by the protocol.
+        max: usize,
+    },
     /// Invalid job state transition.
     InvalidTransition {
+        /// Job identifier whose state transition was rejected.
         job_id: u64,
+        /// State observed before the rejected transition.
         from: JobState,
+        /// Target state requested by the rejected transition.
         to: JobState,
+    },
+    /// A status snapshot tried to report a terminal state.
+    TerminalStatusSnapshot {
+        /// Job identifier carried by the terminal snapshot.
+        job_id: u64,
+        /// Terminal state that must not be reported via `status_snapshot`.
+        state: JobState,
+    },
+    /// A completion result arrived while the explicit cancellation protocol was active.
+    UnexpectedCompletionPhase {
+        /// Job identifier whose completion arrived out of phase.
+        job_id: u64,
+        /// Coordinator state when the completion arrived.
+        state: JobState,
     },
     /// Worker has not reported bootstrap readiness.
     WorkerNotReady,
@@ -574,7 +869,10 @@ pub enum WorkerChannelError {
     /// Worker bootstrap failed.
     BootstrapFailed(String),
     /// Received a message in the wrong direction.
-    UnexpectedDirection { op: String },
+    UnexpectedDirection {
+        /// Operation received from the wrong side of the channel.
+        op: String,
+    },
 }
 
 impl fmt::Display for WorkerChannelError {
@@ -586,6 +884,15 @@ impl fmt::Display for WorkerChannelError {
                     "protocol version mismatch: expected {expected}, got {actual}"
                 )
             }
+            Self::ReplayHashMismatch { expected, actual } => {
+                write!(f, "replay hash mismatch: expected {expected}, got {actual}")
+            }
+            Self::InboundSequenceNotFresh { last_seen, actual } => {
+                write!(
+                    f,
+                    "inbound worker sequence is not fresh: saw {actual} after {last_seen}"
+                )
+            }
             Self::PayloadTooLarge { size, max } => {
                 write!(
                     f,
@@ -594,6 +901,18 @@ impl fmt::Display for WorkerChannelError {
             }
             Self::InvalidTransition { job_id, from, to } => {
                 write!(f, "invalid job {job_id} transition: {from} → {to}")
+            }
+            Self::TerminalStatusSnapshot { job_id, state } => {
+                write!(
+                    f,
+                    "job {job_id} reported terminal state {state} via status snapshot"
+                )
+            }
+            Self::UnexpectedCompletionPhase { job_id, state } => {
+                write!(
+                    f,
+                    "job {job_id} reported completion while coordinator was in {state}"
+                )
             }
             Self::WorkerNotReady => write!(f, "worker has not reported bootstrap readiness"),
             Self::ShutdownInProgress => write!(f, "shutdown already in progress"),
@@ -673,6 +992,10 @@ mod tests {
         coord.handle_inbound(&result_env).unwrap();
         assert_eq!(coord.job_state(1), Some(JobState::Completed));
         assert_eq!(coord.inflight_count(), 0);
+        assert_eq!(
+            JobOutcome::Ok { payload: vec![42] }.payload_transfer(),
+            Some(WorkerPayloadTransfer::StructuredClone)
+        );
     }
 
     #[test]
@@ -682,9 +1005,19 @@ mod tests {
         coord.spawn_job(1, 100, 200, 300, vec![]).unwrap();
         let _ = coord.drain_outbox();
 
-        // Simulate: job starts running (would come from worker)
-        // For tracking, we transition manually:
-        coord.jobs.get_mut(&1).unwrap().state = JobState::Running;
+        let running = WorkerEnvelope::new(
+            2,
+            2,
+            42,
+            1,
+            WorkerOp::StatusSnapshot(JobStatusSnapshot {
+                job_id: 1,
+                state: JobState::Running,
+                detail: Some("worker accepted job".into()),
+            }),
+        );
+        coord.handle_inbound(&running).unwrap();
+        assert_eq!(coord.job_state(1), Some(JobState::Running));
 
         // Request cancellation
         coord.cancel_job(1, "test cancel".into()).unwrap();
@@ -692,20 +1025,108 @@ mod tests {
         let cancel_msg = coord.drain_outbox().unwrap();
         assert!(matches!(cancel_msg.op, WorkerOp::CancelJob { .. }));
 
-        // Worker acknowledges
+        // Worker acknowledges and coordinator emits the explicit drain phase request.
         let ack = WorkerEnvelope::new(3, 3, 42, 2, WorkerOp::CancelAcknowledged { job_id: 1 });
         coord.handle_inbound(&ack).unwrap();
         assert_eq!(coord.job_state(1), Some(JobState::Draining));
+        let drain_request = coord.drain_outbox().unwrap();
+        assert!(matches!(drain_request.op, WorkerOp::DrainJob { job_id: 1 }));
 
-        // Drain completed
+        // Worker completes drain and coordinator emits the finalize phase request.
         let drain = WorkerEnvelope::new(4, 4, 42, 3, WorkerOp::DrainCompleted { job_id: 1 });
         coord.handle_inbound(&drain).unwrap();
         assert_eq!(coord.job_state(1), Some(JobState::Finalizing));
+        let finalize_request = coord.drain_outbox().unwrap();
+        assert!(matches!(
+            finalize_request.op,
+            WorkerOp::FinalizeJob { job_id: 1 }
+        ));
 
         // Finalize completed
         let finalize = WorkerEnvelope::new(5, 5, 42, 4, WorkerOp::FinalizeCompleted { job_id: 1 });
         coord.handle_inbound(&finalize).unwrap();
         assert_eq!(coord.job_state(1), Some(JobState::Completed));
+    }
+
+    #[test]
+    fn coordinator_rejects_terminal_status_snapshot() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+        coord.spawn_job(1, 100, 200, 300, vec![]).unwrap();
+        let _ = coord.drain_outbox();
+
+        let snapshot = WorkerEnvelope::new(
+            2,
+            2,
+            42,
+            1,
+            WorkerOp::StatusSnapshot(JobStatusSnapshot {
+                job_id: 1,
+                state: JobState::Completed,
+                detail: Some("terminal snapshots must use job_completed".into()),
+            }),
+        );
+        assert!(matches!(
+            coord.handle_inbound(&snapshot),
+            Err(WorkerChannelError::TerminalStatusSnapshot {
+                job_id: 1,
+                state: JobState::Completed,
+            })
+        ));
+        assert_eq!(coord.job_state(1), Some(JobState::Queued));
+    }
+
+    #[test]
+    fn coordinator_rejects_job_completed_while_cancellation_protocol_active() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+        coord.spawn_job(1, 100, 200, 300, vec![]).unwrap();
+        let _ = coord.drain_outbox();
+
+        let running = WorkerEnvelope::new(
+            2,
+            2,
+            42,
+            1,
+            WorkerOp::StatusSnapshot(JobStatusSnapshot {
+                job_id: 1,
+                state: JobState::Running,
+                detail: None,
+            }),
+        );
+        coord.handle_inbound(&running).unwrap();
+
+        coord.cancel_job(1, "test cancel".into()).unwrap();
+        let _ = coord.drain_outbox();
+
+        let ack = WorkerEnvelope::new(3, 3, 42, 2, WorkerOp::CancelAcknowledged { job_id: 1 });
+        coord.handle_inbound(&ack).unwrap();
+        let _ = coord.drain_outbox();
+
+        let drain = WorkerEnvelope::new(4, 4, 42, 3, WorkerOp::DrainCompleted { job_id: 1 });
+        coord.handle_inbound(&drain).unwrap();
+        let _ = coord.drain_outbox();
+
+        let completed = WorkerEnvelope::new(
+            5,
+            5,
+            42,
+            4,
+            WorkerOp::JobCompleted(JobResult {
+                job_id: 1,
+                outcome: JobOutcome::Cancelled {
+                    reason: "worker skipped finalize".into(),
+                },
+            }),
+        );
+        assert!(matches!(
+            coord.handle_inbound(&completed),
+            Err(WorkerChannelError::UnexpectedCompletionPhase {
+                job_id: 1,
+                state: JobState::Finalizing,
+            })
+        ));
+        assert_eq!(coord.job_state(1), Some(JobState::Finalizing));
     }
 
     #[test]
@@ -764,6 +1185,51 @@ mod tests {
         let done = WorkerEnvelope::new(2, 2, 42, 1, WorkerOp::ShutdownCompleted);
         coord.handle_inbound(&done).unwrap();
         assert!(!coord.is_shutdown_requested());
+        assert!(!coord.is_worker_ready());
+        assert_eq!(
+            coord.spawn_job(1, 100, 200, 300, vec![]),
+            Err(WorkerChannelError::WorkerNotReady)
+        );
+    }
+
+    #[test]
+    fn coordinator_marks_nonterminal_job_failed_when_shutdown_completes() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+        coord.spawn_job(1, 100, 200, 300, vec![]).unwrap();
+        let _ = coord.drain_outbox();
+
+        let running = WorkerEnvelope::new(
+            2,
+            2,
+            42,
+            1,
+            WorkerOp::StatusSnapshot(JobStatusSnapshot {
+                job_id: 1,
+                state: JobState::Running,
+                detail: Some("worker started".into()),
+            }),
+        );
+        coord.handle_inbound(&running).unwrap();
+
+        coord.cancel_job(1, "shutdown".into()).unwrap();
+        let _ = coord.drain_outbox();
+
+        let ack = WorkerEnvelope::new(3, 3, 42, 2, WorkerOp::CancelAcknowledged { job_id: 1 });
+        coord.handle_inbound(&ack).unwrap();
+        let _ = coord.drain_outbox();
+
+        let drain = WorkerEnvelope::new(4, 4, 42, 3, WorkerOp::DrainCompleted { job_id: 1 });
+        coord.handle_inbound(&drain).unwrap();
+        let _ = coord.drain_outbox();
+        assert_eq!(coord.job_state(1), Some(JobState::Finalizing));
+        assert_eq!(coord.inflight_count(), 1);
+
+        let shutdown = WorkerEnvelope::new(5, 5, 42, 4, WorkerOp::ShutdownCompleted);
+        coord.handle_inbound(&shutdown).unwrap();
+        assert_eq!(coord.job_state(1), Some(JobState::Failed));
+        assert_eq!(coord.inflight_count(), 0);
+        assert!(!coord.is_worker_ready());
     }
 
     #[test]
@@ -793,6 +1259,298 @@ mod tests {
     }
 
     #[test]
+    fn coordinator_polls_status_and_applies_snapshot() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+        coord.spawn_job(1, 100, 200, 300, vec![]).unwrap();
+        let _ = coord.drain_outbox();
+
+        coord.poll_status(1).unwrap();
+        let poll = coord.drain_outbox().unwrap();
+        assert!(matches!(poll.op, WorkerOp::PollStatus { job_id: 1 }));
+
+        let snapshot = WorkerEnvelope::new(
+            3,
+            3,
+            42,
+            2,
+            WorkerOp::StatusSnapshot(JobStatusSnapshot {
+                job_id: 1,
+                state: JobState::Running,
+                detail: None,
+            }),
+        );
+        coord.handle_inbound(&snapshot).unwrap();
+        assert_eq!(coord.job_state(1), Some(JobState::Running));
+    }
+
+    #[test]
+    fn coordinator_rejects_duplicate_inbound_sequence() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+
+        let diag = WorkerEnvelope::new(
+            2,
+            2,
+            42,
+            1,
+            WorkerOp::Diagnostic(DiagnosticEvent {
+                level: DiagnosticLevel::Info,
+                category: "lifecycle".into(),
+                message: "worker initialized".into(),
+                metadata: None,
+            }),
+        );
+        coord.handle_inbound(&diag).unwrap();
+        assert_eq!(coord.last_inbound_seq_no, 2);
+
+        let duplicate = WorkerEnvelope::new(3, 2, 42, 2, WorkerOp::ShutdownCompleted);
+        assert_eq!(
+            coord.handle_inbound(&duplicate),
+            Err(WorkerChannelError::InboundSequenceNotFresh {
+                last_seen: 2,
+                actual: 2,
+            })
+        );
+        assert_eq!(coord.last_inbound_seq_no, 2);
+        assert!(coord.is_worker_ready());
+    }
+
+    #[test]
+    fn coordinator_accepts_fresh_bootstrap_after_shutdown_completed() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+        coord.request_shutdown("done".into()).unwrap();
+        let _ = coord.drain_outbox();
+
+        let shutdown = WorkerEnvelope::new(2, 2, 42, 1, WorkerOp::ShutdownCompleted);
+        coord.handle_inbound(&shutdown).unwrap();
+        assert_eq!(coord.last_inbound_seq_no, 2);
+        assert!(!coord.is_worker_ready());
+
+        let reboot = WorkerEnvelope::new(
+            1,
+            1,
+            42,
+            0,
+            WorkerOp::BootstrapReady {
+                worker_id: "test-worker-2".into(),
+            },
+        );
+        coord.handle_inbound(&reboot).unwrap();
+        assert!(coord.is_worker_ready());
+        assert_eq!(coord.last_inbound_seq_no, 1);
+    }
+
+    #[test]
+    fn coordinator_marks_running_job_failed_when_worker_instance_changes() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+        coord.spawn_job(1, 100, 200, 300, vec![]).unwrap();
+        let _ = coord.drain_outbox();
+
+        let running = WorkerEnvelope::new(
+            2,
+            2,
+            42,
+            1,
+            WorkerOp::StatusSnapshot(JobStatusSnapshot {
+                job_id: 1,
+                state: JobState::Running,
+                detail: Some("worker one accepted job".into()),
+            }),
+        );
+        coord.handle_inbound(&running).unwrap();
+        assert_eq!(coord.job_state(1), Some(JobState::Running));
+        assert_eq!(coord.inflight_count(), 1);
+
+        let reboot = WorkerEnvelope::new(
+            1,
+            1,
+            42,
+            0,
+            WorkerOp::BootstrapReady {
+                worker_id: "test-worker-2".into(),
+            },
+        );
+        coord.handle_inbound(&reboot).unwrap();
+        assert!(coord.is_worker_ready());
+        assert_eq!(coord.last_inbound_seq_no, 1);
+        assert_eq!(coord.job_state(1), Some(JobState::Failed));
+        assert_eq!(coord.inflight_count(), 0);
+    }
+
+    #[test]
+    fn coordinator_accepts_fresh_bootstrap_after_bootstrap_failed() {
+        let mut coord = WorkerCoordinator::new(42);
+
+        let failed = WorkerEnvelope::new(
+            1,
+            1,
+            42,
+            0,
+            WorkerOp::BootstrapFailed {
+                reason: "synthetic boot failure".into(),
+            },
+        );
+        assert_eq!(
+            coord.handle_inbound(&failed),
+            Err(WorkerChannelError::BootstrapFailed(
+                "synthetic boot failure".into()
+            ))
+        );
+        assert_eq!(coord.last_inbound_seq_no, 1);
+        assert!(!coord.is_worker_ready());
+
+        let retry = WorkerEnvelope::new(
+            1,
+            1,
+            42,
+            0,
+            WorkerOp::BootstrapReady {
+                worker_id: "test-worker-2".into(),
+            },
+        );
+        coord.handle_inbound(&retry).unwrap();
+        assert!(coord.is_worker_ready());
+        assert_eq!(coord.last_inbound_seq_no, 1);
+    }
+
+    #[test]
+    fn coordinator_keeps_prior_high_water_mark_until_rebootstrap() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+        coord.request_shutdown("done".into()).unwrap();
+        let _ = coord.drain_outbox();
+
+        let shutdown = WorkerEnvelope::new(2, 2, 42, 1, WorkerOp::ShutdownCompleted);
+        coord.handle_inbound(&shutdown).unwrap();
+        assert_eq!(coord.last_inbound_seq_no, 2);
+        assert!(!coord.is_worker_ready());
+
+        let stale = WorkerEnvelope::new(
+            1,
+            1,
+            42,
+            0,
+            WorkerOp::Diagnostic(DiagnosticEvent {
+                level: DiagnosticLevel::Info,
+                category: "lifecycle".into(),
+                message: "stale pre-restart message".into(),
+                metadata: None,
+            }),
+        );
+        assert_eq!(
+            coord.handle_inbound(&stale),
+            Err(WorkerChannelError::InboundSequenceNotFresh {
+                last_seen: 2,
+                actual: 1,
+            })
+        );
+
+        let reboot = WorkerEnvelope::new(
+            1,
+            1,
+            42,
+            0,
+            WorkerOp::BootstrapReady {
+                worker_id: "test-worker-2".into(),
+            },
+        );
+        coord.handle_inbound(&reboot).unwrap();
+        assert!(coord.is_worker_ready());
+        assert_eq!(coord.last_inbound_seq_no, 1);
+    }
+
+    #[test]
+    fn coordinator_rejects_replayed_bootstrap_from_same_worker_session() {
+        let mut coord = WorkerCoordinator::new(42);
+
+        let ready = WorkerEnvelope::new(
+            5,
+            5,
+            42,
+            0,
+            WorkerOp::BootstrapReady {
+                worker_id: "stable-worker".into(),
+            },
+        );
+        coord.handle_inbound(&ready).unwrap();
+
+        let replay = WorkerEnvelope::new(
+            1,
+            1,
+            42,
+            1,
+            WorkerOp::BootstrapReady {
+                worker_id: "stable-worker".into(),
+            },
+        );
+        assert_eq!(
+            coord.handle_inbound(&replay),
+            Err(WorkerChannelError::InboundSequenceNotFresh {
+                last_seen: 5,
+                actual: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn coordinator_rejects_out_of_order_job_message_sequence() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+        coord.spawn_job(1, 100, 200, 300, vec![]).unwrap();
+        let _ = coord.drain_outbox();
+
+        let running = WorkerEnvelope::new(
+            2,
+            2,
+            42,
+            1,
+            WorkerOp::StatusSnapshot(JobStatusSnapshot {
+                job_id: 1,
+                state: JobState::Running,
+                detail: None,
+            }),
+        );
+        coord.handle_inbound(&running).unwrap();
+
+        let diag = WorkerEnvelope::new(
+            3,
+            4,
+            42,
+            2,
+            WorkerOp::Diagnostic(DiagnosticEvent {
+                level: DiagnosticLevel::Info,
+                category: "scheduler".into(),
+                message: "worker tick".into(),
+                metadata: None,
+            }),
+        );
+        coord.handle_inbound(&diag).unwrap();
+
+        let stale_completion = WorkerEnvelope::new(
+            4,
+            3,
+            42,
+            3,
+            WorkerOp::JobCompleted(JobResult {
+                job_id: 1,
+                outcome: JobOutcome::Ok { payload: vec![7] },
+            }),
+        );
+        assert_eq!(
+            coord.handle_inbound(&stale_completion),
+            Err(WorkerChannelError::InboundSequenceNotFresh {
+                last_seen: 4,
+                actual: 3,
+            })
+        );
+        assert_eq!(coord.last_inbound_seq_no, 4);
+        assert_eq!(coord.job_state(1), Some(JobState::Running));
+    }
+
+    #[test]
     fn envelope_validates_version() {
         let mut env = WorkerEnvelope::new(
             1,
@@ -809,6 +1567,37 @@ mod tests {
         assert!(matches!(
             env.validate(),
             Err(WorkerChannelError::VersionMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn envelope_validates_replay_metadata() {
+        let mut env = WorkerEnvelope::new(
+            1,
+            1,
+            42,
+            0,
+            WorkerOp::BootstrapReady {
+                worker_id: "w".into(),
+            },
+        );
+        assert!(env.validate().is_ok());
+
+        env.decision_seq = 2;
+        env.replay_hash = replay_hash(
+            env.message_id,
+            env.seq_no,
+            env.decision_seq,
+            env.seed,
+            env.issued_at_turn,
+            &env.op,
+        );
+        assert!(env.validate().is_ok());
+
+        env.op = WorkerOp::ShutdownCompleted;
+        assert!(matches!(
+            env.validate(),
+            Err(WorkerChannelError::ReplayHashMismatch { .. })
         ));
     }
 
@@ -831,18 +1620,41 @@ mod tests {
             env.validate(),
             Err(WorkerChannelError::PayloadTooLarge { .. })
         ));
+
+        let completed = WorkerEnvelope::new(
+            2,
+            2,
+            42,
+            0,
+            WorkerOp::JobCompleted(JobResult {
+                job_id: 1,
+                outcome: JobOutcome::Ok {
+                    payload: vec![0u8; MAX_PAYLOAD_BYTES + 1],
+                },
+            }),
+        );
+        assert!(matches!(
+            completed.validate(),
+            Err(WorkerChannelError::PayloadTooLarge { .. })
+        ));
     }
 
     #[test]
     fn job_state_transitions_are_correct() {
         // Valid transitions
         assert!(JobState::Created.can_transition_to(JobState::Queued));
+        assert!(JobState::Created.can_transition_to(JobState::Failed));
         assert!(JobState::Queued.can_transition_to(JobState::Running));
+        assert!(JobState::Queued.can_transition_to(JobState::Failed));
         assert!(JobState::Running.can_transition_to(JobState::Completed));
         assert!(JobState::Running.can_transition_to(JobState::CancelRequested));
+        assert!(JobState::Running.can_transition_to(JobState::Failed));
         assert!(JobState::CancelRequested.can_transition_to(JobState::Draining));
+        assert!(JobState::CancelRequested.can_transition_to(JobState::Failed));
         assert!(JobState::Draining.can_transition_to(JobState::Finalizing));
+        assert!(JobState::Draining.can_transition_to(JobState::Failed));
         assert!(JobState::Finalizing.can_transition_to(JobState::Completed));
+        assert!(JobState::Finalizing.can_transition_to(JobState::Failed));
 
         assert!(JobState::Queued.can_transition_to(JobState::Completed));
 
@@ -850,6 +1662,8 @@ mod tests {
         assert!(!JobState::Created.can_transition_to(JobState::Running));
         assert!(!JobState::Created.can_transition_to(JobState::Completed));
         assert!(!JobState::Queued.can_transition_to(JobState::CancelRequested));
+        assert!(!JobState::CancelRequested.can_transition_to(JobState::Completed));
+        assert!(!JobState::Draining.can_transition_to(JobState::Completed));
         assert!(!JobState::Completed.can_transition_to(JobState::Running));
     }
 
@@ -885,6 +1699,29 @@ mod tests {
         let msg2 = coord.drain_outbox().unwrap();
         assert!(msg2.seq_no > msg1.seq_no);
         assert!(msg2.message_id > msg1.message_id);
+    }
+
+    #[test]
+    fn coordinator_emits_independent_decision_sequence() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+        coord.next_decision_seq = 19;
+
+        coord.spawn_job(1, 100, 200, 300, vec![]).unwrap();
+        coord.spawn_job(2, 100, 201, 301, vec![]).unwrap();
+
+        let msg1 = coord.drain_outbox().unwrap();
+        let msg2 = coord.drain_outbox().unwrap();
+
+        assert_eq!(msg1.seq_no, 1);
+        assert_eq!(msg1.decision_seq, 19);
+        assert_ne!(msg1.seq_no, msg1.decision_seq);
+        assert!(msg1.validate().is_ok());
+
+        assert_eq!(msg2.seq_no, 2);
+        assert_eq!(msg2.decision_seq, 20);
+        assert_ne!(msg2.seq_no, msg2.decision_seq);
+        assert!(msg2.validate().is_ok());
     }
 
     #[test]

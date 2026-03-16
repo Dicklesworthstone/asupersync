@@ -100,7 +100,11 @@ impl StateEncoder {
             usize::from(layout.source_blocks),
         );
 
-        for (block, &repairs) in repair_distribution.iter().enumerate().take(usize::from(layout.source_blocks)) {
+        for (block, &repairs) in repair_distribution
+            .iter()
+            .enumerate()
+            .take(usize::from(layout.source_blocks))
+        {
             let (block_start, block_end) = block_bounds(block, layout.max_block_size, data.len());
             for symbol in self.encode_block_symbols(
                 object_id,
@@ -497,7 +501,9 @@ mod tests {
         let mut snapshot = create_test_snapshot();
         let initial_len = snapshot.to_bytes().len();
         if initial_len < min_serialized_size {
-            snapshot.metadata.resize(min_serialized_size - initial_len, 0xAB);
+            snapshot
+                .metadata
+                .resize(min_serialized_size - initial_len, 0xAB);
             while snapshot.to_bytes().len() < min_serialized_size {
                 snapshot.metadata.push(0xAB);
             }
@@ -639,7 +645,10 @@ mod tests {
 
         assert_eq!(encoded.params.source_blocks, 2);
         assert!(encoded.symbols.iter().any(|symbol| symbol.id().sbn() == 1));
-        assert_eq!(usize::from(encoded.source_count) * 128, encoded.original_size.next_multiple_of(128));
+        assert_eq!(
+            usize::from(encoded.source_count) * 128,
+            encoded.original_size.next_multiple_of(128)
+        );
     }
 
     #[test]

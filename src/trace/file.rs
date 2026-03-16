@@ -345,6 +345,18 @@ pub enum TraceFileError {
     #[error("writer already finished")]
     AlreadyFinished,
 
+    /// Metadata was not written before attempting to write events or finish.
+    #[error("trace metadata must be written before events or finish")]
+    MetadataNotWritten,
+
+    /// Metadata was already written for this trace writer.
+    #[error("trace metadata can only be written once")]
+    MetadataAlreadyWritten,
+
+    /// Metadata writing failed mid-header and left the file unusable.
+    #[error("trace metadata write did not complete; discard and recreate the writer")]
+    MetadataCorrupt,
+
     /// File is truncated or corrupt.
     #[error("file truncated or corrupt")]
     Truncated,
@@ -380,6 +392,13 @@ pub type TraceFileResult<T> = Result<T, TraceFileError>;
 // TraceWriter
 // =============================================================================
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraceWriterMetadataState {
+    Pending,
+    Written,
+    Corrupt,
+}
+
 /// Writer for streaming trace events to a file.
 ///
 /// Events are written incrementally, allowing large traces to be written
@@ -401,6 +420,7 @@ pub struct TraceWriter {
     event_count: u64,
     event_count_pos: u64,
     finished: bool,
+    metadata_state: TraceWriterMetadataState,
     config: TraceFileConfig,
     bytes_written: u64,
     buffered_bytes: u64,
@@ -438,6 +458,7 @@ impl TraceWriter {
             event_count: 0,
             event_count_pos: 0,
             finished: false,
+            metadata_state: TraceWriterMetadataState::Pending,
             config,
             bytes_written: 0,
             buffered_bytes: 0,
@@ -550,6 +571,14 @@ impl TraceWriter {
         }
     }
 
+    fn ensure_metadata_written(&self) -> TraceFileResult<()> {
+        match self.metadata_state {
+            TraceWriterMetadataState::Pending => Err(TraceFileError::MetadataNotWritten),
+            TraceWriterMetadataState::Written => Ok(()),
+            TraceWriterMetadataState::Corrupt => Err(TraceFileError::MetadataCorrupt),
+        }
+    }
+
     /// Writes the trace metadata (must be called first).
     ///
     /// This writes the file header including magic bytes, version,
@@ -562,6 +591,15 @@ impl TraceWriter {
         if self.finished {
             return Err(TraceFileError::AlreadyFinished);
         }
+        match self.metadata_state {
+            TraceWriterMetadataState::Pending => {}
+            TraceWriterMetadataState::Written => {
+                return Err(TraceFileError::MetadataAlreadyWritten);
+            }
+            TraceWriterMetadataState::Corrupt => {
+                return Err(TraceFileError::MetadataCorrupt);
+            }
+        }
 
         // Serialize metadata to get its length
         let meta_bytes = rmp_serde::to_vec(metadata)?;
@@ -572,6 +610,11 @@ impl TraceWriter {
         } else {
             0
         };
+
+        // Once header emission starts, a failure leaves the file in a partial
+        // state. Poison the writer so callers do not append events to a broken
+        // trace blob.
+        self.metadata_state = TraceWriterMetadataState::Corrupt;
 
         // Write header
         self.write_bytes(TRACE_MAGIC)?;
@@ -587,6 +630,7 @@ impl TraceWriter {
         // Write placeholder for event count (we'll update this in finish())
         self.event_count_pos = HEADER_SIZE as u64 + u64::from(meta_len);
         self.write_bytes(&0u64.to_le_bytes())?;
+        self.metadata_state = TraceWriterMetadataState::Written;
 
         Ok(())
     }
@@ -603,6 +647,7 @@ impl TraceWriter {
         if self.finished {
             return Err(TraceFileError::AlreadyFinished);
         }
+        self.ensure_metadata_written()?;
         if !self.should_write() {
             return Ok(());
         }
@@ -697,6 +742,7 @@ impl TraceWriter {
     ///
     /// Returns an error if flushing or seeking fails.
     pub fn finish(mut self) -> TraceFileResult<()> {
+        self.ensure_metadata_written()?;
         self.finished = true;
 
         // Flush any remaining compressed data
@@ -737,7 +783,9 @@ impl Drop for TraceWriter {
 
             // Best-effort: try to flush but don't panic
             let _ = self.writer.flush();
-            self.update_event_count_best_effort();
+            if self.metadata_state == TraceWriterMetadataState::Written {
+                self.update_event_count_best_effort();
+            }
         }
     }
 }
@@ -1096,7 +1144,9 @@ impl TraceReader {
         // Cap pre-allocation to prevent OOM from a malicious event_count header
         // (DoS mitigation — issues #8, #10). The vec will grow naturally if the
         // file legitimately contains more events.
-        let prealloc = (self.event_count as usize).min(MAX_EVENT_PREALLOC);
+        let prealloc = usize::try_from(self.event_count)
+            .unwrap_or(usize::MAX)
+            .min(MAX_EVENT_PREALLOC);
         let mut events = Vec::with_capacity(prealloc);
         while let Some(event) = self.read_event()? {
             events.push(event);
@@ -1139,7 +1189,7 @@ impl Iterator for TraceEventIterator {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.remaining as usize;
+        let remaining = usize::try_from(self.remaining).unwrap_or(usize::MAX);
         (remaining, Some(remaining))
     }
 }
@@ -1620,6 +1670,64 @@ mod tests {
 
         // Attempting to use a finished writer should not be possible
         // because finish() consumes self, so this is compile-time safety
+    }
+
+    #[test]
+    fn write_event_requires_metadata_first() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        let path = temp.path();
+
+        let mut writer = TraceWriter::create(path).expect("create writer");
+        let err = writer
+            .write_event(&ReplayEvent::RngSeed { seed: 42 })
+            .expect_err("events before metadata must be rejected");
+        assert!(matches!(err, TraceFileError::MetadataNotWritten));
+
+        drop(writer);
+
+        let file_len = std::fs::metadata(path).expect("metadata").len();
+        assert_eq!(
+            file_len, 0,
+            "rejecting pre-header events must not scribble an event count at offset zero"
+        );
+    }
+
+    #[test]
+    fn finish_requires_metadata_first() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        let path = temp.path();
+
+        let writer = TraceWriter::create(path).expect("create writer");
+        let err = writer
+            .finish()
+            .expect_err("finish without metadata must be rejected");
+        assert!(matches!(err, TraceFileError::MetadataNotWritten));
+
+        let file_len = std::fs::metadata(path).expect("metadata").len();
+        assert_eq!(
+            file_len, 0,
+            "failed finish without metadata must leave the new file empty"
+        );
+    }
+
+    #[test]
+    fn write_metadata_rejects_duplicate_headers_without_corrupting_file() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        let path = temp.path();
+
+        let metadata = TraceMetadata::new(42);
+        let mut writer = TraceWriter::create(path).expect("create writer");
+        writer.write_metadata(&metadata).expect("write metadata");
+        let err = writer
+            .write_metadata(&metadata)
+            .expect_err("duplicate metadata must be rejected");
+        assert!(matches!(err, TraceFileError::MetadataAlreadyWritten));
+
+        writer.finish().expect("finish");
+
+        let reader = TraceReader::open(path).expect("open reader");
+        assert_eq!(reader.metadata().seed, metadata.seed);
+        assert_eq!(reader.event_count(), 0);
     }
 
     #[test]

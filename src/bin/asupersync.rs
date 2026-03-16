@@ -4475,6 +4475,16 @@ fn trace_file_error(path: &Path, err: TraceFileError) -> CliError {
         TraceFileError::AlreadyFinished => {
             CliError::new("invalid_state", "Trace writer already finished")
         }
+        TraceFileError::MetadataNotWritten => {
+            CliError::new("invalid_state", "Trace metadata must be written first")
+        }
+        TraceFileError::MetadataAlreadyWritten => {
+            CliError::new("invalid_state", "Trace metadata already written")
+        }
+        TraceFileError::MetadataCorrupt => {
+            CliError::new("invalid_state", "Trace writer metadata write failed")
+                .detail("Discard the partial file and recreate the writer")
+        }
         TraceFileError::Truncated => CliError::new("truncated_trace", "Trace file truncated"),
         TraceFileError::OversizedField { field, actual, max } => {
             CliError::new("oversized_field", "Trace field exceeds allowed limit")

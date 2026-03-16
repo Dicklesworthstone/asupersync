@@ -77,6 +77,8 @@ struct WebSocketShared<IO> {
     protocol: Option<String>,
     /// Pending pong payloads to send.
     pending_pongs: std::collections::VecDeque<Bytes>,
+    /// Whether the read half already encoded pong bytes that still need flushing.
+    pending_pong_flush: bool,
     /// Entropy used for client masking when no per-call Cx is available.
     entropy: Arc<dyn EntropySource>,
     /// True while one half is performing a frame write sequence.
@@ -244,6 +246,7 @@ where
             assembler: self.assembler,
             protocol: self.protocol,
             pending_pongs: self.pending_pongs,
+            pending_pong_flush: false,
             entropy: self.entropy,
             writer_active: false,
             writer_waiters: SmallVec::new(),
@@ -281,20 +284,28 @@ where
             }
 
             // Send any pending pongs (under lock)
-            {
+            let flush_pending_pongs = {
                 let shared = &mut *self.shared.lock();
+                let mut flush_pending_pongs = shared.pending_pong_flush;
                 // cancel-safe: pop_front() takes one at a time from the front without reversing the whole queue
                 while let Some(payload) = shared.pending_pongs.pop_front() {
+                    flush_pending_pongs = true;
+                    shared.pending_pong_flush = true;
                     let pong = Frame::pong(payload);
                     let shared = &mut *shared;
                     shared
                         .codec
                         .encode_with_entropy(&pong, &mut shared.write_buf, cx.entropy())?;
                 }
-            }
+                flush_pending_pongs
+            };
 
-            // Flush pending pongs if any were queued
-            flush_write_buf(&self.shared).await?;
+            // Flush pending pongs if this call queued them or a prior recv()
+            // was cancelled after encoding them but before the flush.
+            if flush_pending_pongs {
+                flush_write_buf(&self.shared).await?;
+                self.shared.lock().pending_pong_flush = false;
+            }
 
             // Try to decode a frame from the buffer
             let maybe_frame = {
@@ -851,6 +862,7 @@ mod tests {
                 shared
                     .pending_pongs
                     .push_back(Bytes::from_static(b"pong-c"));
+                shared.pending_pong_flush = false;
             }
 
             // Encode pongs (same block as recv() does)
@@ -862,6 +874,7 @@ mod tests {
                     let pong = Frame::pong(payload);
                     shared.codec.encode(pong, &mut shared.write_buf).unwrap();
                 }
+                shared.pending_pong_flush = true;
             }
 
             let encoded = {
@@ -885,6 +898,45 @@ mod tests {
                     Bytes::from_static(b"pong-c"),
                 ],
                 "pending pong payloads must be emitted in receive order"
+            );
+        });
+    }
+
+    #[test]
+    fn recv_flushes_pongs_left_encoded_by_cancelled_attempt() {
+        future::block_on(async {
+            let ws = WebSocket::from_upgraded(TestIo::new(vec![]), WebSocketConfig::default());
+            let (mut read, _write) = ws.split();
+            let cx = test_cx_with_entropy(Arc::new(FixedEntropy([0xAB, 0xCD, 0xEF, 0x01])));
+
+            {
+                let shared = &mut *read.shared.lock();
+                let pong = Frame::pong(Bytes::from_static(b"pong-after-cancel"));
+                shared
+                    .codec
+                    .encode(pong, &mut shared.write_buf)
+                    .expect("must encode synthetic pong");
+                shared.pending_pong_flush = true;
+            }
+
+            let result = read.recv(&cx).await.expect("recv must succeed");
+            assert!(
+                result.is_none(),
+                "EOF should surface once buffered pongs flush"
+            );
+
+            let shared = read.shared.lock();
+            assert!(
+                !shared.pending_pong_flush,
+                "recv must clear the deferred pong flush marker after flushing"
+            );
+            assert!(
+                shared.write_buf.is_empty(),
+                "recv must flush the encoded pong bytes before returning"
+            );
+            assert!(
+                !shared.io.written.is_empty(),
+                "recv must actually flush deferred pong bytes to the transport"
             );
         });
     }
