@@ -1354,7 +1354,10 @@ applications via `wasm-bindgen`.
   Today the Rust-facing wasm support is limited to semantic-core/browser-profile
   validation plus the internal binding crates
   (`asupersync-browser-core`, `asupersync-wasm`) that feed the shipped JS/TS
-  packages.
+  packages. That is not just a docs gap: `src/runtime/builder.rs` still
+  assumes `std::thread`-backed worker and deadline-monitor startup, so a
+  superficial public `build_browser()` entrypoint would overstate what the
+  runtime can truthfully support today.
 - **Service worker / shared worker direct runtime**: the shipped browser
   package does not expose these as direct-runtime lanes yet. Keep them on
   explicit message/data boundaries until a worker-specific host contract is

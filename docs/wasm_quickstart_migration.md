@@ -118,6 +118,9 @@ the scope honest:
 
 - it uses the existing wasm dispatcher/provider helpers rather than inventing a
   new public browser `RuntimeBuilder` story
+- it keeps the contract honest about the remaining blocker: `src/runtime/builder.rs`
+  still assumes `std::thread`-backed worker and deadline-monitor startup, so
+  this fixture does not pretend a public browser bootstrap API already exists
 - it proves lifecycle semantics through a real browser run (`ready` ->
   `disposed`, one completed task, one cancellation on unmount)
 - it does **not** widen the public contract beyond what `docs/WASM.md`,

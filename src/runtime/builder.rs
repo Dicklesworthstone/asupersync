@@ -42,6 +42,15 @@
 //! let runtime = RuntimeBuilder::current_thread().build()?;
 //! ```
 //!
+//! ## Browser/WASM Status
+//!
+//! Browser-safe profiles can validate semantic-core closure on `wasm32`, but
+//! this module does not yet expose a truthful public browser bootstrap path.
+//! Runtime startup still assumes `std::thread`-backed worker and
+//! deadline-monitor threads, so browser-facing guidance should stay on the
+//! repository-maintained Rust/WASM fixture and the shipped JS/TS Browser
+//! Edition packages until that startup contract is redesigned.
+//!
 //! ## With Deadline Monitoring
 //!
 //! ```ignore

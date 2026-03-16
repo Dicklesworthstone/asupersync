@@ -111,16 +111,30 @@ fn shared_worker_is_feasible_not_shipped() {
 fn rust_authored_wasm_consumer_path_is_feasible_not_shipped() {
     // Evidence: the semantic core compiles to wasm32 (BrowserReactor exists,
     // types are target-agnostic), but there is no public RuntimeBuilder or
-    // Rust-callable API for constructing a wasm32 runtime.
+    // Rust-callable API for constructing a wasm32 runtime and the current
+    // startup path still assumes std::thread-backed worker/monitor threads.
     assert!(
         file_exists("src/runtime/reactor/browser.rs"),
         "browser reactor substrate must exist"
     );
-    // Negative evidence: no public wasm32 RuntimeBuilder path
+    // Negative evidence: no public wasm32 RuntimeBuilder path and no thread-free
+    // browser startup contract yet.
     let builder_src = read_file("src/runtime/builder.rs");
     assert!(
         !builder_src.contains("pub fn build_wasm") && !builder_src.contains("pub fn build_browser"),
         "RuntimeBuilder must not yet expose a public wasm32 build path"
+    );
+    assert!(
+        builder_src.contains("spawn_worker_threads"),
+        "runtime startup evidence should still show worker-thread bootstrapping"
+    );
+    assert!(
+        builder_src.contains("start_deadline_monitor"),
+        "runtime startup evidence should still show deadline-monitor bootstrapping"
+    );
+    assert!(
+        builder_src.contains("std::thread::Builder"),
+        "runtime startup evidence should still show std::thread-backed startup"
     );
 }
 
