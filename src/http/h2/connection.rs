@@ -896,7 +896,10 @@ impl Connection {
                     self.streams.set_initial_window_size(*size)?;
                 }
                 Setting::HeaderTableSize(size) => {
-                    self.hpack_encoder.set_max_table_size(*size as usize);
+                    // Cap to 1 MiB (same limit as the decoder) to prevent
+                    // unbounded encoder table growth from a peer's SETTINGS.
+                    let capped = (*size as usize).min(1024 * 1024);
+                    self.hpack_encoder.set_max_table_size(capped);
                 }
                 Setting::MaxConcurrentStreams(max) => {
                     self.streams.set_max_concurrent_streams(*max);
