@@ -221,3 +221,56 @@ __pycache__/
 franken_decision/false/
 franken_evidence/false/
 franken_kernel/false/
+
+# Agent Mail project ID (per-machine ephemeral)
+.agent-mail-project-id
+
+# Beads bad-import backups
+**/.beads/*.bad_*
+
+# Remote compilation helper workspace
+.rch-target-workspace-libtests/
+
+# Asset generation scripts (one-off, not shipped)
+assets/gen_og_image.py
+
+# Benchmark baselines (local machine-specific)
+baselines/
+
+# Heatmap snapshots (generated locally)
+heatmap-last-year.png
+heatmap-*.png
+
+# Node.js dependencies (installed, not committed)
+**/node_modules/
+
+# wasm-pack output directory
+pkg/
+
+# pnpm lockfile (packages use npm, pnpm is local tooling)
+pnpm-lock.yaml
+
+# Standalone bug reproduction / one-off test harnesses in src/
+src/channel/mpsc_lost_wakeup_test.rs
+
+# Root-level scratch .rs files (not matching /test_*.rs pattern)
+/test.rs
+
+# Root-level compiled test binaries (catch-all for names without extension)
+/test_aggregator_wrapping
+/test_flate
+/test_flate2
+/test_min
+/test_retry_budget
+/test_retry_bug
+/test_sanitize
+/test_total_source
+/test_unwrap
+
+# Root-level test shell scripts (numbered variants)
+/test_script[0-9].sh
+/test_script[0-9][0-9].sh
+
+# Root-level test shell scripts (catch remaining)
+/test_happy.sh
+/test_script.sh
