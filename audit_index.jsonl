@@ -818,3 +818,4 @@
 {"file":"src/runtime/reactor/io_uring.rs","lines":1205,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Good user_data allocation with collision avoidance, eventfd wakeup with coalescing"}
 {"file":"src/runtime/reactor/lab.rs","lines":2412,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Deterministic event ordering, virtual time, per-token fault injection with seeded RNG"}
 {"file":"src/net/websocket/frame.rs","lines":1687,"batch":381,"date":"2026-03-15","agent":"BronzeBrook","verdict":"FIXED","bugs":2,"notes":"Decoder now rejects invalid close status codes and malformed UTF-8 close reasons on inbound Close frames."}
+{"file":"src/plan/fixtures.rs","lines":0,"batch":379,"date":"2026-03-16","agent":"SapphireHill","verdict":"FIXED","bugs":2,"notes":"dynamic_outcomes_equivalent fan-in logic: OR short-circuit masks skipped comparison when only one DAG has fan-in (2 locations)"}
