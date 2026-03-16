@@ -446,6 +446,165 @@ fn websocket_bridge_close_and_validation_surface() {
 }
 
 #[test]
+fn websocket_close_failure_preserves_host_state_for_retry() {
+    reset_dispatcher_for_tests();
+
+    let runtime_json = runtime_create(None).expect("runtime_create succeeds");
+    let runtime: WasmHandleRef = parse_json(&runtime_json);
+    let scope_json = scope_enter(
+        to_json(&WasmScopeEnterRequest {
+            parent: runtime,
+            label: Some("ws-close-retry".to_string()),
+        }),
+        None,
+    )
+    .expect("scope_enter succeeds");
+    let scope: WasmHandleRef = parse_json(&scope_json);
+
+    let open_json = websocket_open(
+        serde_json::json!({
+            "scope": scope,
+            "url": "wss://example.com/retry-close"
+        })
+        .to_string(),
+        None,
+    )
+    .expect("websocket_open succeeds");
+    let open_outcome: WasmAbiOutcomeEnvelope = parse_json(&open_json);
+    let socket = match open_outcome {
+        WasmAbiOutcomeEnvelope::Ok {
+            value: WasmAbiValue::Handle(handle),
+        } => handle,
+        other => panic!("expected websocket_open handle outcome, got {other:?}"),
+    };
+
+    let err = websocket_close(
+        serde_json::json!({
+            "socket": socket,
+            "reason": "x".repeat(124)
+        })
+        .to_string(),
+        None,
+    )
+    .expect_err("oversized close reason must fail");
+    assert!(err.contains("exceeds 123 bytes"), "got: {err}");
+
+    let diagnostics = dispatcher_diagnostics_for_tests();
+    assert_eq!(diagnostics.memory_report.live_handles, 3);
+
+    websocket_send(
+        serde_json::json!({
+            "socket": socket,
+            "value": {"kind": "string", "value": "still-live"}
+        })
+        .to_string(),
+        None,
+    )
+    .expect("send after failed close preserves websocket state");
+    let recv_json = websocket_recv(serde_json::json!({"socket": socket}).to_string(), None)
+        .expect("recv after failed close succeeds");
+    let recv_outcome: WasmAbiOutcomeEnvelope = parse_json(&recv_json);
+    assert!(matches!(
+        recv_outcome,
+        WasmAbiOutcomeEnvelope::Ok {
+            value: WasmAbiValue::String(ref text)
+        } if text == "still-live"
+    ));
+
+    let close_json = websocket_close(serde_json::json!({"socket": socket}).to_string(), None)
+        .expect("retry close succeeds");
+    let close_outcome: WasmAbiOutcomeEnvelope = parse_json(&close_json);
+    assert!(matches!(
+        close_outcome,
+        WasmAbiOutcomeEnvelope::Ok {
+            value: WasmAbiValue::Unit
+        }
+    ));
+
+    scope_close(scope_json, None).expect("scope_close succeeds");
+    runtime_close(runtime_json, None).expect("runtime_close succeeds");
+
+    let diagnostics = dispatcher_diagnostics_for_tests();
+    assert!(
+        diagnostics.is_clean(),
+        "expected clean diagnostics: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn websocket_cancel_failure_preserves_host_state_for_cleanup() {
+    reset_dispatcher_for_tests();
+
+    let runtime_json = runtime_create(None).expect("runtime_create succeeds");
+    let runtime: WasmHandleRef = parse_json(&runtime_json);
+    let scope_json = scope_enter(
+        to_json(&WasmScopeEnterRequest {
+            parent: runtime,
+            label: Some("ws-cancel-retry".to_string()),
+        }),
+        None,
+    )
+    .expect("scope_enter succeeds");
+    let scope: WasmHandleRef = parse_json(&scope_json);
+
+    let open_json = websocket_open(
+        serde_json::json!({
+            "scope": scope,
+            "url": "wss://example.com/retry-cancel"
+        })
+        .to_string(),
+        None,
+    )
+    .expect("websocket_open succeeds");
+    let open_outcome: WasmAbiOutcomeEnvelope = parse_json(&open_json);
+    let socket = match open_outcome {
+        WasmAbiOutcomeEnvelope::Ok {
+            value: WasmAbiValue::Handle(handle),
+        } => handle,
+        other => panic!("expected websocket_open handle outcome, got {other:?}"),
+    };
+
+    let err = websocket_cancel(
+        serde_json::json!({
+            "socket": socket,
+            "kind": "user",
+            "message": "x".repeat(124)
+        })
+        .to_string(),
+        None,
+    )
+    .expect_err("oversized cancel message must fail");
+    assert!(err.contains("exceeds 123 bytes"), "got: {err}");
+
+    let diagnostics = dispatcher_diagnostics_for_tests();
+    assert_eq!(diagnostics.memory_report.live_handles, 3);
+
+    let close_json = websocket_close(
+        serde_json::json!({
+            "socket": socket,
+            "reason": "cleanup"
+        })
+        .to_string(),
+        None,
+    )
+    .expect("close after failed cancel succeeds");
+    let close_outcome: WasmAbiOutcomeEnvelope = parse_json(&close_json);
+    assert!(matches!(
+        close_outcome,
+        WasmAbiOutcomeEnvelope::Cancelled { .. }
+    ));
+
+    scope_close(scope_json, None).expect("scope_close succeeds");
+    runtime_close(runtime_json, None).expect("runtime_close succeeds");
+
+    let diagnostics = dispatcher_diagnostics_for_tests();
+    assert!(
+        diagnostics.is_clean(),
+        "expected clean diagnostics: {diagnostics:?}"
+    );
+}
+
+#[test]
 fn websocket_binary_message_round_trip() {
     reset_dispatcher_for_tests();
 

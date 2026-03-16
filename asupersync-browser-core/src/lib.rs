@@ -315,6 +315,12 @@ fn take_websocket_state(handle: &WasmHandleRef) -> Option<BrowserWebSocketHostSt
     INFLIGHT_WEBSOCKETS.with(|sockets| sockets.borrow_mut().remove(handle))
 }
 
+fn insert_websocket_state(handle: WasmHandleRef, state: BrowserWebSocketHostState) {
+    INFLIGHT_WEBSOCKETS.with(|sockets| {
+        sockets.borrow_mut().insert(handle, state);
+    });
+}
+
 #[cfg(target_arch = "wasm32")]
 fn finalize_fetch_outcome(handle: WasmHandleRef, outcome: WasmAbiOutcomeEnvelope) {
     if take_inflight_fetch(&handle).is_none() {
@@ -596,15 +602,27 @@ fn recv_browser_websocket_message(
     })
 }
 
+const MAX_WEBSOCKET_CLOSE_REASON_BYTES: usize = 123;
+
+fn validate_websocket_close_reason(reason: &str) -> Result<(), String> {
+    if reason.len() > MAX_WEBSOCKET_CLOSE_REASON_BYTES {
+        return Err(format!(
+            "websocket close reason exceeds {MAX_WEBSOCKET_CLOSE_REASON_BYTES} bytes"
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(target_arch = "wasm32")]
 fn close_browser_websocket_socket(
-    state: BrowserWebSocketHostState,
-    reason: Option<String>,
+    state: &mut BrowserWebSocketHostState,
+    reason: Option<&str>,
 ) -> Result<(), String> {
     if let Some(reason) = reason {
+        validate_websocket_close_reason(reason)?;
         state
             .socket
-            .close_with_code_and_reason(1000, &reason)
+            .close_with_code_and_reason(1000, reason)
             .map_err(|err| format!("websocket close failed: {}", js_value_message(&err)))?;
     } else {
         state
@@ -618,18 +636,19 @@ fn close_browser_websocket_socket(
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::unnecessary_wraps)]
 fn close_browser_websocket_socket(
-    mut state: BrowserWebSocketHostState,
-    reason: Option<String>,
+    state: &mut BrowserWebSocketHostState,
+    reason: Option<&str>,
 ) -> Result<(), String> {
-    state.closed = true;
     if let Some(reason) = reason {
+        validate_websocket_close_reason(reason)?;
         state.inbox.push_back(cancelled_outcome(
             "websocket_close",
             "completed",
-            Some(reason),
+            Some(reason.to_string()),
             None,
         ));
     }
+    state.closed = true;
     Ok(())
 }
 
@@ -793,10 +812,14 @@ fn websocket_close_impl(
     let request: BrowserWebSocketCloseRequest =
         parse_json(&request_json, "websocket_close.request")?;
     let consumer_version = parse_consumer_version(consumer_version_json)?;
-    let state = take_websocket_state(&request.socket)
+    let close_reason = request.reason.clone();
+    let mut state = take_websocket_state(&request.socket)
         .ok_or_else(|| format!("unknown websocket handle: {:?}", request.socket))?;
-    close_browser_websocket_socket(state, request.reason.clone())?;
-    let outcome = if let Some(reason) = request.reason {
+    if let Err(err) = close_browser_websocket_socket(&mut state, close_reason.as_deref()) {
+        insert_websocket_state(request.socket, state);
+        return Err(err);
+    }
+    let outcome = if let Some(reason) = close_reason {
         cancelled_outcome(
             "websocket_close",
             "completed",
@@ -817,14 +840,18 @@ fn websocket_cancel_impl(
     let request: BrowserWebSocketCancelRequest =
         parse_json(&request_json, "websocket_cancel.request")?;
     let consumer_version = parse_consumer_version(consumer_version_json)?;
+    let cancel_message = request.message.clone();
     let cancel = WasmTaskCancelRequest {
         task: request.socket,
         kind: request.kind.clone(),
-        message: request.message.clone(),
+        message: cancel_message.clone(),
     };
     let _ = cancel_websocket_handle(&cancel, consumer_version)?;
-    if let Some(state) = take_websocket_state(&request.socket) {
-        close_browser_websocket_socket(state, request.message.clone())?;
+    if let Some(mut state) = take_websocket_state(&request.socket) {
+        if let Err(err) = close_browser_websocket_socket(&mut state, cancel_message.as_deref()) {
+            insert_websocket_state(request.socket, state);
+            return Err(err);
+        }
     }
     let cancelled = cancelled_outcome(
         &request.kind,

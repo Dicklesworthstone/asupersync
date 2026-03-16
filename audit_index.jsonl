@@ -930,3 +930,4 @@
 {"file":"src/types/typed_symbol.rs","lines":0,"batch":384,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit worktree: source_blocks clamp widened from u8 to u16"}
 {"file":"src/distributed/encoding.rs","lines":0,"batch":384,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit worktree: BlockLayout/derive_block_layout widened from u8 to u16"}
 {"file":"src/decoding.rs","lines":0,"batch":384,"date":"2026-03-16","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"diff audit worktree: 256-block boundary test fix + num_blocks u8->u16 cast"}
+{"file":"src/grpc/server.rs","lines":0,"batch":386,"date":"2026-03-16","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"MEDIUM: from_metadata_at Binary grpc-timeout and malformed Ascii lost default_timeout fallback after refactor. Fixed to fall back to default_timeout for both cases."}

@@ -211,6 +211,7 @@ web-sys = { version = "0.3", features = [
     "BroadcastChannel",
     "DomException",
     "Event",
+    "EventTarget",
     "IdbDatabase",
     "IdbFactory",
     "IdbObjectStore",

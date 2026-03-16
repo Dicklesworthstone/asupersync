@@ -282,6 +282,20 @@ Documentation updates for Browser Edition should keep this boundary explicit and
 must not imply automatic fallback from unsupported runtimes into partially
 functional direct execution.
 
+### Browser Support-Class Quick Reference
+
+Use this table before debugging a Browser Edition report. The first question is
+not "which package failed?" but "what support class does this runtime or
+capability belong to right now?"
+
+| Support class | What it means | Typical examples in the live tree | First operator action | Canonical reference |
+|---|---|---|---|---|
+| Direct-runtime supported | Shipped, package-guarded, and covered by Browser Edition evidence lanes | browser main thread, dedicated worker, React client tree, Next client component | keep runtime creation inside that browser boundary and debug the specific failing capability | `docs/WASM.md`, matrix below |
+| Guarded direct-runtime support | Shipped only when explicit host or deployment prerequisites hold | `WebTransport` datagrams, browser-main-thread-only download helpers, `localStorage` substrate | check the prerequisite/denial reason first, then fall back to the documented safe lane instead of widening the support claim | `docs/WASM.md`, `docs/wasm_troubleshooting_compendium.md` |
+| Direct-runtime feasible but not yet shipped | Real substrate exists, but there is no promoted public Browser Edition API/contract yet | service/shared worker direct runtime, public Rust-authored browser bootstrap, public messaging-surface APIs | do not present it as supported; keep it on explicit app-boundary or repo-internal validation lanes until promotion closes | `docs/WASM.md` |
+| Bridge-only | Direct Browser Edition runtime execution is not allowed at that boundary; use serialization or an adapter seam instead | React SSR, Next server components, Next route handlers, Next edge runtime | move runtime creation back into a browser-owned boundary and cross the server/edge hop with serializable data only | matrix below, `docs/wasm_troubleshooting_compendium.md` |
+| Impossible / unsupported | The browser security model or shipped package contract rules out direct Browser Edition runtime support | Node-only direct runtime, raw TCP/UDP, filesystem, process/signal, native DB clients | switch to native `asupersync` or an explicit bridge; do not add fake parity shims | `docs/WASM.md` |
+
 ### Browser Environment Support Matrix
 
 This matrix is the current shipped support posture for the JS/TS packages, not
@@ -373,6 +387,19 @@ Non-goals and fail-closed guardrails:
   surfaces in Browser Edition
 - no documentation that suggests `@asupersync/next` server or edge code can
   safely call direct Browser Edition runtime constructors
+
+### Troubleshooting Handoff By Support Class
+
+Once you classify the failing surface, keep the recovery path aligned with that
+class:
+
+| If the surface is... | Do this next | Do not do this |
+|---|---|---|
+| Direct-runtime supported | stay in the current browser boundary, capture the emitted diagnostics, and follow the matching recipe in `docs/wasm_troubleshooting_compendium.md` | do not move runtime creation across boundaries just because one capability failed |
+| Guarded direct-runtime support | verify the missing prerequisite or denial reason, then use the documented fallback (`WebSocket`, `fetch`, export handoff, etc.) | do not rewrite docs or package claims to make the guarded lane sound ambient |
+| Direct-runtime feasible but not yet shipped | keep the behavior on a repo-internal fixture, app-boundary adapter, or explicit experimental lane until the public contract is promoted | do not present substrate existence as shipped SDK support |
+| Bridge-only | move direct runtime creation into a browser main-thread or dedicated-worker entrypoint and keep the server/edge hop serialized | do not tunnel live Browser Edition handles across client/server boundaries |
+| Impossible / unsupported | change runtime lane entirely: native `asupersync`, server-side bridge, or another explicit non-browser path | do not add hidden partial-runtime fallbacks or pretend the browser package can emulate native surfaces |
 
 Browser Edition doc map (current canonical locations):
 
