@@ -1028,7 +1028,6 @@ input[type="text"]:focus, select:focus, textarea:focus {
       <a href="#forensics" data-section="forensics">Forensics</a>
       <a href="#recycling" data-section="recycling">Slots</a>
       <a href="#isolation" data-section="isolation">Isolation</a>
-      <a href="#replay" data-section="replay">Replay</a>
       <a href="#leakdetect" data-section="leakdetect">Leaks</a>
       <a href="#timeout" data-section="timeout">Timeout</a>
       <a href="#websocket" data-section="websocket">Channel</a>
@@ -1057,7 +1056,6 @@ input[type="text"]:focus, select:focus, textarea:focus {
   <a href="#forensics" data-section="forensics" onclick="closeMobileMenu()">Cancel Forensics</a>
   <a href="#recycling" data-section="recycling" onclick="closeMobileMenu()">Slot Recycling</a>
   <a href="#isolation" data-section="isolation" onclick="closeMobileMenu()">Scope Isolation</a>
-  <a href="#replay" data-section="replay" onclick="closeMobileMenu()">Deterministic Replay</a>
   <a href="#leakdetect" data-section="leakdetect" onclick="closeMobileMenu()">Leak Detection</a>
   <a href="#timeout" data-section="timeout" onclick="closeMobileMenu()">Scope Timeout</a>
   <a href="#websocket" data-section="websocket" onclick="closeMobileMenu()">Channel</a>
@@ -1928,43 +1926,12 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 </section>
 
 <!-- ═══════════════════════════════════════════════════════════════
-     SECTION 22: DETERMINISTIC REPLAY PROOF
-     ═══════════════════════════════════════════════════════════════ -->
-<section class="section" id="replay">
-  <div class="container">
-    <div class="reveal">
-      <span class="exhibit-num">Exhibit 16 — Unique to Asupersync</span>
-      <h2>LIFO Slot Recycling — Deterministic by Construction</h2>
-      <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        Tokio's internal task IDs are opaque and non-deterministic — re-running the same test produces different
-        IDs, making trace replay impossible. Asupersync's handle allocator uses a
-        <strong style="color:var(--text);">deterministic LIFO free-list</strong>: when slots are freed,
-        the most recently freed slot is reused first. This demo creates 4 scopes, frees them in order,
-        then creates 4 new scopes and verifies they reuse slots in <strong style="color:var(--text);">exact reverse order</strong>.
-        This deterministic pattern means you can record a handle allocation trace and replay it identically.
-      </p>
-    </div>
-    <div class="mt-4 reveal">
-      <div class="viz" id="replay-viz">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
-          <div class="viz-title" style="margin-bottom:0;">LIFO Recycling Proof</div>
-          <button class="btn btn-primary btn-sm" onclick="runReplayDemo()">Run Test</button>
-        </div>
-        <div id="replay-result">
-          <div class="text-dim" style="text-align:center;padding:32px 0;">Creates scopes, frees them, then verifies reuse follows LIFO order</div>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ═══════════════════════════════════════════════════════════════
      SECTION 23: HANDLE LEAK DETECTION
      ═══════════════════════════════════════════════════════════════ -->
 <section class="section" id="leakdetect">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 17 — Unique to Asupersync</span>
+      <span class="exhibit-num">Exhibit 16 — Unique to Asupersync</span>
       <h2>Handle Leak Detection — The Runtime Catches Your Mistakes</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         What happens when a programmer forgets to join a spawned task? In tokio, the task becomes an orphan —
@@ -1999,7 +1966,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="timeout">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 18 — Unique to Asupersync</span>
+      <span class="exhibit-num">Exhibit 17 — Unique to Asupersync</span>
       <h2>Scope-as-Timeout — Structural Deadlines, Not Afterthoughts</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         In vanilla JavaScript, implementing a timeout for a group of concurrent operations requires
@@ -2037,7 +2004,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="websocket">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 19 — Unique to Asupersync</span>
+      <span class="exhibit-num">Exhibit 18 — Unique to Asupersync</span>
       <h2>Scoped Channel Lifecycle — Resources Die with Their Scope</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Browser resources (WebSockets, MessageChannels, streams) have no concept of "ownership." If your
@@ -2076,7 +2043,7 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
 <section class="section" id="comparison">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 20 — The Whole Point</span>
+      <span class="exhibit-num">Exhibit 19 — The Whole Point</span>
       <h2>Vanilla JS vs Asupersync — Side-by-Side</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         Every exhibit above demonstrates a structural guarantee. But the real question is:
@@ -2150,14 +2117,14 @@ scope.<span class="fn">fetchRequest</span>({ <span class="prop">url</span>: url3
 <section class="section" id="benchmark">
   <div class="container">
     <div class="reveal">
-      <span class="exhibit-num">Exhibit 21 — Performance</span>
+      <span class="exhibit-num">Exhibit 20 — Performance</span>
       <h2>Rapid Scope Churn — How Fast Is the Runtime?</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
         The common objection to structured concurrency is performance: "all that bookkeeping must be slow."
         This benchmark measures <strong style="color:var(--text);">real WASM operations per second</strong> —
         scope create + close cycles including handle allocation, generation tracking, parent registration,
         and full cleanup. The result: structured concurrency at microsecond latency.
-        These are the same operations that make all 20 exhibits above possible, running at production speed.
+        These are the same operations that make all 19 exhibits above possible, running at production speed.
       </p>
     </div>
     <div class="mt-4 reveal">
@@ -3944,103 +3911,7 @@ window.resetIsolation = function() {
   document.getElementById('btn-iso-close').disabled = true;
 };
 
-// ─── Exhibit 16: Deterministic Replay Proof ──────────────────────
-window.runReplayDemo = function() {
-  const a = requireWasm();
-  if (!a) { showToast('WASM not loaded', 'err'); return; }
-
-  // Demonstrate LIFO recycling determinism: within a single runtime,
-  // the free-list recycles slots in LIFO order. We create scopes, close them,
-  // then create new ones and verify they reuse the most-recently-freed slots first.
-  const rt = (a.runtimeCreate || a.runtime_create)();
-  if (rt.outcome !== 'ok') return;
-
-  const events = [];
-
-  // Phase 1: Create 4 scopes, record their slots
-  const scopes = [];
-  for (let i = 0; i < 4; i++) {
-    const s = rt.value.enterScope('scope-' + i);
-    if (s.outcome === 'ok') {
-      scopes.push(s.value);
-      events.push({ phase: 'create', label: 'scope-' + i, slot: s.value.slot, gen: s.value.generation });
-    }
-  }
-
-  // Phase 2: Close them in order (0, 1, 2, 3) — pushes to free list in this order
-  const freedSlots = [];
-  for (let i = 0; i < scopes.length; i++) {
-    freedSlots.push(scopes[i].slot);
-    scopes[i].close();
-    events.push({ phase: 'free', label: 'scope-' + i, slot: scopes[i].slot, gen: scopes[i].generation });
-  }
-
-  // Phase 3: Create 4 new scopes WITHOUT closing them — each one pops from the free list.
-  // LIFO means last-freed slot is reused first.
-  const reusedSlots = [];
-  const reusedScopes = [];
-  for (let i = 0; i < 4; i++) {
-    const s = rt.value.enterScope('reuse-' + i);
-    if (s.outcome === 'ok') {
-      reusedSlots.push(s.value.slot);
-      reusedScopes.push(s.value);
-      events.push({ phase: 'reuse', label: 'reuse-' + i, slot: s.value.slot, gen: s.value.generation });
-      // DO NOT close — keep the slot occupied so the next alloc pops the next item from the stack
-    }
-  }
-
-  // Cleanup
-  reusedScopes.forEach(s => s.close());
-  rt.value.close();
-
-  // Verify LIFO: reused order should be reverse of freed order
-  const expectedLIFO = [...freedSlots].reverse();
-  const isLIFO = JSON.stringify(reusedSlots) === JSON.stringify(expectedLIFO);
-
-  renderWithEntrance('replay-result', `
-    <div style="margin-bottom:16px;">
-      <table class="handle-table" style="font-size:11px;">
-        <thead><tr><th>Phase</th><th>Label</th><th>Slot</th><th>Gen</th></tr></thead>
-        <tbody>${events.map(e => `
-          <tr>
-            <td style="color:${e.phase==='create'?HEX.green:e.phase==='free'?HEX.red:HEX.cyan};font-weight:600;">${e.phase}</td>
-            <td>${e.label}</td>
-            <td style="color:var(--cyan);font-weight:700;">${e.slot}</td>
-            <td>${e.gen}</td>
-          </tr>
-        `).join('')}</tbody>
-      </table>
-    </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
-      <div style="padding:12px;border-radius:var(--radius);border:1px solid var(--border);background:rgba(255,255,255,0.02);">
-        <div style="font-size:11px;color:var(--text3);text-transform:uppercase;margin-bottom:4px;">Freed order</div>
-        <div style="font-family:var(--mono);font-size:14px;color:${HEX.red};">${freedSlots.join(' → ')}</div>
-      </div>
-      <div style="padding:12px;border-radius:var(--radius);border:1px solid var(--border);background:rgba(255,255,255,0.02);">
-        <div style="font-size:11px;color:var(--text3);text-transform:uppercase;margin-bottom:4px;">Reused order (should be reversed)</div>
-        <div style="font-family:var(--mono);font-size:14px;color:${HEX.cyan};">${reusedSlots.join(' → ')}</div>
-      </div>
-    </div>
-    <div style="text-align:center;padding:16px;border-radius:var(--radius);border:1px solid ${isLIFO?HEX.green+'44':HEX.red+'44'};background:${isLIFO?HEX.green+'08':HEX.red+'08'};">
-      <span style="font-size:24px;">${isLIFO ? '✓' : '✗'}</span>
-      <div style="font-size:16px;font-weight:700;color:${isLIFO?HEX.green:HEX.red};margin-top:4px;">${isLIFO ? 'LIFO CONFIRMED — Last freed = first reused' : 'Unexpected allocation order'}</div>
-      <div style="font-size:12px;color:var(--text3);margin-top:4px;">Expected: ${expectedLIFO.join(' → ')} | Got: ${reusedSlots.join(' → ')}</div>
-    </div>
-    <div style="margin-top:12px;padding:12px;border-radius:8px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.15);font-size:13px;color:var(--text2);">
-      <strong style="color:var(--blue);">Why this matters:</strong> LIFO free-list recycling means the allocation pattern is fully deterministic
-      given the same sequence of operations. Record a failing test's handle operations, replay them on a different machine,
-      and the same slots get assigned in the same order. In tokio, task IDs are opaque and non-deterministic.
-    </div>
-  `);
-  // REVELATION beat: spring pop on the verdict
-  if (motionLib) {
-    const verdict = document.querySelector('#replay-result [style*="font-size:24px"]');
-    if (verdict) motionLib.animate(verdict, { scale: [0, 1.2, 1] }, { type: 'spring', stiffness: 400, damping: 20 });
-  }
-  showToast(isLIFO ? 'LIFO allocation confirmed' : 'Unexpected order', isLIFO ? 'ok' : 'err');
-};
-
-// ─── Exhibit 17: Handle Leak Detection ───────────────────────────
+// ─── Exhibit 16: Handle Leak Detection ───────────────────────────
 window.runLeakDetectDemo = function() {
   clearConsole('leakdetect-console');
   const a = requireWasm('leakdetect-console');
@@ -4108,7 +3979,7 @@ window.runLeakDetectDemo = function() {
   showToast('5 orphaned tasks caught by cascade', 'ok');
 };
 
-// ─── Exhibit 18: Scope-as-Timeout ────────────────────────────────
+// ─── Exhibit 17: Scope-as-Timeout ────────────────────────────────
 window.runTimeoutDemo = function() {
   clearConsole('timeout-console');
   const a = requireWasm('timeout-console');
@@ -4180,7 +4051,7 @@ window.runTimeoutDemo = function() {
   }, 2000);
 };
 
-// ─── Exhibit 19: Scoped Channel with Lifecycle ──────────────────
+// ─── Exhibit 18: Scoped Channel with Lifecycle ──────────────────
 // Uses MessageChannel (always available, no external server) to demonstrate
 // scoped resource lifecycle — the channel is owned by a WASM scope.
 let chanState = { rt: null, scope: null, port: null, msgCount: 0, tasks: [] };
@@ -4265,7 +4136,7 @@ window.wsCloseScope = function() {
   chanState = { rt: null, scope: null, port: null, msgCount: 0, tasks: [] };
 };
 
-// ─── Exhibit 21: Rapid Scope Churn Benchmark ─────────────────────
+// ─── Exhibit 20: Rapid Scope Churn Benchmark ─────────────────────
 window.runBenchmark = async function() {
   const a = requireWasm();
   if (!a) { showToast('WASM not loaded', 'err'); return; }
@@ -4431,7 +4302,7 @@ window.closeMobileMenu = function() {
 };
 
 // ─── Scroll Progress + Active Nav ────────────────────────────────
-const sectionIds = ['abi','regions','outcomes','cancel','budget','stale','cascade','protocol','repl','chaos','scopefetch','severity','forensics','recycling','isolation','replay','leakdetect','timeout','websocket','comparison','benchmark'];
+const sectionIds = ['abi','regions','outcomes','cancel','budget','stale','cascade','protocol','repl','chaos','scopefetch','severity','forensics','recycling','isolation','leakdetect','timeout','websocket','comparison','benchmark'];
 function updateScrollUI() {
   // Progress bar (fallback if motion library didn't load)
   if (!motionLib) {
@@ -4472,7 +4343,6 @@ initRuntime().then(() => {
     'severity': () => runSeverityDemo(),
     'forensics': () => runForensicsDemo(),
     'recycling': () => runRecyclingDemo(),
-    'replay': () => runReplayDemo(),
     'leakdetect': () => runLeakDetectDemo(),
   };
   const autoRanSet = new Set();
