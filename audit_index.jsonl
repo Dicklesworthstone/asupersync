@@ -819,3 +819,19 @@
 {"file":"src/runtime/reactor/lab.rs","lines":2412,"batch":379,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Deterministic event ordering, virtual time, per-token fault injection with seeded RNG"}
 {"file":"src/net/websocket/frame.rs","lines":1687,"batch":381,"date":"2026-03-15","agent":"BronzeBrook","verdict":"FIXED","bugs":2,"notes":"Decoder now rejects invalid close status codes and malformed UTF-8 close reasons on inbound Close frames."}
 {"file":"src/plan/fixtures.rs","lines":0,"batch":379,"date":"2026-03-16","agent":"SapphireHill","verdict":"FIXED","bugs":2,"notes":"dynamic_outcomes_equivalent fan-in logic: OR short-circuit masks skipped comparison when only one DAG has fan-in (2 locations)"}
+{"file":"src/decoding.rs","lines":0,"batch":380,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Diff audit: accepted_symbols_total tracks cumulative fed symbols for accurate progress after block completion"}
+{"file":"src/encoding.rs","lines":0,"batch":380,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Diff audit: validate_config() extracted, empty payload now validates config"}
+{"file":"src/grpc/health.rs","lines":0,"batch":380,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Diff audit: per-service watch_versions fix transient round-trip detection"}
+{"file":"src/grpc/client.rs","lines":0,"batch":380,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Diff audit: loopback-only transport enforcement, URI validation"}
+{"file":"src/grpc/mod.rs","lines":0,"batch":380,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Diff audit: doc updates for loopback-only transport"}
+{"file":"src/net/websocket/frame.rs","lines":0,"batch":380,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Diff audit: RFC 6455 close payload validation (code + UTF-8 reason)"}
+{"file":"src/server/shutdown.rs","lines":0,"batch":380,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Diff audit: trigger_immediate fetch_max monotonic phase fix"}
+{"file":"src/runtime/state.rs","lines":0,"batch":380,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Diff audit: Worker event kind snapshot additions"}
+{"file":"src/trace/event.rs","lines":0,"batch":380,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Diff audit: Worker* event kinds added consistently"}
+{"file":"src/trace/canonicalize.rs","lines":0,"batch":380,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Diff audit: Worker event discriminants + sort keys added"}
+{"file":"src/trace/causality.rs","lines":0,"batch":380,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Diff audit: Worker task_id extraction added"}
+{"file":"src/trace/dpor.rs","lines":0,"batch":380,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Diff audit: Worker task_id in DPOR event_task_id"}
+{"file":"src/trace/event_structure.rs","lines":0,"batch":380,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Diff audit: Worker event kinds in structure"}
+{"file":"src/types/symbol.rs","lines":0,"batch":380,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Diff audit: changes consistent with existing patterns"}
+{"file":"src/types/symbol_set.rs","lines":0,"batch":380,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Diff audit: changes consistent with existing patterns"}
+{"file":"src/lab/oracle/determinism.rs","lines":0,"batch":380,"date":"2026-03-15","agent":"SapphireHill","verdict":"SOUND","bugs":0,"notes":"Diff audit: Worker TraceData summary formatting"}
