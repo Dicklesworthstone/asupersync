@@ -973,10 +973,25 @@ impl CircuitBreaker {
     }
 
     /// Manually reset the circuit breaker to closed state.
+    ///
+    /// Uses a CAS loop to avoid silently overwriting a concurrent state
+    /// transition (e.g., a probe failure transitioning HalfOpen → Open).
+    /// The reset succeeds from any non-Closed state; if the circuit is
+    /// already Closed the counters are still zeroed.
     pub fn reset(&self) {
-        let new_state = State::Closed { failures: 0 };
-        self.state_bits
-            .store(new_state.to_bits(), Ordering::Release);
+        let new_bits = State::Closed { failures: 0 }.to_bits();
+        let mut current = self.state_bits.load(Ordering::Acquire);
+        loop {
+            match self.state_bits.compare_exchange_weak(
+                current,
+                new_bits,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
         self.current_failure_streak.store(0, Ordering::Relaxed);
 
         if let Some(ref window) = self.sliding_window {

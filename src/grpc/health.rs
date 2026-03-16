@@ -170,11 +170,13 @@ impl HealthService {
         let service = service.into();
         let mut statuses = self.statuses.write();
         let changed = statuses.insert(service.clone(), status) != Some(status);
-        drop(statuses);
         if changed {
+            // Bump version while still holding statuses lock so that
+            // concurrent readers see a consistent (status, version) pair.
             self.bump_watch_version(&service);
             self.version.fetch_add(1, Ordering::Release);
         }
+        drop(statuses);
     }
 
     /// Set the status of the overall server.
@@ -208,23 +210,23 @@ impl HealthService {
         };
         if changed {
             statuses.clear();
-        }
-        drop(statuses);
-        if changed {
+            // Bump versions while still holding statuses lock so that
+            // concurrent readers see a consistent (status, version) pair.
             self.bump_watch_versions(affected_services);
             self.version.fetch_add(1, Ordering::Release);
         }
+        drop(statuses);
     }
 
     /// Remove a service from health tracking.
     pub fn clear_status(&self, service: &str) {
         let mut statuses = self.statuses.write();
         let changed = statuses.remove(service).is_some();
-        drop(statuses);
         if changed {
             self.bump_watch_version(service);
             self.version.fetch_add(1, Ordering::Release);
         }
+        drop(statuses);
     }
 
     /// Get all registered services.
@@ -254,6 +256,31 @@ impl HealthService {
         } else {
             let watch_versions = self.watch_versions.read();
             watch_versions.get(service).copied().unwrap_or(0)
+        }
+    }
+
+    /// Read status and version atomically for a named service.
+    ///
+    /// Both the statuses lock and watch_versions lock are held simultaneously
+    /// so that a concurrent `set_status` cannot interleave between the two
+    /// reads, which would cause the watcher to record a stale status with an
+    /// advanced version, permanently missing the real transition.
+    fn watched_status_and_version(&self, service: &str) -> (ServingStatus, u64) {
+        if service.is_empty() {
+            // Server-level watcher uses the global atomic version.
+            let status = self.check(&HealthCheckRequest::server())
+                .map_or(ServingStatus::ServiceUnknown, |response| response.status);
+            let version = self.version();
+            (status, version)
+        } else {
+            let statuses = self.statuses.read();
+            let watch_versions = self.watch_versions.read();
+            let status = statuses
+                .get(service)
+                .copied()
+                .unwrap_or(ServingStatus::ServiceUnknown);
+            let version = watch_versions.get(service).copied().unwrap_or(0);
+            (status, version)
         }
     }
 
@@ -383,8 +410,8 @@ impl HealthWatcher {
     /// last call to `changed` (or since construction) in a way that affects
     /// this watcher's service.
     pub fn changed(&mut self) -> bool {
-        let current_status = self.service.watched_status(&self.service_name);
-        let current_version = self.service.watched_version(&self.service_name);
+        let (current_status, current_version) =
+            self.service.watched_status_and_version(&self.service_name);
         let changed = current_version != self.last_version;
         self.last_status = current_status;
         self.last_version = current_version;
@@ -402,8 +429,8 @@ impl HealthWatcher {
 
     /// Returns a single-read snapshot: `(changed, current_status)`.
     pub fn poll_status(&mut self) -> (bool, ServingStatus) {
-        let current_status = self.service.watched_status(&self.service_name);
-        let current_version = self.service.watched_version(&self.service_name);
+        let (current_status, current_version) =
+            self.service.watched_status_and_version(&self.service_name);
         let changed = current_version != self.last_version;
         self.last_status = current_status;
         self.last_version = current_version;

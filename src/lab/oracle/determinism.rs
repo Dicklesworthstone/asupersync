@@ -262,8 +262,10 @@ impl TraceEventSummary {
                 task,
                 region,
                 obligation,
+                decision_seq,
+                replay_hash,
             } => format!(
-                "worker={worker_id} job_id={job_id} task={task} region={region} obligation={obligation}"
+                "worker={worker_id} job_id={job_id} task={task} region={region} obligation={obligation} decision_seq={decision_seq} replay_hash={replay_hash:016x}"
             ),
         }
     }

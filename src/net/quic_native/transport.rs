@@ -119,8 +119,8 @@ impl RttEstimator {
             }
             (Some(srtt), Some(rttvar)) => {
                 let abs_err = srtt.abs_diff(adjusted);
-                let new_rttvar = ((3 * rttvar) + abs_err) / 4;
-                let new_srtt = ((7 * srtt) + adjusted) / 8;
+                let new_rttvar = (3u64.saturating_mul(rttvar).saturating_add(abs_err)) / 4;
+                let new_srtt = (7u64.saturating_mul(srtt).saturating_add(adjusted)) / 8;
                 self.rttvar_micros = Some(new_rttvar);
                 self.smoothed_rtt_micros = Some(new_srtt);
             }
