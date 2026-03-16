@@ -23,14 +23,7 @@
 <meta name="twitter:description" content="Spec-first, cancel-correct async for Rust. 21 live exhibits running real WASM — structured concurrency, cancel protocol, chaos testing, live REPL.">
 <meta name="twitter:image" content="https://dicklesworthstone.github.io/asupersync/assets/og-share-image.png?v=2">
 <meta name="twitter:image:alt" content="Asupersync Interactive WASM Demo — 21 live exhibits demonstrating structured concurrency, cancel-correct channels, and four-valued outcomes">
-<script type="importmap">
-{
-  "imports": {
-    "motion": "https://esm.sh/motion@12.36.0",
-    "motion/": "https://esm.sh/motion@12.36.0/"
-  }
-}
-</script>
+<!-- Motion library loaded via direct URL in JS (no importmap for iOS Safari compat) -->
 <style>
 /* ═══════════════════════════════════════════════════════════════════
    DESIGN SYSTEM
@@ -2104,14 +2097,18 @@ async function loadWasm() {
   // Try local first (fastest when served from the repo), then CDN fallback
   for (const base of [LOCAL_BASE, CDN_BASE]) {
     try {
-      const rawMod = await import(`${base}/index.js`);
-      await rawMod.default(`${base}/asupersync_bg.wasm`);
+      // Use string concatenation instead of template literal for iOS Safari compat
+      const rawMod = await import(base + '/index.js');
+      await rawMod.default(base + '/asupersync_bg.wasm');
 
-      // Wrap all WASM API functions with exhaustive logging
-      mod = Object.create(rawMod);
-      const wrapFn = (name, fn) => (...args) => {
-        const result = fn(...args);
-        logWasm(name, args.length <= 1 ? (args[0] ?? {}) : args, result);
+      // Wrap all WASM API functions with exhaustive logging.
+      // Use a plain object (not Object.create) — module namespace objects
+      // are exotic and Object.create on them fails on some engines (iOS Safari).
+      mod = {};
+      const wrapFn = (name, fn) => function() {
+        const args = Array.from(arguments);
+        const result = fn.apply(null, args);
+        logWasm(name, args.length <= 1 ? (args[0] != null ? args[0] : {}) : args, result);
         return result;
       };
       const wrapOps = ['runtimeCreate','runtime_create','runtimeClose','runtime_close',
@@ -2122,15 +2119,17 @@ async function loadWasm() {
         'websocketClose','websocket_close','websocketCancel','websocket_cancel'];
       for (const name of wrapOps) {
         if (typeof rawMod[name] === 'function') {
-          mod[name] = wrapFn(name, rawMod[name].bind(rawMod));
+          mod[name] = wrapFn(name, rawMod[name]);
         }
       }
       // Pass through non-function exports
-      for (const key of ['Outcome','BaseHandle','RuntimeHandle','RegionHandle','TaskHandle',
+      var passKeys = ['Outcome','BaseHandle','RuntimeHandle','RegionHandle','TaskHandle',
         'CancellationToken','FetchHandle','BUDGET_BOUNDS','CANCELLATION_PHASE_ORDER',
         'ERROR_CODES','RECOVERABILITY_LEVELS','rawBindings','createBudget','abiVersion',
-        'abi_version','abiFingerprint','abi_fingerprint']) {
-        if (rawMod[key] !== undefined && !(key in mod)) mod[key] = rawMod[key];
+        'abi_version','abiFingerprint','abi_fingerprint'];
+      for (var ki = 0; ki < passKeys.length; ki++) {
+        var key = passKeys[ki];
+        if (rawMod[key] !== undefined && mod[key] === undefined) mod[key] = rawMod[key];
       }
 
       wasmReady = true;
@@ -2140,11 +2139,12 @@ async function loadWasm() {
       console.log(`${LOG_PREFIX} %cAll WASM operations are being logged to this console. Every handle allocation, scope transition, task lifecycle, and cancellation is real.`, LOG_STYLE, 'color:#94A3B8;font-style:italic;');
       return true;
     } catch (e) {
-      console.warn(`WASM load from ${base} failed:`, e.message);
+      console.warn('WASM load from ' + base + ' failed:', e.message || e);
       mod = null;
     }
   }
   updateWasmBadge('failed');
+  console.error(LOG_PREFIX + ' WASM failed to load from all sources. If on iOS, ensure iOS 15+ and Safari is up to date.', LOG_STYLE);
   return false;
 }
 
@@ -4196,7 +4196,7 @@ window.runBenchmark = async function() {
 let motionLib = null;
 async function loadMotion() {
   try {
-    motionLib = await import('motion');
+    motionLib = await import('https://esm.sh/motion@12.36.0');
   } catch (e) {
     console.warn('Motion library not loaded, using CSS fallback:', e.message);
   }
