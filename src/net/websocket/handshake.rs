@@ -601,7 +601,9 @@ impl ServerHandshake {
                         {
                             let normalized = token.to_ascii_lowercase();
                             if accepted_tokens.insert(normalized) {
-                                accepted.push(offer);
+                                // Sanitize: strip CR/LF to prevent HTTP response splitting.
+                                let safe = offer.replace(['\r', '\n'], "");
+                                accepted.push(safe);
                             }
                         }
                     }
@@ -1222,5 +1224,32 @@ mod tests {
         let r2 = r;
         assert_eq!(r2.method, "GET");
         assert_eq!(r2.path, "/test");
+    }
+
+    #[test]
+    fn server_accept_strips_crlf_from_extension_offers() {
+        // Regression: unsanitized extension offers could inject \r\n into
+        // the HTTP response, enabling response splitting.
+        let raw_request = "GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\
+             Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             Sec-WebSocket-Version: 13\r\n\r\n";
+        let mut request = HttpRequest::parse(raw_request.as_bytes()).unwrap();
+        // Inject a malicious extension header with embedded CRLF. In a real
+        // scenario this could come from a misbehaving HTTP/1.1 parser or a
+        // crafted client that smuggles newlines past line-folding rules.
+        request.headers.insert(
+            "sec-websocket-extensions".to_string(),
+            "permessage-deflate; x\r\nX-Injected: evil".to_string(),
+        );
+
+        let server = ServerHandshake::new().extension("permessage-deflate");
+        let accept = server.accept(&request).unwrap();
+        let response = accept.response_bytes();
+        let response_str = String::from_utf8_lossy(&response);
+        // The accepted extension must NOT contain embedded \r\n.
+        assert!(
+            !response_str.contains("X-Injected"),
+            "response splitting via extension offers must be prevented: {response_str}"
+        );
     }
 }
