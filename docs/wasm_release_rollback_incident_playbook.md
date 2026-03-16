@@ -95,6 +95,20 @@ Rollback is mandatory when any condition is true:
 4. npm publish shows partial success or invalid channel/tag state.
 5. `publish.yml` rollback controls fail validation.
 
+### Surface-Specific Rollback Defaults
+
+The vNext browser surfaces must be rolled back independently instead of being
+allowed to blur together under one generic Browser Edition status line.
+
+| Surface | Trigger class | Immediate action | Public downgrade language |
+|---|---|---|---|
+| `Dedicated Web Worker` direct-runtime lane | worker bootstrap, cancel-drain, or worker artifact/export evidence regresses | demote the worker lane from `stable` to `canary` and freeze further worker promotion | keep browser main-thread runtime as the supported fallback while worker evidence is repaired |
+| `IndexedDB` durable storage + `BrowserArtifactStore` | blocked-upgrade/quota/export diagnostics drift or maintained fixture evidence fails | demote durable storage/artifact claims to `canary` and stop advertising durable browser persistence as release-ready | tell users to export/clear artifacts explicitly; do not silently fall back to ambient persistence |
+| Rust-authored browser path | `repository_maintained_rust_browser_fixture` validation or docs drift breaks | revert the surface to `preview_only` / `architecturally feasible only` and block any stable/public Rust lane claim | direct Rust users back to the repository fixture workflow until the evidence bundle is green again |
+| `WebTransport` datagrams | guarded prerequisite or fallback contract regresses | demote to `preview_only` and remove any guarded canary/stable claim | require `WebSocket` / `fetch` fallback guidance in the incident note and release notes |
+| Browser-native messaging (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | public claim appears without public SDK export closure or contract evidence | retract the public Browser Edition claim immediately | state that these surfaces remain application-boundary-only / unshipped |
+| `SharedArrayBuffer` / worker offload / parallel executor lanes | cross-origin-isolation, ownership/cancellation, replay, chaos, or perf evidence regresses | disable the lane immediately and demote `canary -> nightly` or preview-only | keep the single-threaded browser runtime as the only supported default |
+
 ## Rollback Procedure (Deterministic Order)
 
 ### A) WASM channel rollback
@@ -157,7 +171,10 @@ Each incident ticket must include:
 2. executed command bundle (exact commands),
 3. artifact index with path + hash when available,
 4. rollback decision record and authority,
-5. replay command that reproduces the failing gate.
+5. replay command that reproduces the failing gate,
+6. `surface_id` for the affected vNext lane when applicable,
+7. `support_bucket_before` and `support_bucket_after`,
+8. `channel_ceiling_before` and `channel_ceiling_after`.
 
 ## Postmortem Requirements
 
@@ -192,4 +209,3 @@ Local deterministic reproduction command:
 ```bash
 rch exec -- cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture
 ```
-

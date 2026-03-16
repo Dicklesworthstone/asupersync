@@ -74,6 +74,8 @@ evidence landed.
 |---|---|---|---|
 | wasm32 compile fails with forbidden-surface errors | Invalid profile/feature mix (`cli`, `tls`, `sqlite`, `postgres`, `mysql`, `kafka`, etc.) or native-only leakage into the browser closure | `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-dev` | compile output references wasm guardrails in `src/lib.rs`; supporting audit artifacts: `artifacts/wasm_dependency_audit_summary.json`, `artifacts/wasm_dependency_audit_log.ndjson` |
 | `ASUPERSYNC_*_UNSUPPORTED_RUNTIME` thrown during init/bootstrap | direct runtime attempted in Node, SSR, Next server/edge, or another environment outside the shipped browser support boundary | `rch exec -- cargo test --test wasm_js_exports_coverage_contract -- --nocapture` | contract test output proves package-specific unsupported-runtime codes, support reasons, and guidance strings; use `docs/integration.md` support matrix to choose the correct bridge-only fallback |
+| WebTransport reports unsupported/runtime-denied or session/datagram setup fails | browser/runtime lacks `globalThis.WebTransport`, runtime is not a valid HTTPS/HTTP3 target, or the browser rejects datagram readiness for this endpoint | `rch exec -- cargo test --test wasm_js_exports_coverage_contract webtransport -- --nocapture`<br>`rch exec -- cargo test --test wasm_browser_feasibility_matrix web_transport_docs_name_fetch_and_websocket_fallbacks -- --exact` | contract output proves the exported WebTransport diagnostics and cleanup markers remain intact; the matrix contract proves docs still tell operators to fall back to `WebSocket` or `fetch` when WebTransport is unavailable or rejected |
+| `MessageChannel` / `MessagePort` / `BroadcastChannel` expected as public Browser Edition APIs, but nothing is exported | these browser-native messaging surfaces are explicit host-capability/reactor substrate today, not shipped JS/TS SDK entrypoints | `rch exec -- cargo test --test wasm_browser_feasibility_matrix messaging_surfaces_remain_public_sdk_unshipped_but_explicitly_documented -- --exact`<br>`rch exec -- cargo test browser_reactor_message_port --lib -- --nocapture`<br>`rch exec -- cargo test browser_reactor_broadcast_channel --lib -- --nocapture` | the matrix contract proves the docs still classify the messaging boundary and name the supported fallbacks; the focused reactor tests prove MessagePort/BroadcastChannel validation paths remain covered even though the public SDK intentionally withholds those APIs |
 | `ASUPERSYNC_BROWSER_STORAGE_OPERATION_FAILED`, `ASUPERSYNC_BROWSER_ARTIFACT_OPERATION_FAILED`, or `ASUPERSYNC_BROWSER_ARTIFACT_DOWNLOAD_UNSUPPORTED` surfaces during browser persistence flows | blocked IndexedDB upgrade/open, quota pressure, corrupt artifact index state, or a worker/non-DOM runtime attempting direct download instead of export handoff | `rch exec -- cargo test --test wasm_js_exports_coverage_contract browser_src_index_exposes_storage_and_artifact_diagnostics -- --nocapture`<br>`PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh`<br>`PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh` | contract output proves the exported codes/reasons/guidance stay in sync; bundle summaries under `target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json` and `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json` confirm the maintained fixtures still exercise storage/artifact bundle markers |
 | packaged consumer validation says required Browser Edition artifacts are missing | `packages/browser-core/` wasm artifacts or higher-level package `dist/` outputs were not built/staged before running consumer validation | `PATH=/usr/bin:$PATH corepack pnpm run build && bash ./scripts/validate_react_consumer.sh` | built artifacts appear under `packages/browser-core/`; consumer evidence appears at `target/e2e-results/react_consumer/<timestamp>/consumer_build.log` and `summary.json` |
 | dedicated-worker onboarding or bootstrap validation fails | dedicated-worker runtime guard drift, worker fetch-host regression, coordination protocol drift, or a stale packaged consumer fixture | `python3 scripts/run_browser_onboarding_checks.py --scenario worker` | `artifacts/onboarding/worker.ndjson`, `artifacts/onboarding/worker.summary.json`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/consumer_build.log`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json` |
@@ -339,6 +341,48 @@ Evidence to capture:
 - latest packaged bootstrap `steps.ndjson`
 - latest packaged bootstrap `perf-summary.json`
 - any exported `artifacts/wasm_packaged_bootstrap_perf_summary.json`
+
+### J. Host-Capability Boundary Confusion
+
+Use when Browser Edition users conflate dedicated-worker direct-runtime support
+with browser-native messaging support, or when WebTransport is treated as an
+ambient transport instead of a guarded capability lane.
+
+```bash
+rch exec -- cargo test --test wasm_browser_feasibility_matrix \
+  web_transport_docs_name_fetch_and_websocket_fallbacks -- --exact
+
+rch exec -- cargo test --test wasm_browser_feasibility_matrix \
+  messaging_surfaces_remain_public_sdk_unshipped_but_explicitly_documented -- --exact
+
+rch exec -- cargo test browser_reactor_message_port --lib -- --nocapture
+rch exec -- cargo test browser_reactor_broadcast_channel --lib -- --nocapture
+```
+
+Evidence to capture:
+
+- exact unsupported/denied WebTransport diagnostic and URL/runtime context
+- proof that docs still say `WebSocket` / `fetch` is the fallback when
+  WebTransport is unavailable or rejected
+- proof that docs still classify `MessageChannel`, `MessagePort`, and
+  `BroadcastChannel` as substrate-only from the public SDK perspective
+- the focused reactor test output for MessagePort/BroadcastChannel validation
+  paths
+
+Expected operator action:
+
+1. If the goal is direct off-main-thread Browser Edition execution, bootstrap
+   the runtime inside a dedicated worker instead of looking for a
+   `MessagePort` or `BroadcastChannel` API in `@asupersync/browser`.
+2. If the goal is same-origin app coordination, keep
+   `MessageChannel` / `MessagePort` / `BroadcastChannel` at the application
+   boundary and pass serialized data into Asupersync-owned scopes/tasks.
+3. If the hop crosses into server, edge, Node, or another non-browser
+   boundary, route through explicit bridge-only adapters instead of widening
+   the browser direct-runtime contract.
+4. If WebTransport is unavailable or handshake/datagram setup fails, fall back
+   to `WebSocket` or `fetch` unless and until the deployment/runtime satisfies
+   the guarded prerequisites.
 
 ## Escalation Rules
 

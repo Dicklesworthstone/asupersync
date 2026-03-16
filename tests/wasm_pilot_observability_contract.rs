@@ -29,6 +29,29 @@ fn wasm_pilot_observability_playbook_documents_contract_and_commands() {
 }
 
 #[test]
+fn wasm_pilot_observability_contract_names_worker_offload_replay_events() {
+    let doc = fs::read_to_string("docs/wasm_pilot_observability_contract.md")
+        .expect("failed to read wasm pilot observability contract doc");
+
+    for token in [
+        "worker_cancel_requested",
+        "worker_cancel_acknowledged",
+        "worker_drain_started",
+        "worker_drain_completed",
+        "worker_finalize_completed",
+        "job_id",
+        "worker_id",
+        "decision_seq",
+        "replay_hash",
+    ] {
+        assert!(
+            doc.contains(token),
+            "pilot observability contract doc missing worker offload token: {token}"
+        );
+    }
+}
+
+#[test]
 fn wasm_pilot_observability_evaluator_self_test_passes() {
     assert!(
         Path::new("scripts/evaluate_wasm_pilot_cohort.py").exists(),

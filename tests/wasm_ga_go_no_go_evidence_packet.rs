@@ -249,3 +249,55 @@ fn release_strategy_doc_requires_package_and_consumer_artifacts_for_ga_promotion
         );
     }
 }
+
+#[test]
+fn release_docs_define_vnext_surface_promotion_and_packet_rows() {
+    let packet = load_packet_doc();
+    let strategy = load_release_strategy_doc();
+
+    for token in [
+        "GA-VNEXT-01",
+        "surface_decisions",
+        "support_bucket_snapshot",
+        "promotion_ceiling_snapshot",
+        "surface_evidence_rows",
+        "Dedicated Web Worker",
+        "IndexedDB durable storage",
+        "BrowserArtifactStore",
+        "Rust-authored browser path",
+        "WebTransport",
+        "MessageChannel",
+        "MessagePort",
+        "BroadcastChannel",
+        "SharedArrayBuffer",
+        "worker offload",
+        "preview_only",
+        "guarded canary-only",
+    ] {
+        assert!(
+            packet.contains(token),
+            "packet doc missing vNext surface governance token: {token}"
+        );
+    }
+
+    for token in [
+        "## VNext Surface Promotion Ceilings",
+        "Dedicated Web Worker",
+        "IndexedDB durable storage + `BrowserArtifactStore`",
+        "Rust-authored browser path",
+        "`WebTransport` datagrams",
+        "MessageChannel",
+        "SharedArrayBuffer",
+        "target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json",
+        "target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json",
+        "target/e2e-results/rust_browser_consumer/<timestamp>/summary.json",
+        "preview_only",
+        "guarded canary-only",
+        "nightly-only",
+    ] {
+        assert!(
+            strategy.contains(token),
+            "release strategy doc missing vNext surface promotion token: {token}"
+        );
+    }
+}

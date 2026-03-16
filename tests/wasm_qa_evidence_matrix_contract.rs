@@ -99,6 +99,10 @@ fn doc_references_bead() {
         doc.contains("asupersync-3qv04.8.4.4"),
         "doc must reference log-schema hardening bead id"
     );
+    assert!(
+        doc.contains("asupersync-1ky3w.1"),
+        "doc must reference vNext surface matrix bead id"
+    );
 }
 
 #[test]
@@ -108,6 +112,8 @@ fn doc_has_required_sections() {
         "Purpose",
         "Contract Artifacts",
         "Evidence Layers",
+        "VNext Surface Matrix",
+        "VNext Certification Lane",
         "Structured Logging Contract",
         "E2E Log Schema",
         "Artifact Bundle Layout",
@@ -172,6 +178,30 @@ fn doc_references_cfg_compile_harness_commands() {
     }
 }
 
+#[test]
+fn doc_names_vnext_surfaces_and_certification_artifacts() {
+    let doc = load_doc();
+    for token in [
+        "dedicated-worker direct runtime",
+        "Durable storage + artifact persistence",
+        "Rust-authored browser path",
+        "WebTransport guarded lane",
+        "Worker offload / guarded parallel preview lane",
+        "wasm-browser-vnext-surfaces",
+        "artifacts/wasm_browser_vnext_surface_summary.json",
+        "tests/wasm_browser_feasibility_matrix.rs",
+        "tests/wasm_js_exports_coverage_contract.rs",
+        "tests/wasm_rust_browser_example_contract.rs",
+        "tests/wasm_pilot_observability_contract.rs",
+        "python3 scripts/run_browser_onboarding_checks.py --scenario worker --dry-run --out-dir artifacts/onboarding_vnext",
+    ] {
+        assert!(
+            doc.contains(token),
+            "doc must name vNext surface contract token: {token}"
+        );
+    }
+}
+
 // -- Artifact schema and version stability --
 
 #[test]
@@ -201,6 +231,121 @@ fn artifact_versions_are_stable() {
         artifact["runner_script"].as_str(),
         Some("scripts/run_wasm_qa_evidence_smoke.sh")
     );
+    let extension_beads: BTreeSet<&str> = artifact["extension_beads"]
+        .as_array()
+        .expect("extension_beads must be array")
+        .iter()
+        .map(|entry| entry.as_str().expect("extension bead must be string"))
+        .collect();
+    assert!(
+        extension_beads.contains("asupersync-1ky3w.1"),
+        "extension bead list must include asupersync-1ky3w.1"
+    );
+}
+
+#[test]
+fn artifact_vnext_surface_matrix_is_complete() {
+    let artifact = load_artifact();
+    let matrix = artifact["vnext_surface_matrix"]
+        .as_array()
+        .expect("vnext_surface_matrix must be array");
+    let surface_ids: BTreeSet<&str> = matrix
+        .iter()
+        .map(|entry| {
+            entry["surface_id"]
+                .as_str()
+                .expect("surface_id must be string")
+        })
+        .collect();
+    let expected: BTreeSet<&str> = [
+        "dedicated_worker_direct_runtime",
+        "durable_storage_artifact_persistence",
+        "rust_authored_browser_path",
+        "guarded_webtransport_lane",
+        "worker_offload_parallel_preview",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        surface_ids, expected,
+        "vNext surface matrix must enumerate every named browser vNext surface"
+    );
+
+    for entry in matrix {
+        let support_level = entry["support_level"]
+            .as_str()
+            .expect("support_level must be string");
+        let lane = entry["ci_or_release_lane"]
+            .as_str()
+            .expect("ci_or_release_lane must be string");
+        let evidence = entry["required_evidence"]
+            .as_array()
+            .expect("required_evidence must be array");
+        let fail_closed_rule = entry["fail_closed_rule"]
+            .as_str()
+            .expect("fail_closed_rule must be string");
+        assert!(
+            !support_level.is_empty(),
+            "support_level must not be empty for {:?}",
+            entry
+        );
+        assert!(
+            lane.contains("wasm-browser-vnext-surfaces"),
+            "each vNext surface entry must point at the explicit certification lane"
+        );
+        assert!(
+            !evidence.is_empty(),
+            "required_evidence must not be empty for {:?}",
+            entry
+        );
+        assert!(
+            !fail_closed_rule.is_empty(),
+            "fail_closed_rule must not be empty for {:?}",
+            entry
+        );
+    }
+}
+
+#[test]
+fn artifact_certification_lane_matches_vnext_ci_contract() {
+    let artifact = load_artifact();
+    let lane = &artifact["certification_lane"];
+    assert_eq!(
+        lane["lane_id"].as_str(),
+        Some("wasm-browser-vnext-surfaces")
+    );
+    assert_eq!(
+        lane["workflow_step_name"].as_str(),
+        Some("WASM browser vNext surface certification")
+    );
+    assert_eq!(
+        lane["artifact_name"].as_str(),
+        Some("wasm-browser-vnext-surface-certification")
+    );
+    assert_eq!(
+        lane["summary_artifact"].as_str(),
+        Some("artifacts/wasm_browser_vnext_surface_summary.json")
+    );
+    assert_eq!(
+        lane["log_artifact"].as_str(),
+        Some("artifacts/wasm_browser_vnext_surface_test.log")
+    );
+    let replay_command = lane["replay_command"]
+        .as_str()
+        .expect("replay_command must be string");
+    for token in [
+        "run_browser_onboarding_checks.py --scenario worker --dry-run --out-dir artifacts/onboarding_vnext",
+        "rch exec -- bash -lc",
+        "wasm_browser_feasibility_matrix",
+        "wasm_js_exports_coverage_contract",
+        "wasm_rust_browser_example_contract",
+        "wasm_pilot_observability_contract",
+    ] {
+        assert!(
+            replay_command.contains(token),
+            "vNext certification replay command missing token: {token}"
+        );
+    }
 }
 
 // -- Evidence layer catalog --
@@ -833,6 +978,32 @@ fn ci_workflow_runs_aggregate_dry_run_and_uploads_aggregate_artifacts() {
 }
 
 #[test]
+fn ci_workflow_runs_vnext_surface_certification_and_uploads_artifact() {
+    let workflow = load_ci_workflow();
+    for token in [
+        "WASM browser vNext surface certification",
+        "python3 scripts/run_browser_onboarding_checks.py \\",
+        "--scenario worker \\",
+        "--out-dir artifacts/onboarding_vnext",
+        "RCH_BIN=\"${HOME}/.local/bin/rch\"",
+        "rch is required for WASM browser vNext surface certification",
+        "cargo test -p asupersync --test wasm_browser_feasibility_matrix -- --nocapture",
+        "cargo test -p asupersync --test wasm_js_exports_coverage_contract -- --nocapture",
+        "cargo test -p asupersync --test wasm_rust_browser_example_contract -- --nocapture",
+        "cargo test -p asupersync --test wasm_pilot_observability_contract -- --nocapture",
+        "artifacts/wasm_browser_vnext_surface_summary.json",
+        "artifacts/wasm_browser_vnext_surface_test.log",
+        "Upload WASM browser vNext surface certification artifacts",
+        "name: wasm-browser-vnext-surface-certification",
+    ] {
+        assert!(
+            workflow.contains(token),
+            "workflow missing vNext surface certification token: {token}"
+        );
+    }
+}
+
+#[test]
 fn ci_matrix_policy_tracks_suite_summary_artifact_contract() {
     let policy = load_ci_matrix_policy();
     let lane = policy["lanes"]
@@ -888,6 +1059,94 @@ fn ci_matrix_policy_tracks_suite_summary_artifact_contract() {
         failure_taxonomy.contains("suite_summary_artifact_missing"),
         "wasm-browser-qa-smoke lane must track missing suite summary artifacts"
     );
+}
+
+#[test]
+fn ci_matrix_policy_tracks_vnext_surface_certification_lane() {
+    let policy = load_ci_matrix_policy();
+    let lane = policy["lanes"]
+        .as_array()
+        .expect("ci matrix policy lanes must be array")
+        .iter()
+        .find(|lane| lane["lane_id"] == "wasm-browser-vnext-surfaces")
+        .expect("missing wasm-browser-vnext-surfaces lane");
+
+    let required_steps: BTreeSet<&str> = lane["required_step_names"]
+        .as_array()
+        .expect("required_step_names must be array")
+        .iter()
+        .map(|step| step.as_str().expect("required step name must be string"))
+        .collect();
+    assert!(
+        required_steps.contains("WASM browser vNext surface certification"),
+        "vNext surface lane missing certification step"
+    );
+
+    let required_artifacts: BTreeSet<&str> = lane["required_artifact_names"]
+        .as_array()
+        .expect("required_artifact_names must be array")
+        .iter()
+        .map(|artifact| {
+            artifact
+                .as_str()
+                .expect("required artifact name must be string")
+        })
+        .collect();
+    assert!(
+        required_artifacts.contains("wasm-browser-vnext-surface-certification"),
+        "vNext surface lane missing uploaded artifact"
+    );
+
+    assert_eq!(lane["require_rch"].as_bool(), Some(true));
+    let rch_steps: BTreeSet<&str> = lane["rch_required_step_names"]
+        .as_array()
+        .expect("rch_required_step_names must be array")
+        .iter()
+        .map(|step| step.as_str().expect("rch step name must be string"))
+        .collect();
+    assert!(
+        rch_steps.contains("WASM browser vNext surface certification"),
+        "vNext surface lane must require rch for the certification step"
+    );
+
+    let replay_command = lane["replay_command"]
+        .as_str()
+        .expect("replay_command must be string");
+    for token in [
+        "run_browser_onboarding_checks.py --scenario worker --dry-run --out-dir artifacts/onboarding_vnext",
+        "rch exec -- bash -lc",
+        "wasm_browser_feasibility_matrix",
+        "wasm_js_exports_coverage_contract",
+        "wasm_rust_browser_example_contract",
+        "wasm_pilot_observability_contract",
+    ] {
+        assert!(
+            replay_command.contains(token),
+            "vNext surface lane replay command missing token: {token}"
+        );
+    }
+
+    let failure_taxonomy: BTreeSet<&str> = lane["failure_taxonomy"]
+        .as_array()
+        .expect("failure_taxonomy must be array")
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .expect("failure taxonomy entry must be string")
+        })
+        .collect();
+    for token in [
+        "rch_routing_violation",
+        "vnext_surface_matrix_drift",
+        "worker_support_regression",
+        "preview_lane_contract_regression",
+    ] {
+        assert!(
+            failure_taxonomy.contains(token),
+            "vNext surface lane failure taxonomy missing token: {token}"
+        );
+    }
 }
 
 // -- Downstream beads --

@@ -101,6 +101,20 @@ blocked regardless of higher-level board approval text.
 | `L3_GA` | All users | canary success + support readiness quorum | declared GA and active post-GA watch | GA launch brief + support SLA publication |
 | `L4_STABILIZATION` | GA users under enhanced watch | GA live with instrumentation coverage | stabilization exit criteria satisfied | Bi-weekly stabilization report |
 
+## Surface-Specific Rollout Floors and Ceilings
+
+The launch stages above govern the Browser Edition baseline. The vNext browser
+surfaces must still respect their own rollout floors and ceilings.
+
+| Surface | Earliest rollout stage | Highest stage without extra closure | Required artifact bundle before `L3_GA` claim | Default downgrade path |
+|---|---|---|---|---|
+| `Dedicated Web Worker` direct-runtime lane | `L1_PILOT` | may reach `L3_GA` only after worker onboarding + contract evidence is green in the candidate window | `artifacts/onboarding/worker.summary.json`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json`, `tests/wasm_browser_feasibility_matrix.rs`, `tests/wasm_js_exports_coverage_contract.rs`, `PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh` | downgrade the worker lane to `L2_CANARY`; keep the browser main-thread runtime as the supported GA fallback |
+| `IndexedDB` durable storage + `BrowserArtifactStore` | `L1_PILOT` | may reach `L3_GA` only after storage/export diagnostics and maintained fixture evidence are green | `target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json`, `tests/wasm_browser_feasibility_matrix.rs`, `tests/wasm_js_exports_coverage_contract.rs` | downgrade durable storage/artifact promises to `L2_CANARY` and keep users on explicit export / cleanup guidance |
+| Rust-authored browser path | `L0_INTERNAL` | `L1_PILOT` / `preview_only`; no `L3_GA` claim while the lane is repository-maintained rather than a public Rust browser API | `PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh`, `target/e2e-results/rust_browser_consumer/<timestamp>/summary.json`, `tests/wasm_rust_browser_example_contract.rs`, `docs/wasm_quickstart_migration.md` | revert to `repository_maintained_rust_browser_fixture` guidance and remove any public/stable wording |
+| `WebTransport` datagrams | `L1_PILOT` | `L2_CANARY` and `guarded canary-only` unless fallback evidence remains green | `tests/wasm_browser_feasibility_matrix.rs`, `tests/wasm_js_exports_coverage_contract.rs`, `docs/WASM.md`, `docs/wasm_troubleshooting_compendium.md` | downgrade to `preview_only` and require `WebSocket` / `fetch` fallback messaging |
+| Browser-native messaging (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | `L0_INTERNAL` | `preview_only` until public Browser Edition APIs ship | `docs/wasm_api_surface_census.md`, `docs/WASM.md`, public API contract tests once exported | revert to application-boundary-only guidance |
+| `SharedArrayBuffer` / worker offload / parallel executor lanes | `L0_INTERNAL` | `nightly-only`; never default `L3_GA` while `asupersync-2jhnk.*` remains open | `asupersync-2jhnk.2`, `asupersync-2jhnk.3`, `asupersync-2jhnk.4`, `asupersync-2jhnk.5`, plus replay/chaos/perf evidence | disable the lane and demote `canary -> nightly` or preview-only |
+
 ## Rollback Triggers
 
 Automatic rollback triggers:
@@ -110,6 +124,8 @@ Automatic rollback triggers:
 3. `LR-03`: SLO breach against pilot/canary reliability budgets.
 4. `LR-04`: security release gate blocker.
 5. `LR-05`: replay artifact missing for severe incident.
+6. `LR-06`: a vNext surface is published above its allowed rollout ceiling.
+7. `LR-07`: the required surface-specific artifact bundle goes stale or missing.
 
 Rollback action must follow `docs/wasm_release_rollback_incident_playbook.md`
 with deterministic command capture and artifact revocation logging.

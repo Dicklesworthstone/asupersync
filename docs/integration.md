@@ -268,12 +268,13 @@ unsupported runtime into a partially functional direct-execution mode.
 Support posture:
 
 - direct runtime today: browser main thread with a real `window` +
-  `document` environment and `WebAssembly` support
+  `document` environment and `WebAssembly` support, plus dedicated workers
+  with `DedicatedWorkerGlobalScope` and `WebAssembly`
 - bridge-only: Next.js server components, route handlers, edge runtimes, and
   other server-side render environments
-- currently unsupported for direct runtime: Node.js-only contexts and browser
-  worker/service-worker contexts that do not provide the DOM prerequisites the
-  shipped package guards require
+- currently unsupported for direct runtime: Node.js-only contexts plus
+  service-worker/shared-worker browser contexts that are not yet promoted as
+  shipped Browser Edition lanes
 - non-goals for browser runtime closure: native-only modules (`fs`, `process`,
   `signal`, `server`), native DB clients, and native transport surfaces
 
@@ -297,6 +298,28 @@ an aspirational roadmap.
 | Next.js server component / route handler | bridge-only | no | `@asupersync/next` bridge-only adapters | `NEXT_UNSUPPORTED_RUNTIME_CODE` with message `Direct Browser Edition runtime execution is unsupported in Next server runtimes.` | move runtime creation into a client component or browser-only module |
 | Next.js edge runtime | bridge-only | no | `@asupersync/next` bridge-only adapters | `NEXT_UNSUPPORTED_RUNTIME_CODE` with `target = "edge"` | keep edge code on bridge-only adapters and do not call direct runtime APIs |
 | Node.js CLI / tests / serverless code without DOM globals | unsupported for Browser Edition direct runtime | no | use native `asupersync` or explicit bridge code instead | browser/react guards surface `missing_global_this` or `missing_browser_dom` | switch to the native runtime lane or move Browser Edition code behind a browser-only entrypoint |
+
+### Rust-Authored Browser Consumer Lane
+
+The JS/TS packages are the shipped Browser Edition product. The Rust-authored
+lane is narrower and should be treated as three separate workflows:
+
+| Goal | Supported today | Canonical command / artifact | Evidence |
+|---|---|---|---|
+| Verify browser-safe semantic-core closure | Yes | `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` | root `Cargo.toml`, `src/lib.rs`, `tests/wasm_browser_feasibility_matrix.rs` |
+| Maintain the Rust-side ABI/package boundary that feeds the JS/TS packages | Yes, for workspace contributors | `rch exec -- cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features dev` or `rch exec -- cargo check --manifest-path asupersync-wasm/Cargo.toml --target wasm32-unknown-unknown --no-default-features --features dev` | `asupersync-browser-core/`, `asupersync-wasm/` |
+| Use the maintained browser-facing Rust example the repository proves end-to-end | Yes, as an in-repo fixture workflow | `PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh` | `tests/fixtures/rust-browser-consumer/`, `tests/wasm_rust_browser_example_contract.rs` |
+| Construct Browser Edition runtimes directly from external Rust consumer code | No, not yet a public supported lane | Do not document a public wasm/browser `RuntimeBuilder` story yet | `src/runtime/builder.rs` has no public browser-runtime constructor |
+
+Rules:
+
+- Do not present `asupersync-browser-core` or `asupersync-wasm` as the public
+  end-user Browser Edition SDK for Rust consumers.
+- Do not imply external Rust `RuntimeBuilder` parity on `wasm32`.
+- If you need a shipped application-facing browser product surface today, start
+  from `@asupersync/browser`, `@asupersync/react`, or `@asupersync/next`.
+- If you need the truthful current Rust-authored workflow, use the maintained
+  fixture and validation script rather than inventing a broader support claim.
 
 ### Runtime Capability Requirements and Compatibility Guidance
 

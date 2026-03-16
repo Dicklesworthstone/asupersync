@@ -1381,6 +1381,15 @@ cargo check --target wasm32-unknown-unknown \
 # npm install @asupersync/browser
 ```
 
+If you are authoring browser-facing code in Rust today, the truthful supported
+lane is narrower: use the canonical `wasm-browser-*` profile checks for
+semantic-core closure, use `asupersync-browser-core` / `asupersync-wasm` only
+as the Rust-side ABI/package boundary, and use the maintained fixture workflow
+at `tests/fixtures/rust-browser-consumer/` plus
+`scripts/validate_rust_browser_consumer.sh` for the repository's proven
+browser-facing Rust example. The repo does **not** yet expose a public
+`RuntimeBuilder`-style browser bootstrap API for external Rust consumers.
+
 See [`docs/WASM.md`](./docs/WASM.md) for the full Browser Edition guide,
 architecture diagrams, crate map, the current Rust-authored browser contract,
 and known limitations.

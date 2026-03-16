@@ -128,6 +128,21 @@ Required consumer-build and smoke artifacts:
 Missing any Gate 6 artifact is a release-blocking failure even if the policy,
 security, and dependency gates are otherwise green.
 
+## VNext Surface Promotion Ceilings
+
+The Browser Edition channel decision does not automatically promote every new
+browser-facing surface. Each vNext surface must carry its own promotion ceiling
+that matches the live support bucket in `docs/WASM.md`.
+
+| Surface | Support bucket in `docs/WASM.md` | Promotion ceiling before extra closure | Minimum promotion evidence | Default demotion / rollback |
+|---|---|---|---|---|
+| `Dedicated Web Worker` direct-runtime lane | `Direct-runtime supported` | may reach `stable` only when worker-specific evidence is green in the reviewed candidate window | `artifacts/onboarding/worker.summary.json`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json`, `tests/wasm_browser_feasibility_matrix.rs`, `tests/wasm_js_exports_coverage_contract.rs`, `PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh` | demote the worker lane from `stable` to `canary`; keep the browser main-thread runtime as the stable fallback |
+| `IndexedDB` durable storage + `BrowserArtifactStore` | `Direct-runtime supported` | may reach `stable` only when storage/artifact diagnostics, export flows, and fixture evidence are green | `target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json`, `tests/wasm_browser_feasibility_matrix.rs`, `tests/wasm_js_exports_coverage_contract.rs`, `PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh`, `PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh` | demote durable storage/artifact claims to `canary` and remove any durable-persistence promise rather than silently substituting ambient persistence |
+| Rust-authored browser path | `Direct-runtime feasible but not yet shipped` | `preview_only`; no `stable` promotion while the lane is still repository-maintained rather than a public Rust-callable browser builder | `PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh`, `target/e2e-results/rust_browser_consumer/<timestamp>/summary.json`, `tests/wasm_rust_browser_example_contract.rs`, `docs/wasm_quickstart_migration.md` | downgrade to `architecturally feasible only` and remove any public/stable claim if the fixture, docs, or browser-run evidence regresses |
+| `WebTransport` datagrams | `Guarded direct-runtime support` | `guarded canary-only` unless the HTTPS/HTTP3 prerequisites and fallback evidence stay green | `tests/wasm_browser_feasibility_matrix.rs`, `tests/wasm_js_exports_coverage_contract.rs`, `docs/WASM.md`, `docs/wasm_troubleshooting_compendium.md` | demote to `preview_only` and require `WebSocket` / `fetch` fallback guidance in release notes |
+| Browser-native messaging (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | `Direct-runtime feasible but not yet shipped as public Browser Edition APIs` | `preview_only`; no `stable` promotion while the public SDK intentionally does not export them | `docs/wasm_api_surface_census.md`, `docs/WASM.md`, public API contract tests once the SDK exports land | revert to application-boundary-only guidance and remove any public Browser Edition support claim |
+| `SharedArrayBuffer` / worker offload / parallel executor lanes | `Guarded optional, not shipped` | `nightly-only` or explicitly marked preview experiments; never default `stable` | closure of `asupersync-2jhnk.2`, `asupersync-2jhnk.3`, `asupersync-2jhnk.4`, and `asupersync-2jhnk.5`, plus cross-origin-isolation, replay, chaos, and performance evidence | disable the lane immediately and demote `canary -> nightly`; preserve the single-threaded browser runtime as the only supported default |
+
 ## Promotion Rules
 
 `nightly -> canary` promotion requires:
@@ -155,6 +170,13 @@ security, and dependency gates are otherwise green.
 6. consumer-build onboarding summaries and QA smoke bundle/summary artifacts
    are reproducible for the current candidate.
 
+No vNext surface may be promoted above the ceiling declared in
+`docs/WASM.md` and the table above. A `stable` Browser Edition release may
+ship with `preview_only`, `guarded canary-only`, `bridge-only`, or
+`impossible` surfaces still present in the documentation, but release notes and
+support diagnostics must keep those labels explicit rather than implying that
+every browser-facing surface inherited `stable` by package association.
+
 ## Demotion and Rollback Policy
 
 Demotion is mandatory when one of these triggers occurs post-publish:
@@ -171,6 +193,10 @@ Demotion is mandatory when one of these triggers occurs post-publish:
    `bash scripts/validate_npm_pack_smoke.sh`,
 6. consumer-build onboarding or QA smoke artifacts are missing, stale, or not
    reproducible for the candidate being promoted.
+7. any vNext surface is described above its documented ceiling
+   (`preview_only`, `guarded canary-only`, `nightly-only`, `bridge-only`, or
+   `impossible`) or loses the artifact bundle listed in the vNext promotion
+   table.
 
 Demotion actions:
 

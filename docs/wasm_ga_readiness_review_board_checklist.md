@@ -63,6 +63,21 @@ Missing any Browser Edition artifact above is a hard-blocking gap for
 `asupersync-3qv04.7.3` even if the older governance-program packet is
 otherwise complete.
 
+## VNext Surface Review Rows
+
+The board must review the post-v1 browser surfaces individually. None of the
+rows below inherit `stable` by association with the baseline Browser Edition
+package release.
+
+| Review Row | Surface | Ceiling / support rule | Minimum evidence before approval | Hard-blocking when... |
+|---|---|---|---|---|
+| `VT-DW-01` | `Dedicated Web Worker` direct-runtime lane | may reach `stable` only when the worker lane is still `Direct-runtime supported` in `docs/WASM.md` and the worker evidence bundle is green | `artifacts/onboarding/worker.summary.json`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json`, `tests/wasm_browser_feasibility_matrix.rs`, `tests/wasm_js_exports_coverage_contract.rs` | the packet claims stable worker support without those artifacts |
+| `VT-STORAGE-01` | `IndexedDB` durable storage + `BrowserArtifactStore` | may reach `stable` only when blocked-upgrade/quota/export diagnostics and maintained fixture evidence remain green | `target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json`, `tests/wasm_browser_feasibility_matrix.rs`, `tests/wasm_js_exports_coverage_contract.rs` | durable browser persistence is claimed without artifact-backed storage/export evidence |
+| `VT-RUST-01` | Rust-authored browser path | `preview_only` until the lane stops being merely `Direct-runtime feasible but not yet shipped` | `PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh`, `target/e2e-results/rust_browser_consumer/<timestamp>/summary.json`, `tests/wasm_rust_browser_example_contract.rs`, `docs/wasm_quickstart_migration.md` | the packet presents the Rust browser path as stable/public without the fixture evidence bundle |
+| `VT-WT-01` | `WebTransport` guarded lane | `guarded canary-only` until prerequisites and fallback evidence remain green | `tests/wasm_browser_feasibility_matrix.rs`, `tests/wasm_js_exports_coverage_contract.rs`, `docs/WASM.md`, `docs/wasm_troubleshooting_compendium.md` | WebTransport is claimed above its guarded ceiling or without explicit fallback guidance |
+| `VT-MSG-01` | `MessageChannel`, `MessagePort`, `BroadcastChannel` | `preview_only` while the Browser Edition public SDK intentionally does not export them | `docs/wasm_api_surface_census.md`, `docs/WASM.md`, public API contract tests once exported | the packet turns application-boundary-only messaging into a public/stable Browser Edition promise |
+| `VT-SAB-01` | `SharedArrayBuffer` / worker offload / parallel executor lanes | `nightly-only` or preview; never default `stable` while `asupersync-2jhnk.*` remains open | `asupersync-2jhnk.2`, `asupersync-2jhnk.3`, `asupersync-2jhnk.4`, `asupersync-2jhnk.5`, plus replay/chaos/perf evidence | the packet claims SAB/offload as GA/stable without cross-origin-isolation and closure evidence |
+
 ## Mandatory Evidence Fields
 
 Every gate row in the review packet must define all fields below.
@@ -115,6 +130,9 @@ The following conditions are always release-blocking:
 5. Pilot observability summary indicates `status = fail`.
 6. Stress/soak trend report indicates `regression_detected = true`.
 7. Rollback playbook certification missing or failing.
+8. Any vNext surface row is missing or is claimed above its documented
+   ceiling (`preview_only`, `guarded canary-only`, `nightly-only`,
+   `bridge-only`, or `impossible`).
 
 ### Aggregate Decision Rule
 

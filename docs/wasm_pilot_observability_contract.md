@@ -129,3 +129,31 @@ All failure paths must preserve deterministic replay references:
 - owner route included for escalation.
 
 Pilot observability artifacts are non-compliant if any alert is missing replay linkage.
+
+## Worker Offload Replay Linkage
+
+When browser worker offload is enabled for a pilot or failure drill, the
+trace/artifact story must preserve the worker-boundary lifecycle rather than
+collapsing it into generic browser events.
+
+Required browser trace event kinds:
+
+- `worker_cancel_requested`
+- `worker_cancel_acknowledged`
+- `worker_drain_started`
+- `worker_drain_completed`
+- `worker_finalize_completed`
+
+Each worker-boundary event must preserve stable linkage fields:
+
+- `job_id`
+- `worker_id`
+- `task`
+- `region`
+- `obligation`
+- `decision_seq`
+- `replay_hash`
+
+This keeps worker-offload incident drills replayable and lets pilot telemetry
+point back to the concrete cancellation/drain/finalize transition that
+actually failed.

@@ -154,6 +154,33 @@
       }
     },
     {
+      "lane_id": "wasm-browser-vnext-surfaces",
+      "title": "Browser Edition vNext surface certification lane",
+      "owner": "wasm-runtime",
+      "required_job_ids": ["check"],
+      "required_step_names": [
+        "WASM browser vNext surface certification"
+      ],
+      "required_artifact_names": [
+        "wasm-browser-vnext-surface-certification"
+      ],
+      "replay_command": "python3 scripts/run_browser_onboarding_checks.py --scenario worker --dry-run --out-dir artifacts/onboarding_vnext && rch exec -- bash -lc 'set -euo pipefail; cargo test -p asupersync --test wasm_browser_feasibility_matrix -- --nocapture; cargo test -p asupersync --test wasm_js_exports_coverage_contract -- --nocapture; cargo test -p asupersync --test wasm_rust_browser_example_contract -- --nocapture; cargo test -p asupersync --test wasm_pilot_observability_contract -- --nocapture'",
+      "require_rch": true,
+      "rch_required_step_names": [
+        "WASM browser vNext surface certification"
+      ],
+      "failure_taxonomy": [
+        "rch_routing_violation",
+        "vnext_surface_matrix_drift",
+        "worker_support_regression",
+        "preview_lane_contract_regression"
+      ],
+      "thresholds": {
+        "max_failures": 0,
+        "required_artifacts_min": 1
+      }
+    },
+    {
       "lane_id": "wasm-certification",
       "title": "WASM certification cargo-test lane",
       "owner": "wasm-runtime",

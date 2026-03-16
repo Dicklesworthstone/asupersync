@@ -97,6 +97,73 @@ Rules for migration guidance:
   the shipped product, while service/shared workers, SAB-based parallelism, and
   native-only surfaces remain deferred or unsupported.
 
+### Decision Guide For Rust Authors
+
+Use this table to choose the correct lane before writing browser-facing Rust.
+
+| Situation | Recommended lane | Why |
+|---|---|---|
+| You need a shipped browser SDK for application code today | Start from `@asupersync/browser`, `@asupersync/react`, or `@asupersync/next` | These are the public Browser Edition product surfaces; they own the supported runtime diagnostics and packaging story |
+| You need to prove the semantic core still closes under browser cfg/profile rules | Run the canonical `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` commands against `asupersync` | This validates wasm-safe semantic closure without claiming a public Rust browser bootstrap API |
+| You maintain the wasm ABI/package boundary inside this repository | Work in `asupersync-browser-core` or `asupersync-wasm` | These crates are the Rust-side binding/export infrastructure for the JS/TS packages, not the end-user browser SDK |
+| You need the maintained Rust-authored browser example that the tree actually proves | Use `tests/fixtures/rust-browser-consumer/` plus `scripts/validate_rust_browser_consumer.sh` | This is the truthful current Rust-authored browser workflow: an in-repo fixture with deterministic validation, not general external `RuntimeBuilder` parity |
+| You need service/shared workers, cross-origin-isolated `SharedArrayBuffer` parallelism, or native-only modules | Do not start from the Rust-authored browser lane | Those surfaces are deferred, guarded optional, bridge-only, or explicit non-goals today |
+
+### Maintained Repository Workflow For Rust-Authored Browser Consumers
+
+The current supported Rust-authored browser workflow is the repository-maintained
+fixture at `tests/fixtures/rust-browser-consumer/`. It proves that the tree can
+build and run a browser-facing Rust-authored wasm package layout while keeping
+the scope honest:
+
+- it uses the existing wasm dispatcher/provider helpers rather than inventing a
+  new public browser `RuntimeBuilder` story
+- it proves lifecycle semantics through a real browser run (`ready` ->
+  `disposed`, one completed task, one cancellation on unmount)
+- it does **not** widen the public contract beyond what `docs/WASM.md`,
+  `tests/wasm_browser_feasibility_matrix.rs`, and
+  `tests/wasm_rust_browser_example_contract.rs` already enforce
+
+Supported and unsupported contexts for this workflow:
+
+| Context / surface | Status for Rust-authored guidance | What to do |
+|---|---|---|
+| Browser main thread with `window`, `document`, and `WebAssembly` | Maintained repository workflow | Use the fixture pattern and validate it with `scripts/validate_rust_browser_consumer.sh` |
+| Dedicated worker | Supported for the shipped JS/TS Browser Edition, but not yet the maintained Rust fixture | Treat dedicated-worker Rust authoring as future follow-on work; if you need it today, use the JS/TS package lane that already validates `DedicatedWorkerGlobalScope` |
+| Service worker / shared worker | Deferred / not shipped | Keep them on explicit message/data boundaries until host contracts and docs are promoted together |
+| Next.js server components, route handlers, edge runtimes, or plain Node.js | Bridge-only or native-only | Keep direct runtime creation in the browser/client boundary and move Rust server logic behind explicit RPC/API seams |
+| `SharedArrayBuffer` worker pools / multi-threaded WASM | Guarded optional, not shipped | Do not treat SAB-based parallelism as a default migration target |
+| Native-only modules (`fs`, `process`, `signal`, native DB clients, native transports) | Non-goal for browser runtime | Keep these on native/server lanes and cross the boundary with explicit bridges |
+
+Canonical validation command:
+
+```bash
+PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh
+```
+
+Expected evidence bundle:
+
+- `target/e2e-results/rust_browser_consumer/<timestamp>/consumer_build.log`
+- `target/e2e-results/rust_browser_consumer/<timestamp>/browser-run.json`
+- `target/e2e-results/rust_browser_consumer/<timestamp>/summary.json`
+
+The validation is only considered healthy when the browser-run report confirms:
+
+- `scenario_id = "RUST-BROWSER-CONSUMER"`
+- `support_lane = "repository_maintained_rust_browser_fixture"`
+- `ready_phase = "ready"` and `disposed_phase = "disposed"`
+- `completed_task_outcome = "ok"`
+- `cancel_event_count = 1`
+- browser capabilities show `has_window`, `has_document`, and `has_webassembly`
+
+Migration rule of thumb:
+
+- if you want a shipped product surface, use the JS/TS packages
+- if you want to keep the Rust-authored lane honest inside this repository, use
+  the maintained fixture and its validation script
+- if you need runtime authority outside a browser main-thread page, move that
+  logic to a bridge/native lane instead of stretching the Rust browser contract
+
 ## Release Channel Workflow (WASM-14 / `asupersync-umelq.15.3`)
 
 Browser onboarding and migration should flow through the release-channel
@@ -109,8 +176,19 @@ Canonical policy:
 Channel model:
 
 1. `nightly` (`wasm-browser-dev`) for rapid iteration,
-2. `canary` (`wasm-browser-canary`) for pre-stable validation,
-3. `stable` (`wasm-browser-release`) only after all release gates pass.
+2. `canary` (policy label carried by the release process, typically validated
+   with `wasm-browser-prod`) for pre-stable validation,
+3. `stable` (policy label, not a Cargo feature) only after the
+   `wasm-browser-prod` lane plus the required deterministic/minimal evidence
+   lanes and release gates all pass.
+
+Important:
+
+- `wasm-browser-canary` and `wasm-browser-release` are **not** Cargo feature
+  names in this repository.
+- The canonical browser feature flags remain exactly:
+  `wasm-browser-minimal`, `wasm-browser-dev`, `wasm-browser-prod`, and
+  `wasm-browser-deterministic`.
 
 Minimum gate bundle before promotion:
 
@@ -139,6 +217,15 @@ rch exec -- cargo check --target wasm32-unknown-unknown \
 
 If any release-blocking gate fails, treat as promotion-blocking and follow the
 demotion/rollback sequence in `docs/wasm_release_channel_strategy.md`.
+
+Rust-author quick rule:
+
+- use `wasm-browser-dev` while iterating on the repository-maintained Rust
+  browser fixture or ABI crates,
+- use `wasm-browser-prod` when validating the browser package boundary you
+  intend to promote,
+- keep `wasm-browser-deterministic` and `wasm-browser-minimal` as evidence
+  lanes, not as ad hoc replacement feature names for canary/stable.
 
 ## Workspace Slicing Checkpoint (WASM-02 / `asupersync-umelq.3.4`)
 
@@ -313,6 +400,38 @@ Known failure signature and remediation:
 - Immediate action: treat this as a blocker for Next onboarding, capture
   `artifacts/onboarding/next.wasm_profile_check.log`, and route fix through the
   wasm profile/dependency closure beads before retrying this flow.
+
+### Flow D: Maintained Rust Browser Fixture
+
+Goal: validate the repository-maintained Rust-authored browser workflow without
+claiming a general external Rust browser SDK.
+
+Reference surfaces:
+
+- `tests/fixtures/rust-browser-consumer/README.md`
+- `tests/wasm_rust_browser_example_contract.rs`
+- `scripts/validate_rust_browser_consumer.sh`
+
+```bash
+PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh
+```
+
+Expected outcomes:
+
+- the nested Rust crate builds through `wasm-pack` with cargo execution routed
+  through `rch exec -- ...`
+- the staged Vite bundle contains both JavaScript and `.wasm` assets
+- the browser-run report records `scenario_id = "RUST-BROWSER-CONSUMER"`
+- the support lane is `repository_maintained_rust_browser_fixture`
+- the run reaches `ready` before unmount and `disposed` after unmount
+- exactly one cancellation event is emitted during teardown and the completed
+  task reports `ok`
+
+Expected artifacts:
+
+- `target/e2e-results/rust_browser_consumer/<timestamp>/consumer_build.log`
+- `target/e2e-results/rust_browser_consumer/<timestamp>/browser-run.json`
+- `target/e2e-results/rust_browser_consumer/<timestamp>/summary.json`
 
 ## Migration Guides
 

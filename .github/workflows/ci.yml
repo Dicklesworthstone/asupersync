@@ -311,6 +311,81 @@ jobs:
           path: target/e2e-results/wasm_qa_evidence_smoke/*/summary.json
           retention-days: 30
 
+      - name: WASM browser vNext surface certification
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts artifacts/onboarding_vnext
+          python3 scripts/run_browser_onboarding_checks.py \
+            --scenario worker \
+            --dry-run \
+            --out-dir artifacts/onboarding_vnext
+          RCH_BIN="${HOME}/.local/bin/rch"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for WASM browser vNext surface certification" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- bash -lc 'set -euo pipefail; cargo test -p asupersync --test wasm_browser_feasibility_matrix -- --nocapture; cargo test -p asupersync --test wasm_js_exports_coverage_contract -- --nocapture; cargo test -p asupersync --test wasm_rust_browser_example_contract -- --nocapture; cargo test -p asupersync --test wasm_pilot_observability_contract -- --nocapture' | tee artifacts/wasm_browser_vnext_surface_test.log
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          summary = {
+              "schema_version": "wasm-browser-vnext-surface-certification-v1",
+              "workflow": ".github/workflows/ci.yml",
+              "step_name": "WASM browser vNext surface certification",
+              "summary_artifact": "artifacts/wasm_browser_vnext_surface_summary.json",
+              "log_artifact": "artifacts/wasm_browser_vnext_surface_test.log",
+              "worker_onboarding_artifacts": [
+                  "artifacts/onboarding_vnext/worker.ndjson",
+                  "artifacts/onboarding_vnext/worker.summary.json",
+              ],
+              "test_targets": [
+                  "wasm_browser_feasibility_matrix",
+                  "wasm_js_exports_coverage_contract",
+                  "wasm_rust_browser_example_contract",
+                  "wasm_pilot_observability_contract",
+              ],
+              "surface_matrix": [
+                  {
+                      "surface": "Dedicated worker direct runtime",
+                      "support_level": "direct_runtime_supported",
+                  },
+                  {
+                      "surface": "Durable storage + artifact persistence",
+                      "support_level": "direct_runtime_supported_with_explicit_browser_limits",
+                  },
+                  {
+                      "surface": "Rust-authored browser path",
+                      "support_level": "preview_only_repository_maintained",
+                  },
+                  {
+                      "surface": "WebTransport guarded lane",
+                      "support_level": "guarded_direct_runtime_support",
+                  },
+                  {
+                      "surface": "Worker offload / guarded parallel preview lane",
+                      "support_level": "guarded_preview_only",
+                  },
+              ],
+              "replay_command": "python3 scripts/run_browser_onboarding_checks.py --scenario worker --dry-run --out-dir artifacts/onboarding_vnext && rch exec -- bash -lc 'set -euo pipefail; cargo test -p asupersync --test wasm_browser_feasibility_matrix -- --nocapture; cargo test -p asupersync --test wasm_js_exports_coverage_contract -- --nocapture; cargo test -p asupersync --test wasm_rust_browser_example_contract -- --nocapture; cargo test -p asupersync --test wasm_pilot_observability_contract -- --nocapture'",
+          }
+          Path("artifacts/wasm_browser_vnext_surface_summary.json").write_text(
+              json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+          )
+          PY
+
+      - name: Upload WASM browser vNext surface certification artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-browser-vnext-surface-certification
+          path: |
+            artifacts/wasm_browser_vnext_surface_summary.json
+            artifacts/wasm_browser_vnext_surface_test.log
+            artifacts/onboarding_vnext/*.ndjson
+            artifacts/onboarding_vnext/*.summary.json
+          retention-days: 30
+
       - name: WASM bundler compatibility certification
         run: |
           set -euo pipefail

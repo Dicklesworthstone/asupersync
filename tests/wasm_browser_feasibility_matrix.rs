@@ -402,6 +402,23 @@ fn web_transport_is_capability_gated_in_public_packages() {
 }
 
 #[test]
+fn web_transport_docs_name_fetch_and_websocket_fallbacks() {
+    let wasm_doc = read_file("docs/WASM.md");
+    assert!(
+        wasm_doc.contains("fall back to `WebSocket` or `fetch`"),
+        "docs/WASM.md must name WebSocket/fetch fallback for WebTransport"
+    );
+
+    let troubleshooting = read_file("docs/wasm_troubleshooting_compendium.md");
+    assert!(
+        troubleshooting.contains(
+            "WebTransport reports unsupported/runtime-denied or session/datagram setup fails"
+        ) && troubleshooting.contains("fall back to `WebSocket` or `fetch`"),
+        "troubleshooting compendium must carry WebTransport fallback guidance"
+    );
+}
+
+#[test]
 fn browser_stream_bridge_exists_as_substrate() {
     // Evidence: src/io/browser_stream.rs bridges WHATWG
     // ReadableStream/WritableStream to Asupersync AsyncRead/AsyncWrite.
@@ -518,11 +535,11 @@ fn known_contradictions_are_tracked() {
         "IndexedDB BrowserStorage surface should now be shipped"
     );
 
-    // Contradiction 2: MessagePort and BroadcastChannel have reactor
-    // bindings but no public package API.
+    // Boundary 2: MessagePort and BroadcastChannel remain intentionally
+    // outside the public browser SDK even though the substrate exists.
     assert!(
         !browser_src.contains("MessagePort") && !browser_src.contains("BroadcastChannel"),
-        "When MessagePort/BroadcastChannel are shipped, update this test"
+        "public browser SDK must not silently export MessagePort/BroadcastChannel"
     );
 
     // Resolved contradiction 3: localStorage host backend is now elevated
@@ -538,6 +555,71 @@ fn known_contradictions_are_tracked() {
         !browser_src.contains("ReadableStream") && !browser_src.contains("WritableStream"),
         "When WHATWG stream bridges are shipped, update this test"
     );
+}
+
+#[test]
+fn messaging_surfaces_remain_public_sdk_unshipped_but_explicitly_documented() {
+    let browser_src = read_file("packages/browser/src/index.ts");
+    assert!(
+        !browser_src.contains("MessageChannel")
+            && !browser_src.contains("MessagePort")
+            && !browser_src.contains("BroadcastChannel"),
+        "browser SDK must not silently export browser-native messaging APIs"
+    );
+
+    let wasm_doc = read_file("docs/WASM.md");
+    for marker in [
+        "Browser-native messaging surfaces (`MessageChannel`, `MessagePort`, `BroadcastChannel`)",
+        "Direct-runtime feasible but not yet shipped as public Browser Edition APIs",
+        "bootstrap a Browser Edition runtime inside a dedicated worker",
+        "keep `MessageChannel` / `BroadcastChannel` at the application boundary",
+        "use bridge-only adapters",
+    ] {
+        assert!(
+            wasm_doc.contains(marker),
+            "docs/WASM.md must preserve messaging boundary marker: {marker}"
+        );
+    }
+
+    let census_doc = read_file("docs/wasm_api_surface_census.md");
+    for marker in [
+        "Browser-native messaging surfaces (`MessageChannel`, `MessagePort`, `BroadcastChannel`)",
+        "Direct-runtime feasible substrate, not yet shipped as public Browser Edition APIs",
+        "direct off-main-thread execution belongs in a dedicated worker runtime",
+    ] {
+        assert!(
+            census_doc.contains(marker),
+            "wasm_api_surface_census.md must preserve messaging boundary marker: {marker}"
+        );
+    }
+
+    let troubleshooting = read_file("docs/wasm_troubleshooting_compendium.md");
+    for marker in [
+        "`MessageChannel` / `MessagePort` / `BroadcastChannel` expected as public Browser Edition APIs, but nothing is exported",
+        "dedicated-worker direct-runtime support",
+        "same-origin app coordination",
+        "bridge-only adapters",
+    ] {
+        assert!(
+            troubleshooting.contains(marker),
+            "troubleshooting compendium must preserve messaging fallback marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn messaging_host_bindings_have_targeted_error_path_coverage() {
+    let reactor_src = read_file("src/runtime/reactor/browser.rs");
+    for marker in [
+        "browser_reactor_message_port_interest_validation_accepts_readable_and_error",
+        "browser_reactor_message_port_interest_validation_rejects_empty_interest",
+        "browser_reactor_broadcast_channel_interest_validation_rejects_writable_flags",
+    ] {
+        assert!(
+            reactor_src.contains(marker),
+            "browser reactor must preserve messaging coverage marker: {marker}"
+        );
+    }
 }
 
 // ══════════════════════════════════════════════════════════════════════

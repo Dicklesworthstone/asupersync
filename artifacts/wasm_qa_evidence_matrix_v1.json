@@ -1,6 +1,9 @@
 {
   "contract_version": "wasm-qa-evidence-matrix-v1",
   "bead_id": "asupersync-3qv04.8.1",
+  "extension_beads": [
+    "asupersync-1ky3w.1"
+  ],
   "runner_bundle_schema_version": "wasm-qa-evidence-smoke-bundle-v1",
   "runner_report_schema_version": "wasm-qa-evidence-smoke-run-report-v1",
   "artifact_bundle_schema_version": "wasm-qa-artifact-bundle-v1",
@@ -26,6 +29,74 @@
     ]
   },
   "runner_script": "scripts/run_wasm_qa_evidence_smoke.sh",
+  "vnext_surface_matrix": [
+    {
+      "surface_id": "dedicated_worker_direct_runtime",
+      "support_level": "direct_runtime_supported",
+      "ci_or_release_lane": "wasm-browser-vnext-surfaces",
+      "required_evidence": [
+        "python3 scripts/run_browser_onboarding_checks.py --scenario worker --dry-run --out-dir artifacts/onboarding_vnext",
+        "cargo test -p asupersync --test wasm_browser_feasibility_matrix -- --nocapture",
+        "cargo test -p asupersync --test wasm_js_exports_coverage_contract -- --nocapture",
+        "PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh"
+      ],
+      "fail_closed_rule": "Demote dedicated-worker support to canary or unsupported when onboarding, matrix, or fixture evidence drifts."
+    },
+    {
+      "surface_id": "durable_storage_artifact_persistence",
+      "support_level": "direct_runtime_supported_with_explicit_browser_limits",
+      "ci_or_release_lane": "wasm-browser-vnext-surfaces",
+      "required_evidence": [
+        "cargo test -p asupersync --test wasm_browser_feasibility_matrix -- --nocapture",
+        "cargo test -p asupersync --test wasm_js_exports_coverage_contract -- --nocapture",
+        "PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh",
+        "PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh"
+      ],
+      "fail_closed_rule": "Remove durable browser persistence claims and fall back to explicit export or cleanup guidance on regression."
+    },
+    {
+      "surface_id": "rust_authored_browser_path",
+      "support_level": "preview_only_repository_maintained",
+      "ci_or_release_lane": "wasm-browser-vnext-surfaces + wasm-ga-readiness-review-board",
+      "required_evidence": [
+        "cargo test -p asupersync --test wasm_rust_browser_example_contract -- --nocapture",
+        "PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh",
+        "docs/wasm_quickstart_migration.md"
+      ],
+      "fail_closed_rule": "Keep the Rust-authored browser lane preview-only until a public Rust-callable browser builder exists."
+    },
+    {
+      "surface_id": "guarded_webtransport_lane",
+      "support_level": "guarded_direct_runtime_support",
+      "ci_or_release_lane": "wasm-browser-vnext-surfaces + wasm-launch-rollout-support-stabilization",
+      "required_evidence": [
+        "cargo test -p asupersync --test wasm_browser_feasibility_matrix -- --nocapture",
+        "cargo test -p asupersync --test wasm_js_exports_coverage_contract -- --nocapture",
+        "docs/WASM.md",
+        "docs/wasm_troubleshooting_compendium.md"
+      ],
+      "fail_closed_rule": "Demote WebTransport to preview-only and require fetch or WebSocket fallback guidance when capability or docs drift."
+    },
+    {
+      "surface_id": "worker_offload_parallel_preview",
+      "support_level": "guarded_preview_only",
+      "ci_or_release_lane": "wasm-browser-vnext-surfaces",
+      "required_evidence": [
+        "cargo test -p asupersync --test wasm_pilot_observability_contract -- --nocapture",
+        "docs/wasm_browser_scheduler_semantics.md",
+        "docs/wasm_pilot_observability_contract.md"
+      ],
+      "fail_closed_rule": "Keep worker offload preview-only and fail closed on missing cancel, drain, finalize, or replay observability evidence."
+    }
+  ],
+  "certification_lane": {
+    "lane_id": "wasm-browser-vnext-surfaces",
+    "workflow_step_name": "WASM browser vNext surface certification",
+    "artifact_name": "wasm-browser-vnext-surface-certification",
+    "summary_artifact": "artifacts/wasm_browser_vnext_surface_summary.json",
+    "log_artifact": "artifacts/wasm_browser_vnext_surface_test.log",
+    "replay_command": "python3 scripts/run_browser_onboarding_checks.py --scenario worker --dry-run --out-dir artifacts/onboarding_vnext && rch exec -- bash -lc 'set -euo pipefail; cargo test -p asupersync --test wasm_browser_feasibility_matrix -- --nocapture; cargo test -p asupersync --test wasm_js_exports_coverage_contract -- --nocapture; cargo test -p asupersync --test wasm_rust_browser_example_contract -- --nocapture; cargo test -p asupersync --test wasm_pilot_observability_contract -- --nocapture'"
+  },
   "evidence_layers": [
     {
       "layer_id": "L1",

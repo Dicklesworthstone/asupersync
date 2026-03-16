@@ -22,9 +22,9 @@ use asupersync::trace::distributed::{
     CausalOrder, CausalTracker, LamportClock, LamportTime, LogicalTime, VectorClock,
 };
 use asupersync::trace::event::{
-    BROWSER_TRACE_SCHEMA_VERSION, TRACE_EVENT_SCHEMA_VERSION, TraceData, TraceEvent,
-    TraceEventKind, browser_trace_log_fields, browser_trace_schema_v1, decode_browser_trace_schema,
-    redact_browser_trace_event, validate_browser_trace_schema,
+    BROWSER_TRACE_SCHEMA_VERSION, BrowserTraceCategory, TRACE_EVENT_SCHEMA_VERSION, TraceData,
+    TraceEvent, TraceEventKind, browser_trace_log_fields, browser_trace_schema_v1,
+    decode_browser_trace_schema, redact_browser_trace_event, validate_browser_trace_schema,
 };
 use asupersync::trace::replay::{
     CompactRegionId, CompactTaskId, REPLAY_SCHEMA_VERSION, ReplayEvent, ReplayTrace, TraceMetadata,
@@ -295,6 +295,36 @@ fn browser_trace_redaction_and_log_fields_are_deterministic() {
     );
     assert_eq!(fields.get("event_kind"), Some(&"user_trace".to_string()));
     assert_eq!(fields.get("validation_status"), Some(&"valid".to_string()));
+}
+
+#[test]
+fn browser_trace_schema_includes_worker_offload_lifecycle_events() {
+    init_test_logging();
+    let schema = browser_trace_schema_v1();
+    for event_kind in [
+        "worker_cancel_requested",
+        "worker_cancel_acknowledged",
+        "worker_drain_started",
+        "worker_drain_completed",
+        "worker_finalize_completed",
+    ] {
+        let entry = schema
+            .event_specs
+            .iter()
+            .find(|entry| entry.event_kind == event_kind)
+            .unwrap_or_else(|| panic!("missing worker offload event spec: {event_kind}"));
+        assert_eq!(entry.category, BrowserTraceCategory::CancellationTransition);
+        assert_eq!(
+            entry.required_fields,
+            vec![
+                "job_id".to_string(),
+                "obligation".to_string(),
+                "region".to_string(),
+                "task".to_string(),
+                "worker_id".to_string(),
+            ]
+        );
+    }
 }
 
 // ============================================================================

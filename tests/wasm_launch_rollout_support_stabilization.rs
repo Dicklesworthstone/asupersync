@@ -120,6 +120,37 @@ fn rollout_doc_maps_browser_release_bundle_into_launch_requirements() {
 }
 
 #[test]
+fn rollout_doc_defines_vnext_surface_stage_ceilings() {
+    let doc = load_doc();
+    for token in [
+        "## Surface-Specific Rollout Floors and Ceilings",
+        "Dedicated Web Worker",
+        "IndexedDB durable storage + `BrowserArtifactStore`",
+        "Rust-authored browser path",
+        "`WebTransport` datagrams",
+        "MessageChannel",
+        "SharedArrayBuffer",
+        "L0_INTERNAL",
+        "L1_PILOT",
+        "L2_CANARY",
+        "L3_GA",
+        "preview_only",
+        "guarded canary-only",
+        "nightly-only",
+        "target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json",
+        "target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json",
+        "target/e2e-results/rust_browser_consumer/<timestamp>/summary.json",
+        "LR-06",
+        "LR-07",
+    ] {
+        assert!(
+            doc.contains(token),
+            "rollout doc missing vNext surface stage token: {token}"
+        );
+    }
+}
+
+#[test]
 fn rollout_doc_defines_stages_guardrails_and_comm_obligations() {
     let doc = load_doc();
     for token in [

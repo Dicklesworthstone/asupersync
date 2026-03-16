@@ -120,6 +120,38 @@ fn checklist_doc_maps_current_browser_release_evidence_lineage() {
 }
 
 #[test]
+fn checklist_doc_requires_vnext_surface_review_rows() {
+    let doc = load_checklist_doc();
+    for token in [
+        "## VNext Surface Review Rows",
+        "VT-DW-01",
+        "VT-STORAGE-01",
+        "VT-RUST-01",
+        "VT-WT-01",
+        "VT-MSG-01",
+        "VT-SAB-01",
+        "Dedicated Web Worker",
+        "IndexedDB",
+        "BrowserArtifactStore",
+        "Rust-authored browser path",
+        "WebTransport",
+        "MessageChannel",
+        "SharedArrayBuffer",
+        "preview_only",
+        "guarded canary-only",
+        "nightly-only",
+        "target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json",
+        "target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json",
+        "target/e2e-results/rust_browser_consumer/<timestamp>/summary.json",
+    ] {
+        assert!(
+            doc.contains(token),
+            "checklist doc missing vNext surface review token: {token}"
+        );
+    }
+}
+
+#[test]
 fn checklist_doc_defines_mandatory_evidence_fields() {
     let doc = load_checklist_doc();
     let required_fields = [

@@ -102,6 +102,21 @@ Current rule of thumb:
   validate browser-safe semantic-core closure, not as a guarantee of native
   `RuntimeBuilder` parity on `wasm32`.
 
+### Practical lane selection for Rust authors
+
+If you are touching browser-facing Rust today, choose one of these concrete
+lanes and avoid blending them together:
+
+| Need | Use | Live-tree evidence |
+|---|---|---|
+| Prove that the semantic core still closes under browser-safe cfg/profile rules | `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` against `asupersync` | root `Cargo.toml`, `src/lib.rs`, `tests/wasm_browser_feasibility_matrix.rs` |
+| Maintain the Rust-side ABI/package boundary that feeds the JS/TS Browser Edition packages | `rch exec -- cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features dev` or `rch exec -- cargo check --manifest-path asupersync-wasm/Cargo.toml --target wasm32-unknown-unknown --no-default-features --features dev` | `asupersync-browser-core/Cargo.toml`, `asupersync-browser-core/src/lib.rs`, `asupersync-wasm/Cargo.toml`, `asupersync-wasm/src/lib.rs` |
+| Validate the maintained browser-facing Rust example that the repository actually proves end-to-end | `PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh` | `tests/fixtures/rust-browser-consumer/`, `scripts/validate_rust_browser_consumer.sh`, `tests/wasm_rust_browser_example_contract.rs` |
+| Build a browser app that constructs Browser Edition runtimes directly from external Rust consumer code | Not yet a public supported lane | `src/runtime/builder.rs` still has no public wasm/browser runtime constructor; use the JS/TS Browser Edition packages or an explicit bridge instead |
+
+For the command-first version of this workflow, see
+`docs/wasm_quickstart_migration.md`.
+
 ## Authoritative Support Matrix (live tree)
 
 This section is the canonical browser-feasibility classification for the
@@ -139,10 +154,11 @@ The shipped JS/TS diagnostics expose this matrix directly:
 | `IndexedDB` durable storage | Direct-runtime supported in `@asupersync/browser` on browser main thread and dedicated workers | `src/io/cap.rs`, `src/io/browser_storage.rs`, `packages/browser/src/index.ts` | Rust `IndexedDbHostBackend` host backend is complete; the public JS/TS surface adds blocked-open/quota/transaction diagnostics |
 | `localStorage` host-backed storage substrate | Guarded package-level support in `@asupersync/browser` on browser main thread | `src/io/browser_storage.rs`, `packages/browser/src/index.ts` | Exposed as an explicit backend, but intentionally remains non-worker and less durable than IndexedDB |
 | Browser-hosted trace / crash / evidence artifacts | Direct-runtime supported through explicit `BrowserArtifactStore` export flows | `packages/browser/src/index.ts` | Persisted artifacts are opt-in, quota-bounded, retained through explicit policy, exportable via `exportArtifact()` / `exportArchive()`, and directly downloadable only on the browser main thread |
-| Browser-native transport: `WebTransport` datagrams | Guarded direct-runtime support | `src/io/cap.rs`, `packages/browser-core/index.js`, `packages/browser-core/index.d.ts`, `packages/browser/src/index.ts` | Shipped as an explicit, capability-gated datagram lane when the browser exposes `globalThis.WebTransport`; this does not imply raw-socket parity |
+| Browser-native transport: `WebTransport` datagrams | Guarded direct-runtime support | `src/io/cap.rs`, `packages/browser-core/index.js`, `packages/browser-core/index.d.ts`, `packages/browser/src/index.ts` | Shipped as an explicit, capability-gated datagram lane when the browser exposes `globalThis.WebTransport`; this does not imply raw-socket parity. Fall back to `WebSocket` or `fetch` when the browser/runtime lacks WebTransport support or rejects the session. |
+| Browser-native messaging surfaces (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | Direct-runtime feasible but not yet shipped as public Browser Edition APIs | `src/io/cap.rs`, `src/runtime/reactor/browser.rs` | The Rust/browser substrate models explicit authority for these surfaces and the reactor wires `MessagePort` / `BroadcastChannel`, but `@asupersync/browser` intentionally does not export them yet. For direct off-main-thread execution, bootstrap a Browser Edition runtime inside a dedicated worker; for same-origin app coordination, keep `MessageChannel` / `BroadcastChannel` at the application boundary; for server/edge boundaries, use bridge-only adapters. |
 | Raw TCP/UDP, Unix sockets, filesystem, process/signal | Impossible for direct browser runtime | `cfg`-gated native surfaces in core/runtime/docs | Must remain bridge-only or unsupported |
 
-### Substrate-only capabilities (Rust layer complete, no public JS/TS API)
+### Other substrate-only capabilities (Rust layer complete, no public JS/TS API)
 
 These items have real Rust implementations but are not yet exposed in the
 `@asupersync/browser` or `@asupersync/browser-core` public packages.
@@ -150,9 +166,6 @@ Follow-on beads should decide whether to ship, defer, or remove each one.
 
 | Surface | Rust evidence | Gap | Follow-on |
 |---|---|---|---|
-| `MessagePort` reactor binding | `src/runtime/reactor/browser.rs` — `register_message_port()` with `onmessage`/`onmessageerror` handlers | No public API; reactor-internal only | `asupersync-1n453.1` |
-| `BroadcastChannel` reactor binding | `src/runtime/reactor/browser.rs` — `register_broadcast_channel()` with `onmessage`/`onmessageerror` handlers | No public API; reactor-internal only | `asupersync-1n453.3` |
-| `MessageChannel` capability model | `src/io/cap.rs` — modeled in config | No host backend, no JS/TS API | `asupersync-1n453.3` |
 | WHATWG `ReadableStream`/`WritableStream` bridge | `src/io/browser_stream.rs` — maps WHATWG Streams to Asupersync `AsyncRead`/`AsyncWrite` with cancel semantics | No public JS/TS API; substrate-only | Future bead |
 | Storage policy/capability layer | `src/io/cap.rs` — `StorageConsistencyPolicy`, `StorageIoCap`, `StorageBackend` enum, policy validation for namespace/size/consistency | Complete but only used internally by host backends | Part of `asupersync-3ak5y` |
 
@@ -179,11 +192,16 @@ download helpers to browser main-thread DOM runtimes.
    The remaining gap is maintained onboarding/example coverage rather than
    runtime support semantics. **Follow-on:** `asupersync-2w5tu`.
 
-2. **MessagePort/BroadcastChannel: reactor wired, no public API.**
-   `src/runtime/reactor/browser.rs` has real `register_message_port()`
-   and `register_broadcast_channel()` implementations with `wasm_bindgen`
-   closure attachment. The public package surface has no corresponding
-   exports. **Follow-on:** `asupersync-1n453.1`, `asupersync-1n453.3`.
+2. **Browser-native messaging surfaces are explicitly bounded, not silently
+   shipped.** `src/io/cap.rs` grants explicit authority for
+   `MessageChannel`, `MessagePort`, and `BroadcastChannel`, and
+   `src/runtime/reactor/browser.rs` wires `register_message_port()` /
+   `register_broadcast_channel()` to real host listeners. The public package
+   contract is still "no direct JS/TS messaging API yet": use dedicated-worker
+   runtime bootstrap for direct off-main-thread execution, keep same-origin
+   `MessageChannel` / `BroadcastChannel` usage at the application boundary,
+   and use bridge-only adapters when the hop leaves the browser runtime
+   boundary. Future public promotion should be deliberate, not inferred.
 
 3. **Browser stream bridge: real implementation, no public surface.**
    `src/io/browser_stream.rs` bridges WHATWG `ReadableStream`/
@@ -210,6 +228,25 @@ tests/wasm_browser_feasibility_matrix.rs
 These tests validate that the four-bucket classification matches the live
 tree. If a contradiction is resolved (e.g. IndexedDB ships in the browser
 package), the corresponding test assertion must be updated.
+
+### Host-capability fallback rules
+
+1. **WebTransport is optional, not ambient.**
+   When `globalThis.WebTransport` is absent, the runtime is not HTTPS-backed,
+   or the browser rejects the session/datagram setup, treat that as a guarded
+   lane denial and fall back to `WebSocket` or `fetch`. Do not widen the
+   direct-runtime support claim just because a particular browser exposes a
+   partial constructor.
+2. **Browser-native messaging is a substrate boundary today, not a public SDK
+   lane.**
+   If you need direct off-main-thread runtime execution, start the runtime
+   inside a dedicated worker. If you need same-origin coordination between UI
+   and worker/browser contexts, keep `MessageChannel`, `MessagePort`,
+   `BroadcastChannel`, or `postMessage()` at the application boundary and pass
+   serialized data into Asupersync-owned scopes/tasks. If the hop leaves the
+   browser runtime boundary entirely (server, edge, Node, another process),
+   use an explicit bridge-only adapter instead of pretending the browser SDK
+   exports a native messaging transport.
 
 ## Maintainer Admission Rule For New Browser Surfaces
 

@@ -1,10 +1,19 @@
 # WASM QA Evidence Matrix Contract
 
-Beads: `asupersync-3qv04.8.1`, `asupersync-3qv04.8.4.4`
+Beads: `asupersync-3qv04.8.1`, `asupersync-3qv04.8.4.4`, `asupersync-1ky3w.1`
 
 ## Purpose
 
 This contract defines the required evidence matrix for Browser Edition quality assurance. Every implementation bead in the WASM track must satisfy specific evidence requirements before calling itself done. The matrix covers Rust cfg/feature gating, exported ABI handle safety, JS/TS type surface behavior, browser host-bridge correctness, framework adapter lifecycle, bundled-package installability, cross-browser execution, and failure forensics.
+
+It also names the newer browser vNext surfaces explicitly so they do not rely on
+implicit coverage or tribal memory:
+
+1. dedicated-worker direct runtime,
+2. durable storage plus artifact persistence,
+3. the repository-maintained Rust-authored browser lane,
+4. guarded WebTransport support,
+5. guarded worker-offload / parallel preview lanes.
 
 ## Contract Artifacts
 
@@ -12,6 +21,7 @@ This contract defines the required evidence matrix for Browser Edition quality a
 2. Comparator-smoke runner: `scripts/run_wasm_qa_evidence_smoke.sh`
 3. Invariant suite: `tests/wasm_qa_evidence_matrix_contract.rs`
 4. Compile-invariant harness: `tests/wasm_cfg_compile_invariants.rs`
+5. vNext certification summary: `artifacts/wasm_browser_vnext_surface_summary.json`
 
 ## Evidence Layers
 
@@ -107,6 +117,39 @@ Failures must produce diagnosable artifacts with exact repro commands.
 | L8-WASM-VERSION | wasm module version and build hash in logs | structured log |
 | L8-REPRO-COMMAND | Every failure log includes a runnable repro command | log schema |
 | L8-ARTIFACT-RETENTION | CI retains failure artifacts for at least 7 days | CI config |
+
+## VNext Surface Matrix
+
+The broad QA layers above remain the foundation, but the newer browser vNext
+surfaces must also be named directly in the matrix so CI and release policy stay
+honest about what is shipped, guarded, preview-only, or still intentionally
+deferred.
+
+| Surface | Support level | Required evidence anchors | Current CI or release lane | Fail-closed rule |
+|---------|---------------|---------------------------|----------------------------|------------------|
+| Dedicated-worker direct runtime | Direct-runtime supported | `python3 scripts/run_browser_onboarding_checks.py --scenario worker --dry-run --out-dir artifacts/onboarding_vnext`, `tests/wasm_browser_feasibility_matrix.rs`, `tests/wasm_js_exports_coverage_contract.rs`, `scripts/validate_dedicated_worker_consumer.sh` | explicit CI lane `wasm-browser-vnext-surfaces` plus `wasm-browser-qa-smoke` | Demote worker support to canary or unsupported if onboarding, support-matrix, or consumer-fixture evidence drifts |
+| Durable storage + artifact persistence (`IndexedDB`, `BrowserStorage`, `BrowserArtifactStore`) | Direct-runtime supported with explicit browser limits | `tests/wasm_browser_feasibility_matrix.rs`, `tests/wasm_js_exports_coverage_contract.rs`, `scripts/validate_vite_vanilla_consumer.sh`, `scripts/validate_dedicated_worker_consumer.sh` | explicit CI lane `wasm-browser-vnext-surfaces` plus GA/release readiness packets | Remove durable-persistence claims and fall back to explicit export/cleanup guidance if diagnostics or fixture evidence regresses |
+| Rust-authored browser path | Preview-only / repository-maintained, not public | `tests/wasm_rust_browser_example_contract.rs`, `PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh`, `docs/wasm_quickstart_migration.md` | explicit CI lane `wasm-browser-vnext-surfaces` plus release-lane review in `docs/wasm_ga_readiness_review_board_checklist.md` | Do not promote beyond preview-only while the lane remains a maintained fixture rather than a public Rust browser builder |
+| WebTransport guarded lane | Guarded direct-runtime support | `tests/wasm_browser_feasibility_matrix.rs`, `tests/wasm_js_exports_coverage_contract.rs`, `docs/WASM.md`, `docs/wasm_troubleshooting_compendium.md` | explicit CI lane `wasm-browser-vnext-surfaces` plus release-lane review in `docs/wasm_launch_rollout_support_stabilization.md` | Demote to preview-only and require `WebSocket` / `fetch` fallback guidance if capability or docs drift |
+| Worker offload / guarded parallel preview lane | Guarded preview-only; not default Browser Edition behavior | `tests/wasm_pilot_observability_contract.rs`, `docs/wasm_browser_scheduler_semantics.md`, `docs/wasm_pilot_observability_contract.md` | explicit CI lane `wasm-browser-vnext-surfaces`; final release gating still belongs to `asupersync-2jhnk.5` and downstream policy work | Keep the lane preview-only and fail closed on missing cancel/drain/finalize observability evidence |
+
+## VNext Certification Lane
+
+The vNext matrix above must not stay documentation-only. CI therefore carries an
+explicit certification lane named `wasm-browser-vnext-surfaces` with:
+
+1. worker onboarding dry-run output at `artifacts/onboarding_vnext/`,
+2. a summary artifact at `artifacts/wasm_browser_vnext_surface_summary.json`,
+3. an `rch`-backed contract run over:
+   - `wasm_browser_feasibility_matrix`
+   - `wasm_js_exports_coverage_contract`
+   - `wasm_rust_browser_example_contract`
+   - `wasm_pilot_observability_contract`
+
+This lane exists to keep the vNext surface matrix explicit even while some
+surfaces remain guarded or preview-only. The lane is allowed to prove that a
+surface is intentionally not yet GA; it is not allowed to let that surface
+become invisible.
 
 ## Structured Logging Contract
 
@@ -235,6 +278,8 @@ Focused invariant test command (routed through `rch`):
 ${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa cargo test --test wasm_qa_evidence_matrix_contract -- --nocapture
 ${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-cfg cargo test --test wasm_cfg_compile_invariants wasm_profile_matrix_compile_closure_holds -- --ignored --nocapture
 ${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-cfg cargo test --test wasm_cfg_compile_invariants native_all_targets_backstop_holds -- --ignored --nocapture
+python3 scripts/run_browser_onboarding_checks.py --scenario worker --dry-run --out-dir artifacts/onboarding_vnext
+${RCH_BIN:-rch} exec -- bash -lc 'set -euo pipefail; cargo test -p asupersync --test wasm_browser_feasibility_matrix -- --nocapture; cargo test -p asupersync --test wasm_js_exports_coverage_contract -- --nocapture; cargo test -p asupersync --test wasm_rust_browser_example_contract -- --nocapture; cargo test -p asupersync --test wasm_pilot_observability_contract -- --nocapture'
 ```
 
 ## Cross-References
@@ -247,7 +292,20 @@ ${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-
 - `src/trace/file.rs` -- Native file-trace hotspot
 - `Cargo.toml` -- Feature definitions (wasm-browser-*)
 - `artifacts/wasm_qa_evidence_matrix_v1.json`
+- `artifacts/wasm_browser_vnext_surface_summary.json`
+- `docs/WASM.md`
+- `docs/wasm_browser_scheduler_semantics.md`
+- `docs/wasm_ga_readiness_review_board_checklist.md`
+- `docs/wasm_launch_rollout_support_stabilization.md`
+- `docs/wasm_pilot_observability_contract.md`
+- `docs/wasm_quickstart_migration.md`
+- `docs/wasm_troubleshooting_compendium.md`
 - `scripts/run_all_e2e.sh`
+- `scripts/run_browser_onboarding_checks.py`
 - `scripts/run_wasm_qa_evidence_smoke.sh`
+- `tests/wasm_browser_feasibility_matrix.rs`
+- `tests/wasm_js_exports_coverage_contract.rs`
+- `tests/wasm_pilot_observability_contract.rs`
+- `tests/wasm_rust_browser_example_contract.rs`
 - `tests/wasm_qa_evidence_matrix_contract.rs`
 - `tests/wasm_cfg_compile_invariants.rs`

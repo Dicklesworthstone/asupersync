@@ -118,6 +118,10 @@ The packet must include all fields below:
 14. `unresolved_risks`
 15. `deterministic_replay_commands`
 16. `structured_decision_log_pointer`
+17. `surface_decisions`
+18. `support_bucket_snapshot`
+19. `promotion_ceiling_snapshot`
+20. `surface_evidence_rows`
 
 ## Gate Result Contract
 
@@ -138,6 +142,40 @@ Release-blocking gates for this packet:
 - `GA-REPLAY-01` (deterministic replay readiness)
 - `GA-OPS-01` (rollback/incident playbook readiness)
 - `GA-LOG-01` (structured logging quality)
+- `GA-VNEXT-01` (support-matrix truth for vNext browser surfaces)
+
+## VNext Surface Decision Rows
+
+Every packet must carry explicit decision rows for the new browser surfaces
+rather than implying they inherit the Browser Edition baseline decision.
+
+Required `surface_decisions` rows:
+
+- `Dedicated Web Worker`
+- `IndexedDB durable storage`
+- `BrowserArtifactStore`
+- Rust-authored browser path
+- `WebTransport`
+- `MessageChannel`
+- `MessagePort`
+- `BroadcastChannel`
+- `SharedArrayBuffer`
+- worker offload
+
+Each row must include:
+
+1. `surface_id`
+2. `support_bucket`
+3. `promotion_ceiling`
+4. `requested_channel`
+5. `decision` (`promote`, `hold_preview`, `guarded_only`, `demote`)
+6. `evidence_paths`
+7. `rollback_trigger_ids`
+
+`GA-VNEXT-01` is release-blocking whenever a packet claims a surface above its
+documented ceiling (`preview_only`, `guarded canary-only`, `nightly-only`,
+`bridge-only`, or `impossible`) or omits the evidence row for a named vNext
+surface.
 
 ## Waiver Policy
 
@@ -191,7 +229,13 @@ GA approval fails automatically when one or more are true:
 2. any release-blocking gate lacks verifiable `unit_evidence`, `e2e_evidence`, or `logging_evidence`,
 3. required sign-off role is missing or rejected,
 4. packet references artifacts that do not exist,
-5. deterministic replay command bundle is missing.
+5. deterministic replay command bundle is missing,
+6. any vNext surface is claimed above the ceiling declared in `docs/WASM.md`
+   and `docs/wasm_release_channel_strategy.md`,
+7. any `Dedicated Web Worker`, `IndexedDB durable storage`,
+   `BrowserArtifactStore`, Rust-authored browser path, `WebTransport`,
+   `MessageChannel`, `MessagePort`, `BroadcastChannel`, `SharedArrayBuffer`, or
+   worker offload row is missing an explicit decision/evidence entry.
 
 ## Structured Decision Log Schema
 
@@ -253,6 +297,13 @@ Minimum artifact bundle this packet must point to:
 27. `artifacts/onboarding/react.summary.json`
 28. `artifacts/onboarding/next.summary.json`
 29. `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/summary.json`
+30. `artifacts/onboarding/worker.summary.json`
+31. `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json`
+32. `target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json`
+33. `target/e2e-results/rust_browser_consumer/<timestamp>/summary.json`
+34. `docs/WASM.md`
+35. `docs/wasm_release_channel_strategy.md`
+36. `docs/wasm_troubleshooting_compendium.md`
 
 ## Cross-References
 

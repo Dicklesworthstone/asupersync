@@ -5,6 +5,7 @@ import { chromium } from "playwright-core";
 
 const distDir = path.resolve("dist");
 const outputPath = process.argv[2] ? path.resolve(process.argv[2]) : null;
+const REQUIRED_EVENT_SYMBOLS = ["task_spawn", "task_join", "task_cancel"];
 
 function detectChromiumExecutable() {
   const explicit = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
@@ -63,6 +64,12 @@ function writeResult(result) {
   }
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   fs.writeFileSync(outputPath, JSON.stringify(result, null, 2) + "\n");
+}
+
+function assert(condition, message) {
+  if (!condition) {
+    throw new Error(message);
+  }
 }
 
 function startStaticServer() {
@@ -153,6 +160,53 @@ try {
   if (parsed.diagnostics_clean !== true) {
     throw new Error("fixture diagnostics were not clean");
   }
+  assert(parsed.ready_phase === "ready", `expected ready_phase=ready, got ${parsed.ready_phase ?? "missing"}`);
+  assert(
+    parsed.disposed_phase === "disposed",
+    `expected disposed_phase=disposed, got ${parsed.disposed_phase ?? "missing"}`,
+  );
+  assert(
+    parsed.child_scope_count_before_unmount === 1,
+    `expected exactly one child scope before unmount, got ${parsed.child_scope_count_before_unmount ?? "missing"}`,
+  );
+  assert(
+    parsed.active_task_count_before_unmount === 1,
+    `expected exactly one active task before unmount, got ${parsed.active_task_count_before_unmount ?? "missing"}`,
+  );
+  assert(
+    parsed.completed_task_outcome === "ok",
+    `expected completed_task_outcome=ok, got ${parsed.completed_task_outcome ?? "missing"}`,
+  );
+  assert(
+    parsed.cancel_event_count === 1,
+    `expected cancel_event_count=1, got ${parsed.cancel_event_count ?? "missing"}`,
+  );
+  assert(
+    Number.isInteger(parsed.dispatch_count) && parsed.dispatch_count >= 6,
+    `expected dispatch_count >= 6, got ${parsed.dispatch_count ?? "missing"}`,
+  );
+  assert(
+    Array.isArray(parsed.event_symbols),
+    "fixture must report event_symbols as an array",
+  );
+  for (const symbol of REQUIRED_EVENT_SYMBOLS) {
+    assert(
+      parsed.event_symbols.includes(symbol),
+      `fixture event log missing required symbol: ${symbol}`,
+    );
+  }
+  assert(
+    parsed.capabilities?.has_window === true,
+    "fixture must confirm browser window capability availability",
+  );
+  assert(
+    parsed.capabilities?.has_document === true,
+    "fixture must confirm browser document capability availability",
+  );
+  assert(
+    parsed.capabilities?.has_webassembly === true,
+    "fixture must confirm browser WebAssembly capability availability",
+  );
 
   result = {
     status: "ok",
@@ -163,7 +217,13 @@ try {
     diagnostics_clean: parsed.diagnostics_clean,
     ready_phase: parsed.ready_phase,
     disposed_phase: parsed.disposed_phase,
+    child_scope_count_before_unmount: parsed.child_scope_count_before_unmount,
+    active_task_count_before_unmount: parsed.active_task_count_before_unmount,
+    completed_task_outcome: parsed.completed_task_outcome,
     cancel_event_count: parsed.cancel_event_count,
+    dispatch_count: parsed.dispatch_count,
+    event_symbols: parsed.event_symbols,
+    capabilities: parsed.capabilities,
   };
 } catch (error) {
   caughtError = error;
