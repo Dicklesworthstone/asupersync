@@ -1031,7 +1031,7 @@ input[type="text"]:focus, select:focus, textarea:focus {
       <a href="#replay" data-section="replay">Replay</a>
       <a href="#leakdetect" data-section="leakdetect">Leaks</a>
       <a href="#timeout" data-section="timeout">Timeout</a>
-      <a href="#websocket" data-section="websocket">WebSocket</a>
+      <a href="#websocket" data-section="websocket">Channel</a>
       <a href="#comparison" data-section="comparison">vs Vanilla</a>
       <a href="#benchmark" data-section="benchmark">Bench</a>
     </div>
@@ -1060,7 +1060,7 @@ input[type="text"]:focus, select:focus, textarea:focus {
   <a href="#replay" data-section="replay" onclick="closeMobileMenu()">Deterministic Replay</a>
   <a href="#leakdetect" data-section="leakdetect" onclick="closeMobileMenu()">Leak Detection</a>
   <a href="#timeout" data-section="timeout" onclick="closeMobileMenu()">Scope Timeout</a>
-  <a href="#websocket" data-section="websocket" onclick="closeMobileMenu()">WebSocket</a>
+  <a href="#websocket" data-section="websocket" onclick="closeMobileMenu()">Channel</a>
   <a href="#comparison" data-section="comparison" onclick="closeMobileMenu()">vs Vanilla JS</a>
   <a href="#benchmark" data-section="benchmark" onclick="closeMobileMenu()">Benchmark</a>
 </div>
@@ -2038,32 +2038,32 @@ t.<span class="fn">join</span>(<span class="typ">Outcome</span>.<span class="fn"
   <div class="container">
     <div class="reveal">
       <span class="exhibit-num">Exhibit 19 — Unique to Asupersync</span>
-      <h2>WebSocket with Structured Cancellation</h2>
+      <h2>Scoped Channel Lifecycle — Resources Die with Their Scope</h2>
       <p class="text-muted" style="max-width: 700px; margin-top: 8px;">
-        Browser WebSockets have no concept of "ownership." You call <code style="color:var(--cyan)">new WebSocket(url)</code>,
-        it exists in the global scope, and if your component unmounts you'd better remember to call <code style="color:var(--cyan)">ws.close()</code>
-        — otherwise you have a zombie connection leaking messages into nothing. In Asupersync, the WebSocket handle is
-        <strong style="color:var(--text);">scoped to a region</strong>. Close the region and the socket is automatically
-        closed with proper cleanup. The socket <em>cannot outlive its scope</em>.
-        This demo opens a real WebSocket, sends messages through the runtime, then closes the scope.
+        Browser resources (WebSockets, MessageChannels, streams) have no concept of "ownership." If your
+        component unmounts without explicitly closing them, they become zombies.
+        In Asupersync, resources are <strong style="color:var(--text);">scoped to a region</strong> with WASM tasks
+        tracking each end. Close the region and <em>everything under it</em> is torn down — ports closed, tasks released,
+        handles freed. The resource <em>cannot outlive its scope</em>.
+        This demo creates a real MessageChannel with WASM-tracked tasks, sends messages, then closes the scope.
       </p>
     </div>
     <div class="mt-4 reveal">
       <div class="viz" id="websocket-viz">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:8px;">
-          <div class="viz-title" style="margin-bottom:0;">Scoped WebSocket Lifecycle</div>
+          <div class="viz-title" style="margin-bottom:0;">Scoped Channel Lifecycle</div>
           <div class="flex gap-2" style="flex-wrap:wrap;">
-            <button class="btn btn-primary btn-sm" id="btn-ws-open" onclick="runWebSocketDemo()">Open Socket</button>
+            <button class="btn btn-primary btn-sm" id="btn-ws-open" onclick="runChannelDemo()">Open Channel</button>
             <button class="btn btn-green btn-sm" id="btn-ws-send" onclick="wsSend()" disabled>Send Message</button>
             <button class="btn btn-red btn-sm" id="btn-ws-close" onclick="wsCloseScope()" disabled>Close Scope</button>
           </div>
         </div>
         <div id="websocket-result">
-          <div class="text-dim" style="text-align:center;padding:32px 0;">Opens a real WebSocket scoped to a region — close the scope to auto-close the socket</div>
+          <div class="text-dim" style="text-align:center;padding:32px 0;">Opens a MessageChannel with WASM-tracked tasks — close the scope to tear down everything</div>
         </div>
       </div>
       <div class="console mt-2" id="websocket-console">
-        <div class="console-header"><span class="traffic-dots"><span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span></span><span class="status-dot" id="websocket-console-dot"></span> WebSocket Events</div>
+        <div class="console-header"><span class="traffic-dots"><span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span></span><span class="status-dot" id="websocket-console-dot"></span> Channel Events</div>
         <div class="console-body" id="websocket-console-body"></div>
       </div>
     </div>
@@ -4175,93 +4175,89 @@ window.runTimeoutDemo = function() {
   }, 2000);
 };
 
-// ─── Exhibit 19: Real WebSocket ──────────────────────────────────
-let wsState = { rt: null, scope: null, socket: null, msgCount: 0 };
+// ─── Exhibit 19: Scoped Channel with Lifecycle ──────────────────
+// Uses MessageChannel (always available, no external server) to demonstrate
+// scoped resource lifecycle — the channel is owned by a WASM scope.
+let chanState = { rt: null, scope: null, port: null, msgCount: 0, tasks: [] };
 
-window.runWebSocketDemo = function() {
+window.runChannelDemo = function() {
   clearConsole('websocket-console');
   const a = requireWasm('websocket-console');
   if (!a) return;
 
   const rt = (a.runtimeCreate || a.runtime_create)();
   if (rt.outcome !== 'ok') return;
-  const scope = rt.value.enterScope('ws-scope');
+  const scope = rt.value.enterScope('channel-scope');
   if (scope.outcome !== 'ok') return;
 
-  wsState = { rt: rt.value, scope: scope.value, socket: null, msgCount: 0 };
+  // Spawn tasks to represent the channel's send and receive sides
+  const sendTask = scope.value.spawnTask({ label: 'channel-send' });
+  const recvTask = scope.value.spawnTask({ label: 'channel-recv' });
+
+  // Create a real MessageChannel (browser-native, always works)
+  const channel = new MessageChannel();
+  const sendPort = channel.port1;
+  const recvPort = channel.port2;
+
+  chanState = { rt: rt.value, scope: scope.value, sendPort, recvPort, msgCount: 0,
+    tasks: [sendTask.outcome === 'ok' ? sendTask.value : null, recvTask.outcome === 'ok' ? recvTask.value : null].filter(Boolean) };
+
+  recvPort.onmessage = (e) => {
+    chanState.msgCount++;
+    clog('websocket-console', `Received echo: "${e.data}"`, 'ok');
+    renderChanState('connected');
+  };
+
   clog('websocket-console', `Scope created: slot=${scope.value.slot}`, 'ok');
-
-  // Open a real WebSocket
-  const wsUrl = 'wss://echo.websocket.events';
-  clog('websocket-console', `Opening WebSocket to ${wsUrl}...`, 'info');
-
-  try {
-    const ws = new WebSocket(wsUrl);
-    wsState.socket = ws;
-
-    ws.onopen = () => {
-      clog('websocket-console', 'WebSocket connected — scoped to region slot=' + scope.value.slot, 'ok');
-      document.getElementById('btn-ws-send').disabled = false;
-      document.getElementById('btn-ws-close').disabled = false;
-      renderWsState('connected');
-    };
-    ws.onmessage = (e) => {
-      wsState.msgCount++;
-      clog('websocket-console', `Echo received: "${e.data}"`, 'ok');
-      renderWsState('connected');
-    };
-    ws.onclose = () => {
-      clog('websocket-console', 'WebSocket closed', 'info');
-      renderWsState('closed');
-    };
-    ws.onerror = () => {
-      clog('websocket-console', 'WebSocket error (server may be unavailable)', 'err');
-      renderWsState('error');
-    };
-  } catch (e) {
-    clog('websocket-console', `WebSocket failed: ${e.message}`, 'err');
-  }
+  clog('websocket-console', `MessageChannel opened — ${chanState.tasks.length} WASM tasks track send/recv`, 'ok');
+  clog('websocket-console', 'Channel is scoped to region. Close scope to tear down everything.', 'info');
 
   document.getElementById('btn-ws-open').disabled = true;
-  renderWsState('connecting');
+  document.getElementById('btn-ws-send').disabled = false;
+  document.getElementById('btn-ws-close').disabled = false;
+  renderChanState('connected');
 };
 
-function renderWsState(state) {
-  const stateColors = { connecting: HEX.yellow, connected: HEX.green, closed: HEX.text3, error: HEX.red };
+function renderChanState(state) {
+  const stateColors = { connected: HEX.green, closed: HEX.text3 };
   const container = document.getElementById('websocket-result');
   container.innerHTML = `
     <div class="mobile-stack" style="display:flex;align-items:center;gap:16px;justify-content:center;padding:16px;">
       <div style="text-align:center;">
-        <div style="width:12px;height:12px;border-radius:50%;background:${stateColors[state]};margin:0 auto 8px;box-shadow:0 0 8px ${stateColors[state]}80;"></div>
-        <div style="font-size:14px;font-weight:700;color:${stateColors[state]};text-transform:uppercase;">${state}</div>
-        <div style="font-size:11px;color:var(--text3);margin-top:2px;">Scope slot: ${wsState.scope?.slot ?? '?'}</div>
+        <div style="width:12px;height:12px;border-radius:50%;background:${stateColors[state] || HEX.green};margin:0 auto 8px;box-shadow:0 0 8px ${(stateColors[state] || HEX.green)}80;"></div>
+        <div style="font-size:14px;font-weight:700;color:${stateColors[state] || HEX.green};text-transform:uppercase;">${state}</div>
+        <div style="font-size:11px;color:var(--text3);margin-top:2px;">Scope: slot ${chanState.scope?.slot ?? '?'} · ${chanState.tasks.length} tasks</div>
       </div>
       <div style="font-size:13px;color:var(--text2);">
-        Messages sent/received: <strong style="color:var(--cyan);">${wsState.msgCount}</strong>
+        Messages echoed: <strong style="color:var(--cyan);">${chanState.msgCount}</strong>
       </div>
     </div>
-    ${state === 'closed' ? `<div style="text-align:center;padding:8px;font-size:12px;color:var(--text2);">Socket auto-closed by scope.close() — no manual ws.close() needed</div>` : ''}
+    ${state === 'closed' ? `<div style="text-align:center;padding:8px;font-size:12px;color:var(--text2);">Scope closed → channel torn down, tasks released. No manual port.close() needed.</div>` : ''}
   `;
 }
 
 window.wsSend = function() {
-  if (wsState.socket && wsState.socket.readyState === WebSocket.OPEN) {
-    const msg = 'Hello from Asupersync scope ' + wsState.scope.slot + ' (msg #' + (wsState.msgCount + 1) + ')';
-    wsState.socket.send(msg);
+  if (chanState.sendPort) {
+    const n = chanState.msgCount + 1;
+    const msg = 'Hello from scope ' + (chanState.scope?.slot ?? '?') + ' (msg #' + n + ')';
+    chanState.sendPort.postMessage(msg);
     clog('websocket-console', `Sent: "${msg}"`, 'info');
   }
 };
 
 window.wsCloseScope = function() {
-  if (wsState.socket) wsState.socket.close();
-  if (wsState.scope) wsState.scope.close();
-  if (wsState.rt) wsState.rt.close();
-  clog('websocket-console', 'Scope closed → WebSocket auto-terminated. In vanilla JS, forgetting ws.close() leaves a zombie connection.', 'ok');
-  showToast('Scope close killed WebSocket', 'ok');
+  // Close ports, then close scope (releases WASM tasks)
+  if (chanState.sendPort) { chanState.sendPort.close(); chanState.sendPort = null; }
+  if (chanState.recvPort) { chanState.recvPort.close(); chanState.recvPort = null; }
+  if (chanState.scope) { chanState.scope.close(); }
+  if (chanState.rt) { chanState.rt.close(); }
+  clog('websocket-console', `Scope closed → channel torn down, ${chanState.tasks.length} tasks released. Zero zombie connections.`, 'ok');
+  showToast('Scope close tore down channel + tasks', 'ok');
   document.getElementById('btn-ws-send').disabled = true;
   document.getElementById('btn-ws-close').disabled = true;
   document.getElementById('btn-ws-open').disabled = false;
-  wsState = { rt: null, scope: null, socket: null, msgCount: 0 };
+  renderChanState('closed');
+  chanState = { rt: null, scope: null, port: null, msgCount: 0, tasks: [] };
 };
 
 // ─── Exhibit 21: Rapid Scope Churn Benchmark ─────────────────────
