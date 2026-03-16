@@ -180,6 +180,8 @@ export type BrowserRuntimeContext =
 
 export type BrowserRuntimeSupportReason =
   | "missing_global_this"
+  | "service_worker_not_yet_shipped"
+  | "shared_worker_not_yet_shipped"
   | "unsupported_runtime_context"
   | "missing_webassembly"
   | "supported";
@@ -537,6 +539,60 @@ function isDedicatedWorkerGlobal(
   );
 }
 
+function isServiceWorkerLikeGlobal(
+  globalObject: Record<string, unknown> | undefined,
+): boolean {
+  return (
+    globalObject !== undefined &&
+    !isDedicatedWorkerGlobal(globalObject) &&
+    typeof globalObject.skipWaiting === "function" &&
+    typeof globalObject.clients === "object" &&
+    typeof globalObject.registration === "object"
+  );
+}
+
+function isSharedWorkerLikeGlobal(
+  globalObject: Record<string, unknown> | undefined,
+): boolean {
+  return (
+    globalObject !== undefined &&
+    !isDedicatedWorkerGlobal(globalObject) &&
+    "onconnect" in globalObject &&
+    typeof globalObject.importScripts === "function"
+  );
+}
+
+function deferredBrowserHostDiagnostics(
+  globalObject: Record<string, unknown> | undefined,
+): Pick<BrowserRuntimeSupportDiagnostics, "reason" | "message" | "guidance">
+  | null {
+  if (isServiceWorkerLikeGlobal(globalObject)) {
+    return {
+      reason: "service_worker_not_yet_shipped",
+      message:
+        "@asupersync/browser does not yet ship direct runtime APIs for service-worker hosts.",
+      guidance: [
+        "Use a dedicated worker bootstrap today if you need shipped direct Browser Edition execution.",
+        "Keep service-worker orchestration at the application boundary until this host is promoted.",
+      ],
+    };
+  }
+
+  if (isSharedWorkerLikeGlobal(globalObject)) {
+    return {
+      reason: "shared_worker_not_yet_shipped",
+      message:
+        "@asupersync/browser does not yet ship direct runtime APIs for shared-worker hosts.",
+      guidance: [
+        "Use a dedicated worker bootstrap today if you need shipped direct Browser Edition execution.",
+        "Keep shared-worker coordination at the application boundary until this host is promoted.",
+      ],
+    };
+  }
+
+  return null;
+}
+
 function browserRuntimeContext(
   globalObject: Record<string, unknown> | undefined,
   capabilities: BrowserCapabilitySnapshot,
@@ -574,6 +630,20 @@ export function detectBrowserRuntimeSupport(
       message:
         "@asupersync/browser requires a browser-like globalThis to create or enter runtime scopes.",
       guidance: sharedGuidance,
+      capabilities,
+    };
+  }
+
+  const deferredHost = deferredBrowserHostDiagnostics(globalObject);
+  if (deferredHost) {
+    return {
+      supported: false,
+      packageName: "@asupersync/browser",
+      supportClass: "unsupported",
+      runtimeContext,
+      reason: deferredHost.reason,
+      message: deferredHost.message,
+      guidance: [...deferredHost.guidance, ...sharedGuidance],
       capabilities,
     };
   }
