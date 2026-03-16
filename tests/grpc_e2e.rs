@@ -40,7 +40,7 @@ fn e2e_grpc_unary_call_lifecycle() {
 
     test_section!("setup_channel");
     futures_lite::future::block_on(async {
-        let channel = Channel::connect("http://localhost:50051").await.unwrap();
+        let channel = Channel::connect("http://loopback:50051").await.unwrap();
         let mut client = GrpcClient::new(channel.clone());
         tracing::info!(uri = client.channel().uri(), "client connected");
 

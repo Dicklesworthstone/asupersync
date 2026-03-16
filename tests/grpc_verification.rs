@@ -1112,7 +1112,7 @@ fn grpc_verify_035_channel_config_defaults() {
 fn grpc_verify_036_channel_builder() {
     init_test("grpc_verify_036_channel_builder");
 
-    let builder = Channel::builder("http://localhost:50051")
+    let builder = Channel::builder("http://loopback:50051")
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .max_recv_message_size(8 * 1024 * 1024)
@@ -1127,7 +1127,7 @@ fn grpc_verify_036_channel_builder() {
     // Connect produces a Channel
     futures_lite::future::block_on(async {
         let channel = builder.connect().await.unwrap();
-        assert_eq!(channel.uri(), "http://localhost:50051");
+        assert_eq!(channel.uri(), "http://loopback:50051");
         assert!(channel.config().use_tls);
         assert_eq!(channel.config().connect_timeout, Duration::from_secs(10));
     });
@@ -1143,9 +1143,9 @@ fn grpc_verify_037_grpc_client() {
     init_test("grpc_verify_037_grpc_client");
 
     futures_lite::future::block_on(async {
-        let channel = Channel::connect("http://localhost:50051").await.unwrap();
+        let channel = Channel::connect("http://loopback:50051").await.unwrap();
         let mut client = GrpcClient::new(channel.clone());
-        assert_eq!(client.channel().uri(), "http://localhost:50051");
+        assert_eq!(client.channel().uri(), "http://loopback:50051");
 
         let response: Result<Response<String>, Status> = client
             .unary("/test.Svc/Method", Request::new("hello".to_string()))
@@ -1518,7 +1518,7 @@ fn grpc_verify_049_channel_compression_metadata() {
     init_test("grpc_verify_049_channel_compression_metadata");
 
     let channel = futures_lite::future::block_on(
-        Channel::builder("http://localhost:50051")
+        Channel::builder("http://loopback:50051")
             .send_compression(CompressionEncoding::Gzip)
             .accept_compressions([CompressionEncoding::Identity, CompressionEncoding::Gzip])
             .connect(),
@@ -1552,7 +1552,7 @@ fn grpc_verify_050_client_interceptor_chain() {
     init_test("grpc_verify_050_client_interceptor_chain");
 
     let channel = futures_lite::future::block_on(
-        Channel::builder("http://localhost:50051")
+        Channel::builder("http://loopback:50051")
             .timeout(Duration::from_millis(2500))
             .connect(),
     )

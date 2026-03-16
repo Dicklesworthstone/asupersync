@@ -781,7 +781,7 @@ fn channel_config_defaults() {
 fn channel_builder_fluent_api() {
     // ChannelBuilder should accept all config options
     let channel = futures_lite::future::block_on(
-        Channel::builder("http://localhost:50051")
+        Channel::builder("http://loopback:50051")
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
             .max_recv_message_size(8 * 1024 * 1024)
@@ -795,7 +795,7 @@ fn channel_builder_fluent_api() {
     )
     .expect("connect should succeed");
 
-    assert_eq!(channel.uri(), "http://localhost:50051");
+    assert_eq!(channel.uri(), "http://loopback:50051");
     assert_eq!(channel.config().timeout, Some(Duration::from_secs(30)));
     assert!(channel.config().use_tls);
     assert_eq!(
