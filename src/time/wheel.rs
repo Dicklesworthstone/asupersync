@@ -243,6 +243,8 @@ type TimerActivityMap = slab::Slab<u64>;
 impl PartialEq for OverflowEntry {
     fn eq(&self, other: &Self) -> bool {
         self.deadline == other.deadline
+            && self.entry.generation == other.entry.generation
+            && self.entry.id == other.entry.id
     }
 }
 
@@ -257,7 +259,20 @@ impl PartialOrd for OverflowEntry {
 impl Ord for OverflowEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse for min-heap (earliest deadline first)
-        other.deadline.cmp(&self.deadline)
+        other
+            .deadline
+            .cmp(&self.deadline)
+            .then_with(|| {
+                // Lower generation wins
+                let diff = other
+                    .entry
+                    .generation
+                    .wrapping_sub(self.entry.generation)
+                    .cast_signed();
+                diff.cmp(&0)
+            })
+            // Fallback to id
+            .then_with(|| other.entry.id.cmp(&self.entry.id))
     }
 }
 

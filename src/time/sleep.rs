@@ -18,7 +18,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant};
 
 static START_TIME: OnceLock<Instant> = OnceLock::new();
@@ -114,6 +114,28 @@ struct SleepState {
     timer_driver: Option<TimerDriverHandle>,
 }
 
+#[derive(Debug)]
+struct ReadyWaker {
+    ready: Arc<AtomicBool>,
+    inner: Waker,
+}
+
+impl Wake for ReadyWaker {
+    fn wake(self: Arc<Self>) {
+        self.ready.store(true, Ordering::Release);
+        self.inner.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.ready.store(true, Ordering::Release);
+        self.inner.wake_by_ref();
+    }
+}
+
+fn readiness_waker(ready: Arc<AtomicBool>, inner: Waker) -> Waker {
+    Waker::from(Arc::new(ReadyWaker { ready, inner }))
+}
+
 /// A future that completes after a specified deadline.
 ///
 /// `Sleep` is the core primitive for time-based delays. It can be awaited
@@ -159,6 +181,8 @@ pub struct Sleep {
     polled: std::sync::atomic::AtomicBool,
     /// Whether this sleep has already completed and not yet been reset.
     completed: std::sync::atomic::AtomicBool,
+    /// Whether a timer/fallback wake has already made this sleep ready.
+    ready: Arc<AtomicBool>,
     /// Shared state for background waiter thread.
     state: Arc<Mutex<SleepState>>,
 }
@@ -186,6 +210,7 @@ impl Sleep {
             time_getter: None,
             polled: std::sync::atomic::AtomicBool::new(false),
             completed: std::sync::atomic::AtomicBool::new(false),
+            ready: Arc::new(AtomicBool::new(false)),
             state: Arc::new(Mutex::new(SleepState {
                 waker: None,
                 fallback: None,
@@ -235,6 +260,7 @@ impl Sleep {
             time_getter: Some(time_getter),
             polled: std::sync::atomic::AtomicBool::new(false),
             completed: std::sync::atomic::AtomicBool::new(false),
+            ready: Arc::new(AtomicBool::new(false)),
             state: Arc::new(Mutex::new(SleepState {
                 waker: None,
                 fallback: None,
@@ -291,6 +317,7 @@ impl Sleep {
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.completed
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.ready.store(false, Ordering::Release);
         let (handle, driver, fallback_handles) = {
             let mut state = self.state.lock();
             let mut handles = std::mem::take(&mut state.zombie_fallbacks);
@@ -328,6 +355,7 @@ impl Sleep {
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.completed
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.ready.store(false, Ordering::Release);
         let (handle, driver, fallback_handles) = {
             let mut state = self.state.lock();
             let mut handles = std::mem::take(&mut state.zombie_fallbacks);
@@ -387,7 +415,7 @@ impl Sleep {
         );
         self.polled
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        if now >= self.deadline {
+        if self.ready.swap(false, Ordering::AcqRel) || now >= self.deadline {
             self.completed
                 .store(true, std::sync::atomic::Ordering::Release);
             Poll::Ready(())
@@ -424,7 +452,10 @@ impl Future for Sleep {
                 };
                 if let Some(handle) = handle {
                     if let Some(trace) = trace.as_ref() {
-                        trace.record_event(|seq| TraceEvent::timer_fired(seq, now, handle.id()));
+                        let fired_at = now.max(self.deadline);
+                        trace.record_event(|seq| {
+                            TraceEvent::timer_fired(seq, fired_at, handle.id())
+                        });
                     }
                     if let Some(driver) = driver.or_else(|| timer_driver.clone()) {
                         let _ = driver.cancel(&handle);
@@ -481,7 +512,10 @@ impl Future for Sleep {
 
                     if state.timer_handle.is_none() {
                         // Register new timer
-                        let handle = timer.register(self.deadline, cx.waker().clone());
+                        let handle = timer.register(
+                            self.deadline,
+                            readiness_waker(Arc::clone(&self.ready), cx.waker().clone()),
+                        );
                         if let Some(trace) = trace.as_ref() {
                             trace.record_event(|seq| {
                                 TraceEvent::timer_scheduled(seq, now, handle.id(), self.deadline)
@@ -492,8 +526,11 @@ impl Future for Sleep {
                         // Update existing timer with new waker
                         if let Some(handle) = state.timer_handle.take() {
                             let old_id = handle.id();
-                            let new_handle =
-                                timer.update(&handle, self.deadline, cx.waker().clone());
+                            let new_handle = timer.update(
+                                &handle,
+                                self.deadline,
+                                readiness_waker(Arc::clone(&self.ready), cx.waker().clone()),
+                            );
                             if let Some(trace) = trace.as_ref() {
                                 trace.record_event(|seq| {
                                     TraceEvent::timer_cancelled(seq, now, old_id)
@@ -540,13 +577,16 @@ impl Future for Sleep {
                         let stop_for_thread = Arc::clone(&stop);
                         let completed = Arc::new(AtomicBool::new(false));
                         let completed_for_thread = Arc::clone(&completed);
+                        let ready_for_thread = Arc::clone(&self.ready);
                         // ubs:ignore - intentional detach by dropping JoinHandle in Drop to avoid blocking executor
                         let handle = std::thread::spawn(move || {
                             // Allow prompt cancellation via `unpark()`.
                             let start = Instant::now();
                             let mut remaining = duration;
                             while !stop_for_thread.load(Ordering::Acquire) {
-                                std::thread::park_timeout(remaining);
+                                if remaining > Duration::ZERO {
+                                    std::thread::park_timeout(remaining);
+                                }
                                 if stop_for_thread.load(Ordering::Acquire) {
                                     return;
                                 }
@@ -557,6 +597,11 @@ impl Future for Sleep {
                                 remaining = duration.saturating_sub(elapsed);
                             }
 
+                            if stop_for_thread.load(Ordering::Acquire) {
+                                return;
+                            }
+
+                            ready_for_thread.store(true, Ordering::Release);
                             let waker = state_clone.lock().waker.take();
                             if let Some(waker) = waker {
                                 waker.wake();
@@ -626,6 +671,7 @@ impl Clone for Sleep {
             time_getter: self.time_getter,
             polled: std::sync::atomic::AtomicBool::new(false), // Fresh clone hasn't been polled
             completed: std::sync::atomic::AtomicBool::new(false),
+            ready: Arc::new(AtomicBool::new(false)),
             state: Arc::new(Mutex::new(SleepState {
                 waker: None,
                 fallback: None,
@@ -692,7 +738,7 @@ mod tests {
     use crate::types::{Budget, RegionId, TaskId};
     use std::pin::Pin;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::task::{Context, Wake, Waker};
 
     // =========================================================================
@@ -1018,6 +1064,24 @@ mod tests {
         Waker::from(Arc::new(NoopWaker))
     }
 
+    fn waker_that_sets(flag: Arc<AtomicBool>) -> Waker {
+        struct FlagWaker {
+            flag: Arc<AtomicBool>,
+        }
+
+        impl Wake for FlagWaker {
+            fn wake(self: Arc<Self>) {
+                self.flag.store(true, Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.flag.store(true, Ordering::SeqCst);
+            }
+        }
+
+        Waker::from(Arc::new(FlagWaker { flag }))
+    }
+
     #[test]
     fn drop_cancels_timer_registration() {
         init_test("drop_cancels_timer_registration");
@@ -1252,6 +1316,139 @@ mod tests {
         }
 
         crate::test_complete!("poll_with_new_timer_driver_migrates_registration");
+    }
+
+    #[test]
+    fn poll_after_timer_fire_stays_ready_across_driver_migration() {
+        init_test("poll_after_timer_fire_stays_ready_across_driver_migration");
+
+        let clock1 = Arc::new(VirtualClock::new());
+        let timer1 = TimerDriverHandle::with_virtual_clock(clock1.clone());
+        let cx1 = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 3),
+            TaskId::new_for_test(0, 3),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer1.clone()),
+            None,
+        );
+        let _guard1 = Cx::set_current(Some(cx1));
+
+        let mut sleep = Sleep::after(timer1.now(), Duration::from_secs(5));
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = waker_that_sets(Arc::clone(&woke));
+        let mut task_cx = Context::from_waker(&waker);
+
+        let first_poll = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(
+            first_poll.is_pending(),
+            "first poll pending",
+            true,
+            first_poll.is_pending()
+        );
+
+        clock1.set(Time::from_secs(6));
+        let fired = timer1.process_timers();
+        crate::assert_with_log!(fired == 1, "old driver fires timer once", 1usize, fired);
+        crate::assert_with_log!(
+            woke.load(Ordering::SeqCst),
+            "timer wake reached task waker",
+            true,
+            woke.load(Ordering::SeqCst)
+        );
+
+        let clock2 = Arc::new(VirtualClock::new());
+        let timer2 = TimerDriverHandle::with_virtual_clock(clock2);
+        let cx2 = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 4),
+            TaskId::new_for_test(0, 4),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer2.clone()),
+            None,
+        );
+        let _guard2 = Cx::set_current(Some(cx2));
+
+        let second_poll = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(
+            second_poll.is_ready(),
+            "fired timer remains ready on new driver",
+            true,
+            second_poll.is_ready()
+        );
+        crate::assert_with_log!(
+            timer2.pending_count() == 0,
+            "new driver does not re-arm an already fired sleep",
+            0,
+            timer2.pending_count()
+        );
+
+        crate::test_complete!("poll_after_timer_fire_stays_ready_across_driver_migration");
+    }
+
+    #[test]
+    fn poll_after_fallback_wake_stays_ready_on_driver() {
+        init_test("poll_after_fallback_wake_stays_ready_on_driver");
+
+        let _guard = Cx::set_current(None);
+
+        let mut sleep = Sleep::after(wall_now(), Duration::from_millis(10));
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = waker_that_sets(Arc::clone(&woke));
+        let mut task_cx = Context::from_waker(&waker);
+
+        let first_poll = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(
+            first_poll.is_pending(),
+            "first poll pending",
+            true,
+            first_poll.is_pending()
+        );
+
+        let start = Instant::now();
+        while !woke.load(Ordering::SeqCst) && start.elapsed() < Duration::from_millis(250) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        crate::assert_with_log!(
+            woke.load(Ordering::SeqCst),
+            "fallback thread wakes task",
+            true,
+            woke.load(Ordering::SeqCst)
+        );
+
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(clock);
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 5),
+            TaskId::new_for_test(0, 5),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _guard2 = Cx::set_current(Some(cx));
+
+        let second_poll = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(
+            second_poll.is_ready(),
+            "fallback wake remains ready after driver appears",
+            true,
+            second_poll.is_ready()
+        );
+        crate::assert_with_log!(
+            timer.pending_count() == 0,
+            "driver does not re-arm an already fired fallback sleep",
+            0,
+            timer.pending_count()
+        );
+
+        crate::test_complete!("poll_after_fallback_wake_stays_ready_on_driver");
     }
 
     // =========================================================================

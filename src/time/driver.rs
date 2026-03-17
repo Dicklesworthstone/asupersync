@@ -443,12 +443,17 @@ impl<T: TimeSource> TimerDriver<T> {
 
     /// Updates an existing timer registration with a new deadline and waker.
     ///
-    /// This doesn't actually remove the old entry (to avoid O(n) removal),
-    /// but registers a new one. Stale entries are cleaned up on pop.
+    /// This doesn't actually remove the old entry from the heap (to avoid O(n)
+    /// removal), but it does cancel the active handle before registering a new
+    /// one. If the supplied handle is already stale/inactive, the update fails
+    /// closed and leaves the wheel unchanged.
     pub fn update(&self, handle: &TimerHandle, deadline: Time, waker: Waker) -> TimerHandle {
         let mut wheel = self.wheel.lock();
-        wheel.cancel(handle);
-        wheel.register(deadline, waker)
+        if wheel.cancel(handle) {
+            wheel.register(deadline, waker)
+        } else {
+            *handle
+        }
     }
 
     /// Cancels an existing timer registration.
@@ -1354,6 +1359,74 @@ mod tests {
         let count_now = counter.load(Ordering::SeqCst);
         crate::assert_with_log!(count_now == 1, "counter stable", 1, count_now);
         crate::test_complete!("timer_driver_update_cancels_old_handle");
+    }
+
+    #[test]
+    fn timer_driver_update_rejects_stale_handle_without_registering_new_timer() {
+        init_test("timer_driver_update_rejects_stale_handle_without_registering_new_timer");
+        let clock = Arc::new(VirtualClock::new());
+        let driver = TimerDriver::with_clock(clock.clone());
+
+        let stale_counter = Arc::new(AtomicU64::new(0));
+        let stale_handle = driver.register(Time::from_secs(5), futures_waker());
+        let cancelled = driver.cancel(&stale_handle);
+        crate::assert_with_log!(
+            cancelled,
+            "live handle cancelled before stale update",
+            true,
+            cancelled
+        );
+
+        let returned = driver.update(
+            &stale_handle,
+            Time::from_secs(2),
+            waker_that_increments(Arc::clone(&stale_counter)),
+        );
+        crate::assert_with_log!(
+            returned == stale_handle,
+            "stale update returns unchanged handle",
+            stale_handle,
+            returned
+        );
+        crate::assert_with_log!(
+            driver.pending_count() == 0,
+            "stale update leaves pending timer count unchanged",
+            0,
+            driver.pending_count()
+        );
+
+        clock.set(Time::from_secs(3));
+        let early_processed = driver.process_timers();
+        crate::assert_with_log!(
+            early_processed == 0,
+            "stale update does not create an early timer",
+            0usize,
+            early_processed
+        );
+        crate::assert_with_log!(
+            stale_counter.load(Ordering::SeqCst) == 0,
+            "stale update waker not fired",
+            0u64,
+            stale_counter.load(Ordering::SeqCst)
+        );
+
+        clock.set(Time::from_secs(6));
+        let processed = driver.process_timers();
+        crate::assert_with_log!(
+            processed == 0,
+            "stale timer never fires later",
+            0usize,
+            processed
+        );
+        crate::assert_with_log!(
+            stale_counter.load(Ordering::SeqCst) == 0,
+            "stale timer never registered",
+            0u64,
+            stale_counter.load(Ordering::SeqCst)
+        );
+        crate::test_complete!(
+            "timer_driver_update_rejects_stale_handle_without_registering_new_timer"
+        );
     }
 
     #[test]
