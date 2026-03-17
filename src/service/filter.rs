@@ -258,8 +258,6 @@ where
     }
 }
 
-
-
 // ─── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -787,5 +785,4 @@ mod tests {
             Poll::Ready(Err(FilterError::PolledAfterCompletion))
         ));
     }
-
 }

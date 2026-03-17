@@ -5,9 +5,9 @@
 
 use crate::config::EncodingConfig as PipelineEncodingConfig;
 use crate::encoding::EncodingPipeline;
+use crate::types::Time;
 use crate::types::resource::{PoolConfig, SymbolPool};
 use crate::types::symbol::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
-use crate::types::Time;
 use crate::util::DetRng;
 use std::cmp::min;
 
@@ -667,9 +667,11 @@ mod tests {
         assert_eq!(encoded.params.source_blocks, 2);
         assert_eq!(encoded.repair_count, 3);
         assert_eq!(encoded.repair_symbols().count(), 3);
-        assert!(encoded
-            .repair_symbols()
-            .any(|symbol| symbol.id().sbn() == 1));
+        assert!(
+            encoded
+                .repair_symbols()
+                .any(|symbol| symbol.id().sbn() == 1)
+        );
     }
 
     #[test]
@@ -712,10 +714,12 @@ mod tests {
         let encoded = encoder.encode(&snapshot, Time::ZERO).unwrap();
 
         assert_eq!(encoded.params.source_blocks, 256);
-        assert!(encoded
-            .symbols
-            .iter()
-            .any(|symbol| symbol.id().sbn() == 255));
+        assert!(
+            encoded
+                .symbols
+                .iter()
+                .any(|symbol| symbol.id().sbn() == 255)
+        );
     }
 
     #[test]

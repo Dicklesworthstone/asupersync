@@ -3257,9 +3257,9 @@ pub enum EventDataSnapshot {
         /// Offloaded job identifier.
         job_id: u64,
         /// Deterministic decision sequence carried by the worker envelope.
-        
+
         /// Stable replay digest carried by the worker envelope.
-        
+
         /// Originating task identifier.
         task: IdSnapshot,
         /// Originating region identifier.
@@ -7158,8 +7158,7 @@ mod tests {
         let snapshot = EventDataSnapshot::from_trace_data(&TraceData::Worker {
             worker_id: "worker-a".to_string(),
             job_id: 77,
-            
-            
+
             task,
             region,
             obligation,
@@ -7169,16 +7168,15 @@ mod tests {
             EventDataSnapshot::Worker {
                 worker_id,
                 job_id,
-                
-                
+
                 task: task_snapshot,
                 region: region_snapshot,
                 obligation: obligation_snapshot,
             } => {
                 assert_eq!(worker_id, "worker-a");
                 assert_eq!(job_id, 77);
-                assert_eq!( 91);
-                assert_eq!( 0xC0FFEE);
+                assert_eq!(91);
+                assert_eq!(0xC0FFEE);
                 assert_eq!(task_snapshot, IdSnapshot::from(task));
                 assert_eq!(region_snapshot, IdSnapshot::from(region));
                 assert_eq!(obligation_snapshot, IdSnapshot::from(obligation));

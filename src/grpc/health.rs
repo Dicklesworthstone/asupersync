@@ -269,7 +269,8 @@ impl HealthService {
     fn watched_status_and_version(&self, service: &str) -> (ServingStatus, u64) {
         if service.is_empty() {
             // Server-level watcher uses the global atomic version.
-            let status = self.check(&HealthCheckRequest::server())
+            let status = self
+                .check(&HealthCheckRequest::server())
                 .map_or(ServingStatus::ServiceUnknown, |response| response.status);
             let version = self.version();
             (status, version)

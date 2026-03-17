@@ -136,20 +136,18 @@ where
                     Poll::Ready(None)
                 }
             }
-            BodyKind::Stream(stream) => {
-                match Pin::new(stream).poll_next(cx) {
-                    Poll::Ready(Some(Ok(data))) => Poll::Ready(Some(Ok(Frame::data(data)))),
-                    Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
-                    Poll::Ready(None) => {
-                        if let Some(trailers) = this.trailers.take() {
-                            Poll::Ready(Some(Ok(Frame::trailers(trailers))))
-                        } else {
-                            Poll::Ready(None)
-                        }
+            BodyKind::Stream(stream) => match Pin::new(stream).poll_next(cx) {
+                Poll::Ready(Some(Ok(data))) => Poll::Ready(Some(Ok(Frame::data(data)))),
+                Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+                Poll::Ready(None) => {
+                    if let Some(trailers) = this.trailers.take() {
+                        Poll::Ready(Some(Ok(Frame::trailers(trailers))))
+                    } else {
+                        Poll::Ready(None)
                     }
-                    Poll::Pending => Poll::Pending,
                 }
-            }
+                Poll::Pending => Poll::Pending,
+            },
         }
     }
 
