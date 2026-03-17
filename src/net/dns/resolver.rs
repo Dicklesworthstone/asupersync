@@ -174,19 +174,22 @@ impl Resolver {
 
         // Check cache first
         if self.config.cache_enabled {
-            if let Some(cached) = self.cache.get_ip(host) {
-                return Ok(cached);
+            if let Some(cached) = self.cache.get_ip_result(host) {
+                return cached;
             }
         }
 
-        let result = self.do_lookup_ip(host).await?;
+        let result = self.do_lookup_ip(host).await;
 
-        // Cache the result
         if self.config.cache_enabled {
-            self.cache.put_ip(host, &result);
+            match &result {
+                Ok(lookup) => self.cache.put_ip(host, lookup),
+                Err(DnsError::NoRecords(_)) => self.cache.put_negative_ip_no_records(host),
+                Err(_) => {}
+            }
         }
 
-        Ok(result)
+        result
     }
 
     /// Performs the actual IP lookup with retries.
@@ -216,6 +219,9 @@ impl Resolver {
                 match Self::query_ip_sync(&host) {
                     Ok(result) => return Ok(result),
                     Err(e) => {
+                        if matches!(e, DnsError::NoRecords(_)) {
+                            return Err(e);
+                        }
                         last_error = Some(e);
                     }
                 }
@@ -236,7 +242,7 @@ impl Resolver {
 
         let addrs: Vec<IpAddr> = addr_str
             .to_socket_addrs()
-            .map_err(DnsError::from)?
+            .map_err(|err| Self::classify_lookup_io_error(host, &err))?
             .map(|sa| sa.ip())
             .collect();
 
@@ -248,6 +254,23 @@ impl Resolver {
         let ttl = Duration::from_mins(5);
 
         Ok(LookupIp::new(addrs, ttl))
+    }
+
+    fn classify_lookup_io_error(host: &str, err: &io::Error) -> DnsError {
+        let message = err.to_string();
+        let lower = message.to_ascii_lowercase();
+
+        if lower.contains("name or service not known")
+            || lower.contains("nodename nor servname provided, or not known")
+            || lower.contains("no address associated with hostname")
+            || lower.contains("host not found")
+            || lower.contains("no such host")
+            || lower.contains("non-existent domain")
+        {
+            return DnsError::NoRecords(host.to_string());
+        }
+
+        DnsError::Io(message)
     }
 
     /// Looks up IP addresses with Happy Eyeballs ordering.
@@ -1126,5 +1149,66 @@ mod tests {
         crate::assert_with_log!(result.is_err(), "nonexistent fails", true, result.is_err());
 
         crate::test_complete!("resolver_nonexistent_domain");
+    }
+
+    #[test]
+    fn resolver_classifies_no_such_host_io_as_no_records() {
+        init_test("resolver_classifies_no_such_host_io_as_no_records");
+
+        let err = io::Error::new(io::ErrorKind::NotFound, "No such host is known");
+        let classified = Resolver::classify_lookup_io_error("missing.example", &err);
+        crate::assert_with_log!(
+            matches!(classified, DnsError::NoRecords(ref host) if host == "missing.example"),
+            "NXDOMAIN-like io error maps to NoRecords",
+            true,
+            format!("{classified:?}")
+        );
+
+        crate::test_complete!("resolver_classifies_no_such_host_io_as_no_records");
+    }
+
+    #[test]
+    fn resolver_lookup_ip_serves_cached_negative_no_records_until_negative_ttl_expires() {
+        init_test(
+            "resolver_lookup_ip_serves_cached_negative_no_records_until_negative_ttl_expires",
+        );
+        set_test_time(0);
+        let config = ResolverConfig {
+            cache_config: CacheConfig {
+                negative_ttl: Duration::from_millis(10),
+                ..CacheConfig::default()
+            },
+            ..ResolverConfig::default()
+        };
+        let resolver = Resolver::with_time_getter(config, test_time);
+        resolver.cache.put_negative_ip_no_records("localhost");
+
+        let cached = future::block_on(async { resolver.lookup_ip("localhost").await });
+        crate::assert_with_log!(
+            matches!(cached, Err(DnsError::NoRecords(ref host)) if host == "localhost"),
+            "cached negative lookup returned",
+            true,
+            format!("{cached:?}")
+        );
+
+        set_test_time(Duration::from_millis(11).as_nanos() as u64);
+        let refreshed = future::block_on(async { resolver.lookup_ip("localhost").await });
+        crate::assert_with_log!(
+            refreshed.is_ok(),
+            "expired negative entry falls through to fresh resolution",
+            true,
+            refreshed.is_ok()
+        );
+        let refreshed = refreshed.expect("localhost should resolve after negative TTL expiry");
+        crate::assert_with_log!(
+            !refreshed.is_empty(),
+            "fresh localhost resolution yields addresses",
+            true,
+            !refreshed.is_empty()
+        );
+
+        crate::test_complete!(
+            "resolver_lookup_ip_serves_cached_negative_no_records_until_negative_ttl_expires"
+        );
     }
 }

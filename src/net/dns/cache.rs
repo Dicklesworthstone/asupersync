@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use super::error::DnsError;
 use super::lookup::LookupIp;
 
 fn wall_clock_now() -> Time {
@@ -69,10 +70,16 @@ impl<T> CacheEntry<T> {
     }
 }
 
+#[derive(Debug, Clone)]
+enum CachedIpEntry {
+    Positive(LookupIp),
+    NegativeNoRecords,
+}
+
 /// Thread-safe DNS cache.
 #[derive(Debug)]
 pub struct DnsCache {
-    ip_cache: RwLock<HashMap<String, CacheEntry<LookupIp>>>,
+    ip_cache: RwLock<HashMap<String, CacheEntry<CachedIpEntry>>>,
     config: CacheConfig,
     time_getter: fn() -> Time,
     stat_hits: AtomicU64,
@@ -112,8 +119,7 @@ impl DnsCache {
         self.time_getter
     }
 
-    /// Looks up an IP address result from the cache.
-    pub fn get_ip(&self, host: &str) -> Option<LookupIp> {
+    fn get_ip_entry(&self, host: &str) -> Option<CachedIpEntry> {
         let key = normalize_host_key(host);
         let now = (self.time_getter)();
 
@@ -158,8 +164,23 @@ impl DnsCache {
         None
     }
 
-    /// Inserts an IP address lookup result into the cache.
-    pub fn put_ip(&self, host: &str, lookup: &LookupIp) {
+    /// Looks up an IP address result from the cache.
+    pub fn get_ip(&self, host: &str) -> Option<LookupIp> {
+        match self.get_ip_entry(host)? {
+            CachedIpEntry::Positive(lookup) => Some(lookup),
+            CachedIpEntry::NegativeNoRecords => None,
+        }
+    }
+
+    /// Looks up a cached IP result, including negative no-record entries.
+    pub fn get_ip_result(&self, host: &str) -> Option<Result<LookupIp, DnsError>> {
+        Some(match self.get_ip_entry(host)? {
+            CachedIpEntry::Positive(lookup) => Ok(lookup),
+            CachedIpEntry::NegativeNoRecords => Err(DnsError::NoRecords(host.to_string())),
+        })
+    }
+
+    fn put_ip_entry(&self, host: &str, entry: CachedIpEntry, ttl: Duration) {
         if self.config.max_entries == 0 {
             let evicted = {
                 let mut cache = self.ip_cache.write();
@@ -178,7 +199,6 @@ impl DnsCache {
             return;
         }
 
-        let ttl = self.clamp_ttl(lookup.ttl());
         let key = normalize_host_key(host);
         let now = (self.time_getter)();
 
@@ -199,9 +219,21 @@ impl DnsCache {
             }
         }
 
-        cache.insert(
-            key.into_owned(),
-            CacheEntry::new_at(lookup.clone(), ttl, now),
+        cache.insert(key.into_owned(), CacheEntry::new_at(entry, ttl, now));
+    }
+
+    /// Inserts an IP address lookup result into the cache.
+    pub fn put_ip(&self, host: &str, lookup: &LookupIp) {
+        let ttl = self.clamp_ttl(lookup.ttl());
+        self.put_ip_entry(host, CachedIpEntry::Positive(lookup.clone()), ttl);
+    }
+
+    /// Inserts a negative no-record result into the cache.
+    pub fn put_negative_ip_no_records(&self, host: &str) {
+        self.put_ip_entry(
+            host,
+            CachedIpEntry::NegativeNoRecords,
+            self.config.negative_ttl,
         );
     }
 
@@ -256,7 +288,11 @@ impl DnsCache {
         ttl.max(self.config.min_ttl).min(self.config.max_ttl)
     }
 
-    fn evict_expired_locked(&self, cache: &mut HashMap<String, CacheEntry<LookupIp>>, now: Time) {
+    fn evict_expired_locked(
+        &self,
+        cache: &mut HashMap<String, CacheEntry<CachedIpEntry>>,
+        now: Time,
+    ) {
         let before = cache.len();
         cache.retain(|_, entry| !entry.is_expired_at(now));
         let evicted = before - cache.len();
@@ -267,7 +303,7 @@ impl DnsCache {
         }
     }
 
-    fn find_oldest_key(cache: &HashMap<String, CacheEntry<LookupIp>>) -> Option<String> {
+    fn find_oldest_key(cache: &HashMap<String, CacheEntry<CachedIpEntry>>) -> Option<String> {
         cache
             .iter()
             .min_by(|(left_key, left_entry), (right_key, right_entry)| {
@@ -427,6 +463,67 @@ mod tests {
         crate::assert_with_log!(stats.size == 1, "cache size", 1, stats.size);
         crate::assert_with_log!(stats.hits == 2, "cache hits", 2, stats.hits);
         crate::test_complete!("cache_lookup_is_case_insensitive");
+    }
+
+    #[test]
+    fn cache_negative_no_records_hits_and_expires() {
+        init_test("cache_negative_no_records_hits_and_expires");
+        set_test_time(0);
+        let config = CacheConfig {
+            negative_ttl: Duration::from_millis(10),
+            ..Default::default()
+        };
+        let cache = DnsCache::with_time_getter(config, test_time);
+
+        cache.put_negative_ip_no_records("missing.example");
+
+        let first = cache.get_ip_result("missing.example");
+        let second = cache.get_ip_result("MISSING.EXAMPLE");
+        crate::assert_with_log!(first.is_some(), "negative hit", true, first.is_some());
+        crate::assert_with_log!(
+            second.is_some(),
+            "case-insensitive negative hit",
+            true,
+            second.is_some()
+        );
+        crate::assert_with_log!(
+            matches!(first, Some(Err(DnsError::NoRecords(ref host))) if host == "missing.example"),
+            "negative entry returns NoRecords",
+            true,
+            format!("{first:?}")
+        );
+        crate::assert_with_log!(
+            matches!(second, Some(Err(DnsError::NoRecords(ref host))) if host == "MISSING.EXAMPLE"),
+            "negative entry preserves queried host in error",
+            true,
+            format!("{second:?}")
+        );
+        let stats = cache.stats();
+        crate::assert_with_log!(stats.size == 1, "negative cache size", 1, stats.size);
+        crate::assert_with_log!(stats.hits == 2, "negative cache hits", 2, stats.hits);
+
+        set_test_time(Duration::from_millis(11).as_nanos() as u64);
+        let expired = cache.get_ip_result("missing.example");
+        crate::assert_with_log!(
+            expired.is_none(),
+            "negative entry expires via negative_ttl",
+            true,
+            expired.is_none()
+        );
+        let stats = cache.stats();
+        crate::assert_with_log!(
+            stats.size == 0,
+            "expired negative entry evicted",
+            0,
+            stats.size
+        );
+        crate::assert_with_log!(
+            stats.evictions == 1,
+            "expired negative eviction counted",
+            1,
+            stats.evictions
+        );
+        crate::test_complete!("cache_negative_no_records_hits_and_expires");
     }
 
     #[test]
@@ -632,7 +729,7 @@ mod tests {
             entries.insert(
                 "zeta.example".to_string(),
                 CacheEntry {
-                    data: zeta,
+                    data: CachedIpEntry::Positive(zeta),
                     inserted_at,
                     expires_at: inserted_at.saturating_add_nanos(duration_to_nanos(ttl)),
                 },
@@ -640,7 +737,7 @@ mod tests {
             entries.insert(
                 "alpha.example".to_string(),
                 CacheEntry {
-                    data: alpha,
+                    data: CachedIpEntry::Positive(alpha),
                     inserted_at,
                     expires_at: inserted_at.saturating_add_nanos(duration_to_nanos(ttl)),
                 },
