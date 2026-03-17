@@ -155,13 +155,23 @@ impl SystematicParams {
         })
     }
 
-    /// Generate the RFC 6330 repair equation (columns + coefficients) for an ESI.
+    /// Generate the RFC 6330 repair equation (columns + coefficients) for a repair ESI.
+    ///
+    /// RFC 6330 keys repair tuples by repair-symbol ISI `X`, not the raw repair
+    /// ESI. When `K' > K`, the RFC repair ISI space starts at `K'`, so we must
+    /// translate `ESI -> X = ESI + (K' - K)` before tuple expansion.
     ///
     /// This helper centralizes decoder/encoder tuple semantics so parity checks
     /// can use one source of truth for RFC tuple expansion.
     #[must_use]
     pub fn rfc_repair_equation(&self, esi: u32) -> (Vec<usize>, Vec<Gf256>) {
-        let columns = repair_indices_for_esi(self.j, self.w, self.p, esi);
+        let repair_isi = esi
+            .checked_add(
+                u32::try_from(self.k_prime - self.k)
+                    .expect("RFC systematic padding delta must fit in u32"),
+            )
+            .expect("RFC repair ISI must fit in u32");
+        let columns = repair_indices_for_esi(self.j, self.w, self.p, repair_isi);
         let coefficients = vec![Gf256::ONE; columns.len()];
         (columns, coefficients)
     }

@@ -571,6 +571,7 @@ fn send_symbols_directly() {
 mod conformance {
     use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
     use crate::raptorq::gf256::gf256_addmul_slice;
+    use crate::raptorq::rfc6330::repair_indices_for_esi;
     use crate::raptorq::systematic::SystematicEncoder;
     use crate::raptorq::test_log_schema::UnitLogEntry;
     use crate::types::symbol::ObjectId;
@@ -690,6 +691,74 @@ mod conformance {
                 "{context} repair symbol must equal projection of RFC equation for esi={esi}"
             );
         }
+    }
+
+    #[test]
+    fn padded_block_repair_equation_uses_rfc_repair_isi_offset() {
+        let k = 11;
+        let symbol_size = 24;
+        let seed = 321u64;
+        let replay_ref = "replay:rq-u-systematic-rfc-repair-isi-offset-v1";
+        let source: Vec<Vec<u8>> = (0..k)
+            .map(|i| {
+                (0..symbol_size)
+                    .map(|j| ((i * 19 + j * 23 + 11) % 256) as u8)
+                    .collect()
+            })
+            .collect();
+
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed)
+            .unwrap_or_else(|| panic!("expected encoder construction to succeed"));
+        let params = encoder.params();
+        assert!(
+            params.k_prime > params.k,
+            "test requires padded RFC source block parameters"
+        );
+
+        let context = failure_context(
+            "RQ-U-SYSTEMATIC-RFC-REPAIR-ISI-OFFSET",
+            seed,
+            &format!(
+                "k={k},k_prime={},symbol_size={symbol_size},repair_esi={}",
+                params.k_prime, k
+            ),
+            replay_ref,
+        );
+        let esi = k as u32;
+        let repair_isi = esi
+            + u32::try_from(params.k_prime - params.k)
+                .expect("RFC systematic padding delta must fit in u32");
+        let raw_columns = repair_indices_for_esi(params.j, params.w, params.p, esi);
+        let shifted_columns = repair_indices_for_esi(params.j, params.w, params.p, repair_isi);
+        assert_ne!(
+            raw_columns, shifted_columns,
+            "{context} padded blocks must shift repair tuple generation by K' - K"
+        );
+
+        let (columns, coefficients) = params.rfc_repair_equation(esi);
+        assert_eq!(
+            columns, shifted_columns,
+            "{context} shared helper must use RFC repair ISI offset"
+        );
+        assert_ne!(
+            columns, raw_columns,
+            "{context} shared helper must not use raw repair ESI when K' > K"
+        );
+
+        let repair = encoder.repair_symbol(esi);
+        let mut expected = vec![0u8; symbol_size];
+        for (&column, &coefficient) in columns.iter().zip(coefficients.iter()) {
+            gf256_addmul_slice(
+                &mut expected,
+                encoder.intermediate_symbol(column),
+                coefficient,
+            );
+        }
+
+        assert_eq!(
+            repair, expected,
+            "{context} repair symbol must match RFC-adjusted tuple projection"
+        );
     }
 
     /// Known vector: medium block (K=32, symbol_size=64, seed=12345)

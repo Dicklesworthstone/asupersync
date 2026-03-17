@@ -376,6 +376,17 @@ fn poll_send_blocking<T: SymbolSink + Unpin>(
     let waker = std::task::Waker::noop();
     let mut ctx = Context::from_waker(waker);
 
+    match Pin::new(&mut *sink).poll_ready(&mut ctx) {
+        Poll::Ready(Ok(())) => {}
+        Poll::Ready(Err(e)) => {
+            return Err(Error::new(ErrorKind::DispatchFailed).with_message(e.to_string()));
+        }
+        Poll::Pending => {
+            return Err(Error::new(ErrorKind::SinkRejected)
+                .with_message("transport not ready (sync context)"));
+        }
+    }
+
     match Pin::new(&mut *sink).poll_send(&mut ctx, symbol) {
         Poll::Ready(Ok(())) => Ok(()),
         Poll::Ready(Err(e)) => {
@@ -427,6 +438,7 @@ mod tests {
     use super::*;
     use crate::observability::Metrics;
     use crate::security::{AuthenticationTag, SecurityContext};
+    use crate::transport::channel;
     use crate::transport::error::{SinkError, StreamError};
     use crate::types::symbol::{ObjectId, ObjectParams, Symbol};
     use std::pin::Pin;
@@ -838,6 +850,20 @@ mod tests {
     }
 
     #[test]
+    fn test_send_object_channel_backpressure_returns_rejected() {
+        let cx: Cx = Cx::for_testing();
+        let (sink, _stream) = channel(1);
+        let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, None, None);
+
+        let data = vec![0x33u8; 257];
+        let err = sender
+            .send_object(&cx, ObjectId::new_for_test(34), &data)
+            .expect_err("channel backpressure must fail closed as not-ready");
+
+        assert_eq!(err.kind(), ErrorKind::SinkRejected);
+    }
+
+    #[test]
     fn test_send_symbols_pending_flush_returns_rejected() {
         let cx: Cx = Cx::for_testing();
         let sink = FlushPendingSink::new();
@@ -860,6 +886,26 @@ mod tests {
             2,
             "all symbols may be staged before flush reports pending"
         );
+    }
+
+    #[test]
+    fn test_send_symbols_channel_backpressure_returns_rejected() {
+        let cx: Cx = Cx::for_testing();
+        let (sink, _stream) = channel(1);
+        let mut sender = RaptorQSender::new(RaptorQConfig::default(), sink, None, None);
+
+        let symbols: Vec<AuthenticatedSymbol> = (0..2)
+            .map(|i| {
+                let sym = Symbol::new_for_test(1, 0, i, &[i as u8; 256]);
+                AuthenticatedSymbol::new_verified(sym, AuthenticationTag::zero())
+            })
+            .collect();
+
+        let err = sender
+            .send_symbols(&cx, symbols)
+            .expect_err("channel backpressure must fail closed as not-ready");
+
+        assert_eq!(err.kind(), ErrorKind::SinkRejected);
     }
 
     #[test]

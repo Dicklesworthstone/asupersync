@@ -789,8 +789,7 @@ impl GaussianSolver {
             return GaussianResult::Inconsistent { row };
         }
 
-        // Extract solution (RHS values after elimination)
-        GaussianResult::Solved(self.rhs.clone())
+        self.solved_result(n)
     }
 
     /// Solve with Markowitz pivot selection (better for sparse matrices).
@@ -843,7 +842,7 @@ impl GaussianSolver {
             return GaussianResult::Inconsistent { row };
         }
 
-        GaussianResult::Solved(self.rhs.clone())
+        self.solved_result(n)
     }
 
     /// Find first nonzero pivot in column starting from given row.
@@ -903,6 +902,13 @@ impl GaussianSolver {
             self.matrix[row].iter().all(|&coef| coef == 0)
                 && self.rhs[row].as_slice().iter().any(|&byte| byte != 0)
         })
+    }
+
+    fn solved_result(&self, pivot_count: usize) -> GaussianResult {
+        if self.rows < self.cols {
+            return GaussianResult::Singular { row: pivot_count };
+        }
+        GaussianResult::Solved(self.rhs[..self.cols].to_vec())
     }
 
     /// Swap two rows.
@@ -1546,6 +1552,67 @@ mod tests {
             markowitz.solve_markowitz(),
             GaussianResult::Inconsistent { row: 2 },
             "markowitz solver should report the same inconsistent row"
+        );
+    }
+
+    #[test]
+    fn gaussian_consistent_overdetermined_matrix_returns_variable_rows_only() {
+        let mut basic = GaussianSolver::new(3, 2);
+        basic.set_row(0, &[1, 0], DenseRow::new(vec![0x10]));
+        basic.set_row(1, &[0, 1], DenseRow::new(vec![0x20]));
+        basic.set_row(2, &[1, 1], DenseRow::new(vec![0x30]));
+
+        let mut markowitz = GaussianSolver::new(3, 2);
+        markowitz.set_row(0, &[1, 0], DenseRow::new(vec![0x10]));
+        markowitz.set_row(1, &[0, 1], DenseRow::new(vec![0x20]));
+        markowitz.set_row(2, &[1, 1], DenseRow::new(vec![0x30]));
+
+        for (name, result) in [
+            ("basic", basic.solve()),
+            ("markowitz", markowitz.solve_markowitz()),
+        ] {
+            match result {
+                GaussianResult::Solved(solution) => {
+                    assert_eq!(
+                        solution.len(),
+                        2,
+                        "{name} should return one row per variable"
+                    );
+                    let x = solution[0].get(0);
+                    let y = solution[1].get(0);
+                    assert_eq!(x, Gf256::new(0x10), "{name} x value");
+                    assert_eq!(y, Gf256::new(0x20), "{name} y value");
+                    assert_eq!(x + y, Gf256::new(0x30), "{name} redundant row check");
+                }
+                GaussianResult::Singular { row } => {
+                    panic!("{name} unexpectedly reported singular at row {row}")
+                }
+                GaussianResult::Inconsistent { row } => {
+                    panic!("{name} unexpectedly reported inconsistent at row {row}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gaussian_underdetermined_matrix_fails_closed() {
+        let mut basic = GaussianSolver::new(2, 3);
+        basic.set_row(0, &[1, 0, 0], DenseRow::new(vec![0x10]));
+        basic.set_row(1, &[0, 1, 0], DenseRow::new(vec![0x20]));
+
+        let mut markowitz = GaussianSolver::new(2, 3);
+        markowitz.set_row(0, &[1, 0, 0], DenseRow::new(vec![0x10]));
+        markowitz.set_row(1, &[0, 1, 0], DenseRow::new(vec![0x20]));
+
+        assert_eq!(
+            basic.solve(),
+            GaussianResult::Singular { row: 2 },
+            "basic solver should fail closed when a free variable remains"
+        );
+        assert_eq!(
+            markowitz.solve_markowitz(),
+            GaussianResult::Singular { row: 2 },
+            "markowitz solver should fail closed when a free variable remains"
         );
     }
 

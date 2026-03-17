@@ -303,11 +303,25 @@ fn compare_proofs(expected: &DecodeProof, actual: &DecodeProof) -> Result<(), Re
             act_elim.row_ops,
         ));
     }
-    if exp_elim.truncated != act_elim.truncated {
+    if exp_elim.inactive_cols_truncated != act_elim.inactive_cols_truncated {
         return Err(mismatch(
-            "elimination.truncated",
-            exp_elim.truncated,
-            act_elim.truncated,
+            "elimination.inactive_cols_truncated",
+            exp_elim.inactive_cols_truncated,
+            act_elim.inactive_cols_truncated,
+        ));
+    }
+    if exp_elim.pivot_events_truncated != act_elim.pivot_events_truncated {
+        return Err(mismatch(
+            "elimination.pivot_events_truncated",
+            exp_elim.pivot_events_truncated,
+            act_elim.pivot_events_truncated,
+        ));
+    }
+    if exp_elim.strategy_transitions_truncated != act_elim.strategy_transitions_truncated {
+        return Err(mismatch(
+            "elimination.strategy_transitions_truncated",
+            exp_elim.strategy_transitions_truncated,
+            act_elim.strategy_transitions_truncated,
         ));
     }
     if exp_elim.strategy != act_elim.strategy {
@@ -321,19 +335,19 @@ fn compare_proofs(expected: &DecodeProof, actual: &DecodeProof) -> Result<(), Re
         "elimination.inactive_cols",
         &exp_elim.inactive_cols,
         &act_elim.inactive_cols,
-        exp_elim.truncated,
+        exp_elim.inactive_cols_truncated,
     )?;
     compare_prefix(
         "elimination.pivot_events",
         &exp_elim.pivot_events,
         &act_elim.pivot_events,
-        exp_elim.truncated,
+        exp_elim.pivot_events_truncated,
     )?;
     compare_prefix(
         "elimination.strategy_transitions",
         &exp_elim.strategy_transitions,
         &act_elim.strategy_transitions,
-        exp_elim.truncated,
+        exp_elim.strategy_transitions_truncated,
     )?;
 
     if expected.outcome != actual.outcome {
@@ -468,12 +482,16 @@ pub struct EliminationTrace {
     pub pivots: usize,
     /// Pivot events: (column, pivot_row) pairs.
     pub pivot_events: Vec<PivotEvent>,
+    /// True if inactive_cols was truncated.
+    pub inactive_cols_truncated: bool,
+    /// True if pivot_events was truncated.
+    pub pivot_events_truncated: bool,
     /// Number of row operations performed.
     pub row_ops: usize,
     /// Strategy transitions recorded during decode.
     pub strategy_transitions: Vec<StrategyTransition>,
-    /// True if pivot_events was truncated.
-    pub truncated: bool,
+    /// True if strategy_transitions was truncated.
+    pub strategy_transitions_truncated: bool,
 }
 
 impl EliminationTrace {
@@ -497,7 +515,7 @@ impl EliminationTrace {
             self.strategy_transitions
                 .push(StrategyTransition { from, to, reason });
         } else {
-            self.truncated = true;
+            self.strategy_transitions_truncated = true;
         }
         self.strategy = to;
     }
@@ -508,7 +526,7 @@ impl EliminationTrace {
         if self.inactive_cols.len() < MAX_PIVOT_EVENTS {
             self.inactive_cols.push(col);
         } else {
-            self.truncated = true;
+            self.inactive_cols_truncated = true;
         }
     }
 
@@ -518,7 +536,7 @@ impl EliminationTrace {
         if self.pivot_events.len() < MAX_PIVOT_EVENTS {
             self.pivot_events.push(PivotEvent { col, row });
         } else {
-            self.truncated = true;
+            self.pivot_events_truncated = true;
         }
     }
 
@@ -1019,6 +1037,54 @@ mod tests {
         assert_eq!(trace.pivots, 1);
         assert_eq!(trace.row_ops, 1);
         assert_eq!(trace.pivot_events.len(), 1);
+        assert!(!trace.inactive_cols_truncated);
+        assert!(!trace.pivot_events_truncated);
+        assert!(!trace.strategy_transitions_truncated);
+    }
+
+    #[test]
+    fn replay_verification_keeps_non_truncated_elimination_subtraces_strict() {
+        let config = make_test_config();
+        let recovered = make_test_recovered(&config);
+        let mut expected_builder = DecodeProof::builder(config);
+        expected_builder.set_received(ReceivedSummary {
+            total: 10,
+            source_count: 10,
+            repair_count: 0,
+            esi_multiset_hash: 321,
+            esis: (0..10).collect(),
+            truncated: false,
+        });
+        expected_builder.set_success(&recovered);
+
+        let elimination = expected_builder.elimination_mut();
+        for col in 0..=MAX_PIVOT_EVENTS {
+            elimination.record_inactivation(col);
+        }
+        elimination.record_pivot(3, 0);
+        elimination.record_strategy_transition(
+            InactivationStrategy::AllAtOnce,
+            InactivationStrategy::HighSupportFirst,
+            "dense_or_near_square",
+        );
+
+        let expected = expected_builder.build();
+        assert!(expected.elimination.inactive_cols_truncated);
+        assert!(!expected.elimination.pivot_events_truncated);
+        assert!(!expected.elimination.strategy_transitions_truncated);
+
+        let mut actual = expected.clone();
+        actual
+            .elimination
+            .pivot_events
+            .push(PivotEvent { col: 9, row: 1 });
+
+        let err = compare_proofs(&expected, &actual)
+            .expect_err("extra non-truncated pivot events must fail replay verification");
+        assert!(
+            err.to_string().contains("elimination.pivot_events"),
+            "mismatch should point directly at the non-truncated elimination sub-trace"
+        );
     }
 
     #[test]

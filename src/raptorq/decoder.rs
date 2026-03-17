@@ -2345,7 +2345,7 @@ impl InactivationDecoder {
                     trace.pivots = 0;
                     trace.pivot_events.clear();
                     trace.row_ops = 0;
-                    trace.truncated = false;
+                    trace.pivot_events_truncated = false;
                     continue;
                 }
                 if matches!(hard_plan, HardRegimePlan::BlockSchurLowRank { .. }) {
@@ -2361,7 +2361,7 @@ impl InactivationDecoder {
                     trace.pivots = 0;
                     trace.pivot_events.clear();
                     trace.row_ops = 0;
-                    trace.truncated = false;
+                    trace.pivot_events_truncated = false;
                     if let Some(base_b) = retry_rhs_snapshot.as_ref() {
                         rebuild_dense_matrix_from_equations(
                             &state.equations,
@@ -3904,7 +3904,8 @@ mod tests {
 
         for i in 0..width {
             equations.push(Equation::new(cols.clone(), vec![Gf256::ONE; cols.len()]));
-            rhs.push(vec![(i as u8) + 1; symbol_size]);
+            let rhs_byte = ((i % 255) as u8).saturating_add(1);
+            rhs.push(vec![rhs_byte; symbol_size]);
         }
 
         DecoderState {
@@ -4063,7 +4064,9 @@ mod tests {
             trace.strategy_transitions.is_empty(),
             "stale strategy transitions must not leak across proof invocations"
         );
-        assert!(!trace.truncated);
+        assert!(!trace.inactive_cols_truncated);
+        assert!(!trace.pivot_events_truncated);
+        assert!(!trace.strategy_transitions_truncated);
     }
 
     #[test]
@@ -4379,6 +4382,37 @@ mod tests {
                     && transition.reason == "block_schur_failed_to_converge"
             }),
             "proof trace should record deterministic branch fallback transition"
+        );
+    }
+
+    #[test]
+    fn block_schur_fallback_preserves_non_pivot_truncation_flags() {
+        set_test_bypass_governance(true);
+        let decoder = InactivationDecoder::new(300, 1, 7171);
+        let params = decoder.params().clone();
+        let mut state = make_block_schur_rank_deficient_state(
+            &params,
+            1,
+            4,
+            crate::raptorq::proof::MAX_PIVOT_EVENTS + 1,
+        );
+        let mut trace = EliminationTrace::default();
+
+        let err = decoder
+            .inactivate_and_solve_with_proof(&mut state, &mut trace)
+            .expect_err("wide rank-deficient block-schur candidate should fail deterministically");
+        assert!(matches!(err, DecodeError::SingularMatrix { .. }));
+        assert!(
+            trace.inactive_cols_truncated,
+            "large inactivation witness must stay marked truncated after fallback cleanup"
+        );
+        assert!(
+            !trace.pivot_events_truncated,
+            "clearing pivot history for retry should only reset the pivot-events truncation flag"
+        );
+        assert!(
+            !trace.strategy_transitions_truncated,
+            "single fallback transition should remain non-truncated"
         );
     }
 
