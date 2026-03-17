@@ -265,6 +265,7 @@ impl HealthService {
     /// so that a concurrent `set_status` cannot interleave between the two
     /// reads, which would cause the watcher to record a stale status with an
     /// advanced version, permanently missing the real transition.
+    #[allow(clippy::significant_drop_tightening)]
     fn watched_status_and_version(&self, service: &str) -> (ServingStatus, u64) {
         if service.is_empty() {
             // Server-level watcher uses the global atomic version.
@@ -273,13 +274,19 @@ impl HealthService {
             let version = self.version();
             (status, version)
         } else {
-            let status = self
-                .statuses
-                .read()
+            // CORRECTNESS: Both locks MUST be held simultaneously so that a
+            // concurrent set_status() cannot interleave between the status
+            // read and the version read. Do NOT let a linter tighten these
+            // scopes — the atomicity is load-bearing.
+            let statuses = self.statuses.read();
+            let watch_versions = self.watch_versions.read();
+            let status = statuses
                 .get(service)
                 .copied()
                 .unwrap_or(ServingStatus::ServiceUnknown);
-            let version = self.watch_versions.read().get(service).copied().unwrap_or(0);
+            let version = watch_versions.get(service).copied().unwrap_or(0);
+            drop(watch_versions);
+            drop(statuses);
             (status, version)
         }
     }
