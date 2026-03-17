@@ -155,8 +155,23 @@ consistent with that lane-selection contract:
    - `support_class`
    - `reason_code`
    - `fallback_lane_id`
+   - `lane_health_status`
+   - `lane_health_failure_count`
+   - `lane_health_retry_budget_remaining`
+   - `lane_health_cooldown_until_ms`
+   - `lane_health_last_trigger`
+   - `demoted_lane_id`
    - `policy_schema_version`
    - `repro_command`
+5. Lane health is explicit and bounded:
+   - default policy is `max_consecutive_failures=2`, `cooldown_ms=30000`
+   - failure triggers include `runtime_init_failure`,
+     `worker_bootstrap_timeout`, `worker_crash`,
+     `replay_integrity_failure`, `prerequisite_drift`, and
+     `overload_instability`
+   - after the retry budget is exhausted, the lane demotes fail-closed to
+     `lane.unsupported` until either the cooldown elapses or
+     `manual_reset` is recorded
 
 ### W1: Offload Trigger Law
 

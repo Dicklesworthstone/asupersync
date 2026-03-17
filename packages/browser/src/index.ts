@@ -139,6 +139,9 @@ export interface BrowserRuntimeOptions {
   eagerInit?: boolean;
   globalObject?: Record<string, unknown>;
   preferredLane?: BrowserExecutionLane | null;
+  healthPolicy?: Partial<BrowserLaneHealthPolicy>;
+  healthScopeKey?: string | null;
+  now?: () => number;
 }
 
 export interface BrowserScopeOptions {
@@ -226,6 +229,8 @@ export type BrowserExecutionReasonCode =
   | "supported"
   | "candidate_host_role_mismatch"
   | "candidate_prerequisite_missing"
+  | "candidate_lane_unhealthy"
+  | "demote_due_to_lane_health"
   | "downgrade_to_server_bridge"
   | "downgrade_to_edge_bridge"
   | "downgrade_to_websocket_or_fetch"
@@ -239,6 +244,55 @@ export type BrowserExecutionReasonCode =
   | "non_browser_runtime";
 
 export type BrowserExecutionLaneReason = BrowserExecutionReasonCode;
+
+export type BrowserLaneHealthStatus =
+  | "healthy"
+  | "retrying"
+  | "demoted";
+
+export type BrowserLaneHealthTrigger =
+  | "runtime_init_failure"
+  | "worker_bootstrap_timeout"
+  | "worker_crash"
+  | "replay_integrity_failure"
+  | "prerequisite_drift"
+  | "overload_instability"
+  | "manual_reset";
+
+export interface BrowserLaneHealthPolicy {
+  maxConsecutiveFailures: number;
+  cooldownMs: number;
+}
+
+export interface BrowserLaneHealthSnapshot {
+  laneId: BrowserExecutionLane;
+  status: BrowserLaneHealthStatus;
+  failureCount: number;
+  retryBudgetRemaining: number;
+  cooldownMs: number;
+  cooldownUntilMs: number | null;
+  lastTrigger: BrowserLaneHealthTrigger | null;
+  lastMessage: string | null;
+  lastTransitionAtMs: number | null;
+  demotedToLaneId: BrowserExecutionLane | null;
+}
+
+export interface BrowserLaneHealthDiagnostics extends BrowserLaneHealthSnapshot {
+  scopeKey: string;
+}
+
+export interface BrowserLaneHealthOptions {
+  globalObject?: Record<string, unknown>;
+  laneId?: BrowserExecutionLane;
+  healthPolicy?: Partial<BrowserLaneHealthPolicy>;
+  healthScopeKey?: string | null;
+  now?: () => number;
+}
+
+export interface BrowserLaneHealthEventOptions extends BrowserLaneHealthOptions {
+  trigger: Exclude<BrowserLaneHealthTrigger, "manual_reset">;
+  message?: string;
+}
 
 export interface BrowserExecutionLaneCandidate {
   laneId: BrowserExecutionLane;
@@ -273,6 +327,7 @@ export interface BrowserExecutionLadderDiagnostics {
   policySchemaVersion: typeof BROWSER_EXECUTION_POLICY_SCHEMA_VERSION;
   reproCommand: string;
   candidates: BrowserExecutionLaneCandidate[];
+  health: BrowserLaneHealthDiagnostics;
   runtimeSupport: BrowserRuntimeSupportDiagnostics;
   capabilities: BrowserCapabilitySnapshot;
 }
@@ -517,6 +572,11 @@ const DEFAULT_INDEXEDDB_VERSION = 1;
 const BROWSER_ARTIFACT_INDEX_KEY = "__artifact_index__";
 const BROWSER_ARTIFACT_INDEX_SCHEMA_VERSION = 1;
 const DEFAULT_BROWSER_ARTIFACT_NAMESPACE = "runtime_artifacts_v1";
+const DEFAULT_BROWSER_LANE_HEALTH_SCOPE_KEY = "@asupersync/browser::default";
+const DEFAULT_BROWSER_LANE_HEALTH_POLICY: BrowserLaneHealthPolicy = {
+  maxConsecutiveFailures: 2,
+  cooldownMs: 30_000,
+};
 const DEFAULT_BROWSER_ARTIFACT_RETENTION: BrowserArtifactRetentionPolicy = {
   maxArtifacts: 32,
   maxTotalBytes: 4 * 1024 * 1024,
@@ -604,6 +664,10 @@ const INFLIGHT_WEBTRANSPORTS = new Map<string, BrowserWebTransportState>();
 const TERMINAL_WEBTRANSPORTS = new Map<
   string,
   BrowserWebTransportTerminalState
+>();
+const BROWSER_LANE_HEALTH_REGISTRY = new Map<
+  string,
+  Map<BrowserExecutionLane, BrowserLaneHealthSnapshot>
 >();
 
 function browserCapabilitySnapshot(
@@ -866,6 +930,250 @@ function browserExecutionLaneRank(laneId: BrowserExecutionLane): number {
   }
 }
 
+function browserLaneHealthScopeKey(
+  healthScopeKey: string | null | undefined,
+): string {
+  const normalized = healthScopeKey?.trim() ?? "";
+  return normalized || DEFAULT_BROWSER_LANE_HEALTH_SCOPE_KEY;
+}
+
+function browserLaneHealthPolicy(
+  healthPolicy: Partial<BrowserLaneHealthPolicy> | undefined,
+): BrowserLaneHealthPolicy {
+  return {
+    maxConsecutiveFailures: Math.max(
+      1,
+      healthPolicy?.maxConsecutiveFailures ??
+        DEFAULT_BROWSER_LANE_HEALTH_POLICY.maxConsecutiveFailures,
+    ),
+    cooldownMs: Math.max(
+      0,
+      healthPolicy?.cooldownMs ?? DEFAULT_BROWSER_LANE_HEALTH_POLICY.cooldownMs,
+    ),
+  };
+}
+
+function createHealthyBrowserLaneHealthSnapshot(
+  laneId: BrowserExecutionLane,
+  policy: BrowserLaneHealthPolicy,
+  lastTrigger: BrowserLaneHealthTrigger | null = null,
+  lastMessage: string | null = null,
+  lastTransitionAtMs: number | null = null,
+): BrowserLaneHealthSnapshot {
+  return {
+    laneId,
+    status: "healthy",
+    failureCount: 0,
+    retryBudgetRemaining: policy.maxConsecutiveFailures,
+    cooldownMs: policy.cooldownMs,
+    cooldownUntilMs: null,
+    lastTrigger,
+    lastMessage,
+    lastTransitionAtMs,
+    demotedToLaneId: null,
+  };
+}
+
+function browserLaneHealthRegistry(
+  scopeKey: string,
+): Map<BrowserExecutionLane, BrowserLaneHealthSnapshot> {
+  let registry = BROWSER_LANE_HEALTH_REGISTRY.get(scopeKey);
+  if (!registry) {
+    registry = new Map();
+    BROWSER_LANE_HEALTH_REGISTRY.set(scopeKey, registry);
+  }
+  return registry;
+}
+
+function refreshBrowserLaneHealthSnapshot(
+  snapshot: BrowserLaneHealthSnapshot,
+  policy: BrowserLaneHealthPolicy,
+  nowMs: number,
+): BrowserLaneHealthSnapshot {
+  if (
+    snapshot.status === "demoted" &&
+    snapshot.cooldownUntilMs !== null &&
+    nowMs >= snapshot.cooldownUntilMs
+  ) {
+    return createHealthyBrowserLaneHealthSnapshot(
+      snapshot.laneId,
+      policy,
+      snapshot.lastTrigger,
+      snapshot.lastMessage,
+      nowMs,
+    );
+  }
+  return snapshot;
+}
+
+function readBrowserLaneHealthSnapshot(
+  laneId: BrowserExecutionLane,
+  healthScopeKey: string | null | undefined,
+  healthPolicy: Partial<BrowserLaneHealthPolicy> | undefined,
+  now: (() => number) | undefined,
+): BrowserLaneHealthDiagnostics {
+  const policy = browserLaneHealthPolicy(healthPolicy);
+  const scopeKey = browserLaneHealthScopeKey(healthScopeKey);
+  const nowMs = (now ?? Date.now)();
+  const registry = browserLaneHealthRegistry(scopeKey);
+  const stored =
+    registry.get(laneId) ?? createHealthyBrowserLaneHealthSnapshot(laneId, policy);
+  const refreshed = refreshBrowserLaneHealthSnapshot(stored, policy, nowMs);
+  if (refreshed !== stored) {
+    registry.set(laneId, refreshed);
+  }
+  return {
+    scopeKey,
+    ...refreshed,
+  };
+}
+
+function writeBrowserLaneHealthSnapshot(
+  laneId: BrowserExecutionLane,
+  snapshot: BrowserLaneHealthSnapshot,
+  healthScopeKey: string | null | undefined,
+): BrowserLaneHealthDiagnostics {
+  const scopeKey = browserLaneHealthScopeKey(healthScopeKey);
+  browserLaneHealthRegistry(scopeKey).set(laneId, snapshot);
+  return {
+    scopeKey,
+    ...snapshot,
+  };
+}
+
+function recordBrowserLaneHealthEvent(
+  laneId: BrowserExecutionLane,
+  trigger: BrowserLaneHealthTrigger,
+  message: string | undefined,
+  healthScopeKey: string | null | undefined,
+  healthPolicy: Partial<BrowserLaneHealthPolicy> | undefined,
+  now: (() => number) | undefined,
+): BrowserLaneHealthDiagnostics {
+  const policy = browserLaneHealthPolicy(healthPolicy);
+  const nowMs = (now ?? Date.now)();
+  const current = readBrowserLaneHealthSnapshot(
+    laneId,
+    healthScopeKey,
+    healthPolicy,
+    now,
+  );
+  const base = refreshBrowserLaneHealthSnapshot(current, policy, nowMs);
+
+  if (trigger === "manual_reset") {
+    return writeBrowserLaneHealthSnapshot(
+      laneId,
+      createHealthyBrowserLaneHealthSnapshot(
+        laneId,
+        policy,
+        trigger,
+        message ?? null,
+        nowMs,
+      ),
+      healthScopeKey,
+    );
+  }
+
+  const failureCount = base.failureCount + 1;
+  const retryBudgetRemaining = Math.max(
+    0,
+    policy.maxConsecutiveFailures - failureCount,
+  );
+  const demoted = retryBudgetRemaining === 0;
+  return writeBrowserLaneHealthSnapshot(
+    laneId,
+    {
+      laneId,
+      status: demoted ? "demoted" : "retrying",
+      failureCount,
+      retryBudgetRemaining,
+      cooldownMs: policy.cooldownMs,
+      cooldownUntilMs: demoted ? nowMs + policy.cooldownMs : null,
+      lastTrigger: trigger,
+      lastMessage: message ?? null,
+      lastTransitionAtMs: nowMs,
+      demotedToLaneId: demoted ? browserExecutionFallbackLane(laneId) : null,
+    },
+    healthScopeKey,
+  );
+}
+
+function clearBrowserLaneHealth(
+  laneId: BrowserExecutionLane,
+  healthScopeKey: string | null | undefined,
+  healthPolicy: Partial<BrowserLaneHealthPolicy> | undefined,
+  now: (() => number) | undefined,
+): BrowserLaneHealthDiagnostics {
+  const policy = browserLaneHealthPolicy(healthPolicy);
+  const current = readBrowserLaneHealthSnapshot(
+    laneId,
+    healthScopeKey,
+    healthPolicy,
+    now,
+  );
+  if (current.status === "healthy" && current.failureCount === 0) {
+    return current;
+  }
+  return writeBrowserLaneHealthSnapshot(
+    laneId,
+    createHealthyBrowserLaneHealthSnapshot(
+      laneId,
+      policy,
+      current.lastTrigger,
+      current.lastMessage,
+      (now ?? Date.now)(),
+    ),
+    healthScopeKey,
+  );
+}
+
+function browserLaneHealthMessageFragment(
+  health: BrowserLaneHealthDiagnostics,
+): string {
+  const cooldown =
+    health.cooldownUntilMs === null
+      ? "cooldown_until_ms=null"
+      : `cooldown_until_ms=${health.cooldownUntilMs}`;
+  const trigger = health.lastTrigger ?? "runtime_init_failure";
+  return `lane_health_status=${health.status}; failure_count=${health.failureCount}; retry_budget_remaining=${health.retryBudgetRemaining}; ${cooldown}; last_trigger=${trigger}`;
+}
+
+function browserExecutionLaneUnhealthyMessage(
+  laneId: BrowserExecutionLane,
+  health: BrowserLaneHealthDiagnostics,
+): string {
+  return `${laneId} is temporarily unavailable because ${browserLaneHealthMessageFragment(health)}.`;
+}
+
+function browserExecutionLaneUnhealthyGuidance(
+  laneId: BrowserExecutionLane,
+  health: BrowserLaneHealthDiagnostics,
+): string[] {
+  const guidance = [
+    `Wait for the cooldown window to elapse or call resetBrowserLaneHealth({ laneId: "${laneId}" }) after the host is stable again.`,
+  ];
+  if (health.lastMessage) {
+    guidance.push(`Latest health event detail: ${health.lastMessage}`);
+  }
+  return guidance;
+}
+
+function browserExecutionHealthDemotionMessage(
+  laneId: BrowserExecutionLane,
+  health: BrowserLaneHealthDiagnostics,
+): string {
+  return `Browser Edition demoted from ${laneId} to ${BROWSER_UNSUPPORTED_LANE} because ${browserLaneHealthMessageFragment(health)}.`;
+}
+
+function browserExecutionHealthDemotionGuidance(
+  laneId: BrowserExecutionLane,
+  health: BrowserLaneHealthDiagnostics,
+): string[] {
+  return [
+    `Treat ${BROWSER_UNSUPPORTED_LANE} as the fail-closed circuit-breaker lane until ${laneId} becomes healthy again.`,
+    ...browserExecutionLaneUnhealthyGuidance(laneId, health),
+  ];
+}
+
 function browserExecutionFallbackLane(
   laneId: BrowserExecutionLane,
 ): BrowserExecutionLane | null {
@@ -1001,6 +1309,7 @@ function browserExecutionCandidates(
   selectedReasonCode: BrowserExecutionReasonCode,
   selectedMessage: string,
   selectedGuidance: string[],
+  laneHealth: BrowserLaneHealthDiagnostics,
 ): BrowserExecutionLaneCandidate[] {
   const directLaneForHost = browserExecutionDirectLaneForHostRole(hostRole);
 
@@ -1024,9 +1333,25 @@ function browserExecutionCandidates(
       );
     }
 
+    const laneUnhealthy =
+      directLaneForHost === laneId && laneHealth.status === "demoted";
+    if (laneUnhealthy) {
+      return createBrowserExecutionLaneCandidate(
+        laneId,
+        hostRole,
+        supportClass,
+        false,
+        false,
+        "candidate_lane_unhealthy",
+        browserExecutionLaneUnhealthyMessage(laneId, laneHealth),
+        browserExecutionLaneUnhealthyGuidance(laneId, laneHealth),
+      );
+    }
+
     const prerequisiteMissing =
       laneId === BROWSER_UNSUPPORTED_LANE
-        ? selectedLane !== BROWSER_UNSUPPORTED_LANE
+        ? selectedLane !== BROWSER_UNSUPPORTED_LANE &&
+          selectedReasonCode !== "demote_due_to_lane_health"
         : directLaneForHost === laneId && selectedLane === BROWSER_UNSUPPORTED_LANE;
 
     if (prerequisiteMissing) {
@@ -1059,18 +1384,40 @@ function buildBrowserExecutionLadder(
   runtimeSupport: BrowserRuntimeSupportDiagnostics,
   preferredLane: BrowserExecutionLane | null,
   globalObject: Record<string, unknown> | undefined,
+  healthPolicy: Partial<BrowserLaneHealthPolicy> | undefined,
+  healthScopeKey: string | null | undefined,
+  now: (() => number) | undefined,
 ): BrowserExecutionLadderDiagnostics {
   const hostRole = browserExecutionHostRole(globalObject, runtimeSupport.capabilities);
-  const selectedLane = browserExecutionSelectedLane(hostRole, runtimeSupport);
+  const directLaneForHost = browserExecutionDirectLaneForHostRole(hostRole);
+  const nominalLane = browserExecutionSelectedLane(hostRole, runtimeSupport);
+  const laneHealth = readBrowserLaneHealthSnapshot(
+    directLaneForHost ?? nominalLane,
+    healthScopeKey,
+    healthPolicy,
+    now,
+  );
+  const healthDemotion =
+    runtimeSupport.supported &&
+    directLaneForHost !== null &&
+    laneHealth.status === "demoted";
+  const selectedLane = healthDemotion
+    ? laneHealth.demotedToLaneId ?? BROWSER_UNSUPPORTED_LANE
+    : nominalLane;
   const supportClass = runtimeSupport.supportClass;
   const fallbackLaneId = browserExecutionFallbackLane(selectedLane);
-  const reasonCode = runtimeSupport.supported
-    ? "supported"
-    : browserExecutionReasonCodeFromRuntimeSupport(runtimeSupport.reason);
+  const reasonCode = healthDemotion
+    ? "demote_due_to_lane_health"
+    : runtimeSupport.supported
+      ? "supported"
+      : browserExecutionReasonCodeFromRuntimeSupport(runtimeSupport.reason);
   let message = runtimeSupport.message;
   let guidance = [...runtimeSupport.guidance];
 
-  if (runtimeSupport.supported) {
+  if (healthDemotion && directLaneForHost !== null) {
+    message = browserExecutionHealthDemotionMessage(directLaneForHost, laneHealth);
+    guidance = browserExecutionHealthDemotionGuidance(directLaneForHost, laneHealth);
+  } else if (runtimeSupport.supported) {
     message =
       selectedLane === BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE
         ? `Browser Edition selected ${BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE} for the dedicated-worker host role.`
@@ -1091,7 +1438,7 @@ function buildBrowserExecutionLadder(
   }
 
   return {
-    supported: runtimeSupport.supported,
+    supported: runtimeSupport.supported && selectedLane !== BROWSER_UNSUPPORTED_LANE,
     preferredLane,
     selectedLane,
     laneId: selectedLane,
@@ -1115,7 +1462,9 @@ function buildBrowserExecutionLadder(
       reasonCode,
       message,
       guidance,
+      laneHealth,
     ),
+    health: laneHealth,
     runtimeSupport,
     capabilities: runtimeSupport.capabilities,
   };
@@ -1125,6 +1474,9 @@ export function detectBrowserExecutionLadder(
   options: {
     globalObject?: Record<string, unknown>;
     preferredLane?: BrowserExecutionLane | null;
+    healthPolicy?: Partial<BrowserLaneHealthPolicy>;
+    healthScopeKey?: string | null;
+    now?: () => number;
   } = {},
 ): BrowserExecutionLadderDiagnostics {
   const preferredLane = options.preferredLane ?? null;
@@ -1133,6 +1485,67 @@ export function detectBrowserExecutionLadder(
     runtimeSupport,
     preferredLane,
     options.globalObject,
+    options.healthPolicy,
+    options.healthScopeKey,
+    options.now,
+  );
+}
+
+export function inspectBrowserLaneHealth(
+  options: BrowserLaneHealthOptions = {},
+): BrowserLaneHealthDiagnostics {
+  const globalObject = options.globalObject ?? defaultGlobalObject();
+  const runtimeSupport = detectBrowserRuntimeSupport(globalObject);
+  const hostRole = browserExecutionHostRole(globalObject, runtimeSupport.capabilities);
+  const laneId =
+    options.laneId ??
+    browserExecutionDirectLaneForHostRole(hostRole) ??
+    BROWSER_UNSUPPORTED_LANE;
+  return readBrowserLaneHealthSnapshot(
+    laneId,
+    options.healthScopeKey,
+    options.healthPolicy,
+    options.now,
+  );
+}
+
+export function reportBrowserLaneUnhealthy(
+  options: BrowserLaneHealthEventOptions,
+): BrowserLaneHealthDiagnostics {
+  const globalObject = options.globalObject ?? defaultGlobalObject();
+  const runtimeSupport = detectBrowserRuntimeSupport(globalObject);
+  const hostRole = browserExecutionHostRole(globalObject, runtimeSupport.capabilities);
+  const laneId =
+    options.laneId ??
+    browserExecutionDirectLaneForHostRole(hostRole) ??
+    BROWSER_UNSUPPORTED_LANE;
+  return recordBrowserLaneHealthEvent(
+    laneId,
+    options.trigger,
+    options.message,
+    options.healthScopeKey,
+    options.healthPolicy,
+    options.now,
+  );
+}
+
+export function resetBrowserLaneHealth(
+  options: BrowserLaneHealthOptions = {},
+): BrowserLaneHealthDiagnostics {
+  const globalObject = options.globalObject ?? defaultGlobalObject();
+  const runtimeSupport = detectBrowserRuntimeSupport(globalObject);
+  const hostRole = browserExecutionHostRole(globalObject, runtimeSupport.capabilities);
+  const laneId =
+    options.laneId ??
+    browserExecutionDirectLaneForHostRole(hostRole) ??
+    BROWSER_UNSUPPORTED_LANE;
+  return recordBrowserLaneHealthEvent(
+    laneId,
+    "manual_reset",
+    "manual lane-health reset",
+    options.healthScopeKey,
+    options.healthPolicy,
+    options.now,
   );
 }
 
@@ -2101,14 +2514,92 @@ export function unwrapOutcome<T>(outcome: BrowserOutcome<T>): T {
 }
 
 export class BrowserRuntime {
-  readonly diagnostics: BrowserSdkDiagnostics;
+  diagnostics: BrowserSdkDiagnostics;
+  private readonly globalObject: Record<string, unknown> | undefined;
+  private readonly healthPolicy: Partial<BrowserLaneHealthPolicy> | undefined;
+  private readonly healthScopeKey: string | null;
+  private readonly now: () => number;
 
   constructor(
     readonly core: CoreRuntimeHandle,
     readonly consumerVersion: AbiVersion | null = null,
     executionLadder: BrowserExecutionLadderDiagnostics = detectBrowserExecutionLadder(),
+    options: BrowserLaneHealthOptions = {},
   ) {
+    this.globalObject = options.globalObject;
+    this.healthPolicy = options.healthPolicy;
+    this.healthScopeKey = options.healthScopeKey ?? null;
+    this.now = options.now ?? Date.now;
     this.diagnostics = createBrowserSdkDiagnostics(consumerVersion, executionLadder);
+  }
+
+  private currentExecutionLadder(): BrowserExecutionLadderDiagnostics {
+    return detectBrowserExecutionLadder({
+      globalObject: this.globalObject,
+      preferredLane: this.diagnostics.executionLadder.preferredLane,
+      healthPolicy: this.healthPolicy,
+      healthScopeKey: this.healthScopeKey,
+      now: this.now,
+    });
+  }
+
+  private refreshDiagnostics(): BrowserExecutionLadderDiagnostics {
+    const ladder = this.currentExecutionLadder();
+    this.diagnostics = createBrowserSdkDiagnostics(this.consumerVersion, ladder);
+    return ladder;
+  }
+
+  laneAvailabilityOutcome(
+    operation: string,
+  ): BrowserOutcome<never> | null {
+    const ladder = this.refreshDiagnostics();
+    if (ladder.supported) {
+      return null;
+    }
+    const recoverability: Recoverability =
+      ladder.reasonCode === "demote_due_to_lane_health"
+        ? "transient"
+        : "permanent";
+    return OutcomeFactory.err(
+      "capability_denied",
+      recoverability,
+      `Cannot ${operation}: ${ladder.message} ${ladder.guidance.join(" ")}`.trim(),
+    );
+  }
+
+  laneHealth(): BrowserLaneHealthDiagnostics {
+    return this.refreshDiagnostics().health;
+  }
+
+  reportLaneUnhealthy(
+    trigger: Exclude<BrowserLaneHealthTrigger, "manual_reset">,
+    message?: string,
+  ): BrowserLaneHealthDiagnostics {
+    const laneId = this.refreshDiagnostics().health.laneId;
+    const diagnostics = recordBrowserLaneHealthEvent(
+      laneId,
+      trigger,
+      message,
+      this.healthScopeKey,
+      this.healthPolicy,
+      this.now,
+    );
+    this.refreshDiagnostics();
+    return diagnostics;
+  }
+
+  resetLaneHealth(message = "manual lane-health reset"): BrowserLaneHealthDiagnostics {
+    const laneId = this.refreshDiagnostics().health.laneId;
+    const diagnostics = recordBrowserLaneHealthEvent(
+      laneId,
+      "manual_reset",
+      message,
+      this.healthScopeKey,
+      this.healthPolicy,
+      this.now,
+    );
+    this.refreshDiagnostics();
+    return diagnostics;
   }
 
   toJSON(): HandleRef {
@@ -2129,6 +2620,10 @@ export class BrowserRuntime {
     label?: string,
     consumerVersion: AbiVersion | null = this.consumerVersion,
   ): BrowserOutcome<RegionHandle> {
+    const laneOutcome = this.laneAvailabilityOutcome("enter a Browser Edition scope");
+    if (laneOutcome) {
+      return laneOutcome;
+    }
     const entered = scopeEnter({ parent: this.core, label }, consumerVersion);
     if (entered.outcome !== "ok") {
       return entered;
@@ -2182,6 +2677,12 @@ export class RegionHandle {
     label?: string,
     consumerVersion: AbiVersion | null = this.consumerVersion,
   ): BrowserOutcome<RegionHandle> {
+    const laneOutcome = this.runtime?.laneAvailabilityOutcome(
+      "enter a nested Browser Edition scope",
+    );
+    if (laneOutcome) {
+      return laneOutcome;
+    }
     const entered = scopeEnter({ parent: this.core, label }, consumerVersion);
     if (entered.outcome !== "ok") {
       return entered;
@@ -2196,6 +2697,12 @@ export class RegionHandle {
     options: Omit<TaskSpawnRequest, "scope"> = {},
     consumerVersion: AbiVersion | null = this.consumerVersion,
   ): BrowserOutcome<TaskHandle> {
+    const laneOutcome = this.runtime?.laneAvailabilityOutcome(
+      "spawn work on a demoted Browser Edition runtime",
+    );
+    if (laneOutcome) {
+      return laneOutcome;
+    }
     return mapOutcome(
       taskSpawn({ scope: this.core, ...options }, consumerVersion),
       (handle) => new TaskHandle(handle, consumerVersion),
@@ -2206,6 +2713,12 @@ export class RegionHandle {
     options: Omit<FetchRequest, "scope">,
     consumerVersion: AbiVersion | null = this.consumerVersion,
   ): BrowserOutcome<FetchHandle> {
+    const laneOutcome = this.runtime?.laneAvailabilityOutcome(
+      "issue fetch work on a demoted Browser Edition runtime",
+    );
+    if (laneOutcome) {
+      return laneOutcome;
+    }
     return mapOutcome(
       fetchRequest({ scope: this.core, ...options }, consumerVersion),
       (handle) => new FetchHandle(handle, consumerVersion),
@@ -2217,6 +2730,12 @@ export class RegionHandle {
     protocols?: string[],
     consumerVersion: AbiVersion | null = this.consumerVersion,
   ): BrowserOutcome<TaskHandle> {
+    const laneOutcome = this.runtime?.laneAvailabilityOutcome(
+      "open a WebSocket on a demoted Browser Edition runtime",
+    );
+    if (laneOutcome) {
+      return laneOutcome;
+    }
     return mapOutcome(
       websocketOpen({ scope: this.core, url, protocols }, consumerVersion),
       (handle) => new TaskHandle(handle, consumerVersion),
@@ -2228,6 +2747,12 @@ export class RegionHandle {
     options: BrowserWebTransportOpenOptions = {},
     consumerVersion: AbiVersion | null = this.consumerVersion,
   ): BrowserOutcome<WebTransportHandle> {
+    const laneOutcome = this.runtime?.laneAvailabilityOutcome(
+      "open WebTransport on a demoted Browser Edition runtime",
+    );
+    if (laneOutcome) {
+      return laneOutcome;
+    }
     const diagnostics = detectWebTransportSupport();
     if (!diagnostics.supported) {
       return webTransportCapabilityDenied(diagnostics);
@@ -3913,9 +4438,12 @@ export async function createBrowserRuntimeSelection(
   options: BrowserRuntimeOptions = {},
 ): Promise<BrowserRuntimeSelectionResult> {
   const consumerVersion = options.consumerVersion ?? null;
-  const executionLadder = detectBrowserExecutionLadder({
+  let executionLadder = detectBrowserExecutionLadder({
     globalObject: options.globalObject,
     preferredLane: options.preferredLane,
+    healthPolicy: options.healthPolicy,
+    healthScopeKey: options.healthScopeKey,
+    now: options.now,
   });
 
   if (!executionLadder.supported) {
@@ -3927,16 +4455,85 @@ export async function createBrowserRuntimeSelection(
   }
 
   if (options.eagerInit !== false) {
-    await initWasm(options.wasmInput);
+    try {
+      await initWasm(options.wasmInput);
+    } catch (error) {
+      const health = recordBrowserLaneHealthEvent(
+        executionLadder.health.laneId,
+        "runtime_init_failure",
+        `initWasm failed for ${executionLadder.laneId}: ${errorMessage(error)}`,
+        options.healthScopeKey,
+        options.healthPolicy,
+        options.now,
+      );
+      executionLadder = detectBrowserExecutionLadder({
+        globalObject: options.globalObject,
+        preferredLane: options.preferredLane,
+        healthPolicy: options.healthPolicy,
+        healthScopeKey: options.healthScopeKey,
+        now: options.now,
+      });
+      const outcome = OutcomeFactory.err(
+        "internal_failure",
+        health.status === "demoted" ? "transient" : "transient",
+        `Browser Edition failed to initialize WebAssembly runtime: ${errorMessage(error)}`,
+      );
+      return {
+        executionLadder,
+        runtime: null,
+        outcome: executionLadder.supported ? outcome : null,
+      };
+    }
   }
 
   const outcome = mapOutcome(runtimeCreate(consumerVersion), (handle) => {
-    return new BrowserRuntime(handle, consumerVersion, executionLadder);
+    const stableLaneHealth = clearBrowserLaneHealth(
+      executionLadder.health.laneId,
+      options.healthScopeKey,
+      options.healthPolicy,
+      options.now,
+    );
+    const stableExecutionLadder = detectBrowserExecutionLadder({
+      globalObject: options.globalObject,
+      preferredLane: options.preferredLane,
+      healthPolicy: options.healthPolicy,
+      healthScopeKey: stableLaneHealth.scopeKey,
+      now: options.now,
+    });
+    return new BrowserRuntime(handle, consumerVersion, stableExecutionLadder, {
+      globalObject: options.globalObject,
+      healthPolicy: options.healthPolicy,
+      healthScopeKey: stableLaneHealth.scopeKey,
+      now: options.now,
+    });
   });
 
+  if (outcome.outcome !== "ok") {
+    const health = recordBrowserLaneHealthEvent(
+      executionLadder.health.laneId,
+      "runtime_init_failure",
+      `runtimeCreate failed for ${executionLadder.laneId}: ${formatOutcomeFailure(outcome)}`,
+      options.healthScopeKey,
+      options.healthPolicy,
+      options.now,
+    );
+    executionLadder = detectBrowserExecutionLadder({
+      globalObject: options.globalObject,
+      preferredLane: options.preferredLane,
+      healthPolicy: options.healthPolicy,
+      healthScopeKey: options.healthScopeKey,
+      now: options.now,
+    });
+    return {
+      executionLadder,
+      runtime: null,
+      outcome: health.status === "demoted" ? null : outcome,
+    };
+  }
+
   return {
-    executionLadder,
-    runtime: outcome.outcome === "ok" ? outcome.value : null,
+    executionLadder: outcome.value.diagnostics.executionLadder,
+    runtime: outcome.value,
     outcome,
   };
 }

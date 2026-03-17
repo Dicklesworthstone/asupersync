@@ -186,10 +186,13 @@ Canonical reason-code schema:
 - `supported`:
   `supported`
 - `skip`:
-  `candidate_host_role_mismatch`, `candidate_prerequisite_missing`
+  `candidate_host_role_mismatch`, `candidate_prerequisite_missing`,
+  `candidate_lane_unhealthy`
 - `downgrade`:
   `downgrade_to_server_bridge`, `downgrade_to_edge_bridge`,
   `downgrade_to_websocket_or_fetch`, `downgrade_to_export_bytes_for_download`
+- `health`:
+  `demote_due_to_lane_health`
 - `policy_denial`:
   `service_worker_direct_runtime_not_shipped`,
   `shared_worker_direct_runtime_not_shipped`,
@@ -218,8 +221,27 @@ Required log/event fields for all later ladder-selection artifacts:
 - `support_class`
 - `reason_code`
 - `fallback_lane_id`
+- `lane_health_status`
+- `lane_health_failure_count`
+- `lane_health_retry_budget_remaining`
+- `lane_health_cooldown_until_ms`
+- `lane_health_last_trigger`
+- `demoted_lane_id`
 - `policy_schema_version`
 - `repro_command`
+
+Lane health is part of the execution-ladder contract as well, not an
+implementation detail:
+
+- demotion behavior: `bounded_retry_then_fail_closed`
+- demotion fallback lane: `lane.unsupported`
+- default policy: `max_consecutive_failures=2`, `cooldown_ms=30000`
+- failure triggers:
+  `runtime_init_failure`, `worker_bootstrap_timeout`, `worker_crash`,
+  `replay_integrity_failure`, `prerequisite_drift`,
+  `overload_instability`
+- manual reset trigger:
+  `manual_reset`
 
 Required repro-command convention for later e2e scripts:
 
