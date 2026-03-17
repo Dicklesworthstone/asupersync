@@ -309,11 +309,11 @@ impl Compressor for GzipCompressor {
     fn compress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
         use io::Write;
         self.encoder.write_all(input)?;
-        // Flush to get compressed bytes so far.
-        self.encoder.flush()?;
         let buf = self.encoder.get_mut();
-        output.extend_from_slice(buf);
-        buf.clear();
+        if !buf.is_empty() {
+            output.extend_from_slice(buf);
+            buf.clear();
+        }
         Ok(())
     }
 
@@ -422,10 +422,11 @@ impl Compressor for DeflateCompressor {
     fn compress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
         use io::Write;
         self.encoder.write_all(input)?;
-        self.encoder.flush()?;
         let buf = self.encoder.get_mut();
-        output.extend_from_slice(buf);
-        buf.clear();
+        if !buf.is_empty() {
+            output.extend_from_slice(buf);
+            buf.clear();
+        }
         Ok(())
     }
 
@@ -1205,6 +1206,24 @@ mod tests {
         assert!(
             compressed.len() < input.len() / 2,
             "deflate should compress repetitive data: {} -> {}",
+            input.len(),
+            compressed.len()
+        );
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn gzip_compresses_repetitive_data_chunked() {
+        let input: Vec<u8> = "aaaa".repeat(1000).into_bytes();
+        let mut comp = GzipCompressor::new();
+        let mut compressed = Vec::new();
+        for chunk in input.chunks(10) {
+            comp.compress(chunk, &mut compressed).unwrap();
+        }
+        comp.finish(&mut compressed).unwrap();
+        assert!(
+            compressed.len() < input.len() / 2,
+            "gzip should compress chunked repetitive data efficiently: {} -> {}",
             input.len(),
             compressed.len()
         );

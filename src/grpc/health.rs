@@ -269,10 +269,18 @@ impl HealthService {
     fn watched_status_and_version(&self, service: &str) -> (ServingStatus, u64) {
         if service.is_empty() {
             // Server-level watcher uses the global atomic version.
-            let status = self
-                .check(&HealthCheckRequest::server())
-                .map_or(ServingStatus::ServiceUnknown, |response| response.status);
+            // MUST hold the statuses lock while reading the version to prevent
+            // interleaving set_status() from pairing a stale status with a new version.
+            let statuses = self.statuses.read();
+            let status = if statuses.is_empty() {
+                ServingStatus::ServiceUnknown
+            } else if statuses.values().all(|s| s.is_healthy()) {
+                ServingStatus::Serving
+            } else {
+                ServingStatus::NotServing
+            };
             let version = self.version();
+            drop(statuses);
             (status, version)
         } else {
             // CORRECTNESS: Both locks MUST be held simultaneously so that a
@@ -428,11 +436,13 @@ impl HealthWatcher {
 
     /// Returns the current status for the watched service.
     ///
+    /// This returns the status snapshotted during the watcher's creation,
+    /// or during the most recent call to `changed` or `poll_status`.
     /// Unregistered named services report [`ServingStatus::ServiceUnknown`],
     /// matching the gRPC health `Watch` contract.
     #[must_use]
     pub fn status(&self) -> ServingStatus {
-        self.service.watched_status(&self.service_name)
+        self.last_status
     }
 
     /// Returns a single-read snapshot: `(changed, current_status)`.

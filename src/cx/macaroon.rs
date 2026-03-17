@@ -775,7 +775,9 @@ impl MacaroonToken {
         let caveat_count = u16::from_le_bytes(data[pos..pos + 2].try_into().ok()?) as usize;
         pos += 2;
 
-        let mut caveats = Vec::with_capacity(caveat_count);
+        // Prevent unbacked preallocation DoS: a caveat takes at least 3 bytes on the wire.
+        let safe_capacity = caveat_count.min((data.len() - pos) / 3);
+        let mut caveats = Vec::with_capacity(safe_capacity);
         for _ in 0..caveat_count {
             if pos >= data.len() {
                 return None;
