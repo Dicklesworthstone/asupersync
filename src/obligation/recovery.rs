@@ -507,6 +507,36 @@ mod tests {
     }
 
     #[test]
+    fn conflict_repair_survives_stale_merge() {
+        let mut gov = RecoveryGovernor::new(test_config());
+        let mut a = CrdtObligationLedger::new(node("A"));
+        a.record_acquire(oid(1), ObligationKind::SendPermit);
+        a.record_commit(oid(1));
+
+        let mut b = CrdtObligationLedger::new(node("B"));
+        b.record_acquire(oid(1), ObligationKind::SendPermit);
+        b.record_abort(oid(1));
+
+        a.merge(&b);
+        let stale_conflict = a.clone();
+        assert_eq!(a.get(&oid(1)), LatticeState::Conflict);
+
+        let result = gov.tick(&mut a, 0);
+        assert!(
+            result
+                .actions
+                .iter()
+                .any(|a| matches!(a, RecoveryAction::ConflictResolved { .. }))
+        );
+
+        a.merge(&stale_conflict);
+        let repaired = a.get_entry(&oid(1)).expect("entry should exist");
+        assert_eq!(repaired.state, LatticeState::Aborted);
+        assert!(repaired.is_linear());
+        assert!(!repaired.is_conflict());
+    }
+
+    #[test]
     fn conflict_flagged_when_auto_resolve_disabled() {
         let mut config = test_config();
         config.auto_resolve_conflicts = false;

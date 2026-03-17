@@ -39,7 +39,7 @@ use crate::remote::NodeId;
 use crate::trace::distributed::crdt::Merge;
 use crate::trace::distributed::lattice::LatticeState;
 use crate::types::ObligationId;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 // ─── Per-obligation CRDT entry ──────────────────────────────────────────────
@@ -51,6 +51,8 @@ pub struct CrdtObligationEntry {
     pub state: LatticeState,
     /// Which node reported which state (provenance).
     pub witnesses: BTreeMap<NodeId, LatticeState>,
+    /// Nodes that have issued an abort repair for this entry.
+    repair_nodes: BTreeSet<NodeId>,
     /// Obligation kind (informational, set on first observe).
     pub kind: Option<ObligationKind>,
     /// Per-node acquire count (GCounter). Linearity requires global sum == 1.
@@ -64,6 +66,7 @@ impl CrdtObligationEntry {
         Self {
             state: LatticeState::Unknown,
             witnesses: BTreeMap::new(),
+            repair_nodes: BTreeSet::new(),
             kind: None,
             acquire_counts: BTreeMap::new(),
             resolve_counts: BTreeMap::new(),
@@ -130,9 +133,45 @@ impl CrdtObligationEntry {
             let entry = self.resolve_counts.entry(node.clone()).or_insert(0);
             *entry = (*entry).max(count);
         }
+        self.repair_nodes.extend(other.repair_nodes.iter().cloned());
+        self.normalize_repair_tombstone();
+    }
+
+    fn repair_owner(&self) -> Option<&NodeId> {
+        self.repair_nodes.iter().next()
+    }
+
+    fn is_repair_tombstone(&self) -> bool {
+        let Some(owner) = self.repair_owner() else {
+            return false;
+        };
+        self.state == LatticeState::Aborted
+            && self.witnesses.len() == 1
+            && self.witnesses.get(owner).copied() == Some(LatticeState::Aborted)
+            && self.acquire_counts.len() == 1
+            && self.acquire_counts.get(owner).copied() == Some(1)
+            && self.resolve_counts.len() == 1
+            && self.resolve_counts.get(owner).copied() == Some(1)
+    }
+
+    fn normalize_repair_tombstone(&mut self) {
+        let Some(owner) = self.repair_owner().cloned() else {
+            return;
+        };
+
+        self.state = LatticeState::Aborted;
+        self.witnesses.clear();
+        self.witnesses.insert(owner.clone(), LatticeState::Aborted);
+        self.acquire_counts.clear();
+        self.acquire_counts.insert(owner.clone(), 1);
+        self.resolve_counts.clear();
+        self.resolve_counts.insert(owner, 1);
     }
 
     fn is_compact_tombstone_for(&self, local_node: &NodeId) -> bool {
+        if !self.repair_nodes.is_empty() {
+            return self.is_repair_tombstone();
+        }
         let witness_ok = self.witnesses.len() == 1
             && self.witnesses.get(local_node).copied() == Some(self.state);
         let acquire_ok = self.acquire_counts.len() == 1
@@ -145,6 +184,11 @@ impl CrdtObligationEntry {
     fn compact_terminal_tombstone(&mut self, local_node: &NodeId) -> bool {
         if self.is_compact_tombstone_for(local_node) {
             return false;
+        }
+
+        if !self.repair_nodes.is_empty() {
+            self.normalize_repair_tombstone();
+            return true;
         }
 
         self.witnesses.clear();
@@ -237,29 +281,23 @@ impl CrdtObligationLedger {
 
     /// Forces an obligation into an aborted, linear state.
     ///
-    /// This is a recovery-only repair that collapses conflicts or linearity
-    /// violations by resetting counters and witnesses to a single abort.
+    /// This is a recovery-only repair that marks the entry as repaired and
+    /// then projects it onto a deterministic single-abort tombstone.
+    /// The repair marker is convergent, so later merges with stale replicas
+    /// cannot resurrect the pre-repair conflict or linearity violation.
     /// Only applies to entries that are in conflict or violate linearity;
     /// healthy terminal states (Committed/Aborted without conflict) are
     /// left unchanged.
     pub fn force_abort_repair(&mut self, id: ObligationId) {
-        let entry = self
-            .entries
-            .entry(id)
-            .or_insert_with(CrdtObligationEntry::new);
+        let Some(entry) = self.entries.get_mut(&id) else {
+            return;
+        };
         // Guard: only repair entries that are actually broken.
         if !entry.is_conflict() && entry.is_linear() {
             return;
         }
-        entry.state = LatticeState::Aborted;
-        entry.witnesses.clear();
-        entry
-            .witnesses
-            .insert(self.local_node.clone(), LatticeState::Aborted);
-        entry.acquire_counts.clear();
-        entry.resolve_counts.clear();
-        entry.acquire_counts.insert(self.local_node.clone(), 1);
-        entry.resolve_counts.insert(self.local_node.clone(), 1);
+        entry.repair_nodes.insert(self.local_node.clone());
+        entry.normalize_repair_tombstone();
     }
 
     fn record_resolve(&mut self, id: ObligationId, terminal: LatticeState) -> LatticeState {
@@ -277,6 +315,7 @@ impl CrdtObligationLedger {
             .resolve_counts
             .entry(self.local_node.clone())
             .or_insert(0) += 1;
+        entry.normalize_repair_tombstone();
         entry.state
     }
 
@@ -937,6 +976,17 @@ mod tests {
     }
 
     #[test]
+    fn force_abort_repair_missing_id_is_noop() {
+        let mut ledger = CrdtObligationLedger::new(node("A"));
+        let id = oid(145);
+
+        ledger.force_abort_repair(id);
+
+        assert!(ledger.get_entry(&id).is_none());
+        assert!(ledger.is_empty());
+    }
+
+    #[test]
     fn force_abort_repair_collapses_conflict_to_linear_aborted() {
         let id = oid(46);
         let mut a = CrdtObligationLedger::new(node("A"));
@@ -959,6 +1009,71 @@ mod tests {
         assert_eq!(repaired.total_acquires(), 1);
         assert_eq!(repaired.total_resolves(), 1);
         assert_eq!(repaired.witnesses.len(), 1);
+        assert_eq!(
+            repaired.witnesses.get(&node("A")).copied(),
+            Some(LatticeState::Aborted)
+        );
+        assert_eq!(repaired.repair_nodes.len(), 1);
+        assert!(repaired.repair_nodes.contains(&node("A")));
+    }
+
+    #[test]
+    fn force_abort_repair_survives_merge_with_stale_conflict() {
+        let id = oid(48);
+        let mut a = CrdtObligationLedger::new(node("A"));
+        a.record_acquire(id, ObligationKind::SendPermit);
+        a.record_commit(id);
+
+        let mut b = CrdtObligationLedger::new(node("B"));
+        b.record_acquire(id, ObligationKind::SendPermit);
+        b.record_abort(id);
+
+        a.merge(&b);
+        let stale_conflict = a.clone();
+        assert!(a.get(&id).is_conflict());
+
+        a.force_abort_repair(id);
+        a.merge(&stale_conflict);
+
+        let repaired = a.get_entry(&id).expect("entry should exist");
+        assert_eq!(repaired.state, LatticeState::Aborted);
+        assert!(repaired.is_linear());
+        assert!(!repaired.is_conflict());
+        assert_eq!(repaired.total_acquires(), 1);
+        assert_eq!(repaired.total_resolves(), 1);
+        assert_eq!(
+            repaired.witnesses.get(&node("A")).copied(),
+            Some(LatticeState::Aborted)
+        );
+    }
+
+    #[test]
+    fn force_abort_repair_converges_after_independent_repairs() {
+        let id = oid(49);
+        let mut a = CrdtObligationLedger::new(node("A"));
+        a.record_acquire(id, ObligationKind::SendPermit);
+        a.record_commit(id);
+
+        let mut b = CrdtObligationLedger::new(node("B"));
+        b.record_acquire(id, ObligationKind::SendPermit);
+        b.record_abort(id);
+
+        a.merge(&b);
+        b.merge(&a);
+        assert!(a.get(&id).is_conflict());
+        assert!(b.get(&id).is_conflict());
+
+        a.force_abort_repair(id);
+        b.force_abort_repair(id);
+        a.merge(&b);
+
+        let repaired = a.get_entry(&id).expect("entry should exist");
+        assert_eq!(repaired.state, LatticeState::Aborted);
+        assert!(repaired.is_linear());
+        assert_eq!(repaired.total_acquires(), 1);
+        assert_eq!(repaired.total_resolves(), 1);
+        assert_eq!(repaired.witnesses.len(), 1);
+        assert_eq!(repaired.repair_nodes.len(), 2);
         assert_eq!(
             repaired.witnesses.get(&node("A")).copied(),
             Some(LatticeState::Aborted)

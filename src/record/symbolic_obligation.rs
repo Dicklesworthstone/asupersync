@@ -14,6 +14,7 @@
 
 use core::fmt;
 use parking_lot::RwLock;
+use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -591,8 +592,9 @@ pub(crate) struct ObligationEntry {
     state: SymbolicObligationState,
 }
 
-type HolderSlot = Option<(TaskId, Vec<ObligationId>)>;
-type RegionSlot = Option<(RegionId, Vec<ObligationId>)>;
+type ObligationIds = SmallVec<[ObligationId; 4]>;
+type HolderSlot = SmallVec<[(TaskId, ObligationIds); 1]>;
+type RegionSlot = SmallVec<[(RegionId, ObligationIds); 1]>;
 
 /// Registry that tracks all active symbolic obligations.
 ///
@@ -603,9 +605,9 @@ pub struct SymbolicObligationRegistry {
     by_id: Arc<RwLock<HashMap<ObligationId, ObligationEntry>>>,
     /// Obligations by object ID.
     by_object: RwLock<HashMap<ObjectId, Vec<ObligationId>>>,
-    /// Obligations by holder task (arena-slot indexed).
+    /// Obligations by holder task (arena-slot indexed, generation-safe).
     by_holder: RwLock<Vec<HolderSlot>>,
-    /// Obligations by region (arena-slot indexed).
+    /// Obligations by region (arena-slot indexed, generation-safe).
     by_region: RwLock<Vec<RegionSlot>>,
     /// Next obligation ID.
     next_id: AtomicU64,
@@ -754,9 +756,12 @@ impl SymbolicObligationRegistry {
     pub fn obligations_for_region(&self, region: RegionId) -> Vec<ObligationId> {
         let slot = region.arena_index().index() as usize;
         let guard = self.by_region.read();
-        if let Some(Some((stored_region, ids))) = guard.get(slot) {
-            if *stored_region == region {
-                return ids.clone();
+        if let Some(entries) = guard.get(slot) {
+            if let Some((_, ids)) = entries
+                .iter()
+                .find(|(stored_region, _)| *stored_region == region)
+            {
+                return ids.to_vec();
             }
         }
         drop(guard);
@@ -768,9 +773,9 @@ impl SymbolicObligationRegistry {
     pub fn obligations_for_task(&self, task: TaskId) -> Vec<ObligationId> {
         let slot = task.arena_index().index() as usize;
         let guard = self.by_holder.read();
-        if let Some(Some((stored_task, ids))) = guard.get(slot) {
-            if *stored_task == task {
-                return ids.clone();
+        if let Some(entries) = guard.get(slot) {
+            if let Some((_, ids)) = entries.iter().find(|(stored_task, _)| *stored_task == task) {
+                return ids.to_vec();
             }
         }
         drop(guard);
@@ -793,15 +798,12 @@ impl SymbolicObligationRegistry {
         let slot = region.arena_index().index() as usize;
         let ids = {
             let by_region = self.by_region.read();
-            if let Some(Some((stored_region, ids))) = by_region.get(slot) {
-                if *stored_region == region {
-                    Some(ids.clone())
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+            by_region.get(slot).and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|(stored_region, _)| *stored_region == region)
+                    .map(|(_, ids)| ids.clone())
+            })
         };
 
         let Some(ids) = ids else {
@@ -828,15 +830,12 @@ impl SymbolicObligationRegistry {
         let slot = region.arena_index().index() as usize;
         let ids = {
             let by_region = self.by_region.read();
-            if let Some(Some((stored_region, ids))) = by_region.get(slot) {
-                if *stored_region == region {
-                    Some(ids.clone())
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+            by_region.get(slot).and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|(stored_region, _)| *stored_region == region)
+                    .map(|(_, ids)| ids.clone())
+            })
         };
 
         let Some(ids) = ids else {
@@ -897,28 +896,38 @@ impl SymbolicObligationRegistry {
             let holder_slot = holder.arena_index().index() as usize;
             let mut by_holder = self.by_holder.write();
             if holder_slot >= by_holder.len() {
-                by_holder.resize_with(holder_slot + 1, || None);
+                by_holder.resize_with(holder_slot + 1, SmallVec::new);
             }
-            let entry = by_holder[holder_slot].get_or_insert_with(|| (holder, Vec::new()));
-            if entry.0 != holder {
-                entry.0 = holder;
-                entry.1.clear();
+            let entries = &mut by_holder[holder_slot];
+            if let Some((_, ids)) = entries
+                .iter_mut()
+                .find(|(stored_holder, _)| *stored_holder == holder)
+            {
+                ids.push(id);
+            } else {
+                let mut ids = SmallVec::new();
+                ids.push(id);
+                entries.push((holder, ids));
             }
-            entry.1.push(id);
             drop(by_holder);
         }
         {
             let region_slot = region.arena_index().index() as usize;
             let mut by_region = self.by_region.write();
             if region_slot >= by_region.len() {
-                by_region.resize_with(region_slot + 1, || None);
+                by_region.resize_with(region_slot + 1, SmallVec::new);
             }
-            let entry = by_region[region_slot].get_or_insert_with(|| (region, Vec::new()));
-            if entry.0 != region {
-                entry.0 = region;
-                entry.1.clear();
+            let entries = &mut by_region[region_slot];
+            if let Some((_, ids)) = entries
+                .iter_mut()
+                .find(|(stored_region, _)| *stored_region == region)
+            {
+                ids.push(id);
+            } else {
+                let mut ids = SmallVec::new();
+                ids.push(id);
+                entries.push((region, ids));
             }
-            entry.1.push(id);
             drop(by_region);
         }
     }
@@ -944,8 +953,16 @@ mod tests {
         TaskId::from_arena(ArenaIndex::new(1, 0))
     }
 
+    fn test_task_id_with_generation(index: u32, generation: u32) -> TaskId {
+        TaskId::from_arena(ArenaIndex::new(index, generation))
+    }
+
     fn test_region_id() -> RegionId {
         RegionId::from_arena(ArenaIndex::new(1, 0))
+    }
+
+    fn test_region_id_with_generation(index: u32, generation: u32) -> RegionId {
+        RegionId::from_arena(ArenaIndex::new(index, generation))
     }
 
     fn test_params() -> ObjectParams {
@@ -1150,6 +1167,58 @@ mod tests {
         assert!(obligation.progress().complete);
         obligation.commit();
         assert!(!registry.has_pending_in_region(region));
+    }
+
+    #[test]
+    fn registry_obligations_for_task_preserve_same_slot_generations() {
+        let registry = SymbolicObligationRegistry::new();
+        let older = test_task_id_with_generation(5, 0);
+        let newer = test_task_id_with_generation(5, 1);
+        let region = test_region_id();
+        let object = test_object_id();
+        let params = test_params();
+
+        let older_obligation =
+            registry.create_send_object(object, &params, older, region, Time::ZERO);
+        let newer_obligation = registry.create_acknowledge(object, 1, newer, region, Time::ZERO);
+
+        assert_eq!(
+            registry.obligations_for_task(older),
+            vec![older_obligation.id()]
+        );
+        assert_eq!(
+            registry.obligations_for_task(newer),
+            vec![newer_obligation.id()]
+        );
+
+        older_obligation.abort();
+        newer_obligation.abort();
+    }
+
+    #[test]
+    fn registry_obligations_for_region_preserve_same_slot_generations() {
+        let registry = SymbolicObligationRegistry::new();
+        let holder = test_task_id();
+        let older = test_region_id_with_generation(7, 0);
+        let newer = test_region_id_with_generation(7, 1);
+        let object = test_object_id();
+        let params = test_params();
+
+        let older_obligation =
+            registry.create_send_object(object, &params, holder, older, Time::ZERO);
+        let newer_obligation = registry.create_acknowledge(object, 1, holder, newer, Time::ZERO);
+
+        assert_eq!(
+            registry.obligations_for_region(older),
+            vec![older_obligation.id()]
+        );
+        assert_eq!(
+            registry.obligations_for_region(newer),
+            vec![newer_obligation.id()]
+        );
+
+        older_obligation.abort();
+        newer_obligation.abort();
     }
 
     #[test]

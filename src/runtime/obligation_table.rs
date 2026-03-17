@@ -12,6 +12,9 @@ use smallvec::SmallVec;
 use std::backtrace::Backtrace;
 use std::sync::Arc;
 
+type HolderIds = SmallVec<[ObligationId; 4]>;
+type HolderBucket = SmallVec<[(TaskId, HolderIds); 1]>;
+
 /// Information returned when an obligation is committed.
 #[derive(Debug, Clone)]
 pub struct ObligationCommitInfo {
@@ -99,8 +102,11 @@ pub struct ObligationCreateArgs {
 #[derive(Debug, Default)]
 pub struct ObligationTable {
     obligations: Arena<ObligationRecord>,
-    /// Secondary index: task → obligation IDs, indexed by arena slot.
-    by_holder: Vec<Option<(TaskId, SmallVec<[ObligationId; 4]>)>>,
+    /// Secondary index: arena slot → per-generation task → obligation IDs.
+    ///
+    /// Task arena slots are generation-counted and can be reused. Keep each
+    /// generation distinct so task-specific lookups remain correct across reuse.
+    by_holder: Vec<HolderBucket>,
     /// Cached count of pending (Reserved) obligations.
     ///
     /// Maintained incrementally: +1 on create, -1 on commit/abort/leak.
@@ -152,14 +158,17 @@ impl ObligationTable {
     fn push_holder_id(&mut self, holder: TaskId, ob_id: ObligationId) {
         let slot = holder.arena_index().index() as usize;
         if slot >= self.by_holder.len() {
-            self.by_holder.resize_with(slot + 1, || None);
+            self.by_holder.resize_with(slot + 1, SmallVec::new);
         }
-        let entry = self.by_holder[slot].get_or_insert_with(|| (holder, SmallVec::new()));
-        if entry.0 != holder {
-            entry.0 = holder;
-            entry.1.clear();
+        let entries = &mut self.by_holder[slot];
+        if let Some((_, ids)) = entries.iter_mut().find(|(task_id, _)| *task_id == holder) {
+            ids.push(ob_id);
+            return;
         }
-        entry.1.push(ob_id);
+
+        let mut ids = SmallVec::new();
+        ids.push(ob_id);
+        entries.push((holder, ids));
     }
 
     /// Inserts a new obligation record produced by `f` into the arena.
@@ -190,13 +199,17 @@ impl ObligationTable {
         }
         let ob_id = ObligationId::from_arena(index);
         let slot = record.holder.arena_index().index() as usize;
-        if let Some(Some((holder, ids))) = self.by_holder.get_mut(slot) {
-            if *holder == record.holder {
+        if let Some(entries) = self.by_holder.get_mut(slot) {
+            if let Some(entry_index) = entries
+                .iter()
+                .position(|(holder, _)| *holder == record.holder)
+            {
+                let (_, ids) = &mut entries[entry_index];
                 if let Some(pos) = ids.iter().position(|id| *id == ob_id) {
                     ids.swap_remove(pos);
                 }
                 if ids.is_empty() {
-                    self.by_holder[slot] = None;
+                    entries.swap_remove(entry_index);
                 }
             }
         }
@@ -387,8 +400,8 @@ impl ObligationTable {
     #[must_use]
     pub fn ids_for_holder(&self, task_id: TaskId) -> &[ObligationId] {
         let slot = task_id.arena_index().index() as usize;
-        if let Some(Some((holder, ids))) = self.by_holder.get(slot) {
-            if *holder == task_id {
+        if let Some(entries) = self.by_holder.get(slot) {
+            if let Some((_, ids)) = entries.iter().find(|(holder, _)| *holder == task_id) {
                 return ids.as_slice();
             }
         }
@@ -518,6 +531,10 @@ mod tests {
 
     fn test_task_id(n: u32) -> TaskId {
         TaskId::from_arena(ArenaIndex::new(n, 0))
+    }
+
+    fn test_task_id_with_generation(n: u32, generation: u32) -> TaskId {
+        TaskId::from_arena(ArenaIndex::new(n, generation))
     }
 
     fn test_region_id(n: u32) -> RegionId {
@@ -677,6 +694,25 @@ mod tests {
         let pending = table.pending_obligation_ids_for_task(task1);
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0], id3);
+    }
+
+    #[test]
+    fn holder_index_preserves_same_slot_task_generations() {
+        let mut table = ObligationTable::new();
+        let older = test_task_id_with_generation(9, 0);
+        let newer = test_task_id_with_generation(9, 1);
+        let region = test_region_id(1);
+
+        let older_id = make_obligation(&mut table, ObligationKind::SendPermit, older, region);
+        let newer_id = make_obligation(&mut table, ObligationKind::Ack, newer, region);
+
+        assert_eq!(table.ids_for_holder(older), &[older_id]);
+        assert_eq!(table.ids_for_holder(newer), &[newer_id]);
+        assert_eq!(
+            table.sorted_pending_ids_for_holder(older).as_slice(),
+            &[older_id]
+        );
+        assert_eq!(table.pending_obligation_ids_for_task(newer), vec![newer_id]);
     }
 
     #[test]
