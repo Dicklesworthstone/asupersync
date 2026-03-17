@@ -634,6 +634,7 @@ fn execution_ladder_policy_pins_lane_ids_and_host_role_ordering() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn execution_ladder_policy_pins_reason_codes_log_fields_and_non_goals() {
     let policy = read_json(".github/wasm_worker_offload_policy.json");
     let ladder = &policy["execution_ladder"];
@@ -655,6 +656,16 @@ fn execution_ladder_policy_pins_reason_codes_log_fields_and_non_goals() {
         "execution ladder must pin stable downgrade reason codes"
     );
 
+    assert!(
+        reason_codes["health"]
+            .as_array()
+            .expect("execution_ladder.reason_codes.health")
+            .iter()
+            .map(|value| value.as_str().expect("health reason"))
+            .any(|value| value == "demote_due_to_lane_health"),
+        "execution ladder must pin lane-health demotion reason codes"
+    );
+
     let log_fields: Vec<&str> = ladder["required_log_fields"]
         .as_array()
         .expect("execution_ladder.required_log_fields")
@@ -669,12 +680,61 @@ fn execution_ladder_policy_pins_reason_codes_log_fields_and_non_goals() {
         "support_class",
         "reason_code",
         "fallback_lane_id",
+        "lane_health_status",
+        "lane_health_failure_count",
+        "lane_health_retry_budget_remaining",
+        "lane_health_cooldown_until_ms",
+        "lane_health_last_trigger",
+        "demoted_lane_id",
         "policy_schema_version",
         "repro_command",
     ] {
         assert!(
             log_fields.contains(&field),
             "execution ladder must require log field {field}"
+        );
+    }
+
+    let lane_health = ladder["lane_health"]
+        .as_object()
+        .expect("execution_ladder.lane_health");
+    assert_eq!(
+        lane_health["demotion_behavior"].as_str(),
+        Some("bounded_retry_then_fail_closed"),
+        "lane-health policy must pin bounded retry before demotion"
+    );
+    assert_eq!(
+        lane_health["demotion_fallback_lane_id"].as_str(),
+        Some("lane.unsupported"),
+        "lane-health demotion must fail closed to lane.unsupported"
+    );
+    assert_eq!(
+        lane_health["default_policy"]["max_consecutive_failures"].as_u64(),
+        Some(2),
+        "lane-health default retry budget must stay pinned"
+    );
+    assert_eq!(
+        lane_health["default_policy"]["cooldown_ms"].as_u64(),
+        Some(30_000),
+        "lane-health cooldown must stay pinned"
+    );
+    let triggers: Vec<&str> = lane_health["failure_triggers"]
+        .as_array()
+        .expect("execution_ladder.lane_health.failure_triggers")
+        .iter()
+        .map(|value| value.as_str().expect("lane-health trigger"))
+        .collect();
+    for trigger in [
+        "runtime_init_failure",
+        "worker_bootstrap_timeout",
+        "worker_crash",
+        "replay_integrity_failure",
+        "prerequisite_drift",
+        "overload_instability",
+    ] {
+        assert!(
+            triggers.contains(&trigger),
+            "execution ladder must preserve lane-health trigger {trigger}"
         );
     }
 
@@ -719,6 +779,8 @@ fn docs_wasm_md_pins_execution_ladder_contract_markers() {
         "lane.unsupported",
         "candidate_host_role_mismatch",
         "candidate_prerequisite_missing",
+        "candidate_lane_unhealthy",
+        "demote_due_to_lane_health",
         "downgrade_to_server_bridge",
         "downgrade_to_edge_bridge",
         "downgrade_to_websocket_or_fetch",
@@ -726,6 +788,21 @@ fn docs_wasm_md_pins_execution_ladder_contract_markers() {
         "service_worker_direct_runtime_not_shipped",
         "shared_worker_direct_runtime_not_shipped",
         "shared_array_buffer_requires_cross_origin_isolation",
+        "lane_health_status",
+        "lane_health_failure_count",
+        "lane_health_retry_budget_remaining",
+        "lane_health_cooldown_until_ms",
+        "lane_health_last_trigger",
+        "demoted_lane_id",
+        "max_consecutive_failures=2",
+        "cooldown_ms=30000",
+        "runtime_init_failure",
+        "worker_bootstrap_timeout",
+        "worker_crash",
+        "replay_integrity_failure",
+        "prerequisite_drift",
+        "overload_instability",
+        "manual_reset",
         "pnpm --filter <package> test:e2e -- --lane <lane_id> --host-role <host_role> --reason <reason_code>",
         "service_worker_general_runtime_without_bounded_broker_contract",
         "shared_worker_general_runtime_without_tenancy_and_lifecycle_contract",

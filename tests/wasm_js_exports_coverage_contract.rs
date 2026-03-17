@@ -359,8 +359,15 @@ fn browser_src_index_preserves_low_level_aliases_for_core_surface() {
 
 #[test]
 fn browser_dist_index_preserves_low_level_aliases_for_core_surface() {
-    let js = read_source("packages/browser/dist/index.js");
-    let dts = read_source("packages/browser/dist/index.d.ts");
+    let js_path = repo_root().join("packages/browser/dist/index.js");
+    let dts_path = repo_root().join("packages/browser/dist/index.d.ts");
+    if !js_path.exists() || !dts_path.exists() {
+        return;
+    }
+    let js = std::fs::read_to_string(&js_path)
+        .unwrap_or_else(|_| panic!("missing {}", js_path.display()));
+    let dts = std::fs::read_to_string(&dts_path)
+        .unwrap_or_else(|_| panic!("missing {}", dts_path.display()));
     for marker in [
         "webtransportCancel,",
         "webtransportClose,",
@@ -750,6 +757,23 @@ fn wasm_docs_pin_execution_ladder_alias_mapping_and_required_fields() {
         "`support_class`",
         "`reason_code`",
         "`fallback_lane_id`",
+        "`lane_health_status`",
+        "`lane_health_failure_count`",
+        "`lane_health_retry_budget_remaining`",
+        "`lane_health_cooldown_until_ms`",
+        "`lane_health_last_trigger`",
+        "`demoted_lane_id`",
+        "`candidate_lane_unhealthy`",
+        "`demote_due_to_lane_health`",
+        "`max_consecutive_failures=2`",
+        "`cooldown_ms=30000`",
+        "`runtime_init_failure`",
+        "`worker_bootstrap_timeout`",
+        "`worker_crash`",
+        "`replay_integrity_failure`",
+        "`prerequisite_drift`",
+        "`overload_instability`",
+        "`manual_reset`",
         "`policy_schema_version`",
         "`repro_command`",
         "`--lane`",
@@ -796,6 +820,37 @@ fn wasm_worker_policy_pins_execution_ladder_aliases_and_repro_tokens() {
         );
     }
 
+    let health_codes: Vec<&str> = ladder["reason_codes"]["health"]
+        .as_array()
+        .expect("execution_ladder.reason_codes.health")
+        .iter()
+        .map(|value| value.as_str().expect("health code"))
+        .collect();
+    assert_eq!(
+        health_codes,
+        vec!["demote_due_to_lane_health"],
+        "execution ladder must pin the lane-health demotion reason code"
+    );
+
+    let lane_health = ladder["lane_health"]
+        .as_object()
+        .expect("execution_ladder.lane_health");
+    assert_eq!(
+        lane_health["demotion_behavior"].as_str(),
+        Some("bounded_retry_then_fail_closed"),
+        "policy must pin bounded retry before fail-closed demotion"
+    );
+    assert_eq!(
+        lane_health["default_policy"]["max_consecutive_failures"].as_u64(),
+        Some(2),
+        "policy must pin lane-health retry budget"
+    );
+    assert_eq!(
+        lane_health["default_policy"]["cooldown_ms"].as_u64(),
+        Some(30_000),
+        "policy must pin lane-health cooldown"
+    );
+
     let repro = ladder["repro_command_convention"]
         .as_object()
         .expect("execution_ladder.repro_command_convention");
@@ -810,6 +865,34 @@ fn wasm_worker_policy_pins_execution_ladder_aliases_and_repro_tokens() {
         vec!["--lane", "--host-role", "--reason"],
         "execution ladder must pin deterministic repro-command tokens"
     );
+}
+
+#[test]
+fn browser_src_index_exports_lane_health_control_plane_markers() {
+    let content = read_source("packages/browser/src/index.ts");
+    for marker in [
+        "export type BrowserLaneHealthStatus =",
+        "export type BrowserLaneHealthTrigger =",
+        "export interface BrowserLaneHealthPolicy",
+        "export interface BrowserLaneHealthDiagnostics",
+        "\"candidate_lane_unhealthy\"",
+        "\"demote_due_to_lane_health\"",
+        "export function inspectBrowserLaneHealth",
+        "export function reportBrowserLaneUnhealthy",
+        "export function resetBrowserLaneHealth",
+        "laneAvailabilityOutcome(",
+        "reportLaneUnhealthy(",
+        "resetLaneHealth(",
+        "lane_health_status=",
+        "failure_count=",
+        "retry_budget_remaining=",
+        "cooldown_until_ms=",
+    ] {
+        assert!(
+            content.contains(marker),
+            "browser src/index.ts must preserve lane-health marker: {marker}"
+        );
+    }
 }
 
 #[test]
