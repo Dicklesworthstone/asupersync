@@ -7162,7 +7162,7 @@ mod tests {
             worker_id: "worker-a".to_string(),
             job_id: 77,
             decision_seq: 91,
-            replay_hash: 0xC0FFEE,
+            replay_hash: 0x00C0_FFEE,
             task,
             region,
             obligation,
@@ -7181,7 +7181,7 @@ mod tests {
                 assert_eq!(worker_id, "worker-a");
                 assert_eq!(job_id, 77);
                 assert_eq!(decision_seq, 91);
-                assert_eq!(replay_hash, 0xC0FFEE);
+                assert_eq!(replay_hash, 0x00C0_FFEE);
                 assert_eq!(task_snapshot, IdSnapshot::from(task));
                 assert_eq!(region_snapshot, IdSnapshot::from(region));
                 assert_eq!(obligation_snapshot, IdSnapshot::from(obligation));

@@ -28,7 +28,15 @@ impl LocalTaskStore {
         if slot >= self.slots.len() {
             self.slots.resize_with(slot + 1, || None);
         }
-        let prev = self.slots[slot].replace(task);
+        let slot_ref = &mut self.slots[slot];
+        if let Some(existing) = slot_ref.as_ref() {
+            let existing_id = existing.task_id();
+            assert!(
+                existing_id == Some(task_id),
+                "local task slot reuse conflict: slot {slot} holds {existing_id:?}, cannot insert {task_id:?}",
+            );
+        }
+        let prev = slot_ref.replace(task);
         if prev.is_none() {
             self.len += 1;
         }
@@ -60,6 +68,7 @@ thread_local! {
 /// Stores a local task in the current thread's storage.
 ///
 /// If a task with the same ID already exists, it is replaced and a warning is emitted.
+/// Reusing the same arena slot with a different generation fails closed.
 pub fn store_local_task(task_id: TaskId, mut task: LocalStoredTask) {
     task.set_task_id(task_id);
     LOCAL_TASKS.with(|tasks| {
@@ -158,5 +167,49 @@ mod tests {
             result.is_none()
         );
         crate::test_complete!("remove_nonexistent_returns_none");
+    }
+
+    #[test]
+    fn cross_generation_slot_reuse_panics_and_preserves_existing_task() {
+        init_test("cross_generation_slot_reuse_panics_and_preserves_existing_task");
+
+        let task_id = TaskId::new_for_test(42_426, 0);
+        let reused_slot = TaskId::new_for_test(42_426, 1);
+        let _ = remove_local_task(task_id);
+        let _ = remove_local_task(reused_slot);
+        let baseline = local_task_count();
+
+        store_local_task(task_id, LocalStoredTask::new(async { Outcome::Ok(()) }));
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store_local_task(reused_slot, LocalStoredTask::new(async { Outcome::Ok(()) }));
+        }));
+        let reused_missing = remove_local_task(reused_slot).is_none();
+        let original_preserved = remove_local_task(task_id).is_some();
+
+        crate::assert_with_log!(
+            panic.is_err(),
+            "cross-generation insert panics",
+            true,
+            panic.is_err()
+        );
+        crate::assert_with_log!(
+            reused_missing,
+            "new generation was not inserted",
+            true,
+            reused_missing
+        );
+        crate::assert_with_log!(
+            original_preserved,
+            "original task preserved",
+            true,
+            original_preserved
+        );
+        crate::assert_with_log!(
+            local_task_count() == baseline,
+            "count restored after cleanup",
+            baseline,
+            local_task_count()
+        );
+        crate::test_complete!("cross_generation_slot_reuse_panics_and_preserves_existing_task");
     }
 }
