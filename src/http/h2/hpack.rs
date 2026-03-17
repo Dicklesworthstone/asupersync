@@ -532,6 +532,13 @@ impl Decoder {
     }
 
     /// Decode a literal header field.
+    ///
+    /// Validates header name and value characters per RFC 9113 Section 8.2.1:
+    /// - Names must be lowercase ASCII (a-z, 0-9, and `!#$%&'*+-.^_`|~`).
+    /// - Values must not contain NUL (`\0`), CR (`\r`), or LF (`\n`).
+    ///
+    /// Rejecting these characters prevents HTTP/1 header injection when H2
+    /// frames are forwarded to HTTP/1.1 backends.
     fn decode_literal(
         &self,
         src: &mut Bytes,
@@ -540,12 +547,15 @@ impl Decoder {
         let index = decode_integer(src, prefix_bits)?;
 
         let name = if index == 0 {
-            decode_string(src)?
+            let n = decode_string(src)?;
+            validate_header_name(&n)?;
+            n
         } else {
             self.get_indexed_name(index)?
         };
 
         let value = decode_string(src)?;
+        validate_header_value(&value)?;
         Ok((name, value))
     }
 
@@ -728,6 +738,48 @@ fn encode_string(dst: &mut BytesMut, value: &str, use_huffman: bool) {
 }
 
 /// Decode a string (handling Huffman encoding).
+/// Validate an HTTP/2 header name per RFC 9113 Section 8.2.1.
+///
+/// Header names must consist of lowercase ASCII letters (`a-z`), digits (`0-9`),
+/// and the token characters `!#$%&'*+-.^_`|~`. Uppercase letters, spaces,
+/// tabs, and control characters (including NUL, CR, LF) are forbidden.
+///
+/// Pseudo-header names (starting with `:`) are also permitted.
+fn validate_header_name(name: &str) -> Result<(), H2Error> {
+    if name.is_empty() {
+        return Err(H2Error::compression("empty header name"));
+    }
+    for (i, b) in name.bytes().enumerate() {
+        let valid = matches!(b,
+            b'a'..=b'z' | b'0'..=b'9'
+            | b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*'
+            | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'
+        ) || (b == b':' && i == 0);
+        if !valid {
+            return Err(H2Error::compression(
+                "invalid character in header name (RFC 9113 Section 8.2.1)",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate an HTTP/2 header value per RFC 9113 Section 8.2.1.
+///
+/// Header values must not contain NUL (`\0`), CR (`\r`), or LF (`\n`).
+/// These characters enable HTTP/1 header injection when H2 frames are
+/// forwarded to HTTP/1.1 backends.
+fn validate_header_value(value: &str) -> Result<(), H2Error> {
+    for b in value.bytes() {
+        if matches!(b, b'\0' | b'\r' | b'\n') {
+            return Err(H2Error::compression(
+                "invalid character in header value (RFC 9113 Section 8.2.1)",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn decode_string(src: &mut Bytes) -> Result<String, H2Error> {
     if src.is_empty() {
         return Err(H2Error::compression("unexpected end of string"));
