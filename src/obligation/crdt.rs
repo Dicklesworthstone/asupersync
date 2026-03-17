@@ -305,6 +305,12 @@ impl CrdtObligationLedger {
             .entries
             .entry(id)
             .or_insert_with(CrdtObligationEntry::new);
+        // Repaired entries are terminal tombstones — resolving them again is
+        // a no-op (the tombstone shape would just be re-applied by
+        // normalize_repair_tombstone, silently discarding the work).
+        if !entry.repair_nodes.is_empty() {
+            return entry.state;
+        }
         entry.state = entry.state.join(terminal);
         let witness = entry
             .witnesses

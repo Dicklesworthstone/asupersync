@@ -962,3 +962,30 @@
 {"file":"src/process.rs","lines":2209,"batch":397,"date":"2026-03-16","agent":"GreenWolf","verdict":"FIXED","bugs":1,"notes":"Fresh-eyes follow-up: Windows EnvKey updates kept stale key casing because BTreeMap::insert preserved the old equal key. env/envs/env_remove now replace equal-key entries before reinserting, and focused latest-casing regressions were added."}
 {"file":"src/service/load_balance.rs","lines":1834,"batch":398,"date":"2026-03-16","agent":"GreenWolf","verdict":"FIXED","bugs":1,"notes":"Fresh-eyes audit: update_from_discover consumed only delta batches and returned early on empty changes, so late-joining or shared-consumer balancers could stay permanently empty despite a live discovery snapshot. Reconciled topology against discover.endpoints() after applying deltas and added a focused late-join regression."}
 {"file":"src/net/worker_channel.rs","lines":2306,"batch":399,"date":"2026-03-16","agent":"GreenWolf","verdict":"FIXED","bugs":1,"notes":"Fresh-eyes review of fellow-agent session-reset changes: only bootstrap operations carried worker identity, so after a worker reboot a stale higher-sequence message from the replaced worker could be accepted as fresh, poison last_inbound_seq_no, and block the new session. Added explicit worker-session identity to worker-originated envelopes, rejected mismatched inbound sessions, updated the canonical worker harness, and added focused regressions."}
+{"file":"src/runtime/io_op.rs"}
+{"file":"src/runtime/kernel.rs"}
+{"file":"src/runtime/local.rs"}
+{"file":"src/runtime/mod.rs"}
+{"file":"src/runtime/obligation_table.rs"}
+{"file":"src/runtime/reactor/browser.rs"}
+{"file":"src/runtime/reactor/epoll.rs"}
+{"file":"src/runtime/reactor/interest.rs"}
+{"file":"src/runtime/reactor/io_uring.rs"}
+{"file":"src/runtime/reactor/kqueue.rs"}
+{"file":"src/sync/barrier.rs"}
+{"file":"src/sync/contended_mutex.rs"}
+{"file":"src/sync/mod.rs"}
+{"file":"src/sync/mutex.rs"}
+{"file":"src/sync/notify.rs"}
+{"file":"src/sync/once_cell.rs"}
+{"file":"src/sync/rwlock.rs"}
+{"file":"src/sync/pool.rs"}
+{"file":"src/sync/semaphore.rs"}
+{"file":"src/lab/snapshot_restore.rs","lines":1276,"batch":400,"date":"2026-03-16","agent":"GentleRidge","verdict":"FIXED","bugs":1,"notes":"verify_integrity ignored schema_version tampering; hash now covers schema_version and regression added"}
+{"file":"src/link.rs","lines":1885,"batch":395,"date":"2026-03-16","agent":"RoseIsland","verdict":"FIXED","bugs":1,"notes":"Self-links were double-indexed in task_index, duplicating peer views and resolve_exits() actions."}
+{"file":"src/runtime/reactor/lab.rs","lines":2606,"batch":401,"date":"2026-03-16","agent":"BronzeStone","verdict":"FIXED","bugs":5,"notes":"poll ignored wake/next-deadline semantics; chaos delay rebased from poll time; closed-fault HUP was lost on idle polls; injected close survived clear_fault_config"}
+{"file":"src/time/sleep.rs","lines":1545,"batch":401,"date":"2026-03-16","agent":"BronzeStone","verdict":"FIXED","bugs":2,"notes":"Latched timer/fallback wake readiness so fired Sleep cannot be re-armed when later polled under a different earlier clock"}
+{"file":"src/time/driver.rs","lines":1772,"batch":401,"date":"2026-03-16","agent":"BronzeStone","verdict":"FIXED","bugs":1,"notes":"TimerDriver::update now fails closed when asked to update a stale or cancelled handle instead of silently registering a new timer"}
+{"file":"src/runtime/reactor/registration.rs","lines":0,"batch":402,"date":"2026-03-17","agent":"FuchsiaStone","verdict":"FIXED","bugs":1,"notes":"Registration::deregister kept Drop armed on persistent explicit deregister error/panic so consumed handles still get a final best-effort cleanup pass; added direct drop-cleanup regression"}
+{"file":"src/net/dns/cache.rs","lines":783,"batch":403,"date":"2026-03-17","agent":"RoseIsland","verdict":"FIXED","bugs":1,"notes":"DnsCache now stores negative no-record entries using negative_ttl and serves them case-insensitively until expiry instead of ignoring CacheConfig::negative_ttl."}
+{"file":"src/net/dns/resolver.rs","lines":1214,"batch":403,"date":"2026-03-17","agent":"RoseIsland","verdict":"FIXED","bugs":1,"notes":"Resolver now fail-closes no-record lookup errors into cached NoRecords results, skips pointless retries for them, and classifies NXDOMAIN-like std::net errors for negative caching."}

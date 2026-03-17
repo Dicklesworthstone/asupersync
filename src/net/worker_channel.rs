@@ -422,7 +422,10 @@ pub struct JobStatusSnapshot {
     ///
     /// Terminal outcomes must use [`WorkerOp::JobCompleted`] or
     /// [`WorkerOp::FinalizeCompleted`] so the coordinator does not lose the
-    /// completion semantics attached to those messages.
+    /// completion semantics attached to those messages. Coordinator-owned
+    /// phases such as `created`, `draining`, and `finalizing` must not be
+    /// reported via `status_snapshot`; they are driven by explicit control
+    /// messages in the cancellation protocol.
     pub state: JobState,
     /// Optional human-readable detail for diagnostics.
     pub detail: Option<String>,
@@ -555,6 +558,12 @@ impl JobState {
     #[must_use]
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed)
+    }
+
+    /// Whether a worker may report this state via `status_snapshot`.
+    #[must_use]
+    pub const fn allowed_in_status_snapshot(self) -> bool {
+        matches!(self, Self::Queued | Self::Running | Self::CancelRequested)
     }
 
     /// Check whether the given transition is valid.
@@ -779,30 +788,19 @@ impl WorkerCoordinator {
                 self.shutdown_requested = false;
                 Ok(())
             }
-            WorkerOp::BootstrapFailed { worker_id, reason } => {
+            WorkerOp::BootstrapFailed { reason, .. } => {
                 self.fail_nonterminal_jobs();
                 self.discard_outbound_session_messages();
-                self.active_worker_id = Some(worker_id.clone());
+                // Clear active_worker_id so the failed worker cannot send
+                // follow-up messages (Diagnostic, ShutdownCompleted) that
+                // would pass the session check and potentially interfere
+                // with a replacement worker's bootstrap sequence.
+                self.active_worker_id = None;
                 self.worker_ready = false;
                 self.shutdown_requested = false;
                 Err(WorkerChannelError::BootstrapFailed(reason.clone()))
             }
-            WorkerOp::StatusSnapshot(snapshot) => {
-                if snapshot.state.is_terminal() {
-                    return Err(WorkerChannelError::TerminalStatusSnapshot {
-                        job_id: snapshot.job_id,
-                        state: snapshot.state,
-                    });
-                }
-                let job = self
-                    .jobs
-                    .get_mut(&snapshot.job_id)
-                    .ok_or(WorkerChannelError::UnknownJobId(snapshot.job_id))?;
-                if job.state != snapshot.state {
-                    job.transition_to(snapshot.state)?;
-                }
-                Ok(())
-            }
+            WorkerOp::StatusSnapshot(snapshot) => self.handle_status_snapshot(snapshot),
             WorkerOp::JobCompleted(result) => {
                 let job = self
                     .jobs
@@ -890,6 +888,32 @@ impl WorkerCoordinator {
             job.last_seq_no = envelope.seq_no;
         }
         self.outbox.push_back(envelope);
+        Ok(())
+    }
+
+    fn handle_status_snapshot(
+        &mut self,
+        snapshot: &JobStatusSnapshot,
+    ) -> Result<(), WorkerChannelError> {
+        if snapshot.state.is_terminal() {
+            return Err(WorkerChannelError::TerminalStatusSnapshot {
+                job_id: snapshot.job_id,
+                state: snapshot.state,
+            });
+        }
+        if !snapshot.state.allowed_in_status_snapshot() {
+            return Err(WorkerChannelError::InvalidStatusSnapshotState {
+                job_id: snapshot.job_id,
+                state: snapshot.state,
+            });
+        }
+        let job = self
+            .jobs
+            .get_mut(&snapshot.job_id)
+            .ok_or(WorkerChannelError::UnknownJobId(snapshot.job_id))?;
+        if job.state != snapshot.state {
+            job.transition_to(snapshot.state)?;
+        }
         Ok(())
     }
 
@@ -1054,6 +1078,13 @@ pub enum WorkerChannelError {
         /// Terminal state that must not be reported via `status_snapshot`.
         state: JobState,
     },
+    /// A status snapshot tried to report a state owned by explicit coordinator control flow.
+    InvalidStatusSnapshotState {
+        /// Job identifier carried by the invalid snapshot.
+        job_id: u64,
+        /// State that must not be reported via `status_snapshot`.
+        state: JobState,
+    },
     /// A completion result arrived while the explicit cancellation protocol was active.
     UnexpectedCompletionPhase {
         /// Job identifier whose completion arrived out of phase.
@@ -1137,6 +1168,12 @@ impl fmt::Display for WorkerChannelError {
                 write!(
                     f,
                     "job {job_id} reported terminal state {state} via status snapshot"
+                )
+            }
+            Self::InvalidStatusSnapshotState { job_id, state } => {
+                write!(
+                    f,
+                    "job {job_id} reported coordinator-owned state {state} via status snapshot"
                 )
             }
             Self::UnexpectedCompletionPhase { job_id, state } => {
@@ -1334,6 +1371,96 @@ mod tests {
             })
         ));
         assert_eq!(coord.job_state(1), Some(JobState::Queued));
+    }
+
+    #[test]
+    fn coordinator_rejects_status_snapshot_for_protocol_owned_drain_phase() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+        coord.spawn_job(1, 100, 200, 300, vec![]).unwrap();
+        let _ = coord.drain_outbox();
+
+        let running = test_worker_envelope(
+            2,
+            2,
+            1,
+            WorkerOp::StatusSnapshot(JobStatusSnapshot {
+                job_id: 1,
+                state: JobState::Running,
+                detail: None,
+            }),
+        );
+        coord.handle_inbound(&running).unwrap();
+
+        coord.cancel_job(1, "test cancel".into()).unwrap();
+        let _ = coord.drain_outbox();
+        assert_eq!(coord.job_state(1), Some(JobState::CancelRequested));
+
+        let draining_snapshot = test_worker_envelope(
+            3,
+            3,
+            2,
+            WorkerOp::StatusSnapshot(JobStatusSnapshot {
+                job_id: 1,
+                state: JobState::Draining,
+                detail: Some("worker tried to skip cancel_acknowledged".into()),
+            }),
+        );
+        assert!(matches!(
+            coord.handle_inbound(&draining_snapshot),
+            Err(WorkerChannelError::InvalidStatusSnapshotState {
+                job_id: 1,
+                state: JobState::Draining,
+            })
+        ));
+        assert_eq!(coord.job_state(1), Some(JobState::CancelRequested));
+    }
+
+    #[test]
+    fn coordinator_rejects_status_snapshot_for_protocol_owned_finalize_phase() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+        coord.spawn_job(1, 100, 200, 300, vec![]).unwrap();
+        let _ = coord.drain_outbox();
+
+        let running = test_worker_envelope(
+            2,
+            2,
+            1,
+            WorkerOp::StatusSnapshot(JobStatusSnapshot {
+                job_id: 1,
+                state: JobState::Running,
+                detail: None,
+            }),
+        );
+        coord.handle_inbound(&running).unwrap();
+
+        coord.cancel_job(1, "test cancel".into()).unwrap();
+        let _ = coord.drain_outbox();
+
+        let ack = test_worker_envelope(3, 3, 2, WorkerOp::CancelAcknowledged { job_id: 1 });
+        coord.handle_inbound(&ack).unwrap();
+        let _ = coord.drain_outbox();
+        assert_eq!(coord.job_state(1), Some(JobState::Draining));
+
+        let finalizing_snapshot = test_worker_envelope(
+            4,
+            4,
+            3,
+            WorkerOp::StatusSnapshot(JobStatusSnapshot {
+                job_id: 1,
+                state: JobState::Finalizing,
+                detail: Some("worker tried to skip drain_completed".into()),
+            }),
+        );
+        assert!(matches!(
+            coord.handle_inbound(&finalizing_snapshot),
+            Err(WorkerChannelError::InvalidStatusSnapshotState {
+                job_id: 1,
+                state: JobState::Finalizing,
+            })
+        ));
+        assert_eq!(coord.job_state(1), Some(JobState::Draining));
     }
 
     #[test]
