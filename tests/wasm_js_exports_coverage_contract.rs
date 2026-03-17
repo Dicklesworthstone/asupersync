@@ -24,6 +24,13 @@ fn read_source(path: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()))
 }
 
+fn read_json(path: &str) -> serde_json::Value {
+    let path = repo_root().join(path);
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
+    serde_json::from_str(&content).unwrap_or_else(|_| panic!("invalid JSON {}", path.display()))
+}
+
 // ── Export Map Structure ─────────────────────────────────────────────
 
 #[test]
@@ -220,6 +227,25 @@ fn browser_src_index_defines_high_level_sdk_wrappers() {
         assert!(
             content.contains(marker),
             "browser src/index.ts must define marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn browser_src_index_exposes_no_throw_selection_helpers() {
+    let content = read_source("packages/browser/src/index.ts");
+    for marker in [
+        "export interface BrowserRuntimeSelectionResult",
+        "export interface BrowserScopeSelectionResult",
+        "executionLadder: BrowserExecutionLadderDiagnostics;",
+        "runtime: BrowserRuntime | null;",
+        "scope: RegionHandle | null;",
+        "export async function createBrowserRuntimeSelection",
+        "export async function createBrowserScopeSelection",
+    ] {
+        assert!(
+            content.contains(marker),
+            "browser src/index.ts must preserve no-throw selection marker: {marker}"
         );
     }
 }
@@ -483,8 +509,8 @@ fn browser_src_index_requires_actionable_guidance_and_structured_error_payloads(
     }
     assert_eq!(
         content.matches("assertBrowserRuntimeSupport();").count(),
-        2,
-        "browser runtime creation and scope entry must both guard unsupported runtimes"
+        1,
+        "browser scope entry should keep a fail-fast unsupported-runtime guard while the no-throw selection helpers stay additive"
     );
 }
 
@@ -706,6 +732,84 @@ fn wasm_docs_pin_authoritative_support_matrix_and_diagnostic_taxonomy() {
             "docs/WASM.md must preserve authoritative browser-matrix marker: {marker}"
         );
     }
+}
+
+#[test]
+fn wasm_docs_pin_execution_ladder_alias_mapping_and_required_fields() {
+    let content = read_source("docs/WASM.md");
+    for marker in [
+        "### Execution Ladder Contract",
+        "| `service_worker_not_yet_shipped` | `service_worker_direct_runtime_not_shipped` |",
+        "| `shared_worker_not_yet_shipped` | `shared_worker_direct_runtime_not_shipped` |",
+        "| `bridge_only_server_target` | `downgrade_to_server_bridge` |",
+        "| `bridge_only_edge_target` | `downgrade_to_edge_bridge` |",
+        "`lane_id`",
+        "`lane_kind`",
+        "`lane_rank`",
+        "`host_role`",
+        "`support_class`",
+        "`reason_code`",
+        "`fallback_lane_id`",
+        "`policy_schema_version`",
+        "`repro_command`",
+        "`--lane`",
+        "`--host-role`",
+        "`--reason`",
+    ] {
+        assert!(
+            content.contains(marker),
+            "docs/WASM.md must preserve execution-ladder diagnostic marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn wasm_worker_policy_pins_execution_ladder_aliases_and_repro_tokens() {
+    let policy = read_json(".github/wasm_worker_offload_policy.json");
+    let ladder = &policy["execution_ladder"];
+    assert_eq!(
+        ladder["schema_version"].as_str(),
+        Some("wasm-browser-execution-ladder-v1"),
+        "policy must pin execution ladder schema version"
+    );
+
+    let aliases = ladder["current_package_reason_aliases"]
+        .as_object()
+        .expect("execution_ladder.current_package_reason_aliases");
+    let expected_aliases = [
+        (
+            "service_worker_not_yet_shipped",
+            "service_worker_direct_runtime_not_shipped",
+        ),
+        (
+            "shared_worker_not_yet_shipped",
+            "shared_worker_direct_runtime_not_shipped",
+        ),
+        ("bridge_only_server_target", "downgrade_to_server_bridge"),
+        ("bridge_only_edge_target", "downgrade_to_edge_bridge"),
+    ];
+    for (from, to) in expected_aliases {
+        assert_eq!(
+            aliases.get(from).and_then(serde_json::Value::as_str),
+            Some(to),
+            "execution ladder alias mapping must pin {from} -> {to}"
+        );
+    }
+
+    let repro = ladder["repro_command_convention"]
+        .as_object()
+        .expect("execution_ladder.repro_command_convention");
+    let must_include: Vec<&str> = repro["must_include_tokens"]
+        .as_array()
+        .expect("repro_command_convention.must_include_tokens")
+        .iter()
+        .map(|value| value.as_str().expect("repro token"))
+        .collect();
+    assert_eq!(
+        must_include,
+        vec!["--lane", "--host-role", "--reason"],
+        "execution ladder must pin deterministic repro-command tokens"
+    );
 }
 
 #[test]

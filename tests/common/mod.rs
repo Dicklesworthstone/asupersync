@@ -9,6 +9,9 @@
 //! ```
 
 pub mod coverage;
+pub mod e2e_harness;
+pub mod e2e_macros;
+pub mod payloads;
 
 pub use coverage::{
     CoverageEntry, CoverageInfo, CoverageReport, InvariantTracker, assert_coverage,

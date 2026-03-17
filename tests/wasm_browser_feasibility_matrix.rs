@@ -27,6 +27,13 @@ fn read_file(rel: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()))
 }
 
+fn read_json(rel: &str) -> serde_json::Value {
+    let path = repo_root().join(rel);
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
+    serde_json::from_str(&content).unwrap_or_else(|_| panic!("invalid JSON {}", path.display()))
+}
+
 fn file_exists(rel: &str) -> bool {
     repo_root().join(rel).exists()
 }
@@ -562,6 +569,174 @@ fn docs_wasm_md_classifies_dedicated_worker_as_direct_runtime() {
     );
 }
 
+#[test]
+fn execution_ladder_policy_pins_lane_ids_and_host_role_ordering() {
+    let policy = read_json(".github/wasm_worker_offload_policy.json");
+    let ladder = policy["execution_ladder"]
+        .as_object()
+        .expect("policy.execution_ladder must exist");
+    assert_eq!(
+        ladder["schema_version"].as_str(),
+        Some("wasm-browser-execution-ladder-v1"),
+        "execution ladder schema version must be pinned"
+    );
+
+    let lanes = ladder["lanes"].as_array().expect("execution_ladder.lanes");
+    let lane_ids: Vec<&str> = lanes
+        .iter()
+        .map(|lane| lane["id"].as_str().expect("lane.id"))
+        .collect();
+    assert_eq!(
+        lane_ids,
+        vec![
+            "lane.browser.main_thread.direct_runtime",
+            "lane.browser.dedicated_worker.direct_runtime",
+            "lane.next.server.bridge",
+            "lane.next.edge.bridge",
+            "lane.unsupported"
+        ],
+        "execution ladder must pin the stable lane ordering"
+    );
+
+    let host_roles = ladder["host_role_classification"]
+        .as_array()
+        .expect("execution_ladder.host_role_classification");
+    let service_worker = host_roles
+        .iter()
+        .find(|entry| entry["id"].as_str() == Some("service_worker"))
+        .expect("service_worker host role");
+    assert_eq!(
+        service_worker["support_class"].as_str(),
+        Some("unsupported"),
+        "service worker must fail closed in the current ladder"
+    );
+    assert_eq!(
+        service_worker["default_reason_code"].as_str(),
+        Some("service_worker_direct_runtime_not_shipped"),
+        "service worker must carry the canonical policy-denial reason"
+    );
+
+    let next_server = host_roles
+        .iter()
+        .find(|entry| entry["id"].as_str() == Some("next_server"))
+        .expect("next_server host role");
+    let next_server_order: Vec<&str> = next_server["selection_order"]
+        .as_array()
+        .expect("next_server.selection_order")
+        .iter()
+        .map(|value| value.as_str().expect("selection_order entry"))
+        .collect();
+    assert_eq!(
+        next_server_order,
+        vec!["lane.next.server.bridge", "lane.unsupported"],
+        "server hosts must downgrade to the explicit bridge lane before unsupported"
+    );
+}
+
+#[test]
+fn execution_ladder_policy_pins_reason_codes_log_fields_and_non_goals() {
+    let policy = read_json(".github/wasm_worker_offload_policy.json");
+    let ladder = &policy["execution_ladder"];
+
+    let reason_codes = ladder["reason_codes"]
+        .as_object()
+        .expect("execution_ladder.reason_codes");
+    let downgrade_codes: Vec<&str> = reason_codes["downgrade"]
+        .as_array()
+        .expect("execution_ladder.reason_codes.downgrade")
+        .iter()
+        .map(|value| value.as_str().expect("downgrade reason"))
+        .collect();
+    assert!(
+        downgrade_codes.contains(&"downgrade_to_server_bridge")
+            && downgrade_codes.contains(&"downgrade_to_edge_bridge")
+            && downgrade_codes.contains(&"downgrade_to_websocket_or_fetch")
+            && downgrade_codes.contains(&"downgrade_to_export_bytes_for_download"),
+        "execution ladder must pin stable downgrade reason codes"
+    );
+
+    let log_fields: Vec<&str> = ladder["required_log_fields"]
+        .as_array()
+        .expect("execution_ladder.required_log_fields")
+        .iter()
+        .map(|value| value.as_str().expect("log field"))
+        .collect();
+    for field in [
+        "lane_id",
+        "lane_kind",
+        "lane_rank",
+        "host_role",
+        "support_class",
+        "reason_code",
+        "fallback_lane_id",
+        "policy_schema_version",
+        "repro_command",
+    ] {
+        assert!(
+            log_fields.contains(&field),
+            "execution ladder must require log field {field}"
+        );
+    }
+
+    let repro = &ladder["repro_command_convention"];
+    assert_eq!(
+        repro["format"].as_str(),
+        Some(
+            "pnpm --filter <package> test:e2e -- --lane <lane_id> --host-role <host_role> --reason <reason_code>"
+        ),
+        "execution ladder must pin the deterministic repro-command format"
+    );
+
+    let non_goals: Vec<&str> = ladder["explicit_non_goals"]
+        .as_array()
+        .expect("execution_ladder.explicit_non_goals")
+        .iter()
+        .map(|value| value.as_str().expect("non-goal"))
+        .collect();
+    for non_goal in [
+        "service_worker_general_runtime_without_bounded_broker_contract",
+        "shared_worker_general_runtime_without_tenancy_and_lifecycle_contract",
+        "ambient_message_channel_promotion",
+        "shared_array_buffer_multi_worker_default_lane",
+        "raw_socket_filesystem_process_parity",
+    ] {
+        assert!(
+            non_goals.contains(&non_goal),
+            "execution ladder must preserve explicit non-goal {non_goal}"
+        );
+    }
+}
+
+#[test]
+fn docs_wasm_md_pins_execution_ladder_contract_markers() {
+    let doc = read_file("docs/WASM.md");
+    for marker in [
+        "### Execution Ladder Contract",
+        "lane.browser.main_thread.direct_runtime",
+        "lane.browser.dedicated_worker.direct_runtime",
+        "lane.next.server.bridge",
+        "lane.next.edge.bridge",
+        "lane.unsupported",
+        "candidate_host_role_mismatch",
+        "candidate_prerequisite_missing",
+        "downgrade_to_server_bridge",
+        "downgrade_to_edge_bridge",
+        "downgrade_to_websocket_or_fetch",
+        "downgrade_to_export_bytes_for_download",
+        "service_worker_direct_runtime_not_shipped",
+        "shared_worker_direct_runtime_not_shipped",
+        "shared_array_buffer_requires_cross_origin_isolation",
+        "pnpm --filter <package> test:e2e -- --lane <lane_id> --host-role <host_role> --reason <reason_code>",
+        "service_worker_general_runtime_without_bounded_broker_contract",
+        "shared_worker_general_runtime_without_tenancy_and_lifecycle_contract",
+    ] {
+        assert!(
+            doc.contains(marker),
+            "docs/WASM.md must preserve execution-ladder marker: {marker}"
+        );
+    }
+}
+
 // ══════════════════════════════════════════════════════════════════════
 //  SECTION 4: Contradictions Tracking
 // ══════════════════════════════════════════════════════════════════════
@@ -794,19 +969,45 @@ fn browser_sdk_support_classes_are_exactly_two() {
 #[test]
 fn browser_sdk_runtime_contexts_are_exactly_three() {
     // The browser SDK recognizes exactly: browser_main_thread,
-    // dedicated_worker, unknown. Adding service_worker or shared_worker
-    // requires deliberate bead work.
+    // dedicated_worker, unknown. Execution-ladder candidates may name
+    // additional host roles, but the direct runtime-context taxonomy must
+    // remain narrow until a deliberate promotion bead changes it.
     let src = read_file("packages/browser/src/index.ts");
+    let context_block = src
+        .split("export type BrowserRuntimeContext =")
+        .nth(1)
+        .and_then(|tail| tail.split("export type BrowserRuntimeSupportReason =").next())
+        .expect("browser src/index.ts must define BrowserRuntimeContext before BrowserRuntimeSupportReason");
     assert!(
-        src.contains("\"browser_main_thread\"")
-            && src.contains("\"dedicated_worker\"")
-            && src.contains("\"unknown\""),
+        context_block.contains("\"browser_main_thread\"")
+            && context_block.contains("\"dedicated_worker\"")
+            && context_block.contains("\"unknown\""),
         "browser SDK must declare exactly three runtime contexts"
     );
     assert!(
-        !src.contains("\"service_worker\"") && !src.contains("\"shared_worker\""),
-        "browser SDK must NOT silently add service/shared worker contexts"
+        !context_block.contains("\"service_worker\"")
+            && !context_block.contains("\"shared_worker\""),
+        "browser SDK must NOT silently add service/shared worker direct runtime contexts"
     );
+}
+
+#[test]
+fn browser_sdk_execution_ladder_surfaces_service_and_shared_worker_as_unavailable() {
+    let src = read_file("packages/browser/src/index.ts");
+    for marker in [
+        "export type BrowserExecutionLane =",
+        "\"shared_worker\"",
+        "\"service_worker\"",
+        "\"shared_worker_not_yet_shipped\"",
+        "\"service_worker_not_yet_shipped\"",
+        "@asupersync/browser does not yet ship direct runtime APIs for shared-worker hosts.",
+        "@asupersync/browser does not yet ship direct runtime APIs for service-worker hosts.",
+    ] {
+        assert!(
+            src.contains(marker),
+            "browser SDK must explicitly preserve fail-closed execution-ladder marker: {marker}"
+        );
+    }
 }
 
 #[test]

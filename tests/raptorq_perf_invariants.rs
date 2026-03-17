@@ -4778,9 +4778,9 @@ fn f4_all_repair_activates_dense_elimination() {
     let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
 
-    // Drop ALL source symbols.
+    // Drop ALL source symbols. We need a couple extra repair symbols to ensure full rank.
     let drop: Vec<usize> = (0..k).collect();
-    let received = build_decode_received(&source, &encoder, &decoder, &drop, 0);
+    let received = build_decode_received(&source, &encoder, &decoder, &drop, 2);
     let result = decoder
         .decode(&received)
         .expect("all-repair decode should succeed");
