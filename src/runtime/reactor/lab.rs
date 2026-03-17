@@ -114,7 +114,8 @@ pub struct FaultConfig {
     /// One-shot error to inject on next event delivery.
     /// Cleared after delivery.
     pub pending_error: Option<io::ErrorKind>,
-    /// Whether the connection is closed (delivers HUP on next poll).
+    /// Whether the connection is closed (delivers HUP on the next poll, even
+    /// without queued readiness).
     /// Once set, remains set until explicitly cleared.
     pub closed: bool,
     /// Whether this token is partitioned (events are dropped, not delivered).
@@ -539,8 +540,9 @@ impl LabReactor {
 
     /// Injects a connection close (HUP) for a token.
     ///
-    /// Schedules a HUP event for the token, simulating the remote end closing
-    /// the connection. The HUP event will be delivered on the next poll.
+    /// Marks the token as closed, simulating the remote end closing the
+    /// connection. The next poll will deliver HUP even if no readiness is
+    /// queued for the token.
     ///
     /// # Arguments
     ///
@@ -561,7 +563,7 @@ impl LabReactor {
     ///
     /// // Simulate remote close
     /// reactor.inject_close(token)?;
-    /// // Next poll will deliver HUP event
+    /// // Next poll will deliver HUP
     /// ```
     pub fn inject_close(&self, token: Token) -> io::Result<()> {
         let mut inner = self.inner.lock();
@@ -574,7 +576,8 @@ impl LabReactor {
             ));
         }
 
-        // Mark socket as closed and schedule HUP event
+        // Mark socket as closed so the next poll reports HUP, even if no
+        // readiness has been queued.
         if let Some(socket) = inner.sockets.get_mut(&token) {
             if let Some(ref mut fault) = socket.fault {
                 fault.config.closed = true;
@@ -586,17 +589,6 @@ impl LabReactor {
                 socket.fault = Some(fault_state);
             }
         }
-
-        // Schedule the HUP event for immediate delivery
-        let time = inner.time;
-        let sequence = inner.next_sequence;
-        inner.next_sequence += 1;
-        inner.pending.push(TimedEvent {
-            time,
-            sequence,
-            event: Event::hangup(token),
-            delayed: false,
-        });
 
         debug!(
             target: "fault",
@@ -765,18 +757,31 @@ impl Reactor for LabReactor {
 
     #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
     fn poll(&self, events: &mut super::Events, timeout: Option<Duration>) -> io::Result<usize> {
-        // Clear wake flag at poll entry
-        self.woken.store(false, Ordering::Release);
+        let was_woken = self.woken.swap(false, Ordering::AcqRel);
         events.clear();
 
         let delivered_events = {
             let mut inner = self.inner.lock();
 
-            // Advance time if timeout provided (simulated)
-            if let Some(d) = timeout {
-                inner.time = inner
-                    .time
-                    .saturating_add_nanos(duration_to_nanos_saturating(d));
+            let current_time = inner.time;
+            let timeout_deadline = timeout.map(|duration| {
+                current_time.saturating_add_nanos(duration_to_nanos_saturating(duration))
+            });
+            let next_event_time = inner.pending.peek().map(|timed| timed.time);
+
+            let target_time = if was_woken {
+                current_time
+            } else {
+                match (timeout_deadline, next_event_time) {
+                    (Some(deadline), Some(next)) => deadline.min(next),
+                    (Some(deadline), None) => deadline,
+                    (None, Some(next)) => next,
+                    (None, None) => current_time,
+                }
+            };
+
+            if target_time > inner.time {
+                inner.time = target_time;
             }
 
             let mut ready_events = Vec::new();
@@ -798,9 +803,9 @@ impl Reactor for LabReactor {
                 let LabInner {
                     sockets,
                     pending,
-                    time,
                     next_sequence,
                     chaos,
+                    time: _,
                 } = &mut *inner;
                 let mut closed_tokens_emitted = BTreeSet::new();
 
@@ -885,8 +890,9 @@ impl Reactor for LabReactor {
                             if !delay.is_zero() {
                                 let sequence = *next_sequence;
                                 *next_sequence += 1;
-                                let delayed_time =
-                                    time.saturating_add_nanos(duration_to_nanos_saturating(delay));
+                                let delayed_time = timed
+                                    .time
+                                    .saturating_add_nanos(duration_to_nanos_saturating(delay));
                                 pending.push(TimedEvent {
                                     time: delayed_time,
                                     sequence,
@@ -944,6 +950,18 @@ impl Reactor for LabReactor {
                         if !ready.is_empty() {
                             delivered_events.push(Event::new(token, ready));
                         }
+                    }
+                }
+
+                for (&token, socket) in sockets.iter() {
+                    let Some(fault) = socket.fault.as_ref() else {
+                        continue;
+                    };
+                    if fault.config.partitioned || !fault.config.closed {
+                        continue;
+                    }
+                    if closed_tokens_emitted.insert(token) {
+                        delivered_events.push(Event::hangup(token));
                     }
                 }
             }
@@ -1120,6 +1138,33 @@ mod tests {
         let cleared = reactor.check_and_clear_wake();
         crate::assert_with_log!(!cleared, "wake flag cleared", false, cleared);
         crate::test_complete!("wake_sets_flag");
+    }
+
+    #[test]
+    fn wake_interrupts_timed_poll_without_advancing_virtual_time() {
+        init_test("wake_interrupts_timed_poll_without_advancing_virtual_time");
+        let reactor = LabReactor::new();
+        let mut events = crate::runtime::reactor::Events::with_capacity(4);
+
+        reactor.wake().unwrap();
+        let count = reactor
+            .poll(&mut events, Some(Duration::from_millis(50)))
+            .unwrap();
+
+        crate::assert_with_log!(count == 0, "no synthetic events", 0usize, count);
+        crate::assert_with_log!(
+            events.is_empty(),
+            "event buffer empty",
+            true,
+            events.is_empty()
+        );
+        crate::assert_with_log!(
+            reactor.now() == Time::ZERO,
+            "wake does not fast-forward virtual time",
+            Time::ZERO,
+            reactor.now()
+        );
+        crate::test_complete!("wake_interrupts_timed_poll_without_advancing_virtual_time");
     }
 
     #[test]
@@ -1442,8 +1487,8 @@ mod tests {
     }
 
     #[test]
-    fn different_time_events_delivered_in_time_order() {
-        init_test("different_time_events_delivered_in_time_order");
+    fn different_time_events_delivered_one_poll_per_due_deadline() {
+        init_test("different_time_events_delivered_one_poll_per_due_deadline");
         let reactor = LabReactor::new();
         let source = TestFdSource;
 
@@ -1469,14 +1514,13 @@ mod tests {
 
         let mut events = crate::runtime::reactor::Events::with_capacity(10);
 
-        // Poll to 20ms - all events should be delivered
+        // Poll to 20ms - only the earliest due event should be delivered.
         reactor
             .poll(&mut events, Some(Duration::from_millis(20)))
             .unwrap();
 
-        // Should be in time order: token3, token1, token2
         let collected: Vec<_> = events.iter().collect();
-        crate::assert_with_log!(collected.len() == 3, "event count", 3usize, collected.len());
+        crate::assert_with_log!(collected.len() == 1, "event count", 1usize, collected.len());
         crate::assert_with_log!(
             collected[0].token == token3,
             "first token",
@@ -1484,18 +1528,60 @@ mod tests {
             collected[0].token
         );
         crate::assert_with_log!(
-            collected[1].token == token1,
-            "second token",
-            token1,
-            collected[1].token
+            reactor.now() == Time::from_millis(5),
+            "virtual time stops at earliest due event",
+            Time::from_millis(5),
+            reactor.now()
+        );
+
+        events.clear();
+        reactor
+            .poll(&mut events, Some(Duration::from_millis(20)))
+            .unwrap();
+        let collected: Vec<_> = events.iter().collect();
+        crate::assert_with_log!(
+            collected.len() == 1,
+            "second poll count",
+            1usize,
+            collected.len()
         );
         crate::assert_with_log!(
-            collected[2].token == token2,
-            "third token",
-            token2,
-            collected[2].token
+            collected[0].token == token1,
+            "second poll token",
+            token1,
+            collected[0].token
         );
-        crate::test_complete!("different_time_events_delivered_in_time_order");
+        crate::assert_with_log!(
+            reactor.now() == Time::from_millis(10),
+            "virtual time advances to second due event",
+            Time::from_millis(10),
+            reactor.now()
+        );
+
+        events.clear();
+        reactor
+            .poll(&mut events, Some(Duration::from_millis(20)))
+            .unwrap();
+        let collected: Vec<_> = events.iter().collect();
+        crate::assert_with_log!(
+            collected.len() == 1,
+            "third poll count",
+            1usize,
+            collected.len()
+        );
+        crate::assert_with_log!(
+            collected[0].token == token2,
+            "third poll token",
+            token2,
+            collected[0].token
+        );
+        crate::assert_with_log!(
+            reactor.now() == Time::from_millis(15),
+            "virtual time advances to final due event",
+            Time::from_millis(15),
+            reactor.now()
+        );
+        crate::test_complete!("different_time_events_delivered_one_poll_per_due_deadline");
     }
 
     #[test]
@@ -1705,6 +1791,57 @@ mod tests {
             final_stats.decision_points
         );
         crate::test_complete!("io_chaos_delays_events");
+    }
+
+    #[test]
+    fn io_chaos_delay_is_based_on_due_time_not_full_poll_timeout() {
+        init_test("io_chaos_delay_is_based_on_due_time_not_full_poll_timeout");
+        let config = ChaosConfig::new(11)
+            .with_delay_probability(1.0)
+            .with_delay_range(Duration::from_millis(5)..Duration::from_millis(6));
+
+        let reactor = LabReactor::with_chaos(config);
+        let token = Token::new(1);
+        let source = TestFdSource;
+
+        reactor
+            .register(&source, token, Interest::READABLE)
+            .unwrap();
+        reactor.inject_event(token, Event::readable(token), Duration::from_millis(10));
+
+        let mut events = crate::runtime::reactor::Events::with_capacity(10);
+        reactor
+            .poll(&mut events, Some(Duration::from_millis(50)))
+            .unwrap();
+        crate::assert_with_log!(
+            events.is_empty(),
+            "delayed event not delivered on first poll",
+            true,
+            events.is_empty()
+        );
+        crate::assert_with_log!(
+            reactor.now() == Time::from_millis(10),
+            "poll stops at original due time",
+            Time::from_millis(10),
+            reactor.now()
+        );
+
+        let delayed_at = reactor
+            .inner
+            .lock()
+            .pending
+            .peek()
+            .map(|timed| timed.time)
+            .expect("delayed event");
+        let min_delayed_at = Time::from_millis(15);
+        let max_delayed_at = Time::from_millis(16);
+        crate::assert_with_log!(
+            delayed_at >= min_delayed_at && delayed_at < max_delayed_at,
+            "delay rebased from event due time",
+            format!("[{min_delayed_at:?}, {max_delayed_at:?})"),
+            delayed_at
+        );
+        crate::test_complete!("io_chaos_delay_is_based_on_due_time_not_full_poll_timeout");
     }
 
     #[test]
@@ -2105,6 +2242,63 @@ mod tests {
             );
 
             crate::test_complete!("closed_fault_state_forces_hup_until_cleared");
+        }
+
+        #[test]
+        fn closed_fault_state_delivers_hup_on_idle_poll() {
+            super::init_test("closed_fault_state_delivers_hup_on_idle_poll");
+
+            let reactor = LabReactor::new();
+            let token = Token::new(1);
+            let source = TestFdSource;
+
+            reactor
+                .register(&source, token, Interest::READABLE)
+                .unwrap();
+            reactor
+                .set_fault_config(token, FaultConfig::new().with_closed(true))
+                .unwrap();
+
+            let mut events = crate::runtime::reactor::Events::with_capacity(10);
+            reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+
+            crate::assert_with_log!(events.len() == 1, "single idle HUP", 1usize, events.len());
+            let event = events.iter().next().expect("event");
+            crate::assert_with_log!(
+                event.is_hangup(),
+                "idle poll reports HUP for closed socket",
+                true,
+                event.is_hangup()
+            );
+
+            crate::test_complete!("closed_fault_state_delivers_hup_on_idle_poll");
+        }
+
+        #[test]
+        fn clear_fault_config_suppresses_injected_close_before_poll() {
+            super::init_test("clear_fault_config_suppresses_injected_close_before_poll");
+
+            let reactor = LabReactor::new();
+            let token = Token::new(1);
+            let source = TestFdSource;
+
+            reactor
+                .register(&source, token, Interest::READABLE)
+                .unwrap();
+            reactor.inject_close(token).unwrap();
+            reactor.clear_fault_config(token).unwrap();
+
+            let mut events = crate::runtime::reactor::Events::with_capacity(10);
+            reactor.poll(&mut events, Some(Duration::ZERO)).unwrap();
+
+            crate::assert_with_log!(
+                events.is_empty(),
+                "clearing fault config before poll suppresses injected close",
+                true,
+                events.is_empty()
+            );
+
+            crate::test_complete!("clear_fault_config_suppresses_injected_close_before_poll");
         }
 
         #[test]
