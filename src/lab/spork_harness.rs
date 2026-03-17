@@ -146,13 +146,20 @@ impl SporkAppHarness {
     ///
     /// After this call, `app_handle()` returns `None`.
     pub fn stop_app(&mut self) -> Result<(), HarnessError> {
-        if let Some(mut handle) = self.app_handle.take() {
+        let stop_result = if let Some(mut handle) = self.app_handle.take() {
             handle
                 .stop(&mut self.runtime.state)
-                .map_err(HarnessError::Stop)?;
-        }
+                .map_err(HarnessError::Stop)
+                .map(|_| ())
+        } else {
+            Ok(())
+        };
+
+        // Drain to full quiescence even if stop() failed, to honour the
+        // structured-concurrency drain invariant.
         self.runtime.run_until_quiescent();
-        Ok(())
+
+        stop_result
     }
 
     /// Run the full lifecycle: quiesce → stop → quiesce → report.

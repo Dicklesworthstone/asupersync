@@ -276,21 +276,26 @@ impl RestorableSnapshot {
     /// Creates a new restorable snapshot from a runtime snapshot.
     #[must_use]
     pub fn new(snapshot: RuntimeSnapshot) -> Self {
-        let content_hash = Self::compute_hash(&snapshot);
+        let schema_version = Self::SCHEMA_VERSION;
+        let content_hash = Self::compute_hash(schema_version, &snapshot);
         Self {
             snapshot,
-            schema_version: Self::SCHEMA_VERSION,
+            schema_version,
             content_hash,
         }
     }
 
     /// Computes a deterministic hash of the snapshot content.
-    fn compute_hash(snapshot: &RuntimeSnapshot) -> u64 {
+    fn compute_hash(schema_version: u32, snapshot: &RuntimeSnapshot) -> u64 {
         // FNV-1a hash for determinism
         const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
         const FNV_PRIME: u64 = 0x0100_0000_01b3;
 
         let mut hash = FNV_OFFSET;
+        for byte in schema_version.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
         // Hash full snapshot content (not just counts) so semantic tampering is detected.
         // JSON encoding is deterministic here because RuntimeSnapshot and nested fields are
         // structs/vectors with stable field order.
@@ -475,7 +480,11 @@ impl RestorableSnapshot {
         }
 
         let mut region_children: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut closed_regions: HashSet<u32> = HashSet::new();
         for region in &self.snapshot.regions {
+            if is_region_closed(&region.state) {
+                closed_regions.insert(region.id.index);
+            }
             if let Some(parent_id) = region.parent_id {
                 region_children
                     .entry(parent_id.index)
@@ -492,13 +501,7 @@ impl RestorableSnapshot {
                     .map(|children| {
                         children
                             .iter()
-                            .filter(|&&child_id| {
-                                self.snapshot
-                                    .regions
-                                    .iter()
-                                    .find(|r| r.id.index == child_id)
-                                    .is_some_and(|r| !is_region_closed(&r.state))
-                            })
+                            .filter(|&&child_id| !closed_regions.contains(&child_id))
                             .copied()
                             .collect()
                     })
@@ -535,7 +538,7 @@ impl RestorableSnapshot {
     /// Verifies the content hash matches.
     #[must_use]
     pub fn verify_integrity(&self) -> bool {
-        Self::compute_hash(&self.snapshot) == self.content_hash
+        Self::compute_hash(self.schema_version, &self.snapshot) == self.content_hash
     }
 
     /// Returns the snapshot timestamp.
@@ -1035,6 +1038,24 @@ mod tests {
         crate::assert_with_log!(invalid, "semantic tamper invalid", true, invalid);
 
         crate::test_complete!("integrity_verification_detects_semantic_tampering");
+    }
+
+    #[test]
+    fn integrity_verification_detects_schema_version_tampering() {
+        init_test("integrity_verification_detects_schema_version_tampering");
+        let snapshot = make_snapshot(
+            vec![make_region(0, None, RegionStateSnapshot::Open)],
+            vec![make_task(0, 0, TaskStateSnapshot::Running)],
+            Vec::new(),
+        );
+
+        let mut tampered = snapshot;
+        tampered.schema_version = tampered.schema_version.saturating_add(1);
+
+        let invalid = !tampered.verify_integrity();
+        crate::assert_with_log!(invalid, "schema version tamper invalid", true, invalid);
+
+        crate::test_complete!("integrity_verification_detects_schema_version_tampering");
     }
 
     #[test]

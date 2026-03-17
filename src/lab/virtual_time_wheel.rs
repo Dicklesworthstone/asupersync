@@ -203,27 +203,24 @@ impl VirtualTimerWheel {
     /// Uses lazy cancellation - the timer is marked as cancelled and will
     /// be skipped when its deadline is reached.
     pub fn cancel(&mut self, handle: VirtualTimerHandle) {
-        // Guard against stale handles so live timers are never hidden from len()/is_empty().
-        let still_pending = self
-            .heap
-            .iter()
-            .any(|timer| timer.timer_id == handle.timer_id && timer.deadline == handle.deadline);
-        if still_pending {
-            self.cancelled.insert(handle.timer_id);
-        } else {
-            self.cancelled.remove(&handle.timer_id);
-        }
+        // Timer IDs are strictly monotonic and unique per timer.
+        // A stale handle's timer_id will never match a live timer's timer_id,
+        // so it's safe to blindly insert it into the cancelled set without an O(N) search.
+        // Stale IDs in the cancelled set are harmless and will be cleaned up in advance_to().
+        self.cancelled.insert(handle.timer_id);
     }
 
     /// Returns the deadline of the next non-cancelled timer, if any.
     #[must_use]
-    pub fn next_deadline(&self) -> Option<u64> {
-        // Find the first non-cancelled timer
-        self.heap
-            .iter()
-            .filter(|t| !self.cancelled.contains(&t.timer_id))
-            .map(|t| t.deadline)
-            .min()
+    pub fn next_deadline(&mut self) -> Option<u64> {
+        while let Some(top) = self.heap.peek() {
+            if self.cancelled.remove(&top.timer_id) {
+                self.heap.pop();
+            } else {
+                return Some(top.deadline);
+            }
+        }
+        None
     }
 
     /// Advances virtual time to the next timer deadline.
