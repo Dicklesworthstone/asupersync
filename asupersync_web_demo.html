@@ -435,7 +435,7 @@ h3 { font-size: 1.25rem; font-weight: 600; }
 .hero-bg .glow-ring {
   position: absolute; border-radius: 50%;
   pointer-events: none;
-  contain: strict;
+  contain: size layout style;
   backface-visibility: hidden;
 }
 .hero-bg .glow-ring-1 {
@@ -462,16 +462,18 @@ h3 { font-size: 1.25rem; font-weight: 600; }
 .hero-bg .glow-orb {
   position: absolute; border-radius: 50%; pointer-events: none;
   backface-visibility: hidden;
-  contain: strict;
+  contain: size layout style;
 }
 .hero-bg .glow-orb-1 {
   width: 200px; height: 200px; top: 20%; right: 20%;
   background: rgba(59,130,246,0.12); filter: blur(60px);
+  opacity: 0.15;
   animation: orbFloat1 10s ease-in-out infinite;
 }
 .hero-bg .glow-orb-2 {
   width: 260px; height: 260px; bottom: 20%; left: 25%;
   background: rgba(249,115,22,0.08); filter: blur(70px);
+  opacity: 0.1;
   animation: orbFloat2 12s ease-in-out infinite 2s;
 }
 @keyframes orbitSpin1 { 0%,100% { transform: rotate(0deg) scale(1); } 50% { transform: rotate(180deg) scale(1.15); } }
@@ -4368,7 +4370,7 @@ function initMotionAnimations() {
   // Scroll-triggered reveal with spring physics
   document.querySelectorAll('.reveal').forEach(el => {
     inView(el, () => {
-      animate(el, { opacity: [0, 1], transform: ['translateY(32px)', 'translateY(0)'] },
+      animate(el, { opacity: [0, 1], transform: ['translateY(20px)', 'translateY(0)'] },
         { type: 'spring', stiffness: 120, damping: 20, mass: 0.8 });
       el.classList.add('visible');
     }, { margin: '-60px' });
