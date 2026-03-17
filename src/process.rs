@@ -43,10 +43,15 @@ use std::pin::Pin;
 use std::process as std_process;
 use std::task::{Context, Poll};
 
+#[cfg(windows)]
+use std::cmp::Ordering;
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, RawFd};
 #[cfg(windows)]
-use std::os::windows::io::{AsRawHandle, RawHandle};
+use std::os::windows::{
+    ffi::OsStrExt,
+    io::{AsRawHandle, RawHandle},
+};
 
 #[cfg(unix)]
 fn set_nonblocking(fd: RawFd) -> io::Result<()> {
@@ -222,6 +227,125 @@ impl From<Stdio> for std_process::Stdio {
     }
 }
 
+#[cfg(not(windows))]
+#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
+struct EnvKey(OsString);
+
+#[cfg(not(windows))]
+impl From<OsString> for EnvKey {
+    fn from(key: OsString) -> Self {
+        Self(key)
+    }
+}
+
+#[cfg(not(windows))]
+impl From<&OsStr> for EnvKey {
+    fn from(key: &OsStr) -> Self {
+        Self(key.to_os_string())
+    }
+}
+
+#[cfg(not(windows))]
+impl AsRef<OsStr> for EnvKey {
+    fn as_ref(&self) -> &OsStr {
+        &self.0
+    }
+}
+
+#[cfg(windows)]
+#[link(name = "Kernel32")]
+unsafe extern "system" {
+    #[link_name = "CompareStringOrdinal"]
+    fn compare_string_ordinal(
+        string1: *const u16,
+        count1: i32,
+        string2: *const u16,
+        count2: i32,
+        ignore_case: i32,
+    ) -> i32;
+}
+
+#[cfg(windows)]
+const WINDOWS_TRUE: i32 = 1;
+#[cfg(windows)]
+const WINDOWS_CSTR_LESS_THAN: i32 = 1;
+#[cfg(windows)]
+const WINDOWS_CSTR_EQUAL: i32 = 2;
+#[cfg(windows)]
+const WINDOWS_CSTR_GREATER_THAN: i32 = 3;
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Eq)]
+struct EnvKey {
+    os_string: OsString,
+    utf16: Vec<u16>,
+}
+
+#[cfg(windows)]
+impl From<OsString> for EnvKey {
+    fn from(key: OsString) -> Self {
+        Self {
+            utf16: key.encode_wide().collect(),
+            os_string: key,
+        }
+    }
+}
+
+#[cfg(windows)]
+impl From<&OsStr> for EnvKey {
+    fn from(key: &OsStr) -> Self {
+        Self::from(key.to_os_string())
+    }
+}
+
+#[cfg(windows)]
+impl AsRef<OsStr> for EnvKey {
+    fn as_ref(&self) -> &OsStr {
+        &self.os_string
+    }
+}
+
+#[cfg(windows)]
+impl Ord for EnvKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let (Ok(count1), Ok(count2)) = (
+            i32::try_from(self.utf16.len()),
+            i32::try_from(other.utf16.len()),
+        ) else {
+            return self.utf16.cmp(&other.utf16);
+        };
+        let result = unsafe {
+            compare_string_ordinal(
+                self.utf16.as_ptr(),
+                count1,
+                other.utf16.as_ptr(),
+                count2,
+                WINDOWS_TRUE,
+            )
+        };
+        match result {
+            WINDOWS_CSTR_LESS_THAN => Ordering::Less,
+            WINDOWS_CSTR_EQUAL => Ordering::Equal,
+            WINDOWS_CSTR_GREATER_THAN => Ordering::Greater,
+            _ => self.utf16.cmp(&other.utf16),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl PartialOrd for EnvKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[cfg(windows)]
+impl PartialEq for EnvKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.utf16.len() == other.utf16.len() && self.cmp(other) == Ordering::Equal
+    }
+}
+
 /// Builder for spawning child processes.
 ///
 /// Provides a fluent API for configuring and spawning processes.
@@ -241,7 +365,7 @@ impl From<Stdio> for std_process::Stdio {
 pub struct Command {
     program: OsString,
     args: Vec<OsString>,
-    env: BTreeMap<OsString, OsString>,
+    env: BTreeMap<EnvKey, Option<OsString>>,
     env_clear: bool,
     current_dir: Option<PathBuf>,
     stdin: Stdio,
@@ -251,6 +375,11 @@ pub struct Command {
 }
 
 impl Command {
+    fn set_env_change(&mut self, key: EnvKey, value: Option<OsString>) {
+        self.env.remove(&key);
+        self.env.insert(key, value);
+    }
+
     /// Creates a new command for the given program.
     ///
     /// # Arguments
@@ -326,8 +455,8 @@ impl Command {
         K: AsRef<OsStr>,
         V: AsRef<OsStr>,
     {
-        self.env
-            .insert(key.as_ref().to_os_string(), val.as_ref().to_os_string());
+        let key = EnvKey::from(key.as_ref());
+        self.set_env_change(key, Some(val.as_ref().to_os_string()));
         self
     }
 
@@ -346,8 +475,8 @@ impl Command {
         V: AsRef<OsStr>,
     {
         for (key, val) in vars {
-            self.env
-                .insert(key.as_ref().to_os_string(), val.as_ref().to_os_string());
+            let key = EnvKey::from(key.as_ref());
+            self.set_env_change(key, Some(val.as_ref().to_os_string()));
         }
         self
     }
@@ -361,7 +490,12 @@ impl Command {
     ///     .env_remove("PATH");
     /// ```
     pub fn env_remove<K: AsRef<OsStr>>(&mut self, key: K) -> &mut Self {
-        self.env.remove(key.as_ref());
+        let key = EnvKey::from(key.as_ref());
+        if self.env_clear {
+            self.env.remove(&key);
+        } else {
+            self.set_env_change(key, None);
+        }
         self
     }
 
@@ -378,6 +512,7 @@ impl Command {
     /// ```
     pub fn env_clear(&mut self) -> &mut Self {
         self.env_clear = true;
+        self.env.clear();
         self
     }
 
@@ -484,8 +619,12 @@ impl Command {
             cmd.env_clear();
         }
 
-        for (key, val) in &self.env {
-            cmd.env(key, val);
+        for (key, maybe_val) in &self.env {
+            if let Some(val) = maybe_val {
+                cmd.env(key.as_ref(), val);
+            } else {
+                cmd.env_remove(key.as_ref());
+            }
         }
 
         if let Some(ref dir) = self.current_dir {
@@ -1012,7 +1151,7 @@ impl Drop for Child {
 /// ```
 #[derive(Debug)]
 pub struct ChildStdin {
-    inner: std_process::ChildStdin,
+    inner: Option<std_process::ChildStdin>,
     registration: Option<IoRegistration>,
 }
 
@@ -1021,7 +1160,7 @@ impl ChildStdin {
     fn from_std(stdin: std_process::ChildStdin) -> io::Result<Self> {
         set_nonblocking(stdin.as_raw_fd())?;
         Ok(Self {
-            inner: stdin,
+            inner: Some(stdin),
             registration: None,
         })
     }
@@ -1030,7 +1169,7 @@ impl ChildStdin {
     fn from_std(stdin: std_process::ChildStdin) -> io::Result<Self> {
         set_nonblocking()?;
         Ok(Self {
-            inner: stdin,
+            inner: Some(stdin),
             registration: None,
         })
     }
@@ -1039,14 +1178,20 @@ impl ChildStdin {
     #[cfg(unix)]
     #[must_use]
     pub fn as_raw_fd(&self) -> RawFd {
-        self.inner.as_raw_fd()
+        self.inner
+            .as_ref()
+            .expect("child stdin already closed")
+            .as_raw_fd()
     }
 
     /// Returns the raw handle on Windows.
     #[cfg(windows)]
     #[must_use]
     pub fn as_raw_handle(&self) -> RawHandle {
-        self.inner.as_raw_handle()
+        self.inner
+            .as_ref()
+            .expect("child stdin already closed")
+            .as_raw_handle()
     }
 }
 
@@ -1059,15 +1204,23 @@ impl AsyncWrite for ChildStdin {
         let this = self.get_mut();
         #[cfg(unix)]
         {
-            match this.inner.write(buf) {
+            let Some(inner) = this.inner.as_mut() else {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "child stdin already closed",
+                )));
+            };
+
+            match inner.write(buf) {
                 Ok(n) => Poll::Ready(Ok(n)),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    if let Err(err) = register_interest(
-                        &mut this.registration,
-                        &this.inner,
-                        cx,
-                        Interest::WRITABLE,
-                    ) {
+                    let source = this
+                        .inner
+                        .as_ref()
+                        .expect("child stdin must exist while registering write interest");
+                    if let Err(err) =
+                        register_interest(&mut this.registration, source, cx, Interest::WRITABLE)
+                    {
                         return Poll::Ready(Err(err));
                     }
                     Poll::Pending
@@ -1089,15 +1242,20 @@ impl AsyncWrite for ChildStdin {
         let this = self.get_mut();
         #[cfg(unix)]
         {
-            match this.inner.flush() {
+            let Some(inner) = this.inner.as_mut() else {
+                return Poll::Ready(Ok(()));
+            };
+
+            match inner.flush() {
                 Ok(()) => Poll::Ready(Ok(())),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    if let Err(err) = register_interest(
-                        &mut this.registration,
-                        &this.inner,
-                        cx,
-                        Interest::WRITABLE,
-                    ) {
+                    let source = this
+                        .inner
+                        .as_ref()
+                        .expect("child stdin must exist while registering flush interest");
+                    if let Err(err) =
+                        register_interest(&mut this.registration, source, cx, Interest::WRITABLE)
+                    {
                         return Poll::Ready(Err(err));
                     }
                     Poll::Pending
@@ -1116,7 +1274,9 @@ impl AsyncWrite for ChildStdin {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // Closing stdin just means dropping it
+        let this = self.get_mut();
+        this.registration = None;
+        drop(this.inner.take());
         Poll::Ready(Ok(()))
     }
 }
@@ -1547,6 +1707,151 @@ mod tests {
     }
 
     #[test]
+    fn test_command_env_remove_prevents_inheritance() {
+        init_test("test_command_env_remove_prevents_inheritance");
+
+        let inherited = Command::new("sh")
+            .arg("-c")
+            .arg("env")
+            .stdout(Stdio::Pipe)
+            .spawn()
+            .expect("spawn failed")
+            .wait_with_output()
+            .expect("baseline output failed");
+        let inherited_stdout = String::from_utf8_lossy(&inherited.stdout);
+
+        crate::assert_with_log!(
+            inherited_stdout
+                .lines()
+                .any(|line| line.starts_with("PATH=")),
+            "baseline PATH inherited",
+            true,
+            inherited_stdout.as_ref()
+        );
+
+        let removed = Command::new("sh")
+            .arg("-c")
+            .arg("env")
+            .env_remove("PATH")
+            .stdout(Stdio::Pipe)
+            .spawn()
+            .expect("spawn failed")
+            .wait_with_output()
+            .expect("env_remove output failed");
+        let removed_stdout = String::from_utf8_lossy(&removed.stdout);
+
+        crate::assert_with_log!(
+            !removed_stdout.lines().any(|line| line.starts_with("PATH=")),
+            "PATH removed",
+            false,
+            removed_stdout.as_ref()
+        );
+        crate::test_complete!("test_command_env_remove_prevents_inheritance");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_command_env_remove_is_case_insensitive_after_clear() {
+        init_test("test_command_env_remove_is_case_insensitive_after_clear");
+
+        let mut command = Command::new("cmd");
+        command
+            .env_clear()
+            .env("Path", r"C:\custom\bin")
+            .env_remove("PATH");
+
+        crate::assert_with_log!(
+            command.env.is_empty(),
+            "case-insensitive removal after clear",
+            true,
+            command.env.len()
+        );
+        crate::test_complete!("test_command_env_remove_is_case_insensitive_after_clear");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_command_env_overwrite_preserves_latest_case() {
+        init_test("test_command_env_overwrite_preserves_latest_case");
+
+        let mut command = Command::new("cmd");
+        command
+            .env("PATH", r"C:\base\bin")
+            .env("Path", r"C:\custom\bin");
+
+        crate::assert_with_log!(
+            command.env.len() == 1,
+            "single builder entry after case-insensitive overwrite",
+            1,
+            command.env.len()
+        );
+
+        let mut entries = command.env.iter();
+        let (key, value) = entries.next().expect("missing environment entry");
+        crate::assert_with_log!(
+            key.as_ref() == OsStr::new("Path"),
+            "latest casing preserved",
+            "Path",
+            key.as_ref().to_string_lossy()
+        );
+        crate::assert_with_log!(
+            value.as_deref() == Some(OsStr::new(r"C:\custom\bin")),
+            "latest value preserved",
+            r"C:\custom\bin",
+            value
+                .as_deref()
+                .map_or_else(|| "<removed>".into(), |v| v.to_string_lossy())
+        );
+        crate::assert_with_log!(
+            entries.next().is_none(),
+            "no duplicate entries remain",
+            true,
+            false
+        );
+        crate::test_complete!("test_command_env_overwrite_preserves_latest_case");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_command_env_set_restores_removed_key_case_insensitively() {
+        init_test("test_command_env_set_restores_removed_key_case_insensitively");
+
+        let mut command = Command::new("cmd");
+        command.env_remove("PATH").env("Path", r"C:\custom\bin");
+
+        crate::assert_with_log!(
+            command.env.len() == 1,
+            "single builder entry after restore",
+            1,
+            command.env.len()
+        );
+
+        let mut entries = command.env.iter();
+        let (key, value) = entries.next().expect("missing environment entry");
+        crate::assert_with_log!(
+            key.as_ref() == OsStr::new("Path"),
+            "restored key preserves latest case",
+            "Path",
+            key.as_ref().to_string_lossy()
+        );
+        crate::assert_with_log!(
+            value.as_deref() == Some(OsStr::new(r"C:\custom\bin")),
+            "restored key keeps value",
+            r"C:\custom\bin",
+            value
+                .as_deref()
+                .map_or_else(|| "<removed>".into(), |v| v.to_string_lossy())
+        );
+        crate::assert_with_log!(
+            entries.next().is_none(),
+            "no stale removed entry remains",
+            true,
+            false
+        );
+        crate::test_complete!("test_command_env_set_restores_removed_key_case_insensitively");
+    }
+
+    #[test]
     fn test_command_current_dir() {
         init_test("test_command_current_dir");
 
@@ -1582,6 +1887,8 @@ mod tests {
         if let Some(mut stdin) = child.stdin() {
             stdin
                 .inner
+                .as_mut()
+                .expect("stdin should remain open before drop")
                 .write_all(b"hello from stdin")
                 .expect("write failed");
         }
@@ -1596,6 +1903,45 @@ mod tests {
             String::from_utf8_lossy(&output.stdout)
         );
         crate::test_complete!("test_command_stdin_pipe");
+    }
+
+    #[test]
+    fn test_child_stdin_shutdown_closes_pipe_and_delivers_eof() {
+        use crate::io::AsyncWriteExt;
+
+        init_test("test_child_stdin_shutdown_closes_pipe_and_delivers_eof");
+
+        let mut child = Command::new("cat")
+            .stdin(Stdio::Pipe)
+            .stdout(Stdio::Pipe)
+            .spawn()
+            .expect("spawn failed");
+        let mut stdin = child.stdin().expect("missing stdin pipe");
+
+        futures_lite::future::block_on(stdin.shutdown()).expect("shutdown failed");
+        crate::assert_with_log!(
+            stdin.inner.is_none(),
+            "stdin handle closed",
+            true,
+            stdin.inner.is_none()
+        );
+
+        let mut exited = false;
+        for _ in 0..20 {
+            if child.try_wait().expect("try_wait failed").is_some() {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        if !exited {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+
+        crate::assert_with_log!(exited, "shutdown delivers eof", true, exited);
+        crate::test_complete!("test_child_stdin_shutdown_closes_pipe_and_delivers_eof");
     }
 
     #[test]
