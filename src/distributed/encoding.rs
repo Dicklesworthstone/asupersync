@@ -447,6 +447,9 @@ fn derive_block_layout(
 }
 
 fn distribute_repairs(total: usize, blocks: usize) -> Vec<usize> {
+    if blocks == 0 {
+        return Vec::new();
+    }
     let base = total / blocks;
     let remainder = total % blocks;
     (0..blocks)

@@ -746,6 +746,14 @@ impl<Caps> Cx<Caps> {
                     "discharge macaroon verification failed"
                 );
             }
+            #[allow(unused_variables)]
+            Err(VerificationError::DischargeChainTooDeep { depth }) => {
+                info!(
+                    token_id = %token.identifier(),
+                    depth = %depth,
+                    "discharge macaroon chain too deep"
+                );
+            }
         }
 
         result
@@ -774,6 +782,9 @@ impl<Caps> Cx<Caps> {
             }
             Err(VerificationError::DischargeInvalid { index, .. }) => {
                 (format!("verify_fail_discharge_invalid_{index}"), 0.9)
+            }
+            Err(VerificationError::DischargeChainTooDeep { depth }) => {
+                (format!("verify_fail_discharge_chain_too_deep_{depth}"), 1.0)
             }
         };
 

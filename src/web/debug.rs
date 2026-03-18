@@ -192,7 +192,11 @@ fn serve_loop(
     while running.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((mut stream, _peer)) => {
-                if active_connections.load(Ordering::Relaxed) >= max_connections {
+                // Atomically increment-then-check to prevent TOCTOU race
+                // where multiple threads pass the limit check simultaneously.
+                let prev = active_connections.fetch_add(1, Ordering::Relaxed);
+                if prev >= max_connections {
+                    active_connections.fetch_sub(1, Ordering::Relaxed);
                     let _ = write_response(&mut stream, 503, "text/plain", b"Debug server busy");
                     let _ = stream.shutdown(Shutdown::Both);
                     continue;
@@ -200,8 +204,6 @@ fn serve_loop(
 
                 let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
                 let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
-
-                active_connections.fetch_add(1, Ordering::Relaxed);
                 let snapshot_fn = Arc::clone(snapshot_fn);
                 let active_connections_for_thread = Arc::clone(active_connections);
 

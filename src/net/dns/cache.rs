@@ -224,6 +224,11 @@ impl DnsCache {
 
     /// Inserts an IP address lookup result into the cache.
     pub fn put_ip(&self, host: &str, lookup: &LookupIp) {
+        if lookup.ttl().is_zero() {
+            self.remove(host);
+            return;
+        }
+
         let ttl = self.clamp_ttl(lookup.ttl());
         self.put_ip_entry(host, CachedIpEntry::Positive(lookup.clone()), ttl);
     }
@@ -635,6 +640,106 @@ mod tests {
         let result = cache.get_ip("example.com");
         crate::assert_with_log!(result.is_some(), "entry exists", true, result.is_some());
         crate::test_complete!("cache_ttl_clamping");
+    }
+
+    #[test]
+    fn cache_zero_ttl_positive_answers_are_not_retained() {
+        init_test("cache_zero_ttl_positive_answers_are_not_retained");
+        set_test_time(0);
+        let cache = DnsCache::with_time_getter(CacheConfig::default(), test_time);
+
+        let lookup = LookupIp::new(
+            vec!["192.0.2.77".parse::<IpAddr>().expect("ip parse")],
+            Duration::ZERO,
+        );
+        cache.put_ip("zero.example", &lookup);
+
+        let result = cache.get_ip("zero.example");
+        crate::assert_with_log!(
+            result.is_none(),
+            "zero-ttl answer is not cached",
+            true,
+            result.is_none()
+        );
+
+        let stats = cache.stats();
+        crate::assert_with_log!(stats.size == 0, "cache size stays zero", 0, stats.size);
+        crate::test_complete!("cache_zero_ttl_positive_answers_are_not_retained");
+    }
+
+    #[test]
+    fn cache_zero_ttl_positive_answers_clear_existing_entry() {
+        init_test("cache_zero_ttl_positive_answers_clear_existing_entry");
+        set_test_time(0);
+        let cache = DnsCache::with_time_getter(CacheConfig::default(), test_time);
+
+        let cached = LookupIp::new(
+            vec!["192.0.2.10".parse::<IpAddr>().expect("ip parse")],
+            Duration::from_mins(5),
+        );
+        cache.put_ip("replace.example", &cached);
+        crate::assert_with_log!(
+            cache.get_ip("replace.example").is_some(),
+            "seeded entry exists",
+            true,
+            cache.get_ip("replace.example").is_some()
+        );
+
+        let zero_ttl = LookupIp::new(
+            vec!["192.0.2.99".parse::<IpAddr>().expect("ip parse")],
+            Duration::ZERO,
+        );
+        cache.put_ip("replace.example", &zero_ttl);
+
+        let result = cache.get_ip("replace.example");
+        crate::assert_with_log!(
+            result.is_none(),
+            "zero-ttl refresh clears stale cached entry",
+            true,
+            result.is_none()
+        );
+
+        let stats = cache.stats();
+        crate::assert_with_log!(stats.size == 0, "cache size returns to zero", 0, stats.size);
+        crate::test_complete!("cache_zero_ttl_positive_answers_clear_existing_entry");
+    }
+
+    #[test]
+    fn cache_positive_nonzero_ttl_still_honors_minimum_floor() {
+        init_test("cache_positive_nonzero_ttl_still_honors_minimum_floor");
+        set_test_time(0);
+        let config = CacheConfig {
+            min_ttl: Duration::from_millis(10),
+            max_ttl: Duration::from_secs(1),
+            ..Default::default()
+        };
+        let cache = DnsCache::with_time_getter(config, test_time);
+
+        let lookup = LookupIp::new(
+            vec!["192.0.2.55".parse::<IpAddr>().expect("ip parse")],
+            Duration::from_millis(1),
+        );
+        cache.put_ip("floor.example", &lookup);
+
+        set_test_time(Duration::from_millis(5).as_nanos() as u64);
+        let before_floor = cache.get_ip("floor.example");
+        crate::assert_with_log!(
+            before_floor.is_some(),
+            "positive nonzero ttl still honors configured floor",
+            true,
+            before_floor.is_some()
+        );
+
+        set_test_time(Duration::from_millis(11).as_nanos() as u64);
+        let after_floor = cache.get_ip("floor.example");
+        crate::assert_with_log!(
+            after_floor.is_none(),
+            "entry expires after floored ttl elapses",
+            true,
+            after_floor.is_none()
+        );
+
+        crate::test_complete!("cache_positive_nonzero_ttl_still_honors_minimum_floor");
     }
 
     #[test]

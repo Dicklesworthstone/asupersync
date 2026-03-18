@@ -1302,6 +1302,51 @@ function browserExecutionMissingPrerequisiteGuidance(
   ];
 }
 
+function browserExecutionPreferredLaneMismatch(
+  preferredLane: BrowserExecutionLane,
+  selectedLane: BrowserExecutionLane,
+  hostRole: BrowserExecutionHostRole,
+  directLaneForHost: BrowserExecutionLane | null,
+  reasonCode: BrowserExecutionReasonCode,
+): { message: string; guidance: string[] } {
+  if (
+    preferredLane !== BROWSER_UNSUPPORTED_LANE &&
+    preferredLane !== directLaneForHost
+  ) {
+    return {
+      message: `Preferred lane ${preferredLane} is not truthful for host role ${hostRole}, so Browser Edition stayed on ${selectedLane}.`,
+      guidance: [
+        `Use ${selectedLane} for this host role, or switch entrypoints before pinning ${preferredLane}.`,
+      ],
+    };
+  }
+
+  if (reasonCode === "demote_due_to_lane_health") {
+    return {
+      message: `Preferred lane ${preferredLane} is temporarily unavailable because lane health demoted Browser Edition to ${selectedLane}.`,
+      guidance: [
+        `Wait for lane-health recovery or call resetBrowserLaneHealth() before pinning ${preferredLane} again.`,
+      ],
+    };
+  }
+
+  if (selectedLane === BROWSER_UNSUPPORTED_LANE) {
+    return {
+      message: `Preferred lane ${preferredLane} could not be selected because Browser Edition currently reports ${reasonCode} and stayed on ${selectedLane}.`,
+      guidance: [
+        `Restore the reported Browser Edition prerequisites before pinning ${preferredLane} again.`,
+      ],
+    };
+  }
+
+  return {
+    message: `Preferred lane ${preferredLane} is a lower-priority fail-closed fallback, so Browser Edition stayed on ${selectedLane}.`,
+    guidance: [
+      `Only pin ${preferredLane} when you intentionally want the fail-closed fallback lane.`,
+    ],
+  };
+}
+
 function browserExecutionCandidates(
   selectedLane: BrowserExecutionLane,
   hostRole: BrowserExecutionHostRole,
@@ -1436,11 +1481,15 @@ function buildBrowserExecutionLadder(
   }
 
   if (preferredLane !== null && preferredLane !== selectedLane) {
-    message = `${message} Preferred lane ${preferredLane} is not truthful for host role ${hostRole}, so Browser Edition stayed on ${selectedLane}.`;
-    guidance = [
-      ...guidance,
-      `Use ${selectedLane} for this host role, or switch entrypoints before pinning ${preferredLane}.`,
-    ];
+    const preferredLaneMismatch = browserExecutionPreferredLaneMismatch(
+      preferredLane,
+      selectedLane,
+      hostRole,
+      directLaneForHost,
+      reasonCode,
+    );
+    message = `${message} ${preferredLaneMismatch.message}`;
+    guidance = [...guidance, ...preferredLaneMismatch.guidance];
   }
 
   return {

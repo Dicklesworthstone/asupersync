@@ -149,7 +149,14 @@ impl FinalizerOracle {
     /// * `Ok(())` if no violations are found
     /// * `Err(FinalizerViolation)` if a violation is detected
     pub fn check(&self) -> Result<(), FinalizerViolation> {
-        for (&region, &close_time) in &self.region_closes {
+        let mut regions: Vec<(RegionId, Time)> = self
+            .region_closes
+            .iter()
+            .map(|(&region, &close_time)| (region, close_time))
+            .collect();
+        regions.sort_by_key(|(region, _)| *region);
+
+        for (region, close_time) in regions {
             let Some(finalizers) = self.finalizers_by_region.get(&region) else {
                 continue; // No finalizers registered for this region
             };
@@ -161,6 +168,7 @@ impl FinalizerOracle {
                     unrun.push(finalizer_id);
                 }
             }
+            unrun.sort_by_key(|id| id.0);
 
             if !unrun.is_empty() {
                 return Err(FinalizerViolation {
@@ -350,6 +358,46 @@ mod tests {
             violation.unrun_finalizers
         );
         crate::test_complete!("multiple_regions_independent");
+    }
+
+    #[test]
+    fn check_reports_regions_and_finalizers_in_stable_order() {
+        init_test("check_reports_regions_and_finalizers_in_stable_order");
+        let mut oracle = FinalizerOracle::new();
+
+        let region0_f1 = oracle.generate_id();
+        let region0_f0 = oracle.generate_id();
+        let region1_f0 = oracle.generate_id();
+
+        oracle.on_register(region1_f0, region(1), t(10));
+        oracle.on_region_close(region(1), t(200));
+
+        oracle.on_register(region0_f1, region(0), t(20));
+        oracle.on_register(region0_f0, region(0), t(30));
+        oracle.on_region_close(region(0), t(100));
+
+        let violation = oracle
+            .check()
+            .expect_err("lower region id should be reported first");
+        crate::assert_with_log!(
+            violation.region == region(0),
+            "violation region",
+            region(0),
+            violation.region
+        );
+        crate::assert_with_log!(
+            violation.unrun_finalizers == vec![region0_f0, region0_f1],
+            "sorted unrun finalizers",
+            vec![region0_f0, region0_f1],
+            violation.unrun_finalizers
+        );
+        crate::assert_with_log!(
+            violation.region_close_time == t(100),
+            "region close time",
+            t(100),
+            violation.region_close_time
+        );
+        crate::test_complete!("check_reports_regions_and_finalizers_in_stable_order");
     }
 
     #[test]

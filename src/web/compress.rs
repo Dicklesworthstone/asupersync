@@ -106,10 +106,7 @@ impl<H: Handler> CompressionMiddleware<H> {
 impl<H: Handler> Handler for CompressionMiddleware<H> {
     fn call(&self, req: Request) -> Response {
         // Extract accept-encoding before passing the request.
-        let accept_encoding = req
-            .header("accept-encoding")
-            .unwrap_or_default()
-            .to_string();
+        let accept_encoding = req.header("accept-encoding").map(str::to_owned);
 
         let mut resp = self.inner.call(req);
 
@@ -129,9 +126,25 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
             return resp;
         }
 
+        // Only negotiate encodings we can actually serve in this build.
+        let available_encodings: Vec<_> = self
+            .policy
+            .supported_encodings
+            .iter()
+            .copied()
+            .filter(content_encoding_available)
+            .collect();
+
+        let accept = accept_encoding.as_deref().unwrap_or_default();
+
         // Negotiate encoding.
-        let Some(encoding) = negotiate_encoding(&accept_encoding, &self.policy.supported_encodings)
-        else {
+        let Some(encoding) = negotiate_encoding(accept, &available_encodings) else {
+            if accept_encoding.is_some() {
+                return Response::new(
+                    StatusCode::from_u16(406),
+                    b"No acceptable response encoding".to_vec(),
+                );
+            }
             return resp;
         };
 
@@ -167,6 +180,17 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
         append_vary_token(&mut resp, "accept-encoding");
 
         resp
+    }
+}
+
+fn content_encoding_available(encoding: &ContentEncoding) -> bool {
+    match encoding {
+        ContentEncoding::Identity => true,
+        #[cfg(feature = "compression")]
+        ContentEncoding::Gzip | ContentEncoding::Deflate => true,
+        #[cfg(not(feature = "compression"))]
+        ContentEncoding::Gzip | ContentEncoding::Deflate => false,
+        ContentEncoding::Brotli => false,
     }
 }
 
@@ -345,6 +369,31 @@ mod tests {
         let req = make_request_with_encoding("identity");
         let resp = mw.call(req);
         assert!(!resp.headers.contains_key("content-encoding"));
+    }
+
+    #[test]
+    fn rejects_explicitly_unacceptable_encodings() {
+        let policy = CompressionPolicy::default().with_min_body_size(0);
+        let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
+        let req = make_request_with_encoding("gzip;q=0, deflate;q=0, identity;q=0, *;q=0");
+        let resp = mw.call(req);
+        assert_eq!(resp.status.as_u16(), 406);
+        assert_eq!(resp.body.as_ref(), b"No acceptable response encoding");
+    }
+
+    #[cfg(not(feature = "compression"))]
+    #[test]
+    fn falls_back_to_identity_when_non_identity_codecs_are_unavailable() {
+        let policy = CompressionPolicy::default().with_min_body_size(0);
+        let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
+        let req = make_request_with_encoding("gzip");
+        let resp = mw.call(req);
+        assert_eq!(resp.status, StatusCode::OK);
+        assert!(!resp.headers.contains_key("content-encoding"));
+        assert_eq!(
+            resp.headers.get("vary"),
+            Some(&"accept-encoding".to_string())
+        );
     }
 
     // --- Feature-gated compression tests ---

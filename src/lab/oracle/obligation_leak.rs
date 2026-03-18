@@ -156,7 +156,7 @@ impl ObligationLeakOracle {
         for (region, close_time) in &self.region_closes {
             let mut leaked = Vec::new();
             for (id, snapshot) in &self.obligations {
-                if snapshot.region == *region && snapshot.state == ObligationState::Reserved {
+                if snapshot.region == *region && !snapshot.state.is_success() {
                     leaked.push(ObligationLeak {
                         obligation: *id,
                         kind: snapshot.kind,
@@ -391,5 +391,25 @@ mod tests {
         oracle.on_resolve(obligation, ObligationState::Aborted);
         oracle.on_region_close(region, Time::ZERO);
         assert!(oracle.check(Time::ZERO).is_ok());
+    }
+
+    #[test]
+    fn oracle_leaked_state_is_reported_as_violation() {
+        let mut oracle = ObligationLeakOracle::new();
+        let region = RegionId::from_arena(ArenaIndex::new(0, 0));
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let obligation = ObligationId::from_arena(ArenaIndex::new(2, 0));
+
+        oracle.on_create(obligation, ObligationKind::Lease, task, region);
+        oracle.on_resolve(obligation, ObligationState::Leaked);
+        oracle.on_region_close(region, Time::ZERO);
+
+        let err = oracle
+            .check(Time::ZERO)
+            .expect_err("leaked obligation must still violate the invariant");
+        assert_eq!(err.region, region);
+        assert_eq!(err.leaked.len(), 1);
+        assert_eq!(err.leaked[0].obligation, obligation);
+        assert_eq!(err.leaked[0].kind, ObligationKind::Lease);
     }
 }

@@ -344,7 +344,7 @@ codegen-units = 1
 [lints.rust]
 # Default to deny for unsafe code - specific modules that require it can use #[allow(unsafe_code)]
 # The epoll reactor requires unsafe for the polling crate's FFI operations
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(feature, values("quic", "http3", "quic-compat", "http3-compat", "wasm-browser-preview", "simd-intrinsics"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(feature, values("quic", "http3", "quic-compat", "http3-compat", "wasm-browser-preview", "simd-intrinsics", "messaging-fabric"))'] }
 unsafe_code = "deny"
 missing_docs = "warn"
 unused = { level = "warn", priority = -1 }

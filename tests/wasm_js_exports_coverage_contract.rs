@@ -305,6 +305,45 @@ fn browser_runtime_constructor_derives_initial_ladder_from_options_when_omitted(
 }
 
 #[test]
+fn browser_src_index_keeps_preferred_lane_mismatch_reasons_truthful() {
+    let content = read_source("packages/browser/src/index.ts");
+    let helper = slice_between(
+        &content,
+        "function browserExecutionPreferredLaneMismatch(",
+        "\nfunction browserExecutionCandidates(",
+    );
+    let build = slice_between(
+        &content,
+        "function buildBrowserExecutionLadder(",
+        "\nexport function detectBrowserExecutionLadder(",
+    );
+
+    assert_markers_in_order(
+        helper,
+        &[
+            "preferredLane !== BROWSER_UNSUPPORTED_LANE &&",
+            "preferredLane !== directLaneForHost",
+            "is not truthful for host role",
+            "reasonCode === \"demote_due_to_lane_health\"",
+            "is temporarily unavailable because lane health demoted Browser Edition",
+            "selectedLane === BROWSER_UNSUPPORTED_LANE",
+            "could not be selected because Browser Edition currently reports ${reasonCode}",
+            "is a lower-priority fail-closed fallback",
+        ],
+        "preferred-lane mismatch helper must distinguish host mismatch, health demotion, prerequisite loss, and intentional fallback pins",
+    );
+    assert_markers_in_order(
+        build,
+        &[
+            "const preferredLaneMismatch = browserExecutionPreferredLaneMismatch(",
+            "message = `${message} ${preferredLaneMismatch.message}`;",
+            "guidance = [...guidance, ...preferredLaneMismatch.guidance];",
+        ],
+        "buildBrowserExecutionLadder must append the structured preferred-lane mismatch diagnostics instead of a blanket host-role explanation",
+    );
+}
+
+#[test]
 fn browser_src_index_pins_runtime_selection_no_throw_fail_closed_semantics() {
     let content = read_source("packages/browser/src/index.ts");
     let function = slice_between(

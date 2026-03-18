@@ -124,9 +124,13 @@ impl SymbolBuffer {
     }
 
     /// Consumes the buffer and returns the boxed slice.
+    ///
+    /// The buffer's `Drop` zeroing is bypassed for the extracted data — the
+    /// caller takes ownership and is responsible for clearing it if needed.
     #[must_use]
-    pub fn into_boxed_slice(self) -> Box<[u8]> {
-        self.data
+    pub fn into_boxed_slice(mut self) -> Box<[u8]> {
+        // Swap in an empty slice so Drop zeros nothing.
+        std::mem::take(&mut self.data)
     }
 
     fn mark_checked_out(&mut self, owner_pool_id: u64) {
@@ -137,6 +141,16 @@ impl SymbolBuffer {
     fn clear_checkout_state(&mut self) {
         self.checked_out = false;
         self.owner_pool_id = None;
+    }
+}
+
+impl Drop for SymbolBuffer {
+    fn drop(&mut self) {
+        // Zero buffer contents to prevent stale payload leakage when a buffer
+        // is dropped without being returned to the pool via `deallocate()`.
+        // This is defense-in-depth: `deallocate()` also zeros, and new buffers
+        // are zero-initialized, but this catches the panic/forget-to-return path.
+        self.data.fill(0);
     }
 }
 

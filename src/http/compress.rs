@@ -366,6 +366,17 @@ impl GzipDecompressor {
 impl Decompressor for GzipDecompressor {
     fn decompress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
         use io::Write;
+        // Cap the internal buffer before decompressing to prevent transient
+        // unbounded allocation from decompression bombs.  The cap is the
+        // remaining budget (max_size - total) plus a small margin so flate2
+        // can finish a partial block without hitting an artificial limit.
+        if let Some(max) = self.max_size {
+            let remaining = max.saturating_sub(self.total).saturating_add(4096);
+            let buf = self.decoder.get_mut();
+            if buf.capacity() > remaining {
+                buf.shrink_to(remaining);
+            }
+        }
         self.decoder.write_all(input)?;
         self.decoder.flush()?;
         let buf = std::mem::take(self.decoder.get_mut());
@@ -484,6 +495,15 @@ impl DeflateDecompressor {
 impl Decompressor for DeflateDecompressor {
     fn decompress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
         use io::Write;
+        // Cap the internal buffer before decompressing to prevent transient
+        // unbounded allocation from decompression bombs.
+        if let Some(max) = self.max_size {
+            let remaining = max.saturating_sub(self.total).saturating_add(4096);
+            let buf = self.decoder.get_mut();
+            if buf.capacity() > remaining {
+                buf.shrink_to(remaining);
+            }
+        }
         self.decoder.write_all(input)?;
         self.decoder.flush()?;
         let buf = std::mem::take(self.decoder.get_mut());

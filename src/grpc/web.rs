@@ -172,7 +172,14 @@ pub fn decode_trailers(body: &[u8]) -> Result<TrailerFrame, GrpcError> {
                 status_code = value.parse::<i32>().ok();
             }
             "grpc-message" => {
-                status_message = value.to_string();
+                // Reverse the percent-encoding applied by encode_trailers
+                // (grpc-message uses percent-encoded ASCII per gRPC spec).
+                status_message = value
+                    .replace("%0D", "\r")
+                    .replace("%0d", "\r")
+                    .replace("%0A", "\n")
+                    .replace("%0a", "\n")
+                    .replace("%25", "%");
             }
             _ => {
                 if key.ends_with("-bin") {
@@ -511,6 +518,31 @@ mod tests {
             msg
         );
         crate::test_complete!("test_trailer_with_message");
+    }
+
+    #[test]
+    fn test_trailer_message_percent_encoding_roundtrip() {
+        init_test("test_trailer_message_percent_encoding_roundtrip");
+        let original_msg = "error on line\r\n42: 100% failure";
+        let status = Status::new(Code::Internal, original_msg);
+        let metadata = Metadata::new();
+        let mut buf = BytesMut::new();
+
+        encode_trailers(&status, &metadata, &mut buf);
+
+        let frame_codec = WebFrameCodec::new();
+        let frame = frame_codec.decode(&mut buf).unwrap().unwrap();
+        let WebFrame::Trailers(trailers) = frame else {
+            panic!("expected trailer frame")
+        };
+        let decoded_msg = trailers.status.message();
+        crate::assert_with_log!(
+            decoded_msg == original_msg,
+            "percent-encoded grpc-message must round-trip",
+            original_msg,
+            decoded_msg
+        );
+        crate::test_complete!("test_trailer_message_percent_encoding_roundtrip");
     }
 
     #[test]

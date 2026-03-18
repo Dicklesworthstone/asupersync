@@ -45,6 +45,8 @@
 //!
 //! The native fabric API must grow in layers, not as a single all-or-nothing
 //! surface:
+//! The experimental native brokerless fabric surface is gated behind the
+//! `messaging-fabric` feature until the higher layers are ready to ship.
 //!
 //! - Layer 0: connect, publish, and subscribe stay NATS-small on the packet
 //!   plane with the ephemeral-interactive delivery class as the default.
@@ -71,19 +73,21 @@
 //! - what evidence or replay surface makes the behavior inspectable.
 
 #[cfg(feature = "messaging-fabric")]
-pub mod fabric {
-    //! Placeholder namespace for the future native FABRIC surface.
-    //!
-    //! The feature is intentionally exposed as an empty module for now so
-    //! explicit opt-in builds stay green while the real implementation is
-    //! developed behind this boundary.
-}
+pub mod class;
+#[cfg(feature = "messaging-fabric")]
+pub mod fabric;
+#[cfg(feature = "messaging-fabric")]
+pub mod ir;
 pub mod jetstream;
 pub mod kafka;
 pub mod kafka_consumer;
 pub mod nats;
 pub mod redis;
 
+#[cfg(feature = "messaging-fabric")]
+pub use class::{
+    AckKind, DeliveryClass, DeliveryClassPolicy, DeliveryClassPolicyError, DeliveryCostVector,
+};
 pub use jetstream::{
     AckPolicy, Consumer, ConsumerConfig, DeliverPolicy, DiscardPolicy, JetStreamContext, JsError,
     JsMessage, PubAck, RetentionPolicy, StorageType, StreamConfig, StreamInfo, StreamState,

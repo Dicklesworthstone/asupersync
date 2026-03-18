@@ -574,6 +574,10 @@ impl MacaroonToken {
         .map(|_| ())
     }
 
+    /// Maximum nesting depth for recursive third-party discharge verification.
+    /// Prevents stack overflow from deeply nested (but acyclic) discharge chains.
+    const MAX_DISCHARGE_DEPTH: usize = 32;
+
     fn verify_with_discharges_inner(
         &self,
         root_key: &AuthKey,
@@ -582,6 +586,11 @@ impl MacaroonToken {
         binding_signature: Option<&MacaroonSignature>,
         active_discharges: &mut Vec<usize>,
     ) -> Result<MacaroonSignature, VerificationError> {
+        if active_discharges.len() >= Self::MAX_DISCHARGE_DEPTH {
+            return Err(VerificationError::DischargeChainTooDeep {
+                depth: active_discharges.len(),
+            });
+        }
         let unbound_signature = self.verify_discharge_signature(root_key, binding_signature)?;
         let self_ptr = Self::discharge_stack_id(self);
         if active_discharges.contains(&self_ptr) {
@@ -750,6 +759,9 @@ impl MacaroonToken {
                 predicate: format!("discharge[{tp_id}]: {predicate}"),
                 reason,
             },
+            VerificationError::DischargeChainTooDeep { depth } => {
+                VerificationError::DischargeChainTooDeep { depth }
+            }
         }
     }
 
@@ -1065,6 +1077,12 @@ pub enum VerificationError {
         /// Identifier of the failing discharge.
         identifier: String,
     },
+    /// The discharge chain exceeded the maximum allowed nesting depth.
+    /// This prevents stack overflow from deeply nested (but acyclic) chains.
+    DischargeChainTooDeep {
+        /// Nesting depth at which the limit was hit.
+        depth: usize,
+    },
 }
 
 impl fmt::Display for VerificationError {
@@ -1083,6 +1101,9 @@ impl fmt::Display for VerificationError {
             }
             Self::DischargeInvalid { index, identifier } => {
                 write!(f, "caveat {index}: discharge \"{identifier}\" invalid")
+            }
+            Self::DischargeChainTooDeep { depth } => {
+                write!(f, "discharge chain too deep ({depth} levels)")
             }
         }
     }

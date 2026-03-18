@@ -172,9 +172,13 @@ impl Resolver {
             ));
         }
 
+        // Normalize FQDN trailing dot so "example.com." and "example.com"
+        // share the same cache key and don't trigger redundant lookups.
+        let normalized = host.strip_suffix('.').unwrap_or(host);
+
         // Check cache first
         if self.config.cache_enabled {
-            if let Some(cached) = self.cache.get_ip_result(host) {
+            if let Some(cached) = self.cache.get_ip_result(normalized) {
                 return cached;
             }
         }
@@ -183,8 +187,8 @@ impl Resolver {
 
         if self.config.cache_enabled {
             match &result {
-                Ok(lookup) => self.cache.put_ip(host, lookup),
-                Err(DnsError::NoRecords(_)) => self.cache.put_negative_ip_no_records(host),
+                Ok(lookup) => self.cache.put_ip(normalized, lookup),
+                Err(DnsError::NoRecords(_)) => self.cache.put_negative_ip_no_records(normalized),
                 Err(_) => {}
             }
         }
