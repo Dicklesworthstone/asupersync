@@ -1711,6 +1711,9 @@ impl AsyncWrite for PgStream {
 // PostgreSQL Connection
 // ============================================================================
 
+/// Maximum rows accepted per result set before closing the connection.
+const DEFAULT_MAX_RESULT_ROWS: usize = 1_000_000;
+
 /// Inner connection state.
 struct PgConnectionInner {
     /// Transport stream (plain TCP or TLS).
@@ -1731,6 +1734,10 @@ struct PgConnectionInner {
     needs_rollback: bool,
     /// Counter for generating unique prepared statement names.
     next_stmt_id: u32,
+    /// Maximum number of rows to accept per result set before closing the
+    /// connection. Prevents unbounded memory growth from runaway queries or
+    /// a malicious server sending an endless DataRow stream.
+    max_result_rows: usize,
 }
 
 impl Drop for PgConnectionInner {
@@ -1865,6 +1872,7 @@ impl PgConnection {
                 closed: false,
                 needs_rollback: false,
                 next_stmt_id: 0,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
             },
         };
 
@@ -2344,7 +2352,15 @@ impl PgConnection {
                     }
                 }
                 b'D' => {
-                    // DataRow
+                    // DataRow — enforce max_result_rows to prevent OOM from
+                    // runaway queries or a malicious server.
+                    if rows.len() >= self.inner.max_result_rows {
+                        self.inner.closed = true;
+                        return Outcome::Err(PgError::Protocol(format!(
+                            "result set exceeded {} row limit",
+                            self.inner.max_result_rows,
+                        )));
+                    }
                     if let (Some(cols), Some(indices)) = (&columns, &column_indices) {
                         match self.parse_data_row(&data, cols) {
                             Ok(values) => {
@@ -3325,6 +3341,13 @@ impl PgConnection {
                 },
                 b'n' => { /* NoData */ }
                 b'D' => {
+                    if rows.len() >= self.inner.max_result_rows {
+                        self.inner.closed = true;
+                        return Outcome::Err(PgError::Protocol(format!(
+                            "result set exceeded {} row limit",
+                            self.inner.max_result_rows,
+                        )));
+                    }
                     if let (Some(cols), Some(indices)) = (&columns, &column_indices) {
                         match self.parse_data_row(&data, cols) {
                             Ok(values) => {
@@ -3770,6 +3793,7 @@ mod tests {
                 closed: false,
                 needs_rollback: false,
                 next_stmt_id: 0,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
             },
         }
     }
@@ -3794,6 +3818,7 @@ mod tests {
                     closed: false,
                     needs_rollback: false,
                     next_stmt_id: 0,
+                    max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 },
             },
             peer_stream,

@@ -828,10 +828,16 @@ impl Scheduler {
     #[inline]
     #[must_use]
     pub fn pop_cancel_only_with_hint(&mut self, rng_hint: u64) -> Option<TaskId> {
-        let entry =
-            Self::pop_entry_with_rng(&mut self.cancel_lane, rng_hint, &mut self.scratch_entries)?;
-        self.scheduled.remove(entry.task);
-        Some(entry.task)
+        loop {
+            let entry = Self::pop_entry_with_rng(
+                &mut self.cancel_lane,
+                rng_hint,
+                &mut self.scratch_entries,
+            )?;
+            if self.scheduled.remove(entry.task) {
+                return Some(entry.task);
+            }
+        }
     }
 
     /// Pops only from the timed lane if the earliest deadline is due.
